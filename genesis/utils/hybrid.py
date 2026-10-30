@@ -11,7 +11,7 @@ from matplotlib.patches import FancyArrowPatch
 
 import genesis as gs
 
-from .misc import get_gel_cache_dir
+from .cache import get_gel_cache_dir
 
 
 def load_hmesh(fpath: str):

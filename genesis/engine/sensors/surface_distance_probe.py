@@ -26,6 +26,7 @@ from .tactile_shared import (
 )
 
 if TYPE_CHECKING:
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
 
@@ -419,11 +420,11 @@ class SurfaceDistanceProbeSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext"):
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make the probes, their nearest surface points and the lines joining them, for the first rendered env."""
+        if 0 not in envs_idx:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-        for obj in self._debug_objects:
-            context.clear_debug_object(obj)
-        self._debug_objects.clear()
 
         # Single env: drop the leading env axis to a bare (3,) / (4,); squeeze(0) leaves an unbatched vector untouched.
         link_pos = self._link.get_pos(env_idx, relative=False).squeeze(0)
@@ -435,21 +436,22 @@ class SurfaceDistanceProbeSensor(
 
         rgb = tuple(float(c) for c in self._options.debug_probe_color)
         line_color = (*rgb, 1.0)
-        self._debug_objects.extend(self._draw_probe_spheres(context, probe_world, rgb))
-        self._debug_objects.append(
-            context.draw_debug_spheres(
+        nodes = self._draw_probe_spheres(context, probe_world, rgb)
+        nodes.append(
+            context.make_debug_spheres(
                 poss=points, radius=float(self._options.debug_probe_center_radius), color=line_color
             )
         )
         for i in range(len(probe_world)):
-            self._debug_objects.append(
-                context.draw_debug_line(
+            nodes.append(
+                context.make_debug_line(
                     probe_world[i],
                     points[i],
                     radius=float(self._options.debug_probe_center_radius) / 4.0,
                     color=line_color,
                 )
             )
+        return [(None, node, None) for node in nodes]
 
     @property
     def nearest_points(self) -> torch.Tensor:

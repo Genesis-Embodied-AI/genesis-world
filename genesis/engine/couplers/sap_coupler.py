@@ -70,10 +70,14 @@ def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, fem_solver: qd.te
 
 @qd.func
 def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, coupler: qd.template()) -> bool:
-    """Drop a pair of rigid tets whose geoms hold no collision pair."""
+    """Drop a pair of rigid tets whose geoms hold no collision pair.
+
+    The tree and the queries hold the same tets, so every pair of geoms is found in both orders, the one of increasing
+    geom index alone being kept.
+    """
     i_ag = coupler.rigid_volume_elems_geom_idx[i_a]
     i_qg = coupler.rigid_volume_elems_geom_idx[i_q]
-    return coupler.rigid_collision_pair_idx[i_ag, i_qg] == -1
+    return i_ag >= i_qg or coupler.rigid_collision_pair_idx[i_ag, i_qg] == -1
 
 
 class FEMFloorContactType(IntEnum):
@@ -174,6 +178,9 @@ class SAPCoupler(RBC):
     Drake reference: https://drake.mit.edu/release_notes/v1.5.0.html
     Code reference: https://github.com/RobotLocomotion/drake/blob/d7a5096c6d0f131705c374390202ad95d0607fd4/multibody/plant/sap_driver.cc
     """
+
+    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    is_differentiable = False
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -346,9 +353,9 @@ class SAPCoupler(RBC):
             if geom.contype or geom.conaffinity:
                 if geom.type == gs.GEOM_TYPE.PLANE:
                     gs.raise_exception("Primitive plane not supported as user-specified collision geometries.")
-                volume = geom.get_trimesh().volume
+                volume = geom.trimesh.volume
                 tet_cfg = {"nobisect": False, "maxvolume": volume / 100}
-                mesh_verts, mesh_elems = eu.mesh_to_elements(geom.get_trimesh(), tet_cfg=tet_cfg)
+                mesh_verts, mesh_elems = eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg)
                 verts, elems = eu.split_all_surface_tets(mesh_verts, mesh_elems)
                 rigid_volume_verts.append(verts)
                 rigid_volume_elems.append(elems + offset)
@@ -647,7 +654,7 @@ class SAPCoupler(RBC):
         )
 
     def precompute(self, i_step):
-        from genesis.engine.solvers.rigid.rigid_solver import kernel_update_all_verts
+        from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 
         if self.fem_solver.is_active:
             if qd.static(
@@ -703,9 +710,6 @@ class SAPCoupler(RBC):
         if self.has_contact:
             self.sap_solve(i_step)
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
-
-    def couple_grad(self, i_step):
-        gs.raise_exception("couple_grad is not available for SAPCoupler. Please use LegacyCoupler instead.")
 
     @qd.kernel
     def update_vel(self, i_step: qd.i32, dofs_state: array_class.DofsState):

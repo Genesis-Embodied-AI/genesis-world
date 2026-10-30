@@ -43,7 +43,7 @@ class EnvironmentSphere:
         self._renderer = renderer
         if self.surface is None:
             return
-        env_sphere = trimesh.load(self.file_path)
+        env_sphere = mu.load_trimesh(self.file_path)
         env_vertices = env_sphere.vertices * self.radius
         env_faces = env_sphere.faces
         env_normals = env_sphere.vertex_normals
@@ -259,17 +259,6 @@ class Raytracer:
             else:
                 self.add_surface(str(entity.uid), entity.surface)
 
-        # tool entities
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                self.add_rigid(
-                    name=str(tool_entity.uid),
-                    vertices=tool_entity.mesh.raw_vertices,
-                    triangles=tool_entity.mesh.faces_np,
-                    normals=tool_entity.mesh.raw_vertex_normals,
-                    uvs=np.array([]),
-                )
-
         # rigid entities
         if self.sim.rigid_solver.is_active:
             for rigid_entity in self.sim.rigid_solver.entities:
@@ -280,9 +269,9 @@ class Raytracer:
 
                 for geom in geoms:
                     if "sdf" in rigid_entity.surface.vis_mode:
-                        mesh = geom.get_sdf_trimesh()
+                        mesh = geom.sdf_trimesh
                     else:
-                        mesh = geom.get_trimesh()
+                        mesh = geom.trimesh
                     self.add_rigid_batch(
                         name=str(geom.uid),
                         vertices=mesh.vertices,
@@ -296,7 +285,7 @@ class Raytracer:
             for kinematic_entity in self.sim.kinematic_solver.entities:
                 assert kinematic_entity.surface.vis_mode == "visual"
                 for geom in kinematic_entity.vgeoms:
-                    mesh = geom.get_trimesh()
+                    mesh = geom.trimesh
                     self.add_rigid_batch(
                         name=str(geom.uid),
                         vertices=mesh.vertices,
@@ -684,14 +673,6 @@ class Raytracer:
 
         # update variables not used in simulation
         self.visualizer.update_visual_states(force_render)
-
-        # tool entities
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                pos = tool_entity.pos[self.sim.cur_substep_local].to_numpy()
-                quat = tool_entity.quat[self.sim.cur_substep_local].to_numpy()
-                T = gu.trans_quat_to_T(pos, quat)
-                self.update_rigid(str(tool_entity.uid), T)
 
         # rigid-like entities (rigid + kinematic)
         for solver in (self.sim.rigid_solver, self.sim.kinematic_solver):

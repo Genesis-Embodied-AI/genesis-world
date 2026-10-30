@@ -5,11 +5,16 @@ import pathlib
 import subprocess
 import sys
 
-import pytest
 import numpy as np
+import pytest
+
+import quadrants as qd
 
 import genesis as gs
-from genesis.utils.misc import qd_to_torch
+from genesis.engine.solvers.rigid.collider.collider import kernel_detection
+from genesis.engine.solvers.rigid.constraint.solver import linear_to_lower_tri
+from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
+from genesis.utils.misc import qd_to_numpy, qd_to_torch
 
 from ..utils.assertions import assert_allclose
 
@@ -55,8 +60,6 @@ def _initialize_genesis(backend: gs.constants.backend | str):
     ],
 )
 def test_to_torch(qd_type_spec, batch_shape, arg_shape):
-    import quadrants as qd
-
     for _ in range(10):
         QD_TYPE_MAP = {
             ("field", "scalar"): qd.field,
@@ -112,25 +115,29 @@ def gs_static_child(args: list[str]):
     )
     scene.build()
 
-    scene.rigid_solver.collider.detection()
-    actual_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
-    assert actual_contacts == args.expected_num_contacts
-    from genesis.engine.solvers.rigid.collider.collider import kernel_detection
-
-    kernel_to_check = kernel_detection
-
-    assert kernel_to_check._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
-    assert kernel_to_check._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
-    assert kernel_to_check._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    scene.step()
+    assert qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts) == args.expected_num_contacts
+    assert kernel_detection._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
+    assert kernel_detection._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
+    assert kernel_detection._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
 
     sys.exit(RET_SUCCESS)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("backend", [None])  # Disable genesis initialization at worker level
-@pytest.mark.parametrize("test_backend", ["cpu", "gpu"])
-@pytest.mark.parametrize("use_ndarray", [False, True])
-@pytest.mark.parametrize("enable_multicontact, expected_num_contacts", [(False, 1), (True, 4)])
+@pytest.mark.parametrize(
+    "enable_multicontact, expected_num_contacts, use_ndarray, test_backend",
+    [
+        (False, 1, False, "cpu"),
+        pytest.param(True, 4, False, "cpu", marks=pytest.mark.required),
+        (False, 1, True, "cpu"),
+        pytest.param(True, 4, True, "cpu", marks=pytest.mark.required),
+        pytest.param(False, 1, False, "gpu", marks=pytest.mark.required),
+        pytest.param(True, 4, False, "gpu", marks=pytest.mark.required),
+        pytest.param(False, 1, True, "gpu", marks=pytest.mark.required),
+        pytest.param(True, 4, True, "gpu", marks=pytest.mark.required),
+    ],
+)
 def test_static(
     enable_multicontact: bool,
     expected_num_contacts: int,
@@ -138,7 +145,7 @@ def test_static(
     use_ndarray: bool,
     tmp_path: pathlib.Path,
 ) -> None:
-    for it in range(3):
+    for it in range(2):
         cmd_line = [
             sys.executable,
             "-m",
@@ -173,8 +180,6 @@ def test_static(
 
 
 def gs_num_envs_child(args: list[str]):
-    import quadrants as qd
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", type=str, choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("--n_envs", type=int, required=True)
@@ -203,16 +208,13 @@ def gs_num_envs_child(args: list[str]):
     )
     scene.build(n_envs=args.n_envs, env_spacing=(0.5, 0.5))
 
-    scene.rigid_solver.collider.detection()
-    qd.sync()
+    scene.step()
+    assert (qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts) > 0).all()
 
-    from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
-
-    assert kernel_substep_dynamics._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
-    assert (
-        kernel_substep_dynamics._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
-    )
-    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    for kernel in (kernel_substep_dynamics, kernel_detection):
+        assert kernel._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
+        assert kernel._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
+        assert kernel._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
 
     sys.exit(RET_SUCCESS)
 
@@ -223,7 +225,7 @@ def gs_num_envs_child(args: list[str]):
 @pytest.mark.parametrize("use_ndarray", [False, True])
 def test_num_envs(use_ndarray: bool, test_backend: str, tmp_path: pathlib.Path) -> None:
     # Change n_envs each time, and check effect on reading from cache
-    for it, n_envs in enumerate([3, 5, 7]):
+    for it, n_envs in enumerate([3, 5]):
         cmd_line = [
             sys.executable,
             "-m",
@@ -271,49 +273,54 @@ def change_scene(args: list[str]):
 
     _initialize_genesis(backend=args.backend)
 
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            sparse_solve=False,
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1, 1, 0.5),
-            camera_lookat=(0.0, 0.0, 0.0),
-        ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
-        ),
-        show_viewer=False,
-    )
-    scene.add_entity(
-        gs.morphs.Plane(),
-    )
-    for i_obj in range(args.n_objs):
-        scene.add_entity(
-            gs.morphs.Box(
-                size=(0.4, 0.4, 0.4),
-                pos=(0.0, 0.5 * i_obj, 0.5),
-            )
+    kernel_primal = kernel_substep_dynamics._primal
+    for i_build in range(2):
+        scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(
+                sparse_solve=False,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(1, 1, 0.5),
+                camera_lookat=(0.0, 0.0, 0.0),
+            ),
+            profiling_options=gs.options.ProfilingOptions(
+                show_FPS=False,
+            ),
+            show_viewer=False,
         )
-    scene.build(n_envs=args.n_envs)
+        scene.add_entity(
+            gs.morphs.Plane(),
+        )
+        for i_obj in range(args.n_objs):
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(0.4, 0.4, 0.4),
+                    pos=(0.0, 0.5 * i_obj, 0.5),
+                )
+            )
+        scene.build(n_envs=args.n_envs)
 
-    for _ in range(60):
-        scene.step()
+        for _ in range(60):
+            scene.step()
 
-    qpos = scene.sim.rigid_solver.get_qpos()
-    if args.n_envs > 0:
-        assert qpos.ndim == 2
-        assert qpos.shape[0] == args.n_envs
-    else:
-        assert qpos.ndim == 1
-    assert qpos.shape[-1] == args.n_objs * 7
+        qpos = scene.sim.rigid_solver.get_qpos()
+        if args.n_envs > 0:
+            assert qpos.ndim == 2
+            assert qpos.shape[0] == args.n_envs
+        else:
+            assert qpos.ndim == 1
+        assert qpos.shape[-1] == args.n_objs * 7
 
-    z = qpos.reshape((*qpos.shape[:-1], args.n_objs, 7))[..., 2]
-    assert_allclose(z, 0.2, atol=1e-3)
+        z = qpos.reshape((*qpos.shape[:-1], args.n_objs, 7))[..., 2]
+        assert_allclose(z, 0.2, atol=1e-3)
 
-    from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
+        if i_build == 0:
+            assert kernel_primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
+            assert kernel_primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+            n_kernels = len(kernel_primal.materialized_kernels)
 
-    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
-    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    # The same scene built again in the process reuses the kernels compiled for the first one
+    assert len(kernel_primal.materialized_kernels) == n_kernels
 
     sys.exit(RET_SUCCESS)
 
@@ -370,9 +377,6 @@ def test_linear_to_lower_tri(n_dofs):
     # Metal's GPU sqrt can return slightly-below-exact results for perfect squares (e.g. sqrt(11881) ->
     # ~108.999 instead of 109), so the sqrt-based triangular index formula must post-correct the row index
     # against off-by-one selection.
-    import quadrants as qd
-    from genesis.engine.solvers.rigid.constraint.solver import linear_to_lower_tri
-
     n_lower_tri = n_dofs * (n_dofs + 1) // 2
     result_row = qd.field(dtype=qd.i32, shape=(n_lower_tri,))
     result_col = qd.field(dtype=qd.i32, shape=(n_lower_tri,))

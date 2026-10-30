@@ -1,7 +1,10 @@
 import ctypes
 import gc
+import hashlib
+import itertools
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,11 +14,12 @@ from enum import Enum
 from io import BytesIO
 from pathlib import Path
 
-import setproctitle
 import psutil
 import pyglet
 import pytest
+import setproctitle
 from _pytest.mark import Expression, MarkMatcher
+from _pytest.mark.structures import ParameterSet
 from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
 
@@ -94,6 +98,7 @@ SKIP_NO_MADRONA = _skip_reason("BatchRenderer is not supported because 'gs_madro
 SKIP_NO_LUISA = _skip_reason("RayTracer is not supported because 'LuisaRenderPy' is not available.")
 SKIP_NO_VIEWER = _skip_reason("Interactive viewer not supported on this platform.")
 SKIP_NO_OMNIVERSE_KIT = _skip_reason("omniverse-kit support not available")
+SKIP_NO_IPC = _skip_reason("IPC Coupler is not supported because 'uipc' module is not available.")
 SKIP_NO_IMGUI_BUNDLE = _skip_reason("'imgui-bundle' is not available.")
 
 
@@ -231,7 +236,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
             # FIXME: Enabling multi-threading in benchmark is making compile time estimation unreliable
             num_cpu_per_worker = "1"
         else:
-            physical_core_count = psutil.cpu_count(logical=config.option.logical)
+            physical_core_count = _get_core_count(config.option.logical)
             num_workers = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
             num_cpu_per_worker = str(max(int(physical_core_count / num_workers), 1))
         os.environ["QD_NUM_THREADS"] = num_cpu_per_worker
@@ -248,6 +253,22 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     os.environ["NUMBA_CACHE_DIR"] = str(basetemp / "numba-cache")
 
 
+def _get_core_count(logical):
+    """Return the number of cores the process may run on, logical or physical.
+
+    A job scheduler or a container grants the process a share of the machine through its CPU affinity, which bounds the
+    cores it may use below those of the machine.
+    """
+    core_count = psutil.cpu_count(logical=logical)
+    # The CPU affinity of a process is not exposed on macOS
+    if sys.platform != "darwin":
+        n_cpus_allowed = len(psutil.Process().cpu_affinity())
+        if not logical:
+            n_cpus_allowed = max(n_cpus_allowed * core_count // psutil.cpu_count(logical=True), 1)
+        core_count = min(core_count, n_cpus_allowed)
+    return core_count
+
+
 def _get_gpu_indices():
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cuda_visible_devices is not None:
@@ -260,10 +281,14 @@ def _get_gpu_indices():
             if device_count > 0:
                 return tuple(range(device_count))
 
-        warnings.warn(
-            "No GPU backend detected (neither NVML nor AMD SMI); multi-GPU support will be disabled.",
-            stacklevel=2,
-        )
+        # The device nodes of the NVIDIA and AMD ROCm kernel drivers only exist on a machine with a GPU, which tells a
+        # missing management library apart from a CPU-only machine.
+        if any([Path(path).exists() for path in ("/dev/nvidiactl", "/dev/kfd")]):
+            warnings.warn(
+                "GPU detected but no GPU management library available (neither NVML nor AMD SMI); multi-GPU support "
+                "will be disabled.",
+                stacklevel=2,
+            )
 
     return (0,)
 
@@ -329,8 +354,12 @@ def _get_egl_index(gpu_index):
 
 def pytest_xdist_auto_num_workers(config):
     # Get available memory (RAM & VRAM) and number of cores
-    physical_core_count = psutil.cpu_count(logical=config.option.logical)
+    physical_core_count = _get_core_count(config.option.logical)
     ram_memory = psutil.virtual_memory().total / 1024**3
+    # A job scheduler or a container also caps the memory of the process below that of the machine (Linux cgroup v2)
+    cgroup_memory_max = Path("/sys/fs/cgroup/memory.max")
+    if cgroup_memory_max.exists() and (memory_max := cgroup_memory_max.read_text().strip()) != "max":
+        ram_memory = min(ram_memory, int(memory_max) / 1024**3)
     if sys.platform == "darwin":
         # On Apple ARM, cpu and gpu are part of the same physical device with unified memory
         num_gpus = 1
@@ -362,17 +391,12 @@ def pytest_xdist_auto_num_workers(config):
                 num_gpus = 0
                 vram_memory = float("inf")
 
-    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores.
-    # Note that if `forked` is not enabled, up to 7.5Gb per worker is necessary on Linux because Quadrants
-    # does not completely release memory between each test.
+    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores
     if sys.platform == "darwin":
-        ram_memory_per_worker = vram_memory_per_worker = 3.0
-    elif config.option.forked:
-        ram_memory_per_worker = 5.5
-        vram_memory_per_worker = 1.8
+        ram_memory_per_worker = vram_memory_per_worker = 2.0
     else:
-        ram_memory_per_worker = 7.5
-        vram_memory_per_worker = 2.5
+        ram_memory_per_worker = 3.5
+        vram_memory_per_worker = 1.8
     num_workers = min(
         physical_core_count,
         max(ram_memory / ram_memory_per_worker, 1),
@@ -414,6 +438,67 @@ def pytest_collection_modifyitems(config, items):
             backend = default_backend
         if backend not in mark.args:
             item.own_markers = [own for own in item.own_markers if own.name != "slow"]
+
+    # Resolve '@pytest.mark.required("pairwise")' and '@pytest.mark.required("sparse")' before pytest applies '-m'
+    # selection, as for 'slow' above. Such a test keeps the marker on a subset of its cases only, separately for each
+    # backend. A sweep of solver options validates how two options interact, so "pairwise" keeps a subset in which every
+    # pair of parameter values appears together, picked greedily preferring the cases that are not slow. Options acting
+    # on distinct parts of the pipeline only need each of their values validated once, so "sparse" keeps the diagonal of
+    # the grid whose axes are the parametrize decorators, each axis tiled to the longest: its i-th case takes the i-th
+    # value of every axis, the first values and the last ones included. The rest of the full product repeats the same
+    # code paths.
+    cases_by_test = {}
+    for item in items:
+        mark = item.get_closest_marker("required")
+        if mark is not None and mark.args in (("pairwise",), ("sparse",)):
+            test_key = (item.nodeid.split("[")[0], repr(item.callspec.params.get("backend")), mark.args[0])
+            cases_by_test.setdefault(test_key, []).append(item)
+    for (_, _, coverage), cases in cases_by_test.items():
+        if coverage == "sparse":
+            axes = []
+            for mark in cases[0].iter_markers("parametrize"):
+                names = mark.args[0]
+                names = [name.strip() for name in names.split(",")] if isinstance(names, str) else list(names)
+                if names != ["backend"]:
+                    # A value of the axis is the tuple of its parameters, whether given bare or as a 'pytest.param'
+                    entries = []
+                    for entry in mark.args[1]:
+                        values = (
+                            entry.values if isinstance(entry, ParameterSet) else entry if len(names) > 1 else (entry,)
+                        )
+                        entries.append(repr(tuple(values)))
+                    axes.append((names, entries))
+            n_diagonal = max(len(entries) for _, entries in axes)
+            diagonal = {tuple(i % len(entries) for _, entries in axes) for i in range(n_diagonal)}
+            cases_kept = set()
+            for i_case, item in enumerate(cases):
+                params = item.callspec.params
+                position = tuple(entries.index(repr(tuple(params[name] for name in names))) for names, entries in axes)
+                if position in diagonal:
+                    cases_kept.add(i_case)
+        else:
+            cases_values = []
+            for item in cases:
+                values = sorted(
+                    (name, repr(value)) for name, value in item.callspec.params.items() if name != "backend"
+                )
+                cases_values.append({*((value,) for value in values), *itertools.combinations(values, 2)})
+            cases_is_slow = [item.get_closest_marker("slow") is not None for item in cases]
+            values_uncovered = set().union(*cases_values)
+            cases_kept = set()
+            while values_uncovered:
+                i_best = max(
+                    range(len(cases)),
+                    key=lambda i_case: (
+                        not cases_is_slow[i_case] and bool(cases_values[i_case] & values_uncovered),
+                        len(cases_values[i_case] & values_uncovered),
+                    ),
+                )
+                cases_kept.add(i_best)
+                values_uncovered -= cases_values[i_best]
+        for i_case, item in enumerate(cases):
+            if i_case not in cases_kept:
+                item.own_markers = [own for own in item.own_markers if own.name != "required"]
 
     yield
 
@@ -470,16 +555,12 @@ def pytest_runtest_setup(item):
                     pass
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Normalize skip trace locations so identical reasons stack into a single summary line.
+def _normalize_skip_location(report):
+    """Normalize the location of a skip report so that identical reasons stack into a single summary line.
 
-    By default, pytest attributes setup-phase skips to the test item's location, scattering
-    identical reasons across many lines. This hook rewrites the location to the canonical
-    definition line in conftest.py for all registered skip reasons.
+    By default, pytest attributes a skip to the test item or the module it skips, scattering identical reasons across
+    many lines. The location is rewritten to the canonical definition line in conftest.py for all registered reasons.
     """
-    outcome = yield
-    report = outcome.get_result()
     if report.skipped and isinstance(report.longrepr, tuple):
         _, _, reason = report.longrepr
         # pytest may prefix the reason with "Skipped: " - strip it for matching
@@ -493,6 +574,19 @@ def pytest_runtest_makereport(item, call):
             lineno = _CANONICAL_SKIP_LINES[SKIP_BACKEND_UNAVAILABLE]
         if lineno is not None:
             report.longrepr = (os.path.relpath(__file__), lineno, reason)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    _normalize_skip_location(outcome.get_result())
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    # A module skipping itself as it is imported is reported here rather than by its tests
+    outcome = yield
+    _normalize_skip_location(outcome.get_result())
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -526,6 +620,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     if IS_INTERACTIVE_VIEWER_AVAILABLE:
         parser.addoption("--vis", action="store_true", default=False, help="Enable interactive viewer.")
     parser.addoption("--dev", action="store_true", default=False, help="Enable genesis debug mode.")
+    parser.addoption(
+        "--failure-artifacts-dir",
+        type=str,
+        default=None,
+        help=(
+            "Write what a failing test leaves for investigation in this directory: the image a mismatching snapshot "
+            "test rendered."
+        ),
+    )
     supported, _reason = is_mem_monitoring_supported()
     help_text = (
         "Run memory monitoring, and store results to mem_monitoring_filepath. CUDA on linux ONLY."
@@ -554,6 +657,16 @@ def backend(pytestconfig):
 @pytest.fixture(scope="session")
 def asset_tmp_path(tmp_path_factory):
     return tmp_path_factory.mktemp("assets")
+
+
+@pytest.fixture
+def caplog(caplog):
+    # The genesis logger keeps its records from propagating to the root logger, so that they are never printed twice.
+    # The handler of the fixture therefore has to sit on it directly.
+    logger = logging.getLogger("genesis")
+    logger.addHandler(caplog.handler)
+    yield caplog
+    logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture
@@ -812,7 +925,7 @@ def initialize_genesis(
         shutil.rmtree(numba_cache_dir, ignore_errors=True)
 
     # Redirect name terrain cache directory to some test-local temporary location to avoid conflict and persistence
-    monkeypatch.setattr("genesis.utils.misc.get_gnd_cache_dir", lambda: str(tmp_path / ".cache" / "terrain"))
+    monkeypatch.setattr("genesis.utils.cache.get_gnd_cache_dir", lambda: str(tmp_path / ".cache" / "terrain"))
 
     try:
         # Skip if requested backend is not available
@@ -833,13 +946,13 @@ def initialize_genesis(
         gs.init(
             backend=backend,
             precision=precision,
+            logging_level=logging_level,
             debug=debug,
             seed=0,
-            logging_level=logging_level,
+            theme="raw",
             performance_mode=performance_mode,
             use_deterministic_algorithms=use_deterministic_algorithms,
         )
-        gc.collect()
 
         if gs.backend != gs.cpu and gs.device.index is not None:
             # The device torch selected must be one this worker is allowed to use. Anything else - including a
@@ -855,8 +968,6 @@ def initialize_genesis(
         yield
     finally:
         gs.destroy()
-        # Double garbage collection is over-zealous since gstaichi 2.2.1 but let's do it anyway
-        gc.collect()
         gc.collect()
 
 
@@ -973,6 +1084,8 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
     _std_err_threshold: float | None = None
     _ratio_err_threshold: float | None = None
     _blurred_kernel_size: int | None = None
+    # Where the rendered image goes when it does not match its snapshot (see 'png_snapshot')
+    _mismatch_path: Path | None = None
 
     def matches(self, *, serialized_data, snapshot_data) -> bool:
         # Imported here rather than at module top: conftest must not be coupled to any other test module at load
@@ -991,6 +1104,9 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
                 blurred_kernel_size=blurred_kernel_size,
             )
         except AssertionError:
+            if self._mismatch_path is not None:
+                self._mismatch_path.parent.mkdir(parents=True, exist_ok=True)
+                self._mismatch_path.write_bytes(serialized_data)
             return False
         return True
 
@@ -1021,12 +1137,28 @@ def png_snapshot(request, snapshot):
             repo_name="snapshots",
             local_dir=tests_dir,
         )
+        # The image goes into a directory of its own per test, inside the one given by '--failure-artifacts-dir'. Its
+        # name is shortened to keep the path within the length limit of Windows, and the digest of the full test id
+        # keeps the tests sharing that prefix apart.
+        artifacts_root = request.config.getoption("--failure-artifacts-dir")
+        if artifacts_root is not None:
+            nodeid_name = re.sub(r"[^\w.\[\]-]+", "_", request.node.nodeid)[:150]
+            nodeid_digest = hashlib.sha1(request.node.nodeid.encode()).hexdigest()[:12]
+            artifacts_dir = Path(artifacts_root) / f"{nodeid_name}-{nodeid_digest}"
+            snapshot_obj.extension._mismatch_path = artifacts_dir / f"{snapshot_name}.png"
 
     return snapshot_obj
 
 
 @pytest.fixture
-def trajectory_snapshot(request) -> Path:
+def load_trajectory_snapshot(request):
+    """Return a function loading the trajectory snapshot of the test, recorded from a scene with '--snapshot-update'.
+
+    The function takes the unbuilt scene the snapshot records, the number of environments it is built with, the number
+    of steps it records, and whether the replay shows the viewer, and returns the loaded trajectory. The scene is built
+    and recorded only when the snapshots are updated, the published snapshot being loaded otherwise.
+    """
+    import genesis as gs
     from genesis.recorders.trajectory import TRAJECTORY_FORMAT
 
     from .utils.assets import get_hf_dataset
@@ -1034,12 +1166,25 @@ def trajectory_snapshot(request) -> Path:
     # The path is the one syrupy gives a single-file snapshot of the test. The test reads the file itself, so syrupy
     # leaves it out of its count of unused snapshots.
     path = request.path.parent / "__snapshots__" / request.path.stem / f"{request.node.name}{TRAJECTORY_FORMAT}"
-    # The brackets of a parametrized test name are escaped for the same reason as in 'png_snapshot'
-    snapshot_pattern = "".join(f"[{char}]" if char in ("[", "]") else char for char in path.name)
-    tests_dir = Path(__file__).parent
-    get_hf_dataset(
-        pattern=f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
-        repo_name="snapshots",
-        local_dir=tests_dir,
-    )
-    return path
+    must_update_snapshot = request.config.getoption("--snapshot-update")
+    if not must_update_snapshot:
+        # The brackets of a parametrized test name are escaped for the same reason as in 'png_snapshot'
+        snapshot_pattern = "".join(f"[{char}]" if char in ("[", "]") else char for char in path.name)
+        tests_dir = Path(__file__).parent
+        get_hf_dataset(
+            pattern=f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
+            repo_name="snapshots",
+            local_dir=tests_dir,
+        )
+
+    def load(scene, n_envs, n_steps, show_viewer):
+        if must_update_snapshot:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            scene.start_recording(gs.recorders.TrajectoryFile(filename=str(path)))
+            scene.build(n_envs=n_envs)
+            for _ in range(n_steps):
+                scene.step()
+            scene.stop_recording()
+        return gs.Scene.load_trajectory(path, show_viewer=show_viewer)
+
+    return load

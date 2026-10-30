@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import pytest
+import torch
 
 import genesis as gs
 from genesis.utils.misc import qd_to_torch, tensor_to_array
@@ -28,7 +29,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     off.entity_fd.set_dofs_velocity(100.0)
     for _ in range(60):
         off.scene_fd.step()
-    assert (off.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() > 50.0).all()
+    assert (off.entity_fd.get_qpos()[:, 0].abs() > 50.0).all()
 
     on = make_diff_scene_pair(
         grad_slider_limit,
@@ -44,7 +45,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     on.entity_fd.set_dofs_velocity(100.0)
     for _ in range(60):
         on.scene_fd.step()
-    assert (on.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() <= 1.5).all()
+    assert (on.entity_fd.get_qpos()[:, 0].abs() <= 1.5).all()
 
     # Backward, with mixed per-environment activity: env 0 drives past the active |x|=0.5 limit while env 1 stays
     # inside it, so the adjoint solve faces different constraint counts in the same batch. Sanity-check the split.
@@ -52,7 +53,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     on.entity_fd.set_dofs_velocity([[100.0], [2.0]])
     for _ in range(5):
         on.scene_fd.step()
-    qpos_end = on.scene_fd.rigid_solver.get_state().qpos
+    qpos_end = on.entity_fd.get_qpos()
     assert abs(qpos_end[0, 0]) > 0.5
     assert abs(qpos_end[1, 0]) < 0.5
 
@@ -60,7 +61,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
         on,
         [np.array([[100.0], [2.0]])],
         lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: (scene.rigid_solver.get_state().qpos[:, 0] ** 2).sum(),
+        lambda scene, entity: (entity.get_qpos()[:, 0] ** 2).sum(),
         n_steps=5,
         rtol=1e-10 if precision == "64" else 5e-4,
         atol=1e-10 if precision == "64" else 5e-4,
@@ -82,10 +83,10 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     grads = {}
     for pair, key in ((off_solver, "off"), (on, "on")):
         pair.scene_ana.reset()
-        v = gs.tensor([[0.5], [0.3]], dtype=gs.tc_float, requires_grad=True)
+        v = torch.tensor([[0.5], [0.3]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
         pair.entity_ana.set_dofs_velocity(v)
         pair.scene_ana.step()
-        loss = (pair.scene_ana.rigid_solver.get_state().qpos[:, 0] ** 2).sum()
+        loss = (pair.entity_ana.get_qpos()[:, 0] ** 2).sum()
         loss.backward()
         grads[key] = tensor_to_array(v.grad)
     assert_allclose(
@@ -96,8 +97,14 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("model_name", ["grad_slider_limit", "grad_cartpole", "grad_hopper"])
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "grad_slider_limit",
+        "grad_cartpole",
+        pytest.param("grad_hopper", marks=pytest.mark.required),
+    ],
+)
 @pytest.mark.debug(False)
 def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precision, show_viewer):
     # Per-step control-force adjoint driving a joint into its limit, across three topologies. A constant force over
@@ -126,15 +133,14 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precisio
             entity.set_dofs_position(init_pos)
 
     def loss_fn(scene, entity):
-        state = scene.rigid_solver.get_state()
-        return (state.links_pos.reshape(-1) ** 2).sum() if is_links_loss else state.qpos[0, 0] ** 2
+        return (entity.get_links_pos() ** 2).sum() if is_links_loss else entity.get_qpos()[0] ** 2
 
     pair.scene_fd.reset()
     setup_fn(pair.scene_fd, pair.entity_fd)
     for force in forces:
         pair.entity_fd.control_dofs_force(force)
         pair.scene_fd.step()
-    reached = abs(pair.scene_fd.rigid_solver.get_state().qpos[0, sanity_dof])
+    reached = abs(pair.entity_fd.get_qpos()[sanity_dof])
     assert reached > sanity_thresh, f"setup error: {model_name} did not reach its limit band (q={reached})"
 
     assert_grad_matches_fd(
@@ -156,7 +162,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
         n_envs=2,
         substeps=4,
         dt=1.0 / 60.0,
-        gravity=(0.0, 0.0, 0.0),
+        gravity=(0.0, 0.0, -5.0),
         enable_joint_limit=False,
         disable_constraint=False,
         show_viewer=show_viewer,
@@ -166,27 +172,37 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
     cs = pair.scene_fd.rigid_solver.constraint_solver.constraint_state
     assert (qd_to_torch(cs.n_constraints_frictionloss) == 1).all()
 
+    # The joint slides then sticks, holding a gravity load below its frictionloss, and the loss reads its actuator force
+    # between steps, whose frictionloss effort comes out of the constraint solve
+    actuator_forces = []
+
+    def step_fn(entity, i_step):
+        if i_step == 0:
+            actuator_forces.clear()
+        else:
+            actuator_forces.append(entity.solver.get_dofs_actuator_force())
+
     assert_grad_matches_fd(
         pair,
         [np.array([[2.0], [1.2]])],
         lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: (scene.rigid_solver.get_state().qpos[:, 0] ** 2).sum(),
+        lambda scene, entity: (entity.get_qpos()[:, 0] ** 2).sum() + sum([force.sum() for force in actuator_forces]),
         n_steps=10,
+        step_fn=step_fn,
         rtol=1e-10 if precision == "64" else 5e-5,
         atol=1e-10 if precision == "64" else 5e-5,
-        eps=3e-6 if precision == "64" else 1e-2,
+        eps=3e-5 if precision == "64" else 3e-2,
     )
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name, n_rows",
     [
         ("grad_hinge_pair_joint_eq_linear", 1),
-        ("grad_hinge_pair_joint_eq_quadratic", 1),
-        ("grad_hinge_joint_eq_constant", 1),
-        ("grad_connect_loop", 3),
-        ("grad_weld_pair", 6),
+        pytest.param("grad_hinge_pair_joint_eq_quadratic", 1, marks=pytest.mark.required),
+        pytest.param("grad_hinge_joint_eq_constant", 1, marks=pytest.mark.required),
+        pytest.param("grad_connect_loop", 3, marks=pytest.mark.required),
+        pytest.param("grad_weld_pair", 6, marks=pytest.mark.required),
     ],
 )
 def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_viewer):
@@ -204,11 +220,13 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_v
     pair.scene_fd.step()
     cs = pair.scene_fd.rigid_solver.constraint_solver.constraint_state
     assert (qd_to_torch(cs.n_constraints_equality) == n_rows).all()
+    with pytest.raises(gs.GenesisException, match="Screw constraints are not supported yet"):
+        pair.scene_ana.rigid_solver.add_screw_constraint(0, 1, axis=(0.0, 0.0, 1.0), pitch=0.0)
 
     # Large initial velocities: the anchor velocity-product bias entering aref is quadratic in velocity, so its
     # adjoint contribution only clears the fp64 tolerance band when the joints spin fast.
     def loss_fn(scene, entity):
-        qpos = scene.rigid_solver.get_state().qpos
+        qpos = entity.get_qpos()
         return (qpos[:, 0] ** 2 + 0.7 * qpos[:, 1] ** 2).sum()
 
     assert_grad_matches_fd(
@@ -245,7 +263,7 @@ def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, show
     weights = np.array([1.0, 0.7, 1.3, 0.5, 0.9, 1.1, 0.6])
 
     def loss_fn(scene, entity):
-        qpos = scene.rigid_solver.get_state().qpos[0]
+        qpos = entity.get_qpos()
         return sum(weights[d] * qpos[d] ** 2 for d in range(7))
 
     assert_grad_matches_fd(

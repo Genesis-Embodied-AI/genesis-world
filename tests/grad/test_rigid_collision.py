@@ -12,9 +12,19 @@ from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 from ..utils.assertions import assert_allclose
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-@pytest.mark.parametrize("shape", ["ground_box", "box", "sphere", "capsule"])
+@pytest.mark.parametrize(
+    "shape, backend",
+    [
+        pytest.param("ground_box", gs.cpu, marks=pytest.mark.required),
+        pytest.param("ground_box", gs.gpu, marks=pytest.mark.required),
+        pytest.param("box", gs.cpu, marks=pytest.mark.required),
+        pytest.param("box", gs.gpu, marks=pytest.mark.required),
+        ("sphere", gs.cpu),
+        pytest.param("sphere", gs.gpu, marks=pytest.mark.required),
+        ("capsule", gs.cpu),
+        pytest.param("capsule", gs.gpu, marks=pytest.mark.required),
+    ],
+)
 def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, show_viewer):
     def _build_contact_scene(shape, mjcf_capsule, *, requires_grad, show_viewer=False):
         scene = gs.Scene(
@@ -33,7 +43,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             show_viewer=show_viewer,
         )
         if shape == "ground_box":
-            scene.add_entity(
+            ground = scene.add_entity(
                 gs.morphs.Box(
                     size=(2.0, 2.0, 0.2),
                     pos=(0.0, 0.0, 0.1),
@@ -49,7 +59,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
                 vis_mode="collision",
             )
         else:
-            scene.add_entity(gs.morphs.Plane())
+            ground = scene.add_entity(gs.morphs.Plane())
             if shape == "box":
                 obj = scene.add_entity(
                     gs.morphs.Box(
@@ -77,10 +87,10 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             else:
                 raise ValueError(shape)
         scene.build(n_envs=0)
-        return scene, obj
+        return scene, obj, ground
 
-    def _n_contacts(scene):
-        return qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts)[0]
+    def _n_contacts(entity):
+        return len(entity.get_contacts()["geom_a"])
 
     # Rest z puts the body's lowest point on its support: box / sphere half extent 0.2, upright capsule
     # radius 0.1 + half length 0.2 = 0.3, box-on-ground centered at 0.40.
@@ -102,38 +112,51 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     def settle(scene, obj):
         # Settling under the same base force as the grad window keeps the contact manifold in its loaded
         # configuration throughout, so the in-window contact-count guards hold.
-        obj.set_dofs_position(gs.tensor(rest_dofs, dtype=gs.tc_float).sceneless())
+        obj.set_dofs_position(torch.tensor(rest_dofs, dtype=gs.tc_float, device=gs.device))
         for _ in range(n_settle):
             obj.control_dofs_force(base_force)
             scene.step()
 
-    scene_ana, obj_ana = _build_contact_scene(shape, grad_capsule, requires_grad=True, show_viewer=show_viewer)
+    scene_ana, obj_ana, ground_ana = _build_contact_scene(
+        shape, grad_capsule, requires_grad=True, show_viewer=show_viewer
+    )
     scene_ana.reset()
     settle(scene_ana, obj_ana)
-    nc = _n_contacts(scene_ana)
+    nc = _n_contacts(obj_ana)
     assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
-    forces = [gs.tensor(init_force[t], dtype=gs.tc_float, requires_grad=True) for t in range(n_steps)]
+    # The fixed ground box is set back at its height through a tensor tracking gradients, which reaches the contact
+    # through the poses of its fixed geoms
+    ground_pos = torch.tensor((0.0, 0.0, 0.1), dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    if shape == "ground_box":
+        ground_ana.set_pos(ground_pos, relative=False)
+    forces = [
+        torch.tensor(init_force[t], dtype=gs.tc_float, device=gs.device, requires_grad=True) for t in range(n_steps)
+    ]
     for t in range(n_steps):
         obj_ana.control_dofs_force(forces[t])
         scene_ana.step()
-        assert _n_contacts(scene_ana) == nc, "contact set changed during grad window - FD invalid"
-    loss = (scene_ana.rigid_solver.get_state().qpos[0, :3] ** 2).sum()
+        assert _n_contacts(obj_ana) == nc, "contact set changed during grad window - FD invalid"
+    loss = (obj_ana.get_qpos()[:3] ** 2).sum()
     scene_ana.backward(loss)
     ana = np.stack([tensor_to_array(f.grad) for f in forces])
 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would
     # measure that forward gap instead of the gradient.
-    scene_fd, obj_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
+    scene_fd, obj_fd, ground_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
 
-    def loss_at(perturbed):
+    # The finite differences need no autograd graph of the rollout, so it is left unrecorded
+    @torch.no_grad()
+    def loss_at(perturbed, ground_height=0.1):
         scene_fd.reset()
         settle(scene_fd, obj_fd)
+        if shape == "ground_box":
+            ground_fd.set_pos((0.0, 0.0, ground_height), relative=False)
         for t in range(n_steps):
             obj_fd.control_dofs_force(perturbed[t])
             scene_fd.step()
-            assert _n_contacts(scene_fd) == nc, "contact set changed under FD perturbation"
-        return float((scene_fd.rigid_solver.get_state().qpos[0, :3] ** 2).sum().detach())
+            assert _n_contacts(obj_fd) == nc, "contact set changed under FD perturbation"
+        return (obj_fd.get_qpos()[:3] ** 2).sum()
 
     # Both the normal (z) and a tangential (x) force component: the tangential adjoint flows through the friction
     # rows and their contact-frame chains, which the normal component alone leaves untested.
@@ -147,6 +170,12 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             assert_allclose(
                 ana[t, i_d], fd, rtol=fd_rtol, atol=fd_atol, err_msg=f"contact force.grad mismatch at t={t} dof={i_d}"
             )
+    # The box-box manifold gains or loses a contact within 1e-5 of ground height, a step fp32 finite differences cannot
+    # go below
+    if shape == "ground_box" and precision == "64":
+        eps_height = 1e-6
+        fd = (loss_at(init_force, 0.1 + eps_height) - loss_at(init_force, 0.1 - eps_height)) / (2 * eps_height)
+        assert_allclose(ground_pos.grad[2], fd, rtol=fd_rtol, atol=fd_atol, err_msg="ground height grad mismatch")
 
 
 @pytest.mark.required
@@ -242,6 +271,14 @@ def test_diff_unsupported_configuration_raises():
     with pytest.raises(gs.GenesisException):
         scene.build()
 
+    # An opt-in algorithm that diff sim does not support yet raises before build, here accelerated box-box collision
+    with pytest.raises(gs.GenesisException):
+        gs.Scene(
+            sim_options=gs.options.SimOptions(requires_grad=True),
+            rigid_options=gs.options.RigidOptions(box_box_detection=True),
+            show_viewer=False,
+        )
+
     # Attach merges kinematic trees across entities, which the per-entity backward kernels cannot reverse
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -330,6 +367,8 @@ def test_contact_detection_jacobian_matches_fd():
     dL_dpos = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.pos.grad)
     dL_dquat = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.quat.grad)
 
+    # fp64 is required: in fp32 the finite differences of the contacts stay off by more than 1e-2 at every step size,
+    # rounding dominating the small steps and contact changes the large ones
     fd_eps = 1e-5
     trials = 100
 
@@ -479,7 +518,6 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         rigid_solver.rigid_config,
         is_forward_pos_updated=True,
         is_forward_vel_updated=True,
-        is_backward=False,
     )
     constraint_solver.add_equality_constraints()
     rigid_solver.collider.detection()
@@ -522,6 +560,19 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     dL_defc_D = qd_to_numpy(constraint_solver.constraint_state.dL_defc_D)
     dL_dforce = qd_to_numpy(constraint_solver.constraint_state.dL_dforce)
 
+    # The solver relies on the structural zeros of the Jacobian (outside row supports) and mass matrix (outside blocks):
+    # some paths read rows whole rather than through the support lists. The adjoint differentiates the structurally
+    # nonzero entries alone, so the perturbations stay on them.
+    jac_n_dofs = qd_to_numpy(constraint_solver.constraint_state.jac_n_dofs)
+    jac_dofs_idx = qd_to_numpy(constraint_solver.constraint_state.jac_dofs_idx)
+    rows_idx, slots_idx, envs_idx = np.nonzero(np.arange(jac_dofs_idx.shape[1])[:, None] < jac_n_dofs[:, None, :])
+    jac_mask = np.zeros(init_input_jac.shape, dtype=bool)
+    jac_mask[rows_idx, jac_dofs_idx[rows_idx, slots_idx, envs_idx], envs_idx] = True
+    dofs_idx = np.arange(init_input_mass.shape[0])
+    dofs_mass_block_start = qd_to_numpy(rigid_solver.rigid_info.dofs_mass_block_start)
+    dofs_mass_block_end = qd_to_numpy(rigid_solver.rigid_info.dofs_mass_block_end)
+    mass_mask = (dofs_idx >= dofs_mass_block_start[:, None]) & (dofs_idx < dofs_mass_block_end[:, None])
+
     fd_eps = 1e-3
     trials = 200
     for dL_dx, x_type in (
@@ -534,6 +585,10 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         error = 0.0
         for _ in range(trials):
             rand_dx = np.random.randn(*dL_dx.shape)
+            if x_type == "jac":
+                rand_dx = rand_dx * jac_mask
+            elif x_type == "mass":
+                rand_dx = rand_dx * mass_mask[..., None]
             rand_dx = rand_dx / max(
                 np.linalg.norm(rand_dx, axis=0 if x_type in ("force", "aref", "efc_D") else (0, 1)), gs.EPS
             )

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -41,15 +42,17 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
 
     monkeypatch.setattr(ImGuiOverlayPlugin, "on_draw", _on_draw_deterministic)
 
-    # Discard the plugin's 18 px ``ImFontConfig`` so ProggyClean loads at its native 13 px. ProggyClean is a bitmap
-    # font, so glyph rasterization is a memcpy on every renderer (stb_truetype is not byte-identical across software
-    # vs hardware OpenGL). The patch must run before the plugin's lazy ``_init_imgui`` so the renderer uploads the
-    # font texture at the correct size from the start.
-    original_add_font_default = imgui.ImFontAtlas.add_font_default
-    monkeypatch.setattr(imgui.ImFontAtlas, "add_font_default", lambda atlas, _=None: original_add_font_default(atlas))
+    # Discard the plugin's 18 px ``ImFontConfig`` and load ProggyClean, the bitmap font, at its native 13 px, so glyph
+    # rasterization is a memcpy on every renderer. It is named explicitly since ``add_font_default`` picks the vector
+    # font. The patch must run before the plugin's lazy ``_init_imgui`` so the renderer uploads the font texture at the
+    # correct size from the start.
+    original_add_font_default_bitmap = imgui.ImFontAtlas.add_font_default_bitmap
+    monkeypatch.setattr(
+        imgui.ImFontAtlas, "add_font_default", lambda atlas, _=None: original_add_font_default_bitmap(atlas)
+    )
 
-    # Disable shape anti-aliasing (lines, fills, textured-line shortcut) and baked thick-line atlas entries so window
-    # borders and button rounding do not drift between renderers either.
+    # Disable shape anti-aliasing (lines and fills) and baked thick-line atlas entries so window borders and button
+    # rounding do not drift between renderers either.
     original_init_imgui = ImGuiOverlayPlugin._init_imgui
 
     def _init_imgui_deterministic(self):
@@ -59,7 +62,6 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
         style = self._imgui.get_style()
         style.anti_aliased_lines = False
         style.anti_aliased_fill = False
-        style.anti_aliased_lines_use_tex = False
         # Pyglet's backend sets ``display_framebuffer_scale`` from the window's pixel ratio (2.0 on Retina macOS,
         # 1.0 on most Linux runners); ImGui scales vertex positions by that factor, so the same layout produces
         # different pixel grids across platforms. Pin to 1.0 so vertex positions are byte-identical everywhere.
@@ -200,7 +202,6 @@ def test_editing_controls(png_snapshot, monkeypatch):
     assert rgb_array_to_png_bytes(rgb) == png_snapshot
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason="Interactive viewer not supported on this platform.")
 @pytest.mark.skipif(not is_imgui_bundle_supported, reason=SKIP_NO_IMGUI_BUNDLE)
@@ -232,6 +233,8 @@ def test_runtime_plugin_toggle_and_pause():
 
     scene = _build_default_scene(enable_gui=True)
     scene.build()
+    cube = scene.get_entity("cube")
+    cube_init_pos = cube.get_pos()
     viewer = scene.viewer
     pyrender_viewer = viewer._pyrender_viewer
     pyrender_viewer.switch_to()
@@ -258,9 +261,27 @@ def test_runtime_plugin_toggle_and_pause():
     scene.step()
     assert not mouse._sim_running
     assert mouse._held_link is None
+    # A paused step waits for the next refresh of the viewer, never for the simulation pace, so that the GUI stays
+    # responsive while paused. The simulation pace is set to a period that no slowdown of the machine comes close to.
+    period = 600.0
+    viewer.realtime_factor = scene.dt / period
+    time_start = time.perf_counter()
+    scene.step()
+    scene.step()
+    assert 1.0 / viewer.refresh_rate < time.perf_counter() - time_start < period
+    viewer.realtime_factor = None
     overlay.interactive_scene.resume()
     scene.step()
     assert mouse._sim_running
+
+    # A reset asked for from the GUI is applied by the next step, which puts the scene back in its initial state and
+    # does not advance it
+    cube.set_pos((0.0, 0.4, 0.5))
+    assert_allclose(cube.get_pos(), (0.0, 0.4, 0.5), tol=gs.EPS)
+    overlay.interactive_scene.reset()
+    scene.step()
+    assert_allclose(cube.get_pos(), cube_init_pos, tol=gs.EPS)
+    assert_allclose(scene.get_time(), 0.0, tol=gs.EPS)
 
     # Disabling detaches it and tears down its interaction state and debug visuals.
     viewer.remove_plugin(mouse)
@@ -349,6 +370,18 @@ def test_scene_rebuild():
 
     scene.step()
     assert_allclose(scene.rigid_solver.get_qpos(), qpos_before, tol=gs.EPS)
+
+    # A scale edit hands the rebuild a new morph, so the entity is resolved again at the new scale
+    duck_aabb = scene.get_entity("duck").get_AABB()
+    digest_before = scene._desc_digest
+    duck_kwargs = plugin._pending_entities_kwargs["duck"]
+    duck_kwargs["morph"] = duck_kwargs["morph"].model_copy(update={"scale": 0.002})
+    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    scene.step()
+    duck_aabb_scaled = scene.get_entity("duck").get_AABB()
+    assert_allclose(duck_aabb_scaled[1] - duck_aabb_scaled[0], 2.0 * (duck_aabb[1] - duck_aabb[0]), tol=1e-3)
+    # A checkpoint restore compares against the cached digest, so the cache must follow the edit
+    assert scene._desc_digest != digest_before
 
     # Switching the visual mode of an entity gives its geoms fresh nodes, which must keep following the simulation:
     # the arm sags under gravity once unpaused, so the frames before and after must differ

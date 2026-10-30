@@ -199,45 +199,6 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         queried live. Each scene-editing control gates on its own feature and renders disabled when absent."""
         return self.interactive_scene.supported_features
 
-    def _refresh_visuals(self):
-        """Refresh render transforms after a GUI-driven mutation.
-
-        Caller must hold the render lock. Covers both the rigid and kinematic solvers, since both manage
-        KinematicEntity-based entities the browser can pose."""
-        for solver in (self.scene.rigid_solver, self.scene.kinematic_solver):
-            if solver.is_active:
-                solver.update_vgeoms()
-        ctx = self.viewer.gs_context
-        ctx.update_link_frame()
-        ctx.update_rigid()
-
-    def _apply_entity_vis_mode(self, entity, mode: str):
-        """Switch the entity's rendered mesh between ``"visual"`` and ``"collision"``. Removes the previous
-        render nodes from the context, swaps ``entity.surface.vis_mode``, then rebuilds nodes from the
-        appropriate geom set."""
-        if not isinstance(entity.surface, gs.surfaces.Surface):
-            return
-        old_mode = entity.surface.vis_mode
-        if old_mode == mode:
-            return
-
-        with self.viewer.render_lock:
-            ctx = self.viewer.gs_context
-            solver = entity.solver
-
-            old_geoms = entity.vgeoms if old_mode == "visual" else entity.geoms
-            for geom in old_geoms:
-                ctx.remove_rigid_node(geom)
-
-            entity.surface.vis_mode = mode
-            self._refresh_visuals()
-
-            is_visual = mode == "visual"
-            geoms = entity.vgeoms if is_visual else entity.geoms
-            geoms_T = ctx.rigid_geoms_T(solver, is_visual)
-            for geom in geoms:
-                ctx.add_geom_node(geom, geoms_T)
-
     def _init_imgui(self):
         """Initialize ImGui. Must be called from the viewer thread (e.g., in on_draw)."""
         if self._init_attempted:
@@ -709,15 +670,13 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # ImGuizmo wrote the new absolute pose into object_matrix.
         new_mat = np.array(object_matrix.values).reshape(4, 4).T
         self.interactive_scene.pause()
-        with self.viewer.render_lock:
-            if self._gizmo_operation == gizmo.OPERATION.rotate:
-                quat_xyzw = R.from_matrix(new_mat[:3, :3]).as_quat()  # scipy: x,y,z,w
-                new_quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
-                # set_quat must be absolute (relative=False), since the KinematicEntity default is relative.
-                entity.set_quat(new_quat_wxyz, envs_idx=self._controlled_env_idx, relative=False)
-            else:
-                entity.set_pos(new_mat[:3, 3], envs_idx=self._controlled_env_idx, relative=False)
-            self._refresh_visuals()
+        if self._gizmo_operation == gizmo.OPERATION.rotate:
+            quat_xyzw = R.from_matrix(new_mat[:3, :3]).as_quat()  # scipy: x,y,z,w
+            new_quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+            # set_quat must be absolute (relative=False), since the KinematicEntity default is relative.
+            entity.set_quat(new_quat_wxyz, envs_idx=self._controlled_env_idx, relative=False)
+        else:
+            entity.set_pos(new_mat[:3, 3], envs_idx=self._controlled_env_idx, relative=False)
 
     def _is_gizmo_active(self):
         """Check if the gizmo is being used (for input blocking)."""
@@ -894,7 +853,9 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 imgui.end_disabled()
                 self._maybe_show_disabled_tooltip(scale_disabled)
                 if changed and not scale_disabled:
-                    morph.scale = new_scale
+                    # A new morph rather than an edit in place, since the rebuild re-creates an entity handed its own
+                    # morph from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
+                    kwargs["morph"] = morph.model_copy(update={"scale": new_scale})
                     self._pending_dirty = True
 
                 imgui.same_line()
@@ -1093,7 +1054,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                     if disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
                         imgui.set_tooltip("No collision geometry available for this entity")
                     if clicked and mode != current_mode:
-                        self._apply_entity_vis_mode(entity, mode)
+                        self.interactive_scene.set_entity_vis_mode(entity, mode)
                 imgui.end_combo()
 
             # Per-entity wireframe toggle. Material lives on render primitives, so we walk the active geom set (vgeoms
@@ -1202,9 +1163,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                             if norm > 1e-8:
                                 q /= norm
                                 new_qpos[qstart:qend] = q.tolist()
-                    with self.viewer.render_lock:
-                        entity.set_qpos(new_qpos, envs_idx=self._controlled_env_idx)
-                        self._refresh_visuals()
+                    entity.set_qpos(new_qpos, envs_idx=self._controlled_env_idx)
 
             imgui.unindent()
 
@@ -1253,9 +1212,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 new_dofs[5] = np.radians(new_euler_deg[2])
 
             # Use set_dofs_position for the whole entity (handles euler->quat internally)
-            with self.viewer.render_lock:
-                entity.set_dofs_position(new_dofs, envs_idx=self._controlled_env_idx)
-                self._refresh_visuals()
+            entity.set_dofs_position(new_dofs, envs_idx=self._controlled_env_idx)
 
             # Refresh new_qpos with updated free joint qpos (euler->quat conversion happened)
             fresh = tensor_to_array(entity.get_qpos())

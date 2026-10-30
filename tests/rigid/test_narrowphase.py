@@ -31,15 +31,25 @@ resetting errno explicit in this test.
 import copy
 import importlib.util
 import xml.etree.ElementTree as ET
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, cast
 
 import numpy as np
 import pytest
+import trimesh
+from scipy.spatial import ConvexHull
+
+import quadrants as qd
 
 import genesis as gs
-from ..utils.assertions import assert_allclose
+import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.collider import gjk_support, support_field
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+
 from ..conftest import TOL_SINGLE
+from ..utils.assertions import assert_allclose, assert_equal
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
@@ -63,7 +73,9 @@ GJK_NORMAL_TOL = 1e-2
 
 
 def _check_expected_values(contacts, description, exp_pen, exp_normal, method_name, pen_tol, normal_tol):
-    """Check that contacts match the expected penetration and/or normal, when provided.
+    """Check that the deepest contact matches the expected penetration and/or normal, when provided.
+
+    The other contacts of the pair are found on its perturbed copies, so that they penetrate no deeper.
 
     Parameters
     ----------
@@ -75,15 +87,16 @@ def _check_expected_values(contacts, description, exp_pen, exp_normal, method_na
     if not contacts or len(contacts["geom_a"]) == 0:
         return
 
+    i_deepest = np.argmax(contacts["penetration"])
     if exp_pen is not None:
-        pen = contacts["penetration"][0]
+        pen = contacts["penetration"][i_deepest]
         assert abs(pen - exp_pen) < pen_tol, (
             f"[{method_name}] {description}: penetration {pen:.6f} != expected {exp_pen:.6f} (tol={pen_tol})"
         )
 
     if exp_normal is not None:
-        normal = np.array(contacts["normal"][0])
-        exp_n = np.array(exp_normal, dtype=float)
+        normal = np.array(contacts["normal"][i_deepest])
+        exp_n = np.array(exp_normal, dtype=gs.np_float)
         exp_n_len = np.linalg.norm(exp_n)
         assert gs.EPS is not None
         if exp_n_len > gs.EPS:
@@ -225,7 +238,7 @@ def insert_errno_before_call(lines, function_call_pattern, errno_value, comment,
     return lines
 
 
-def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, comment):
+def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, comment, index_var="i_b"):
     """Insert errno marker before ALL occurrences of a function call.
 
     Finds all call sites first, then inserts markers from bottom to top to preserve indices.
@@ -236,10 +249,15 @@ def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, com
             idx = line.find(function_call_pattern)
             if idx != -1:
                 if idx == 0 or not (line[idx - 1].isalnum() or line[idx - 1] == "_"):
+                    stripped = line.strip()
+                    if stripped.startswith("def ") or stripped.startswith("@"):
+                        continue
                     call_indices.append(i)
+    if not call_indices:
+        raise ValueError(f"Could not find function call: {function_call_pattern}")
     for call_line_idx in reversed(call_indices):
         indent_size = len(lines[call_line_idx]) - len(lines[call_line_idx].lstrip())
-        errno_line = f"{' ' * indent_size}errno[i_b] |= {errno_value}  # {comment}"
+        errno_line = f"{' ' * indent_size}errno[{index_var}] |= {errno_value}  # {comment}"
         lines.insert(call_line_idx, errno_line)
     return lines
 
@@ -290,14 +308,14 @@ def create_modified_narrowphase_file(tmp_path: Path):
         lines, "gjk.func_gjk_contact(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK called for collision detection"
     )
 
-    # Split path: mark the multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
+    # Split path: mark every multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
     # contacts with GJK), indexing errno by the env of the queue entry it dispatches.
-    lines = insert_errno_before_call(
+    lines = insert_errno_before_all_calls(
         lines,
         "_func_multicontact_detect(",
         ERRNO_CALLED_GJK_K2,
         "MODIFIED: GJK path in multicontact",
-        "collider_state.narrowphase_work_queues.mpr_i_b[i_work]",
+        "collider_state.work_queue.i_b[i_work]",
     )
 
     content = "\n".join(lines)
@@ -356,8 +374,13 @@ class AnalyticalVsGJKSceneCreator:
 
     def setup_scenes(self) -> tuple[gs.Scene, gs.Scene]:
         """Build the analytical scene, then patch the narrowphase and build the GJK scene against it."""
+        viewer_options = gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 1.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        )
         # Scene 1: Using ORIGINAL analytical collision detection
         self.scene_analytical = gs.Scene(
+            viewer_options=viewer_options,
             show_viewer=self.show_viewer,
         )
         self.build_scene(
@@ -376,6 +399,7 @@ class AnalyticalVsGJKSceneCreator:
             rigid_options=gs.options.RigidOptions(
                 use_gjk_collision=True,
             ),
+            viewer_options=viewer_options,
             show_viewer=self.show_viewer,
         )
         self.build_scene(scene=self.scene_gjk, tmp_path=self.tmp_path, entities=self.entities_gjk)
@@ -418,141 +442,13 @@ class AnalyticalVsGJKSceneCreator:
         self.scene_gjk._sim.rigid_solver._errno.fill(0)
         self.scene_gjk.step()
         errno_val = self.scene_gjk._sim.rigid_solver._errno[0]
-        use_split_narrowphase = self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase
-        if use_split_narrowphase:
-            # Kernel1 always runs GJK for collision detection (analytical paths are disabled).
-            assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
         if expect_collision:
+            # Kernel1 runs GJK on every pair left by the broad phase (analytical paths are disabled).
+            if self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase:
+                assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
             # On GPU: multicontact is reached when contact0 detects a collision and enqueues the pair.
             # On CPU: the monolithic kernel calls gjk.func_gjk_contact directly (skipping gjk.func_gjk).
             assert (errno_val & ERRNO_CALLED_GJK_K2) != 0, "GJK scene should use GJK for contact generation."
-
-
-@pytest.mark.slow("gpu")  # gpu ~400s
-@pytest.mark.required
-@pytest.mark.cache(False)
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_capsule_capsule_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool, tol: float) -> None:
-    # Compare the analytical capsule-capsule narrowphase against GJK by monkey-patching the collider. Multiple
-    # configurations reuse a single scene build by moving the objects between checks.
-    test_cases = [
-        # (pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal)
-        # Segments cross at origin (distance=0), pen = sum of radii, normal is degenerate
-        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 90, 0), True, "perpendicular_close", 0.2, None),
-        # Parallel vertical, seg distance = 0.18, pen = 0.2 - 0.18 = 0.02
-        ((0, 0, 0), (0, 0, 0), (0.18, 0, 0), (0, 0, 0), True, "parallel_light", 0.02, (-1, 0, 0)),
-        ((0, 0, 0), (0, 90, 0), (0, 0.17, 0.17), (0, 90, 0), False, "horizontal_displaced", None, None),
-        # Parallel vertical, seg distance = 0.15, pen = 0.2 - 0.15 = 0.05
-        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 0, 0), True, "parallel_deep", 0.05, (-1, 0, 0)),
-        # Segments cross at origin (distance=0), pen = sum of radii, normal is degenerate
-        ((0, 0, 0), (0, 0, 0), (0, 0, 0), (90, 0, 0), True, "perpendicular_center", 0.2, None),
-        # 45° capsule segment crosses the vertical segment at (0, 0, -0.15), so dist=0, pen = sum of radii
-        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 45, 0), True, "diagonal_rotated", 0.2, None),
-    ]
-
-    radius = 0.1
-    half_length = 0.25
-
-    def build_scene(scene: gs.Scene, tmp_path: Path, entities: list):
-        entities.append(scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius))
-        entities.append(scene_add_capsule(tmp_path, scene, half_length=half_length, radius=radius))
-        scene.build()
-
-    scene_creator = AnalyticalVsGJKSceneCreator(
-        monkeypatch=monkeypatch, build_scene=build_scene, tmp_path=tmp_path, show_viewer=show_viewer
-    )
-    scene_analytical, scene_gjk = scene_creator.setup_scenes()
-    assert scene_analytical.rigid_solver.collider is not None
-    assert scene_gjk.rigid_solver.collider is not None
-
-    # Phase 1: Run all analytical scenarios (original, unpatched kernel)
-    analytical_results = {}
-    for pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal in test_cases:
-        try:
-            scene_creator.update_pos_quat_analytical(entity_idx=0, pos=pos0, euler=euler0)
-            scene_creator.update_pos_quat_analytical(entity_idx=1, pos=pos1, euler=euler1)
-            scene_creator.step_analytical()
-
-            contacts = scene_analytical.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            has_collision = len(contacts["geom_a"]) > 0
-            assert has_collision == should_collide, "Analytical collision mismatch!"
-            _check_expected_values(
-                contacts, description, exp_pen, exp_normal, "analytical", ANALYTICAL_PEN_TOL, ANALYTICAL_NORMAL_TOL
-            )
-            # Deep-copy so subsequent steps can't corrupt stored data
-            analytical_results[description] = copy.deepcopy(contacts)
-        except AssertionError as e:
-            raise AssertionError(
-                f"\nFAILED TEST SCENARIO (analytical phase): {description}\n"
-                f"Capsule 0: pos={pos0}, euler={euler0}\n"
-                f"Capsule 1: pos={pos1}, euler={euler1}\n"
-                f"Expected collision: {should_collide}\n"
-                f"Backend: {backend}\n"
-                f"Radius: {radius}, Half-length: {half_length}\n"
-            ) from e
-
-    # Phase 2: Run all GJK scenarios (patched narrowphase)
-    for pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal in test_cases:
-        try:
-            scene_creator.update_pos_quat_gjk(entity_idx=0, pos=pos0, euler=euler0)
-            scene_creator.update_pos_quat_gjk(entity_idx=1, pos=pos1, euler=euler1)
-            scene_creator.step_gjk(should_collide)
-
-            contacts_gjk = scene_gjk.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            contacts_analytical = analytical_results[description]
-
-            has_collision_analytical = contacts_analytical is not None and len(contacts_analytical["geom_a"]) > 0
-            has_collision_gjk = contacts_gjk is not None and len(contacts_gjk["geom_a"]) > 0
-
-            assert has_collision_analytical == has_collision_gjk, "Collision detection mismatch!"
-            assert has_collision_gjk == should_collide
-
-            _check_expected_values(contacts_gjk, description, exp_pen, exp_normal, "GJK", GJK_PEN_TOL, GJK_NORMAL_TOL)
-
-            # If both detected a collision, compare the full contact manifold. Each analytical contact is matched to
-            # its nearest GJK contact by position (order-independent), then position, penetration and normal are
-            # compared for every contact - not just the first - so multi-contact manifolds are fully validated.
-            if has_collision_analytical and has_collision_gjk:
-                n_analytical = len(contacts_analytical["geom_a"])
-                n_gjk = len(contacts_gjk["geom_a"])
-                analytical_positions = np.array([contacts_analytical["position"][i] for i in range(n_analytical)])
-                gjk_positions = np.array([contacts_gjk["position"][j] for j in range(n_gjk)])
-
-                # Every analytical contact must have a matching GJK contact with agreeing position, penetration and
-                # normal - checked for all points, not just the first. GJK may emit a few extra near-duplicate
-                # manifold points, so contacts are matched by nearest position rather than requiring equal counts.
-                for i in range(n_analytical):
-                    j = int(np.argmin(np.linalg.norm(gjk_positions - analytical_positions[i], axis=1)))
-                    assert np.linalg.norm(analytical_positions[i] - gjk_positions[j]) < POS_TOL, "Position mismatch!"
-                    assert_allclose(
-                        contacts_analytical["penetration"][i],
-                        contacts_gjk["penetration"][j],
-                        atol=POS_TOL,
-                        rtol=0.1,
-                        err_msg="Penetration mismatch!",
-                    )
-                    normal_a = np.array(contacts_analytical["normal"][i])
-                    normal_g = np.array(contacts_gjk["normal"][j])
-                    assert abs(np.dot(normal_a, normal_g)) > 0.95, "Normal mismatch!"
-
-                # Parallel capsules produce a two-point manifold; verify both methods find it, and for the vertical
-                # configuration that every contact lies on the line midway between the axes.
-                if description in ["parallel_light", "parallel_deep"]:
-                    assert n_analytical >= 2, f"Expected >=2 analytical contacts for {description}, got {n_analytical}"
-                    if euler0 == (0, 0, 0) and euler1 == (0, 0, 0):
-                        expected_xy = np.array([pos1[0] / 2, 0.0])  # Midpoint between capsules
-                        for pos in (*analytical_positions, *gjk_positions):
-                            assert_allclose(pos[:2], expected_xy, tol=POS_TOL)
-                            assert -0.26 < pos[2] < 0.26
-        except AssertionError as e:
-            raise AssertionError(
-                f"\nFAILED TEST SCENARIO (GJK phase): {description}\n"
-                f"Capsule 0: pos={pos0}, euler={euler0}\n"
-                f"Capsule 1: pos={pos1}, euler={euler1}\n"
-                f"Expected collision: {should_collide}\n"
-                f"Backend: {backend}\n"
-                f"Radius: {radius}, Half-length: {half_length}\n"
-            ) from e
 
 
 @pytest.mark.required
@@ -622,143 +518,6 @@ def create_box_mjcf(name, pos, euler, size):
     return mjcf
 
 
-@pytest.mark.slow("gpu")  # gpu ~400s, dominated by recompiling the patched narrowphase kernels
-@pytest.mark.required
-@pytest.mark.cache(False)
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_sphere_pairs_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool) -> None:
-    # Compare the analytical sphere-capsule and sphere-sphere narrowphase against GJK by monkey-patching the
-    # collider. One scene holds a reference sphere, a capsule and a second sphere; each configuration moves the
-    # reference sphere and the case's partner while parking the third entity far away. The GJK arm of the
-    # sphere-sphere cases also covers EPA robustness on smooth geometries, whose extremely small polytope faces near
-    # convergence amplify the relative reprojection error and can cause false contact rejections.
-    sphere_radius = 0.1
-    capsule_radius = 0.1
-    capsule_half_length = 0.25
-    sphere_b_radius = 0.08
-
-    test_cases = [
-        # (partner_idx, sphere_pos, partner_pos, partner_euler, should_collide, description, exp_pen, exp_normal)
-        # --- sphere vs capsule ---
-        # Sphere above top cap: dist to segment endpoint (0,0,0.25) = 0.15, pen = 0.05
-        (1, (0, 0, 0.4), (0, 0, 0), (0, 0, 0), True, "sphere_above_capsule_top", 0.05, (0, 0, 1)),
-        # Sphere beside cylinder: dist to axis = 0.18, pen = 0.02
-        (1, (0.18, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_close_to_capsule", 0.02, (1, 0, 0)),
-        # dist to axis = sqrt(0.17^2+0.17^2) ≈ 0.24 > 0.2, no collision
-        (1, (0.17, 0.17, 0), (0, 0, 0), (0, 0, 0), False, "sphere_near_cylinder", None, None),
-        (1, (0.35, 0, 0.35), (0, 0, 0), (0, 45, 0), False, "sphere_near_cap", None, None),
-        # Sphere beside cylinder: dist to axis = 0.15, pen = 0.05
-        (1, (0.15, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_touching_cylinder", 0.05, (1, 0, 0)),
-        # Sphere at capsule centre: dist = 0, pen = sum of radii = 0.2, normal is degenerate
-        (1, (0, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_at_capsule_center", 0.2, None),
-        # Sphere near top cap: nearest segment pt = (0,0,0.25), dist = sqrt(0.15²+0.05²) ≈ 0.1581
-        # pen = 0.2 - sqrt(0.025) ≈ 0.041886, normal along (3, 0, 1)
-        (1, (0.15, 0, 0.3), (0, 0, 0), (0, 0, 0), True, "sphere_near_capsule_cap", 0.041886, (3, 0, 1)),
-        # Horizontal capsule (axis along X after 90° Y rotation), sphere offset in Y: pen = 0.05
-        (1, (0, 0.15, 0), (0, 0, 0), (0, 90, 0), True, "sphere_horizontal_capsule", 0.05, (0, 1, 0)),
-        # --- sphere vs sphere ---
-        # Diagonal offset: dist ≈ 0.1166, pen ≈ 0.0634
-        (2, (0, 0, 0), (0.08, 0.06, 0.06), (0, 0, 0), True, "diagonal_3d", 0.0634, (0.08, 0.06, 0.06)),
-        # Axis-aligned overlap: dist = 0.15, pen = 0.03
-        (2, (0, 0, 0), (0.15, 0, 0), (0, 0, 0), True, "axis_aligned", 0.03, (1, 0, 0)),
-        # Near-touching: dist = 0.17, pen = 0.01
-        (2, (0, 0, 0), (0.17, 0, 0), (0, 0, 0), True, "near_touching", 0.01, (1, 0, 0)),
-        # No collision: diagonal near-miss, dist ≈ 0.212 > 0.18, with per-axis offsets below the radii sum so the
-        # bounding boxes still overlap and the pair reaches the narrowphase.
-        (2, (0, 0, 0), (0.15, 0.15, 0), (0, 0, 0), False, "separated", None, None),
-        # Concentric spheres: fully degenerate, just check collision is detected
-        (2, (0, 0, 0), (0, 0, 0), (0, 0, 0), True, "concentric", None, None),
-    ]
-
-    def build_scene(scene: gs.Scene, tmp_path: Path, entities: list) -> None:
-        entities.append(scene_add_sphere(tmp_path, scene, radius=sphere_radius))
-        entities.append(scene_add_capsule(tmp_path, scene, half_length=capsule_half_length, radius=capsule_radius))
-        entities.append(scene_add_sphere(tmp_path, scene, radius=sphere_b_radius))
-        scene.build()
-
-    scene_creator = AnalyticalVsGJKSceneCreator(
-        monkeypatch=monkeypatch,
-        build_scene=build_scene,
-        tmp_path=tmp_path,
-        show_viewer=show_viewer,
-    )
-    scene_analytical, scene_gjk = scene_creator.setup_scenes()
-    assert scene_analytical.rigid_solver.collider is not None
-    assert scene_gjk.rigid_solver.collider is not None
-
-    # Phase 1: Run all analytical scenarios (original, unpatched kernel)
-    analytical_results = {}
-    for (
-        partner_idx,
-        sphere_pos,
-        partner_pos,
-        partner_euler,
-        should_collide,
-        description,
-        exp_pen,
-        exp_normal,
-    ) in test_cases:
-        try:
-            scene_creator.update_pos_quat_analytical(entity_idx=0, pos=sphere_pos, euler=[0, 0, 0])
-            scene_creator.update_pos_quat_analytical(entity_idx=partner_idx, pos=partner_pos, euler=partner_euler)
-            scene_creator.update_pos_quat_analytical(entity_idx=3 - partner_idx, pos=(0.0, 0.0, 10.0), euler=[0, 0, 0])
-            scene_creator.step_analytical()
-
-            contacts = scene_analytical.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            assert (len(contacts["geom_a"]) > 0) == should_collide, "Analytical collision mismatch"
-            _check_expected_values(
-                contacts, description, exp_pen, exp_normal, "analytical", ANALYTICAL_PEN_TOL, ANALYTICAL_NORMAL_TOL
-            )
-            # Deep-copy so subsequent steps can't corrupt stored data
-            analytical_results[description] = copy.deepcopy(contacts)
-        except AssertionError as e:
-            raise AssertionError(f"\nFAILED TEST SCENARIO (analytical phase): {description}\n") from e
-
-    # Phase 2: Run all GJK scenarios (patched narrowphase)
-    for (
-        partner_idx,
-        sphere_pos,
-        partner_pos,
-        partner_euler,
-        should_collide,
-        description,
-        exp_pen,
-        exp_normal,
-    ) in test_cases:
-        try:
-            scene_creator.update_pos_quat_gjk(entity_idx=0, pos=sphere_pos, euler=[0, 0, 0])
-            scene_creator.update_pos_quat_gjk(entity_idx=partner_idx, pos=partner_pos, euler=partner_euler)
-            scene_creator.update_pos_quat_gjk(entity_idx=3 - partner_idx, pos=(0.0, 0.0, 10.0), euler=[0, 0, 0])
-            scene_creator.step_gjk(should_collide)
-
-            contacts_gjk = scene_gjk.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            contacts_analytical = analytical_results[description]
-            assert (len(contacts_gjk["geom_a"]) > 0) == should_collide, "GJK collision mismatch"
-            _check_expected_values(contacts_gjk, description, exp_pen, exp_normal, "GJK", GJK_PEN_TOL, GJK_NORMAL_TOL)
-
-            # If both detected a collision, compare the contact details. The concentric sphere pair only compares
-            # penetration: its contact frame is fully arbitrary and, with distinct radii, its contact position moves
-            # with it. The coincident sphere-capsule case keeps a loose frame check, and its position is
-            # direction-independent since the sphere radius equals half the penetration there.
-            if should_collide:
-                assert_allclose(
-                    contacts_analytical["penetration"][0],
-                    contacts_gjk["penetration"][0],
-                    atol=POS_TOL,
-                    rtol=0.1,
-                    err_msg="Penetration mismatch!",
-                )
-                if description != "concentric":
-                    normal_agreement = abs(
-                        np.dot(np.array(contacts_analytical["normal"][0]), np.array(contacts_gjk["normal"][0]))
-                    )
-                    normal_tol = 0.5 if description == "sphere_at_capsule_center" else 0.95
-                    assert normal_agreement > normal_tol, "Normal mismatch!"
-                    assert_allclose(contacts_analytical["position"][0], contacts_gjk["position"][0], tol=POS_TOL)
-        except AssertionError as e:
-            raise AssertionError(f"\nFAILED TEST SCENARIO (GJK phase): {description}\n") from e
-
-
 def scene_add_box(tmp_path: Path, scene: gs.Scene, size) -> "RigidEntity":
     box_mjcf = create_box_mjcf("box", (0, 0, 0), (0, 0, 0), size)
     box_path = tmp_path / "box.xml"
@@ -774,66 +533,101 @@ def scene_add_box(tmp_path: Path, scene: gs.Scene, size) -> "RigidEntity":
     return cast("RigidEntity", entity_box)
 
 
-@pytest.mark.slow  # ~250s
+@pytest.mark.slow("gpu")
 @pytest.mark.required
 @pytest.mark.cache(False)
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_sphere_box_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool) -> None:
+def test_analytical_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool) -> None:
+    # Compare the analytical capsule-capsule, sphere-capsule, sphere-sphere and sphere-box narrowphase against GJK by
+    # monkey-patching the collider. One scene holds every entity: each configuration poses the pair it checks and parks
+    # the others far apart. The GJK arm of the sphere-sphere cases also covers EPA robustness on smooth geometries,
+    # whose extremely small polytope faces near convergence amplify the relative reprojection error and can cause false
+    # contact rejections.
     sphere_radius = 0.1
+    sphere_b_radius = 0.08
+    capsule_radius = 0.1
+    capsule_half_length = 0.25
     box_size = (0.4, 0.4, 0.2)
-    half = (0.5 * box_size[0], 0.5 * box_size[1], 0.5 * box_size[2])
 
-    test_cases = [
-        # (sphere_pos, box_pos, box_euler, should_collide, description, exp_pen, exp_normal)
-        # Sphere directly above top face by 0.05 -> dist 0.05, pen = 0.05, normal +z
-        ((0, 0, half[2] + sphere_radius - 0.05), (0, 0, 0), (0, 0, 0), True, "top_face_center", 0.05, (0, 0, 1)),
-        # Sphere off-center above top face, just touching -> shallow contact, normal must be +z
-        # This is the issue #2793 regression scenario
-        (
-            (0.05, 0.05, half[2] + sphere_radius - 1e-4),
-            (0, 0, 0),
-            (0, 0, 0),
-            True,
-            "shallow_top_offcenter",
-            1e-4,
-            (0, 0, 1),
-        ),
-        # Sphere just outside the +x +y +z corner (AABB overlaps but no actual contact)
-        # Corner = (half[0], half[1], half[2]); offset along (1,1,1)*sphere_radius*0.7 from corner
-        (
-            (half[0] + 0.7 * sphere_radius, half[1] + 0.7 * sphere_radius, half[2] + 0.7 * sphere_radius),
-            (0, 0, 0),
-            (0, 0, 0),
-            False,
-            "near_corner_no_contact",
-            None,
-            None,
-        ),
-        # Sphere off the +x face -> normal +x, pen = 0.04
-        ((half[0] + sphere_radius - 0.04, 0, 0), (0, 0, 0), (0, 0, 0), True, "x_face", 0.04, (1, 0, 0)),
-        # Sphere off the -y face -> normal -y, pen = 0.03
-        ((0, -(half[1] + sphere_radius - 0.03), 0), (0, 0, 0), (0, 0, 0), True, "ny_face", 0.03, (0, -1, 0)),
-        # Sphere near a +x +z edge: closest point is the edge, normal along the diagonal
-        # closest = (half[0], 0, half[2]) -> diff = (0.06, 0, 0.08), dist = 0.1, pen = 0
-        # offset diff to (0.06*0.5, 0, 0.08*0.5) so the sphere has pen
-        ((half[0] + 0.03, 0, half[2] + 0.04), (0, 0, 0), (0, 0, 0), True, "edge_x_z", 0.05, (3, 0, 4)),
-        # Box rotated 45 deg around z -- still axis-aligned in own frame; sphere above
-        ((0, 0, half[2] + sphere_radius - 0.05), (0, 0, 0), (0, 0, 45), True, "top_rotated_z", 0.05, (0, 0, 1)),
-        # Box rotated 90 deg around y -> original local +x face is now world +z
-        # Sphere above world origin -> contact with face that was +x in local frame
-        (
-            (0, 0, half[0] + sphere_radius - 0.05),
-            (0, 0, 0),
-            (0, 90, 0),
-            True,
-            "top_rotated_y90",
-            0.05,
-            (0, 0, 1),
-        ),
+    capsule_cases = [
+        # (pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal)
+        # Segments cross at origin (distance=0), pen = sum of radii, normal is degenerate
+        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 90, 0), True, "perpendicular_close", 0.2, None),
+        # Parallel vertical, seg distance = 0.18, pen = 0.2 - 0.18 = 0.02
+        ((0, 0, 0), (0, 0, 0), (0.18, 0, 0), (0, 0, 0), True, "parallel_light", 0.02, (-1, 0, 0)),
+        ((0, 0, 0), (0, 90, 0), (0, 0.17, 0.17), (0, 90, 0), False, "horizontal_displaced", None, None),
+        # Parallel vertical, seg distance = 0.15, pen = 0.2 - 0.15 = 0.05
+        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 0, 0), True, "parallel_deep", 0.05, (-1, 0, 0)),
+        # Segments cross at origin (distance=0), pen = sum of radii, normal is degenerate
+        ((0, 0, 0), (0, 0, 0), (0, 0, 0), (90, 0, 0), True, "perpendicular_center", 0.2, None),
+        # 45 deg capsule segment crosses the vertical segment at (0, 0, -0.15), so dist=0, pen = sum of radii
+        ((0, 0, 0), (0, 0, 0), (0.15, 0, 0), (0, 45, 0), True, "diagonal_rotated", 0.2, None),
+    ]
+    sphere_cases = [
+        # (partner_idx, sphere_pos, partner_pos, partner_euler, should_collide, description, exp_pen, exp_normal)
+        # --- sphere vs capsule ---
+        # Sphere above top cap: dist to segment endpoint (0,0,0.25) = 0.15, pen = 0.05
+        (1, (0, 0, 0.4), (0, 0, 0), (0, 0, 0), True, "sphere_above_capsule_top", 0.05, (0, 0, 1)),
+        # Sphere beside cylinder: dist to axis = 0.18, pen = 0.02
+        (1, (0.18, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_close_to_capsule", 0.02, (1, 0, 0)),
+        # dist to axis = sqrt(0.17^2+0.17^2) ~= 0.24 > 0.2, no collision
+        (1, (0.17, 0.17, 0), (0, 0, 0), (0, 0, 0), False, "sphere_near_cylinder", None, None),
+        (1, (0.35, 0, 0.35), (0, 0, 0), (0, 45, 0), False, "sphere_near_cap", None, None),
+        # Sphere beside cylinder: dist to axis = 0.15, pen = 0.05
+        (1, (0.15, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_touching_cylinder", 0.05, (1, 0, 0)),
+        # Sphere at capsule centre: dist = 0, pen = sum of radii = 0.2, normal is degenerate
+        (1, (0, 0, 0), (0, 0, 0), (0, 0, 0), True, "sphere_at_capsule_center", 0.2, None),
+        # Sphere near top cap: nearest segment pt = (0,0,0.25), dist = sqrt(0.15^2+0.05^2) ~= 0.1581
+        # pen = 0.2 - sqrt(0.025) ~= 0.041886, normal along (3, 0, 1)
+        (1, (0.15, 0, 0.3), (0, 0, 0), (0, 0, 0), True, "sphere_near_capsule_cap", 0.041886, (3, 0, 1)),
+        # Horizontal capsule (axis along X after a 90 deg rotation about Y), sphere offset in Y: pen = 0.05
+        (1, (0, 0.15, 0), (0, 0, 0), (0, 90, 0), True, "sphere_horizontal_capsule", 0.05, (0, 1, 0)),
+        # --- sphere vs sphere ---
+        # Diagonal offset: dist ~= 0.1166, pen ~= 0.0634
+        (2, (0, 0, 0), (0.08, 0.06, 0.06), (0, 0, 0), True, "diagonal_3d", 0.0634, (0.08, 0.06, 0.06)),
+        # Axis-aligned overlap: dist = 0.15, pen = 0.03
+        (2, (0, 0, 0), (0.15, 0, 0), (0, 0, 0), True, "axis_aligned", 0.03, (1, 0, 0)),
+        # Near-touching: dist = 0.17, pen = 0.01
+        (2, (0, 0, 0), (0.17, 0, 0), (0, 0, 0), True, "near_touching", 0.01, (1, 0, 0)),
+        # No collision: diagonal near-miss, dist ~= 0.212 > 0.18, with per-axis offsets below the radii sum so the
+        # bounding boxes still overlap and the pair reaches the narrowphase.
+        (2, (0, 0, 0), (0.15, 0.15, 0), (0, 0, 0), False, "separated", None, None),
+        # Concentric spheres: fully degenerate, just check collision is detected
+        (2, (0, 0, 0), (0, 0, 0), (0, 0, 0), True, "concentric", None, None),
+        # --- sphere vs box, whose half extents are (0.2, 0.2, 0.1) ---
+        # Sphere sunk 0.05 into the top face: pen = 0.05, normal +z
+        (4, (0, 0, 0.15), (0, 0, 0), (0, 0, 0), True, "top_face_center", 0.05, (0, 0, 1)),
+        # Sphere off-center just touching the top face: shallow contact, normal must be +z
+        (4, (0.05, 0.05, 0.1999), (0, 0, 0), (0, 0, 0), True, "shallow_top_offcenter", 1e-4, (0, 0, 1)),
+        # Sphere 0.07 off the +x +y +z corner along each axis: dist ~= 0.121 > 0.1, the bounding boxes still overlap
+        (4, (0.27, 0.27, 0.17), (0, 0, 0), (0, 0, 0), False, "near_corner_no_contact", None, None),
+        # Sphere off the +x face: pen = 0.04, normal +x
+        (4, (0.26, 0, 0), (0, 0, 0), (0, 0, 0), True, "x_face", 0.04, (1, 0, 0)),
+        # Sphere off the -y face: pen = 0.03, normal -y
+        (4, (0, -0.27, 0), (0, 0, 0), (0, 0, 0), True, "ny_face", 0.03, (0, -1, 0)),
+        # Sphere near the +x +z edge (0.2, 0, 0.1): diff = (0.03, 0, 0.04), dist = 0.05, pen = 0.05
+        (4, (0.23, 0, 0.14), (0, 0, 0), (0, 0, 0), True, "edge_x_z", 0.05, (3, 0, 4)),
+        # Box rotated 45 deg around z, sphere above: pen = 0.05, normal +z
+        (4, (0, 0, 0.15), (0, 0, 0), (0, 0, 45), True, "top_rotated_z", 0.05, (0, 0, 1)),
+        # Box rotated 90 deg around y, its local +x face now facing world +z: pen = 0.05, normal +z
+        (4, (0, 0, 0.25), (0, 0, 0), (0, 90, 0), True, "top_rotated_y90", 0.05, (0, 0, 1)),
+    ]
+    # Entities: 0 sphere, 1 capsule, 2 second sphere, 3 second capsule, 4 box. Each case maps the entities it poses to
+    # their (pos, euler).
+    cases = [
+        ("manifold", {1: (pos0, euler0), 3: (pos1, euler1)}, should_collide, description, exp_pen, exp_normal)
+        for pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal in capsule_cases
+    ]
+    cases += [
+        ("single", {0: (sphere_pos, (0, 0, 0)), i_partner: (partner_pos, partner_euler)}, *case)
+        for i_partner, sphere_pos, partner_pos, partner_euler, *case in sphere_cases
     ]
 
     def build_scene(scene: gs.Scene, tmp_path: Path, entities: list) -> None:
         entities.append(scene_add_sphere(tmp_path, scene, radius=sphere_radius))
+        entities.append(scene_add_capsule(tmp_path, scene, half_length=capsule_half_length, radius=capsule_radius))
+        entities.append(scene_add_sphere(tmp_path, scene, radius=sphere_b_radius))
+        entities.append(scene_add_capsule(tmp_path, scene, half_length=capsule_half_length, radius=capsule_radius))
         entities.append(scene_add_box(tmp_path, scene, size=box_size))
         scene.build()
 
@@ -844,75 +638,115 @@ def test_sphere_box_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
         show_viewer=show_viewer,
     )
     scene_analytical, scene_gjk = scene_creator.setup_scenes()
-    assert scene_analytical.rigid_solver.collider is not None
-    assert scene_gjk.rigid_solver.collider is not None
+    # The entities a case leaves unposed are parked far apart
+    entities_parking = [
+        ((10.0 + 2.0 * i_entity, 0.0, 10.0), (0, 0, 0)) for i_entity in range(len(scene_creator.entities_analytical))
+    ]
 
-    analytical_results = {}
-    for sphere_pos, box_pos, box_euler, should_collide, description, exp_pen, exp_normal in test_cases:
+    # Phase 1: Run all analytical scenarios (original, unpatched kernel)
+    analytical_results = []
+    for _, poses, should_collide, description, exp_pen, exp_normal in cases:
         try:
-            scene_creator.update_pos_quat_analytical(entity_idx=0, pos=sphere_pos, euler=[0, 0, 0])
-            scene_creator.update_pos_quat_analytical(entity_idx=1, pos=box_pos, euler=box_euler)
+            for i_entity, parking in enumerate(entities_parking):
+                pos, euler = poses.get(i_entity, parking)
+                scene_creator.update_pos_quat_analytical(entity_idx=i_entity, pos=pos, euler=euler)
             scene_creator.step_analytical()
 
             contacts = scene_analytical.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            has_collision = len(contacts["geom_a"]) > 0
-            assert has_collision == should_collide, "Analytical collision mismatch"
+            assert (len(contacts["geom_a"]) > 0) == should_collide, "Analytical collision mismatch"
             _check_expected_values(
                 contacts, description, exp_pen, exp_normal, "analytical", ANALYTICAL_PEN_TOL, ANALYTICAL_NORMAL_TOL
             )
-            analytical_results[description] = copy.deepcopy(contacts)
+            # Deep-copy so subsequent steps can't corrupt stored data
+            analytical_results.append(copy.deepcopy(contacts))
         except AssertionError as e:
             raise AssertionError(
-                f"\nFAILED TEST SCENARIO (analytical phase): {description}\n"
-                f"Sphere: pos={sphere_pos}\n"
-                f"Box: pos={box_pos}, euler={box_euler}\n"
-                f"Expected collision: {should_collide}\n"
-                f"Backend: {backend}\n"
-                f"Sphere radius: {sphere_radius}\n"
-                f"Box size: {box_size}\n"
+                f"\nFAILED TEST SCENARIO (analytical phase): {description}\nPoses: {poses}\nBackend: {backend}\n"
             ) from e
 
-    for sphere_pos, box_pos, box_euler, should_collide, description, exp_pen, exp_normal in test_cases:
+    # Phase 2: Run all GJK scenarios (patched narrowphase)
+    for (family, poses, should_collide, description, exp_pen, exp_normal), contacts_analytical in zip(
+        cases, analytical_results
+    ):
         try:
-            scene_creator.update_pos_quat_gjk(entity_idx=0, pos=sphere_pos, euler=[0, 0, 0])
-            scene_creator.update_pos_quat_gjk(entity_idx=1, pos=box_pos, euler=box_euler)
+            for i_entity, parking in enumerate(entities_parking):
+                pos, euler = poses.get(i_entity, parking)
+                scene_creator.update_pos_quat_gjk(entity_idx=i_entity, pos=pos, euler=euler)
             scene_creator.step_gjk(should_collide)
 
             contacts_gjk = scene_gjk.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
-            contacts_analytical = analytical_results[description]
-
             has_collision_analytical = len(contacts_analytical["geom_a"]) > 0
             has_collision_gjk = len(contacts_gjk["geom_a"]) > 0
-
             assert has_collision_analytical == has_collision_gjk, "Collision detection mismatch!"
-            assert has_collision_gjk == should_collide
-
+            assert has_collision_gjk == should_collide, "GJK collision mismatch"
             _check_expected_values(contacts_gjk, description, exp_pen, exp_normal, "GJK", GJK_PEN_TOL, GJK_NORMAL_TOL)
+            if not has_collision_gjk:
+                continue
 
-            if has_collision_analytical and has_collision_gjk:
-                pen_analytical = contacts_analytical["penetration"][0]
-                pen_gjk = contacts_gjk["penetration"][0]
+            if family == "manifold":
+                # Every contact lies within both capsules, no farther than the radius from their segments
+                for pos, euler in poses.values():
+                    axis = gs.utils.geom.quat_to_R(
+                        gs.utils.geom.xyz_to_quat(xyz=np.array(euler, dtype=gs.np_float), degrees=True)
+                    )[:, 2]
+                    offsets = contacts_gjk["position"] - pos
+                    offsets_axial = np.clip(offsets @ axis, -capsule_half_length, capsule_half_length)
+                    dists = np.linalg.norm(offsets - offsets_axial[:, None] * axis, axis=-1)
+                    assert (dists <= capsule_radius + GJK_PEN_TOL).all()
 
-                normal_analytical = np.array(contacts_analytical["normal"][0])
-                normal_gjk = np.array(contacts_gjk["normal"][0])
+                # Every analytical contact must have a matching GJK contact with agreeing position, penetration and
+                # normal. GJK may emit a few extra near-duplicate manifold points, so contacts are matched by nearest
+                # position rather than requiring equal counts.
+                analytical_positions = np.array(contacts_analytical["position"])
+                gjk_positions = np.array(contacts_gjk["position"])
+                for i in range(len(analytical_positions)):
+                    j = np.argmin(np.linalg.norm(gjk_positions - analytical_positions[i], axis=1))
+                    assert np.linalg.norm(analytical_positions[i] - gjk_positions[j]) < POS_TOL, "Position mismatch!"
+                    assert_allclose(
+                        contacts_analytical["penetration"][i],
+                        contacts_gjk["penetration"][j],
+                        atol=POS_TOL,
+                        rtol=0.1,
+                        err_msg="Penetration mismatch!",
+                    )
+                    normal_analytical = np.array(contacts_analytical["normal"][i])
+                    normal_gjk = np.array(contacts_gjk["normal"][j])
+                    assert abs(np.dot(normal_analytical, normal_gjk)) > 0.95, "Normal mismatch!"
 
-                pos_analytical = np.array(contacts_analytical["position"][0])
-                pos_gjk = np.array(contacts_gjk["position"][0])
-                assert_allclose(pen_analytical, pen_gjk, atol=POS_TOL, rtol=0.1, err_msg="Penetration mismatch!")
-
-                normal_agreement = abs(np.dot(normal_analytical, normal_gjk))
-                assert normal_agreement > 0.95, "Normal mismatch!"
-
-                assert_allclose(pos_analytical, pos_gjk, tol=POS_TOL)
+                # Parallel capsules produce a two-point manifold. Both methods must find it and, for the vertical
+                # configuration, every contact lies on the line midway between the axes.
+                if description in ["parallel_light", "parallel_deep"]:
+                    n_analytical = len(analytical_positions)
+                    assert n_analytical >= 2, f"Expected >=2 analytical contacts for {description}, got {n_analytical}"
+                    (_, euler0), (pos1, euler1) = poses[1], poses[3]
+                    if euler0 == (0, 0, 0) and euler1 == (0, 0, 0):
+                        # Midpoint between capsules
+                        expected_xy = np.array([pos1[0] / 2, 0.0])
+                        for pos in (*analytical_positions, *gjk_positions):
+                            assert_allclose(pos[:2], expected_xy, tol=POS_TOL)
+                            assert -0.26 < pos[2] < 0.26
+            else:
+                # The concentric sphere pair only compares penetration: its contact frame is fully arbitrary and, with
+                # distinct radii, its contact position moves with it. The coincident sphere-capsule case keeps a loose
+                # frame check, and its position is direction-independent since the sphere radius equals half the
+                # penetration there.
+                assert_allclose(
+                    contacts_analytical["penetration"][0],
+                    contacts_gjk["penetration"][0],
+                    atol=POS_TOL,
+                    rtol=0.1,
+                    err_msg="Penetration mismatch!",
+                )
+                if description != "concentric":
+                    normal_agreement = abs(
+                        np.dot(np.array(contacts_analytical["normal"][0]), np.array(contacts_gjk["normal"][0]))
+                    )
+                    normal_tol = 0.5 if description == "sphere_at_capsule_center" else 0.95
+                    assert normal_agreement > normal_tol, "Normal mismatch!"
+                    assert_allclose(contacts_analytical["position"][0], contacts_gjk["position"][0], tol=POS_TOL)
         except AssertionError as e:
             raise AssertionError(
-                f"\nFAILED TEST SCENARIO (GJK phase): {description}\n"
-                f"Sphere: pos={sphere_pos}\n"
-                f"Box: pos={box_pos}, euler={box_euler}\n"
-                f"Expected collision: {should_collide}\n"
-                f"Backend: {backend}\n"
-                f"Sphere radius: {sphere_radius}\n"
-                f"Box size: {box_size}\n"
+                f"\nFAILED TEST SCENARIO (GJK phase): {description}\nPoses: {poses}\nBackend: {backend}\n"
             ) from e
 
 
@@ -1048,3 +882,425 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
         order = np.lexsort((positions[:, 1].round(4), positions[:, 0].round(4)))
         assert_allclose(positions[order], expected, atol=1e-5)
         assert_allclose(penetrations, 1e-3, atol=1e-5)
+
+
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("gjk_collision", [False, True])
+@pytest.mark.parametrize("n_base_sides", [4, 32])
+def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer, tol):
+    # A box rests on a wider base, a box or a 32-sided prism, at a random yaw and offset in each environment, so that
+    # the overlap of their faces takes every shape from slivers and short edges to near-collinear corners and many-sided
+    # polygons. The contacts of a pair lie within this overlap at its exact depth, on each of its corners when it has at
+    # most 4, and span its area.
+    N_ENVS = 128
+    PENETRATION = 1e-4
+    PRUNING_TOLERANCE = 0.02
+    BASE_SIZE = (1.0, 0.6, 0.1)
+    BOX_SIZE = (0.5, 0.4, 0.1)
+
+    corners_sign = np.array(((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)))
+    base_corners = 0.5 * corners_sign * BASE_SIZE[:2]
+    base_morph = gs.morphs.Box(
+        size=BASE_SIZE,
+        pos=(0.0, 0.0, 0.5 * BASE_SIZE[2]),
+        fixed=True,
+    )
+    if n_base_sides > 4:
+        angles = 2.0 * np.pi * np.arange(n_base_sides) / n_base_sides
+        base_corners = 0.5 * np.stack((np.cos(angles), np.sin(angles)), axis=-1) * BASE_SIZE[:2]
+        heights = np.repeat((0.0, BASE_SIZE[2]), n_base_sides)[:, None]
+        base_mesh = trimesh.Trimesh(np.concatenate((np.tile(base_corners, (2, 1)), heights), axis=-1)).convex_hull
+        base_morph = gs.morphs.MeshSet(
+            files=(base_mesh,),
+            fixed=True,
+        )
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=gjk_collision,
+            contact_pruning_tolerance=PRUNING_TOLERANCE,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.5, 1.5),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(base_morph)
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=BOX_SIZE,
+        ),
+    )
+    scene.build(n_envs=N_ENVS)
+
+    yaw = np.random.uniform(0.0, 2.0 * np.pi, N_ENVS)
+    is_aligned = np.random.random(N_ENVS) < 0.3
+    yaw_aligned = 0.5 * np.pi * np.random.randint(4, size=is_aligned.sum())
+    yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
+    offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
+    box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
+    corners_tol = scene.rigid_solver.collider._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
+    box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
+    box.set_quat(np.stack((np.cos(0.5 * yaw), np.zeros(N_ENVS), np.zeros(N_ENVS), np.sin(0.5 * yaw)), axis=-1))
+    scene.step()
+    contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+
+    for i_b in range(N_ENVS):
+        # The overlap clips the top face of the base by the half-planes of the bottom face of the box
+        rot = np.array(((np.cos(yaw[i_b]), -np.sin(yaw[i_b])), (np.sin(yaw[i_b]), np.cos(yaw[i_b]))))
+        clip = offset[i_b] + (0.5 * corners_sign * BOX_SIZE[:2]) @ rot.T
+        clip_edges = np.roll(clip, -1, axis=0) - clip
+        half_normals = np.stack((-clip_edges[:, 1], clip_edges[:, 0]), axis=-1)
+        half_normals *= np.sign(((clip.mean(axis=0) - clip) * half_normals).sum(axis=-1))[:, None]
+        overlap = base_corners.copy()
+        for half_normal, half_offset in zip(half_normals, -(half_normals * clip).sum(axis=-1)):
+            overlap_side = half_offset + overlap @ half_normal
+            overlap_clipped = []
+            for point, point_next, side, side_next in zip(
+                overlap, np.roll(overlap, -1, axis=0), overlap_side, np.roll(overlap_side, -1)
+            ):
+                if side >= 0.0:
+                    overlap_clipped.append(point)
+                if side * side_next < 0.0:
+                    overlap_clipped.append(point + (point_next - point) * side / (side - side_next))
+            overlap = np.array(overlap_clipped).reshape((-1, 2))
+        overlap = overlap[np.linalg.norm(overlap - np.roll(overlap, 1, axis=0), axis=-1) > gs.EPS]
+
+        # Faces overlapping along a point or a segment at most have no contact
+        contacts_pos = contacts["position"][i_b][:, :2]
+        if len(overlap) < 3:
+            assert len(contacts_pos) == 0
+            continue
+
+        # Every contact lies within the overlap, at the depth of the box
+        overlap_edges = np.roll(overlap, -1, axis=0) - overlap
+        overlap_normals = np.stack((-overlap_edges[:, 1], overlap_edges[:, 0]), axis=-1)
+        overlap_normals *= np.sign(((overlap.mean(axis=0) - overlap) * overlap_normals).sum(axis=-1))[:, None]
+        overlap_normals /= np.linalg.norm(overlap_normals, axis=-1, keepdims=True)
+        assert ((contacts_pos[:, None] - overlap[None]) * overlap_normals[None]).sum(axis=-1).min(initial=0.0) > -tol
+        assert_allclose(contacts["penetration"][i_b], PENETRATION, tol=tol)
+
+        # An overlap of at most 4 corners has a contact within the merge distance of each corner, unless the pruning
+        # drops it: the triangle a corner forms with its two neighbors then covers less than its pruning tolerance.
+        if len(overlap) <= 4:
+            overlap_prev, overlap_next = np.roll(overlap, 1, axis=0), np.roll(overlap, -1, axis=0)
+            corners_edges = np.stack((overlap - overlap_prev, overlap_next - overlap), axis=-2)
+            corners_area = 0.5 * np.abs(np.linalg.det(corners_edges))
+            overlap_area = 0.5 * np.abs(np.linalg.det(np.stack((overlap, overlap_next), axis=-2)).sum())
+            is_kept = corners_area > PRUNING_TOLERANCE * overlap_area
+            corners_dist = np.linalg.norm(overlap[:, None] - contacts_pos[None], axis=-1)
+            assert (corners_dist.min(axis=1, initial=np.inf)[is_kept] < corners_tol).all()
+
+            # Corner distances alone can accept a collapsed contact patch when the overlap is thin.
+            corners_kept = overlap[is_kept]
+            if len(corners_kept) >= 3:
+                corners_separation = np.linalg.norm(corners_kept[:, None] - corners_kept[None], axis=-1)
+                np.fill_diagonal(corners_separation, val=np.inf)
+                if corners_separation.min() > corners_tol:
+                    assert ConvexHull(contacts_pos).volume > 0.75 * overlap_area
+        else:
+            # Five contacts can span an inscribed pentagon of a larger overlap.
+            pentagons = overlap[np.array(list(combinations(range(len(overlap)), 5)))]
+            pentagons_next = np.roll(pentagons, -1, axis=1)
+            pentagons_area = 0.5 * np.abs(
+                (pentagons[..., 0] * pentagons_next[..., 1] - pentagons[..., 1] * pentagons_next[..., 0]).sum(axis=1)
+            )
+            assert ConvexHull(contacts_pos).volume > 0.65 * pentagons_area.max()
+
+
+@pytest.mark.required
+def test_maximum_contact_area(show_viewer, tol):
+    # A pillar of three, four or six sides rests on a wider pillar of seven, both of random convex sections, at evenly
+    # spread yaws and a random tilt within the reach of the multi-contact perturbation, each pair at its own scale. The
+    # overlap of their faces is the bottom face of the narrow pillar. GJK keeps the first contact exact, so that only the
+    # multi-contact perturbation is on trial.
+    N_YAWS = 16
+    N_TRIALS = 4
+    TOPS_N_SIDES = (3, 4, 6, 3, 4, 6, 3, 4, 6)
+    SCALES = np.geomspace(0.05, 5.0, len(TOPS_N_SIDES))
+    TILT_RATIO = 0.5
+    PENETRATION = 1e-4
+    BASE_RADIUS = 0.5
+    TOP_RADIUS = 0.15
+    PILLAR_HEIGHT = 0.1
+    # Multi-contact detection guarantees every corner of a patch of at most four corners whose interior angle does not
+    # exceed this bound. A larger patch gets five contacts spanning close to the largest pentagon it contains.
+    CORNER_ANGLE_MAX = 0.75 * np.pi
+    AREA_RATIO_MIN = 0.75
+
+    # Each convex section takes its vertices on a circle stretched along one axis by up to 3, at jittered angles. The
+    # jitter bounds the gaps between them, so that the wide section always contains a disk around its center. The narrow
+    # sections of at most four sides are drawn again until every interior angle complies with the guarantee.
+    bases_mesh, tops_mesh, tops_corners = [], [], []
+    for scale, n_sides_top in zip(SCALES, TOPS_N_SIDES):
+        for n_sides, radius, aspect_max, meshes in (
+            (7, BASE_RADIUS, 1.0, bases_mesh),
+            (n_sides_top, TOP_RADIUS, 3.0, tops_mesh),
+        ):
+            while True:
+                angles = 2.0 * np.pi * (np.arange(n_sides) + np.random.uniform(-0.25, 0.25, n_sides)) / n_sides
+                corners = np.stack((np.random.uniform(1.0, aspect_max) * np.cos(angles), np.sin(angles)), axis=-1)
+                corners *= scale * radius / np.linalg.norm(corners, axis=-1).max()
+                dirs_in = corners - np.roll(corners, 1, axis=0)
+                dirs_out = np.roll(corners, -1, axis=0) - corners
+                corners_turn = np.arccos(
+                    (dirs_in * dirs_out).sum(axis=-1)
+                    / (np.linalg.norm(dirs_in, axis=-1) * np.linalg.norm(dirs_out, axis=-1))
+                )
+                if n_sides > 4 or (np.pi - corners_turn <= CORNER_ANGLE_MAX).all():
+                    break
+            heights = scale * np.repeat((0.0, PILLAR_HEIGHT), n_sides)[:, None]
+            meshes.append(trimesh.Trimesh(np.concatenate((np.tile(corners, (2, 1)), heights), axis=-1)).convex_hull)
+        tops_corners.append(corners)
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -60.0, 60.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=[gs.morphs.MeshSet(files=(mesh,), fixed=True) for mesh in bases_mesh],
+        vis_mode="collision",
+    )
+    top = scene.add_entity(
+        morph=[gs.morphs.MeshSet(files=(mesh,)) for mesh in tops_mesh],
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    scene.build(n_envs=len(SCALES) * N_YAWS, env_spacing=(6.0, 6.0))
+
+    # Environments come in one block per variant, sweeping the yaws of the narrow pillar
+    envs_scale = np.repeat(SCALES, N_YAWS)
+    yaws = np.tile(2.0 * np.pi * np.arange(N_YAWS) / N_YAWS, len(SCALES))
+    quats_yaw = gu.rotvec_to_quat(yaws[:, None] * np.array((0.0, 0.0, 1.0)))
+    envs_corners = [np.pad(tops_corners[i_b // N_YAWS], ((0, 0), (0, 1))) for i_b in range(scene.n_envs)]
+    tilt_max = TILT_RATIO * scene.rigid_solver.collider._mc_perturbation
+    for _ in range(N_TRIALS):
+        # The narrow pillar lies inside the disk that the wide section contains, anywhere within it, with its deepest
+        # corner pressed into the wide one by the penetration
+        tilts_angle = np.random.uniform(0.0, 2.0 * np.pi, scene.n_envs)
+        tilts = np.random.uniform(0.0, tilt_max, scene.n_envs)[:, None] * np.stack(
+            (np.cos(tilts_angle), np.sin(tilts_angle), np.zeros(scene.n_envs)), axis=-1
+        )
+        quats = gu.transform_quat_by_quat(quats_yaw, gu.rotvec_to_quat(tilts))
+        envs_R = gu.quat_to_R(quats)
+        envs_corners_z = np.array([(corners @ R.T)[:, 2].max() for corners, R in zip(envs_corners, envs_R)])
+        offsets = envs_scale[:, None] * np.random.uniform(-TOP_RADIUS, TOP_RADIUS, (scene.n_envs, 2))
+        tops_z = envs_scale * (PILLAR_HEIGHT - PENETRATION) - envs_corners_z
+        top.set_pos(np.concatenate((offsets, tops_z[:, None]), axis=-1))
+        top.set_quat(quats)
+        scene.rigid_solver.collider.clear()
+        scene.rigid_solver.collider.detection()
+        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+
+        tops_pos = tensor_to_array(top.get_pos())
+        for i_b in range(scene.n_envs):
+            corners = tops_pos[i_b] + envs_corners[i_b] @ envs_R[i_b].T
+            contacts_pos = contacts["position"][i_b]
+            depth_max = envs_scale[i_b] * PILLAR_HEIGHT - corners[:, 2].min()
+            assert ((contacts["penetration"][i_b] > 0.0) & (contacts["penetration"][i_b] < depth_max + tol)).all()
+            # Every contact lies within the patch. A contact sits midway between its witnesses, which lie its penetration
+            # apart along a normal that may follow the tilted face, so it leaves the patch by half the penetration times
+            # the tilt at most.
+            edges = np.roll(corners[:, :2], -1, axis=0) - corners[:, :2]
+            edges_normal = np.stack((edges[:, 1], -edges[:, 0]), axis=-1) / np.linalg.norm(edges, axis=-1)[:, None]
+            edges_normal *= np.sign(((corners[:, :2] - corners[:, :2].mean(axis=0)) * edges_normal).sum(axis=-1))[
+                :, None
+            ]
+            contacts_side = ((contacts_pos[:, None, :2] - corners[None, :, :2]) * edges_normal[None]).sum(axis=-1)
+            contacts_side_max = 0.5 * contacts["penetration"][i_b] * np.linalg.norm(tilts[i_b]) + tol * envs_scale[i_b]
+            assert (contacts_side < contacts_side_max[:, None]).all()
+            if len(corners) <= 4:
+                corners_dist = np.linalg.norm(corners[:, None, :2] - contacts_pos[None, :, :2], axis=-1).min(axis=1)
+                assert (corners_dist < tol * envs_scale[i_b]).all()
+            else:
+                area_max = max(
+                    ConvexHull(corners[pentagon, :2]).volume
+                    for pentagon in map(list, combinations(range(len(corners)), 5))
+                )
+                assert ConvexHull(contacts_pos[:, :2]).volume > AREA_RATIO_MIN * area_max
+
+
+@pytest.mark.required
+def test_mesh_support_exactness(show_viewer, tol):
+    # The support table of a mesh returns, for any direction, a vertex that supports it, wherever it falls on the grid of
+    # directions the table is laid on: across its cells, on their boundaries, along the normals of the hull faces, and
+    # along the arcs between the normals of adjacent hull faces, where vertices tie. Meshes range from the eight corners
+    # of a box, whose supports tie along the axes, to a couple of hundred vertices, at scales from 0.05 to 5. The table
+    # also counts the vertices tied for a support, every one of which the cell of the direction lists. The last mesh is
+    # added twice, so that one geom reads its supports from the table of another geom of the same mesh.
+    N_RANDOM_DIRECTIONS = 20000
+    N_ARC_SAMPLES = 8
+    MESHES_N_VERTS = (40, 200)
+    SCALES = (0.05, 1.0, 5.0)
+
+    meshes = [trimesh.creation.box(extents=(SCALES[0], 2.0 * SCALES[0], 3.0 * SCALES[0]))]
+    for n_verts, scale in zip(MESHES_N_VERTS, SCALES[1:]):
+        verts = np.random.normal(size=(n_verts, 3))
+        verts /= np.linalg.norm(verts, axis=-1, keepdims=True)
+        meshes.append(trimesh.Trimesh(scale * verts * np.random.uniform(0.5, 1.5, 3)).convex_hull)
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_mujoco_compatibility=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, -15.0, 8.0),
+            camera_lookat=(4.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entities = [
+        scene.add_entity(
+            morph=gs.morphs.MeshSet(
+                files=(mesh,),
+                pos=(4.0 * i_e, 0.0, 0.0),
+            ),
+            vis_mode="collision",
+        )
+        for i_e, mesh in enumerate((*meshes, meshes[-1]))
+    ]
+    scene.build()
+
+    @qd.kernel
+    def query_supports(
+        i_g: int,
+        directions: qd.types.ndarray(),
+        supports: qd.types.ndarray(),
+        supports_count: qd.types.ndarray(),
+        supports_idx: qd.types.ndarray(),
+        dyn_info: array_class.DynInfo,
+        collider_info: array_class.ColliderInfo,
+    ):
+        for i_d in range(directions.shape[0]):
+            direction = qd.Vector([directions[i_d, 0], directions[i_d, 1], directions[i_d, 2]], dt=gs.qd_float)
+            support, i_v = support_field._func_support_mesh(i_g, direction, dyn_info, collider_info)
+            supports_idx[i_d] = i_v
+            for k in qd.static(range(3)):
+                supports[i_d, k] = support[k]
+            supports_count[i_d] = support_field._func_count_supports_mesh(i_g, direction, collider_info)
+
+    @qd.kernel
+    def query_local_supports(
+        i_g: int,
+        directions: qd.types.ndarray(),
+        supports_world: qd.types.ndarray(),
+        supports_local: qd.types.ndarray(),
+        collider_state: array_class.ColliderState,
+        gjk_state: array_class.GJKState,
+        dyn_info: array_class.DynInfo,
+        collider_info: array_class.ColliderInfo,
+        rigid_config: qd.template(),
+        collider_config: qd.template(),
+    ):
+        for i in range(1):
+            for i_d in range(directions.shape[0]):
+                direction = gs.qd_vec3(directions[i_d, 0], directions[i_d, 1], directions[i_d, 2])
+                point, point_local, i_v = gjk_support.support_driver(
+                    i_g,
+                    i,
+                    i,
+                    direction,
+                    gs.qd_vec3(1.0, 2.0, 3.0),
+                    gs.qd_vec4(0.5, 0.5, 0.5, 0.5),
+                    collider_state,
+                    gjk_state,
+                    dyn_info,
+                    collider_info,
+                    rigid_config,
+                    collider_config,
+                    shrink_sphere=False,
+                )
+                for k in qd.static(range(3)):
+                    supports_world[i_d, k] = point[k]
+                    supports_local[i_d, k] = point_local[k]
+
+    # Directions on the boundaries of the cells of both charts, the second chart seeing a direction (x, y, z) of the
+    # mesh frame as (x, -z, y)
+    support_res = qd_to_numpy(scene.rigid_solver.collider.collider_info.support_field.support_res).item()
+    theta = np.random.randint(support_res, size=N_RANDOM_DIRECTIONS // 4) / support_res * 2.0 * np.pi
+    phi = np.random.uniform(0.25 * np.pi, 0.75 * np.pi, N_RANDOM_DIRECTIONS // 4)
+    directions_meridian = np.stack((np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)), axis=-1)
+    theta = np.random.uniform(0.0, 2.0 * np.pi, N_RANDOM_DIRECTIONS // 4)
+    phi = np.random.randint(support_res // 4, 3 * support_res // 4 + 1, N_RANDOM_DIRECTIONS // 4) / support_res * np.pi
+    directions_parallel = np.stack((np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)), axis=-1)
+    directions_boundary = np.concatenate((directions_meridian, directions_parallel))
+    directions_boundary = np.concatenate((directions_boundary, directions_boundary[:, (0, 2, 1)] * (1.0, 1.0, -1.0)))
+
+    for entity in entities:
+        geom = entity.geoms[0]
+        verts = geom.init_verts
+        hull = ConvexHull(verts)
+        faces_normal = hull.equations[:, :3]
+        arcs_weight = np.random.uniform(0.0, 1.0, (len(faces_normal), N_ARC_SAMPLES, 1))
+        directions_arc = (
+            arcs_weight * faces_normal[:, None] + (1.0 - arcs_weight) * faces_normal[hull.neighbors[:, 0], None]
+        ).reshape((-1, 3))
+        directions = np.concatenate(
+            (
+                np.random.normal(size=(N_RANDOM_DIRECTIONS, 3)),
+                directions_boundary,
+                faces_normal,
+                directions_arc,
+                np.eye(3),
+                -np.eye(3),
+            )
+        )
+        directions = (directions / np.linalg.norm(directions, axis=-1, keepdims=True)).astype(gs.np_float)
+        supports = np.zeros_like(directions)
+        supports_count = np.zeros(len(directions), dtype=gs.np_int)
+        supports_idx = np.empty(len(directions), dtype=gs.np_int)
+        query_supports(
+            geom.idx,
+            directions,
+            supports,
+            supports_count,
+            supports_idx,
+            scene.rigid_solver.dyn_info,
+            scene.rigid_solver.collider.collider_info,
+        )
+        directions_local = directions[:8].copy()
+        supports_world = np.empty_like(directions_local)
+        supports_local = np.empty_like(directions_local)
+        query_local_supports(
+            geom.idx,
+            directions_local,
+            supports_world,
+            supports_local,
+            scene.rigid_solver.collider.collider_state,
+            scene.rigid_solver.collider.gjk.gjk_state,
+            scene.rigid_solver.dyn_info,
+            scene.rigid_solver.collider.collider_info,
+            scene.rigid_solver.rigid_config,
+            scene.rigid_solver.collider.collider_config,
+        )
+        assert_allclose(supports_world, supports_local[:, (2, 0, 1)] + (1.0, 2.0, 3.0), tol=tol)
+        assert_allclose(supports, verts[supports_idx - geom.vert_start], tol=tol)
+        assert_allclose((supports * directions).sum(axis=-1), (directions @ verts.T).max(axis=-1), tol=tol)
+
+    # A direction in a coordinate plane ties exactly two corners of the box, along an arc between two face normals that
+    # lies on the boundaries of the equatorial cells, and an axis of the box ties the four corners of a face.
+    directions_sign = np.random.choice((-1.0, 1.0), (N_RANDOM_DIRECTIONS, 3))
+    directions = directions_sign * np.random.uniform(0.2, 1.0, (N_RANDOM_DIRECTIONS, 3))
+    directions[np.arange(N_RANDOM_DIRECTIONS), np.random.randint(3, size=N_RANDOM_DIRECTIONS)] = 0.0
+    directions = np.concatenate((directions, np.eye(3), -np.eye(3)))
+    directions = (directions / np.linalg.norm(directions, axis=-1, keepdims=True)).astype(gs.np_float)
+    supports = np.zeros_like(directions)
+    supports_count = np.zeros(len(directions), dtype=gs.np_int)
+    supports_idx = np.empty(len(directions), dtype=gs.np_int)
+    query_supports(
+        entities[0].geoms[0].idx,
+        directions,
+        supports,
+        supports_count,
+        supports_idx,
+        scene.rigid_solver.dyn_info,
+        scene.rigid_solver.collider.collider_info,
+    )
+    assert_equal(supports_count, np.repeat((2, 4), (N_RANDOM_DIRECTIONS, 6)))

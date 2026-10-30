@@ -15,18 +15,18 @@ from genesis.engine.entities import (
 )
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
-from genesis.utils.array_class import LinksState
 from genesis.utils.geom import SpatialHasher
 
-from .base_solver import GravityMixin, Solver, TimeBasedMixin
+from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 
 
 @qd.data_oriented
-class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
+class PBDSolver(ParticleSolver):
     material_cls = PBD.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -200,12 +200,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
 
-    def init_ckpt(self):
-        self._ckpt = dict()
-
-    def reset_grad(self):
-        pass
-
     def build(self):
         super().build()
 
@@ -226,13 +220,125 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_elem_fields()
             self.init_vvert_fields()
 
-            self.init_ckpt()
-
             for entity in self._entities:
                 entity._add_to_solver()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity(as_field=True)
+
+    @qd.kernel
+    def add_uvs_and_faces(
+        self,
+        vvert_start: int,
+        vface_start: int,
+        uvs: qd.types.ndarray(element_dim=1),
+        faces: qd.types.ndarray(element_dim=1),
+    ):
+        """Add the render UVs and faces of an entity, an empty `uvs` leaving its slice of the UV buffer zeroed."""
+        for i_vv_ in range(uvs.shape[0]):
+            self.vverts_uvs[i_vv_ + vvert_start] = uvs[i_vv_]
+        for i_vf_ in range(faces.shape[0]):
+            self.vfaces_indices[i_vf_ + vface_start] = faces[i_vf_] + vvert_start
+
+    @qd.kernel
+    def add_particles(
+        self,
+        f: int,
+        particle_start: int,
+        active: int,
+        material_type: int,
+        mass: float,
+        rho_rest: float,
+        mu_s: float,
+        mu_k: float,
+        air_resistance: float,
+        density_relaxation: float,
+        viscosity_relaxation: float,
+        particles: qd.types.ndarray(),
+    ):
+        """Add the particles of an entity at rest, each property a material leaves out being given zero."""
+        for i_p_ in range(particles.shape[0]):
+            i_p = i_p_ + particle_start
+            for j in qd.static(range(3)):
+                self.particles_info[i_p].pos_rest[j] = particles[i_p_, j]
+            self.particles_info[i_p].material_type = material_type
+            self.particles_info[i_p].mass = mass
+            self.particles_info[i_p].rho_rest = rho_rest
+            self.particles_info[i_p].mu_s = mu_s
+            self.particles_info[i_p].mu_k = mu_k
+            self.particles_info[i_p].air_resistance = air_resistance
+            self.particles_info[i_p].density_relaxation = density_relaxation
+            self.particles_info[i_p].viscosity_relaxation = viscosity_relaxation
+
+        for i_p_, i_b in qd.ndrange(particles.shape[0], self._B):
+            i_p = i_p_ + particle_start
+            for j in qd.static(range(3)):
+                self.particles[i_p, i_b].pos[j] = particles[i_p_, j]
+            self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
+            self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
+            self.particles[i_p, i_b].free = True
+            self.particles_ng[i_p, i_b].active = qd.cast(active, gs.qd_bool)
+
+    @qd.kernel
+    def add_edges(
+        self,
+        edge_start: int,
+        particle_start: int,
+        stretch_compliance: float,
+        stretch_relaxation: float,
+        edges: qd.types.ndarray(),
+        edges_len_rest: qd.types.ndarray(),
+    ):
+        """Add the stretch constraints of the edges of an entity, given by the local indices of their particles."""
+        for i_e_ in range(edges.shape[0]):
+            i_e = i_e_ + edge_start
+            self.edges_info[i_e].stretch_compliance = stretch_compliance
+            self.edges_info[i_e].stretch_relaxation = stretch_relaxation
+            self.edges_info[i_e].len_rest = edges_len_rest[i_e_]
+            self.edges_info[i_e].v1 = particle_start + edges[i_e_, 0]
+            self.edges_info[i_e].v2 = particle_start + edges[i_e_, 1]
+
+    @qd.kernel
+    def add_inner_edges(
+        self,
+        inner_edge_start: int,
+        particle_start: int,
+        bending_compliance: float,
+        bending_relaxation: float,
+        inner_edges: qd.types.ndarray(),
+        inner_edges_len_rest: qd.types.ndarray(),
+    ):
+        """Add the bending constraints of the inner edges of an entity, given by the local indices of their particles."""
+        for i_ie_ in range(inner_edges.shape[0]):
+            i_ie = i_ie_ + inner_edge_start
+            self.inner_edges_info[i_ie].bending_compliance = bending_compliance
+            self.inner_edges_info[i_ie].bending_relaxation = bending_relaxation
+            self.inner_edges_info[i_ie].len_rest = inner_edges_len_rest[i_ie_]
+            self.inner_edges_info[i_ie].v1 = particle_start + inner_edges[i_ie_, 0]
+            self.inner_edges_info[i_ie].v2 = particle_start + inner_edges[i_ie_, 1]
+            self.inner_edges_info[i_ie].v3 = particle_start + inner_edges[i_ie_, 2]
+            self.inner_edges_info[i_ie].v4 = particle_start + inner_edges[i_ie_, 3]
+
+    @qd.kernel
+    def add_elems(
+        self,
+        elem_start: int,
+        particle_start: int,
+        volume_compliance: float,
+        volume_relaxation: float,
+        elems: qd.types.ndarray(),
+        elems_vol_rest: qd.types.ndarray(),
+    ):
+        """Add the volume constraints of the tetrahedra of an entity, given by the local indices of their particles."""
+        for i_el_ in range(elems.shape[0]):
+            i_el = i_el_ + elem_start
+            self.elems_info[i_el].volume_compliance = volume_compliance
+            self.elems_info[i_el].volume_relaxation = volume_relaxation
+            self.elems_info[i_el].vol_rest = elems_vol_rest[i_el_]
+            self.elems_info[i_el].v1 = particle_start + elems[i_el_, 0]
+            self.elems_info[i_el].v2 = particle_start + elems[i_el_, 1]
+            self.elems_info[i_el].v3 = particle_start + elems[i_el_, 2]
+            self.elems_info[i_el].v4 = particle_start + elems[i_el_, 3]
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -750,13 +856,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def process_input(self, in_backward=False):
-        for entity in self._entities:
-            entity.process_input(in_backward=in_backward)
-
-    def process_input_grad(self):
-        pass
-
     def substep_pre_coupling(self, f):
         if self.is_active:
             self._kernel_store_initial_pos(f)
@@ -785,9 +884,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             # compute effective velocity
             self._kernel_compute_velocity(f)
 
-    def substep_pre_coupling_grad(self, f):
-        pass
-
     def substep_post_coupling(self, f):
         if self.is_active:
             self._kernel_copy_from_reordered(f)
@@ -795,28 +891,9 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             # boundary collision
             self._kernel_solve_boundary_collision(f)
 
-    def substep_post_coupling_grad(self, f):
-        pass
-
-    # ------------------------------------------------------------------------------------
-    # ------------------------------------ gradient --------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def collect_output_grads(self):
-        pass
-
-    def add_grad_from_state(self, state):
-        pass
-
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    def save_ckpt(self, ckpt_name):
-        pass
-
-    def load_ckpt(self, ckpt_name):
-        pass
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
@@ -904,6 +981,54 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.vverts_info.support_idxs[i_v][0], i_b
             ].active
 
+    @gs.assert_built
+    @mutates(StateChange.DYNAMICS, differentiable=False)
+    def fix_particles(self, particles_idx=None, envs_idx=None):
+        """
+        Fix some particles where they are, until they are released (see 'release_particles').
+
+        Parameters
+        ----------
+        particles_idx : None | int | array_like, shape ([M,] N), optional
+            Global index of the particles (see 'set_particles_pos'). If None, all particles will be considered.
+        envs_idx : None | int | array_like, shape (M,), optional
+            The indices of the environments to set. If None, all environments will be considered. Defaults to None.
+        """
+        _, particles_idx, envs_idx = self._sanitize_io_variables(
+            None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
+        )
+        self._kernel_fix_particles(particles_idx, envs_idx)
+
+    @gs.assert_built
+    @mutates(StateChange.DYNAMICS, differentiable=False)
+    def fix_particles_to_link(self, link_idx, particles_idx=None, envs_idx=None):
+        """
+        Attach some particles to a rigid link, which carries them along until they are released (see
+        'release_particles').
+
+        Parameters
+        ----------
+        link_idx : int
+            Global index of the rigid link.
+        particles_idx, envs_idx : see 'fix_particles'.
+        """
+        _, particles_idx, envs_idx = self._sanitize_io_variables(
+            None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
+        )
+        self._sim._coupler.kernel_attach_pbd_to_rigid_link(
+            particles_idx, envs_idx, link_idx, self._sim.rigid_solver.dyn_state.links
+        )
+
+    @gs.assert_built
+    @mutates(StateChange.DYNAMICS, differentiable=False)
+    def release_particles(self, particles_idx=None, envs_idx=None):
+        """Release some particles fixed in place or to a rigid link, which then move freely again (see 'fix_particles')."""
+        _, particles_idx, envs_idx = self._sanitize_io_variables(
+            None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
+        )
+        self._kernel_release_particles(particles_idx, envs_idx)
+        self._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
+
     @qd.kernel
     def _kernel_set_particles_pos(
         self,
@@ -914,20 +1039,18 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
-            self.particles[i_p, i_b].vel.fill(0.0)
+            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
+            if i_p >= 0:
+                for i in qd.static(range(3)):
+                    self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
+                self.particles[i_p, i_b].vel.fill(0.0)
 
     @qd.kernel
     def _kernel_get_particles_pos(
-        self,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        envs_idx: qd.types.ndarray(),
-        poss: qd.types.ndarray(),
+        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), poss: qd.types.ndarray()
     ):
-        for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
-            i_p = i_p_ + particle_start
+        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+            i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
                 poss[i_b_, i_p_, i] = self.particles[i_p, i_b].pos[i]
@@ -942,30 +1065,17 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                self.particles[i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
-
-    @gs.assert_built
-    def set_animate_particles_by_link(
-        self,
-        particles_idx,
-        link_idx: int,
-        links_state: LinksState,
-        envs_idx=None,
-    ) -> None:
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        self._sim._coupler.kernel_attach_pbd_to_rigid_link(particles_idx, envs_idx, link_idx, links_state)
+            # See '_kernel_set_particles_pos'
+            if i_p >= 0:
+                for i in qd.static(range(3)):
+                    self.particles[i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
 
     @qd.kernel
     def _kernel_get_particles_vel(
-        self,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        envs_idx: qd.types.ndarray(),
-        vels: qd.types.ndarray(),
+        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vels: qd.types.ndarray()
     ):
-        for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
-            i_p = i_p_ + particle_start
+        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+            i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
                 vels[i_b_, i_p_, i] = self.particles[i_p, i_b].vel[i]
@@ -980,18 +1090,16 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            self.particles_ng[i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+            # See '_kernel_set_particles_pos'
+            if i_p >= 0:
+                self.particles_ng[i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
 
     @qd.kernel
     def _kernel_get_particles_active(
-        self,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        envs_idx: qd.types.ndarray(),
-        actives: qd.types.ndarray(),  # shape [B, n_particles]
+        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actives: qd.types.ndarray()
     ):
-        for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
-            i_p = i_p_ + particle_start
+        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+            i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             actives[i_b_, i_p_] = self.particles_ng[i_p, i_b].active
 
@@ -1003,22 +1111,19 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             self.particles[i_p, i_b].free = False
 
     @qd.kernel
-    def _kernel_release_particle(self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray()):
+    def _kernel_release_particles(self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray()):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             self.particles[i_p, i_b].free = True
 
     @qd.kernel
-    def _kernel_get_mass(
-        self, particle_start: qd.i32, n_particles: qd.i32, mass: qd.types.ndarray(), envs_idx: qd.types.ndarray()
+    def _kernel_get_particles_mass(
+        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), masses: qd.types.ndarray()
     ):
-        total_mass = gs.qd_float(0.0)
-        for i_p_ in range(n_particles):
-            i_p = i_p_ + particle_start
-            total_mass += self.particles_info[i_p].mass
-        for i_b_ in range(envs_idx.shape[0]):
-            mass[i_b_] = total_mass
+        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+            i_p = particles_idx[i_b_, i_p_]
+            masses[i_b_, i_p_] = self.particles_info[i_p].mass
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1053,6 +1158,13 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_built:
             return self._n_elems
         return sum(entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity))
+
+    @property
+    def n_vvert_supports(self):
+        """
+        Number of particles supporting each visual vertex.
+        """
+        return self._n_vvert_supports
 
     @property
     def n_vverts(self):

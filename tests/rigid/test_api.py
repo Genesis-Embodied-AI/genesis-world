@@ -8,7 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.states.solvers import RigidSolverState
-from genesis.utils.misc import qd_to_numpy, qd_to_torch
+from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -174,7 +174,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_s.n_links, n_envs_info, gs_s.get_links_COM, gs_s.set_links_COM, gs_s.dyn_info.links.inertial_pos),
         (gs_s.n_links, n_envs_info, gs_s.get_links_inertia, gs_s.set_links_inertia, gs_s.dyn_info.links.inertial_i),
         (gs_s.n_links, n_envs_info, gs_s.get_links_invweight, None, gs_s.dyn_info.links.invweight),
-        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, gs_s.control_dofs_force, None),
+        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, None, gs_s.dyn_state.dofs.qf_applied),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_force, None, gs_s.dyn_state.dofs.force),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_velocity, gs_s.set_dofs_velocity, gs_s.dyn_state.dofs.vel),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_position, gs_s.set_dofs_position, gs_s.dyn_state.dofs.pos),
@@ -432,7 +432,6 @@ def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
         assert_allclose(dof_pos[:3], pos, atol=gs.EPS)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_extended_broadcasting():
     scene = gs.Scene(show_viewer=False)
@@ -457,10 +456,11 @@ def test_extended_broadcasting():
     assert_allclose(entity.get_dofs_velocity(), 3.0, tol=gs.EPS)
     entity.zero_all_dofs_velocity(torch.tensor([False, True], dtype=torch.bool, device=gs.device))
     assert_allclose(entity.get_dofs_velocity(), np.array([(3.0,) * 6, (0.0,) * 6]), tol=gs.EPS)
+    entity.set_dofs_velocity(np.array(((2.0,) * 6, (1.0,) * 6))[::-1])
+    assert_allclose(entity.get_dofs_velocity(), np.array([(1.0,) * 6, (2.0,) * 6]), tol=gs.EPS)
 
 
-@pytest.mark.slow  # ~250s
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
 @pytest.mark.parametrize("batch_joints_info", [False, True])
 @pytest.mark.parametrize("batch_dofs_info", [False, True])
@@ -469,6 +469,7 @@ def test_batched_info(batch_links_info, batch_joints_info, batch_dofs_info, tol)
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
             batch_links_info=batch_links_info,
             batch_joints_info=batch_joints_info,
             batch_dofs_info=batch_dofs_info,
@@ -737,27 +738,17 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     pos_delta = np.random.rand(2, 3)
     with nullcontext() if batch_fixed_verts else pytest.raises(gs.GenesisException):
         robot.set_pos(pos_delta, relative=False)
-        if show_viewer:
-            scene.visualizer.update()
     with nullcontext() if batch_fixed_verts else pytest.raises(gs.GenesisException):
         robot.set_pos(pos_delta[[0]], envs_idx=[0], relative=False)
-        if show_viewer:
-            scene.visualizer.update()
     cube.set_pos(pos_delta[[0]] + (0.0, 0.0, 0.16), envs_idx=[0], relative=False)
     cube.set_pos(pos_delta[[1]] + (0.0, 0.0, 0.11), envs_idx=1, relative=False)
     sphere.set_pos(np.tile(pos_delta[[0]], (2, 1)) + 1.0, relative=False)
     quat_delta = np.random.rand(2, 4)
     with nullcontext() if batch_fixed_verts else pytest.raises(gs.GenesisException):
         robot.set_quat(quat_delta, relative=False)
-        if show_viewer:
-            scene.visualizer.update()
     with nullcontext() if batch_fixed_verts else pytest.raises(gs.GenesisException):
         robot.set_quat(quat_delta[[0]], envs_idx=[0], relative=False)
-        if show_viewer:
-            scene.visualizer.update()
     cube.set_quat(quat_delta, relative=False)
-    if show_viewer:
-        scene.visualizer.update()
 
     sphere_aabb, sphere_base_aabb = sphere.get_AABB(), sphere.geoms[0].get_AABB()
     assert_allclose(sphere_aabb.mean(dim=-2), pos_delta[0] + 1.0, tol=tol)
@@ -765,11 +756,13 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
 
     # Simulate for a while to check if the dynamic object is colliding with the static one
     if batch_fixed_verts:
-        has_collided = torch.tensor([False, False], dtype=torch.bool, device=gs.device)
+        has_collided = np.zeros((2,), dtype=bool)
         for _ in range(20):
             scene.step()
             contacts_state = cube.get_contacts(with_entity=robot, exclude_self_contact=True)
-            has_collided |= contacts_state["valid_mask"].any(dim=-1)
+            # FIXME: pytorch#TBD - 'any' over an empty dimension returns uninitialized memory on MPS, so the contacts
+            # are reduced on the host, an environment without any contact leaving that dimension empty
+            has_collided |= tensor_to_array(contacts_state["valid_mask"]).any(axis=-1)
             if has_collided.all():
                 break
         else:
@@ -863,7 +856,6 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     assert_allclose(links_quat_qpos, links_quat_expected, tol=tol)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_normalized_quat(show_viewer, tol):
     scene = gs.Scene(
@@ -1115,7 +1107,6 @@ def test_inertial_property_setters(
         assert_allclose(qd_to_numpy(buffer)[untouched], SENTINEL, tol=gs.EPS)
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 3])
 def test_axis_aligned_bounding_boxes(n_envs):

@@ -13,13 +13,17 @@ import quadrants as qd
 from quadrants.lang import impl
 
 import genesis as gs
-from genesis.utils.misc import qd_to_torch
+from genesis.utils.misc import data_to_array
 
 
 def _tensor_backend():
     return qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD
 
 
+# FIXME: quadrants#936 - a vector or matrix tensor takes no layout, so those read environment by environment are
+# allocated and indexed with the environment first instead of last, against the convention of every other tensor.
+# FIXME: quadrants#935 - indexing a laid-out tensor by a list or tuple skips its axis permutation, so laid-out tensors
+# are indexed by plain subscripts alone.
 def V(*args, **kwargs):
     return qd.tensor(*args, backend=_tensor_backend(), **kwargs)
 
@@ -38,7 +42,12 @@ def maybe_shape(shape, is_on):
 
 @dataclass_transform(eq_default=True, kw_only_default=False, frozen_default=True)
 class AutoInitMeta(type):
-    """Metaclass that generates __init__ from annotations, like a mutable dataclass."""
+    """Metaclass generating __init__, __eq__ and __hash__ from annotations, like a frozen dataclass.
+
+    Kernels key their compiled instances on the static configs they take, by equality, so configs holding the same
+    values let a rebuilt scene reuse the kernels compiled for the previous one. A config is immutable, since a write
+    would change the key under which its kernels are stored.
+    """
 
     def __new__(cls, name, bases, namespace):
         names = tuple(namespace["__annotations__"].keys())
@@ -69,9 +78,21 @@ class AutoInitMeta(type):
 
             # Set attributes
             for key, value in assigned.items():
-                setattr(self, key, value)
+                object.__setattr__(self, key, value)
+
+        def __setattr__(self, key, value):
+            raise AttributeError(f"{name} is immutable")
+
+        def __eq__(self, other):
+            return type(other) is type(self) and vars(other) == vars(self)
+
+        def __hash__(self):
+            return hash((type(self), *(vars(self)[key] for key in names)))
 
         namespace["__init__"] = __init__
+        namespace["__setattr__"] = __setattr__
+        namespace["__eq__"] = __eq__
+        namespace["__hash__"] = __hash__
 
         return super().__new__(cls, name, bases, namespace)
 
@@ -118,31 +139,33 @@ def V_SCALAR_FROM(dtype, value):
 
 
 class DataKind(IntEnum):
-    """The kind of every array or static config a solver yields (see 'Solver.data'), which checkpoints and trajectories
+    """The kind of every array or scalar a solver yields (see 'Solver.data'), which checkpoints and trajectories
     select by.
 
-    CONFIG is a static config of plain Python natives that keys the compiled kernels, recorded as provenance only.
     CONSTANT is an array the build computes from the scene description once. INFO is a model parameter the setters
-    write, such as mass, friction, gains or limits. STATE is the reduced-space configuration, velocities,
-    accelerations, control inputs, contacts and constraint solution. WARMSTART is a cache the next solve reads to
-    reproduce the previous result bit-for-bit. Forward kinematics and dynamics recompute DERIVED from STATE. A step or
-    a solve writes SCRATCH before it reads it.
+    write, such as mass, friction, gains or limits. STATE is what specifies the scene with INFO: the reduced-space
+    configuration, velocities, accelerations, control inputs and the warm starts of the collision detection and the
+    constraint solve, which change the result of the next step. DERIVED is what the next step or forward kinematics
+    recomputes from STATE and INFO, such as the link poses, the contacts and the constraint forces, and recomputing it
+    changes the result at the last bits at most. A step or a solve writes SCRATCH before it reads it.
+
+    The kinds decide what a minimal trajectory records (see TrajectoryFile), so every solver classifies its arrays by
+    one rule: an array the next step reads before writing it is STATE or INFO, and a DERIVED array is recomputed
+    before it is read, by the next step or by the restore of a record without it (see 'Solver.__setstate__').
     """
 
-    CONFIG = 0
-    CONSTANT = 1
-    INFO = 2
-    STATE = 3
-    WARMSTART = 4
-    DERIVED = 5
-    SCRATCH = 6
+    CONSTANT = 0
+    INFO = 1
+    STATE = 2
+    DERIVED = 3
+    SCRATCH = 4
 
 
 # Metadata key under which 'of_kind' stores the kind of a field.
 KIND = "kind"
-# The kinds a checkpoint carries: INFO, STATE, WARMSTART and DERIVED. The static configs travel in a separate field of
-# the checkpoint as provenance.
-CHECKPOINT_KINDS = frozenset((DataKind.INFO, DataKind.STATE, DataKind.WARMSTART, DataKind.DERIVED))
+# The kinds a checkpoint carries: INFO, STATE and DERIVED. The static configs travel in a separate field of the
+# checkpoint as provenance.
+CHECKPOINT_KINDS = frozenset((DataKind.INFO, DataKind.STATE, DataKind.DERIVED))
 
 
 def of_kind(kind: DataKind):
@@ -150,92 +173,192 @@ def of_kind(kind: DataKind):
     return dataclasses.field(metadata={KIND: kind})
 
 
-class DataItem(NamedTuple):
-    """One array or static config a solver holds, under the dotted name of the slot and fields reaching it."""
+class ArrayItem(NamedTuple):
+    """An array of a solver or of the simulator, under the dotted name of the slot and fields reaching it.
+
+    It lives on the device of the backend, and a restore fills it in place (see 'iter_data'). It is a quadrants array,
+    or a torch tensor such as the step counts of the simulator. An unused quadrants array is the 0-d placeholder of a
+    feature switched off (see 'maybe_shape'), which a restore leaves as built (see 'check_data').
+    """
 
     name: str
-    value: object
     kind: DataKind
+    array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
 
 
-def iter_data(struct, name: str, kind: DataKind | None = None) -> Iterator[DataItem]:
-    """Yield a DataItem for every array in a struct of arrays, named by 'name' plus field names joined with dots.
+class ScalarItem(NamedTuple):
+    """A Python native scalar of a solver, such as a flag, under the name of its attribute (see 'iter_data').
 
-    Structs are the frozen dataclasses and named tuples of this module, nested to any depth. The class attribute
-    'kind' gives the default kind of a struct's fields, and 'of_kind' on a field overrides it. An override on a
-    struct-valued field applies to every array of that struct. An array carrying gradients yields them as one more item
-    of its kind, named 'grad'. A static config yields one item of kind CONFIG, and anything else raises and names the
-    offending slot.
+    It is the attribute 'attr' of 'owner', a property with a setter included, which a restore sets back.
     """
-    if isinstance(struct, (qd.Tensor, qd.Field, qd.Ndarray)):
+
+    name: str
+    kind: DataKind
+    owner: object
+    attr: str
+
+
+# What a solver yields among its data, which a checkpoint or a trajectory reads and writes back (see 'iter_data')
+DataItem = ArrayItem | ScalarItem
+
+
+class ConfigItem(NamedTuple):
+    """A static config of plain Python natives that keys the compiled kernels of a solver, under its name.
+
+    A checkpoint and a trajectory record it as provenance alone, and never write it back.
+    """
+
+    name: str
+    config: object
+
+
+def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterator[DataItem | ConfigItem]:
+    """Yield the data of an attribute, one item per array if it is a struct, named by the fields reaching it.
+
+    The attribute is 'attr' of 'owner', and an item of a struct is named by 'attr' plus field names joined with dots.
+    Structs are the frozen dataclasses and named tuples of this module, nested to any depth. The class attribute 'kind'
+    gives the default kind of a struct's fields, and 'of_kind' on a field overrides it. An override on a struct-valued
+    field applies to every array of that struct. An array is a quadrants array or a torch tensor, and a quadrants array
+    carrying gradients yields them as one more item of its kind, named 'grad'. A Python native scalar of an object that
+    is no struct, such as a flag, yields an item of the given kind, which a restore sets back as the attribute. A static
+    config yields a ConfigItem. Anything else raises and names the offending attribute.
+    """
+    value = getattr(owner, attr)
+    if isinstance(type(value), AutoInitMeta):
+        yield ConfigItem(attr, value)
+    elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
         if kind is None:
-            gs.raise_exception(f"'{name}' holds an array that no struct or annotation gives a kind.")
-        yield DataItem(name, struct, kind)
-        if struct.has_grad():
-            yield DataItem(f"{name}.grad", struct.grad, kind)
-    elif isinstance(type(struct), AutoInitMeta):
-        yield DataItem(name, struct, DataKind.CONFIG)
-    elif dataclasses.is_dataclass(struct) or isinstance(struct, tuple):
-        if dataclasses.is_dataclass(struct):
-            values = vars(struct)
-            members = [
-                (field.name, values[field.name], field.metadata.get(KIND)) for field in dataclasses.fields(struct)
-            ]
+            gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
+        yield ArrayItem(attr, kind, value)
+        if not isinstance(value, torch.Tensor) and value.has_grad():
+            yield ArrayItem(f"{attr}.grad", kind, value.grad)
+    elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
+        if dataclasses.is_dataclass(value):
+            members = [(field.name, field.metadata.get(KIND)) for field in dataclasses.fields(value)]
         else:
-            members = [(member, value, None) for member, value in zip(struct._fields, struct)]
-        for member, value, stated_kind in members:
-            if stated_kind is None and kind is None and isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
-                stated_kind = type(struct).kind
-            yield from iter_data(value, f"{name}.{member}", kind if stated_kind is None else stated_kind)
+            members = [(member, None) for member in value._fields]
+        for member, stated_kind in members:
+            is_member_array = isinstance(getattr(value, member), (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
+            if stated_kind is None and kind is None and is_member_array:
+                stated_kind = type(value).kind
+            for item in iter_data(value, member, kind if stated_kind is None else stated_kind):
+                yield item._replace(name=f"{attr}.{item.name}")
+    elif isinstance(value, (bool, int, float)) and not (dataclasses.is_dataclass(owner) or isinstance(owner, tuple)):
+        if kind is None:
+            gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")
+        yield ScalarItem(attr, kind, owner, attr)
     else:
-        gs.raise_exception(f"'{name}' holds a {type(struct).__name__} where an array or a struct of arrays stands.")
+        gs.raise_exception(f"'{attr}' holds a {type(value).__name__} where an array, a struct or a scalar stands.")
 
 
-def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> list[tuple]:
-    """Return the (array, value) pairs 'fill_data' writes, rejecting a record made for another scene.
+def iter_state_arrays(
+    struct, path: tuple[str, ...], kind: DataKind | None = None
+) -> Iterator[tuple[tuple[str, ...], qd.Tensor | qd.Field | qd.Ndarray]]:
+    """Yield the quadrants arrays of a struct a step may write, those of no kind INFO or CONSTANT, with their paths.
 
-    A value with the array's shape fills it, cast to its dtype, so a one-byte boolean fills an int32 flag. A floating
-    value for an integer array, or the reverse, raises. 'maybe_shape' shapes an unused array as (), so an array with
-    that shape on either side stays as built. Any other shape mismatch raises, since the record comes from a different
-    build. A name on one side only raises, since the record comes from another build or version.
+    A path is 'path' followed by the fields reaching the array. Kinds resolve as in 'iter_data'.
+    """
+    for field in dataclasses.fields(struct):
+        value = getattr(struct, field.name)
+        field_kind = field.metadata.get(KIND, kind)
+        if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
+            if field_kind is None:
+                field_kind = type(struct).kind
+            if field_kind not in (DataKind.INFO, DataKind.CONSTANT):
+                yield (*path, field.name), value
+        elif dataclasses.is_dataclass(value):
+            yield from iter_state_arrays(value, (*path, field.name), field_kind)
+
+
+def check_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
+) -> list[DataItem]:
+    """Return the items 'fill_data' writes, rejecting a record made for another scene.
+
+    A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may
+    differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
+    and so does a name on one side only, since the record comes from another build or version. 'maybe_shape' shapes an
+    unused array as (), so an array with that shape on either side stays as built, and is left out. With
+    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
     """
     items = tuple(items)
-    unshared = sorted({name for name, _, _ in items} ^ set(values))
+    unshared = sorted({item.name for item in items} ^ set(values))
     if unshared:
         gs.raise_exception(f"The record and this scene do not share {unshared}: another build or version wrote it.")
     writes = []
-    for name, array, _ in items:
-        value = values[name]
-        element_shape = array.element_shape if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)) else ()
-        if tuple(array.shape) == () or tuple(value.shape) == element_shape:
-            continue
-        shape = (*array.shape, *element_shape)
+    for item in items:
+        value = values[item.name]
+        if isinstance(item, ArrayItem) and isinstance(item.array, torch.Tensor):
+            shape, dtype = tuple(item.array.shape), item.array.dtype
+            is_item_real = dtype.is_floating_point
+        elif isinstance(item, ArrayItem):
+            array = item.array
+            if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)):
+                element_shape = array.element_shape
+            elif isinstance(array, qd.MatrixField):
+                element_shape = (array.n, array.m)[: array.ndim]
+            else:
+                element_shape = ()
+            if tuple(array.shape) == () or tuple(value.shape) == element_shape:
+                continue
+            shape, dtype = (*array.shape, *element_shape), array.dtype
+            if frame_only:
+                shape = shape[1:]
+            is_item_real = dtype in qd.types.primitive_types.real_types
+        else:
+            scalar = getattr(item.owner, item.attr)
+            shape, dtype = (), type(scalar).__name__
+            is_item_real = isinstance(scalar, float)
         if tuple(value.shape) != shape:
-            gs.raise_exception(f"'{name}' is shaped {shape} here and {value.shape} in the record: another build.")
+            gs.raise_exception(f"'{item.name}' is shaped {shape} here and {value.shape} in the record: another build.")
         if isinstance(value, torch.Tensor):
             is_real = value.dtype.is_floating_point
         else:
             is_real = np.issubdtype(value.dtype, np.floating)
-        if is_real != (array.dtype in qd.types.primitive_types.real_types):
-            gs.raise_exception(f"'{name}' holds {array.dtype} values here where {value.dtype} ones were recorded.")
-        writes.append((array, value))
+        if is_real != is_item_real:
+            gs.raise_exception(f"'{item.name}' holds {dtype} values here where {value.dtype} ones were recorded.")
+        writes.append(item)
     return writes
 
 
-def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> None:
-    """Write into each array the value recorded under its name, once every value passed 'check_data', so a record
-    from another build leaves the scene as it was.
+def fill_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
+) -> None:
+    """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
+    record made for another scene leaves the scene as it was.
 
-    Where zero-copy views exist the values go through them, so a device-resident record stays on the device. On Metal
-    these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once before the next kernel.
+    An array is filled in place, through its zero-copy view where one exists, so that a device-resident record stays on
+    the device. On Metal these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once
+    before the next kernel. A scalar is set back as the Python native the host code reading it expects. With
+    `frame_only`, the frame 0 alone of each array is written (see 'check_data').
     """
-    # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
-    for array, value in check_data(items, values):
-        if gs.use_zerocopy:
-            view = qd_to_torch(array, copy=False)
-            view.copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+    for item in check_data(items, values, frame_only=frame_only):
+        value = values[item.name]
+        if isinstance(item, ScalarItem):
+            # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
+            setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
+            continue
+        view = None
+        if isinstance(item.array, torch.Tensor):
+            view = item.array
+        elif gs.use_zerocopy.is_supported:
+            try:
+                view = data_to_array(item.array, to_torch=True, copy=False)
+            except ValueError:
+                # A member of a struct field may have no zero-copy view (see 'qd_zero_grad')
+                pass
+        if view is not None:
+            # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
+            (view[0] if frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+        elif frame_only:
+            # Without zero-copy views, the array is written whole, its other frames as they are
+            frames = data_to_array(item.array, to_torch=True, copy=True)
+            frames[0] = value
+            item.array.from_torch(frames)
+        elif isinstance(value, torch.Tensor):
+            item.array.from_torch(value)
         else:
-            array.from_numpy(value)
+            item.array.from_numpy(value)
 
 
 # =========================================== ErrorCode ===========================================
@@ -246,9 +369,12 @@ class ErrorCode(IntEnum):
     OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
     OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
     OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
+    UNSUPPORTED_COLLISION_PAIR = 0b00000000000000000000000000001000
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
+    INVALID_GRAD_NAN = 0b00000000000000000000000010000000
+    INVALID_PARTICLE_NAN = 0b00000000000000000000000100000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -317,6 +443,9 @@ class RigidInfo:
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
     dofs_mass_envelope_start: qd.Tensor
+    # Mass parent of each dof, -1 for none: the previous dof of its link, else the last dof of its nearest ancestor link
+    # holding one, when it lies in the same mass block.
+    dofs_mass_parent: qd.Tensor
     # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
     # the dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor
@@ -337,11 +466,23 @@ class RigidInfo:
     EPS: qd.Tensor
 
 
+def _is_tensor_addressable(shape, dtype) -> bool:
+    """
+    Whether every backend can address all the elements of a solver tensor of this shape and dtype.
+
+    A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal.
+    """
+    # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.
+    if gs.backend == gs.metal:
+        return math.prod(shape) * np.dtype(dtype).itemsize <= 2**31
+    return math.prod(shape) <= np.iinfo(np.int32).max
+
+
 def get_rigid_info(solver, kinematic_only):
     _B = solver._B
 
     mass_mat_shape = (solver.n_dofs_, solver.n_dofs_, _B)
-    if math.prod(mass_mat_shape) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable(mass_mat_shape, gs.np_float):
         gs.raise_exception(
             f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
@@ -419,6 +560,7 @@ def get_rigid_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
+            dofs_mass_parent=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
             substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -469,6 +611,7 @@ def get_rigid_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
+        dofs_mass_parent=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
         substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
@@ -851,20 +994,20 @@ class ConstraintState:
 
     # Union-find partition of links into contact islands, read by the per-island Newton solve and hibernation.
     island: IslandState
-    is_warmstart: qd.Tensor = of_kind(DataKind.WARMSTART)
-    n_constraints: qd.Tensor = of_kind(DataKind.STATE)
+    is_warmstart: qd.Tensor = of_kind(DataKind.STATE)
+    n_constraints: qd.Tensor = of_kind(DataKind.DERIVED)
     qd_n_equalities: qd.Tensor = of_kind(DataKind.STATE)
     jac: qd.Tensor
     diag: qd.Tensor
     aref: qd.Tensor
     jac_dofs_idx: qd.Tensor
     jac_n_dofs: qd.Tensor
-    n_constraints_equality: qd.Tensor = of_kind(DataKind.STATE)
-    n_constraints_frictionloss: qd.Tensor = of_kind(DataKind.STATE)
+    n_constraints_equality: qd.Tensor = of_kind(DataKind.DERIVED)
+    n_constraints_frictionloss: qd.Tensor = of_kind(DataKind.DERIVED)
     # Number of elliptic-cone contact rows (rows_per_contact per contact), laid out contiguously at the start of the
     # collision segment. Zero for the pyramidal cone. The cone rows occupy
     # [ne + n_frictionloss, ne + n_frictionloss + n_cone).
-    n_constraints_cone: qd.Tensor = of_kind(DataKind.STATE)
+    n_constraints_cone: qd.Tensor = of_kind(DataKind.DERIVED)
     improved: qd.Tensor
     Jaref: qd.Tensor
     Ma: qd.Tensor
@@ -884,12 +1027,12 @@ class ConstraintState:
     # contact sliding friction coefficient read by the cone solver, and with torsional friction the spin row carries
     # the torsional coefficient the same way (the tangent rows hold 0).
     efc_frictionloss: qd.Tensor
-    efc_force: qd.Tensor = of_kind(DataKind.STATE)
-    active: qd.Tensor = of_kind(DataKind.STATE)
+    efc_force: qd.Tensor = of_kind(DataKind.DERIVED)
+    active: qd.Tensor = of_kind(DataKind.DERIVED)
     prev_active: qd.Tensor
     qfrc_constraint: qd.Tensor = of_kind(DataKind.STATE)
     qacc: qd.Tensor = of_kind(DataKind.STATE)
-    qacc_ws: qd.Tensor = of_kind(DataKind.WARMSTART)
+    qacc_ws: qd.Tensor = of_kind(DataKind.STATE)
     cost_ws: qd.Tensor
     cost: qd.Tensor
     mv: qd.Tensor
@@ -944,9 +1087,11 @@ class ConstraintState:
     solver_iter_counter: qd.Tensor
     # Always ndarray (not field): graph.do_while requires the same physical ndarray on every call.
     graph_counter: qd.types.ndarray()
-    early_exit_flag: qd.Tensor
-    # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the row being updated, in the column of the
-    # env, or of the lane of the cooperative sweep at [i_d, i_b * 32 + tid] (see func_noslip in noslip.py).
+    # Iterations left to the graph loop past the current one, which it resumes with once an env iterates on
+    graph_counter_next: qd.Tensor
+    # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the two rows of the pair being updated, in
+    # the two columns of the env, or of the lane of the cooperative sweep at [i_d, 2 * (i_b * 32 + tid) + i_r] (see
+    # func_noslip_update_row in noslip.py).
     noslip_MinvJT: qd.Tensor
     # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
     # of each row, the color count of each island and the next free color of the mass block starting at each dof.
@@ -969,10 +1114,10 @@ def get_constraint_state(constraint_solver, solver, collider):
     # DRAM-bound once the combined per-env working sets exceed the CPU caches and batched stepping scales super-linearly
     # with n_envs.
     serialized = solver.rigid_config.para_level < gs.PARA_LEVEL.ALL
-    # Layout-flippable constraint-state tensors (Jaref, jv, efc_D, efc_frictionloss, diag, active) keep their
-    # canonical (len_constraints_, _B) shape; the static config flag picks the physical layout via ``layout=(1, 0)``.
-    # Cooperative kernels read the same flag at compile time to switch between serial and warp-cooperative reductions.
-    # The remaining (len_constraints_,) tensors outside the GPU cooperative flip set follow only the serialized flip.
+    # Layout-flippable constraint-state tensors (Jaref, jv, efc_D, efc_frictionloss, diag, active, aref, efc_force and
+    # the Newton row state) keep their canonical (len_constraints_, _B) shape. The static config flag picks the physical
+    # layout via ``layout=(1, 0)``. Cooperative kernels read the same flag at compile time to switch between serial and
+    # warp-cooperative reductions, their lanes striding the rows of one env.
     con_layout = (1, 0) if batch_first else None
     serial_layout = (1, 0) if serialized else None
     # The CPU incremental factor maintains the elliptic cone by a per-iteration rank-3 update reading the previous cone
@@ -980,12 +1125,12 @@ def get_constraint_state(constraint_solver, solver, collider):
     is_cone_incremental = solver.rigid_config.enable_elliptic_friction and solver.rigid_config.backend == gs.cpu
     is_signorini = solver.rigid_config.enable_signorini_contact
     n_cones_ = max(1, constraint_solver.n_cone_constraints_ // solver.rigid_config.rows_per_contact)
-    # The 3D Jacobian and its sparse-column-index sibling extend the flip: canonical (len_constraints_, n_dofs_, _B) ->
-    # physical (_B, n_dofs_, len_constraints_) via layout=(2, 1, 0). This makes cooperative-warp-per-env access (lanes
-    # stride i_c) coalesced for the hot p0 J@search, hessian_direct_tiled, and patch_hessian_delta kernels.
-    # Serialized execution instead wants physical (_B, len_constraints_, n_dofs_) via layout=(2, 0, 1): constraint rows
-    # are read and written dof-by-dof for a fixed env.
-    jac_layout = (2, 1, 0) if cooperative else (2, 0, 1) if serialized else None
+    # The 3D Jacobian and its sparse-column-index sibling (the support of each row) extend the flip: canonical
+    # (len_constraints_, n_dofs_, _B) -> physical (_B, len_constraints_, n_dofs_) via layout=(2, 0, 1), each row of an
+    # env stored whole. The cooperative kernels then read the per-iteration J^T @ efc_force and the Hessian staging
+    # with lanes on consecutive dofs of one row, and a row's support spans a cache line or two. Serialized execution
+    # reads and writes the rows dof by dof for a fixed env.
+    jac_layout = (2, 0, 1) if cooperative or serialized else None
     # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_) via layout=(1, 0). Adjacent-lane reads
     # striding i_d in cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on
     # a per-consumer basis under the same enable_cooperative_constraint_kernels flag.
@@ -1001,7 +1146,7 @@ def get_constraint_state(constraint_solver, solver, collider):
     # The Hessian, its equilibration and the incremental factor update exist for the Newton solver alone
     is_newton = solver.rigid_config.solver_type == gs.constraint_solver.Newton
     newton_dof_vec_layout = dof_vec_layout if is_newton else None
-    newton_serial_layout = serial_layout if is_newton else None
+    newton_con_layout = con_layout if is_newton else None
     # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
     # (see func_noslip in noslip.py).
     is_noslip_active = solver._options.noslip_iterations > 0
@@ -1024,7 +1169,7 @@ def get_constraint_state(constraint_solver, solver, collider):
     jac_dofs_idx_shape = (len_constraints_, min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))), _B)
     jac_n_dofs_shape = (len_constraints_, _B)
 
-    if math.prod(jac_shape) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable(jac_shape, gs.np_float):
         gs.raise_exception(
             f"Jacobian shape (n_constraints={len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
@@ -1075,28 +1220,26 @@ def get_constraint_state(constraint_solver, solver, collider):
             dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), is_newton), layout=newton_dof_vec_layout
         ),
         incr_changed_idx=V(
-            dtype=gs.qd_int, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
+            dtype=gs.qd_int, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_con_layout
         ),
         incr_n_changed=V(dtype=gs.qd_int, shape=(_B,)),
         # Layout-flippable constraint-state tensors: allocated as qd.Tensor wrappers, optionally with
         # ``layout=(1, 0)`` to physically store as (_B, len_constraints_). Canonical shape stays (len_constraints_, _B);
         # kernel-body indexing ``Jaref[i_c, i_b]`` is rewritten by the AST when ``layout != None``.
         active=V(dtype=gs.qd_bool, shape=(len_constraints_, _B), layout=con_layout),
-        prev_active=V(
-            dtype=gs.qd_bool, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
-        ),
+        prev_active=V(dtype=gs.qd_bool, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_con_layout),
         diag=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
+        aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
+        efc_force=V(
+            dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout, needs_grad=solver._requires_grad
+        ),
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
-        jac_dofs_idx=V(
-            dtype=gs.qd_int, shape=jac_dofs_idx_shape, layout=jac_layout if constraint_solver.sparse_solve else None
-        ),
-        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape, layout=serial_layout if jac_n_dofs_shape else None),
+        jac_dofs_idx=V(dtype=gs.qd_int, shape=jac_dofs_idx_shape, layout=jac_layout),
+        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape, layout=con_layout),
         # Backward gradients
         dL_dqacc=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
         dL_dM=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, solver.n_dofs_, _B), solver._requires_grad)),
@@ -1115,14 +1258,14 @@ def get_constraint_state(constraint_solver, solver, collider):
         timers=V(dtype=qd.i64 if gs.backend != gs.metal else qd.i32, shape=(10, _B)),
         solver_iter_counter=V(dtype=qd.i32, shape=()),
         graph_counter=qd.ndarray(qd.i32, shape=()),
-        early_exit_flag=V(dtype=qd.i32, shape=()),
+        graph_counter_next=V(dtype=qd.i32, shape=()),
         nt_H_cone_free_diag=V(
             dtype=gs.qd_float,
             shape=maybe_shape((_B, solver.n_dofs_), solver.rigid_config.enable_cone_free_hessian_reuse),
         ),
         noslip_MinvJT=V(
             dtype=gs.qd_float,
-            shape=maybe_shape((solver.n_dofs_, noslip_n_lanes * _B), is_noslip_active),
+            shape=maybe_shape((solver.n_dofs_, 2 * noslip_n_lanes * _B), is_noslip_active),
             layout=dof_vec_layout if is_noslip_active else None,
         ),
         noslip_rows_color=V(
@@ -1150,7 +1293,7 @@ def get_constraint_state(constraint_solver, solver, collider):
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class ContactData:
-    kind: ClassVar[DataKind] = DataKind.STATE
+    kind: ClassVar[DataKind] = DataKind.DERIVED
 
     geom_a: qd.Tensor
     geom_b: qd.Tensor
@@ -1240,10 +1383,10 @@ def get_diff_contact_input(_B, max_contacts_per_pair, is_active, requires_grad=F
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class SortBuffer:
-    kind: ClassVar[DataKind] = DataKind.WARMSTART
+    kind: ClassVar[DataKind] = DataKind.STATE
 
     value: qd.Tensor
-    i_g: qd.Tensor
+    i_l: qd.Tensor
     is_max: qd.Tensor
 
 
@@ -1251,15 +1394,15 @@ def get_sort_buffer(solver):
     _B = solver._B
 
     return SortBuffer(
-        value=V(dtype=gs.qd_float, shape=(2 * solver.n_geoms_, _B)),
-        i_g=V(dtype=gs.qd_int, shape=(2 * solver.n_geoms_, _B)),
-        is_max=V(dtype=gs.qd_bool, shape=(2 * solver.n_geoms_, _B)),
+        value=V(dtype=gs.qd_float, shape=(2 * solver.n_links_, _B)),
+        i_l=V(dtype=gs.qd_int, shape=(2 * solver.n_links_, _B)),
+        is_max=V(dtype=gs.qd_bool, shape=(2 * solver.n_links_, _B)),
     )
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class ContactCache:
-    kind: ClassVar[DataKind] = DataKind.WARMSTART
+    kind: ClassVar[DataKind] = DataKind.STATE
 
     normal: qd.Tensor
     # Previous-step penetration per pair (reset to 0 when out of contact), the warm-start for the MPR->GJK gate.
@@ -1268,7 +1411,7 @@ class ContactCache:
 
 def get_contact_cache(solver, n_possible_pairs, active):
     # Only the convex-convex detection reads the cache, so the other scenes keep it empty
-    shape = maybe_shape((n_possible_pairs, solver._B), active)
+    shape = maybe_shape((max(n_possible_pairs, 1), solver._B), active)
     return ContactCache(
         normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
         penetration=V(dtype=gs.qd_float, shape=shape),
@@ -1276,43 +1419,48 @@ def get_contact_cache(solver, n_possible_pairs, active):
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class NarrowphaseWorkQueues:
+class NarrowphaseWorkQueue:
     kind: ClassVar[DataKind] = DataKind.SCRATCH
 
-    mpr_i_b: qd.Tensor
-    mpr_i_ga: qd.Tensor
-    mpr_i_gb: qd.Tensor
-    mpr_i_pair: qd.Tensor
+    # The pair of every entry (see collision_pair_idx in ColliderInfo), queued for the multicontact pass, then for the
+    # terrain pass, which runs after it
+    i_b: qd.Tensor
+    i_ga: qd.Tensor
+    i_gb: qd.Tensor
+    i_pair: qd.Tensor
     # Candidate contacts of the multicontact pass, one slot per contact a pair can hold. The contact0 kernel stores the
     # first contact of the pair in slot 0, the detections of the pass store theirs in their own slot, and the gather
     # accepts them in slot order according to their status (see MULTICONTACT_SLOT in collider/constants.py). Under the
     # contact patch an entry holds slot 0 alone and no status.
-    mpr_contact_pos: qd.Tensor
-    mpr_normal: qd.Tensor
-    mpr_penetration: qd.Tensor
-    mpr_contact_status: qd.Tensor
-    # Whether contact0 preferred GJK (the per-pair MPR->GJK gate fired). The multicontact pass uses GJK for contact0
-    # when set, and otherwise tries MPR first and falls back to GJK per perturbed contact.
-    mpr_prefer_gjk: qd.Tensor
-    mpr_queue_size: qd.Tensor
-    mpr_work_counter: qd.Tensor
+    contact_pos: qd.Tensor
+    contact_normal: qd.Tensor
+    contact_penetration: qd.Tensor
+    contact_status: qd.Tensor
+    # Where contact 0 of the entry stands (see MULTICONTACT_ENTRY in collider/constants.py). The contact0 kernel leaves
+    # it to Gilbert-Johnson-Keerthi (GJK) when the per-pair gate from Minkowski portal refinement (MPR) to GJK fired,
+    # and each perturbed contact otherwise falls back from MPR to GJK.
+    contact0_status: qd.Tensor
+    # The number of pairs queued and claimed so far
+    n_pairs: qd.Tensor
+    n_claimed: qd.Tensor
 
 
-def get_narrowphase_work_queues(max_entries, n_slots, active):
-    entries_shape = maybe_shape((max_entries,), active)
-    slots_shape = maybe_shape((max_entries, n_slots), active)
-    return NarrowphaseWorkQueues(
-        mpr_i_b=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_ga=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_gb=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_pair=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        mpr_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        mpr_penetration=V(dtype=gs.qd_float, shape=slots_shape),
-        mpr_contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), active and n_slots > 1)),
-        mpr_prefer_gjk=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_queue_size=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
-        mpr_work_counter=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
+def get_narrowphase_work_queue(max_entries, n_slots, split_narrowphase, has_terrain):
+    is_queue_active = split_narrowphase or has_terrain
+    entries_shape = maybe_shape((max_entries,), is_queue_active)
+    slots_shape = maybe_shape((max_entries, n_slots), split_narrowphase)
+    return NarrowphaseWorkQueue(
+        i_b=V(dtype=gs.qd_int, shape=entries_shape),
+        i_ga=V(dtype=gs.qd_int, shape=entries_shape),
+        i_gb=V(dtype=gs.qd_int, shape=entries_shape),
+        i_pair=V(dtype=gs.qd_int, shape=entries_shape),
+        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        contact_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        contact_penetration=V(dtype=gs.qd_float, shape=slots_shape),
+        contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), split_narrowphase and n_slots > 1)),
+        contact0_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries,), split_narrowphase)),
+        n_pairs=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
+        n_claimed=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
     )
 
 
@@ -1323,10 +1471,14 @@ class ColliderState:
     sort_buffer: SortBuffer
     contact_data: ContactData
     active_buffer: qd.Tensor
+    # Bounding box of every link, the box of its frame moved with it (see func_collision_clear in broadphase.py)
+    links_aabb_min: qd.Tensor
+    links_aabb_max: qd.Tensor
+    # Valid link pairs whose boxes overlap, by index into ColliderInfo.valid_link_pairs
+    n_broad_link_pairs: qd.Tensor
+    broad_link_pairs: qd.Tensor
     n_broad_pairs: qd.Tensor
     broad_collision_pairs: qd.Tensor
-    active_buffer_awake: qd.Tensor
-    active_buffer_hib: qd.Tensor
     box_depth: qd.Tensor
     box_points: qd.Tensor
     box_pts: qd.Tensor
@@ -1335,21 +1487,22 @@ class ColliderState:
     box_axi: qd.Tensor
     box_ppts2: qd.Tensor
     box_pu: qd.Tensor
-    xyz_max_min: qd.Tensor
+    # The prism under the triangle every thread of the terrain pass tests, which reads its thread count from its shape
     prism: qd.Tensor
-    n_contacts: qd.Tensor = of_kind(DataKind.STATE)
+    n_contacts: qd.Tensor = of_kind(DataKind.DERIVED)
     # Kept contacts of the sleepers, at the front of the contact buffer with the identity permutation: a hibernated
-    # link's contacts against fixed bodies are carried from step to step with the force of the last solve they took
-    # part in, for the contact getters and the per-link contact force alone. Every per-step pass (prune, sort, island
-    # edges, constraint rows, noslip) walks the live contacts after them, [n_contacts_hibernated, n_contacts).
-    n_contacts_hibernated: qd.Tensor = of_kind(DataKind.STATE)
-    first_time: qd.Tensor = of_kind(DataKind.WARMSTART)
+    # link's contacts against fixed links and other sleepers are carried from step to step with the force of the last
+    # solve they took part in, for the contact getters and the per-link contact force alone. Every per-step pass
+    # (prune, sort, island edges, constraint rows, noslip) walks the live contacts after them,
+    # [n_contacts_hibernated, n_contacts).
+    n_contacts_hibernated: qd.Tensor = of_kind(DataKind.DERIVED)
+    first_time: qd.Tensor = of_kind(DataKind.STATE)
     contact_cache: ContactCache
     # Input data for differentiable contact detection used in the backward pass
     diff_contact_input: DiffContactInput
-    narrowphase_work_queues: NarrowphaseWorkQueues
+    work_queue: NarrowphaseWorkQueue
     contact_sort_key: qd.Tensor
-    contact_sort_idx: qd.Tensor = of_kind(DataKind.STATE)
+    contact_sort_idx: qd.Tensor = of_kind(DataKind.DERIVED)
     contact_proj_v: qd.Tensor
     contact_keep: qd.Tensor
     contact_hull_stack: qd.Tensor
@@ -1360,10 +1513,17 @@ class ColliderState:
 
 
 def get_collider_state(
-    solver, rigid_config, n_possible_pairs, collider_info, collider_static_config, split_narrowphase
+    solver,
+    rigid_config,
+    n_possible_pairs,
+    n_terrain_threads,
+    collider_info,
+    collider_static_config,
+    split_narrowphase,
 ):
     _B = solver._B
-    n_geoms = solver.n_geoms_
+    n_links = solver.n_links_
+    n_valid_link_pairs = collider_info.n_valid_link_pairs[None]
     # Collider._init_max_contacts, which runs before this, sizes the contacts per regime (convex vs nonconvex) and the
     # broad phase candidates within the possible pairs.
     max_collision_pairs_broad = collider_info.max_collision_pairs_broad[None]
@@ -1382,14 +1542,19 @@ def get_collider_state(
     box_axi_shape = maybe_shape((3, _B), rigid_config.box_box_detection)
     box_ppts2_shape = maybe_shape((4, 2, _B), rigid_config.box_box_detection)
     box_pu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
+    # The pruning scratch is laid out environment-first, so that the threads of the block running an environment read
+    # neighbouring slots from the same cache lines (see func_clamp_prune_contacts_coop)
     prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
+    prune_layout = (1, 0) if collider_static_config.has_prunable_contacts else None
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
-        active_buffer=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
+        active_buffer=V(dtype=gs.qd_int, shape=(n_links, _B)),
+        links_aabb_min=V(dtype=gs.qd_vec3, shape=(n_links, _B)),
+        links_aabb_max=V(dtype=gs.qd_vec3, shape=(n_links, _B)),
+        n_broad_link_pairs=V(dtype=gs.qd_int, shape=(_B,)),
+        broad_link_pairs=V(dtype=gs.qd_int, shape=(max(n_valid_link_pairs, 1), _B)),
         n_broad_pairs=V(dtype=gs.qd_int, shape=(_B,)),
-        active_buffer_awake=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
-        active_buffer_hib=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
         box_depth=V(dtype=gs.qd_float, shape=box_depth_shape),
         box_points=V_VEC(3, dtype=gs.qd_float, shape=box_points_shape),
         box_pts=V_VEC(3, dtype=gs.qd_float, shape=box_pts_shape),
@@ -1398,8 +1563,7 @@ def get_collider_state(
         box_axi=V_VEC(3, dtype=gs.qd_float, shape=box_axi_shape),
         box_ppts2=V(dtype=gs.qd_float, shape=box_ppts2_shape),
         box_pu=V_VEC(3, dtype=gs.qd_float, shape=box_pu_shape),
-        xyz_max_min=V(dtype=gs.qd_float, shape=(6, _B)),
-        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, _B)),
+        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, n_terrain_threads)),
         n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
         n_contacts_hibernated=V(dtype=gs.qd_int, shape=(_B,)),
         first_time=V(dtype=gs.qd_bool, shape=(_B,)),
@@ -1410,16 +1574,19 @@ def get_collider_state(
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
         # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
-        # first contact alone under the contact patch (see NarrowphaseWorkQueues)
-        narrowphase_work_queues=get_narrowphase_work_queues(
-            max_collision_pairs_broad * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
+        # first contact alone under the contact patch (see NarrowphaseWorkQueue).
+        work_queue=get_narrowphase_work_queue(
+            max(max_collision_pairs_broad, 1) * _B,
+            1 if solver._options.enable_contact_patch else 5,
+            split_narrowphase,
+            collider_static_config.has_terrain,
         ),
-        contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
+        contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B), layout=(1, 0)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
-        contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape),
-        contact_keep=V(dtype=gs.qd_int, shape=prune_shape),
-        contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape),
-        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape),
+        contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape, layout=prune_layout),
+        contact_keep=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
+        contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
+        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
     )
 
 
@@ -1451,25 +1618,15 @@ def get_verts_spatial_grid(solver):
 @qd.data_oriented
 class ColliderStaticConfig(metaclass=AutoInitMeta):
     has_terrain: bool
-    # True when the scene has convex-convex collision pairs not handled by
-    # func_narrow_phase_convex_specializations (box-box, plane-box). Computed once
-    # at scene build time by iterating all geom pairs in collider._init_static_config().
-    # On GPU, the split narrowphase path runs (contact0 + multicontact + sort).
-    # On CPU, falls back to the monolithic func_narrow_phase_convex_vs_convex.
+    # True when a convex-convex pair escapes func_narrow_phase_convex_specializations (box-box, plane-box) and reaches
+    # the general narrowphase: the split narrowphase on GPU (contact0 + multicontact + sort), the monolithic
+    # func_narrow_phase_convex_vs_convex on CPU. Also gates the deterministic contact sort (see func_sort_contacts),
+    # which orders the contacts independently of the racy narrowphase layout. See its resolution in collider.py.
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
-    # True when link-pair contact pruning can ever do useful work. False when every link has at most one convex geom and
-    # no terrain is present (each (link_a, link_b) bucket then holds at most one geom-pair's contacts, capped at
-    # n_contacts_per_convex_pair, so the 2D hull is at best a marginal reduction). Lets us skip the pruning kernel call
-    # and its scratch buffers entirely. Composes with contact islands: pruning writes a logical permutation into
-    # contact_sort_idx and the island construction reads contacts through it, so pruning collapses the contacts first.
+    # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # True when contacts are ordered deterministically by position in add_inequality_constraints, making the contact
-    # order independent of the racy atomic_add narrowphase layout. Only meaningful when has_non_box_plane_convex_convex
-    # on GPU; disabled in autodiff (the gradient writeback indexes contacts by physical layout, so a non-identity
-    # permutation would misattach gradients).
-    spatial_sort_supported: bool
     # maximum number of contact pairs per collision pair
     n_contacts_per_convex_pair: int
     # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair
@@ -1527,7 +1684,6 @@ class MPRInfo:
     CCD_EPS: qd.Tensor
     CCD_TOLERANCE: qd.Tensor
     CCD_ITERATIONS: qd.Tensor
-    CCD_EXTRAPOLATION_TOL: qd.Tensor
 
 
 def get_mpr_info(**kwargs):
@@ -1535,7 +1691,6 @@ def get_mpr_info(**kwargs):
         CCD_EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EPS"]),
         CCD_TOLERANCE=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_TOLERANCE"]),
         CCD_ITERATIONS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_ITERATIONS"]),
-        CCD_EXTRAPOLATION_TOL=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EXTRAPOLATION_TOL"]),
     )
 
 
@@ -1980,17 +2135,24 @@ class GJKStaticConfig(metaclass=AutoInitMeta):
 class SupportFieldInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
+    # First cell of the table of each geom, the geoms of one trimesh sharing one table
     support_cell_start: qd.Tensor
+    # First extra candidate of each cell, past those of its record, its extras ending where those of the next start
+    support_list_start: qd.Tensor
+    # Mesh-frame position and index of each candidate vertex, among the vertices of its geom: the record of every cell
+    # at twice the index of the cell, holding the first two candidates of the cell (a single candidate twice), then the
+    # extra candidates of all cells
     support_v: qd.Tensor
     support_vid: qd.Tensor
     support_res: qd.Tensor
 
 
-def get_support_field_info(n_geoms, n_support_cells, support_res):
+def get_support_field_info(n_geoms, n_support_cells, n_support_candidates, support_res):
     return SupportFieldInfo(
         support_cell_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
-        support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_cells, 1),)),
-        support_vid=V(dtype=gs.qd_int, shape=(max(n_support_cells, 1),)),
+        support_list_start=V(dtype=gs.qd_int, shape=(n_support_cells + 1,)),
+        support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_candidates, 1),)),
+        support_vid=V(dtype=gs.qd_int, shape=(max(n_support_candidates, 1),)),
         support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
     )
 
@@ -2029,7 +2191,6 @@ class SDFInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     geoms_info: SDFGeomInfo
-    geoms_sdf_start: qd.Tensor
     geoms_sdf_val: qd.Tensor
     geoms_sdf_grad: qd.Tensor
     geoms_sdf_closest_vert: qd.Tensor
@@ -2037,15 +2198,14 @@ class SDFInfo:
 
 
 def get_sdf_info(n_geoms, n_cells, n_coarse_cells):
-    if math.prod((n_cells, 3)) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable((n_cells, 3), gs.np_float):
         gs.raise_exception(
-            f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider manually setting larger "
-            "'sdf_cell_size' in 'gs.materials.Rigid' options."
+            f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', or a "
+            "smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
         )
 
     return SDFInfo(
         geoms_info=get_sdf_geom_info(max(n_geoms, 1)),
-        geoms_sdf_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
         geoms_sdf_val=V(dtype=gs.qd_float, shape=(max(n_cells, 1),)),
         geoms_sdf_grad=V_VEC(3, dtype=gs.qd_float, shape=(max(n_cells, 1),)),
         geoms_sdf_closest_vert=V(dtype=gs.qd_int, shape=(max(n_cells, 1),)),
@@ -2061,9 +2221,8 @@ class ColliderInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     # Narrowphase sub-component descriptions, owned by their respective builders (MPR, GJK, SupportField, SDF) and
-    # embedded here so kernels receive the whole collider description as one argument. Each has a single instance,
-    # activated (which may reallocate it at its final size) before this struct is built; a reassignment after the
-    # embedding would leave the reference here stale.
+    # embedded here so kernels receive the whole collider description as one argument. They are built at their final
+    # size before this struct is.
     mpr: MPRInfo
     gjk: GJKInfo
     support_field: SupportFieldInfo
@@ -2072,8 +2231,13 @@ class ColliderInfo:
     vert_neighbor_start: qd.Tensor
     vert_n_neighbors: qd.Tensor
     verts_spatial_grid: VertsSpatialGrid
-    # (i_ga, i_gb) -> dense pair index, or -1 if invalid. Used by SAP broadphase, narrowphase, and contact cache.
+    # (i_ga, i_gb) -> dense pair index, or -1 if invalid. Used by the broadphase, the narrowphase and the contact cache.
     collision_pair_idx: qd.Tensor
+    # (i_la, i_lb) -> index into valid_link_pairs, or -1 if no geom pair between the two links is valid
+    link_pair_idx: qd.Tensor
+    # Lower and upper corners of the box of every link in its own frame, bounding the boxes of its geoms
+    links_init_aabb_min: qd.Tensor
+    links_init_aabb_max: qd.Tensor
     max_possible_pairs: qd.Tensor
     max_collision_pairs: qd.Tensor
     max_candidate_contacts: qd.Tensor
@@ -2081,9 +2245,9 @@ class ColliderInfo:
     # Post-pruning contact-point budget per environment, which sizes the contact constraint buffers (4 constraints per
     # contact point). Smaller than max_candidate_contacts when contact pruning is enabled or 'max_contacts' is set.
     max_contacts: qd.Tensor
-    # Compact list of valid collision pairs. Used by all-vs-all broadphase to dispatch valid pairs to GPU threads.
-    n_valid_pairs: qd.Tensor
-    valid_collision_pairs: qd.Tensor
+    # Link pairs holding at least one valid geom pair, the link carrying most geoms first (see func_broad_phase_geoms)
+    n_valid_link_pairs: qd.Tensor
+    valid_link_pairs: qd.Tensor
     # Terrain fields
     terrain_hf: qd.Tensor
     terrain_rc: qd.Tensor
@@ -2092,9 +2256,6 @@ class ColliderInfo:
     # multi contact perturbation and tolerance
     mc_perturbation: qd.Tensor
     mc_tolerance: qd.Tensor
-    mpr_to_gjk_overlap_ratio: qd.Tensor
-    mpr_to_gjk_overlap_ratio_valid: qd.Tensor
-    mpr_to_gjk_penetration_ratio: qd.Tensor
     # differentiable contact tolerance
     diff_pos_tolerance: qd.Tensor
     diff_normal_tolerance: qd.Tensor
@@ -2106,7 +2267,7 @@ class ColliderInfo:
 def get_collider_info(
     solver,
     n_vert_neighbors,
-    n_valid_pairs,
+    n_valid_link_pairs,
     collider_static_config,
     mpr_info,
     gjk_info,
@@ -2131,22 +2292,22 @@ def get_collider_info(
         vert_n_neighbors=V(dtype=gs.qd_int, shape=(solver.n_verts_,)),
         verts_spatial_grid=get_verts_spatial_grid(solver),
         collision_pair_idx=V(dtype=gs.qd_int, shape=(solver.n_geoms_, solver.n_geoms_)),
+        link_pair_idx=V(dtype=gs.qd_int, shape=(solver.n_links_, solver.n_links_)),
+        links_init_aabb_min=V(dtype=gs.qd_vec3, shape=(solver.n_links_,)),
+        links_init_aabb_max=V(dtype=gs.qd_vec3, shape=(solver.n_links_,)),
         max_possible_pairs=V(dtype=gs.qd_int, shape=()),
         max_collision_pairs=V(dtype=gs.qd_int, shape=()),
         max_candidate_contacts=V(dtype=gs.qd_int, shape=()),
         max_collision_pairs_broad=V(dtype=gs.qd_int, shape=()),
         max_contacts=V(dtype=gs.qd_int, shape=()),
-        n_valid_pairs=V_SCALAR_FROM(dtype=gs.qd_int, value=n_valid_pairs),
-        valid_collision_pairs=V(dtype=gs.qd_ivec2, shape=(max(n_valid_pairs, 1),)),
+        n_valid_link_pairs=V_SCALAR_FROM(dtype=gs.qd_int, value=n_valid_link_pairs),
+        valid_link_pairs=V(dtype=gs.qd_ivec2, shape=(max(n_valid_link_pairs, 1),)),
         terrain_hf=V(dtype=gs.qd_float, shape=terrain_hf_shape),
         terrain_rc=V(dtype=gs.qd_int, shape=(2,)),
         terrain_scale=V(dtype=gs.qd_float, shape=(2,)),
         terrain_xyz_maxmin=V(dtype=gs.qd_float, shape=(6,)),
         mc_perturbation=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_perturbation"]),
         mc_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_tolerance"]),
-        mpr_to_gjk_overlap_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mpr_to_gjk_overlap_ratio"]),
-        mpr_to_gjk_overlap_ratio_valid=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mpr_to_gjk_overlap_ratio_valid"]),
-        mpr_to_gjk_penetration_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mpr_to_gjk_penetration_ratio"]),
         diff_pos_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_pos_tolerance"]),
         diff_normal_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
         contact_pruning_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
@@ -2285,8 +2446,10 @@ class LinksState:
     crb_mass: qd.Tensor
     cdd_vel: qd.Tensor
     cdd_ang: qd.Tensor
-    pos: qd.Tensor
-    quat: qd.Tensor
+    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
+    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
+    pos: qd.Tensor = of_kind(DataKind.STATE)
+    quat: qd.Tensor = of_kind(DataKind.STATE)
     pos_bw: qd.Tensor
     quat_bw: qd.Tensor
     i_pos: qd.Tensor
@@ -2298,6 +2461,12 @@ class LinksState:
     # assembly (the deterministic post-sort view of the contacts), consumed by the midpoint-integration eligibility;
     # the raw collider contact buffer is only valid through the contact_sort_idx indirection.
     is_constrained: qd.Tensor
+    # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
+    # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
+    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated for the dynamic
+    # solvers integrating with the midpoint rule only.
+    midpoint_ang: qd.Tensor = of_kind(DataKind.SCRATCH)
+    midpoint_res: qd.Tensor = of_kind(DataKind.SCRATCH)
     cd_ang_bw: qd.Tensor
     cd_vel_bw: qd.Tensor
     mass_sum: qd.Tensor
@@ -2309,8 +2478,9 @@ class LinksState:
     cfrc_vel: qd.Tensor
     cfrc_applied_ang: qd.Tensor = of_kind(DataKind.STATE)
     cfrc_applied_vel: qd.Tensor = of_kind(DataKind.STATE)
-    cfrc_coupling_ang: qd.Tensor
-    cfrc_coupling_vel: qd.Tensor
+    # The wrench the couplers accumulate during a substep, which the next substep consumes
+    cfrc_coupling_ang: qd.Tensor = of_kind(DataKind.STATE)
+    cfrc_coupling_vel: qd.Tensor = of_kind(DataKind.STATE)
     contact_force: qd.Tensor
     # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
     # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
@@ -2319,9 +2489,10 @@ class LinksState:
     awake_steps: qd.Tensor = of_kind(DataKind.STATE)
 
 
-def get_links_state(solver):
+def get_links_state(solver, kinematic_only):
     shape = (solver.n_links_, solver._B)
     requires_grad = solver._requires_grad
+    is_midpoint = not kinematic_only and solver.rigid_config.integrator != gs.integrator.Euler
     # The backward joint buffers hold one slot per joint of a link plus the link itself; collapsed when grad is off.
     n_joints_bw = (max(link.n_joints for link in solver.links) + 1) if requires_grad and solver.n_links else 1
     shape_bw = (solver.n_links_, n_joints_bw, solver._B)
@@ -2347,6 +2518,8 @@ def get_links_state(solver):
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),
+        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
+        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
         cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         mass_sum=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
@@ -2701,7 +2874,7 @@ class VVertsState:
 def get_vverts_state(solver, is_active=True):
     if not is_active:
         return VVertsState(pos=V(dtype=gs.qd_vec3, shape=()))
-    if math.prod((solver.n_custom_vverts_, solver._B, 3)) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable((solver.n_custom_vverts_, solver._B, 3), gs.np_float):
         gs.raise_exception(
             f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
             "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
@@ -2788,6 +2961,8 @@ class EqualitiesInfo:
 
     eq_obj1id: qd.Tensor
     eq_obj2id: qd.Tensor
+    # The data of a screw constraint, the largest one, sizes the entries of all equalities (see func_screw_frame in
+    # constraint/solver.py)
     eq_data: qd.Tensor
     eq_type: qd.Tensor
     sol_params: qd.Tensor
@@ -2799,7 +2974,7 @@ def get_equalities_info(solver, is_active=True):
     return EqualitiesInfo(
         eq_obj1id=V(dtype=gs.qd_int, shape=shape),
         eq_obj2id=V(dtype=gs.qd_int, shape=shape),
-        eq_data=V(dtype=gs.qd_vec11, shape=shape),
+        eq_data=V(dtype=gs.qd_vec18, shape=shape),
         eq_type=V(dtype=gs.qd_int, shape=shape),
         sol_params=V(dtype=gs.qd_vec7, shape=shape),
     )
@@ -2857,34 +3032,6 @@ def get_entities_state(solver, is_active=True):
     return EntitiesState(is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_, solver._B) if is_active else ()))
 
 
-# =========================================== RigidAdjointCache ===========================================
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class RigidAdjointCache:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    # This cache stores intermediate values during rigid body simulation to use Quadrants's AD. Quadrants's AD requires
-    # us not to overwrite the values that have been read during the forward pass, so we need to store the intemediate
-    # values in this cache to avoid overwriting them. Specifically, after we compute next frame's qpos, dofs_vel, and
-    # dofs_acc, we need to store them in this cache because we overwrite the values in the next frame. See how
-    # [kernel_save_adjoint_cache] is used in [rigid_solver.py] to store the values in this cache.
-    qpos: qd.Tensor
-    dofs_vel: qd.Tensor
-    dofs_acc: qd.Tensor
-
-
-def get_rigid_adjoint_cache(solver):
-    substeps_local = solver._sim.substeps_local
-    requires_grad = solver._requires_grad
-
-    qs_shape = maybe_shape((substeps_local + 1, solver.n_qs_, solver._B), requires_grad)
-    dofs_shape = maybe_shape((substeps_local + 1, solver.n_dofs_, solver._B), requires_grad)
-    return RigidAdjointCache(
-        qpos=V(dtype=gs.qd_float, shape=qs_shape, needs_grad=requires_grad),
-        dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        dofs_acc=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-    )
-
-
 # =========================================== DynInfo and DynState ===========================================
 
 
@@ -2927,20 +3074,6 @@ class DynState:
     fixed_verts: VertsState
     vverts: VVertsState
     vgeoms: VGeomsState
-
-
-def get_dyn_state_adjoint_cache(solver):
-    return DynState(
-        dofs=get_dofs_state(solver),
-        links=get_links_state(solver),
-        joints=get_joints_state(solver),
-        geoms=get_geoms_state(solver),
-        entities=get_entities_state(solver, is_active=False),
-        free_verts=get_free_verts_state(solver, is_active=False),
-        fixed_verts=get_fixed_verts_state(solver, is_active=False),
-        vverts=get_vverts_state(solver, is_active=False),
-        vgeoms=get_vgeoms_state(solver, is_active=False),
-    )
 
 
 # =================================== RigidSimStaticConfig ===================================
@@ -3000,8 +3133,13 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # single mass block (the common case: one kinematic tree). The tile width is always 32: the path is only taken
     # when the per-entity block exceeds shared memory, which on any real GPU means well over 48 DOFs.
     enable_register_tiled_mass: bool = False
+    # When True, the shared-memory mass factor also solves the smooth acceleration from the forces against the factor it
+    # holds, which runs it after the force passes, and func_compute_qacc skips its own solve. See the rigid solver's
+    # resolution for the gating.
+    enable_fused_smooth_acc_solve: bool = False
     # When True, func_solve_init seeds every island's factor with the tiled per-island kernels at any env count. The
-    # monolith self-seeds with the scalar per-island factor otherwise. See the rigid solver's resolution for the gating.
+    # solve is seeded one env per thread otherwise (see has_per_env_solve_seed). See the rigid solver's resolution for
+    # the gating.
     enable_tiled_island_seed: bool = False
     # When True, the scene holds one dof-carrying kinematic tree, so an env forms at most one island and the
     # per-island passes of the solve read the env's plain dof and row ranges. See the rigid solver's resolution.
@@ -3061,6 +3199,22 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
         """
         return max(8, 2 * self.rows_per_contact)
 
+    @property
+    def has_per_env_solve_seed(self) -> bool:
+        """Whether func_solve_init seeds the Newton factor, the gradient and the convergence certificate one env per
+        thread, for both solve arms.
+
+        This holds on GPU wherever the tiled factor seed is off or leaves the factor to the scalar dense Cholesky (see
+        has_scalar_seed_factor). The decomposed arm then factors the Hessian of every env one env per thread at each
+        iteration too, since its tiled per-iteration factor maintains the assembled Hessian that only the tiled seed
+        provides.
+        """
+        return (
+            self.solver_type == gs.constraint_solver.Newton
+            and self.backend != gs.cpu
+            and (not self.enable_tiled_island_seed or self.has_scalar_seed_factor)
+        )
+
 
 # =========================================== DataManager ===========================================
 
@@ -3069,6 +3223,20 @@ def cholesky_tile_size_for(n_dofs):
     """Tile size of the register-streaming Cholesky kernels for a system of n_dofs dofs: 16 where one 16-lane tile
     holds it or where a 32-lane tile would pad it past its lane utilization (33 to 48 dofs), 32 otherwise."""
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
+
+
+def cholesky_packed_tile_shape(max_dofs):
+    """Shape of the shared tile of the tiled factor of a block of up to max_dofs dofs.
+
+    The tile holds the blocks of the lower triangle alone, one below the other, each a square of the tile size (see
+    cholesky_tile_size_for) padded by one column against shared-memory bank conflicts, a block of a single tile being
+    the tile itself (see func_packed_tile_pos in solver.py). The sizes are native integers, as the shared array takes
+    them.
+    """
+    tile_size = cholesky_tile_size_for(max_dofs)
+    n_blocks = (max_dofs + tile_size - 1) // tile_size
+    n_rows = min(tile_size, max_dofs)
+    return int(n_blocks * (n_blocks + 1) // 2 * n_rows), int(n_rows + 1)
 
 
 def island_tile_caps(cap_first, cap_last):
@@ -3094,7 +3262,7 @@ class DataManager:
         dofs_info = get_dofs_info(solver)
         dofs_state = get_dofs_state(solver)
         links_info = get_links_info(solver)
-        links_state = get_links_state(solver)
+        links_state = get_links_state(solver, kinematic_only)
         joints_info = get_joints_info(solver)
         joints_state = get_joints_state(solver)
 
@@ -3148,11 +3316,6 @@ class DataManager:
             vgeoms=vgeoms_state,
         )
 
-        if solver.rigid_config.requires_grad:
-            # Data structures required for backward pass
-            self.dyn_state_adjoint_cache = get_dyn_state_adjoint_cache(solver)
-
-        self.rigid_adjoint_cache = get_rigid_adjoint_cache(solver)
         self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
 
         self._solver = solver

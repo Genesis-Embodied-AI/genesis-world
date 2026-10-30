@@ -179,8 +179,8 @@ class TactileProbeSensorOptionsMixin(ProbeSensorOptionsMixin[SensorT]):
     dead_taxel_value_range : (float, float), optional
         Uniform range for the dead value sampled per probe on reset. Default ``(0.0, 0.0)``.
     contact_depth_query : {"sdf", "raycast"} or None, optional
-        Per-probe contact-depth backend. ``"sdf"`` queries the per-geom analytic SDF grid (fast, exact for primitives,
-        requires SDF activation). ``"raycast"`` walks the rigid solver's per-frame collision-mesh BVH and takes the
+        Per-probe contact-depth backend. ``"sdf"`` queries the per-geom analytic SDF grid (fast, exact for primitives).
+        ``"raycast"`` walks the rigid solver's per-frame collision-mesh BVH and takes the
         signed distance to the nearest candidate triangle (sign from the triangle's face normal, negative inside),
         so ``pen = R - signed_distance`` matches the SDF backend while handling arbitrary meshes uniformly (shares
         the BVH with ``RaycasterSensor``). ``None`` (default) defers the choice: all sensors of the same class must

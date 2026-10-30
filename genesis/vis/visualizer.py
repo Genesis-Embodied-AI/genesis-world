@@ -3,6 +3,7 @@ import sys
 import pyglet
 
 import genesis as gs
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.repr_base import RBC
 
 from .camera import Camera
@@ -171,7 +172,12 @@ class Visualizer(RBC):
             gs.raise_exception("`add_light` is specific to batch renderer.")
 
     @gs.assert_built
-    def reset(self):
+    def reset(self, refresh_viewer=True):
+        """Drop what every renderer drew of the scene, so that each one draws it anew from its current state.
+
+        The cameras sync at their next render. 'refresh_viewer' repaints the interactive viewer right away, which
+        otherwise repaints when a refresh is due (see 'Viewer.update').
+        """
         self._t = -1
 
         self._context.reset()
@@ -183,12 +189,25 @@ class Visualizer(RBC):
             self._batch_renderer.reset()
 
         if self._viewer is not None:
-            self._viewer.update(auto_refresh=True, force=True)
+            if refresh_viewer:
+                self._viewer.update(auto_refresh=True, force=True)
+            else:
+                self._viewer.update()
 
     def build(self):
         self._context.build(self._scene)
 
         if self._viewer is not None:
+            # Setter changes are shown in the viewer right away, syncing the solver that changed alone. The window only
+            # repaints when a refresh is due, so that a loop of setters does not pay one repaint per call.
+            for solver in self._scene.active_solvers:
+                solver.subscribe(
+                    Subscriber(
+                        to=frozenset((StateChange.GEOMETRY,)),
+                        callback=lambda change, envs_idx, solver=solver: self.sync(frozenset((solver,))),
+                    )
+                )
+
             self._viewer.build(self._scene)
             self.viewer_lock = self._viewer.lock
 
@@ -209,15 +228,49 @@ class Visualizer(RBC):
         # Make sure that the viewer is fully compiled and in a clean state
         self.reset()
 
+    def sync(self, solvers=None):
+        """Sync every renderer with the current state of the scene.
+
+        The renderers shared with the interactive viewer sync right away, while the raytracer and the batch renderer
+        sync at their next render. The interactive viewer then refreshes when a refresh is due (see 'Viewer.update').
+        `solvers` restricts the sync of the shared renderers to those solvers, whose state changed since the last sync
+        (see 'RasterizerContext.update').
+        """
+        if self._raytracer is not None:
+            self._raytracer.reset()
+        if self._batch_renderer is not None:
+            self._batch_renderer.reset()
+        self._context.update(force_render=True, solvers=solvers)
+        if self._viewer is not None:
+            self._viewer.update()
+
+    def update_on_sim_step(self, advanced, auto=None):
+        """Show a simulation step: refresh the viewer when due, run its per-step callbacks and pace the loop.
+
+        If the step 'advanced' the simulation, the loop is paced to real time, otherwise (a paused scene) to the refresh
+        rate of the viewer (see 'Viewer.update_on_sim_step'). 'auto' is passed on to 'Viewer.update'.
+        """
+        if self._viewer is not None:
+            self._viewer.update(auto_refresh=auto)
+            self._viewer.update_on_sim_step(advanced=advanced)
+
     def update(self, force=True, auto=None):
+        """Sync the visualization with the scene and refresh the interactive viewer.
+
+        With 'force', every renderer syncs and the viewer refreshes right away, which shows a change made outside of a
+        step. Without it, the call does to the viewer what a step does, for loops stepping with
+        'update_visualizer=False' (see 'update_on_sim_step'). 'auto' is passed on to 'Viewer.update'.
+        """
         if force:  # force update
             self.reset()
-        elif self._viewer is not None:
-            self._viewer.update(auto_refresh=auto, force=force)
+        else:
+            self.update_on_sim_step(advanced=True, auto=auto)
 
-    def update_visual_states(self, force_render: bool = False):
+    def update_visual_states(self, force_render: bool = False, solvers=None):
         """
         Update all visualization-only variables here.
+
+        `solvers` restricts the update of the render data to those solvers, all the active ones if None.
         """
         # Early return if already updated previously
         if not force_render and self._t >= self.scene.sim.cur_step_global:
@@ -230,27 +283,21 @@ class Visualizer(RBC):
                 elif camera._followed_entity is not None:
                     camera.update_following()
 
-        if self._scene.rigid_solver.is_active:
-            self._scene.rigid_solver.update_vgeoms()
+        for solver in self._scene.active_solvers if solvers is None else solvers:
+            # The rigid solver derives from the kinematic one
+            if isinstance(solver, gs.engine.solvers.KinematicSolver):
+                solver.update_vgeoms()
+                # drone propellers
+                for entity in solver.entities:
+                    if isinstance(entity, gs.engine.entities.DroneEntity):
+                        entity.update_propeller_vgeoms()
+            elif isinstance(
+                solver, (gs.engine.solvers.MPMSolver, gs.engine.solvers.SPHSolver, gs.engine.solvers.PBDSolver)
+            ):
+                solver.update_render_fields()
 
-            # drone propellers
-            for entity in self._scene.rigid_solver.entities:
-                if isinstance(entity, gs.engine.entities.DroneEntity):
-                    entity.update_propeller_vgeoms()
-
-        if self._scene.kinematic_solver.is_active:
-            self._scene.kinematic_solver.update_vgeoms()
-
-        if self._scene.mpm_solver.is_active:
-            self._scene.mpm_solver.update_render_fields()
-
-        if self._scene.sph_solver.is_active:
-            self._scene.sph_solver.update_render_fields()
-
-        if self._scene.pbd_solver.is_active:
-            self._scene.pbd_solver.update_render_fields()
-
-        self._t = self._scene.sim.cur_step_global
+        if solvers is None:
+            self._t = self._scene.sim.cur_step_global
 
     def colorize_seg_idxc_arr(self, seg_idxc_arr):
         if self._batch_renderer is not None:

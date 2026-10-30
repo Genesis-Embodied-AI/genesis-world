@@ -28,7 +28,6 @@ except ImportError:
     ENABLE_MADRONA = False
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 1])
 def test_rasterizer_non_batched(n_envs, show_viewer):
@@ -218,7 +217,6 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
     assert_equal(raster_cam0.read().rgb, shifted_frame)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_rasterizer_batched(show_viewer, png_snapshot):
     CAM_RES = (128, 128)
@@ -634,7 +632,6 @@ def test_raytracer_destroy():
     assert shared_metadata.renderer is None
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
 def test_lookat_entity(show_viewer, png_snapshot):
     scene = gs.Scene(show_viewer=show_viewer)

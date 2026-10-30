@@ -21,14 +21,11 @@ class SimOptions(Options):
 
     Note
     ----
-    1. `SimOptions` specifies the global settings for the simulator. Some parameters exist both in `SimOptions` and
+    `SimOptions` specifies the global settings for the simulator. Some parameters exist both in `SimOptions` and
     `SolverOptions`. In this case, if such parameters are given in `SolverOptions`, it will override the one specified
     in `SimOptions` for this specific solver. For example, if `dt` is only given in `SimOptions`, it will be shared by
     all the solvers, while a solver given its own `dt` integrates over that interval instead, and the number of
     substeps of every solver follows from it.
-
-    2. In differentiable mode, `substeps_local` must be divisible by `substeps`, as external command is input per
-    `step`, but `substep`. If `requires_grad` is False, we can use arbitrary `substeps_local`.
 
     Parameters
     ----------
@@ -39,8 +36,6 @@ class SimOptions(Options):
         substeps buy accuracy and stability, at a runtime cost that grows linearly with the count in the worst case
         though sub-linearly in practice. Setting both this and a solver `dt` that implies a different count raises an
         exception. Defaults to 1.
-    substeps_local : int, optional
-        Number of substeps stored in GPU memory. Defaults to None. This is used for differentiable mode.
     gravity : tuple, optional
         Gravity force in N/kg. Defaults to (0.0, 0.0, -9.81).
     floor_height : float, optional
@@ -53,29 +48,9 @@ class SimOptions(Options):
 
     dt: PositiveFloat = 1e-2
     substeps: PositiveInt = 1
-    substeps_local: PositiveInt | None = None  # number of substeps stored in GPU memory
     gravity: Vec3FType = (0.0, 0.0, -9.81)
     floor_height: float = 0.0
     requires_grad: StrictBool = False
-
-    _steps_local: int | None = PrivateAttr(default=None)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_substeps(cls, data: dict) -> dict:
-        if data.get("substeps_local") is None:
-            # use 1 to save gpu memory when not in differentiable mode
-            data["substeps_local"] = data.get("substeps", 1) if data.get("requires_grad", False) else 1
-        return data
-
-    def model_post_init(self, context: Any) -> None:
-        if self.requires_grad:
-            if self.substeps_local % self.substeps != 0:
-                gs.raise_exception("`substeps_local` must be divisible by `substeps` when `requires_grad` is True.")
-            else:
-                self._steps_local = int(self.substeps_local / self.substeps)
-        else:
-            self._steps_local = None
 
 
 class BaseCouplerOptions(Options):
@@ -404,7 +379,7 @@ class KinematicOptions(Options):
     batch_links_info : bool, optional
         Whether to batch link info. Automatically enabled for heterogeneous simulation. Defaults to False.
     batch_dofs_info : bool, optional
-        Whether to batch DOF info. Defaults to False.
+        Whether to batch DOF info. Automatically enabled for heterogeneous simulation. Defaults to False.
     IK_max_targets : int, optional
         Maximum number of IK targets. Increasing this doesn't affect IK solving speed, but will increase memory usage.
         Defaults to 6.
@@ -414,23 +389,6 @@ class KinematicOptions(Options):
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
     IK_max_targets: PositiveInt = 6
-
-
-class ToolOptions(TimeBasedMixin):
-    """
-    Options configuring the ToolSolver.
-
-    Note
-    ----
-    ToolEntity is a simplified form of RigidEntity. It supports one way tool->other coupling, but has *no* internal dynamics and can only be created from a single mesh. This is a temporal workaround for differentiable rigid-soft interaction. This solver will be removed once differentiable mode is supported by the RigidSolver.
-
-    Parameters
-    ----------
-    floor_height : float, optional
-        Height of the floor in meters. Defaults to 0.0.
-    """
-
-    floor_height: float | None = None
 
 
 class RigidOptions(GravityMixin, TimeBasedMixin):
@@ -483,10 +441,12 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         memory-bound kernels. Automatically enabled for heterogeneous simulation. Defaults to False.
     batch_joints_info : bool, optional
         Whether the model parameters of a joint are stored per environment rather than shared by the whole batch,
-        with the same tradeoff as `batch_links_info`. Defaults to False.
+        with the same tradeoff as `batch_links_info`. Automatically enabled for heterogeneous simulation. Defaults to
+        False.
     batch_dofs_info : bool, optional
         Whether the model parameters of a degree of freedom are stored per environment rather than shared by the
-        whole batch, with the same tradeoff as `batch_links_info`. Defaults to False.
+        whole batch, with the same tradeoff as `batch_links_info`. Automatically enabled for heterogeneous simulation.
+        Defaults to False.
     constraint_solver : gs.constraint_solver, optional
         Constraint solver type. Current supported constraint solvers are 'gs.constraint_solver.CG' (conjugate gradient)
         and 'gs.constraint_solver.Newton' (Newton's method). Defaults to 'Newton'.
@@ -569,7 +529,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         translation and rotation. If None, it is set to 1e-4 when MuJoCo compatibility is enabled (matching MuJoCo's
         default) and 2e-3 otherwise. Defaults to None.
     max_dynamic_constraints : int, optional
-        Maximum number of dynamic constraints (like suction cup). Defaults to 8.
+        Maximum number of dynamic constraints (like suction cup) per environment. Adding one past it raises. Defaults
+        to 8.
     use_gjk_collision: bool, optional
         Whether to use GJK for collision detection instead of MPR. More stable but much slower. Defaults to
         `sim_options.requires_grad`.

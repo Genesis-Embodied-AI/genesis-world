@@ -40,6 +40,9 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
 
         class FakeSensorOptions(SensorOptions["FakeSensor"]):
             pass
+
+        class MissingSensorOptions(SensorOptions["MissingSensor"]):
+            pass
         """
         )
     )
@@ -85,6 +88,10 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
         )
     )
 
+    # Sibling modules failing to import, which discovery skips: one lacking a dependency, one broken
+    (pkg_dir / "optional.py").write_text("import fake_sensor_plugin_missing_dependency\n")
+    (pkg_dir / "broken.py").write_text("raise AttributeError('broken plugin module')\n")
+
     sys.path.insert(0, str(tmp_path))
     try:
         # Import ONLY the options module (not the sensor module)
@@ -100,6 +107,10 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
 
         # Now it should be registered
         assert SensorManager.SENSOR_TYPES_MAP[FakeSensorOptions] is sensor_cls
+
+        # A sensor class defined nowhere is reported along with the sibling modules lacking a dependency
+        with pytest.raises(gs.GenesisException, match="fake_sensor_plugin.optional"):
+            SensorManager._resolve_sensor_cls(options_mod.MissingSensorOptions)
 
         # Verify it works end-to-end with a scene
         scene = gs.Scene(show_viewer=show_viewer)

@@ -1,7 +1,5 @@
-import inspect
-from functools import wraps
 from itertools import chain
-from typing import TYPE_CHECKING, Hashable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -11,7 +9,7 @@ from genesis.constants import link_ref_frame
 from genesis.engine.states.entities import RigidEntityState
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch, tensor_to_array
+from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
 
 from ..base_entity import Entity
 from .description import (
@@ -31,40 +29,6 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
-
-
-# Wrapper to track the arguments of a function and save them in the target buffer
-def tracked(fun):
-    sig = inspect.signature(fun)
-
-    @wraps(fun)
-    def wrapper(self, *args, **kwargs):
-        if self._update_tgt_while_set:
-            bound = sig.bind(self, *args, **kwargs)
-            bound.apply_defaults()
-            args_dict = dict(tuple(bound.arguments.items())[1:])
-            # Key the slot by (method, dofs subset, envs subset) so same-step calls on distinct subsets (e.g. arm
-            # and gripper force control, or per-environment-group commands) each keep their own entry and gradient
-            # path; a coarser key would let the second call evict the first from the tape. Slices key directly when
-            # hashable (Python 3.12 onward) and resolve against their dimension size otherwise.
-            key = [fun.__name__]
-            for indices, n in (
-                (args_dict.get("dofs_idx_local"), self.n_dofs),
-                (args_dict.get("envs_idx"), self._solver._B),
-            ):
-                if indices is None:
-                    subset = None
-                elif isinstance(indices, slice):
-                    subset = indices if isinstance(indices, Hashable) else tuple(range(*indices.indices(n)))
-                elif isinstance(indices, torch.Tensor):
-                    subset = tuple(tensor_to_array(indices).reshape(-1).tolist())
-                else:
-                    subset = tuple(np.asarray(indices).reshape(-1).tolist())
-                key.append(subset)
-            self._update_tgt(tuple(key), args_dict)
-        return fun(self, *args, **kwargs)
-
-    return wrapper
 
 
 class KinematicEntity(Entity):
@@ -107,31 +71,6 @@ class KinematicEntity(Entity):
         self._is_vverts_overridden: bool = False
 
         self._load_model()
-
-        # Initialize target variables and checkpoint
-        self._tgt_keys = (
-            "set_pos",
-            "set_quat",
-            "set_dofs_velocity",
-            "control_dofs_force",
-            "control_dofs_velocity",
-            "control_dofs_position",
-            "control_dofs_position_velocity",
-        )
-        self._tgt = dict()
-        self._tgt_buffer = list()
-        self._ckpt = dict()
-        self._update_tgt_while_set = self._solver._requires_grad
-
-    def _update_tgt(self, key, value):
-        # Set [self._tgt] value while keeping the insertion order between keys. When a new key is inserted or an existing
-        # key is updated, the new element should be inserted at the end of the dict. This is because we need to keep
-        # the insertion order to correctly pass the gradients in the backward pass.
-        self._tgt.pop(key, None)
-        self._tgt[key] = value
-
-    def init_ckpt(self):
-        pass
 
     def _add_heterogeneous_variant(self, link, v_link):
         """Give a link the geoms one variant describes for it. A kinematic entity holds visual geoms alone.
@@ -465,192 +404,15 @@ class KinematicEntity(Entity):
     # ---------------------------------- control & io ------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def process_input(self, in_backward=False):
-        if in_backward:
-            # use negative index because buffer length might not be full
-            index = self._sim.cur_step_local - self._sim._steps_local
-            self._tgt = self._tgt_buffer[index].copy()
-        else:
-            self._tgt_buffer.append(self._tgt.copy())
-
-        update_tgt_while_set = self._update_tgt_while_set
-        # Apply targets in the order of insertion
-        for key in self._tgt.keys():
-            data_kwargs = self._tgt[key]
-
-            # We do not need zero velocity here because if it was true, [set_dofs_velocity] from zero_velocity would
-            # be in [tgt]
-            if "zero_velocity" in data_kwargs:
-                data_kwargs["zero_velocity"] = False
-            # Do not update [tgt], as input information is finalized at this point
-            self._update_tgt_while_set = False
-
-            # Every tracked setter replays uniformly from its taped kwargs, so dispatch by name (a rare legitimate
-            # use of getattr, on our own vetted key set).
-            if key[0] not in self._tgt_keys:
-                gs.raise_exception(f"Invalid target key: {key[0]} not in {self._tgt_keys}")
-            getattr(self, key[0])(**data_kwargs)
-
-        self._tgt = dict()
-        self._update_tgt_while_set = update_tgt_while_set
-
-    def process_input_grad(self):
-        index = self._sim.cur_step_local - self._sim._steps_local
-        for key in reversed(self._tgt_buffer[index].keys()):
-            data_kwargs = self._tgt_buffer[index][key]
-
-            match key[0]:
-                # We need to unpack the data_kwargs because [_backward_from_qd] only supports positional arguments.
-                # Inputs are stored on the tape as passed by the user, so scalars and array-likes (valid setter
-                # inputs that cannot carry a gradient) are filtered out with the tensor check.
-                case "set_pos":
-                    pos = data_kwargs.pop("pos")
-                    if isinstance(pos, torch.Tensor) and pos.requires_grad:
-                        pos._backward_from_qd(self.set_pos_grad, data_kwargs["envs_idx"], data_kwargs["relative"])
-
-                case "set_quat":
-                    quat = data_kwargs.pop("quat")
-                    if isinstance(quat, torch.Tensor) and quat.requires_grad:
-                        quat._backward_from_qd(self.set_quat_grad, data_kwargs["envs_idx"], data_kwargs["relative"])
-
-                case "set_dofs_velocity":
-                    velocity = data_kwargs.pop("velocity")
-                    # [velocity] could be None when we want to zero the velocity (see set_dofs_velocity of RigidSolver)
-                    if isinstance(velocity, torch.Tensor) and velocity.requires_grad:
-                        velocity._backward_from_qd(
-                            self.set_dofs_velocity_grad, data_kwargs["dofs_idx_local"], data_kwargs["envs_idx"]
-                        )
-
-                case "control_dofs_force":
-                    force = data_kwargs.pop("force")
-                    if isinstance(force, torch.Tensor) and force.requires_grad:
-                        force._backward_from_qd(
-                            self.set_dofs_force_grad, data_kwargs["dofs_idx_local"], data_kwargs["envs_idx"]
-                        )
-
-                case "control_dofs_velocity" | "control_dofs_position" | "control_dofs_position_velocity":
-                    # PD control targets are replayed for primal correctness but have no input-gradient path.
-                    for target in (data_kwargs.get("position"), data_kwargs.get("velocity")):
-                        if isinstance(target, torch.Tensor) and target.requires_grad:
-                            gs.raise_exception(
-                                "Gradients with respect to PD control targets are not supported yet. Use "
-                                "'control_dofs_force' for differentiable control inputs."
-                            )
-
-                case _:
-                    gs.raise_exception(f"Invalid target key: {key[0]} not in {self._tgt_keys}")
-
-    def save_ckpt(self, ckpt_name):
-        if ckpt_name not in self._ckpt:
-            self._ckpt[ckpt_name] = {}
-        self._ckpt[ckpt_name]["_tgt_buffer"] = self._tgt_buffer.copy()
-        self._tgt_buffer.clear()
-
-    def load_ckpt(self, ckpt_name):
-        self._tgt_buffer = self._ckpt[ckpt_name]["_tgt_buffer"].copy()
-
-    def reset_grad(self):
-        self._tgt_buffer.clear()
-
     @gs.assert_built
     def get_state(self):
-        state = RigidEntityState(self, self._sim.cur_step_global)
-
         solver_state = self._solver.get_state()
-        pos = solver_state.links_pos[:, self.base_link_idx]
-        quat = solver_state.links_quat[:, self.base_link_idx]
-
-        state._pos = pos
-        state._quat = quat
-
-        return state
-
-    def _get_global_idx(self, idx_local, idx_local_max, idx_global_start=0, *, unsafe=False):
-        if idx_local is None:
-            idx_global = range(idx_global_start, idx_local_max + idx_global_start)
-        elif isinstance(idx_local, (int, np.integer)):
-            if idx_local < 0:
-                idx_local = idx_local_max + idx_local
-            idx_global = (idx_local + idx_global_start,)
-        elif isinstance(idx_local, slice):
-            start, stop, step = idx_local.indices(idx_local_max)
-            idx_global = range(start + idx_global_start, stop + idx_global_start, step)
-            if step < 0:
-                idx_global = tuple(idx_global)
-        elif isinstance(idx_local, range):
-            if idx_local and -idx_local_max <= idx_local[0] < 0 and -idx_local_max <= idx_local[-1] < 0:
-                # Every entry shifts by the same amount, so the constant step and the range form are preserved
-                idx_global = range(
-                    idx_local.start + idx_local_max + idx_global_start,
-                    idx_local.stop + idx_local_max + idx_global_start,
-                    idx_local.step,
-                )
-            elif idx_local and (idx_local[0] < 0 or idx_local[-1] < 0):
-                # Mixed-sign entries wrap by different amounts, which breaks the constant step
-                idx_global = [
-                    i + idx_global_start + (idx_local_max if -idx_local_max <= i < 0 else 0) for i in idx_local
-                ]
-            else:
-                idx_global = range(
-                    idx_local.start + idx_global_start, idx_local.stop + idx_global_start, idx_local.step
-                )
-            if isinstance(idx_global, range) and idx_global.step < 0:
-                idx_global = tuple(idx_global)
-        elif isinstance(idx_local, (list, tuple)):
-            try:
-                idx_global = [
-                    i + idx_global_start + (idx_local_max if -idx_local_max <= i < 0 else 0) for i in idx_local
-                ]
-            except TypeError:
-                gs.raise_exception("Expecting a sequence of integers for `idx_local`.")
-        else:
-            if isinstance(idx_local, torch.Tensor):
-                if idx_local.dtype == torch.bool:
-                    if idx_local.shape != (idx_local_max,):
-                        gs.raise_exception(f"Boolean masks for `idx_local` must have shape ({idx_local_max},).")
-                    idx_local, *_ = torch.where(idx_local)
-                    is_negative_wrap_required = False
-                else:
-                    is_negative_wrap_required = idx_local.dtype.is_signed
-                    where = torch.where
-            elif isinstance(idx_local, np.ndarray):
-                if np.issubdtype(idx_local.dtype, np.bool_):
-                    if idx_local.shape != (idx_local_max,):
-                        gs.raise_exception(f"Boolean masks for `idx_local` must have shape ({idx_local_max},).")
-                    idx_local, *_ = np.where(idx_local)
-                    is_negative_wrap_required = False
-                else:
-                    is_negative_wrap_required = not np.issubdtype(idx_local.dtype, np.unsignedinteger)
-                    where = np.where
-            else:
-                gs.raise_exception("Expecting integer indices for `idx_local`.")
-            if is_negative_wrap_required:
-                # Wrap valid Python-style negatives before the global offset so those entries stay local to the entity
-                is_valid_negative = (-idx_local_max <= idx_local) & (idx_local < 0)
-                idx_local = where(is_valid_negative, idx_local + idx_local_max, idx_local)
-            # Increment may be slow when dealing with heterogenuous data, so it must be avoided if possible
-            if idx_global_start > 0:
-                idx_global = idx_local + idx_global_start
-            else:
-                idx_global = idx_local
-
-        # Early return if unsafe
-        if unsafe:
-            return idx_global
-
-        # Perform a bunch of sanity checks
-        idx_global = torch.as_tensor(idx_global, dtype=gs.tc_int, device=gs.device).contiguous()
-        ndim = idx_global.ndim
-        if ndim == 0:
-            idx_global = idx_global[None]
-        elif ndim > 1:
-            gs.raise_exception("Expecting a 1D tensor for local index.")
-
-        # FIXME: This check is too expensive
-        # if (idx_global < 0).any() or (idx_global >= idx_global_start + idx_local_max).any():
-        #     gs.raise_exception("`idx_local` exceeds valid range.")
-
-        return idx_global
+        return RigidEntityState(
+            self,
+            self._sim.cur_step_global,
+            solver_state.links_pos[:, self.base_link_idx],
+            solver_state.links_quat[:, self.base_link_idx],
+        )
 
     def get_joint(self, name=None, uid=None):
         """
@@ -935,7 +697,6 @@ class KinematicEntity(Entity):
         return self._solver.get_links_ang(links_idx, envs_idx)
 
     @gs.assert_built
-    @tracked
     def set_pos(self, pos, envs_idx=None, *, zero_velocity=False, relative=True, skip_forward=False):
         """
         Set position of the entity's base link.
@@ -963,11 +724,6 @@ class KinematicEntity(Entity):
         self._solver.set_base_links_pos(pos, self.base_link_idx, envs_idx, relative=relative, skip_forward=skip_forward)
 
     @gs.assert_built
-    def set_pos_grad(self, envs_idx, relative, pos_grad):
-        self._solver.set_base_links_pos_grad(self.base_link_idx, envs_idx, relative, pos_grad.data)
-
-    @gs.assert_built
-    @tracked
     def set_quat(self, quat, envs_idx=None, *, zero_velocity=False, relative=True, skip_forward=False):
         """
         Set quaternion of the entity's base link.
@@ -996,10 +752,6 @@ class KinematicEntity(Entity):
         )
 
     @gs.assert_built
-    def set_quat_grad(self, envs_idx, relative, quat_grad):
-        self._solver.set_base_links_quat_grad(self.base_link_idx, envs_idx, relative, quat_grad.data)
-
-    @gs.assert_built
     def set_qpos(self, qpos, qs_idx_local=None, envs_idx=None, *, zero_velocity=False, skip_forward=False):
         """
         Set the entity's qpos.
@@ -1022,7 +774,6 @@ class KinematicEntity(Entity):
         self._solver.set_qpos(qpos, qs_idx, envs_idx, skip_forward=skip_forward)
 
     @gs.assert_built
-    @tracked
     def set_dofs_velocity(self, velocity=None, dofs_idx_local=None, envs_idx=None, *, skip_forward=False):
         """
         Set the entity's dofs' velocity.
@@ -1403,36 +1154,6 @@ class KinematicEntity(Entity):
         """The base joint of the entity"""
         return self._joints[0][0]
 
-    @property
-    @gs.assert_built
-    def q_limit(self):
-        """The build-time positional limits of the entity's generalised coordinates, lower row then upper row.
-
-        A joint holding its orientation as a quaternion, a free or a ball joint, contributes the unit bounds of that
-        quaternion, which is normalized rather than limited.
-        """
-        return self._q_limit
-
-    def _init_q_limit(self):
-        q_limit_lower, q_limit_upper = [], []
-        for joint in self.joints:
-            if joint.type in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.SPHERICAL):
-                # A quaternion takes four of the coordinates of such a joint; whatever remains is a translation,
-                # carried by the first of its degrees of freedom.
-                n_translation = joint.n_qs - 4
-                q_limit_lower += [joint.desc.dofs_limit[:n_translation, 0], -np.ones(4)]
-                q_limit_upper += [joint.desc.dofs_limit[:n_translation, 1], np.ones(4)]
-            elif joint.type != gs.JOINT_TYPE.FIXED:
-                q_limit_lower.append(joint.desc.dofs_limit[:, 0])
-                q_limit_upper.append(joint.desc.dofs_limit[:, 1])
-        if not q_limit_lower:
-            # An entity that no degree of freedom moves holds no coordinate, hence a limit of width zero.
-            self._q_limit = np.zeros((2, self.n_qs), dtype=gs.np_float)
-            return
-        self._q_limit = np.stack(
-            (np.concatenate(q_limit_lower), np.concatenate(q_limit_upper)), axis=0, dtype=gs.np_float
-        )
-
     # ------------------------------------------------------------------------------------
     # --------------------------------- Jacobian & IK ------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1781,7 +1502,6 @@ class RigidEntity(KinematicEntity):
 
     def __init__(self, scene: "Scene", solver: "RigidSolver", idx: int, desc: RigidEntityDescription):
         self._geom_start = solver.n_geoms
-        self._cell_start = solver.n_cells
         self._vert_start = solver.n_verts
         self._face_start = solver.n_faces
         self._edge_start = solver.n_edges
@@ -1813,7 +1533,6 @@ class RigidEntity(KinematicEntity):
         """Reassign collision and visual geom indices for multi-link heterogeneous entities."""
         # Reassign collision geom indices sequentially
         running_idx = self._geom_start
-        running_cell = self._cell_start
         running_vert = self._vert_start
         running_face = self._face_start
         running_edge = self._edge_start
@@ -1823,7 +1542,6 @@ class RigidEntity(KinematicEntity):
         for link in self._links:
             for geom in link.geoms:
                 geom._idx = running_idx
-                geom._cell_start = running_cell
                 geom._vert_start = running_vert
                 geom._face_start = running_face
                 geom._edge_start = running_edge
@@ -1834,7 +1552,6 @@ class RigidEntity(KinematicEntity):
                     geom._verts_state_start = running_free_vs
                     running_free_vs += geom.n_verts
                 running_idx += 1
-                running_cell += geom.n_cells
                 running_vert += geom.n_verts
                 running_face += geom.n_faces
                 running_edge += geom.n_edges
@@ -1936,7 +1653,6 @@ class RigidEntity(KinematicEntity):
             joint_start=joint_start,
             n_joints=len(l_desc.joints),
             geom_start=self.n_geoms + self._geom_start,
-            cell_start=self.n_cells + self._cell_start,
             vert_start=self.n_verts + self._vert_start,
             face_start=self.n_faces + self._face_start,
             edge_start=self.n_edges + self._edge_start,
@@ -1995,8 +1711,6 @@ class RigidEntity(KinematicEntity):
             self._fixed_verts_idx_local = torch.cat(fixed_verts_idx_local)
         self._n_free_verts = len(self._free_verts_idx_local)
         self._n_fixed_verts = len(self._fixed_verts_idx_local)
-
-        self._init_q_limit()
 
     def _add_equality(self, desc: RigidEqualityDescription):
         match desc.type:
@@ -2150,23 +1864,6 @@ class RigidEntity(KinematicEntity):
         return path
 
     # ------------------------------------------------------------------------------------
-    # ---------------------------------- control & io ------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @gs.assert_built
-    def get_state(self):
-        state = RigidEntityState(self, self._sim.cur_step_global)
-
-        solver_state = self._solver.get_state()
-        pos = solver_state.links_pos[:, self.base_link_idx]
-        quat = solver_state.links_quat[:, self.base_link_idx]
-
-        state._pos = pos
-        state._quat = quat
-
-        return state
-
-    # ------------------------------------------------------------------------------------
     # -------------------------------- vertices / AABB -----------------------------------
     # ------------------------------------------------------------------------------------
 
@@ -2208,7 +1905,8 @@ class RigidEntity(KinematicEntity):
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)
             for geom in self.geoms:
-                geom_aabb = geom.get_AABB()
+                # See RigidLink.get_AABB
+                geom_aabb = geom.get_AABB().expand((self._solver.n_envs, 2, 3))
                 active_mask = geom.active_envs_mask[envs_idx] if geom.active_envs_mask is not None else ()
                 aabb_min[active_mask] = torch.minimum(aabb_min[active_mask], geom_aabb[envs_idx[active_mask], 0])
                 aabb_max[active_mask] = torch.maximum(aabb_max[active_mask], geom_aabb[envs_idx[active_mask], 1])
@@ -2463,7 +2161,6 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @tracked
     def set_pos(self, pos, envs_idx=None, *, zero_velocity=True, relative=True, skip_forward=False):
         """
         Set position of the entity's base link.
@@ -2493,11 +2190,6 @@ class RigidEntity(KinematicEntity):
         super().set_pos(pos, envs_idx, zero_velocity=zero_velocity, relative=relative, skip_forward=skip_forward)
 
     @gs.assert_built
-    def set_pos_grad(self, envs_idx, relative, pos_grad):
-        self._solver.set_base_links_pos_grad(self.base_link_idx, envs_idx, relative, pos_grad.data)
-
-    @gs.assert_built
-    @tracked
     def set_quat(self, quat, envs_idx=None, *, zero_velocity=True, relative=True, skip_forward=False):
         """
         Set quaternion of the entity's base link.
@@ -2525,10 +2217,6 @@ class RigidEntity(KinematicEntity):
                 "This method is only supported by `RigidMaterial.coup_type=None` for fixed-based rigid entities."
             )
         super().set_quat(quat, envs_idx, zero_velocity=zero_velocity, relative=relative, skip_forward=skip_forward)
-
-    @gs.assert_built
-    def set_quat_grad(self, envs_idx, relative, quat_grad):
-        self._solver.set_base_links_quat_grad(self.base_link_idx, envs_idx, relative, quat_grad.data)
 
     @gs.assert_built
     def get_verts(self):
@@ -2739,16 +2427,6 @@ class RigidEntity(KinematicEntity):
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         self._solver.set_dofs_frictionloss(frictionloss, dofs_idx, envs_idx)
 
-    @gs.assert_built
-    def set_dofs_velocity_grad(self, dofs_idx_local, envs_idx, velocity_grad):
-        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
-        self._solver.set_dofs_velocity_grad(dofs_idx, envs_idx, velocity_grad.data)
-
-    @gs.assert_built
-    def set_dofs_force_grad(self, dofs_idx_local, envs_idx, force_grad):
-        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
-        self._solver.set_dofs_force_grad(dofs_idx, envs_idx, force_grad.data)
-
     # ------------------------------------------------------------------------------------
     # ----------------------------- DOF property setters ---------------------------------
     # ------------------------------------------------------------------------------------
@@ -2782,7 +2460,6 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    @tracked
     def control_dofs_force(self, force, dofs_idx_local=None, envs_idx=None):
         """
         Control the entity's dofs' motor force. This is used for force/torque control.
@@ -2805,7 +2482,6 @@ class RigidEntity(KinematicEntity):
         self._solver.control_dofs_force(force, dofs_idx, envs_idx)
 
     @gs.assert_built
-    @tracked
     def control_dofs_velocity(self, velocity, dofs_idx_local=None, envs_idx=None):
         """
         Set the PD controller's target velocity for the entity's dofs. This is used for velocity control.
@@ -2828,7 +2504,6 @@ class RigidEntity(KinematicEntity):
         self._solver.control_dofs_velocity(velocity, dofs_idx, envs_idx)
 
     @gs.assert_built
-    @tracked
     def control_dofs_position(self, position, dofs_idx_local=None, envs_idx=None):
         """
         Set the position controller's target position for the entity's dofs. The controller is a proportional term
@@ -2852,7 +2527,6 @@ class RigidEntity(KinematicEntity):
         self._solver.control_dofs_position(position, dofs_idx, envs_idx)
 
     @gs.assert_built
-    @tracked
     def control_dofs_position_velocity(self, position, velocity, dofs_idx_local=None, envs_idx=None):
         """
         Set a PD controller's target position and velocity for the entity's dofs. This is used for position control.
@@ -2879,7 +2553,10 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_control_force(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the entity's dofs' internal control force, computed based on the position/velocity control command.
+        Get the control force the last step applied to the entity's dofs, clamped to their force range.
+
+        A force is discontinuous at a step, so this getter reports it over the last step, like `get_dofs_force`. A target
+        set since then shows in the force of the next step.
 
         Parameters
         ----------
@@ -2891,7 +2568,7 @@ class RigidEntity(KinematicEntity):
         Returns
         -------
         control_force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
-            The entity's dofs' internal control force.
+            The control force of the entity's dofs.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_control_force(dofs_idx, envs_idx)
@@ -2899,11 +2576,10 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_force(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the entity's dofs' internal force at the current time step.
+        Get the smooth force on the entity's dofs over the last step.
 
-        Note
-        ----
-        Different from `get_dofs_control_force`, this function returns the actual internal force experienced by all the dofs at the current time step.
+        It sums the control force the step applied and the passive forces of damping and stiffness, minus the bias
+        forces of gravity, Coriolis and centrifugal effects. Constraint, contact and external forces are left out.
 
         Parameters
         ----------
@@ -3491,11 +3167,6 @@ class RigidEntity(KinematicEntity):
         return sum(link.n_geoms for link in self._links)
 
     @property
-    def n_cells(self):
-        """The number of sdf cells in the entity."""
-        return sum(link.n_cells for link in self._links)
-
-    @property
     def n_verts(self):
         """The number of vertices (from collision geom `RigidGeom`) in the entity."""
         return sum(link.n_verts for link in self._links)
@@ -3519,16 +3190,6 @@ class RigidEntity(KinematicEntity):
     def geom_end(self):
         """The index of the entity's last RigidGeom in the scene *plus one*."""
         return self._geom_start + self.n_geoms
-
-    @property
-    def cell_start(self):
-        """The start index the entity's sdf cells in the scene."""
-        return self._cell_start
-
-    @property
-    def cell_end(self):
-        """The end index the entity's sdf cells in the scene *plus one*."""
-        return self._cell_start + self.n_cells
 
     @property
     def gravity_compensation(self):

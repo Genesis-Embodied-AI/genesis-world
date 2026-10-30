@@ -1,5 +1,4 @@
 import dataclasses
-from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -23,34 +22,6 @@ class SolverCheckpoint:
     arrays: dict[str, np.ndarray | torch.Tensor]
     configs: dict[str, object]
     kinds: frozenset[DataKind]
-
-
-@dataclasses.dataclass
-class KinematicSolverCheckpoint(SolverCheckpoint):
-    """A SolverCheckpoint plus the two forward-kinematics flags of a kinematic or rigid solver,
-    'is_forward_pos_updated' and 'is_forward_vel_updated'.
-
-    The flags decide whether the next step recomputes the Cartesian pose and velocity of the links. Recomputing them
-    where the saved scene skipped it rounds differently on some backends, so the flags travel with the derived arrays
-    they describe.
-    """
-
-    is_forward_pos_updated: bool
-    is_forward_vel_updated: bool
-
-
-class FrameField(NamedTuple):
-    """Where one array stands in a trajectory frame.
-
-    The name, canonical shape, numpy dtype string, byte offset and byte length cut a frame back into its arrays without
-    the scene.
-    """
-
-    name: str
-    shape: tuple[int, ...]
-    dtype: str
-    offset: int
-    nbytes: int
 
 
 @dataclasses.dataclass
@@ -112,15 +83,10 @@ class KinematicSolverState:
         self._s_global = s_global
 
         _B = scene.sim.kinematic_solver._B
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self.scene,
-        }
-        self.qpos = gs.zeros((_B, scene.sim.kinematic_solver.n_qs), **args)
-        self.dofs_vel = gs.zeros((_B, scene.sim.kinematic_solver.n_dofs), **args)
-        self.links_pos = gs.zeros((_B, scene.sim.kinematic_solver.n_links, 3), **args)
-        self.links_quat = gs.zeros((_B, scene.sim.kinematic_solver.n_links, 4), **args)
+        self.qpos = torch.zeros((_B, scene.sim.kinematic_solver.n_qs), dtype=gs.tc_float, device=gs.device)
+        self.dofs_vel = torch.zeros((_B, scene.sim.kinematic_solver.n_dofs), dtype=gs.tc_float, device=gs.device)
+        self.links_pos = torch.zeros((_B, scene.sim.kinematic_solver.n_links, 3), dtype=gs.tc_float, device=gs.device)
+        self.links_quat = torch.zeros((_B, scene.sim.kinematic_solver.n_links, 4), dtype=gs.tc_float, device=gs.device)
 
     @property
     def s_global(self):
@@ -132,47 +98,19 @@ class RigidSolverState:
     Dynamic state queried from a RigidSolver.
     """
 
-    def __init__(self, scene, s_global):
+    def __init__(self, scene, s_global, qpos, dofs_vel, dofs_acc, links_pos, links_quat, friction_ratio):
         self.scene = scene
-
         self._s_global = s_global
-
-        _B = scene.sim.rigid_solver._B
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self.scene,
-        }
-        self.qpos = gs.zeros((_B, scene.sim.rigid_solver.n_qs), **args)
-        self.dofs_vel = gs.zeros((_B, scene.sim.rigid_solver.n_dofs), **args)
-        self.dofs_acc = gs.zeros((_B, scene.sim.rigid_solver.n_dofs), **args)
-        self.links_pos = gs.zeros((_B, scene.sim.rigid_solver.n_links, 3), **args)
-        self.links_quat = gs.zeros((_B, scene.sim.rigid_solver.n_links, 4), **args)
-        self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
+        self.qpos = qpos
+        self.dofs_vel = dofs_vel
+        self.dofs_acc = dofs_acc
+        self.links_pos = links_pos
+        self.links_quat = links_quat
+        self.friction_ratio = friction_ratio
 
     @property
     def s_global(self):
         return self._s_global
-
-
-class ToolSolverState:
-    """
-    Dynamic state queried from a RigidSolver.
-    """
-
-    def __init__(self, scene):
-        self.scene = scene
-        self.entities = []
-
-    def __len__(self):
-        return len(self.entities)
-
-    def __getitem__(self, index):
-        return self.entities[index]
-
-    # def __repr__(self):
-    #     return f'{_repr(self)}\n' \
-    #            f'entities : {_repr(self.entities)}'
 
 
 class MPMSolverState(RBC):
@@ -180,21 +118,15 @@ class MPMSolverState(RBC):
     Dynamic state queried from a MPMSolver.
     """
 
-    def __init__(self, scene):
+    def __init__(self, scene, pos, vel, C, F, Jp, actu, active):
         self._scene = scene
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self._scene,
-        }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles, 3), **args)
-        self._C = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles, 3, 3), **args)
-        self._F = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles, 3, 3), **args)
-        self._Jp = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), **args)
-        args["dtype"] = gs.tc_bool
-        args["requires_grad"] = False
-        self._active = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), **args)
+        self._pos = pos
+        self._vel = vel
+        self._C = C
+        self._F = F
+        self._Jp = Jp
+        self._actu = actu
+        self._active = active
 
     @property
     def scene(self):
@@ -221,6 +153,10 @@ class MPMSolverState(RBC):
         return self._Jp
 
     @property
+    def actu(self):
+        return self._actu
+
+    @property
     def active(self):
         return self._active
 
@@ -232,16 +168,13 @@ class SPHSolverState:
 
     def __init__(self, scene):
         self._scene = scene
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self._scene,
-        }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.sph_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((self._scene.sim._B, scene.sim.sph_solver.n_particles, 3), **args)
-        args["dtype"] = gs.tc_bool
-        args["requires_grad"] = False
-        self._active = gs.zeros((self._scene.sim._B, scene.sim.sph_solver.n_particles), **args)
+        self._pos = torch.zeros(
+            (scene.sim._B, scene.sim.sph_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
+        )
+        self._vel = torch.zeros(
+            (scene.sim._B, scene.sim.sph_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
+        )
+        self._active = torch.zeros((scene.sim._B, scene.sim.sph_solver.n_particles), dtype=gs.tc_bool, device=gs.device)
 
     @property
     def scene(self):
@@ -267,16 +200,13 @@ class PBDSolverState:
 
     def __init__(self, scene):
         self._scene = scene
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self._scene,
-        }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
-        args["dtype"] = gs.tc_bool
-        args["requires_grad"] = False
-        self._free = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles), **args)
+        self._pos = torch.zeros(
+            (scene.sim._B, scene.sim.pbd_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
+        )
+        self._vel = torch.zeros(
+            (scene.sim._B, scene.sim.pbd_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
+        )
+        self._free = torch.zeros((scene.sim._B, scene.sim.pbd_solver.n_particles), dtype=gs.tc_bool, device=gs.device)
 
     @property
     def scene(self):
@@ -296,18 +226,10 @@ class PBDSolverState:
 
 
 class FEMSolverState:
-    def __init__(self, scene):
+    def __init__(self, scene, pos, vel):
         self._scene = scene
-        args = {
-            "dtype": gs.tc_float,
-            "requires_grad": scene.requires_grad,
-            "scene": self._scene,
-        }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.fem_solver.n_vertices, 3), **args)
-        self._vel = gs.zeros((scene.sim._B, scene.sim.fem_solver.n_vertices, 3), **args)
-        args["dtype"] = gs.tc_bool
-        args["requires_grad"] = False
-        self._active = gs.zeros((scene.sim._B, scene.sim.fem_solver.n_elements), **args)
+        self._pos = pos
+        self._vel = vel
 
     @property
     def scene(self):
@@ -320,7 +242,3 @@ class FEMSolverState:
     @property
     def vel(self):
         return self._vel
-
-    @property
-    def active(self):
-        return self._active

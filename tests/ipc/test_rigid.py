@@ -5,10 +5,12 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pytest
 
+from ..conftest import SKIP_NO_IPC, TOL_SINGLE
+
 try:
     import uipc
 except ImportError:
-    pytest.skip("IPC Coupler is not supported because 'uipc' module is not available.", allow_module_level=True)
+    pytest.skip(SKIP_NO_IPC, allow_module_level=True)
 
 from uipc import builtin
 
@@ -16,7 +18,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array, geometric_mean, harmonic_mean
 
-from ..conftest import TOL_SINGLE
 from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
 from .utils import (

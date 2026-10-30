@@ -46,7 +46,7 @@ def func_group_dof_range_start(
     if tid < n_group:
         is_in_order = constraint_state.island.dof_range_start[base + tid, i_b] >= 0
     range_start = -1
-    if qd.simt.subgroup.all_true(is_in_order) != 0:
+    if su.qd_block_all(is_in_order):
         range_start = func_list_range_start(constraint_state.island.dof_id, dof_lo, dof_hi, i_b)
     return range_start
 
@@ -1388,7 +1388,7 @@ def func_linesearch_islands_coop(
         qd.simt.block.sync()
 
         # Lockstep rounds: one sweep of the group's rows evaluates every pending island's candidates
-        while qd.simt.subgroup.any_true(is_pending) != 0:
+        while su.qd_block_any(is_pending):
             if is_per_island:
                 for i_g in range(n_group):
                     if sh_pending[i_g] != 0:
@@ -1526,7 +1526,7 @@ def func_linesearch_islands_coop(
             constraint_state.island.ls_improvement[i_island, i_b] = improvement
         sh_alpha[tid] = res_alpha
         qd.simt.block.sync()
-        if qd.simt.subgroup.any_true(res_alpha != 0.0) != 0:
+        if su.qd_block_any(res_alpha != 0.0):
             is_moved = True
             i_pos = dof_lo + tid
             while i_pos < dof_hi:
@@ -1630,7 +1630,7 @@ def func_exit_islands_coop(
         sh_pending[tid] = improved
         sh_alpha[tid] = cg_beta
         qd.simt.block.sync()
-        if qd.simt.subgroup.any_true(improved) != 0:
+        if su.qd_block_any(improved):
             improved_any = True
             if qd.static(not certify):
                 i_pos = dof_lo + tid

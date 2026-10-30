@@ -70,6 +70,11 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
     else:
         max_leaves = RANK_SORT_LEAVES_PER_CORE * get_gpu_core_count()
         is_rank_sort = n_trees * n_leaves**3 <= max_leaves**3
+    # Outside performance mode the radix sort serves every set, with the widest keys and a scan depth reaching any key
+    # count a device holds. The choice of the rank sort stays per set, its single pass being much faster on small trees.
+    if gs.use_ndarray:
+        end_bit = 64
+        log256_max_n = max(log256_max_n, 4)
     if is_rank_sort:
         sort_kind = array_class.BVH_SORT_KIND.RANK
     elif gs.backend == gs.cpu:

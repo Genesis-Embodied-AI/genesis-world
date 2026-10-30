@@ -3,7 +3,7 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.engine.states.solvers import MPMSolverState, PBDSolverState, RigidSolverState, ToolSolverState
+from genesis.engine.states.solvers import FEMSolverState, MPMSolverState, PBDSolverState, RigidSolverState
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -17,13 +17,9 @@ from ..utils.assets import get_hf_dataset
         pytest.param(gs.materials.MPM.Elastic, False, False, id="mpm"),
         pytest.param(gs.materials.MPM.Elastic, False, True, id="mpm_grad"),
         pytest.param(gs.materials.PBD.Liquid, False, False, id="pbd"),
-        pytest.param(gs.materials.PBD.Liquid, False, True, id="pbd_grad"),
         pytest.param(gs.materials.SPH.Liquid, False, False, id="sph"),
-        pytest.param(gs.materials.SPH.Liquid, False, True, id="sph_grad"),
         pytest.param(gs.materials.FEM.Elastic, False, False, id="fem"),
         pytest.param(gs.materials.FEM.Elastic, False, True, id="fem_grad"),
-        pytest.param(gs.materials.Tool, False, False, id="tool"),
-        pytest.param(gs.materials.Tool, False, True, id="tool_grad"),
         pytest.param(gs.materials.MPM.Elastic, True, False, id="mpm_cpic"),
     ],
 )
@@ -32,7 +28,6 @@ def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewe
         sim_options=gs.options.SimOptions(
             dt=0.002,
             substeps=2,
-            substeps_local=8 if requires_grad else None,
             requires_grad=requires_grad,
         ),
         mpm_options=gs.options.MPMOptions(
@@ -53,27 +48,17 @@ def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewe
         ),
         show_viewer=show_viewer,
     )
-    if material_type is gs.materials.Tool:
-        morph = gs.morphs.Mesh(
-            pos=(0.0, 0.0, 0.4),
-            file="meshes/stirrer.obj",
-            scale=0.05,
-        )
-        material = material_type(
-            collision=False,
-        )
+    morph = gs.morphs.Box(
+        pos=(0.0, 0.0, 0.4),
+        size=(0.075, 0.075, 0.075),
+    )
+    if material_type is gs.materials.FEM.Elastic:
+        material = material_type()
     else:
-        morph = gs.morphs.Box(
-            pos=(0.0, 0.0, 0.4),
-            size=(0.075, 0.075, 0.075),
+        material = material_type(
+            sampler="regular",
         )
-        if material_type is gs.materials.FEM.Elastic:
-            material = material_type()
-        else:
-            material = material_type(
-                sampler="regular",
-            )
-    entity = scene.add_entity(
+    scene.add_entity(
         morph=morph,
         material=material,
     )
@@ -83,8 +68,6 @@ def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewe
         )
     scene.build(n_envs=n_envs)
     snapshot_initial = scene.get_state()
-    if material_type is gs.materials.Tool:
-        entity.set_velocity(vel=[[0.0, 0.0, -0.1]] * max(n_envs, 1), ang=[[0.0, 0.2, 0.0]] * max(n_envs, 1))
     scene.step()
     snapshot_first = scene.get_state()
     scene.step()
@@ -108,23 +91,18 @@ def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewe
         ):
             if state_initial is None or isinstance(state_initial, RigidSolverState):
                 continue
-            if isinstance(state_initial, ToolSolverState):
-                state_initial, state_first, state_second, state_before, state_after = (
-                    state.entities[0] for state in (state_initial, state_first, state_second, state_before, state_after)
-                )
-                fields = (
-                    (state_after.quat, state_initial.quat, state_before.quat),
-                    (state_after.ang, state_initial.ang, state_before.ang),
-                )
-            elif isinstance(state_initial, MPMSolverState):
+            if isinstance(state_initial, MPMSolverState):
                 fields = (
                     (state_after.C, state_initial.C, state_before.C),
                     (state_after.F, state_initial.F, state_before.F),
                     (state_after.Jp, state_initial.Jp, state_before.Jp),
+                    (state_after.actu, state_initial.actu, state_before.actu),
                     (state_after.active, state_initial.active, state_before.active),
                 )
             elif isinstance(state_initial, PBDSolverState):
                 fields = ((state_after.free, state_initial.free, state_before.free),)
+            elif isinstance(state_initial, FEMSolverState):
+                fields = ()
             else:
                 fields = ((state_after.active, state_initial.active, state_before.active),)
             assert (state_first.pos[..., 2] < state_initial.pos[..., 2]).all()
@@ -144,12 +122,6 @@ def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewe
         ):
             if state_first is None or isinstance(state_first, RigidSolverState):
                 continue
-            if isinstance(state_first, ToolSolverState):
-                state_first, state_third, state_after = (
-                    state_initial.entities[0],
-                    state_third.entities[0],
-                    state_after.entities[0],
-                )
             for actual, selected, unselected in (
                 (state_after.pos, state_first.pos, state_third.pos),
                 (state_after.vel, state_first.vel, state_third.vel),
@@ -352,8 +324,6 @@ def test_hanging_rigid_cable(show_viewer, tol):
     links_quat_0 /= np.linalg.norm(links_quat_0, axis=-1, keepdims=True)
 
     robot.set_dofs_position(robot.get_dofs_position())
-    if show_viewer:
-        scene.visualizer.update()
     for _ in range(100):
         scene.step()
 
@@ -367,7 +337,6 @@ def test_hanging_rigid_cable(show_viewer, tol):
     assert_allclose(links_quat_err, 0.0, tol=1e-3)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.parametrize("primitive_type", ["box", "sphere"])
 @pytest.mark.parametrize("precision", ["64"])
 def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):

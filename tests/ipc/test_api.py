@@ -2,10 +2,12 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from ..conftest import SKIP_NO_IPC
+
 try:
     import uipc
 except ImportError:
-    pytest.skip("IPC Coupler is not supported because 'uipc' module is not available.", allow_module_level=True)
+    pytest.skip(SKIP_NO_IPC, allow_module_level=True)
 
 
 import genesis as gs

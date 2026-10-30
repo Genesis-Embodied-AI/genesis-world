@@ -19,6 +19,7 @@ from .base_sensor import SimpleSensor, RigidSensorMetadataMixin, RigidSensorMixi
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
@@ -58,7 +59,6 @@ class _ScratchIdx(IntEnum):
     GROUP_POS2_Y = 18
 
 
-@torch.jit.script
 def _compute_K2_rfft3(
     nx: int, ny: int, nz: int, dx: float, dy: float, dz: float, device: torch.device, dtype: torch.dtype, eps: float
 ) -> torch.Tensor:
@@ -74,7 +74,6 @@ def _compute_K2_rfft3(
     return K2.to(device=device)
 
 
-@torch.jit.script
 def _compute_surface_mask(nx: int, ny: int, nz: int, device: torch.device) -> torch.Tensor:
     """Boolean mask of boundary voxels (at least one face on grid boundary). Shape (nx, ny, nz)."""
     ix, iy, iz = torch.meshgrid(
@@ -83,10 +82,8 @@ def _compute_surface_mask(nx: int, ny: int, nz: int, device: torch.device) -> to
     return (ix == 0) | (ix == nx - 1) | (iy == 0) | (iy == ny - 1) | (iz == 0) | (iz == nz - 1)
 
 
-@torch.jit.script
 def _apply_diffusion_and_heat_generation(
     cache_sizes: list[int],
-    grid_size: torch.Tensor,
     heat_generation: list[torch.Tensor | None],
     voxel_size: torch.Tensor,
     links_idx: torch.Tensor,
@@ -103,7 +100,8 @@ def _apply_diffusion_and_heat_generation(
     start = 0
     for i_s in range(len(cache_sizes)):
         size = cache_sizes[i_s]
-        nx, ny, nz = int(grid_size[i_s][0]), int(grid_size[i_s][1]), int(grid_size[i_s][2])
+        # The spectrum spans the mirror-padded grid (2 * nx, 2 * ny, 2 * nz), halved along z by the real FFT
+        nx, ny, nz = K2_spectral[i_s].shape[0] // 2, K2_spectral[i_s].shape[1] // 2, K2_spectral[i_s].shape[2] - 1
         mat_idx = link_to_material_idx[links_idx[i_s]]
         rcp = link_rho_cp[mat_idx]
         k = link_conductivity[mat_idx]
@@ -122,7 +120,7 @@ def _apply_diffusion_and_heat_generation(
         # Add internal heat generation (W/m² -> Q_vol = Q_surface / dz).
         q = heat_generation[i_s]
         if q is not None:
-            dz = max(voxel_size[i_s, 2], eps)
+            dz = voxel_size[i_s, 2].clamp(min=eps)
             Q_vol = q.reshape(-1) / dz
             delta_T = dt * Q_vol / rcp
             output[start : start + size] += delta_T.unsqueeze(-1).expand(-1, n_batches)
@@ -515,7 +513,6 @@ class TemperatureGridSensor(
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
         self._link: "RigidLink | None" = None
-        self._debug_objects: list = []
         self._debug_t_min: float = self._options.debug_temperature_range[0]
         self._debug_t_range: float = self._options.debug_temperature_range[1] - self._debug_t_min
         self._debug_cell_local_positions: np.ndarray = np.array([])  # set in build
@@ -704,7 +701,6 @@ class TemperatureGridSensor(
         # 1) Batched FFT semi-implicit diffusion + 2) Heat generation
         _apply_diffusion_and_heat_generation(
             shared_metadata.cache_sizes,
-            shared_metadata.grid_size,
             shared_metadata.heat_generation,
             shared_metadata.voxel_size,
             shared_metadata.links_idx,
@@ -792,20 +788,11 @@ class TemperatureGridSensor(
         )
         data.copy_(previous)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw a single flat mesh colored by temperature (cool=blue, hot=red).
-
-        Only draws for the first rendered environment.
-        """
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make a flat mesh colored by temperature (cool=blue, hot=red), for the first rendered environment."""
+        if 0 not in envs_idx or self._link is None:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-        if self._link is None:
-            return
-
-        for obj in self._debug_objects:
-            if obj is not None:
-                context.clear_debug_object(obj)
-        self._debug_objects = []
 
         link_pos = self._link.get_pos(env_idx, relative=False)
         link_quat = self._link.get_quat(env_idx, relative=False)
@@ -840,7 +827,7 @@ class TemperatureGridSensor(
         face_colors_u8[1::2] = face_colors_u8[0::2]
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, face_colors=face_colors_u8)
-        self._debug_objects.append(context.draw_debug_mesh(mesh, T=link_T))
+        return [(None, context.make_debug_mesh(mesh, T=link_T), None)]
 
     @property
     def link_temperatures(self) -> torch.Tensor:

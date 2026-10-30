@@ -38,6 +38,7 @@ from .tactile_shared import (
 )
 
 if TYPE_CHECKING:
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
@@ -954,8 +955,8 @@ def _kernel_kinematic_taxel_bvh(
 class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin[ProbeSensorSharedMetadataT]):
     """Contact-depth probe family (ContactDepthProbe, ContactProbe, KinematicTaxel).
 
-    The class-wide SDF/raycast backend is resolved and activated by ``ContactDepthQuerySensorMixin.build``;
-    subclasses add their own metadata.
+    The class-wide SDF/raycast backend is resolved by ``ContactDepthQuerySensorMixin.build``, and subclasses add their
+    own metadata.
     """
 
     def build(self):
@@ -1092,14 +1093,15 @@ class ContactDepthProbeSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        def mask(envs_idx):
-            depth = self.read_ground_truth(envs_idx)
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        def mask(batch_envs_idx):
+            depth = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
                 depth = depth.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
             return depth >= gs.EPS
 
-        self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
+        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
+        return [(None, node, None) for node in nodes]
 
 
 @dataclass
@@ -1171,14 +1173,15 @@ class ContactProbeSensor(
         prev_state = timeline.at(0, copy=False)
         return above_enter | (prev_state & above_exit)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        def mask(envs_idx):
-            contact = self.read_ground_truth(envs_idx)
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        def mask(batch_envs_idx):
+            contact = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
                 contact = contact.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
             return contact
 
-        self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
+        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
+        return [(None, node, None) for node in nodes]
 
 
 class KinematicTaxelReturnType(NamedTuple):
@@ -1381,11 +1384,12 @@ class KinematicTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        def mask(envs_idx):
-            force = self.read_ground_truth(envs_idx).force
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        def mask(batch_envs_idx):
+            force = self.read_ground_truth(batch_envs_idx).force
             if self._options.history_length > 0:
                 force = force.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
             return torch.linalg.norm(force, dim=-1) >= gs.EPS
 
-        self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
+        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
+        return [(None, node, None) for node in nodes]

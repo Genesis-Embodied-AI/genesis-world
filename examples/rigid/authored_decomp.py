@@ -35,6 +35,8 @@ def main():
         ),
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=args.gjk,
+            # The convex pieces of the stacked rings put more geom pairs in contact at once than the default budget
+            max_collision_pairs=500,
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=False,

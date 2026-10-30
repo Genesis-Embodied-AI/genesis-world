@@ -37,7 +37,7 @@ ARRAY_MEMBER = "arrays.npz"
 
 # This dict records how to write a class from another library to a file and read it back. Such a class cannot
 # declare this itself. '_class_codec' walks the method resolution order, so a subclass falls back to its base's pair.
-_REGISTERED: dict[type, tuple[Callable, Callable]] = {}
+_REGISTERED: dict[type, tuple[Callable, Callable | None]] = {}
 
 
 class Exporting(NamedTuple):
@@ -59,22 +59,10 @@ class Exported(NamedTuple):
 
 
 class Loading(NamedTuple):
-    """Gives a class loading itself back the arrays a file holds and the load of any value it holds.
-
-    'shared' holds what has already been built from a given part of a file, so a class handed the same bytes twice
-    can share with the first instance what deriving it again would cost.
-    """
+    """Gives a class loading itself back the arrays a file holds and the load of any value it holds."""
 
     array: Callable[[int], np.ndarray]
     value: Callable[..., object]
-    shared: dict
-
-
-class Loaded(NamedTuple):
-    """The arrays one load reads, and what the classes loading themselves have already built from them."""
-
-    values: list[np.ndarray]
-    shared: dict
 
 
 class SerializationMixin:
@@ -103,17 +91,21 @@ class SerializationMixin:
         raise NotImplementedError
 
 
-def register(cls: type, export: Callable, load: Callable) -> None:
+def register(cls: type, export: Callable, load: Callable | None) -> None:
     """Record how a class from another library travels in a file, which lets a file hold a class Genesis does not own.
 
     'export(value, exporting)' returns what JSON can hold and 'load(raw, loading)' gives the value back, both of them
     handed an 'Exporting' or a 'Loading' to put arrays aside and to export or load the values the class holds. A class
     Genesis declares mixes in 'SerializationMixin' and states the same two things as its own methods.
+
+    Without 'load', the class travels as the plain value 'export' returns and loads back as that value. This suits a
+    class that stands for a value Genesis also accepts in its place, such as a model built in memory from a document,
+    whose recreation would read the assets the document names. A value and its plain stand-in then export alike.
     """
     _REGISTERED[cls] = (export, load)
 
 
-def _class_codec(cls) -> tuple[Callable, Callable] | None:
+def _class_codec(cls) -> tuple[Callable, Callable | None] | None:
     """Return the export and load pair for a class.
 
     A self-serialisable class supplies its own methods; otherwise its own or its base's registered pair applies.
@@ -366,9 +358,9 @@ def _exporting_into(exported: "Exported") -> Exporting:
     return Exporting(array=partial(_store_array, exported=exported), value=partial(_export_value, exported=exported))
 
 
-def _loading_from(loaded: "Loaded") -> Loading:
-    """Builds the handle a class receives to load itself back out of this file."""
-    return Loading(array=loaded.values.__getitem__, value=partial(_load_value, loaded=loaded), shared=loaded.shared)
+def _loading_from(loaded: list[np.ndarray]) -> Loading:
+    """Builds the handle a class receives to load itself back out of this file, from the arrays the file holds."""
+    return Loading(array=loaded.__getitem__, value=partial(_load_value, loaded=loaded))
 
 
 def _export_value(value, expect, exported: "Exported"):
@@ -392,7 +384,7 @@ def _export_value(value, expect, exported: "Exported"):
     if codec is not None:
         held = codec[0](value, _exporting_into(exported))
         # A class saying how it travels may stand where its base is declared, so the file names which one it is.
-        if held is None or _accepted_classes(expect) == (type(value),):
+        if held is None or codec[1] is None or _accepted_classes(expect) == (type(value),):
             return held
         return {"@class": type(value).__name__, "raw": held}
     if _has_declared_fields(expect):
@@ -442,11 +434,12 @@ def _export_any(value, exported: "Exported"):
     # it received rather than a path to read them from.
     codec = _class_codec(type(value))
     if codec is not None:
-        return {"@class": type(value).__name__, "raw": codec[0](value, _exporting_into(exported))}
+        held = codec[0](value, _exporting_into(exported))
+        return held if codec[1] is None else {"@class": type(value).__name__, "raw": held}
     gs.raise_exception(f"A Genesis file cannot hold {type(value).__name__} where 'Any' was declared.")
 
 
-def _load_any(raw, loaded: "Loaded"):
+def _load_any(raw, loaded: list[np.ndarray]):
     """Load back one value declared as 'Any', as what it was exported as."""
     if not isinstance(raw, dict):
         return raw
@@ -465,7 +458,7 @@ def _load_any(raw, loaded: "Loaded"):
     gs.raise_exception(f"A Genesis file holds a value this version cannot load where 'Any' stands: {sorted(raw)}.")
 
 
-def _load_value(raw, expect, loaded: "Loaded"):
+def _load_value(raw, expect, loaded: list[np.ndarray]):
     """Load back one value as the type it is declared to be, creating only what that declaration allows."""
     if raw is None:
         if typing.get_origin(expect) is typing.Annotated:
@@ -617,7 +610,7 @@ def load(path: str | os.PathLike, expect: dict) -> dict:
         with zipfile.ZipFile(path) as archive:
             manifest = json.loads(archive.read(MANIFEST_NAME))
             member = np.load(io.BytesIO(archive.read(ARRAY_MEMBER)))
-            loaded = Loaded(values=[member[str(index)] for index in range(len(member.files))], shared={})
+            loaded = [member[str(index)] for index in range(len(member.files))]
     except zipfile.BadZipFile as e:
         gs.raise_exception_from(f"'{path}' is not a Genesis file, or was truncated on its way here.", e)
     except KeyError as e:

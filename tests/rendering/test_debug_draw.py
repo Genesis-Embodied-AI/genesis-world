@@ -210,6 +210,19 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
 
     assert rgb_array_to_png_bytes(rgb_arr) == png_snapshot
 
+    # A sensor reading is a step output, so a setter moving the scene hides the debug drawing of the sensors until the
+    # next step rather than showing the previous reading at the new pose. The pink sphere of the contact sensor marks
+    # the contact of the ground box, and it stays hidden once a setter lifts the box, right away and after a step.
+    PINK_LOWER, PINK_UPPER = (200, 60, 200), (255, 190, 255)
+    assert ((PINK_LOWER <= rgb_arr) & (rgb_arr <= PINK_UPPER)).all(axis=-1).any()
+    ground_box.set_pos((-0.25, 0.0, 0.3))
+    for _ in range(2):
+        rgb_arr, *_ = pyrender_viewer.render_offscreen(
+            pyrender_viewer._camera_node, pyrender_viewer._renderer, rgb=True, depth=False, seg=False, normal=False
+        )
+        assert not ((PINK_LOWER <= rgb_arr) & (rgb_arr <= PINK_UPPER)).all(axis=-1).any()
+        scene.step()
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])

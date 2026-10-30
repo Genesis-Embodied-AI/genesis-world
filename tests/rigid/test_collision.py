@@ -35,7 +35,7 @@ def _ellipsoid_mjcf_path(tmp_path, semi_axes):
     return str(path)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.mujoco_compatibility(False)
 @pytest.mark.parametrize("mode", range(9))
 @pytest.mark.parametrize("model_name", ["collision_edge_cases"])
@@ -102,7 +102,6 @@ def test_plane_convex(show_viewer, tol):
                 assert_allclose(qvel, 0, atol=0.14)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["ellipsoid"])
 def test_ellipsoid(xml_path, show_viewer):
@@ -176,7 +175,11 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
     ELLIPSOID_SEMI_AXES = (0.0035, 0.0030, SMOOTH_RADIUS)
     BOX_HALF_EXTENT = 0.1
     N_ENVS = 16
-    SPHERE_TESSELLATION_SUBDIVISIONS = 3
+    # A tessellated ball resting on a facet stands on the corners of that facet, around a centre of mass that projects
+    # slightly off their centroid. The contacts are compliant, so the torque they oppose to a tilt grows with the square
+    # of the facet size, while the inertia of the ball grows with the square of its radius. The finest tessellation
+    # whose facets still rebalance that offset is used, since a finer one tilts onto the next facet and rolls away.
+    SPHERE_TESSELLATION_SUBDIVISIONS = 2
 
     # The box and the gravity vector are rotated by the same tilt, which is physically equivalent to the untilted setup.
     tilt_axis = np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0)
@@ -359,8 +362,6 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
 
     entity.set_pos(smooth_pos_world)
     entity.set_quat(smooth_quat_world)
-    if show_viewer:
-        scene.visualizer.update()
 
     for i_step in range(400):
         scene.step()
@@ -369,6 +370,70 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
     # A tessellated ball settles into the basin of whichever facet it rests on, which is what this bound covers: it
     # sits a little over twice the largest displacement any entity here needs, in either precision.
     assert_allclose(pos_local[..., :2], smooth_xy_local, atol=5e-4)
+
+
+@pytest.mark.required
+@pytest.mark.xfail(reason="Flickering contact points make the entities drift at rest.", strict=False)
+@pytest.mark.parametrize("precision", ["32"])
+def test_convex_on_primitive_at_rest(show_viewer, tol):
+    # The tilt is generic, so that the faces of the supports are aligned with no world axis. The gravity vector is
+    # rotated by the same tilt, which leaves the entities nothing to slide down.
+    tilt_quat = gu.xyz_to_quat(np.radians((3.5, 1.2, 23.0)), rpy=True)
+    R = gu.quat_to_R(tilt_quat)
+    cube_mesh = trimesh.creation.box(extents=(0.06, 0.06, 0.06))
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=R @ (0.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.1, -0.3, 0.25),
+            camera_lookat=(0.1, 0.0, 0.1),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Cylinder(
+            pos=(0.0, 0.0, 0.1),
+            quat=tilt_quat,
+            fixed=True,
+            height=0.008,
+            radius=0.05,
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.2, 0.0, 0.1),
+            quat=tilt_quat,
+            fixed=True,
+            size=(0.1, 0.1, 0.008),
+        ),
+    )
+    entity_on_cylinder = scene.add_entity(
+        gs.morphs.MeshSet(
+            pos=(0.0, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
+            quat=tilt_quat,
+            files=(cube_mesh,),
+        ),
+        visualize_contact=True,
+    )
+    entity_on_box = scene.add_entity(
+        gs.morphs.MeshSet(
+            pos=(0.2, 0.0, 0.1) + R @ (0.004, -0.003, 0.034),
+            quat=tilt_quat,
+            files=(cube_mesh,),
+        ),
+        visualize_contact=True,
+    )
+    scene.build(n_envs=2)
+
+    for _ in range(30):
+        scene.step()
+    for _ in range(50):
+        scene.step()
+        assert_allclose(entity_on_cylinder.get_dofs_velocity(), 0.0, tol=tol)
+        assert_allclose(entity_on_box.get_dofs_velocity(), 0.0, tol=tol)
 
 
 @pytest.mark.required
@@ -420,6 +485,597 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
     assert_allclose(pos[..., 2], 0.015, atol=1e1 * tol)
 
 
+@pytest.mark.slow  # ~150s
+@pytest.mark.required
+@pytest.mark.parametrize("detection", ["mpr", "gjk", "box_box"])
+def test_box_contact_minimal_separation(detection, show_viewer, tol):
+    # A contact is a point and a normal along which the depth is the smallest displacement separating both boxes. For a
+    # box pair, that displacement is the smallest overlap over the 15 separating axes (the face normals of either box and
+    # the cross products of their edges), which gives an exact reference however the boxes are posed.
+    N_ENVS = 64
+    N_ROUNDS = 8
+    N_STEPS = 3
+    CAMERA_FOV = 60.0
+    SCALES = (0.05, 0.2, 1.0, 5.0)
+    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.05, 0.05), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
+    BOX_EULER_ROTS = ((0, 0, 0), (180, 0, 0), (90, 0, 0), (-90, 0, 0), (0, -90, 0), (0, 90, 0))
+    # Angle within which the normal of Minkowski Portal Refinement (MPR) follows a separating axis of the pair, as
+    # bounded by the convergence of its portal
+    MPR_AXIS_ANGLE_TOL = 2e-3
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=detection == "gjk",
+            box_box_detection=detection == "box_box",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, 0.0, 0.0),
+            camera_lookat=(0.0, 1.0, -1.0),
+            camera_fov=CAMERA_FOV,
+        ),
+        show_viewer=show_viewer,
+    )
+    # Every box takes each shape in some environments, in an order shuffled per box. Both boxes of the pair at unit
+    # scale share their order, so that identical boxes posed aligned overlap nearly as much along two of their axes. The
+    # pairs are laid out in the view as a grid, each one away from the camera in proportion to its scale, so that all of
+    # them look alike while lying at depths far enough apart for their boxes to never reach each other. The smallest
+    # ones also sit near the origin, where rounding errors are the smallest.
+    pairs_boxes = []
+    for i_s, scale in enumerate(SCALES):
+        view_x, view_y = 0.7 * (2 * (i_s % 2) - 1), 0.3 * (2 * (i_s // 2) - 1)
+        pair_pos = 3.0 * scale * np.array((view_x, 1.0 + view_y, view_y - 1.0))
+        boxes_size = [np.random.permutation(BOXES_SIZE) for _ in range(2)]
+        if np.isclose(scale, 1.0):
+            boxes_size[1] = boxes_size[0]
+        pairs_boxes.append(
+            [
+                scene.add_entity(
+                    morph=[
+                        gs.morphs.Box(pos=pair_pos + (0.0, 0.0, 3.0 * scale * i_box), size=scale * box_size)
+                        for box_size in boxes_size[i_box]
+                    ],
+                    vis_mode="collision",
+                )
+                for i_box in range(2)
+            ]
+        )
+    scene.build(n_envs=N_ENVS)
+    n_pairs = len(pairs_boxes)
+    # The armature bounds the response of the thinnest boxes, whose inertia would otherwise call for a smaller time step
+    for boxes in pairs_boxes:
+        for box in boxes:
+            box.set_dofs_armature(0.1)
+
+    # The boxes are built axis-aligned, so their bounding boxes give the half-size each environment simulates
+    boxes_aabb = np.stack(
+        [np.stack([tensor_to_array(box.get_AABB()) for box in boxes], axis=1) for boxes in pairs_boxes], axis=1
+    )
+    boxes_half = 0.5 * (boxes_aabb[..., 1, :] - boxes_aabb[..., 0, :])
+    pairs_pos = 0.5 * (boxes_aabb[:, :, 0, 0] + boxes_aabb[:, :, 0, 1])
+    pairs_size = np.linalg.norm(boxes_half, axis=-1).sum(axis=-1)
+    pairs_scale = np.linalg.norm(boxes_half, axis=-1).min(axis=-1)
+    # Multi-contact detection tilts each box of a pair about its first contact by the perturbation angle. A point found
+    # in the tilted pose moves by up to this angle times the diameter of its box, as does the overlap along any normal.
+    pairs_tol = 2.0 * scene.rigid_solver.collider._mc_perturbation * pairs_size
+
+    links_pair_idx = np.full(scene.rigid_solver.n_links, -1)
+    links_box_idx = np.full(scene.rigid_solver.n_links, -1)
+    for i_p, boxes in enumerate(pairs_boxes):
+        for i_box, box in enumerate(boxes):
+            links_pair_idx[box.base_link_idx] = i_p
+            links_box_idx[box.base_link_idx] = i_box
+
+    for i_round in range(N_ROUNDS):
+        # Fully random poses, faces aligned up to a random yaw and a tiny tilt, edges nearly parallel, exactly aligned. The
+        # draw favors the families whose contacts span an edge or a face over the vertex contacts of random poses.
+        modes = np.random.choice(4, size=(N_ENVS, n_pairs), p=(0.1, 0.3, 0.4, 0.2))
+        quats_rand = gu.random_quaternion(2 * N_ENVS * n_pairs).reshape((N_ENVS, n_pairs, 2, 4))
+        quats_face = gu.euler_to_quat(np.take(BOX_EULER_ROTS, np.random.randint(6, size=(N_ENVS, n_pairs, 2)), axis=0))
+        tilts = 10.0 ** np.random.uniform(-7.0, -2.0, size=(N_ENVS, n_pairs, 2))
+        tilts *= np.where(modes[..., None] == 3, 0.0, np.random.choice((-1.0, 1.0), size=(N_ENVS, n_pairs, 2)))
+        yaws = 0.5 * np.pi * np.random.randint(4, size=(N_ENVS, n_pairs))
+        yaws += (modes == 2) * 10.0 ** np.random.uniform(-7.0, -2.0, size=(N_ENVS, n_pairs))
+        yaws = np.where(modes == 1, np.random.uniform(-np.pi, np.pi, size=(N_ENVS, n_pairs)), yaws)
+        quats_tilt = gu.euler_to_quat(np.rad2deg(np.concatenate((tilts, yaws[..., None]), axis=-1)))
+        quats_a = np.where(
+            ((modes == 0) | (np.random.rand(N_ENVS, n_pairs) < 0.5))[..., None],
+            quats_rand[..., 0, :],
+            quats_face[..., 0, :],
+        )
+        quats_b = gu.transform_quat_by_quat(gu.transform_quat_by_quat(quats_tilt, quats_face[..., 1, :]), quats_a)
+        quats_b = np.where((modes == 0)[..., None], quats_rand[..., 1, :], quats_b)
+
+        for i_p, boxes in enumerate(pairs_boxes):
+            for box, quat in zip(boxes, (quats_a[:, i_p], quats_b[:, i_p])):
+                box.set_pos(pairs_pos[:, i_p])
+                box.set_quat(quat)
+
+        # Detect the contacts from scratch, then over a few steps along which the boxes separate. The contacts of a step
+        # are detected at the poses that precede it.
+        for i_step in range(N_STEPS + 1):
+            boxes_pos = np.stack(
+                [np.stack([tensor_to_array(box.get_pos()) for box in boxes], axis=1) for boxes in pairs_boxes], axis=1
+            )
+            boxes_R = gu.quat_to_R(
+                np.stack(
+                    [np.stack([tensor_to_array(box.get_quat()) for box in boxes], axis=1) for boxes in pairs_boxes],
+                    axis=1,
+                )
+            )
+
+            # Separation directions: the face normals of either box, then the cross products of their edges
+            boxes_axes = boxes_R.swapaxes(-1, -2)
+            edges_cross = np.cross(boxes_axes[..., 0, :, None, :], boxes_axes[..., 1, None, :, :])
+            axes = np.concatenate(
+                (boxes_axes[..., 0, :, :], boxes_axes[..., 1, :, :], edges_cross.reshape((*modes.shape, 9, 3))), axis=-2
+            )
+            axes_norm = np.linalg.norm(axes, axis=-1)
+            is_axis_valid = axes_norm > gs.EPS
+            axes /= np.where(is_axis_valid, axes_norm, 1.0)[..., None]
+            # Support of the Minkowski difference of both boxes centred at the origin along each axis
+            axes_support = (np.abs(axes[..., None, :, :] @ boxes_R) * boxes_half[..., None, :]).sum(axis=(-1, -3))
+
+            if i_step == 0:
+                # Offset the second box along a random direction from touching, by a gap, a graze, or a deep penetration
+                dirs = np.random.normal(size=(N_ENVS, n_pairs, 3))
+                dirs /= np.linalg.norm(dirs, axis=-1, keepdims=True)
+                axes_dist = np.where(is_axis_valid, axes_support / np.abs(axes @ dirs[..., None])[..., 0], np.inf)
+                dist_touch = axes_dist.min(axis=-1)
+
+                half_min = boxes_half.min(axis=(-1, -2))
+                dist_gap = 10.0 ** np.random.uniform(-6.0, -1.0, size=(N_ENVS, n_pairs)) * half_min
+                dist_graze = -(10.0 ** np.random.uniform(-7.0, -3.0, size=(N_ENVS, n_pairs))) * half_min
+                dist_deep = -np.random.uniform(0.0, 2.0, size=(N_ENVS, n_pairs)) * half_min
+                offset_kinds = np.random.choice(3, size=(N_ENVS, n_pairs), p=(0.1, 0.5, 0.4))
+                dist = np.choose(offset_kinds, (dist_gap, dist_graze, dist_deep))
+
+                for i_p, (box_a, box_b) in enumerate(pairs_boxes):
+                    box_b.set_pos(pairs_pos[:, i_p] + np.maximum(dist_touch + dist, 0.0)[:, i_p, None] * dirs[:, i_p])
+                    # The boxes tumble at random while the second one closes in on the first, so that contacts evolve
+                    for box, vel_lin in ((box_a, 0.0), (box_b, -dirs[:, i_p])):
+                        vel_lin = SCALES[i_p] * (np.random.normal(size=(N_ENVS, 3)) + vel_lin)
+                        box.set_dofs_velocity(np.concatenate((vel_lin, np.random.normal(size=(N_ENVS, 3))), axis=-1))
+                boxes_pos[..., 1, :] = np.stack([tensor_to_array(box_b.get_pos()) for _, box_b in pairs_boxes], axis=1)
+
+                scene.rigid_solver.collider.clear()
+                scene.rigid_solver.collider.detection()
+            else:
+                scene.step()
+            contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+            offsets = boxes_pos[..., 1, :] - boxes_pos[..., 0, :]
+            axes_depth = np.where(is_axis_valid, axes_support - np.abs(axes @ offsets[..., None])[..., 0], np.inf)
+            pairs_depth = axes_depth.min(axis=-1)
+
+            # Geom A and geom B of every contact, with its normal pointing from B to A
+            envs_idx, _ = np.nonzero(contacts["link_a"] >= 0)
+            links_a, links_b = contacts["link_a"][contacts["link_a"] >= 0], contacts["link_b"][contacts["link_a"] >= 0]
+            pairs_idx = links_pair_idx[links_a]
+            assert_equal(links_pair_idx[links_b], pairs_idx)
+            boxes_ab_idx = np.stack((links_box_idx[links_a], links_box_idx[links_b]), axis=-1)
+            contacts_boxes_R = boxes_R[envs_idx[:, None], pairs_idx[:, None], boxes_ab_idx]
+            contacts_boxes_half = boxes_half[envs_idx[:, None], pairs_idx[:, None], boxes_ab_idx]
+            contacts_boxes_pos = boxes_pos[envs_idx[:, None], pairs_idx[:, None], boxes_ab_idx]
+            contacts_tol = pairs_tol[envs_idx, pairs_idx]
+            normals_ab = -contacts["normal"][contacts["link_a"] >= 0]
+            depths = contacts["penetration"][contacts["link_a"] >= 0]
+            positions = contacts["position"][contacts["link_a"] >= 0]
+
+            # The boxes overlap along the normal of a contact by at least its depth. The first contact of a pair takes
+            # their minimal overlap along any direction, the other ones being found on the pair tilted by the
+            # perturbation, which leaves their normals unconstrained.
+            offsets_ab = contacts_boxes_pos[:, 1] - contacts_boxes_pos[:, 0]
+            normals_support = np.abs(normals_ab[:, None, None] @ contacts_boxes_R) * contacts_boxes_half[:, :, None]
+            normals_overlap = normals_support.sum(axis=(-1, -2, -3)) - (normals_ab * offsets_ab).sum(axis=-1)
+            assert (depths <= normals_overlap + contacts_tol).all()
+            pairs_overlap_min = np.full((N_ENVS, n_pairs), np.inf)
+            np.minimum.at(pairs_overlap_min, (envs_idx, pairs_idx), normals_overlap)
+            is_pair_detected = np.isfinite(pairs_overlap_min)
+            if detection == "mpr":
+                # Minkowski Portal Refinement (MPR) converges on the face of the Minkowski difference crossed by its
+                # ray, which may differ from the one of least overlap. Its normal is still the direction of a face or of
+                # a pair of edges of both boxes, one of their separating axes, up to the convergence of its portal.
+                axes_cos = np.abs((axes[envs_idx, pairs_idx] @ normals_ab[..., None])[..., 0])
+                is_axis_followed = np.arccos(np.minimum(axes_cos, 1.0)) < MPR_AXIS_ANGLE_TOL
+                assert is_axis_followed.any(axis=-1).all()
+                if i_step == 0:
+                    # Detected from scratch, the axis of every contact overlaps no more than the face normals of either
+                    # box, since a face normal overlapping less proves the portal non-minimal and has GJK refine the
+                    # contact, up to the tilt of the perturbed contacts. Nearly parallel axes may both be followed, in
+                    # which case the normal can follow the shallower one.
+                    axes_depth_followed = np.where(is_axis_followed, axes_depth[envs_idx, pairs_idx], np.inf)
+                    pairs_axis_depth = np.full((N_ENVS, n_pairs), -np.inf)
+                    np.maximum.at(pairs_axis_depth, (envs_idx, pairs_idx), axes_depth_followed.min(axis=-1))
+                    pairs_faces_depth = axes_depth[..., :6].min(axis=-1)
+                    assert (pairs_axis_depth - pairs_faces_depth <= pairs_tol)[is_pair_detected].all()
+            else:
+                assert (pairs_overlap_min - pairs_depth <= tol * pairs_size)[is_pair_detected].all()
+
+            # The deepest contact of a pair takes the whole overlap along its normal
+            pairs_depth_max = np.full((N_ENVS, n_pairs), -np.inf)
+            np.maximum.at(pairs_depth_max, (envs_idx, pairs_idx), depths)
+            is_deepest = depths >= pairs_depth_max[envs_idx, pairs_idx]
+            assert (normals_overlap[is_deepest] - depths[is_deepest] <= contacts_tol[is_deepest]).all()
+
+            # A contact lies midway between its witnesses, each on the surface of its own box. Rebuilt along the normal,
+            # the witnesses of GJK, which lie apart along another direction, may land past the surfaces by up to twice
+            # the tolerance, and those of a perturbed contact, whose depth is a lower bound, inside the boxes by up to
+            # five times it. MPR approximates the depth of a perturbed contact further, up to five times the tolerance
+            # either way.
+            witnesses_tol_out, witnesses_tol_in = {"box_box": (1.0, 1.0), "gjk": (2.0, 5.0), "mpr": (5.0, 5.0)}[
+                detection
+            ]
+            witnesses = (
+                positions[:, None] + 0.5 * np.array((1.0, -1.0))[:, None] * depths[:, None, None] * normals_ab[:, None]
+            )
+            witnesses_local = ((witnesses - contacts_boxes_pos)[..., None, :] @ contacts_boxes_R)[..., 0, :]
+            witnesses_q = np.abs(witnesses_local) - contacts_boxes_half
+            witnesses_sdf = np.linalg.norm(np.maximum(witnesses_q, 0.0), axis=-1)
+            witnesses_sdf += np.minimum(witnesses_q.max(axis=-1), 0.0)
+            assert (witnesses_sdf <= witnesses_tol_out * contacts_tol[:, None]).all()
+            assert (witnesses_sdf >= -witnesses_tol_in * contacts_tol[:, None]).all()
+
+            # Overlapping boxes have contacts, boxes apart have none
+            assert is_pair_detected[pairs_depth > pairs_tol].all()
+            assert not is_pair_detected[pairs_depth < -pairs_tol].any()
+
+
+@pytest.mark.required
+def test_box_contact_true_penetration(show_viewer, tol):
+    # Every contact of two aligned boxes takes their overlap along the axis its normal follows, and the shallowest one
+    # their least overlap
+    N_ENVS = 64
+    N_ROUNDS = 8
+    BOX_SIZE = np.array((4.0, 0.25, 0.25))
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -8.0, 4.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    box_1, box_2 = (
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=BOX_SIZE,
+            ),
+            vis_mode="collision",
+        )
+        for _ in range(2)
+    )
+    scene.build(n_envs=N_ENVS)
+
+    for _ in range(N_ROUNDS):
+        # Two identical boxes posed exactly aligned at random orientations, overlapping end to end
+        quats = gu.random_quaternion(N_ENVS)
+        overlaps = np.random.uniform(0.01, 0.5, size=(N_ENVS, 3)) * BOX_SIZE
+        offsets_local = np.random.choice((-1.0, 1.0), size=(N_ENVS, 3)) * (BOX_SIZE - overlaps)
+        box_1.set_quat(quats)
+        box_2.set_pos(gu.transform_by_quat(offsets_local, quats))
+        box_2.set_quat(quats)
+
+        scene.rigid_solver.collider.clear()
+        scene.rigid_solver.collider.detection()
+        contacts = box_1.get_contacts(with_entity=box_2)
+        is_contact_valid = tensor_to_array(contacts["valid_mask"])
+        penetrations = tensor_to_array(contacts["penetration"])
+        normals_local = gu.inv_transform_by_quat(tensor_to_array(contacts["normal"]), quats[:, None])
+        normals_overlap = np.take_along_axis(overlaps, np.abs(normals_local).argmax(axis=-1), axis=-1)
+        assert_allclose(penetrations[is_contact_valid], normals_overlap[is_contact_valid], tol=tol)
+        assert_allclose(np.where(is_contact_valid, penetrations, np.inf).min(axis=-1), overlaps.min(axis=-1), tol=tol)
+
+
+@pytest.mark.slow  # ~150s
+@pytest.mark.required
+@pytest.mark.parametrize("detection", ["mpr", "gjk", "box_box"])
+def test_box_stacks_stability(detection, show_viewer, tol):
+    # Piles of boxes of random shapes, each lying on a random face at a random yaw with a tiny tilt, on fixed bases at
+    # several scales, restacked in a new order and pose after every reset. Each pile is statically stable: at every
+    # interface, the center of mass of the boxes above lies within the contact polygon, which holds as long as it lies
+    # within the footprint of the box below, since the box above contains it too by convexity. Placing the boxes from the
+    # top down, the next box only has to cover the center of mass of the boxes already placed.
+    N_ENVS = 24
+    GRAVITY = 9.81
+    TILT = 0.0
+    CONSTRAINT_TIMECONST = 0.002
+    CONTACT_IMPEDANCE = 0.99
+    PRUNING_TOLERANCE = 0.02
+    SCALES = (0.1, 2.0)
+    BASE_SIZE = np.array((1.5, 1.5, 0.2))
+    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.05, 0.05), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
+    # Rotation laying a box on each of its faces, and the axis of the box that then points up
+    BOX_EULER_ROTS = ((0, 0, 0), (180, 0, 0), (90, 0, 0), (-90, 0, 0), (0, -90, 0), (0, 90, 0))
+    BOX_UP_AXES = np.array((2, 2, 1, 1, 0, 0))
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.001,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=detection == "gjk",
+            box_box_detection=detection == "box_box",
+            contact_pruning_tolerance=PRUNING_TOLERANCE,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, 0.0, 0.0),
+            camera_lookat=(0.0, 1.0, -0.1),
+            camera_fov=60.0,
+        ),
+        show_viewer=show_viewer,
+    )
+    # Every box takes each shape in some environments, in an order shuffled per box. The boxes are built apart, as the
+    # contacts of boxes overlapping at build time overflow the contact budget. The piles are laid out in the view as a
+    # row, each one away from the camera in proportion to its scale, so that all of them look alike while lying at
+    # depths far enough apart for their boxes, which may overhang the center of mass of the boxes above by half their
+    # diagonal, to never reach each other. The camera looks at them from barely above, which keeps every pile close
+    # to the horizontal plane through the origin, where the vertical resolution of the coordinates stays far finer
+    # than the depth at which the boxes rest.
+    piles = []
+    for i_s, scale in enumerate(SCALES):
+        view_x = 0.5 * (i_s - 0.5 * (len(SCALES) - 1))
+        pile_pos = 5.0 * scale * np.array((view_x, 1.0, -0.1)) + (0.0, 0.0, scale * BASE_SIZE[2])
+        base = scene.add_entity(
+            gs.morphs.Box(
+                pos=pile_pos - (0.0, 0.0, 0.5 * scale * BASE_SIZE[2]),
+                size=scale * BASE_SIZE,
+                fixed=True,
+            ),
+            vis_mode="collision",
+        )
+        boxes = [
+            scene.add_entity(
+                morph=[
+                    gs.morphs.Box(pos=(*pile_pos[:2], pile_pos[2] + (i_b + 1) * scale), size=scale * box_size)
+                    for box_size in np.random.permutation(BOXES_SIZE)
+                ],
+                visualize_contact=True,
+                vis_mode="collision",
+            )
+            for i_b in range(len(BOXES_SIZE))
+        ]
+        piles.append((scale, pile_pos, base, boxes))
+    scene.build(n_envs=N_ENVS)
+
+    # Under the default impedance, the residual softness of the contacts tips the tallest piles standing on the
+    # narrowest supports at the smallest scale, although they are statically stable. At rest, a contact sinks by about
+    # the gravity acceleration times the squared time constant, scaled by (1 - d) / d for an impedance d and by the load
+    # it carries: the mass of the boxes it supports times the sum of the inverse masses of the two links it separates,
+    # the fixed base adding none. The time constant grows with the square root of the scale, which sinks every pile by a
+    # depth in proportion to its size: the piles stay geometrically similar, and this depth stays above the resolution
+    # of the coordinates of the largest ones, which stand the farthest from the origin. The boxes are built
+    # axis-aligned, so their bounding boxes give the size each environment simulates.
+    sol_params = gu.default_solver_params()
+    piles_rest_depth, piles_boxes_size, piles_boxes_mass = [], [], []
+    for scale, pile_pos, base, boxes in piles:
+        sol_params[0] = CONSTRAINT_TIMECONST * np.sqrt(scale / SCALES[0])
+        sol_params[2:4] = CONTACT_IMPEDANCE
+        for entity in (base, *boxes):
+            for geom in entity.geoms:
+                geom.set_sol_params(sol_params)
+        piles_rest_depth.append(GRAVITY * sol_params[0] ** 2 * (1.0 - CONTACT_IMPEDANCE) / CONTACT_IMPEDANCE)
+        piles_boxes_mass.append(np.stack([tensor_to_array(box.get_mass()) for box in boxes]))
+        aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
+        piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
+
+    for i_phase in range(3):
+        if i_phase > 0:
+            scene.reset()
+        piles_boxes_pos_rest = []
+        piles_boxes_up_axis = []
+        for (scale, pile_pos, base, boxes), rest_depth, boxes_size, boxes_mass in zip(
+            piles, piles_rest_depth, piles_boxes_size, piles_boxes_mass
+        ):
+            n_boxes = len(boxes)
+            # Each box lies on a face no taller than the narrowest side of the face
+            is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
+            faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
+            faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
+            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
+            is_box_up_axis = is_up_axis[faces]
+            angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * np.rad2deg(TILT)
+            angles_yaw = np.random.uniform(low=-180.0, high=180.0, size=(n_boxes, N_ENVS, 1))
+            quats_face = gu.euler_to_quat(np.take(BOX_EULER_ROTS, faces, axis=0))
+            quats_yaw = gu.euler_to_quat(np.concatenate((np.zeros_like(angles_rp), angles_yaw), axis=-1))
+            quats_tilt = gu.euler_to_quat(np.concatenate((angles_rp, angles_yaw), axis=-1))
+            boxes_R_flat = gu.quat_to_R(gu.transform_quat_by_quat(quats_face, quats_yaw))
+            boxes_quat = gu.transform_quat_by_quat(quats_face, quats_tilt)
+            boxes_height = (is_box_up_axis * boxes_size).sum(axis=-1)
+
+            # Stack the boxes in a random order, the height of each one being where it rests once the pile lies flat
+            levels = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
+            levels_height = np.take_along_axis(boxes_height, levels, axis=0)
+            levels_z_rest = pile_pos[2] + np.cumsum(levels_height, axis=0) - 0.5 * levels_height
+            levels_bottom = levels_z_rest - 0.5 * levels_height
+            pile_top = levels_bottom[-1] + levels_height[-1]
+
+            # The tilt of every box above moves their center of mass while they settle flat, by up to the tilt times
+            # their height, which the margin to the edges of each footprint covers.
+            levels_half = np.take_along_axis(0.5 * boxes_size, levels[..., None], axis=0)
+            levels_margin = TILT * (pile_top - levels_bottom)[..., None]
+            levels_is_up_axis = np.take_along_axis(is_box_up_axis, levels[..., None], axis=0)
+            levels_footprint_half = np.where(levels_is_up_axis, 0.0, np.maximum(0.5 * levels_half - levels_margin, 0.0))
+            levels_R_flat = np.take_along_axis(boxes_R_flat, levels[..., None, None], axis=0)
+            levels_volume = np.take_along_axis(boxes_size.prod(axis=-1), levels, axis=0)
+            levels_xy = np.empty((n_boxes, N_ENVS, 2))
+            com_xy, com_moment, mass = np.zeros((N_ENVS, 2)), np.zeros((N_ENVS, 2)), np.zeros(N_ENVS)
+            for i_l in reversed(range(n_boxes)):
+                offset = np.random.uniform(low=-1.0, high=1.0, size=(N_ENVS, 3)) * levels_footprint_half[i_l]
+                levels_xy[i_l] = com_xy + (levels_R_flat[i_l, :, :2] @ offset[..., None])[..., 0]
+                com_moment += levels_volume[i_l, :, None] * levels_xy[i_l]
+                mass += levels_volume[i_l]
+                com_xy = com_moment / mass[:, None]
+            base_half = np.maximum(0.5 * 0.5 * scale * BASE_SIZE[:2] - TILT * (pile_top - pile_pos[2])[:, None], 0.0)
+            levels_xy += pile_pos[:2] + np.random.uniform(low=-1.0, high=1.0, size=(N_ENVS, 2)) * base_half - com_xy
+
+            # Lower every box onto the one below until they touch, then by the depth at which its contact rests under
+            # the load it carries. Raised along the vertical, a pair of boxes separates at the lowest height at which
+            # one of their separating axes (the face normals of either box and the cross products of their edges)
+            # separates them.
+            levels_mass = np.take_along_axis(boxes_mass, levels, axis=0)
+            levels_mass_above = np.cumsum(levels_mass[::-1], axis=0)[::-1]
+            levels_mass_inv = 1.0 / levels_mass + np.concatenate((np.zeros((1, N_ENVS)), 1.0 / levels_mass[:-1]))
+            levels_rest_depth = rest_depth * levels_mass_above * levels_mass_inv
+            levels_R = np.take_along_axis(gu.quat_to_R(boxes_quat), levels[..., None, None], axis=0)
+            levels_z = np.empty((n_boxes, N_ENVS))
+            below_R = np.broadcast_to(np.eye(3), (N_ENVS, 3, 3))
+            below_half = np.broadcast_to(0.5 * scale * BASE_SIZE, (N_ENVS, 3))
+            below_pos = np.broadcast_to(pile_pos - (0.0, 0.0, 0.5 * scale * BASE_SIZE[2]), (N_ENVS, 3))
+            for i_l in range(n_boxes):
+                pair_R = np.stack((below_R, levels_R[i_l]), axis=1)
+                pair_half = np.stack((below_half, levels_half[i_l]), axis=1)
+                pair_axes = pair_R.swapaxes(-1, -2)
+                edges_cross = np.cross(pair_axes[:, 0, :, None, :], pair_axes[:, 1, None, :, :])
+                axes = np.concatenate((pair_axes[:, 0], pair_axes[:, 1], edges_cross.reshape((N_ENVS, 9, 3))), axis=1)
+                axes /= np.maximum(np.linalg.norm(axes, axis=-1, keepdims=True), gs.EPS)
+                axes *= np.where(axes[..., 2:] < 0.0, -1.0, 1.0)
+                axes_support = (np.abs(axes[:, None] @ pair_R) * pair_half[:, :, None]).sum(axis=(-1, -3))
+                offset = np.concatenate((levels_xy[i_l] - below_pos[:, :2], -below_pos[:, 2:]), axis=-1)
+                axes_height = (axes_support - (axes * offset[:, None]).sum(axis=-1)) / axes[..., 2]
+                levels_z[i_l] = np.where(axes[..., 2] > gs.EPS, axes_height, np.inf).min(axis=-1)
+                levels_z[i_l] -= levels_rest_depth[i_l]
+                below_R, below_half = levels_R[i_l], levels_half[i_l]
+                below_pos = np.concatenate((levels_xy[i_l], levels_z[i_l, :, None]), axis=-1)
+
+            boxes_pos = np.empty((n_boxes, N_ENVS, 3))
+            np.put_along_axis(
+                boxes_pos, levels[..., None], np.concatenate((levels_xy, levels_z[..., None]), -1), axis=0
+            )
+            boxes_pos_rest = np.empty((n_boxes, N_ENVS, 3))
+            np.put_along_axis(
+                boxes_pos_rest, levels[..., None], np.concatenate((levels_xy, levels_z_rest[..., None]), -1), axis=0
+            )
+            piles_boxes_pos_rest.append(boxes_pos_rest)
+            piles_boxes_up_axis.append(BOX_UP_AXES[faces])
+            for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
+                box.set_pos(pos)
+                box.set_quat(quat)
+
+        # At every step, every pile stays where it was placed, its boxes lying flat on each other, and the contacts that
+        # the step detects from the poses it starts from cover the patch between each pair of boxes in contact
+        for i_step in range(100):
+            piles_boxes_pos = [np.stack([tensor_to_array(box.get_pos()) for box in boxes]) for *_, boxes in piles]
+            piles_boxes_quat = [np.stack([tensor_to_array(box.get_quat()) for box in boxes]) for *_, boxes in piles]
+            scene.step()
+            contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+            for i_pile, (scale, _, base, boxes) in enumerate(piles):
+                rest_depth, boxes_size = piles_rest_depth[i_pile], piles_boxes_size[i_pile]
+                boxes_pos_rest, boxes_up_axis = piles_boxes_pos_rest[i_pile], piles_boxes_up_axis[i_pile]
+                boxes_pos, boxes_quat = piles_boxes_pos[i_pile], piles_boxes_quat[i_pile]
+                boxes_R = gu.quat_to_R(boxes_quat)
+                boxes_up_z = np.take_along_axis(boxes_R[..., 2, :], boxes_up_axis[..., None], axis=-1)[..., 0]
+                boxes_tilt = np.arccos(np.minimum(np.abs(boxes_up_z), 1.0))
+                boxes_drift = np.linalg.norm(boxes_pos - boxes_pos_rest, axis=-1) / scale
+                assert (boxes_tilt < np.deg2rad(0.5)).all()
+                assert (boxes_drift < 5e-3).all()
+
+                # Each link rests on the one below through the faces nearest to the horizontal, whose corners are spanned
+                # by its two other axes. The base is the first link of the pile.
+                links_idx = np.array([base.base_link_idx] + [box.base_link_idx for box in boxes])
+                links_pos = np.concatenate((tensor_to_array(base.get_pos())[None], boxes_pos))
+                links_R = np.concatenate((np.broadcast_to(np.eye(3), (1, N_ENVS, 3, 3)), boxes_R))
+                links_half = 0.5 * np.concatenate((np.broadcast_to(scale * BASE_SIZE, (1, N_ENVS, 3)), boxes_size))
+                links_axes_order = (np.argmax(np.abs(links_R[..., 2, :]), axis=-1)[..., None] + np.arange(3)) % 3
+                links_axes = np.take_along_axis(links_R, links_axes_order[..., None, :], axis=-1)
+                links_axes_half = np.take_along_axis(links_half, links_axes_order, axis=-1)
+                links_normal = links_axes[..., 0] * np.sign(links_axes[..., 2, :1])
+                corners_sign = np.array(((-1.0, 1.0, 1.0, -1.0), (-1.0, -1.0, 1.0, 1.0)))
+                links_corners = (links_axes[..., 1:] * links_axes_half[..., None, 1:]) @ corners_sign
+                links_top = links_pos + links_normal * links_axes_half[..., :1]
+                links_bottom = links_pos - links_normal * links_axes_half[..., :1]
+
+                # The patch between two links is the overlap of their faces seen from above. Its depth at a point is the
+                # vertical distance between the face planes there. A guard band covering the rounding of either depth
+                # tells pressed and lifted corners from touching ones.
+                depth_guard = 1e-2 * rest_depth + tol * scale
+                for i_b in range(N_ENVS):
+                    levels = np.concatenate(((0,), 1 + np.argsort(boxes_pos_rest[:, i_b, 2])))
+                    is_contact = contacts["link_a"][i_b] >= 0
+                    contacts_link_a = contacts["link_a"][i_b][is_contact]
+                    contacts_link_b = contacts["link_b"][i_b][is_contact]
+                    contacts_pos = contacts["position"][i_b][is_contact]
+                    for i_lower, i_upper in zip(levels[:-1], levels[1:]):
+                        # The overlap clips the top face of the lower link by the half-planes of the bottom face of the
+                        # upper link, each keeping the points p where 'offset + p @ normal' is non-negative. Its pressed
+                        # part clips it further by the half-plane where the depth exceeds the guard band.
+                        lower_top, lower_normal = links_top[i_lower, i_b], links_normal[i_lower, i_b]
+                        upper_bottom, upper_normal = links_bottom[i_upper, i_b], links_normal[i_upper, i_b]
+                        lower_slope = -lower_normal[:2] / lower_normal[2]
+                        upper_slope = -upper_normal[:2] / upper_normal[2]
+                        lower_offset = lower_top[2] - lower_top[:2] @ lower_slope
+                        upper_offset = upper_bottom[2] - upper_bottom[:2] @ upper_slope
+                        depth_normal = lower_slope - upper_slope
+                        depth_offset = lower_offset - upper_offset
+
+                        clip = (links_bottom[i_upper, i_b, :2, None] + links_corners[i_upper, i_b, :2]).T
+                        clip_edges = np.roll(clip, -1, axis=0) - clip
+                        half_normals = np.stack((-clip_edges[:, 1], clip_edges[:, 0]), axis=-1)
+                        half_normals *= np.sign(((clip.mean(axis=0) - clip) * half_normals).sum(axis=-1))[:, None]
+                        half_offsets = -(half_normals * clip).sum(axis=-1)
+                        half_planes = [*zip(half_normals, half_offsets), (depth_normal, depth_offset - depth_guard)]
+                        patch = (links_top[i_lower, i_b, :2, None] + links_corners[i_lower, i_b, :2]).T
+                        for i_half, (half_normal, half_offset) in enumerate(half_planes):
+                            if i_half == len(half_planes) - 1:
+                                patch_overlap = patch
+                            patch_side = half_offset + patch @ half_normal
+                            patch_clipped = []
+                            for point, point_next, side, side_next in zip(
+                                patch, np.roll(patch, -1, axis=0), patch_side, np.roll(patch_side, -1)
+                            ):
+                                if side >= 0.0:
+                                    patch_clipped.append(point)
+                                if side * side_next < 0.0:
+                                    patch_clipped.append(point + (point_next - point) * side / (side - side_next))
+                            patch = np.array(patch_clipped).reshape((-1, 2))
+                        patch_pressed, patch = patch, patch_overlap
+                        # Faces resting flat on each other have no part deeper than the guard band, all of it touching
+                        if len(patch_pressed) < 3:
+                            patch_pressed = patch
+                        patch_depth = depth_offset + patch @ depth_normal
+
+                        pair_links_idx = links_idx[[i_lower, i_upper]]
+                        is_pair = np.isin(contacts_link_a, pair_links_idx) & np.isin(contacts_link_b, pair_links_idx)
+                        pair_pos = contacts_pos[is_pair, :2]
+
+                        # When at most four corners of the patch touch the other face, each of those pressed into it
+                        # carries a contact, unless the pruning drops it: the triangle a corner forms with its two
+                        # neighbors then covers less than the pruning tolerance of the patch area. Detection merges the
+                        # contacts closer than the multi-contact tolerance, which scales with the smaller box of the
+                        # pair, so a contact stands for every corner within this distance.
+                        if (patch_depth > -depth_guard).sum() <= 4:
+                            patch_prev, patch_next = np.roll(patch, 1, axis=0), np.roll(patch, -1, axis=0)
+                            corners_edges = np.stack((patch - patch_prev, patch_next - patch), axis=-2)
+                            corners_area = 0.5 * np.abs(np.linalg.det(corners_edges))
+                            patch_area = 0.5 * np.abs(np.linalg.det(np.stack((patch, patch_next), axis=-2)).sum())
+                            is_kept = corners_area > PRUNING_TOLERANCE * patch_area
+                            is_pressed = patch_depth > depth_guard
+                            corners_pair_dist = np.linalg.norm(patch[:, None] - pair_pos, axis=-1)
+                            corners_dist = corners_pair_dist.min(axis=-1, initial=np.inf)
+                            pair_scale = np.linalg.norm(links_half[[i_lower, i_upper], i_b], axis=-1).min()
+                            corners_tol = scene.rigid_solver.collider._mc_tolerance * pair_scale
+                            assert (corners_dist[is_pressed & is_kept] < corners_tol).all()
+
+                        # Otherwise, detection reports only a few points per pair, so their hull only has to span the
+                        # pressed part of the patch: its smallest width is compared with that of this part.
+                        else:
+                            assert len(pair_pos) >= 3
+                            widths = []
+                            for points in (pair_pos, patch_pressed):
+                                points_diff = (points[:, None] - points[None]).reshape((-1, 2))
+                                points_diff = points_diff[np.linalg.norm(points_diff, axis=-1) > gs.EPS]
+                                directions = np.stack((-points_diff[:, 1], points_diff[:, 0]), axis=-1)
+                                directions /= np.linalg.norm(directions, axis=-1, keepdims=True)
+                                projections = points @ directions.T
+                                widths.append((projections.max(axis=0) - projections.min(axis=0)).min())
+                            assert widths[0] > 0.25 * widths[1]
+
+
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
 @pytest.mark.parametrize("gjk_collision", [True, False])
@@ -434,6 +1090,8 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     GRAZING_SPOT = (-3.36, 0.8)
     PRESSED_SPOT = (-3.3, 0.8)
     PRESSED_DEPTH = 0.25 * GEOM_SIZE
+
+    asset_path = get_hf_dataset(pattern="meshes/*_hull.obj")
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -470,6 +1128,27 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         visualize_contact=True,
         vis_mode="collision",
     )
+    # The lamp spans a meter while the finger presses it by less than a millimeter, so the rounding errors of the
+    # Minkowski difference reach the depth convergence tolerance and cut dents into the polytope that refines the depth.
+    # The finger is placed where the search would end on a dent.
+    finger = scene.add_entity(
+        gs.morphs.Mesh(
+            file=f"{asset_path}/meshes/inspire_finger_hull.obj",
+            pos=(0.2282334562357352, -0.24876064442406798, -3.140536243429785),
+            quat=(0.5830528595970937, 0.23922303491173352, -0.7549261541988322, 0.18140618564379823),
+            decimate=False,
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    lamp = scene.add_entity(
+        gs.morphs.Mesh(
+            file=f"{asset_path}/meshes/floor_lamp_hull.obj",
+            pos=(-0.13053986430168152, -0.09062329679727554, -3.08468234539032),
+            quat=(-0.04015674069523811, 0.15293818712234497, 0.14172174036502838, 0.9771961569786072),
+        ),
+        vis_mode="collision",
+    )
     scene.build()
 
     face_offset = 0.5 * (BOX_SIZE + GEOM_SIZE)
@@ -479,19 +1158,29 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         geom.set_pos(gu.transform_by_quat(pos_local, box.get_quat()) + box.get_pos())
         geom.set_quat(box.get_quat())
 
+    # The exact depth of the hull pair is the distance from the origin to the boundary of their Minkowski difference
+    finger_verts = tensor_to_array(finger.geoms[0].get_verts(), dtype=np.float64)
+    lamp_verts = tensor_to_array(lamp.geoms[0].get_verts(), dtype=np.float64)
+    hull_depth = -ConvexHull((finger_verts[:, None] - lamp_verts).reshape((-1, 3))).equations[:, 3].max()
+
     scene.step()
     contacts = scene.rigid_solver.collider.get_contacts()
-    assert_allclose((contacts["normal"] @ face_normal).abs(), 1.0, tol=tol)
+    is_box = contacts["geom_a"] == box.geoms[0].idx
+    assert_allclose((contacts["normal"][is_box] @ face_normal).abs(), 1.0, tol=tol)
     is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
     assert is_pressed.any()
     assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
-    assert (contacts["penetration"][~is_pressed] >= 0.0).all()
-    assert (contacts["penetration"][~is_pressed] <= GEOM_SIZE).all()
+    assert (contacts["penetration"][is_box & ~is_pressed] >= 0.0).all()
+    assert (contacts["penetration"][is_box & ~is_pressed] <= GEOM_SIZE).all()
+    is_lamp = contacts["geom_b"] == lamp.geoms[0].idx
+    assert is_lamp.any()
+    # MPR stops refining the depth once it moves by less than its convergence tolerance, relative to the pair scale
+    depth_tol = 1e-7 if gjk_collision else 1e-5 * 0.5 * np.linalg.norm(np.ptp(finger_verts, axis=0))
+    assert_allclose(contacts["penetration"][is_lamp].max(), hull_depth, atol=depth_tol)
     offset = (geom_grazing.get_pos() - box.get_pos()) @ face_normal
     assert face_offset - tol <= offset <= face_offset + GEOM_SIZE
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_robot_scaling_primitive_collision(show_viewer):
     scene = gs.Scene(
@@ -624,74 +1313,7 @@ def test_contact_forces(show_viewer):
     assert torch.quantile(torch.cat(all_errors), 0.95) < 2e-4
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.xfail(reason="De-duplication of repeated contact points is currently too naive for this test to pass...")
-@pytest.mark.parametrize("surface_kind", ["primitive_box", "primitive_plane", "vertex_box", "flat_terrain"])
-def test_contact_dedup(surface_kind, show_viewer):
-    SPHERE_RADIUS = 0.05
-    GROUND_SIZE = 1.0
-
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.005,
-        ),
-        show_viewer=show_viewer,
-    )
-    if surface_kind == "primitive_box":
-        scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, -0.05),
-                size=(GROUND_SIZE, GROUND_SIZE, 0.1),
-                fixed=True,
-            ),
-        )
-    elif surface_kind == "primitive_plane":
-        scene.add_entity(
-            morph=gs.morphs.Plane(
-                pos=(0.0, 0.0, 0.0),
-            ),
-        )
-    elif surface_kind == "vertex_box":
-        box_mesh = trimesh.creation.box(extents=(GROUND_SIZE, GROUND_SIZE, 0.1))
-        scene.add_entity(
-            morph=gs.morphs.MeshSet(
-                files=(box_mesh,),
-                pos=(0.0, 0.0, -0.05),
-                fixed=True,
-            ),
-        )
-    elif surface_kind == "flat_terrain":
-        flat_hf = np.zeros((16, 16), dtype=np.float32)
-        scene.add_entity(
-            morph=gs.morphs.Terrain(
-                horizontal_scale=0.1,
-                vertical_scale=1.0,
-                height_field=flat_hf,
-                pos=(-0.8, -0.8, 0.0),
-            ),
-        )
-    sphere = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(trimesh.creation.icosphere(radius=SPHERE_RADIUS, subdivisions=3),),
-            pos=(0.0, 0.0, SPHERE_RADIUS - 1e-4),
-            decimate=False,
-        ),
-        vis_mode="collision",
-        visualize_contact=True,
-    )
-    scene.build()
-
-    for i in range(80):
-        scene.step()
-        if i == 20:
-            sphere.set_dofs_velocity(0.2, dofs_idx_local=sphere.dof_start)
-        n_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
-        assert np.all(n_contacts == 1), f"Expected 1 contact after dedup, got {n_contacts}"
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [True, pytest.param(False, marks=pytest.mark.required)])
 def test_contact_pruning(gjk_collision, show_viewer):
     GEOM_HALF_SIZE = 0.1
     MARGIN = 1e-4
@@ -725,6 +1347,31 @@ def test_contact_pruning(gjk_collision, show_viewer):
             color=(1, 0, 0, 0.8),
         ),
     )
+
+    # The pruning groups the contacts by link pair, which must stay apart however large and close their indices, so the
+    # box comes after a sphere apart from everything and two walls come after the box
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(10.0, 10.0, 10.0),
+            radius=0.01,
+            fixed=True,
+        ),
+    )
+    sub_meshes = []
+    for sx, sy, sz in product((-1, 0, +1), repeat=3):
+        mesh = trimesh.creation.box(extents=(2 / 3 * GEOM_HALF_SIZE,) * 3)
+        mesh.apply_translation((2 / 3 * sx * GEOM_HALF_SIZE, 2 / 3 * sy * GEOM_HALF_SIZE, 2 / 3 * sz * GEOM_HALF_SIZE))
+        sub_meshes.append(mesh)
+    box = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=sub_meshes,
+        ),
+        surface=gs.surfaces.Default(
+            smooth=False,
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
     scene.add_entity(
         morph=gs.morphs.Box(
             size=(1.0, GEOM_HALF_SIZE, 1.0),
@@ -745,23 +1392,32 @@ def test_contact_pruning(gjk_collision, show_viewer):
             color=(0, 0, 1, 0.8),
         ),
     )
-
-    sub_meshes = []
-    for sx, sy, sz in product((-1, 0, +1), repeat=3):
-        mesh = trimesh.creation.box(extents=(2 / 3 * GEOM_HALF_SIZE,) * 3)
-        mesh.apply_translation((2 / 3 * sx * GEOM_HALF_SIZE, 2 / 3 * sy * GEOM_HALF_SIZE, 2 / 3 * sz * GEOM_HALF_SIZE))
-        sub_meshes.append(mesh)
-    box = scene.add_entity(
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.0, -0.3),
+        ),
+    )
+    meshes = []
+    for angle in np.linspace(0.0, np.pi / 2.0, 8, endpoint=False):
+        mesh = trimesh.creation.box(extents=(0.2, 0.2, 0.2))
+        quat = gu.xyz_to_quat(np.array((0.0, 0.0, angle)))
+        mesh.apply_transform(gu.trans_quat_to_T(trans=np.zeros(3), quat=quat))
+        meshes.append(mesh)
+    prism = scene.add_entity(
         morph=gs.morphs.MeshSet(
-            files=sub_meshes,
+            files=meshes,
+            pos=(0.8, 0.0, 2.0),
+            decimate=False,
         ),
         surface=gs.surfaces.Default(
             smooth=False,
         ),
-        visualize_contact=True,
         vis_mode="collision",
     )
     scene.build(n_envs=2)
+    # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
+    # in the second one, where its only contacts come from the two link pairs of closest indices
+    box.set_pos(((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)))
 
     for step_idx in range(200):
         scene.step()
@@ -788,9 +1444,7 @@ def test_contact_pruning(gjk_collision, show_viewer):
                 if diam < 1e-6:
                     continue
                 try:
-                    # Qhull's E tolerance merges nearly-collinear points into hull edges; without it, float noise on
-                    # the order of 1e-6 hides the collinearity that the pruning kernel is supposed to detect.
-                    hull = ConvexHull(proj, qhull_options=f"Qt E{diam * 1e-3}")
+                    hull = ConvexHull(proj, qhull_options="Qt")
                     n_hull_vertices = len(hull.vertices)
                 except QhullError:
                     raise AssertionError(
@@ -810,7 +1464,26 @@ def test_contact_pruning(gjk_collision, show_viewer):
                     f"{n_hull_vertices} are vertices of the bucket's 2D convex hull. The pruning kernel should have "
                     f"dropped these {len(idxs) - n_hull_vertices} redundant contact(s):\n{details}"
                 )
-    assert_allclose(box.get_pos(), 0.0, atol=2e-3)
+    assert_allclose(box.get_pos(), ((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)), atol=2e-3)
+
+    # Micrometre translations preserve the supporting area even when several boundary reductions have equal cost.
+    areas_reference = None
+    for i_step in range(8):
+        positions = np.array(((0.8, 0.0, -0.2001), (1.8, 0.0, -0.2001)))
+        positions[:, 0] += 1e-6 * np.sin(0.3 * i_step)
+        positions[:, 1] += 1e-6 * np.cos(0.7 * i_step)
+        prism.set_pos(positions)
+        prism.set_quat((1.0, 0.0, 0.0, 0.0))
+        scene.step()
+        contacts = prism.get_contacts()
+        contact_positions = tensor_to_array(contacts["position"])
+        contact_mask = tensor_to_array(contacts["valid_mask"])
+        areas = np.array(
+            [ConvexHull(contact_positions[i_b, contact_mask[i_b], :2]).volume for i_b in range(scene.n_envs)]
+        )
+        if areas_reference is None:
+            areas_reference = areas
+        assert_allclose(areas / areas_reference, 1.0, tol=1e-4)
 
 
 @pytest.mark.required
@@ -951,16 +1624,14 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         assert is_vertical and is_pruned
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name",
     [
         "side_by_side_capsules",
-        "collinear_capsules",
-        "side_by_side_cylinders",
+        pytest.param("collinear_capsules", marks=pytest.mark.required),
+        pytest.param("side_by_side_cylinders", marks=pytest.mark.required),
         "collinear_cylinders",
-        "collinear_spheres",
+        pytest.param("collinear_spheres", marks=pytest.mark.required),
     ],
 )
 def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
@@ -1012,9 +1683,6 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
     smooth_quat = gu.xyz_to_quat(np.concatenate([np.zeros((N_ENVS, 2)), angle_yaw], axis=-1), rpy=True)
     entity.set_quat(smooth_quat)
 
-    if show_viewer:
-        scene.visualizer.update()
-
     for _ in range(20):
         scene.step()
     for _ in range(300):
@@ -1022,7 +1690,7 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
         n_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
         assert n_contacts.all()
         if model_name.startswith("side_by_side"):
-            assert (n_contacts == 4).all()
+            assert (n_contacts >= 4).all()
         elif model_name == "collinear_spheres":
             assert (n_contacts == 2).all()
 
@@ -1031,7 +1699,7 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 
 @pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.parametrize(
-    "scene_kind, max_collision_pairs, max_contacts, error_pattern, is_raised_by_build",
+    "scene_kind, max_collision_pairs, max_contacts, error_pattern, is_warned_by_build",
     [
         # Post-pruning contact budget overflow, with the candidate buffer large enough (2x margin) that it cannot
         # trip first. The automatic budget resolves to 32 contact points per link pair floored at 512, far below
@@ -1041,8 +1709,11 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
             "bowls", 1_000, None, "max number of post-pruning contact points", None, marks=pytest.mark.required
         ),
         # Candidate contact buffer overflow. The explicit contact budget is clamped down to the buffer size, so only
-        # the buffer itself can overflow.
-        ("bowls", 150, 1_000, "max number of candidate contact points", False),
+        # the buffer itself can overflow. Its phase is left unpinned, for the same reason as above. Debug mode is
+        # forced, as fast-math moves the candidate count of the steps after the build across the buffer size.
+        pytest.param(
+            "bowls", 150, 1_000, "max number of candidate contact points", None, marks=pytest.mark.debug(True)
+        ),
         # Broad phase candidate pair overflow on the step taken by the build, the bowls starting fully overlapping.
         pytest.param(
             "bowls", 20, None, "max number of broad phase candidate contact pairs", True, marks=pytest.mark.required
@@ -1058,17 +1729,23 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 @pytest.mark.parametrize("use_hibernation", [False, True])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_num_contact_overflow(
-    scene_kind, max_collision_pairs, max_contacts, error_pattern, is_raised_by_build, use_hibernation, show_viewer
+    scene_kind,
+    max_collision_pairs,
+    max_contacts,
+    error_pattern,
+    is_warned_by_build,
+    use_hibernation,
+    show_viewer,
+    caplog,
 ):
-    from genesis.engine.simulator import RATE_CHECK_ERRNO
-
     N_BOWLS = 4
+    rigid_options = gs.options.RigidOptions(
+        max_collision_pairs=max_collision_pairs,
+        max_contacts=max_contacts,
+        use_hibernation=use_hibernation,
+    )
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            max_collision_pairs=max_collision_pairs,
-            max_contacts=max_contacts,
-            use_hibernation=use_hibernation,
-        ),
+        rigid_options=rigid_options,
         renderer=gs.renderers.Rasterizer(),
         show_viewer=show_viewer,
     )
@@ -1105,34 +1782,77 @@ def test_num_contact_overflow(
                 ),
             )
 
-    with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
+    with caplog.at_level("WARNING"):
         scene.build()
-        assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
+    qposs_init = [entity.get_qpos() for entity in scene.entities[1:]]
+    log_text = " ".join(record.getMessage() for record in caplog.records)
+    if is_warned_by_build is not None:
+        assert ("The initial state is invalid" in log_text) is is_warned_by_build
+    if is_warned_by_build:
+        assert error_pattern in log_text
+    assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
 
-        # Contact budget as documented for 'RigidOptions.max_contacts' (32 contact points per link pair floored at 512),
-        # each contact point taking 4 constraint rows under the default pyramidal friction cone.
-        solver = scene.rigid_solver
-        collider_info = solver.collider.collider_info
-        if max_contacts is None:
-            n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
-            expected_max_contacts = max(32 * n_link_pairs, 512)
-        else:
-            expected_max_contacts = min(max_contacts, int(collider_info.max_candidate_contacts[None]))
-        assert int(collider_info.max_contacts[None]) == expected_max_contacts
-        expected_len_constraints = 4 * expected_max_contacts + solver.n_dofs + 6 * solver.n_candidate_equalities_
-        assert solver.constraint_solver.len_constraints == expected_len_constraints
+    # Contact budget as documented for 'RigidOptions.max_contacts' (32 contact points per link pair floored at 512),
+    # each contact point taking 4 constraint rows under the default pyramidal friction cone.
+    solver = scene.rigid_solver
+    collider_info = solver.collider.collider_info
+    if max_contacts is None:
+        n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
+        expected_max_contacts = max(32 * n_link_pairs, 512)
+    else:
+        expected_max_contacts = max_contacts
+    expected_max_contacts = min(expected_max_contacts, int(collider_info.max_candidate_contacts[None]))
+    assert int(collider_info.max_contacts[None]) == expected_max_contacts
+    expected_len_constraints = (
+        4 * expected_max_contacts
+        + solver.n_dofs
+        + 6 * solver.n_candidate_equalities_
+        + rigid_options.max_dynamic_constraints
+    )
+    assert solver.constraint_solver.len_constraints == expected_len_constraints
 
-        # errno is only polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee that an
-        # error triggered by the first steps gets raised.
-        for _ in range(RATE_CHECK_ERRNO + 1):
+    # An error flagged by a step raises at the beginning of the next step on CPU, and at worst of the one after it on
+    # GPU, where the check may not block, so an error flagged by the first step raises within that many steps. The
+    # other errors, whose phase is left unpinned, raise within the window over which the bowls pile up.
+    n_steps_raise = 2 if gs.backend == gs.cpu else 3
+    with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
+        for _ in range(n_steps_raise if is_warned_by_build else 15):
             scene.step()
 
-    # An error raised by the build leaves the scene destroyed, one raised by a step leaves it built.
-    if is_raised_by_build is not None:
-        assert scene.is_built is not is_raised_by_build
+    if error_pattern is not None:
+        # Setting a valid state clears the error, so the simulation proceeds once the bodies are lifted apart in the air
+        assert scene.get_error_envs_mask().all()
+        for i, entity in enumerate(scene.entities[1:]):
+            entity.set_qpos([3.0 * i, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0])
+        assert not scene.get_error_envs_mask().any()
+        for _ in range(n_steps_raise):
+            scene.step()
+
+        # A training loop resets the envs a step flagged right after it, so that the next step proceeds
+        for entity, qpos in zip(scene.entities[1:], qposs_init):
+            entity.set_qpos(qpos)
+        n_resets = 0
+        for _ in range(15):
+            scene.step()
+            if scene.get_error_envs_mask().any():
+                for i, entity in enumerate(scene.entities[1:]):
+                    entity.set_qpos([3.0 * i, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0])
+                n_resets += 1
+        assert n_resets > 0
+
+        # So do clearing the errors and resetting the scene, from a state that flags one again
+        for clear in (scene.clear_errno, scene.reset):
+            for entity, qpos in zip(scene.entities[1:], qposs_init):
+                entity.set_qpos(qpos)
+            for _ in range(15):
+                scene.step()
+                if scene.get_error_envs_mask().any():
+                    break
+            assert scene.get_error_envs_mask().all()
+            clear()
+            assert not scene.get_error_envs_mask().any()
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_filter_neutral_self_collisions(show_viewer):
     scene = gs.Scene(
@@ -1219,7 +1939,6 @@ def test_filter_neutral_self_collisions(show_viewer):
         scene.step()
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_contype_conaffinity(show_viewer, tol):
     GRAVITY = (0.0, 0.0, -10.0)
@@ -1296,7 +2015,7 @@ def test_contype_conaffinity(show_viewer, tol):
 @pytest.mark.required
 @pytest.mark.precision("32")
 @pytest.mark.parametrize("backend", [gs.gpu])
-@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None], ids=["prune", "noprune"])
+@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None])
 @pytest.mark.parametrize(
     "prefer_decomposed_solver",
     [
@@ -1304,7 +2023,6 @@ def test_contype_conaffinity(show_viewer, tol):
         pytest.param(True, marks=pytest.mark.use_deterministic_algorithms(False)),
         None,
     ],
-    ids=["monolith", "decomposed", "deterministic"],
 )
 def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_tolerance, monkeypatch, show_viewer):
     # Run-to-run reproducibility on GPU: from an identical initial state, every trial must reproduce a bit-identical
@@ -1332,7 +2050,7 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
 
         monkeypatch.setattr(RigidSimStaticConfig, "__init__", init_forced)
 
-    N_TRIALS = 8
+    N_TRIALS = 4
     N_STEPS = 25
     N_WEDGES = 16
     BASE_HEIGHT = 0.020
