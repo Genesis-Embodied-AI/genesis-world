@@ -281,10 +281,14 @@ def _get_gpu_indices():
             if device_count > 0:
                 return tuple(range(device_count))
 
-        warnings.warn(
-            "No GPU backend detected (neither NVML nor AMD SMI); multi-GPU support will be disabled.",
-            stacklevel=2,
-        )
+        # The device nodes of the NVIDIA and AMD ROCm kernel drivers only exist on a machine with a GPU, which tells a
+        # missing management library apart from a CPU-only machine.
+        if any([Path(path).exists() for path in ("/dev/nvidiactl", "/dev/kfd")]):
+            warnings.warn(
+                "GPU detected but no GPU management library available (neither NVML nor AMD SMI); multi-GPU support "
+                "will be disabled.",
+                stacklevel=2,
+            )
 
     return (0,)
 
@@ -387,17 +391,12 @@ def pytest_xdist_auto_num_workers(config):
                 num_gpus = 0
                 vram_memory = float("inf")
 
-    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores.
-    # Note that if `forked` is not enabled, up to 7.5Gb per worker is necessary on Linux because Quadrants
-    # does not completely release memory between each test.
+    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores
     if sys.platform == "darwin":
-        ram_memory_per_worker = vram_memory_per_worker = 3.0
-    elif config.option.forked:
-        ram_memory_per_worker = 5.5
-        vram_memory_per_worker = 1.8
+        ram_memory_per_worker = vram_memory_per_worker = 2.0
     else:
-        ram_memory_per_worker = 7.5
-        vram_memory_per_worker = 2.5
+        ram_memory_per_worker = 3.5
+        vram_memory_per_worker = 1.8
     num_workers = min(
         physical_core_count,
         max(ram_memory / ram_memory_per_worker, 1),

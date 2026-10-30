@@ -929,6 +929,7 @@ def test_thread_crash_reports_traceback():
         assert isinstance(exc_info.value.__cause__, RuntimeError)
         assert "Deliberate viewer thread crash." in str(exc_info.value.__cause__)
     else:
-        # Non-threaded: exception propagates directly through scene.step()
+        # Non-threaded: exception propagates directly through scene.step(), which redraws only once a refresh is due
+        time.sleep(1.0 / scene.viewer.refresh_rate)
         with pytest.raises(RuntimeError, match="Deliberate viewer thread crash."):
             scene.step()

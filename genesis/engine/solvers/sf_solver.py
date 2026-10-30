@@ -57,9 +57,6 @@ class SFSolver(TimeBasedMixin, Solver):
             for q in qd.static(range(self.grid.q.n)):
                 self.grid.q[I][q] = 0.0
 
-    def reset_grad(self):
-        pass
-
     def build(self):
         super().build()
 
@@ -246,9 +243,6 @@ class SFSolver(TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def process_input(self, in_backward):
-        return []
-
     def substep_pre_coupling(self, f):
         self.advect_and_impulse(f, self.t)
         self.divergence()
@@ -269,16 +263,6 @@ class SFSolver(TimeBasedMixin, Solver):
         return
 
     # ------------------------------------------------------------------------------------
-    # ------------------------------------ gradient --------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def collect_output_grads(self):
-        pass
-
-    def add_grad_from_state(self, state):
-        pass
-
-    # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
@@ -286,12 +270,6 @@ class SFSolver(TimeBasedMixin, Solver):
         pass
 
     def set_state(self, f, state, envs_idx=None):
-        pass
-
-    def save_ckpt(self, ckpt_name):
-        pass
-
-    def load_ckpt(self, ckpt_name):
         pass
 
 

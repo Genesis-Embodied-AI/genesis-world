@@ -4,7 +4,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.bvh import func_build_bvh
-from genesis.engine.solvers.rigid.rigid_solver import func_update_all_verts
+from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
 
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths

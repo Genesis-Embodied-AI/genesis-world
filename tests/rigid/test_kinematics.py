@@ -291,8 +291,7 @@ def test_jacobian(gs_sim, tol):
     assert_allclose(J_p[:3, 0], lin_expected, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_joint_get_anchor_pos_and_axis(n_envs):
     scene = gs.Scene(
         show_viewer=False,
@@ -373,8 +372,7 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
     # local_point positions an offset point of the link at the target. The floating-base go2 also exercises the
     # FREE root joint (base translation and orientation degrees of freedom) at a non-zero entity offset.

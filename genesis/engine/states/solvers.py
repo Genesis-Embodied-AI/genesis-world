@@ -89,11 +89,6 @@ class KinematicSolverState:
         self.links_quat = torch.zeros((_B, scene.sim.kinematic_solver.n_links, 4), dtype=gs.tc_float, device=gs.device)
 
     @property
-    def grad_tensors(self):
-        """The tensors of the state that carry gradients."""
-        return (self.qpos, self.dofs_vel, self.links_pos, self.links_quat)
-
-    @property
     def s_global(self):
         return self._s_global
 
@@ -103,47 +98,19 @@ class RigidSolverState:
     Dynamic state queried from a RigidSolver.
     """
 
-    def __init__(self, scene, s_global):
+    def __init__(self, scene, s_global, qpos, dofs_vel, dofs_acc, links_pos, links_quat, friction_ratio):
         self.scene = scene
-
         self._s_global = s_global
-
-        _B = scene.sim.rigid_solver._B
-        self.qpos = torch.zeros((_B, scene.sim.rigid_solver.n_qs), dtype=gs.tc_float, device=gs.device)
-        self.dofs_vel = torch.zeros((_B, scene.sim.rigid_solver.n_dofs), dtype=gs.tc_float, device=gs.device)
-        self.dofs_acc = torch.zeros((_B, scene.sim.rigid_solver.n_dofs), dtype=gs.tc_float, device=gs.device)
-        self.links_pos = torch.zeros((_B, scene.sim.rigid_solver.n_links, 3), dtype=gs.tc_float, device=gs.device)
-        self.links_quat = torch.zeros((_B, scene.sim.rigid_solver.n_links, 4), dtype=gs.tc_float, device=gs.device)
-        self.friction_ratio = torch.ones((_B, scene.sim.rigid_solver.n_geoms), dtype=gs.tc_float, device=gs.device)
-
-    @property
-    def grad_tensors(self):
-        """The tensors of the state that carry gradients."""
-        return (self.qpos, self.dofs_vel, self.dofs_acc, self.links_pos, self.links_quat, self.friction_ratio)
+        self.qpos = qpos
+        self.dofs_vel = dofs_vel
+        self.dofs_acc = dofs_acc
+        self.links_pos = links_pos
+        self.links_quat = links_quat
+        self.friction_ratio = friction_ratio
 
     @property
     def s_global(self):
         return self._s_global
-
-
-class ToolSolverState:
-    """
-    Dynamic state queried from a RigidSolver.
-    """
-
-    def __init__(self, scene):
-        self.scene = scene
-        self.entities = []
-
-    def __len__(self):
-        return len(self.entities)
-
-    def __getitem__(self, index):
-        return self.entities[index]
-
-    # def __repr__(self):
-    #     return f'{_repr(self)}\n' \
-    #            f'entities : {_repr(self.entities)}'
 
 
 class MPMSolverState(RBC):
@@ -151,28 +118,15 @@ class MPMSolverState(RBC):
     Dynamic state queried from a MPMSolver.
     """
 
-    def __init__(self, scene):
+    def __init__(self, scene, pos, vel, C, F, Jp, actu, active):
         self._scene = scene
-        self._pos = torch.zeros(
-            (scene.sim._B, scene.sim.mpm_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._vel = torch.zeros(
-            (scene.sim._B, scene.sim.mpm_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._C = torch.zeros(
-            (scene.sim._B, scene.sim.mpm_solver.n_particles, 3, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._F = torch.zeros(
-            (scene.sim._B, scene.sim.mpm_solver.n_particles, 3, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._Jp = torch.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), dtype=gs.tc_float, device=gs.device)
-        self._actu = torch.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), dtype=gs.tc_float, device=gs.device)
-        self._active = torch.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), dtype=gs.tc_bool, device=gs.device)
-
-    @property
-    def grad_tensors(self):
-        """The tensors of the state that carry gradients."""
-        return (self._pos, self._vel, self._C, self._F, self._Jp)
+        self._pos = pos
+        self._vel = vel
+        self._C = C
+        self._F = F
+        self._Jp = Jp
+        self._actu = actu
+        self._active = active
 
     @property
     def scene(self):
@@ -272,16 +226,10 @@ class PBDSolverState:
 
 
 class FEMSolverState:
-    def __init__(self, scene):
+    def __init__(self, scene, pos, vel):
         self._scene = scene
-        self._pos = torch.zeros((scene.sim._B, scene.sim.fem_solver.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
-        self._vel = torch.zeros((scene.sim._B, scene.sim.fem_solver.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
-        self._active = torch.zeros((scene.sim._B, scene.sim.fem_solver.n_elements), dtype=gs.tc_bool, device=gs.device)
-
-    @property
-    def grad_tensors(self):
-        """The tensors of the state that carry gradients."""
-        return (self._pos, self._vel)
+        self._pos = pos
+        self._vel = vel
 
     @property
     def scene(self):
@@ -294,7 +242,3 @@ class FEMSolverState:
     @property
     def vel(self):
         return self._vel
-
-    @property
-    def active(self):
-        return self._active

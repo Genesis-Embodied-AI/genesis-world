@@ -251,13 +251,35 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         gs.raise_exception(f"'{attr}' holds a {type(value).__name__} where an array, a struct or a scalar stands.")
 
 
-def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> list[DataItem]:
+def iter_state_arrays(
+    struct, path: tuple[str, ...], kind: DataKind | None = None
+) -> Iterator[tuple[tuple[str, ...], qd.Tensor | qd.Field | qd.Ndarray]]:
+    """Yield the quadrants arrays of a struct a step may write, those of no kind INFO or CONSTANT, with their paths.
+
+    A path is 'path' followed by the fields reaching the array. Kinds resolve as in 'iter_data'.
+    """
+    for field in dataclasses.fields(struct):
+        value = getattr(struct, field.name)
+        field_kind = field.metadata.get(KIND, kind)
+        if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
+            if field_kind is None:
+                field_kind = type(struct).kind
+            if field_kind not in (DataKind.INFO, DataKind.CONSTANT):
+                yield (*path, field.name), value
+        elif dataclasses.is_dataclass(value):
+            yield from iter_state_arrays(value, (*path, field.name), field_kind)
+
+
+def check_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
+) -> list[DataItem]:
     """Return the items 'fill_data' writes, rejecting a record made for another scene.
 
     A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may
     differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
     and so does a name on one side only, since the record comes from another build or version. 'maybe_shape' shapes an
-    unused array as (), so an array with that shape on either side stays as built, and is left out.
+    unused array as (), so an array with that shape on either side stays as built, and is left out. With
+    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
     """
     items = tuple(items)
     unshared = sorted({item.name for item in items} ^ set(values))
@@ -271,10 +293,17 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
             is_item_real = dtype.is_floating_point
         elif isinstance(item, ArrayItem):
             array = item.array
-            element_shape = array.element_shape if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)) else ()
+            if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)):
+                element_shape = array.element_shape
+            elif isinstance(array, qd.MatrixField):
+                element_shape = (array.n, array.m)[: array.ndim]
+            else:
+                element_shape = ()
             if tuple(array.shape) == () or tuple(value.shape) == element_shape:
                 continue
             shape, dtype = (*array.shape, *element_shape), array.dtype
+            if frame_only:
+                shape = shape[1:]
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
             scalar = getattr(item.owner, item.attr)
@@ -292,23 +321,42 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
     return writes
 
 
-def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> None:
+def fill_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
+) -> None:
     """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
     record made for another scene leaves the scene as it was.
 
     An array is filled in place, through its zero-copy view where one exists, so that a device-resident record stays on
     the device. On Metal these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once
-    before the next kernel. A scalar is set back as the Python native the host code reading it expects.
+    before the next kernel. A scalar is set back as the Python native the host code reading it expects. With
+    `frame_only`, the frame 0 alone of each array is written (see 'check_data').
     """
-    for item in check_data(items, values):
+    for item in check_data(items, values, frame_only=frame_only):
         value = values[item.name]
         if isinstance(item, ScalarItem):
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
             setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
-        elif isinstance(item.array, torch.Tensor) or gs.use_zerocopy:
-            view = data_to_array(item.array, to_torch=True, copy=False)
+            continue
+        view = None
+        if isinstance(item.array, torch.Tensor):
+            view = item.array
+        elif gs.use_zerocopy.is_supported:
+            try:
+                view = data_to_array(item.array, to_torch=True, copy=False)
+            except ValueError:
+                # A member of a struct field may have no zero-copy view (see 'qd_zero_grad')
+                pass
+        if view is not None:
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
-            view.copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+            (view[0] if frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+        elif frame_only:
+            # Without zero-copy views, the array is written whole, its other frames as they are
+            frames = data_to_array(item.array, to_torch=True, copy=True)
+            frames[0] = value
+            item.array.from_torch(frames)
+        elif isinstance(value, torch.Tensor):
+            item.array.from_torch(value)
         else:
             item.array.from_numpy(value)
 
@@ -325,6 +373,8 @@ class ErrorCode(IntEnum):
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
+    INVALID_GRAD_NAN = 0b00000000000000000000000010000000
+    INVALID_PARTICLE_NAN = 0b00000000000000000000000100000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -1182,7 +1232,9 @@ def get_constraint_state(constraint_solver, solver, collider):
         aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
+        efc_force=V(
+            dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout, needs_grad=solver._requires_grad
+        ),
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
@@ -2394,8 +2446,10 @@ class LinksState:
     crb_mass: qd.Tensor
     cdd_vel: qd.Tensor
     cdd_ang: qd.Tensor
-    pos: qd.Tensor
-    quat: qd.Tensor
+    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
+    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
+    pos: qd.Tensor = of_kind(DataKind.STATE)
+    quat: qd.Tensor = of_kind(DataKind.STATE)
     pos_bw: qd.Tensor
     quat_bw: qd.Tensor
     i_pos: qd.Tensor
@@ -2409,8 +2463,8 @@ class LinksState:
     is_constrained: qd.Tensor
     # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
     # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
-    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated in differentiable
-    # mode only.
+    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated for the dynamic
+    # solvers integrating with the midpoint rule only.
     midpoint_ang: qd.Tensor = of_kind(DataKind.SCRATCH)
     midpoint_res: qd.Tensor = of_kind(DataKind.SCRATCH)
     cd_ang_bw: qd.Tensor
@@ -2424,8 +2478,9 @@ class LinksState:
     cfrc_vel: qd.Tensor
     cfrc_applied_ang: qd.Tensor = of_kind(DataKind.STATE)
     cfrc_applied_vel: qd.Tensor = of_kind(DataKind.STATE)
-    cfrc_coupling_ang: qd.Tensor
-    cfrc_coupling_vel: qd.Tensor
+    # The wrench the couplers accumulate during a substep, which the next substep consumes
+    cfrc_coupling_ang: qd.Tensor = of_kind(DataKind.STATE)
+    cfrc_coupling_vel: qd.Tensor = of_kind(DataKind.STATE)
     contact_force: qd.Tensor
     # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
     # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
@@ -2434,9 +2489,10 @@ class LinksState:
     awake_steps: qd.Tensor = of_kind(DataKind.STATE)
 
 
-def get_links_state(solver):
+def get_links_state(solver, kinematic_only):
     shape = (solver.n_links_, solver._B)
     requires_grad = solver._requires_grad
+    is_midpoint = not kinematic_only and solver.rigid_config.integrator != gs.integrator.Euler
     # The backward joint buffers hold one slot per joint of a link plus the link itself; collapsed when grad is off.
     n_joints_bw = (max(link.n_joints for link in solver.links) + 1) if requires_grad and solver.n_links else 1
     shape_bw = (solver.n_links_, n_joints_bw, solver._B)
@@ -2462,8 +2518,8 @@ def get_links_state(solver):
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),
-        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, requires_grad)),
-        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, requires_grad)),
+        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
+        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
         cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         mass_sum=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
@@ -2976,41 +3032,6 @@ def get_entities_state(solver, is_active=True):
     return EntitiesState(is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_, solver._B) if is_active else ()))
 
 
-# =========================================== RigidAdjointCache ===========================================
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class RigidAdjointCache:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    # This cache stores intermediate values during rigid body simulation to use Quadrants's AD. Quadrants's AD requires
-    # us not to overwrite the values that have been read during the forward pass, so we need to store the intemediate
-    # values in this cache to avoid overwriting them. Specifically, after we compute next frame's qpos, dofs_vel, and
-    # dofs_acc, we need to store them in this cache because we overwrite the values in the next frame. See how
-    # [kernel_save_adjoint_cache] is used in [rigid_solver.py] to store the values in this cache.
-    qpos: qd.Tensor
-    dofs_vel: qd.Tensor
-    dofs_acc: qd.Tensor
-    # The coupling wrench each substep consumes, which the couplers accumulate during the previous one (see
-    # func_integrate). The replay of a substep in the backward pass restores it.
-    links_cfrc_coupling_ang: qd.Tensor
-    links_cfrc_coupling_vel: qd.Tensor
-
-
-def get_rigid_adjoint_cache(solver):
-    substeps_local = solver._sim.substeps_local
-    requires_grad = solver._requires_grad
-
-    qs_shape = maybe_shape((substeps_local + 1, solver.n_qs_, solver._B), requires_grad)
-    dofs_shape = maybe_shape((substeps_local + 1, solver.n_dofs_, solver._B), requires_grad)
-    links_shape = maybe_shape((substeps_local + 1, solver.n_links_, solver._B), requires_grad)
-    return RigidAdjointCache(
-        qpos=V(dtype=gs.qd_float, shape=qs_shape, needs_grad=requires_grad),
-        dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        dofs_acc=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        links_cfrc_coupling_ang=V(dtype=gs.qd_vec3, shape=links_shape),
-        links_cfrc_coupling_vel=V(dtype=gs.qd_vec3, shape=links_shape),
-    )
-
-
 # =========================================== DynInfo and DynState ===========================================
 
 
@@ -3053,20 +3074,6 @@ class DynState:
     fixed_verts: VertsState
     vverts: VVertsState
     vgeoms: VGeomsState
-
-
-def get_dyn_state_adjoint_cache(solver):
-    return DynState(
-        dofs=get_dofs_state(solver),
-        links=get_links_state(solver),
-        joints=get_joints_state(solver),
-        geoms=get_geoms_state(solver),
-        entities=get_entities_state(solver, is_active=False),
-        free_verts=get_free_verts_state(solver, is_active=False),
-        fixed_verts=get_fixed_verts_state(solver, is_active=False),
-        vverts=get_vverts_state(solver, is_active=False),
-        vgeoms=get_vgeoms_state(solver, is_active=False),
-    )
 
 
 # =================================== RigidSimStaticConfig ===================================
@@ -3255,7 +3262,7 @@ class DataManager:
         dofs_info = get_dofs_info(solver)
         dofs_state = get_dofs_state(solver)
         links_info = get_links_info(solver)
-        links_state = get_links_state(solver)
+        links_state = get_links_state(solver, kinematic_only)
         joints_info = get_joints_info(solver)
         joints_state = get_joints_state(solver)
 
@@ -3309,11 +3316,6 @@ class DataManager:
             vgeoms=vgeoms_state,
         )
 
-        if solver.rigid_config.requires_grad:
-            # Data structures required for backward pass
-            self.dyn_state_adjoint_cache = get_dyn_state_adjoint_cache(solver)
-
-        self.rigid_adjoint_cache = get_rigid_adjoint_cache(solver)
         self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
 
         self._solver = solver

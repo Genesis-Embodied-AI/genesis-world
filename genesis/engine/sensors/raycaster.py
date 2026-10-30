@@ -8,8 +8,9 @@ import torch
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.bvh import BVHData, get_bvh_data
-from genesis.engine.solvers.base_solver import StateChange, Subscriber
-from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, kernel_update_all_verts
+from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat

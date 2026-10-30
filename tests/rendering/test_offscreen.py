@@ -845,7 +845,6 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         materials = (
             *materials,
-            (gs.materials.Tool(), "visual"),
             (gs.materials.FEM.Elastic(), "visual"),
             (gs.materials.MPM.Elastic(), particle_mode),
             (gs.materials.PBD.Cloth(), particle_mode),
@@ -1456,8 +1455,10 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     franka.set_dofs_position(dofs_pos)
     scene.step()
 
-    # Capture viewer screenshot when the interactive viewer is enabled
+    # Capture viewer screenshot when the interactive viewer is enabled. The viewer syncs at most once per refresh
+    # period, which the setter right before the step may just have used, so the frame of the step is synced explicitly.
     if force_show_viewer:
+        scene.visualizer.update(force=True)
         pyrender_viewer = scene.visualizer.viewer._pyrender_viewer
         assert pyrender_viewer.is_active
         pyrender_viewer.switch_to()

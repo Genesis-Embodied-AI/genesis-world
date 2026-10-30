@@ -27,7 +27,7 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.utils import array_class
 
-from .mpm_rigid_func import EMPTY_BOX_HALF, particle_stencil
+from .mpm_rigid_func import particle_stencil
 
 # Smallest friction coefficient of a contact row, as Rigid floors its contacts
 MIN_FRICTION = 1e-2
@@ -136,26 +136,21 @@ class FemTriangleQuery:
 def kernel_fit_triangle_leaves(query: qd.template(), f: qd.i32):
     """The box of every surface triangle with the element behind it, so that a particle that penetrated the surface
     element still finds the triangle, grown by the contact thickness and by twice the distance the fastest vertex of
-    the element travels over the substep. An inactive triangle gets an empty box with a finite center, for the morton
-    code."""
+    the element travels over the substep."""
     dt = query.params.substep_dt[()]
     thickness = query.params.fem_contact_thickness[()]
     for i_b, i_s in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
-        if query.fem.surface[i_s].active:
-            lo = gu.qd_vec3(qd.math.inf)
-            hi = gu.qd_vec3(-qd.math.inf)
-            speed = gs.qd_float(0.0)
-            for k in qd.static(range(4)):
-                i_v = query.fem.elements_i[query.fem.surface[i_s].tri2el].el2v[k]
-                lo = qd.min(lo, query.fem.elements_v[f, i_v, i_b].pos)
-                hi = qd.max(hi, query.fem.elements_v[f, i_v, i_b].pos)
-                speed = qd.max(speed, query.fem.elements_v[f, i_v, i_b].vel.norm())
-            margin = thickness + 2.0 * dt * speed
-            query.leaves.aabbs_min[i_b, i_s] = lo - margin
-            query.leaves.aabbs_max[i_b, i_s] = hi + margin
-        else:
-            query.leaves.aabbs_min[i_b, i_s] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            query.leaves.aabbs_max[i_b, i_s] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+        lo = gu.qd_vec3(qd.math.inf)
+        hi = gu.qd_vec3(-qd.math.inf)
+        speed = gs.qd_float(0.0)
+        for k in qd.static(range(4)):
+            i_v = query.fem.elements_i[query.fem.surface[i_s].tri2el].el2v[k]
+            lo = qd.min(lo, query.fem.elements_v[f, i_v, i_b].pos)
+            hi = qd.max(hi, query.fem.elements_v[f, i_v, i_b].pos)
+            speed = qd.max(speed, query.fem.elements_v[f, i_v, i_b].vel.norm())
+        margin = thickness + 2.0 * dt * speed
+        query.leaves.aabbs_min[i_b, i_s] = lo - margin
+        query.leaves.aabbs_max[i_b, i_s] = hi + margin
 
 
 @qd.func

@@ -1,11 +1,10 @@
-import enum
-import functools
-import inspect
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Iterator, Sequence
+from typing import TYPE_CHECKING, NamedTuple, overload
 
 import numpy as np
 import torch
+
+import numba as nb
 
 import quadrants as qd
 
@@ -13,16 +12,22 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
+from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import QueriedStates
+from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     data_to_array,
+    drop_repeated_index,
     indices_to_mask,
+    qd_add_grad,
+    qd_from_torch,
+    qd_to_numpy,
     qd_to_torch,
     sanitize_index,
+    sanitize_indexed_tensor,
     tensor_to_array,
 )
 
@@ -30,169 +35,6 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
-
-
-class StateChange(enum.Enum):
-    """Category of solver scene-state mutation broadcast to subscribers (see `Solver.subscribe`).
-
-    Solver-agnostic: it names what kind of state changed, never an index space (links, dofs, particles, ...), which
-    differs from one solver to the next. GEOMETRY is the kinematic configuration that places or deforms the world
-    surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is the model parameters (mass,
-    inertia, friction, gains, limits, gravity).
-    """
-
-    GEOMETRY = enum.auto()
-    DYNAMICS = enum.auto()
-    MODEL = enum.auto()
-
-
-class MutatedLinks(enum.Enum):
-    """Which links a @mutates-tagged method can affect, consumed by link-filtered subscribers (see Subscriber).
-
-    ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration
-    - a configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom
-    (fixed links move only through explicit base-pose setters, whose reach is their link selection). A method whose
-    reach is an explicit link selection instead declares the name of its links-index argument.
-    """
-
-    ALL = enum.auto()
-    ARTICULATED = enum.auto()
-
-
-def _expand_links_subtree(links_idx: np.ndarray, links_parent_idx: np.ndarray) -> np.ndarray:
-    """Close a set of global link indices over their kinematic subtrees: every descendant of a member is a member.
-
-    Iterates one tree level per pass (a link joins when its parent is a member), so it terminates after at most the
-    tree depth."""
-    is_affected = np.zeros(links_parent_idx.shape[0], dtype=bool)
-    is_affected[links_idx] = True
-    has_parent = links_parent_idx >= 0
-    while True:
-        is_expanded = is_affected.copy()
-        is_expanded[has_parent] |= is_affected[links_parent_idx[has_parent]]
-        if (is_expanded == is_affected).all():
-            return np.flatnonzero(is_affected)
-        is_affected = is_expanded
-
-
-def mutates(
-    *changes: StateChange, links: str | MutatedLinks = MutatedLinks.ALL
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Tag a solver state-mutating method with the StateChange categories it produces (one method may produce several,
-    e.g. set_state changes both GEOMETRY and DYNAMICS).
-
-    Notification is deferred to the outermost tagged call: a setter that internally calls other tagged setters fires a
-    single notification per StateChange that occurred, when the outermost call returns, rather than one per nested
-    call. The outermost call's `envs_idx` (None meaning all envs) is forwarded. Untagged methods, reads included, never
-    notify, so a subscriber only ever wakes on a genuine mutation.
-
-    `links` declares which links the method can affect, so link-filtered subscribers can drop notifications that
-    cannot concern them: the name of the argument holding the targeted global link indices (e.g. "links_idx") - the
-    reach then closes over their kinematic subtrees, since forward kinematics carries a new pose to every descendant,
-    fixed children included - MutatedLinks.ARTICULATED for configuration-space setters, or MutatedLinks.ALL when any
-    link may change. Nested tagged calls union their mutated links, an unbounded reach absorbing the rest.
-    """
-    triggered = frozenset(changes)
-
-    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-        signature = inspect.signature(method)
-
-        def resolve_mutated_links_idx(self: "Solver", bound_arguments) -> np.ndarray | None:
-            if links is MutatedLinks.ARTICULATED:
-                return self._articulated_links_idx
-            if links is MutatedLinks.ALL:
-                return None
-            links_idx = bound_arguments.get(links)
-            if links_idx is None or self._links_parent_idx is None:
-                # The setter substitutes its own default selection (potentially reaching any link), or the solver
-                # exposes no kinematic structure to close the reach over: stay unbounded.
-                return None
-            # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor);
-            # the reach set lives host-side, where the subscriber filters compare.
-            links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
-            return _expand_links_subtree(links_idx, self._links_parent_idx)
-
-        @functools.wraps(method)
-        def wrapper(self: "Solver", *args: Any, **kwargs: Any) -> Any:
-            if not self._subscribers:
-                return method(self, *args, **kwargs)
-            bound_arguments = signature.bind(self, *args, **kwargs).arguments
-            mutated_links_idx = resolve_mutated_links_idx(self, bound_arguments)
-            if self._is_mutating:
-                # Nested tagged call: record the changes and mutated links, let the outermost call do the single
-                # notification.
-                self._mutation_changes |= triggered
-                if self._mutation_links_idx_list is not None:
-                    if mutated_links_idx is None:
-                        self._mutation_links_idx_list = None
-                    else:
-                        self._mutation_links_idx_list.append(mutated_links_idx)
-                return method(self, *args, **kwargs)
-            self._is_mutating = True
-            self._mutation_changes = set(triggered)
-            self._mutation_links_idx_list = None if mutated_links_idx is None else [mutated_links_idx]
-            try:
-                result = method(self, *args, **kwargs)
-            finally:
-                self._is_mutating = False
-            envs_idx = bound_arguments.get("envs_idx")
-            links_idx = None
-            if self._mutation_links_idx_list is not None:
-                links_idx = np.concatenate(self._mutation_links_idx_list)
-            for subscriber in self._subscribers:
-                if not subscriber.is_watching(links_idx):
-                    continue
-                for changed in self._mutation_changes & subscriber.to:
-                    if subscriber.callback is None:
-                        subscriber._pending.add(changed)
-                    else:
-                        subscriber.callback(changed, envs_idx)
-            return result
-
-        return wrapper
-
-    return decorator
-
-
-class Subscriber:
-    """A unique handle for the solver state changes whose category is in `to`.
-
-    A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
-    construction by whether a callback is given:
-      - eager (callback given): each matching change immediately calls callback(change, envs_idx);
-      - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
-        that rebuilds a cache on its next update rather than on every set_pos.
-
-    `links_filter` (global link indices, normalized by Solver.subscribe) restricts the subscription to changes that
-    can affect those links: a notification whose mutated links (see mutates) are disjoint from the filter is dropped;
-    a notification with an unbounded reach always passes.
-    """
-
-    def __init__(
-        self,
-        to: frozenset[StateChange],
-        callback: Callable[[StateChange, object], None] | None = None,
-        links_filter: "np.typing.ArrayLike | None" = None,
-    ):
-        self.to = to
-        self.callback = callback
-        self.links_filter = links_filter
-        self._pending: set[StateChange] = set()
-
-    def is_watching(self, links_idx: np.ndarray | None) -> bool:
-        """Whether a change affecting `links_idx` (None meaning possibly any link) concerns this subscriber."""
-        if self.links_filter is None or links_idx is None:
-            return True
-        return bool(np.isin(links_idx, self.links_filter).any())
-
-    @property
-    def pending(self) -> frozenset[StateChange]:
-        """Categories accumulated since the last clear() (always empty in eager mode)."""
-        return frozenset(self._pending)
-
-    def clear(self):
-        """Drop the accumulated changes, once they have been handled."""
-        self._pending.clear()
 
 
 class TimeBasedMixin:
@@ -228,6 +70,48 @@ class TimeBasedMixin:
     def substeps(self):
         """The number of times this solver integrates per scene step."""
         return self._substeps
+
+    @property
+    def n_frames(self):
+        """
+        The number of frames of substeps the solver holds.
+
+        A solver holding its state in frames keeps those of one step with gradients, whose backward pass replays it
+        whole, and those of one substep otherwise (see 'Solver.has_frames').
+        """
+        return self._substeps + 1 if self._requires_grad else 2
+
+
+@nb.jit(nopython=True, cache=True)
+def merge_errno(errno_out: np.ndarray, errno_in: np.ndarray) -> int:
+    """
+    Add the error flags of each env in `errno_in` to `errno_out` in place, and return the union of `errno_out`.
+
+    It merges the flags of a solver on CPU at the end of every step in one pass (see 'Solver.update_errno').
+    """
+    flags = 0
+    for i_b in range(errno_out.shape[0]):
+        errno_out[i_b] |= errno_in[i_b]
+        flags |= errno_out[i_b]
+    return flags
+
+
+class BoundaryItems(NamedTuple):
+    """The items a boundary checkpoint holds, listed once by the solver (see 'Solver.save_checkpoint')."""
+
+    # Every item the checkpoint holds
+    items: list[array_class.DataItem]
+    # The names of the arrays copied at once, in the order of their views
+    names: list[str]
+    # The zero-copy views of the arrays copied at once
+    views: list[torch.Tensor]
+    # The items copied one by one: the scalars, and the arrays without a view
+    items_copied: list[array_class.DataItem]
+    # The zero-copy views of the gradients of the arrays, which a backward pass checks at every step, the environment
+    # first with a trailing axis that gives every view one to reduce over
+    grads: list[torch.Tensor]
+    # The items whose gradient has no view, copied at every check
+    items_grad_copied: list[array_class.ArrayItem]
 
 
 class GravityMixin:
@@ -317,6 +201,12 @@ class GravityMixin:
 class Solver(RBC):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
+    # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
+    is_differentiable: bool = False
+    # Whether the solver holds its state in frames, one per substep of a window of them (see 'n_frames'), frame 0
+    # holding the state between two steps. The simulator copies the last frame into frame 0 at the end of each
+    # window ('copy_frame'), and a boundary checkpoint holds frame 0 alone.
+    has_frames: bool = False
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
@@ -325,8 +215,13 @@ class Solver(RBC):
         self._options = options
         self._entities: list[Entity] = gs.List()
 
-        # The solver states queried during the current rollout, registered by 'get_state' (see QueriedStates)
-        self._queried_states = QueriedStates(sim)
+        # Whether the state of the solver tracks gradients, and the autograd graph of the simulator recording them
+        self._requires_grad: bool = sim.options.requires_grad
+        self._rollout_graph: RolloutGraph = sim._rollout_graph
+
+        # The items and views of the boundary checkpoints, built by the first one, which comes after the build, and
+        # valid from then on since the arrays are never reallocated, which spares walking the structs at every step
+        self._boundary_items: BoundaryItems | None = None
 
         # force fields
         self._ffs = list()
@@ -345,6 +240,18 @@ class Solver(RBC):
         self._articulated_links_idx: np.ndarray | None = None
         self._links_parent_idx: np.ndarray | None = None
 
+        # The error flags the kernels of the solver write, the message raised for each, and the flags accumulated from
+        # them and from the backward pass since the last reset of each env (see 'register_errors')
+        self._errno: "qd.Tensor | None" = None
+        self._error_messages: dict[int, str] = {}
+        self._errno_latched: torch.Tensor | None = None
+        # The page-locked host copy of '_errno_latched' a non-blocking check reads, and the event recorded once it
+        # landed (see 'check_errno')
+        self._errno_host: torch.Tensor | None = None
+        self._errno_event: "torch.cuda.Event | None" = None
+        # The context of the check that enqueued the copy 'check_errno' reads next
+        self._errno_host_context: str | None = None
+
     def _add_force_field(self, force_field):
         self._ffs.append(force_field)
 
@@ -356,31 +263,292 @@ class Solver(RBC):
             )
         self._subscribers.add(subscriber)
 
+    def register_errors(self, errno: qd.Tensor, messages: dict[int, str]) -> None:
+        """
+        Declare the error flags the kernels of the solver write per env, one bit per error, and the message of each.
+
+        `errno` is an array of the solver, which the base solver references. 'check_errno' raises the message of the
+        first flagged error, in the order of `messages`. It reads `_errno_latched`, the union of every flag `errno` held
+        since the last reset of each env, which no restore of the state rewinds (see 'update_errno'), so a solver clears
+        the flags of some envs through 'clear_errno'. The flags of the backward pass come after those of `messages`
+        (see 'StepOperation.backward').
+        """
+        # Each error owns its bit, those of the backward pass included
+        assert not messages.keys() & self._error_messages.keys(), f"{type(self).__name__} reuses a reserved error bit."
+        self._errno = errno
+        self._error_messages = {**messages, **self._error_messages}
+
+    def update_errno(self) -> None:
+        """
+        Add the error flags `errno` holds to those the solver raises, '_errno_latched'.
+
+        A step calls this once it is over, so that 'check_errno' and 'get_error_envs_mask' read '_errno_latched' alone.
+        A backward pass restores `errno` with the state before reversing each step, so it calls this once before its
+        first restore and after reversing each step.
+        """
+        if self._errno is None:
+            return
+        # On CPU, numpy views of both share their memory, which spares a torch operation
+        if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
+            merge_errno(self._errno_latched.numpy(), qd_to_numpy(self._errno, copy=False))
+        else:
+            self._errno_latched |= qd_to_torch(self._errno)
+
+    def get_error_envs_mask(self) -> torch.Tensor:
+        """Return whether each env flagged an error since its last reset (see 'register_errors')."""
+        return self._errno_latched > 0
+
+    def flag_errno(self, code: int, envs_idx=None) -> None:
+        """Flag the given error for the given envs, all of them if None, which 'check_errno' then raises."""
+        # The flags of every env are updated through a mask, rather than those of the selected envs alone: indexing by a
+        # boolean mask makes torch count the envs it selects to size the result, which waits for the device, and the
+        # backward pass flags envs after reversing every step (see 'StepOperation.backward')
+        envs_mask = torch.zeros_like(self._errno_latched, dtype=torch.bool)
+        envs_mask[indices_to_mask(envs_idx)] = True
+        self._errno_latched |= torch.where(envs_mask, code, 0)
+
+    def clear_errno(self, envs_idx=None) -> None:
+        """Clear the errors the solver flagged for the given envs, all of them if None (see 'register_errors')."""
+        envs_mask = indices_to_mask(envs_idx)
+        if self._errno is not None:
+            if gs.use_zerocopy:
+                errno = qd_to_torch(self._errno, copy=False)
+                errno[envs_mask] = 0
+                if gs.backend == gs.metal:
+                    torch.mps.synchronize()
+            else:
+                errno = qd_to_torch(self._errno, copy=True)
+                errno[envs_mask] = 0
+                qd_from_torch(self._errno, errno)
+        self._errno_latched[envs_mask] = 0
+
+    def check_errno(self, blocking: bool = True, *, context: str | None = None) -> None:
+        """
+        Raise on the first error the solver flagged since the last reset of each env (see 'register_errors').
+
+        Without `blocking` on CUDA, the flags are copied to page-locked host memory without waiting for the device, and
+        the copy the previous call enqueued is checked instead: an error raises one call later, with the context of the
+        call that enqueued it, and the host only waits for the device when it runs ahead of it by more than the interval
+        between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
+        `context` says where the check runs, ahead of the message.
+        """
+        if not self._error_messages:
+            return
+        if not blocking and self._errno_host is not None:
+            self._errno_event.synchronize()
+            errno = np.bitwise_or.reduce(self._errno_host.numpy())
+            context, self._errno_host_context = self._errno_host_context, context
+            # The flags stay raised on the device until a reset, so a copy that raises is cleared rather than renewed,
+            # which spares raising it again once a valid state is set
+            if errno:
+                self._errno_host.zero_()
+            else:
+                self._errno_host.copy_(self._errno_latched, non_blocking=True)
+                self._errno_event.record()
+        else:
+            errno = np.bitwise_or.reduce(tensor_to_array(self._errno_latched))
+            if context is None:
+                context = self._errno_host_context
+            self._errno_host_context = None
+        if not errno:
+            return
+        for code, message in self._error_messages.items():
+            if errno & code:
+                gs.raise_exception(message if context is None else f"{context}: {message}")
+
+    def _sanitize_io_variables(
+        self,
+        tensor,
+        inputs_idx,
+        input_size,
+        idx_name,
+        envs_idx=None,
+        element_shape=(),
+        *,
+        dtype=None,
+        batched=True,
+        batched_idx=False,
+        skip_allocation=False,
+        accumulate=False,
+    ):
+        """
+        Sanitize the indices of the entries of a state a getter reads or a setter writes, and the values written.
+
+        The values are floating unless `dtype` says otherwise. `inputs_idx` is shared by every env. With `batched_idx`,
+        for kernels indexing them per env, the indices are returned with a leading env dimension, whatever the number
+        of envs: indices shared by every env are repeated for each of them (`[3, 7]` becomes `[[3, 7], [3, 7]]` for two
+        envs, `3` becomes `[[3], [3]]`), while a nested sequence holds one row of indices per env (`[[3, 7], [1, 2]]`
+        selects the entries 3 and 7 in the first env, 1 and 2 in the second). The values are returned the same way.
+
+        A write keeps the last occurrence of an index given several times and its values, which is the state writing
+        them in turn leaves (see 'drop_repeated_index'): in a row of indices per env, an earlier occurrence becomes -1,
+        which the kernels skip. A write adding its values to the state (`accumulate`) keeps every occurrence, so that
+        the values of a repeated index add up.
+        """
+        if dtype is None:
+            dtype = gs.tc_float
+        n_envs = self._scene.n_envs
+        is_overwrite = tensor is not None and not accumulate
+        envs_idx_ = self._scene._sanitize_envs_idx(envs_idx) if batched else self._scene._envs_idx[:0]
+
+        if batched and batched_idx and np.ndim(inputs_idx) == 2:
+            dim_names = ("envs_idx", idx_name, *["" for _ in element_shape])
+            inputs_idx_ = broadcast_tensor(inputs_idx, gs.tc_int, (len(envs_idx_), -1), dim_names[:2]).contiguous()
+            # Negative indices wrap as in sanitize_index, before the repeated ones are dropped
+            is_valid_negative = (-input_size <= inputs_idx_) & (inputs_idx_ < 0)
+            inputs_idx_ = torch.where(is_valid_negative, inputs_idx_ + input_size, inputs_idx_)
+            tensor_ = None
+            if tensor is not None or not skip_allocation:
+                tensor_shape = (*inputs_idx_.shape, *element_shape)
+                tensor_ = broadcast_tensor(tensor, dtype, tensor_shape, dim_names).contiguous()
+            if is_overwrite:
+                envs_idx_, (tensor_, inputs_idx_) = drop_repeated_index(
+                    envs_idx, envs_idx_, (tensor_, inputs_idx_), axis=0, max_size=n_envs
+                )
+                inputs_idx_, (tensor_,) = drop_repeated_index(inputs_idx, inputs_idx_, (tensor_,), 1, input_size)
+            return tensor_, inputs_idx_, envs_idx_
+
+        if n_envs == 0 or not batched:
+            tensor_, (inputs_idx_,) = sanitize_indexed_tensor(
+                tensor,
+                dtype,
+                (inputs_idx,),
+                (-1, *element_shape),
+                (input_size, *element_shape),
+                (idx_name, *["" for _ in element_shape]),
+                skip_allocation=skip_allocation,
+            )
+        else:
+            tensor_, (envs_idx_, inputs_idx_) = sanitize_indexed_tensor(
+                tensor,
+                dtype,
+                (envs_idx_, inputs_idx),
+                (-1, -1, *element_shape),
+                (n_envs, input_size, *element_shape),
+                ("envs_idx", idx_name, *["" for _ in element_shape]),
+                skip_allocation=skip_allocation,
+            )
+            if is_overwrite:
+                envs_idx_, (tensor_,) = drop_repeated_index(envs_idx, envs_idx_, (tensor_,), axis=0, max_size=n_envs)
+        if is_overwrite:
+            axis = 1 if n_envs > 0 and batched else 0
+            inputs_idx_, (tensor_,) = drop_repeated_index(inputs_idx, inputs_idx_, (tensor_,), axis, input_size)
+
+        if batched_idx:
+            inputs_idx_ = inputs_idx_.expand(len(envs_idx_), -1).contiguous()
+            if tensor_ is not None and n_envs == 0:
+                tensor_ = tensor_[None]
+        return tensor_, inputs_idx_, envs_idx_
+
     def build(self):
         self._B = self._sim._B
+        self._errno_latched = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
+        if gs.device.type == "cuda":
+            self._errno_host = torch.zeros((self._B,), dtype=gs.tc_int, pin_memory=True)
+            self._errno_event = torch.cuda.Event()
+        if self._requires_grad:
+            self._error_messages[array_class.ErrorCode.INVALID_GRAD_NAN] = (
+                "The backward pass produced a 'nan' or 'inf' gradient of the state. The rollout is likely too stiff to "
+                "differentiate over this horizon: shorten it, or decrease the simulation timestep."
+            )
 
-    def process_input(self, in_backward=False):
+    # ------------------------------------------------------------------------------------
+    # ------------------------------ differentiable simulation ---------------------------
+    # ------------------------------------------------------------------------------------
+
+    # The protocol a solver implements to take part in a differentiable scene. The simulator calls it on every active
+    # solver alone, so a solver of any origin becomes differentiable by implementing it, and the defaults below fit a
+    # solver holding no differentiable state.
+
+    @property
+    def requires_grad(self) -> bool:
         """
-        Apply the inputs the entities taped for the coming step.
+        Whether the state of the solver tracks gradients.
 
-        Returns the inputs applied, of any type, for the simulator to tape on the step.
+        In a scene with `requires_grad`, the state of every solver does, but those whose state stays outside the
+        autograd graph (see 'KinematicSolver').
         """
-        return [value for entity in self._entities for value in entity.process_input(in_backward=in_backward)]
+        return self._requires_grad
 
-    def process_input_grad(self):
+    @property
+    def is_recording(self) -> bool:
         """
-        Run the reverse pass of the inputs the entities applied at the current step.
+        Whether the operations on the state of the solver are recorded in the autograd graph of the rollout right now.
 
-        Returns the pairs (input, gradient) of those that track gradients.
+        They are while the solver tracks gradients ('requires_grad') and the graph records, which it stops doing under
+        `torch.no_grad` and while a step replays its kernels for its backward pass (see 'RolloutGraph.is_recording').
         """
-        return [pair for entity in reversed(self._entities) for pair in entity.process_input_grad()]
+        return self._requires_grad and self._rollout_graph.is_recording
 
-    def collect_output_grads(self):
-        """Hand the gradients of the states queried at the current step to the solver, then to its entities."""
-        for state in self._queried_states.get(self._sim.cur_step_global):
-            self.add_grad_from_state(state)
-        for entity in self._entities:
-            entity.collect_output_grads()
+    def record_read(self, tensors: tuple[torch.Tensor, ...], selection) -> None:
+        """
+        Record the query of the given tensors of a state as one operation of the rollout, while it is recorded (see
+        ReadOperation).
+
+        `selection` names the state the tensors cover, which 'add_grad_from_state' interprets.
+        """
+        if self.is_recording:
+            self._rollout_graph.record_read(self, tensors, selection)
+
+    @overload
+    def _read_data(
+        self, data: qd.Tensor | qd.Field | qd.Ndarray, envs_idx, idx, *, copy: bool | None = None
+    ) -> torch.Tensor: ...
+
+    @overload
+    def _read_data(
+        self, data: Sequence[qd.Tensor | qd.Field | qd.Ndarray], envs_idx, idx, *, copy: bool | None = None
+    ) -> list[torch.Tensor]: ...
+
+    def _read_data(self, data, envs_idx, idx, *, copy=None):
+        """
+        Read the given slots of one array of the solver, or of several, in the layout of the getters ('qd_to_torch').
+
+        `data` is one array, read as one tensor, or a sequence of them, read as a list of tensors, whatever their kind
+        (state, info). A solver holding its state in frames is given arrays held in frames, read from frame 0, which
+        holds the state between two steps (see 'has_frames'). `copy` is
+        passed on to 'qd_to_torch': a getter returning what it reads asks for a copy, since a getter returns by value.
+        While the operations of the solver are recorded, the read is one operation of the rollout whose outputs are
+        copies of the whole arrays, which a later step leaves untouched, and from which torch selects the slots (see
+        'record_read').
+        """
+        is_single = isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray))
+        fields = (data,) if is_single else tuple(data)
+        copy = True if self.is_recording else copy
+        if self.has_frames:
+            tensors = [qd_to_torch(field, row_mask=0, keepdim=False).movedim(1, 0) for field in fields]
+            if copy:
+                tensors = [tensor.clone(memory_format=torch.contiguous_format) for tensor in tensors]
+        elif self.is_recording:
+            tensors = [qd_to_torch(field, transpose=True, copy=True) for field in fields]
+        else:
+            tensors = [qd_to_torch(field, envs_idx, idx, transpose=True, copy=copy) for field in fields]
+        if self.is_recording:
+            self.record_read(tuple(tensors), fields)
+        if self.has_frames or self.is_recording:
+            mask = indices_to_mask(envs_idx, idx)
+            tensors = [tensor[mask] for tensor in tensors]
+        return tensors[0] if is_single else tensors
+
+    def add_grad_from_state(self, grads, selection) -> None:
+        """
+        Add the gradients of the tensors of a queried state to the adjoint of the state of the solver.
+
+        By default, `selection` holds the fields the tensors are, each read whole in the layout of the getters, from
+        frame 0 for a solver holding its state in frames (see '_read_data').
+        """
+        for field, grad in zip(selection, grads):
+            # A field with no entry keeps one padding slot, to which no gradient goes
+            if grad is not None and grad.numel() > 0:
+                if self.has_frames:
+                    qd_add_grad(field, grad.movedim(0, 1), row=0)
+                else:
+                    qd_add_grad(field, grad)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
+
+    def reset_grad(self) -> None:
+        """Zero the adjoint of the state of the solver, from which a backward pass starts."""
 
     @property
     def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
@@ -389,33 +557,130 @@ class Solver(RBC):
         """
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-    def __getstate__(self) -> SolverCheckpoint:
-        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore.
+    def save_checkpoint(
+        self, kinds: frozenset[array_class.DataKind], *, boundary_only: bool = False
+    ) -> SolverCheckpoint:
+        """
+        Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
 
-        The state is what 'data' yields of the kinds a checkpoint carries (see 'CHECKPOINT_KINDS'), copied where it
-        lives: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
-        process off the host, and as numpy arrays otherwise.
+        The arrays are what 'data' yields of those kinds. A full checkpoint copies them with their gradients where they
+        live: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
+        process off the host, and as numpy arrays otherwise. A boundary checkpoint holds the state at the boundary of
+        two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame 0 of the arrays
+        holding frames, on the device whatever the backend.
         """
         arrays = {}
+        if boundary_only:
+            if self._boundary_items is None:
+                # The gradients ('iter_data' names each one after its array) and the placeholders of the features
+                # switched off (see 'ArrayItem') hold nothing a replay reads
+                self._boundary_items = BoundaryItems(
+                    items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
+                )
+                grad_names = set()
+                for item in self.data:
+                    if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
+                        continue
+                    if isinstance(item, array_class.ArrayItem):
+                        is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
+                        if item.name in grad_names or is_placeholder:
+                            continue
+                        if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
+                            grad_names.add(f"{item.name}.grad")
+                            grad = None
+                            if gs.use_zerocopy.is_supported:
+                                try:
+                                    grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
+                                except ValueError:
+                                    # See 'fill_data'
+                                    pass
+                            if grad is None:
+                                self._boundary_items.items_grad_copied.append(item)
+                            else:
+                                self._boundary_items.grads.append(grad[..., None])
+                    self._boundary_items.items.append(item)
+                    if isinstance(item, array_class.ScalarItem) or not gs.use_zerocopy.is_supported:
+                        self._boundary_items.items_copied.append(item)
+                        continue
+                    if isinstance(item.array, torch.Tensor):
+                        view = item.array
+                    else:
+                        try:
+                            if self.has_frames:
+                                view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
+                            else:
+                                view = qd_to_torch(item.array, copy=False)
+                        except ValueError:
+                            # A member of a struct field may have no zero-copy view (see 'fill_data')
+                            self._boundary_items.items_copied.append(item)
+                            continue
+                    self._boundary_items.names.append(item.name)
+                    self._boundary_items.views.append(view)
+            if self._boundary_items.views:
+                # One fused copy of every array with a view, rather than one launch each
+                copies = [torch.empty_like(view) for view in self._boundary_items.views]
+                # The views read the arrays as the last kernel left them once it is done (see qd_to_torch)
+                if gs.backend == gs.metal:
+                    qd.sync()
+                torch._foreach_copy_(copies, self._boundary_items.views)
+                # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
+                if gs.backend == gs.metal:
+                    torch.mps.synchronize()
+                arrays.update(zip(self._boundary_items.names, copies))
+            items = self._boundary_items.items_copied
+        else:
+            items = [item for item in self.data if not isinstance(item, array_class.ConfigItem) and item.kind in kinds]
+        for item in items:
+            if isinstance(item, array_class.ScalarItem):
+                arrays[item.name] = np.array(getattr(item.owner, item.attr))
+            elif boundary_only and self.has_frames:
+                arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
+            else:
+                arrays[item.name] = data_to_array(
+                    item.array, to_torch=boundary_only or gs.use_zerocopy.is_supported, copy=True
+                )
+        # The static configs are provenance, which a boundary checkpoint never leaving the process does without
         configs = {}
-        for item in self.data:
-            if isinstance(item, array_class.ConfigItem):
-                configs[item.name] = item.config
-            elif item.kind in array_class.CHECKPOINT_KINDS:
-                if isinstance(item, array_class.ScalarItem):
-                    arrays[item.name] = np.array(getattr(item.owner, item.attr))
-                else:
-                    arrays[item.name] = data_to_array(item.array, to_torch=gs.use_zerocopy, copy=True)
-        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=array_class.CHECKPOINT_KINDS)
+        if not boundary_only:
+            configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
+        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
+
+    def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
+        """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
+
+        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint.
+
+        Nothing is notified to the subscribers (see 'mutates'). A solver whose step reads a DERIVED array before
+        recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
+        'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+        """
+        if boundary_only:
+            # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them
+            # in this process, which spares checking them against the scene
+            if self._boundary_items.views:
+                # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
+                if gs.backend == gs.metal:
+                    qd.sync()
+                values = [checkpoint.arrays[name] for name in self._boundary_items.names]
+                torch._foreach_copy_(self._boundary_items.views, values)
+            items = self._boundary_items.items_copied
+            arrays = {item.name: checkpoint.arrays[item.name] for item in items}
+        else:
+            items = [
+                item
+                for item in self.data
+                if not isinstance(item, array_class.ConfigItem) and item.kind in checkpoint.kinds
+            ]
+            arrays = checkpoint.arrays
+        array_class.fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
+
+    def __getstate__(self) -> SolverCheckpoint:
+        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
+        return self.save_checkpoint(array_class.CHECKPOINT_KINDS)
 
     def __setstate__(self, state: SolverCheckpoint) -> None:
-        """Write back the arrays of the kinds a record holds, rejecting a record read from another build.
-
-        A solver whose step reads a DERIVED array before recomputing it overrides this to recompute or invalidate that
-        array when the record lacks DERIVED (see 'DataKind').
-        """
-        items = (item for item in self.data if isinstance(item, array_class.DataItem) and item.kind in state.kinds)
-        array_class.fill_data(items, state.arrays)
+        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
+        self.load_checkpoint(state)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

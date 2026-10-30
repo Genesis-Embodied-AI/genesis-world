@@ -30,7 +30,7 @@ import zstandard
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import StateChange, Subscriber
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization

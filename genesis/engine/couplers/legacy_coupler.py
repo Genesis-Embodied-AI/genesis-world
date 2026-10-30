@@ -32,7 +32,6 @@ class LegacyCoupler(RBC):
         self.sim = simulator
         self.options = options
 
-        self.tool_solver = self.sim.tool_solver
         self.rigid_solver = self.sim.rigid_solver
         self.mpm_solver = self.sim.mpm_solver
         self.sph_solver = self.sim.sph_solver
@@ -291,55 +290,74 @@ class LegacyCoupler(RBC):
     ):
         # TODO: all collisions are on vertices instead of surface and edge
         for i_s, i_b in qd.ndrange(self.fem_solver.n_surfaces, self.fem_solver._B):
-            if self.fem_solver.surface[i_s].active:
-                dt = self.fem_solver.substep_dt
-                iel = self.fem_solver.surface[i_s].tri2el
-                mass = self.fem_solver.elements_i[iel].mass_scaled / self.fem_solver.vol_scale
+            dt = self.fem_solver.substep_dt
+            iel = self.fem_solver.surface[i_s].tri2el
+            mass = self.fem_solver.elements_i[iel].mass_scaled / self.fem_solver.vol_scale
 
-                p1 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[0], i_b].pos
-                p2 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[1], i_b].pos
-                p3 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[2], i_b].pos
-                u = p2 - p1
-                v = p3 - p1
-                surface_normal = qd.math.cross(u, v)
-                surface_normal = surface_normal / surface_normal.norm(gs.EPS)
+            p1 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[0], i_b].pos
+            p2 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[1], i_b].pos
+            p3 = self.fem_solver.elements_v[f, self.fem_solver.surface[i_s].tri2v[2], i_b].pos
+            u = p2 - p1
+            v = p3 - p1
+            surface_normal = qd.math.cross(u, v)
+            surface_normal = surface_normal / surface_normal.norm(gs.EPS)
 
-                # FEM <-> Rigid
-                if qd.static(self._rigid_fem):
-                    # NOTE: collision only on surface vertices
-                    for j in qd.static(range(3)):
-                        iv = self.fem_solver.surface[i_s].tri2v[j]
-                        vel_fem_sv = self._func_collide_with_rigid(
-                            f,
-                            self.fem_solver.elements_v[f, iv, i_b].pos,
-                            self.fem_solver.elements_v[f + 1, iv, i_b].vel,
-                            mass / 3.0,  # assume element mass uniformly distributed to vertices
-                            i_b,
-                            geoms_state,
-                            geoms_info,
-                            links_state,
-                            rigid_info,
-                            sdf_info,
-                            collider_static_config,
-                        )
-                        self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
+            # FEM <-> Rigid
+            if qd.static(self._rigid_fem):
+                # NOTE: collision only on surface vertices
+                for j in qd.static(range(3)):
+                    iv = self.fem_solver.surface[i_s].tri2v[j]
+                    vel_fem_sv = self._func_collide_with_rigid(
+                        f,
+                        self.fem_solver.elements_v[f, iv, i_b].pos,
+                        self.fem_solver.elements_v[f + 1, iv, i_b].vel,
+                        mass / 3.0,  # assume element mass uniformly distributed to vertices
+                        i_b,
+                        geoms_state,
+                        geoms_info,
+                        links_state,
+                        rigid_info,
+                        sdf_info,
+                        collider_static_config,
+                    )
+                    self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
 
-                # FEM <-> SPH TODO: this doesn't work well
-                if qd.static(self._fem_sph):
-                    for j in qd.static(range(3)):
-                        iv = self.fem_solver.surface[i_s].tri2v[j]
-                        pos = self.fem_solver.elements_v[f, iv, i_b].pos
-                        vel_fem_sv = self.fem_solver.elements_v[f + 1, iv, i_b].vel
-                        mass_fem_sv = mass / 4.0
+            # FEM <-> SPH TODO: this doesn't work well
+            if qd.static(self._fem_sph):
+                for j in qd.static(range(3)):
+                    iv = self.fem_solver.surface[i_s].tri2v[j]
+                    pos = self.fem_solver.elements_v[f, iv, i_b].pos
+                    vel_fem_sv = self.fem_solver.elements_v[f + 1, iv, i_b].vel
+                    mass_fem_sv = mass / 4.0
 
-                        dx = self.sph_solver.hash_grid_cell_size  # self._dx
-                        stencil_size = 2  # self._stencil_size
+                    dx = self.sph_solver.hash_grid_cell_size  # self._dx
+                    stencil_size = 2  # self._stencil_size
 
-                        base = self.sph_solver.sh.pos_to_grid(pos - 0.5 * dx)
+                    base = self.sph_solver.sh.pos_to_grid(pos - 0.5 * dx)
 
-                        # ---------- SPH -> FEM ----------
-                        sph_vel = qd.Vector([0.0, 0.0, 0.0])
-                        colliding_particles = 0
+                    # ---------- SPH -> FEM ----------
+                    sph_vel = qd.Vector([0.0, 0.0, 0.0])
+                    colliding_particles = 0
+                    for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
+                        slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
+                        for k in range(
+                            self.sph_solver.sh.slot_start[slot_idx, i_b],
+                            self.sph_solver.sh.slot_start[slot_idx, i_b] + self.sph_solver.sh.slot_size[slot_idx, i_b],
+                        ):
+                            if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
+                                sph_vel += self.sph_solver.particles_reordered.vel[k, i_b]
+                                colliding_particles += 1
+
+                    if colliding_particles > 0:
+                        vel_old = vel_fem_sv
+                        vel_fem_sv_unprojected = sph_vel / colliding_particles
+                        vel_fem_sv = (
+                            vel_fem_sv_unprojected.dot(surface_normal) * surface_normal
+                        )  # exclude tangential velocity
+
+                        # ---------- FEM -> SPH ----------
+                        delta_mv = mass_fem_sv * (vel_fem_sv - vel_old)
+
                         for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
                             slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
                             for k in range(
@@ -348,40 +366,20 @@ class LegacyCoupler(RBC):
                                 + self.sph_solver.sh.slot_size[slot_idx, i_b],
                             ):
                                 if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                    sph_vel += self.sph_solver.particles_reordered.vel[k, i_b]
-                                    colliding_particles += 1
+                                    self.sph_solver.particles_reordered[k, i_b].vel = (
+                                        self.sph_solver.particles_reordered[k, i_b].vel
+                                        - delta_mv / self.sph_solver.particles_info_reordered[k, i_b].mass
+                                    )
 
-                        if colliding_particles > 0:
-                            vel_old = vel_fem_sv
-                            vel_fem_sv_unprojected = sph_vel / colliding_particles
-                            vel_fem_sv = (
-                                vel_fem_sv_unprojected.dot(surface_normal) * surface_normal
-                            )  # exclude tangential velocity
+                        self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
 
-                            # ---------- FEM -> SPH ----------
-                            delta_mv = mass_fem_sv * (vel_fem_sv - vel_old)
-
-                            for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-                                slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
-                                for k in range(
-                                    self.sph_solver.sh.slot_start[slot_idx, i_b],
-                                    self.sph_solver.sh.slot_start[slot_idx, i_b]
-                                    + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                                ):
-                                    if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                        self.sph_solver.particles_reordered[k, i_b].vel = (
-                                            self.sph_solver.particles_reordered[k, i_b].vel
-                                            - delta_mv / self.sph_solver.particles_info_reordered[k, i_b].mass
-                                        )
-
-                            self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
-
-                # boundary condition
-                for j in qd.static(range(3)):
-                    iv = self.fem_solver.surface[i_s].tri2v[j]
-                    _, self.fem_solver.elements_v[f + 1, iv, i_b].vel = self.fem_solver.boundary.impose_pos_vel(
-                        self.fem_solver.elements_v[f, iv, i_b].pos, self.fem_solver.elements_v[f + 1, iv, i_b].vel
-                    )
+        # The boundary condition runs once per surface vertex: the reverse pass of an overwrite of the velocity of a
+        # vertex by each of the surface triangles sharing it would race on its adjoint
+        for i_sv, i_b in qd.ndrange(self.fem_solver.surface_vertices.shape[0], self.fem_solver._B):
+            i_v = self.fem_solver.surface_vertices[i_sv]
+            _, self.fem_solver.elements_v[f + 1, i_v, i_b].vel = self.fem_solver.boundary.impose_pos_vel(
+                self.fem_solver.elements_v[f, i_v, i_b].pos, self.fem_solver.elements_v[f + 1, i_v, i_b].vel
+            )
 
     def fem_hydroelastic(self, f: qd.i32):
         # Floor contact
@@ -652,17 +650,17 @@ class LegacyCoupler(RBC):
         )
         self.fem_rigid_link_constraints()
 
-    def couple_grad(self, f):
-        if self.fem_solver.is_active:
-            self.fem_surface_force.grad(
-                f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
-                self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.sdf.sdf_info,
-                self.rigid_solver.collider.collider_config,
-            )
+    @property
+    def is_differentiable(self) -> bool:
+        """
+        Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable').
+
+        The couplings of the FEM solver with the rigid and SPH solvers carry no gradient: each surface triangle of an
+        FEM entity overwrites the velocity of the vertices it shares with its neighbours, which the reverse pass cannot
+        undo without a race. FEM couples with MPM in the Newton solve of the implicit FEM solver, which carries none
+        either.
+        """
+        return not (self._rigid_fem or self._fem_sph)
 
     @property
     def active_solvers(self):

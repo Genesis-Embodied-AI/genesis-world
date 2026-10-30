@@ -20,6 +20,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     func_wakeup_island,
     linear_to_lower_tri,
 )
+from genesis.grad.bridge import no_grad
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
@@ -45,7 +46,7 @@ def _func_clear_jac_row(i_con: int, i_b: int, constraint_state: array_class.Cons
 
     Only the dofs of the support last recorded for row i_con are cleared, the row being zero elsewhere: every writer of
     a row records its support, and a cleared env records empty supports over zero rows (see
-    func_clear_constraint_at_env).
+    constraint_solver_kernel_clear).
     """
     for i_d_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
         i_d = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
@@ -564,6 +565,7 @@ def kernel_get_equality_constraints(
 # ====================================== Reset and Clear Constraint Solver State ======================================
 
 
+@no_grad
 @qd.kernel(fastcache=True)
 def constraint_solver_kernel_reset(
     envs_idx: qd.types.ndarray(), constraint_state: array_class.ConstraintState, rigid_config: qd.template()
@@ -579,23 +581,15 @@ def constraint_solver_kernel_reset(
 
 
 @qd.func
-def func_clear_constraint_at_env(
-    i_b: int,
-    n_dofs: int,
-    len_constraints: int,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+def func_clear_constraint_counts_at_env(
+    i_b: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
 ):
+    """Reset the constraint counts of env i_b (see constraint_solver_kernel_clear)."""
     constraint_state.n_constraints[i_b] = 0
     constraint_state.n_constraints_equality[i_b] = 0
     constraint_state.n_constraints_frictionloss[i_b] = 0
     constraint_state.n_constraints_cone[i_b] = 0
     constraint_state.qd_n_equalities[i_b] = rigid_info.n_equalities[None]
-    for i_d, i_c in qd.ndrange(n_dofs, len_constraints):
-        constraint_state.jac[i_c, i_d, i_b] = 0.0
-    for i_c in range(len_constraints):
-        constraint_state.jac_n_dofs[i_c, i_b] = 0
 
 
 @qd.kernel(fastcache=True)
@@ -605,13 +599,27 @@ def constraint_solver_kernel_clear(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
+    """Clear the constraints of the given envs, every row of their Jacobian included (see _func_clear_jac_row)."""
     n_dofs = constraint_state.qacc_ws.shape[0]
     len_constraints = constraint_state.jac.shape[0]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_clear_constraint_at_env(i_b, n_dofs, len_constraints, constraint_state, rigid_info, rigid_config)
+        func_clear_constraint_counts_at_env(i_b, constraint_state, rigid_info)
+
+    # One thread per row of an env, consecutive threads following the memory order of the layout so that their writes
+    # coalesce (see constraint_layout_batch_first)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_c, i_b_ in qd.ndrange(
+        len_constraints,
+        envs_idx.shape[0],
+        axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
+    ):
+        i_b = envs_idx[i_b_]
+        for i_d in range(n_dofs):
+            constraint_state.jac[i_c, i_d, i_b] = gs.qd_float(0.0)
+        constraint_state.jac_n_dofs[i_c, i_b] = 0
 
 
 @qd.kernel(fastcache=True)
@@ -621,13 +629,26 @@ def constraint_solver_kernel_masked_clear(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
+    """Clear the constraints of the envs the mask selects (see constraint_solver_kernel_clear)."""
     n_dofs = constraint_state.qacc_ws.shape[0]
     len_constraints = constraint_state.jac.shape[0]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_clear_constraint_at_env(i_b, n_dofs, len_constraints, constraint_state, rigid_info, rigid_config)
+            func_clear_constraint_counts_at_env(i_b, constraint_state, rigid_info)
+
+    # See constraint_solver_kernel_clear
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_c, i_b in qd.ndrange(
+        len_constraints,
+        envs_mask.shape[0],
+        axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
+    ):
+        if envs_mask[i_b]:
+            for i_d in range(n_dofs):
+                constraint_state.jac[i_c, i_d, i_b] = gs.qd_float(0.0)
+            constraint_state.jac_n_dofs[i_c, i_b] = 0
 
 
 # ========================================= Register Pre-Defined Constraints ==========================================

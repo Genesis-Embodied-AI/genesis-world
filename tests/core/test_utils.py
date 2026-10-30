@@ -449,7 +449,7 @@ def test_unique_rows():
             ],
             dtype=np.uint64,
         ),
-        np.random.randint(-(2**40), 2**40, (1000, 3)),
+        np.random.randint(-(2**40), 2**40, (1000, 3), dtype=np.int64),
         np.random.randint(0, 2, (100, 40)),
         np.zeros((0, 3), dtype=np.int64),
     )

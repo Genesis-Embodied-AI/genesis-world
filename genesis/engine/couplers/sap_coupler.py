@@ -179,6 +179,9 @@ class SAPCoupler(RBC):
     Code reference: https://github.com/RobotLocomotion/drake/blob/d7a5096c6d0f131705c374390202ad95d0607fd4/multibody/plant/sap_driver.cc
     """
 
+    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    is_differentiable = False
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -651,7 +654,7 @@ class SAPCoupler(RBC):
         )
 
     def precompute(self, i_step):
-        from genesis.engine.solvers.rigid.rigid_solver import kernel_update_all_verts
+        from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 
         if self.fem_solver.is_active:
             if qd.static(
@@ -707,9 +710,6 @@ class SAPCoupler(RBC):
         if self.has_contact:
             self.sap_solve(i_step)
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
-
-    def couple_grad(self, i_step):
-        gs.raise_exception("couple_grad is not available for SAPCoupler. Please use LegacyCoupler instead.")
 
     @qd.kernel
     def update_vel(self, i_step: qd.i32, dofs_state: array_class.DofsState):

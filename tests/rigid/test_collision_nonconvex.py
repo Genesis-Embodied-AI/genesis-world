@@ -618,9 +618,15 @@ def test_concave_slanted_wall(timestep, decimate, show_viewer):
         assert (bowls_dist_rel < BOWL_THICKNESS + 1e-3).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("convexify", [True, False])
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize(
+    "gjk_collision, convexify",
+    [
+        pytest.param(True, True, marks=pytest.mark.required),
+        (True, False),
+        pytest.param(False, True, marks=pytest.mark.required),
+        pytest.param(False, False, marks=pytest.mark.required),
+    ],
+)
 def test_mesh_repair(convexify, show_viewer, gjk_collision):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -686,9 +692,15 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
     assert_allclose(obj.geoms[0].get_pos()[:2], init_pos[:2], atol=2e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("euler", [(90, 0, 90), (74, 15, 90)])
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize(
+    "gjk_collision, euler",
+    [
+        pytest.param(True, (90, 0, 90), marks=pytest.mark.required),
+        (True, (74, 15, 90)),
+        pytest.param(False, (90, 0, 90), marks=pytest.mark.required),
+        pytest.param(False, (74, 15, 90), marks=pytest.mark.required),
+    ],
+)
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_convexify(euler, show_viewer, gjk_collision):
     OBJ_OFFSET_X = 0.0  # 0.02

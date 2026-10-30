@@ -1,6 +1,114 @@
+import dataclasses
+import operator
+import weakref
 import xml.etree.ElementTree as ET
 
 import pytest
+import torch
+
+import quadrants as qd
+
+import genesis as gs
+from genesis.grad.bridge import LaunchRecorder
+from genesis.utils.misc import qd_to_torch
+
+
+@pytest.fixture(autouse=True)
+def step_overwrites(backend, monkeypatch):
+    # Check that the backward pass of a recorded rollout saves every overwrite it needs (see LaunchRecorder): before
+    # each entry of a recorder, copy the arrays its launches use that an earlier entry used, and report those the entry
+    # changed without the recorder saving them. The arrays a kernel reaches through the solver it is a method of, such
+    # as the frames of the particle solvers, are outside of its reach. The arrays a kernel writes follow from its source
+    # alone, the same on every backend, so it runs on CPU alone.
+    if isinstance(backend, str):
+        backend = getattr(gs.constants.backend, backend)
+    if backend != gs.cpu:
+        yield
+        return
+
+    insert, entry, reverse, exit_ = operator.attrgetter("insert", "entry", "reverse", "__exit__")(LaunchRecorder)
+    # Per recorder, released with it since a later one may take its identity: the arrays its closed entries used, the
+    # values before its open entry, and the launches of that entry
+    arrays_used, values_before, launches_open = (weakref.WeakKeyDictionary() for _ in range(3))
+    overwrites = set()
+    # The copies of the checker are kernel launches of their own without zero-copy views, which it does not record
+    is_copying = False
+
+    def iter_arrays_used(kernel, args):
+        key = kernel.ensure_compiled(*args)
+        flat_names_used = kernel.used_py_dataclass_parameters_by_key_enforcing.get(key)
+        for arg_meta, arg in zip(kernel.arg_metas, args):
+            if dataclasses.is_dataclass(arg):
+                stack = [((arg_meta.name,), arg)]
+                while stack:
+                    path, struct = stack.pop()
+                    for field in dataclasses.fields(struct):
+                        value = getattr(struct, field.name)
+                        if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
+                            array_path = (*path, field.name)
+                            if flat_names_used is None or "__qd_" + "__qd_".join(array_path) in flat_names_used:
+                                yield array_path, value
+                        elif dataclasses.is_dataclass(value):
+                            stack.append(((*path, field.name), value))
+
+    def close_entry(recorder):
+        nonlocal is_copying
+        values = values_before.pop(recorder, {})
+        launches = launches_open.pop(recorder, [])
+        if not launches:
+            return
+        arrays_saved = {id(array) for array, _ in recorder.entries[-1].arrays_saved}
+        is_copying = True
+        for key, (path, array, value) in values.items():
+            if key not in arrays_saved:
+                value_after = qd_to_torch(array, copy=True)
+                # Entries the solver leaves at NaN compare equal to themselves
+                if value.is_floating_point():
+                    is_unchanged = torch.allclose(value_after, value, rtol=0.0, atol=0.0, equal_nan=True)
+                else:
+                    is_unchanged = torch.equal(value_after, value)
+                if not is_unchanged:
+                    overwrites.add(f"{launches[0][0].func.__name__} overwrites {path}")
+        is_copying = False
+        recorder_arrays_used = arrays_used.setdefault(recorder, set())
+        for kernel, args in launches:
+            recorder_arrays_used.update(id(array) for _, array in iter_arrays_used(kernel, args))
+
+    def checked_insert(recorder, kernel, args):
+        nonlocal is_copying
+        if is_copying:
+            return
+        if not recorder._is_grouping:
+            close_entry(recorder)
+        recorder_arrays_used = arrays_used.get(recorder, set())
+        values = values_before.setdefault(recorder, {})
+        is_copying = True
+        for path, array in iter_arrays_used(kernel, args):
+            if id(array) in recorder_arrays_used and id(array) not in values:
+                values[id(array)] = (".".join(path), array, qd_to_torch(array, copy=True))
+        is_copying = False
+        launches_open.setdefault(recorder, []).append((kernel, args))
+        insert(recorder, kernel, args)
+
+    def checked_entry(recorder, *args, **kwargs):
+        close_entry(recorder)
+        return entry(recorder, *args, **kwargs)
+
+    def checked_reverse(recorder, *args, **kwargs):
+        close_entry(recorder)
+        return reverse(recorder, *args, **kwargs)
+
+    # A recorder of the calls between two steps is exited after each call, before the step runs unrecorded
+    def checked_exit(recorder, *args):
+        close_entry(recorder)
+        return exit_(recorder, *args)
+
+    monkeypatch.setattr(LaunchRecorder, "insert", checked_insert)
+    monkeypatch.setattr(LaunchRecorder, "entry", checked_entry)
+    monkeypatch.setattr(LaunchRecorder, "reverse", checked_reverse)
+    monkeypatch.setattr(LaunchRecorder, "__exit__", checked_exit)
+    yield
+    assert not overwrites, f"Overwrites the backward pass does not save: {sorted(overwrites)}"
 
 
 def _add_hinge_arm(parent, body_name, pos, axis="0 1 0", joint_pos=None, **joint_kwargs):
@@ -92,6 +200,28 @@ def grad_free_with_revolute():
     ET.SubElement(arm, "joint", type="hinge", axis="0 1 0")
     ET.SubElement(arm, "inertial", mass="0.5", pos="0.1 0 0", diaginertia="0.01 0.01 0.01")
     ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def grad_free_with_hinge_ball_slide():
+    # A free chassis carrying one arm per other joint type, so that every way of deriving dof positions from the
+    # configuration is exercised: a coordinate, a coordinate offset by the neutral configuration, and Euler angles.
+    mjcf = ET.Element("mujoco", model="free_with_hinge_ball_slide")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    chassis = ET.SubElement(worldbody, "body", name="chassis", pos="0 0 0.5")
+    ET.SubElement(chassis, "freejoint")
+    ET.SubElement(chassis, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.1 0.1 0.1")
+    ET.SubElement(chassis, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    _add_hinge_arm(chassis, "hinge_arm", "0.1 0 0")
+    for name, pos, joint_kwargs in (
+        ("ball_arm", "-0.1 0 0", {"type": "ball"}),
+        ("slide_arm", "0 0.1 0", {"type": "slide", "axis": "0 1 0"}),
+    ):
+        arm = ET.SubElement(chassis, "body", name=name, pos=pos)
+        ET.SubElement(arm, "joint", **joint_kwargs)
+        ET.SubElement(arm, "inertial", mass="0.5", pos="0.1 0 0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", contype="0", conaffinity="0")
     return ET.tostring(mjcf, encoding="unicode")
 
 

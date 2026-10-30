@@ -170,9 +170,9 @@ def func_add_polytope_vertex_contacts_sdf(
         center_b_world = gu.qd_transform_by_trans_quat(b_center_local, gb_pos, gb_quat)
         top_iv = qd.Vector.zero(gs.qd_int, N_SLOTS)
         top_pen = qd.Vector.zero(gs.qd_float, N_SLOTS)
-        for i_k in qd.static(range(N_SLOTS)):
-            top_pen[i_k] = -gs.qd_float(1e30)
-            top_iv[i_k] = -1
+        for i_k in range(N_SLOTS):
+            su.qd_lane_local_set(top_pen, i_k, -1e30, block_dim)
+            su.qd_lane_local_set(top_iv, i_k, -1, block_dim)
         # Both passes walk groups of candidate verts of A (all the columns of cells as one group for the full scan, a
         # 1-ring per seed for the verification) and pick the group and the vert in runtime branches, so that the SDF
         # query and the insertion below are inlined once. This trades some runtime for compile time: the per-vert
@@ -725,9 +725,9 @@ def func_add_polytope_vertex_contacts_sdf(
                     )
                     if is_batched:
                         su.qd_lane_slot_write(emit_pos, k, contact_pos_v, tid, block_dim)
-                        for i_k in qd.static(range(N_SLOTS)):
-                            if k // block_dim == i_k:
-                                lanes_emitted[i_k] = lanes_emitted[i_k] | (qd.u32(1) << qd.u32(k % block_dim))
+                        lanes = su.qd_lane_local_get(lanes_emitted, k // block_dim, block_dim)
+                        lanes = lanes | (qd.u32(1) << qd.u32(k % block_dim))
+                        su.qd_lane_local_set(lanes_emitted, k // block_dim, lanes, block_dim)
                     else:
                         # The first lane writes the contacts of the block, whose slots every lane reads back. A new
                         # contact takes a fresh slot of the buffer, and the contact it displaces at the cap otherwise,
@@ -780,56 +780,57 @@ def func_add_polytope_vertex_contacts_sdf(
                         # Every lane reads the contact back, for the repeated-contact check and the seeds.
                         if qd.static(block_dim > 1):
                             qd.simt.block.sync()
-        if is_batched:
-            n_emitted = 0
-            for i_k in qd.static(range(N_SLOTS)):
-                n_emitted = n_emitted + qd.cast(qd.math.popcnt(lanes_emitted[i_k]), gs.qd_int)
-            if n_emitted > 0:
-                i_c_base = 0
-                if tid == 0:
-                    i_c_base = func_reserve_contacts(
-                        i_b,
-                        n_emitted,
-                        collider_state,
-                        collider_info,
-                        use_atomic=qd.static(rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL),
-                        errno=errno,
-                    )
-                i_c_base = su.qd_block_shuffle(i_c_base, 0)
-                max_contacts = collider_info.max_candidate_contacts[None]
-                # The contacts take the reserved slots in the order of the slots of their verts
-                n_emitted_before = 0
-                for i_k in range(N_SLOTS):
-                    lanes = su.qd_lane_local_get(lanes_emitted, i_k, block_dim)
-                    if (lanes >> qd.u32(tid)) & qd.u32(1) != 0:
-                        i_c = i_c_base + n_emitted_before
-                        i_c = i_c + qd.cast(qd.math.popcnt(lanes & ((qd.u32(1) << qd.u32(tid)) - qd.u32(1))), gs.qd_int)
-                        if i_c < max_contacts:
-                            func_set_contact(
-                                i_ga,
-                                i_gb,
-                                i_b,
-                                i_c,
-                                i_pair,
-                                su.qd_lane_local_get(emit_normal, i_k, block_dim),
-                                su.qd_lane_local_get(emit_pos, i_k, block_dim),
-                                su.qd_lane_local_get(emit_pen, i_k, block_dim),
-                                dyn_state,
-                                collider_state,
-                                dyn_info,
-                                rigid_info,
-                                collider_info,
-                                errno,
-                            )
-                    n_emitted_before = n_emitted_before + qd.cast(qd.math.popcnt(lanes), gs.qd_int)
-                n_stored = qd.max(qd.min(max_contacts - i_c_base, n_emitted), 0)
+        if qd.static(block_dim > 1):
+            if is_batched:
+                n_emitted = 0
                 for i_k in qd.static(range(N_SLOTS)):
-                    i_added = i_k * block_dim + tid
-                    if i_added >= n_added and i_added < n_added + n_stored:
-                        contacts_slot[i_k] = i_c_base + i_added - n_added
-                n_added = n_added + n_stored
-                # Every lane reads the contacts back in the next scan of the pair, for its seeds and repeated contacts.
-                if qd.static(block_dim > 1):
+                    n_emitted = n_emitted + qd.cast(qd.math.popcnt(lanes_emitted[i_k]), gs.qd_int)
+                if n_emitted > 0:
+                    i_c_base = 0
+                    if tid == 0:
+                        i_c_base = func_reserve_contacts(
+                            i_b,
+                            n_emitted,
+                            collider_state,
+                            collider_info,
+                            use_atomic=qd.static(rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL),
+                            errno=errno,
+                        )
+                    i_c_base = su.qd_block_shuffle(i_c_base, 0)
+                    max_contacts = collider_info.max_candidate_contacts[None]
+                    # The contacts take the reserved slots in the order of the slots of their verts
+                    n_emitted_before = 0
+                    for i_k in range(N_SLOTS):
+                        lanes = su.qd_lane_local_get(lanes_emitted, i_k, block_dim)
+                        if (lanes >> qd.u32(tid)) & qd.u32(1) != 0:
+                            i_c = i_c_base + n_emitted_before
+                            lanes_before = lanes & ((qd.u32(1) << qd.u32(tid)) - qd.u32(1))
+                            i_c = i_c + qd.cast(qd.math.popcnt(lanes_before), gs.qd_int)
+                            if i_c < max_contacts:
+                                func_set_contact(
+                                    i_ga,
+                                    i_gb,
+                                    i_b,
+                                    i_c,
+                                    i_pair,
+                                    su.qd_lane_local_get(emit_normal, i_k, block_dim),
+                                    su.qd_lane_local_get(emit_pos, i_k, block_dim),
+                                    su.qd_lane_local_get(emit_pen, i_k, block_dim),
+                                    dyn_state,
+                                    collider_state,
+                                    dyn_info,
+                                    rigid_info,
+                                    collider_info,
+                                    errno,
+                                )
+                        n_emitted_before = n_emitted_before + qd.cast(qd.math.popcnt(lanes), gs.qd_int)
+                    n_stored = qd.max(qd.min(max_contacts - i_c_base, n_emitted), 0)
+                    for i_k in qd.static(range(N_SLOTS)):
+                        i_added = i_k * block_dim + tid
+                        if i_added >= n_added and i_added < n_added + n_stored:
+                            contacts_slot[i_k] = i_c_base + i_added - n_added
+                    n_added = n_added + n_stored
+                    # All lanes read the contacts back in the next scan of the pair, for its seeds and repeated contacts
                     qd.simt.block.sync()
     return n_added, contacts_slot
 
@@ -4573,86 +4574,94 @@ def func_narrow_phase_diff_convex_vs_convex(
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
+    # The reverse is the only launch of this kernel, and it costs a thread of the grid whether it holds a contact or
+    # not, so the lanes of an env stride over its contacts rather than over the capacity of the contact buffer
+    N_LANES = qd.static(32)
+
     # Compute reference contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
-        if i_c < collider_state.n_contacts[i_b]:
-            ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
-            is_ref = i_c == ref_id
-            i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-            i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+    for i_b, i_lane in qd.ndrange(collider_state.active_buffer.shape[1], N_LANES):
+        for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
+            i_c = i_chunk_ * N_LANES + i_lane
+            if i_c < collider_state.n_contacts[i_b]:
+                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                is_ref = i_c == ref_id
+                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
+                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
 
-            if is_ref:
-                ref_penetration = -1.0
-                contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
-                contact_normal = gs.qd_vec3(0.0, 0.0, 0.0)
-                penetration = gs.qd_float(0.0)
-                weight = gs.qd_float(0.0)
-                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_plane_contact(
-                        i_ga, i_gb, i_b, i_c, dyn_state, diff_contact_input, dyn_info
-                    )
-                elif (
-                    dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
-                    and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
-                ):
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_sphere_contact(
-                        i_ga, i_gb, i_b, dyn_state, dyn_info, rigid_info
-                    )
-                else:
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
-                        i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
-                    )
-                collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
+                if is_ref:
+                    ref_penetration = -1.0
+                    contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
+                    contact_normal = gs.qd_vec3(0.0, 0.0, 0.0)
+                    penetration = gs.qd_float(0.0)
+                    weight = gs.qd_float(0.0)
+                    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_plane_contact(
+                            i_ga, i_gb, i_b, i_c, dyn_state, diff_contact_input, dyn_info
+                        )
+                    elif (
+                        dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                        and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
+                    ):
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_sphere_contact(
+                            i_ga, i_gb, i_b, dyn_state, dyn_info, rigid_info
+                        )
+                    else:
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
+                            i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
+                        )
+                    collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
 
-                func_set_contact(
-                    i_ga,
-                    i_gb,
-                    i_b,
-                    i_c,
-                    collider_state.contact_data.pair_idx[i_c, i_b],
-                    contact_normal,
-                    contact_pos,
-                    penetration * weight,
-                    dyn_state,
-                    collider_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    errno,
-                )
+                    func_set_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_c,
+                        collider_state.contact_data.pair_idx[i_c, i_b],
+                        contact_normal,
+                        contact_pos,
+                        penetration * weight,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        errno,
+                    )
 
     # Compute other contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
-        if i_c < collider_state.n_contacts[i_b]:
-            ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
-            is_ref = i_c == ref_id
-            i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-            i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+    for i_b, i_lane in qd.ndrange(collider_state.active_buffer.shape[1], N_LANES):
+        for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
+            i_c = i_chunk_ * N_LANES + i_lane
+            if i_c < collider_state.n_contacts[i_b]:
+                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                is_ref = i_c == ref_id
+                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
+                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
 
-            if not is_ref:
-                ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
-                contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
-                    i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
-                )
+                if not is_ref:
+                    ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
+                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
+                        i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
+                    )
 
-                func_set_contact(
-                    i_ga,
-                    i_gb,
-                    i_b,
-                    i_c,
-                    collider_state.contact_data.pair_idx[i_c, i_b],
-                    contact_normal,
-                    contact_pos,
-                    penetration * weight,
-                    dyn_state,
-                    collider_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    errno,
-                )
+                    func_set_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_c,
+                        collider_state.contact_data.pair_idx[i_c, i_b],
+                        contact_normal,
+                        contact_pos,
+                        penetration * weight,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        errno,
+                    )
 
 
 @qd.func

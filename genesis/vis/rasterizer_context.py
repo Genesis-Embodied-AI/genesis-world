@@ -10,7 +10,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
-from genesis.engine.solvers.base_solver import StateChange, Subscriber
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
 from genesis.utils.misc import qd_to_numpy, sanitize_index, tensor_to_array
@@ -262,13 +262,23 @@ class RasterizerContext:
         if self.show_cameras:
             self.on_camera_frustum()
 
-        self.on_tool()
         self.on_rigid()
         self.on_mpm()
         self.on_sph()
         self.on_pbd()
         self.on_fem()
         self.on_sensors()
+
+        # The update of the nodes of each solver, so that a change of the state of some solvers updates theirs alone
+        rigid_solvers = (self.sim.rigid_solver, self.sim.kinematic_solver)
+        self._updates_solvers = (
+            (self.update_link_frame, rigid_solvers),
+            (self.update_rigid, rigid_solvers),
+            (self.update_mpm, (self.sim.mpm_solver,)),
+            (self.update_sph, (self.sim.sph_solver,)),
+            (self.update_pbd, (self.sim.pbd_solver,)),
+            (self.update_fem, (self.sim.fem_solver,)),
+        )
 
         # segmentation mapping
         self.seg_color_map.generate_seg_colors()
@@ -545,37 +555,6 @@ class RasterizerContext:
                 links_T = self._link_frame_grid_T()
                 self.link_frame_node.mesh.primitives[0].poses = links_T
                 self.jit.update_buffer(self.link_frame_node, "model", links_T.transpose((0, 2, 1)))
-
-    def on_tool(self):
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                if tool_entity.mesh is not None:
-                    for env_i, idx in enumerate(self.rendered_envs_idx):
-                        mesh = trimesh.Trimesh(
-                            tool_entity.mesh.raw_vertices,
-                            tool_entity.mesh.faces_np.reshape([-1, 3]),
-                            tool_entity.mesh.raw_vertex_normals,
-                            process=False,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(tool_entity.surface, n_verts=len(mesh.vertices))
-
-                        pose = gu.trans_quat_to_T(tool_entity.init_pos, tool_entity.init_quat)
-                        double_sided = tool_entity.surface.double_sided
-                        self.add_static_node(
-                            tool_entity,
-                            pyrender.Mesh.from_trimesh(mesh, double_sided=double_sided, envs=env_i),
-                            i_b=idx,
-                            pose=pose,
-                        )
-
-    def update_tool(self):
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                poss = qd_to_numpy(tool_entity.pos)[self.sim.cur_substep_local]
-                quats = qd_to_numpy(tool_entity.quat)[self.sim.cur_substep_local]
-                for idx in self.rendered_envs_idx:
-                    pose = gu.trans_quat_to_T(poss[idx], quats[idx])
-                    self.set_node_pose(self.static_nodes[(idx, tool_entity.uid)], pose=pose)
 
     def set_reflection_mat(self, geom_T):
         height = geom_T[0, 2, 3]
@@ -1323,10 +1302,18 @@ class RasterizerContext:
     def clear_debug_objects(self):
         self.clear_external_nodes()
 
-    def update(self, force_render: bool = False):
+    def update(self, force_render: bool = False, solvers=None):
+        """
+        Sync the nodes with the state of the scene.
+
+        `solvers` restricts the sync to the nodes of those solvers, whose state changed since the last sync, the others
+        being current. A sync after a step updates the nodes of every solver, whatever `solvers`.
+        """
         # Early return if already updated previously
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             return
+        if self._t < self.scene.sim.cur_step_global:
+            solvers = None
 
         # The interactive viewer draws from its own thread whatever is uploaded here
         with self.scene._visualizer.viewer_lock:
@@ -1337,18 +1324,14 @@ class RasterizerContext:
             self.clear_dynamic_nodes(only_outdated=True)
 
             # Force updating rendering-only quantities that are not updated automatically during simulation
-            self.visualizer.update_visual_states(force_render)
+            self.visualizer.update_visual_states(force_render, solvers)
 
             # Reset scene bounds to trigger recomputation. They are involved in shadow map.
             self._scene._bounds = None
 
-            self.update_link_frame()
-            self.update_tool()
-            self.update_rigid()
-            self.update_mpm()
-            self.update_sph()
-            self.update_pbd()
-            self.update_fem()
+            for update, update_solvers in self._updates_solvers:
+                if solvers is None or not solvers.isdisjoint(update_solvers):
+                    update()
             self.update_sensors()
 
             # Update camera fructum

@@ -174,7 +174,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_s.n_links, n_envs_info, gs_s.get_links_COM, gs_s.set_links_COM, gs_s.dyn_info.links.inertial_pos),
         (gs_s.n_links, n_envs_info, gs_s.get_links_inertia, gs_s.set_links_inertia, gs_s.dyn_info.links.inertial_i),
         (gs_s.n_links, n_envs_info, gs_s.get_links_invweight, None, gs_s.dyn_info.links.invweight),
-        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, gs_s.control_dofs_force, None),
+        (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, None, gs_s.dyn_state.dofs.qf_applied),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_force, None, gs_s.dyn_state.dofs.force),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_velocity, gs_s.set_dofs_velocity, gs_s.dyn_state.dofs.vel),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_position, gs_s.set_dofs_position, gs_s.dyn_state.dofs.pos),
@@ -460,7 +460,7 @@ def test_extended_broadcasting():
     assert_allclose(entity.get_dofs_velocity(), np.array([(1.0,) * 6, (2.0,) * 6]), tol=gs.EPS)
 
 
-@pytest.mark.required("pairwise")
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
 @pytest.mark.parametrize("batch_joints_info", [False, True])
 @pytest.mark.parametrize("batch_dofs_info", [False, True])

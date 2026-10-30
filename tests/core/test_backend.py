@@ -26,7 +26,6 @@ MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.s
         (True, False, True),
         (False, True, False),
     ],
-    ids=["ndarray-field-ndarray", "field-ndarray-field"],
 )
 def test_switching(backend, order):
     # Each cycle rebuilds a box-on-plane scene and verifies the quadrants type wrappers re-resolve for the

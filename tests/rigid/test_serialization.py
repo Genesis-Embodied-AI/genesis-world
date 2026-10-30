@@ -914,9 +914,8 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol)
         Trajectory(cut_path, scene=replay_scene)
 
 
-@pytest.mark.required
 @pytest.mark.precision("32")
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_trajectory_replay_across_backends(n_envs, checkpoint_scene, load_trajectory_snapshot, show_viewer, tol):
     # The snapshot is a log recorded on CPU in single precision, replayed here on whatever backend the session runs
     trajectory = load_trajectory_snapshot(checkpoint_scene, n_envs=n_envs, n_steps=10, show_viewer=show_viewer)

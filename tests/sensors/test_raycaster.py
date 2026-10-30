@@ -268,8 +268,8 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     assert_allclose(grid_distances, grid_distances_ref, tol=1e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("n_envs", [2, 0])
 @pytest.mark.parametrize("kin_raycastable", [True, False])
 def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     # Two depth cameras, one per entity:

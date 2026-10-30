@@ -259,17 +259,6 @@ class Raytracer:
             else:
                 self.add_surface(str(entity.uid), entity.surface)
 
-        # tool entities
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                self.add_rigid(
-                    name=str(tool_entity.uid),
-                    vertices=tool_entity.mesh.raw_vertices,
-                    triangles=tool_entity.mesh.faces_np,
-                    normals=tool_entity.mesh.raw_vertex_normals,
-                    uvs=np.array([]),
-                )
-
         # rigid entities
         if self.sim.rigid_solver.is_active:
             for rigid_entity in self.sim.rigid_solver.entities:
@@ -684,14 +673,6 @@ class Raytracer:
 
         # update variables not used in simulation
         self.visualizer.update_visual_states(force_render)
-
-        # tool entities
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                pos = tool_entity.pos[self.sim.cur_substep_local].to_numpy()
-                quat = tool_entity.quat[self.sim.cur_substep_local].to_numpy()
-                T = gu.trans_quat_to_T(pos, quat)
-                self.update_rigid(str(tool_entity.uid), T)
 
         # rigid-like entities (rigid + kinematic)
         for solver in (self.sim.rigid_solver, self.sim.kinematic_solver):

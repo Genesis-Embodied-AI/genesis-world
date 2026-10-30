@@ -1,305 +1,61 @@
 """
-Backward pass functions for the rigid body solver.
+State updates of the rigid body solver outside its dynamics, and the finiteness checks guarding them.
 
-This module contains functions used during the backward pass (gradient computation)
-of the rigid body simulation. These functions handle:
-- Copying state between next and current time steps
-- Saving and loading adjoint cache for gradient computation
-- Preparing and beginning backward substeps
-- Gradient validity checking
-- Cartesian space copying for adjoint computation
-- Acceleration copying and dq integration
-
-These functions are extracted from the main rigid_solver module to improve
-code organization and maintainability.
+These functions handle:
+- Copying the integrated state to the current one, and flagging the envs whose integration is not finite
+- Integrating the positions of an entity by given velocities
 """
 
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
-from .forward_kinematics import func_update_cartesian_space, func_forward_velocity
+import genesis.utils.geom as gu
+from genesis.utils.misc import qd_isfinite
+
+from .forward_dynamics import func_clear_coupling_wrench
 
 
 @qd.func
 def func_copy_next_to_curr(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
-    """Copy the integrated velocities and positions of every env to its state, unless one of them is not a number.
+    """Copy the integrated velocities and positions of every env to its state, unless one of them is not finite.
 
-    A NaN raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env as it was so
-    that the NaN does not propagate. Every velocity and position takes its own thread.
+    A 'nan' or an 'inf' raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env
+    as it was so that the value does not propagate. Every velocity and position takes its own thread.
     """
-    n_qs = rigid_info.qpos.shape[0]
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-    n_dofs_qs = qd.max(n_dofs, n_qs)
-
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_dq, i_b in qd.ndrange(n_dofs_qs, _B):
+    for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
         is_valid = True
-        if i_dq < n_dofs:
-            is_valid = not qd.math.isnan(dyn_state.dofs.vel_next[i_dq, i_b])
-        if i_dq < n_qs:
-            is_valid = is_valid and not qd.math.isnan(rigid_info.qpos_next[i_dq, i_b])
+        if i_dq < dyn_state.dofs.vel.shape[0]:
+            is_valid = qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b])
+        if i_dq < rigid_info.qpos.shape[0]:
+            is_valid = is_valid and qd_isfinite(rigid_info.qpos_next[i_dq, i_b])
         if not is_valid:
-            qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_ACC_NAN)
+            errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_ACC_NAN
 
+    # The sizes are read in the loop ranges, since autodiff takes a top level made of loops alone
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_dq, i_b in qd.ndrange(n_dofs_qs, _B):
+    for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
         if (errno[i_b] & array_class.ErrorCode.INVALID_ACC_NAN) == 0:
-            if i_dq < n_dofs:
+            if i_dq < dyn_state.dofs.vel.shape[0]:
                 dyn_state.dofs.vel[i_dq, i_b] = dyn_state.dofs.vel_next[i_dq, i_b]
-            if i_dq < n_qs:
+            if i_dq < rigid_info.qpos.shape[0]:
                 rigid_info.qpos[i_dq, i_b] = rigid_info.qpos_next[i_dq, i_b]
 
 
-@qd.func
-def func_copy_next_to_curr_grad(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    n_qs = rigid_info.qpos.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.vel_next.grad[i_d, i_b] = dyn_state.dofs.vel.grad[i_d, i_b]
-        dyn_state.dofs.vel.grad[i_d, i_b] = 0.0
-        dyn_state.dofs.vel[i_d, i_b] = rigid_adjoint_cache.dofs_vel[f, i_d, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        rigid_info.qpos_next.grad[i_q, i_b] = rigid_info.qpos.grad[i_q, i_b]
-        rigid_info.qpos.grad[i_q, i_b] = 0.0
-        rigid_info.qpos[i_q, i_b] = rigid_adjoint_cache.qpos[f, i_q, i_b]
-
-
 @qd.kernel(fastcache=True)
-def kernel_save_adjoint_cache(
-    f: qd.int32,
+def kernel_copy_next_to_curr_clear_coupling(
     dyn_state: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    func_save_adjoint_cache(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
-
-
-@qd.func
-def func_save_adjoint_cache(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    n_qs = rigid_info.qpos.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        rigid_adjoint_cache.dofs_vel[f, i_d, i_b] = dyn_state.dofs.vel[i_d, i_b]
-        rigid_adjoint_cache.dofs_acc[f, i_d, i_b] = dyn_state.dofs.acc[i_d, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        rigid_adjoint_cache.qpos[f, i_q, i_b] = rigid_info.qpos[i_q, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_state.links.cfrc_coupling_ang.shape[0], _B):
-        rigid_adjoint_cache.links_cfrc_coupling_ang[f, i_l, i_b] = dyn_state.links.cfrc_coupling_ang[i_l, i_b]
-        rigid_adjoint_cache.links_cfrc_coupling_vel[f, i_l, i_b] = dyn_state.links.cfrc_coupling_vel[i_l, i_b]
-
-
-@qd.func
-def func_load_adjoint_cache(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    n_qs = rigid_info.qpos.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.vel[i_d, i_b] = rigid_adjoint_cache.dofs_vel[f, i_d, i_b]
-        dyn_state.dofs.acc[i_d, i_b] = rigid_adjoint_cache.dofs_acc[f, i_d, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        rigid_info.qpos[i_q, i_b] = rigid_adjoint_cache.qpos[f, i_q, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_state.links.cfrc_coupling_ang.shape[0], _B):
-        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = rigid_adjoint_cache.links_cfrc_coupling_ang[f, i_l, i_b]
-        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = rigid_adjoint_cache.links_cfrc_coupling_vel[f, i_l, i_b]
-
-
-@qd.kernel(fastcache=True)
-def kernel_prepare_backward_substep(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    dyn_state_adjoint_cache: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
+    errno: qd.Tensor,
 ):
-    # Load the current state from adjoint cache
-    func_load_adjoint_cache(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
-
-    # The coupling wrench is cleared at the end of a substep outside the backward pass (see func_integrate), so its
-    # adjoint, which the couplers have read by now, starts from zero for this substep.
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_state.links.cfrc_coupling_ang.shape[0], dyn_state.links.cfrc_coupling_ang.shape[1]):
-        dyn_state.links.cfrc_coupling_ang.grad[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel.grad[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-
-    # If mujoco compatibility is disabled, update the cartesian space and save the results to adjoint cache. This is
-    # because the cartesian space is overwritten later by other kernels if mujoco compatibility was disabled.
-    if qd.static(not rigid_config.enable_mujoco_compatibility):
-        func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=True
-        )
-        func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
-
-        # FIXME: Parameter pruning for ndarray is buggy for now and requires match variable and arg names.
-        # Save results of [update_cartesian_space] to adjoint cache
-        func_copy_cartesian_space(dyn_state, dyn_state_adjoint_cache, rigid_config)
-
-
-@qd.kernel(fastcache=True)
-def kernel_begin_backward_substep(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    dyn_state_adjoint_cache: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-) -> qd.i32:
-    is_grad_valid = func_is_grad_valid(dyn_state, rigid_info, rigid_config)
-    if is_grad_valid:
-        func_copy_next_to_curr_grad(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
-
-        if not rigid_config.enable_mujoco_compatibility:
-            # Restore the cartesian space that was overwritten by the post-integrate forward replay in the backward
-            # substep (see _update_cartesian_grad in rigid_solver.py).
-            func_copy_cartesian_space(dyn_state_adjoint_cache, dyn_state, rigid_config)
-
-    return is_grad_valid
-
-
-@qd.func
-def func_is_grad_valid(dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
-    is_valid = True
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*rigid_info.qpos.shape)):
-        if qd.math.isnan(rigid_info.qpos.grad[I]):
-            is_valid = False
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.dofs.vel.shape)):
-        if qd.math.isnan(dyn_state.dofs.vel.grad[I]):
-            is_valid = False
-
-    return is_valid
-
-
-@qd.func
-def func_copy_cartesian_space(
-    dyn_state: array_class.DynState, dyn_state_adjoint_cache: array_class.DynState, rigid_config: qd.template()
-):
-    # Copy outputs of [kernel_update_cartesian_space] among [dofs, links, joints, geoms] states. This is used to restore
-    # the outputs that were overwritten if we disabled mujoco compatibility for backward pass.
-
-    # dofs state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.dofs.pos.shape)):
-        # pos, cdof_ang, cdof_vel, cdofd_ang, cdofd_vel
-        dyn_state_adjoint_cache.dofs.pos[I] = dyn_state.dofs.pos[I]
-        dyn_state_adjoint_cache.dofs.cdof_ang[I] = dyn_state.dofs.cdof_ang[I]
-        dyn_state_adjoint_cache.dofs.cdof_vel[I] = dyn_state.dofs.cdof_vel[I]
-        dyn_state_adjoint_cache.dofs.cdofd_ang[I] = dyn_state.dofs.cdofd_ang[I]
-        dyn_state_adjoint_cache.dofs.cdofd_vel[I] = dyn_state.dofs.cdofd_vel[I]
-
-    # links state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.links.pos.shape)):
-        # pos, quat, root_COM, mass_sum, i_pos, i_quat, cinr_inertial, cinr_pos, cinr_quat, cinr_mass, cd_vel, cd_ang
-        dyn_state_adjoint_cache.links.pos[I] = dyn_state.links.pos[I]
-        dyn_state_adjoint_cache.links.quat[I] = dyn_state.links.quat[I]
-        dyn_state_adjoint_cache.links.root_COM[I] = dyn_state.links.root_COM[I]
-        dyn_state_adjoint_cache.links.mass_sum[I] = dyn_state.links.mass_sum[I]
-        dyn_state_adjoint_cache.links.i_pos[I] = dyn_state.links.i_pos[I]
-        dyn_state_adjoint_cache.links.i_quat[I] = dyn_state.links.i_quat[I]
-        dyn_state_adjoint_cache.links.cinr_inertial[I] = dyn_state.links.cinr_inertial[I]
-        dyn_state_adjoint_cache.links.cinr_pos[I] = dyn_state.links.cinr_pos[I]
-        dyn_state_adjoint_cache.links.cinr_quat[I] = dyn_state.links.cinr_quat[I]
-        dyn_state_adjoint_cache.links.cinr_mass[I] = dyn_state.links.cinr_mass[I]
-        dyn_state_adjoint_cache.links.cd_vel[I] = dyn_state.links.cd_vel[I]
-        dyn_state_adjoint_cache.links.cd_ang[I] = dyn_state.links.cd_ang[I]
-
-    # joints state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.joints.xanchor.shape)):
-        # xanchor, xaxis
-        dyn_state_adjoint_cache.joints.xanchor[I] = dyn_state.joints.xanchor[I]
-        dyn_state_adjoint_cache.joints.xaxis[I] = dyn_state.joints.xaxis[I]
-
-    # geoms state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.geoms.pos.shape)):
-        # pos, quat, verts_updated
-        dyn_state_adjoint_cache.geoms.pos[I] = dyn_state.geoms.pos[I]
-        dyn_state_adjoint_cache.geoms.quat[I] = dyn_state.geoms.quat[I]
-        dyn_state_adjoint_cache.geoms.verts_updated[I] = dyn_state.geoms.verts_updated[I]
-
-
-@qd.kernel(fastcache=True)
-def kernel_copy_acc(
-    f: qd.int32,
-    dyn_state: array_class.DynState,
-    rigid_adjoint_cache: array_class.RigidAdjointCache,
-    rigid_config: qd.template(),
-):
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.acc[i_d, i_b] = rigid_adjoint_cache.dofs_acc[f, i_d, i_b]
-
-
-@qd.kernel(fastcache=True)
-def kernel_copy_next_to_curr_no_check(
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Unguarded copy of the _next slots to current, used in the backward substep right before the forward replay so
-    the backward kernels see the post-integrate qpos / vel."""
-    n_qs = rigid_info.qpos.shape[0]
-    n_dofs = dyn_state.dofs.vel.shape[0]
-    _B = dyn_state.dofs.vel.shape[1]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        rigid_info.qpos[i_q, i_b] = rigid_info.qpos_next[i_q, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.vel[i_d, i_b] = dyn_state.dofs.vel_next[i_d, i_b]
+    """Copy the integrated state to the current one, then clear the coupling wrench (see func_clear_coupling_wrench)."""
+    func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
+    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.func

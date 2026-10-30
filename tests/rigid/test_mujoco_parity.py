@@ -91,13 +91,11 @@ def test_equality_link(gs_sim, mj_sim):
             gs.constraint_solver.CG,
             gs.integrator.implicitfast,
             marks=(pytest.mark.friction_cone(gs.friction_cone.elliptic), pytest.mark.required),
-            id="CG-implicitfast-elliptic",
         ),
         pytest.param(
             gs.constraint_solver.Newton,
             gs.integrator.implicitfast,
-            marks=(pytest.mark.friction_cone(gs.friction_cone.elliptic), pytest.mark.required),
-            id="Newton-implicitfast-elliptic",
+            marks=pytest.mark.friction_cone(gs.friction_cone.elliptic),
         ),
     ],
 )
@@ -133,7 +131,7 @@ def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("model_name", ["hinge_slide"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
@@ -160,10 +158,7 @@ def test_frictionloss(gs_sim, mj_sim, tol):
     [
         (gs.constraint_solver.Newton, gs.integrator.Euler),
         pytest.param(
-            gs.constraint_solver.Newton,
-            gs.integrator.Euler,
-            marks=pytest.mark.friction_cone(gs.friction_cone.elliptic),
-            id="Newton-Euler-elliptic",
+            gs.constraint_solver.Newton, gs.integrator.Euler, marks=pytest.mark.friction_cone(gs.friction_cone.elliptic)
         ),
     ],
 )
@@ -176,7 +171,7 @@ def test_torsional_and_rolling_friction(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=qpos, qvel=qvel, num_steps=60, tol=tol)
 
 
-@pytest.mark.required("pairwise")
+@pytest.mark.required("sparse")
 @pytest.mark.adjacent_collision(True)
 @pytest.mark.parametrize("model_name", ["chain_capsule_hinge_mesh"])  # FIXME: , "chain_capsule_hinge_capsule"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
@@ -231,7 +226,7 @@ def test_one_ball_joint(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=600, tol=tol)
 
 
-@pytest.mark.required("pairwise")
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("xml_path", ["xml/rope_ball.xml", "xml/rope_hinge.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
@@ -269,18 +264,19 @@ def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=5e-5)
 
 
-@pytest.mark.required("pairwise")
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize(
     "model_name, gjk_collision",
     [
         ("xml/tet_tet.xml", True),
         ("xml/tet_ball.xml", True),
-        ("xml/tet_capsule.xml", True),
-        # Multi-vertex contact patches between discrete meshes, recovered by clipping the touching faces; the rows
-        # above settle on single-point vertex-face contacts.
+        # Multi-vertex contact patches between discrete meshes, recovered by clipping the touching faces. The tet rows
+        # settle on single-point vertex-face contacts. Both tet_meshball rows sit at even positions, so that the sparse
+        # selection runs them with multi-contact enabled.
         ("tet_meshball", True),
-        # The same patches through the MPR pipeline, whose manifold comes from exhaustive mesh supports and perturbed
-        # re-detections.
+        ("xml/tet_capsule.xml", True),
+        # The tet_meshball patches through the MPR pipeline, whose manifold comes from exhaustive mesh supports and
+        # perturbed re-detections.
         ("tet_meshball", False),
     ],
 )

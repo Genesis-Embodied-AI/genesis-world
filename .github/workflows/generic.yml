@@ -129,7 +129,13 @@ jobs:
           python -m pip install --upgrade pip setuptools pkg-info wheel
 
           # FIXME: Must install torch>2.9.1 to support zerocopy on Apple Metal
-          pip3 install torch --upgrade --index-url https://download.pytorch.org/whl/cpu
+          TORCH_SPEC="torch"
+          if [[ "${{ matrix.OS }}" == macos-* ]] ; then
+            # FIXME: quadrants#1017 - Quadrants Metal interop crashes without Torch MPS device, which torch>=2.15 no
+            # longer exposes on the virtualized GPU of macOS runners.
+            TORCH_SPEC="torch<2.15"
+          fi
+          pip3 install "${TORCH_SPEC}" --upgrade --index-url https://download.pytorch.org/whl/cpu
       - name: Install Genesis
         shell: bash
         run: |

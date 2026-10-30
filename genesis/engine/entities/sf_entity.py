@@ -17,9 +17,6 @@ class SFParticleEntity(ParticleEntity):
         # Nothing to add here because particles in SF are purely for visualization
         pass
 
-    def process_input(self, in_backward=False):
-        pass
-
     def sample(self):
         pass
 

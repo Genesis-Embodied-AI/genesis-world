@@ -971,12 +971,9 @@ def func_apply_link_external_wrench(
 def func_clear_external_force(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
-    n_links = dyn_state.links.pos.shape[0]
-    _B = dyn_state.links.pos.shape[1]
-
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
@@ -984,21 +981,6 @@ def func_clear_external_force(
 # --------------------------------------------------------------------------------------
 # Render transform kernels
 # --------------------------------------------------------------------------------------
-
-
-@qd.kernel(fastcache=True)
-def kernel_bit_reduction(tensor: qd.Tensor) -> qd.i32:
-    flag = qd.i32(0)
-    for i in range(tensor.shape[0]):
-        qd.atomic_or(flag, tensor[i])
-    return flag
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_zero(envs_idx: qd.types.ndarray(), tensor: qd.Tensor):
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        tensor[i_b] = 0
 
 
 @qd.func
@@ -1036,12 +1018,6 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
     if qd.static(cond):
         field[I] = value
     return field[I] if qd.static(cond) else value
-
-
-@qd.func
-def func_check_index_range(idx: qd.i32, min: qd.i32, max: qd.i32, cond: qd.template()):
-    # Conditionally check if the index is in the range [min, max) to save computational cost
-    return (idx >= min and idx < max) if qd.static(cond) else True
 
 
 @qd.kernel(fastcache=True)

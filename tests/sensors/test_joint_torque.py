@@ -11,12 +11,13 @@ from ..utils.assertions import assert_allclose
 
 @pytest.fixture(scope="session")
 def joint_torque_pendulums():
-    # Four independent single-DOF pendulums (a point mass at distance 1 m from a hinge), one per gearbox-loss kind:
-    # none, armature inertia, Coulomb frictionloss, viscous damping. Spaced 2 m apart so they never collide.
+    # Five independent single-DOF pendulums (a point mass at distance 1 m from a hinge), one per gearbox-loss kind:
+    # none, armature inertia, Coulomb frictionloss, viscous damping, then armature inertia and viscous damping together.
+    # Spaced 2 m apart so they never collide.
     mjcf = ET.Element("mujoco", model="joint_torque_pendulums")
     ET.SubElement(mjcf, "compiler", angle="radian")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    losses = (("0", "0", "0"), ("0.5", "0", "0"), ("0", "0.4", "0"), ("0", "0", "0.3"))
+    losses = (("0", "0", "0"), ("0.5", "0", "0"), ("0", "0.4", "0"), ("0", "0", "0.3"), ("0.5", "0", "0.3"))
     for i, (armature, frictionloss, damping) in enumerate(losses):
         arm = ET.SubElement(worldbody, "body", name=f"arm{i}", pos=f"{2 * i} 0 0")
         ET.SubElement(
@@ -50,9 +51,9 @@ def joint_torque_contact_pendulum():
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
-    # One MJCF packs four single-DOF pendulums, each with a different gearbox loss (none, armature, frictionloss,
-    # damping); a single JointTorqueSensor reads all four output efforts. The loss parameters are read back from the
-    # built model so the assertions stay in sync with the MJCF.
+    # One MJCF packs five single-DOF pendulums, each with a different gearbox loss (none, armature, frictionloss,
+    # damping, armature with damping). A single JointTorqueSensor reads all five output efforts. The loss parameters are
+    # read back from the built model so the assertions stay in sync with the MJCF.
     MASS = 1.0  # link mass, kg
     LENGTH = 1.0  # pivot-to-mass distance, m
     RADIUS = 0.05  # mass sphere radius, m
@@ -124,6 +125,12 @@ def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
         assert_allclose((tau_s - tau_ctrl)[..., 1], -armature[..., 1] * qacc_num[..., 1], tol=tol)
         # Damping joint (index 3): sensor is reduced by damping * vel (velocity before the step).
         assert_allclose(tau_s[..., 3], tau_ctrl[..., 3] - damping[..., 3] * vel_prev[..., 3], tol=tol)
+        # Armature and damping joint (index 4): both losses add up.
+        assert_allclose(
+            (tau_s - tau_ctrl)[..., 4],
+            -armature[..., 4] * qacc_num[..., 4] - damping[..., 4] * vel_prev[..., 4],
+            tol=tol,
+        )
         # Friction (index 2) and damping (index 3) dissipate part of the command, so the sensor reads less than it
         # while the joints slide forward.
         assert (tau_s[..., 2] < tau_ctrl[..., 2]).all()

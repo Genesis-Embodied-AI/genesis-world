@@ -40,9 +40,8 @@ def test_reference_trajectory_recovery_converges(control_target, grad_cartpole, 
         for t in range(N_STEPS):
             robot_ref.control_dofs_force(target_ctrl[t])
             scene_ref.step()
-    ref_state = scene_ref.rigid_solver.get_state()
-    target_qpos = ref_state.qpos.detach().clone()
-    target_vel = ref_state.dofs_vel.detach().clone()
+    target_qpos = robot_ref.get_qpos()
+    target_vel = robot_ref.get_dofs_velocity()
 
     if control_target == "init_vel":
         init_vel = torch.tensor(
@@ -74,9 +73,8 @@ def test_reference_trajectory_recovery_converges(control_target, grad_cartpole, 
             for t in range(N_STEPS):
                 robot_opt.control_dofs_force(forces[t])
                 scene_opt.step()
-        state = scene_opt.rigid_solver.get_state()
-        diff_pos = (state.qpos - target_qpos).reshape(B, -1)
-        diff_vel = (state.dofs_vel - target_vel).reshape(B, -1)
+        diff_pos = robot_opt.get_qpos() - target_qpos
+        diff_vel = robot_opt.get_dofs_velocity() - target_vel
         loss_per_env = (diff_pos**2).sum(dim=-1) + (diff_vel**2).sum(dim=-1)
         loss_history.append(tensor_to_array(loss_per_env).copy())
         loss_per_env.sum().backward()

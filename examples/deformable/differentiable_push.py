@@ -37,17 +37,20 @@ def main():
         )
     )
     stick = scene.add_entity(
-        material=gs.materials.Tool(
-            friction=8.0,
-        ),
         morph=gs.morphs.Mesh(
             file="meshes/stirrer.obj",
-            scale=0.6,
+            scale=1.0,
             pos=(0.5, 0.5, 0.05),
             euler=(90.0, 0.0, 0.0),
         ),
+        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+        material=gs.materials.Rigid(
+            rho=1e6,
+            coup_friction=8.0,
+            gravity_compensation=1.0,
+        ),
         surface=gs.surfaces.Default(
-            color=(1.0, 1.0, 1.0, 1.0),
+            color=(0.85, 0.2, 0.15, 1.0),
         ),
     )
     obj1 = scene.add_entity(
@@ -103,9 +106,9 @@ def main():
     for _ in range(2):
         scene.reset()
         init_pos = torch.tensor(
-            [[0.3, 0.1, 0.28], [0.3, 0.1, 0.5]], dtype=gs.tc_float, device=gs.device, requires_grad=True
+            [[0.3, 0.19, 0.1], [0.3, 0.19, 0.5]], dtype=gs.tc_float, device=gs.device, requires_grad=True
         )
-        stick.set_position(init_pos)
+        stick.set_pos(init_pos)
         pos_obj1_init = torch.tensor([0.3, 0.3, 0.1], dtype=gs.tc_float, device=gs.device, requires_grad=True)
         obj1.set_position(pos_obj1_init)
         v_obj1_init = torch.tensor([0.0, -1.0, 0.0], dtype=gs.tc_float, device=gs.device, requires_grad=True)
@@ -116,7 +119,7 @@ def main():
         timer = gs.tools.Timer()
         loss = 0.0
         for i, v_i in enumerate(v_list):
-            stick.set_velocity(vel=v_i)
+            stick.set_dofs_velocity(v_i, dofs_idx_local=slice(0, 3))
 
             scene.step()
 

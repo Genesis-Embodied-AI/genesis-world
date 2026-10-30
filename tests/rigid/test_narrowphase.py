@@ -884,8 +884,8 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
         assert_allclose(penetrations, 1e-3, atol=1e-5)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("gjk_collision", [False, True])
 @pytest.mark.parametrize("n_base_sides", [4, 32])
 def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer, tol):
     # A box rests on a wider base, a box or a 32-sided prism, at a random yaw and offset in each environment, so that
