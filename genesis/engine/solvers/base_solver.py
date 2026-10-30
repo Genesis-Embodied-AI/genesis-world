@@ -16,7 +16,7 @@ from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.data import CHECKPOINT_KINDS, V, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
+from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -123,28 +123,24 @@ class GravityMixin:
 
     _gravity: "qd.Tensor | None" = None
 
-    def _build_gravity(self, gravity=None, *, as_field: bool = False):
+    def _build_gravity(self, gravity=None):
         """Allocate the buffer storing this solver's gravity and fill it with the value from the options.
 
         Called once, at build time, every environment getting the same value. Pass `gravity` to reuse a buffer the
         solver already declares among its own arrays, as the rigid solver does with `RigidInfo.gravity`, so that
-        `set_gravity` and the kernels read the same memory. Leave it out to have one allocated here. Pass
-        `as_field=True` for a solver whose kernels access gravity as an attribute of the solver object, which quadrants
-        supports for a field only. A solver holding no entity gets no buffer, and its accessors then raise.
+        `set_gravity` and the kernels read the same memory. Leave it out to have a field allocated here, for a
+        solver whose kernels read gravity as an attribute of the solver object. A solver holding no entity gets no
+        buffer, and its accessors then raise.
         """
         # FIXME: a field is what a kernel taking the solver as a template can read, since Quadrants resolves no
-        # ndarray attribute of a @qd.data_oriented class in kernel scope. Two ways out, either of which retires the
-        # as_field flag: adding ndarray support to that resolution, or migrating the solver to a frozen dataclass so
-        # its ndarrays are predeclared. Until then the buffer is only allocated for a solver with an entity, since a
+        # ndarray attribute of a @qd.data_oriented class in kernel scope. Two ways out, either of which lets the solver
+        # declare its buffer: adding ndarray support to that resolution, or migrating the solver to a frozen dataclass
+        # so its ndarrays are predeclared. Until then the buffer is only allocated for a solver with an entity, since a
         # field costs an SNode tree that Quadrants never gives back short of qd.reset().
         if not self.is_active:
             return
-        shape = (self._B,)
         if gravity is None:
-            if as_field:
-                gravity = qd.tensor(gs.qd_vec3, shape, backend=qd.Backend.FIELD)
-            else:
-                gravity = V(gs.qd_vec3, shape)
+            gravity = qd.tensor(gs.qd_vec3, (self._B,), backend=qd.Backend.FIELD)
         self._gravity = gravity
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
 

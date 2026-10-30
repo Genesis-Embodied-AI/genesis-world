@@ -359,7 +359,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_constraints()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     @property
     def is_active(self):
