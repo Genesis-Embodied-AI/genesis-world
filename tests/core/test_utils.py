@@ -27,6 +27,7 @@ from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
 
+from ..utils import future_annotations
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from ..utils.collision import display_collision_pairs, get_genuine_interpenetration
@@ -1154,11 +1155,51 @@ def test_data_aggregation():
         class LateInfo(Data, kind=DataKind.CONSTANT, shape=(), into=(Aggregate, "late")):
             value: qd.Tensor = field(float)
 
-    with pytest.raises(TypeError, match="one struct per type"):
+    class TwiceAggregate(Data):
+        first_info: Info = requires()
+        second_info: Info = requires()
 
-        class TwiceAggregate(Data):
-            first_info: Info = requires()
-            second_info: Info = requires()
+    with pytest.raises(TypeError, match="one struct per type"):
+        TwiceAggregate()
+
+    # A struct hooked in but built nowhere is dropped from the struct it hooks into, and refused afterwards
+    class PluggedAggregate(Data, kind=DataKind.CONSTANT, shape=()):
+        value: qd.Tensor = field(float)
+
+    class PluginInfo(Data, kind=DataKind.CONSTANT, shape=(), into=(PluggedAggregate, "plugin")):
+        value: qd.Tensor = field(float)
+
+    with namespace("root", root=True):
+        PluggedAggregate(values=dict(value=0.0))
+        with pytest.raises(TypeError, match="refused"):
+            PluginInfo(values=dict(value=1.0))
+
+    # The annotations postponed by 'from __future__ import annotations' resolve in the module of their struct
+    with namespace("root", root=True):
+        future_shared_info = future_annotations.SharedInfo(values=dict(value=1.0))
+        future_hooked_info = future_annotations.HookedInfo(values=dict(value=2.0))
+        outer = future_annotations.Outer(sizes=dict(items=4), values=dict(inner=dict(value=3.0)))
+    assert outer.shared_info is future_shared_info and outer.hooked_info is future_hooked_info
+    assert isinstance(outer.inner, future_annotations.Inner) and outer.scratch.buffer.shape == (4,)
+    assert future_annotations.Config(count=5).nested == future_annotations.NestedConfig()
+
+    # Python 3.14 resolves an annotation naming a struct defined later within the scope defining the struct
+    if sys.version_info >= (3, 14):
+
+        class ForwardAggregate(Data, kind=DataKind.CONSTANT, shape=()):
+            member: LaterMember  # noqa: F821
+            info: LaterInfo = requires()  # noqa: F821
+
+        class LaterMember(Data, kind=DataKind.CONSTANT, shape=()):
+            value: qd.Tensor = field(float)
+
+        class LaterInfo(Data, kind=DataKind.CONSTANT, shape=()):
+            value: qd.Tensor = field(float)
+
+        with namespace("root", root=True):
+            later_info = LaterInfo(values=dict(value=1.0))
+            forward_aggregate = ForwardAggregate(values=dict(member=dict(value=2.0)))
+        assert forward_aggregate.info is later_info and isinstance(forward_aggregate.member, LaterMember)
 
 
 @pytest.mark.required

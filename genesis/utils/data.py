@@ -4,7 +4,9 @@ import contextlib
 import dataclasses
 import math
 import operator
+import sys
 import types
+import typing
 import weakref
 from collections.abc import Iterable, Iterator, Mapping
 from contextvars import ContextVar
@@ -23,7 +25,7 @@ from quadrants.lang import impl
 
 import genesis as gs
 from genesis.typing import StrictBool, StrictInt, ValidFloat
-from genesis.utils.misc import data_to_array
+from genesis.utils.misc import data_to_array, get_own_annotations
 
 
 def _tensor_backend():
@@ -43,9 +45,11 @@ class _StaticConfigMeta(type):
     """Generate the keyword-only constructor, the equality and the hash of a static config from its annotations."""
 
     def __new__(cls, name, bases, namespace):
-        annotations = namespace.get("__annotations__", {})
+        config_cls = super().__new__(cls, name, bases, namespace)
+        annotations = get_own_annotations(config_cls)
         validators = {}
         for key, annotation in annotations.items():
+            annotation = _resolve_type(annotation, config_cls)
             if annotation is bool:
                 validators[key] = TypeAdapter(StrictBool)
             elif annotation is int:
@@ -77,8 +81,9 @@ class _StaticConfigMeta(type):
             return hash((type(self), *[vars(self)[key] for key in validators]))
 
         if annotations:
-            namespace.update(__init__=__init__, __setattr__=__setattr__, __eq__=__eq__, __hash__=__hash__)
-        return super().__new__(cls, name, bases, namespace)
+            for method in (__init__, __setattr__, __eq__, __hash__):
+                setattr(config_cls, method.__name__, method)
+        return config_cls
 
 
 class StaticConfig(metaclass=_StaticConfigMeta):
@@ -214,7 +219,7 @@ class FieldRef:
         self._owner, self._path = owner, path
 
     def __getattr__(self, name):
-        member_cls = self._owner.__dataclass_fields__[self._path[-1]].type
+        member_cls = {data_field.name: data_field for data_field in _data_fields(self._owner)}[self._path[-1]].type
         if (
             not (isinstance(member_cls, type) and issubclass(member_cls, Data))
             or name not in member_cls.__dataclass_fields__
@@ -372,13 +377,14 @@ class Data:
     kind: ClassVar["DataKind | None"] = None
     _shape: ClassVar[tuple | None] = None
     _lazy: ClassVar[dict[str, type]] = {}
-    # The names of the sizes of the arrays of the tree, lazy members included
-    _size_names: ClassVar[frozenset[str]] = frozenset()
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
-    # The type of each struct the struct requires by its field, the hooks being closed once an instance is built
+    # The type of each struct the struct requires by its field, those hooked into it among them, its fields being
+    # final once an instance is built. A struct hooked into one first built without it is refused afterwards.
     _requires: ClassVar[dict[str, type]] = {}
+    _hooks: ClassVar[set[str]] = set()
     _is_sealed: ClassVar[bool] = False
+    _is_refused: ClassVar[bool] = False
 
     def __init_subclass__(
         cls,
@@ -392,44 +398,36 @@ class Data:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._lazy, cls._values_models, cls._requires = dict(cls._lazy), {}, {}
-        annotations = cls.__dict__.get("__annotations__", {})
-        for name in list(annotations):
-            default = cls.__dict__.get(name)
-            if not (isinstance(default, dataclasses.Field) and default.metadata[_SPEC].lazy):
-                continue
+        cls._lazy, cls._values_models, cls._requires, cls._hooks = dict(cls._lazy), {}, {}, set()
+        annotations = get_own_annotations(cls)
+        lazy_names = [
+            name
+            for name in annotations
+            if isinstance(cls.__dict__.get(name), dataclasses.Field) and cls.__dict__[name].metadata[_SPEC].lazy
+        ]
+        for name in lazy_names:
             cls._lazy[name] = annotations.pop(name)
 
             def get_lazy(self, name=name):
                 member = self.__dict__.get(f"_lazy_{name}")
                 if member is None:
                     sizes, requires_grad = self._context
-                    member_cls = type(self)._lazy[name]
-                    member_sizes = {key: size for key, size in sizes.items() if key in member_cls._size_names}
+                    member_cls = _resolve_type(type(self)._lazy[name], type(self))
+                    member_sizes = {key: size for key, size in sizes.items() if key in _size_names(member_cls)}
                     member = member_cls(sizes=member_sizes, requires_grad=requires_grad)
                     object.__setattr__(self, f"_lazy_{name}", member)
                 return member
 
             setattr(cls, name, property(get_lazy))
+        # The lazy members are left out of the fields
+        if lazy_names:
+            cls.__annotations__ = annotations
         dataclasses.dataclass(init=False, eq=True, frozen=True)(cls)
-        dims, size_names = [*(cls._shape or ())], set().union(*[member._size_names for member in cls._lazy.values()])
         for data_field in dataclasses.fields(cls):
             # An instance shadows them with its arrays and members
             setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
-            spec = data_field.metadata.get(_SPEC, _FieldSpec())
-            if spec.is_required:
-                cls._require(data_field.name, data_field.type)
-            elif isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                size_names |= data_field.type._size_names
-            element_shape = spec.dtype[1] if isinstance(spec.dtype, tuple) else ()
-            dims += [*(spec.shape or ()), *(element_shape if isinstance(element_shape, tuple) else (element_shape,))]
-        while dims:
-            dim = dims.pop()
-            if isinstance(dim, Size):
-                size_names.add(str(dim))
-            elif isinstance(dim, SizeExpr):
-                dims += dim._operands
-        cls._size_names = frozenset(size_names)
+            if data_field.metadata.get(_SPEC, _FieldSpec()).is_required:
+                cls._requires[data_field.name] = data_field.type
         if into is not None:
             target, field_name = into
             target = _DATA_CLASSES.get(target) if isinstance(target, str) else target
@@ -457,16 +455,8 @@ class Data:
             dataclasses.make_dataclass(field_name, [(field_name, hook_cls)])
         )[0]
         setattr(cls, field_name, FieldRef(cls, (field_name,)))
-        cls._require(field_name, hook_cls)
-
-    @classmethod
-    def _require(cls, field_name: str, required_cls: type) -> None:
-        # Two fields bound to one struct would alias it, which Quadrants cannot detect
-        if not (isinstance(required_cls, type) and issubclass(required_cls, Data)):
-            raise TypeError(f"{cls.__name__}.{field_name}: a required field holds a struct.")
-        if required_cls in cls._requires.values():
-            raise TypeError(f"{cls.__name__}.{field_name}: a struct requires one struct per type.")
-        cls._requires[field_name] = required_cls
+        cls._requires[field_name] = hook_cls
+        cls._hooks.add(field_name)
 
     def __init__(
         self,
@@ -481,14 +471,40 @@ class Data:
     ):
         cls = type(self)
         name = cls.__name__
-        cls._is_sealed = True
+        if cls._is_refused:
+            raise TypeError(f"{name}() is refused: it hooks into a struct first built without it (see the warning).")
+        # The first instance resolves the annotations of the required structs and checks them, its fields being final
+        is_first = not cls._is_sealed
+        if is_first:
+            cls._requires = {
+                field_name: _resolve_type(annotation, cls) for field_name, annotation in cls._requires.items()
+            }
+            for field_name, required_cls in cls._requires.items():
+                if not (isinstance(required_cls, type) and issubclass(required_cls, Data)):
+                    raise TypeError(f"{name}.{field_name}: a required field holds a struct.")
+            # Two fields bound to one struct would alias it, which Quadrants cannot detect
+            if len(set(cls._requires.values())) < len(cls._requires):
+                raise TypeError(f"{name}: a struct requires one struct per type.")
+            cls._is_sealed = True
 
         # The required structs are bound in their fields, from the entered namespace, else from the nearest ancestor
         binds = {}
-        for field_name, required_cls in cls._requires.items():
+        for field_name, required_cls in list(cls._requires.items()):
             holding_namespace = _ACTIVE_NAMESPACE.get()
             while holding_namespace is not None and not holding_namespace._structs.get(required_cls):
                 holding_namespace = holding_namespace.parent
+            # A struct hooked in but built nowhere is dropped from the first instance on, and refused afterwards, so
+            # that a broken plugin disables itself rather than every struct it hooks into
+            if holding_namespace is None and is_first and field_name in cls._hooks:
+                gs.logger.warning(
+                    f"{required_cls.__name__} hooks into {name}, but none is built: {name} goes without it, and any "
+                    f"{required_cls.__name__} built from now on is refused."
+                )
+                del cls.__dataclass_fields__[field_name], cls._requires[field_name]
+                delattr(cls, field_name)
+                cls._hooks.discard(field_name)
+                required_cls._is_refused = True
+                continue
             if holding_namespace is None:
                 raise TypeError(f"{name}() finds no {required_cls.__name__} in {_ACTIVE_NAMESPACE.get()!r}.")
             structs = list(holding_namespace._structs[required_cls])
@@ -501,7 +517,7 @@ class Data:
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
         # fields each has left
         nodes = []
-        pending = [((), (), None, () if cls._shape is None else cls._shape, cls, iter(dataclasses.fields(cls)))]
+        pending = [((), (), None, () if cls._shape is None else cls._shape, cls, iter(_data_fields(cls)))]
         while pending:
             path, labels, kind, shape, holder, data_fields = pending[-1]
             data_field = next(data_fields, None)
@@ -520,9 +536,7 @@ class Data:
             node_shape = next(iter([s for s in (spec.shape, member._shape) if s is not None]), shape)
             nodes.append(_Node(node_path, member, spec, node_kind, node_shape, node_labels))
             if node_path not in binds:
-                pending.append(
-                    (node_path, node_labels, node_kind, node_shape, member, iter(dataclasses.fields(member)))
-                )
+                pending.append((node_path, node_labels, node_kind, node_shape, member, iter(_data_fields(member))))
         paths = {node.path for node in nodes}
         leaves = [node for node in nodes if node.member is None]
 
@@ -533,7 +547,7 @@ class Data:
             binds[key_path] = bound
         sizes = _by_path(name, "sizes", sizes or {}, paths)
         for entries in sizes.values():
-            if unknown := sorted(entries.keys() - cls._size_names):
+            if unknown := sorted(entries.keys() - _size_names(cls)):
                 raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
         properties = {leaf.path: {} for leaf in leaves}
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
@@ -624,6 +638,60 @@ class Data:
         entered_namespace = _ACTIVE_NAMESPACE.get()
         if entered_namespace is not None:
             entered_namespace._structs.setdefault(cls, weakref.WeakSet()).add(self)
+
+
+def _resolve_type(annotation: Any, owner: type) -> Any:
+    """Return what an annotation of a class names, a string or a forward reference evaluated where the class lives.
+
+    A string comes from a quoted annotation or from `from __future__ import annotations`, and resolves in the namespace
+    of the module of the class alone. A forward reference comes from Python 3.14, which records a name not defined yet
+    as one, and resolves within the scope defining the class, functions included.
+    """
+    try:
+        if isinstance(annotation, str):
+            return eval(annotation, vars(sys.modules[owner.__module__]))
+        if isinstance(annotation, typing.ForwardRef):
+            return annotation.evaluate()
+    except NameError as err:
+        raise TypeError(f"{owner.__qualname__}: the annotation {annotation!r} names nothing defined.") from err
+    return annotation
+
+
+def _data_fields(cls: type) -> tuple[dataclasses.Field, ...]:
+    """Return the fields of a struct, the annotations naming a struct defined later resolved in place (see Data)."""
+    data_fields = dataclasses.fields(cls)
+    for data_field in data_fields:
+        data_field.type = _resolve_type(data_field.type, cls)
+    return data_fields
+
+
+def _size_names(cls: type) -> frozenset[str]:
+    """Return the names of the sizes of a struct tree, its lazy members included and its required structs excluded."""
+    if "_tree_size_names" not in cls.__dict__:
+        size_names, dims, holders = set(), [], [cls]
+        while holders:
+            holder = holders.pop()
+            dims += holder._shape or ()
+            holders += [_resolve_type(lazy_type, holder) for lazy_type in holder._lazy.values()]
+            for data_field in _data_fields(holder):
+                if data_field.name in holder._requires:
+                    continue
+                if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
+                    holders.append(data_field.type)
+                spec = data_field.metadata.get(_SPEC, _FieldSpec())
+                element_shape = spec.dtype[1] if isinstance(spec.dtype, tuple) else ()
+                dims += [
+                    *(spec.shape or ()),
+                    *(element_shape if isinstance(element_shape, tuple) else (element_shape,)),
+                ]
+        while dims:
+            dim = dims.pop()
+            if isinstance(dim, Size):
+                size_names.add(str(dim))
+            elif isinstance(dim, SizeExpr):
+                dims += dim._operands
+        cls._tree_size_names = frozenset(size_names)
+    return cls._tree_size_names
 
 
 def _by_path(struct_name, arg_name, table, paths):

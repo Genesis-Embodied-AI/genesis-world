@@ -16,6 +16,9 @@ from importlib import import_module
 from itertools import combinations
 from typing import Any, NoReturn, Optional, Sequence
 
+if sys.version_info >= (3, 14):
+    import annotationlib
+
 import numpy as np
 import torch
 
@@ -1110,16 +1113,24 @@ def qd_zero_grad(value) -> None:
         # The fields alone: a struct also declares its data kind as a class variable (see DataKind in data.py)
         attr_names = [field.name for field in dataclasses.fields(cls)]
     else:
-        try:
-            attr_names = cls.__dict__["__annotations__"]
-        except KeyError as err:
-            raise_exception_from(
+        attr_names = get_own_annotations(cls)
+        if not attr_names:
+            raise_exception(
                 f"qd_zero_grad: expected `qd.Field`, `qd.Ndarray`, or a `dataclass` / `@qd.data_oriented` "
-                f"struct-of-arrays; got `{cls.__name__}`.",
-                cause=err,
+                f"struct-of-arrays; got `{cls.__name__}`."
             )
     for attr_name in attr_names:
         qd_zero_grad(getattr(value, attr_name, None))
+
+
+def get_own_annotations(cls: type) -> dict[str, Any]:
+    """Return the annotations a class declares itself, those naming something not defined yet as forward references.
+
+    Python 3.14 evaluates annotations lazily (PEP 649), leaving them out of the dictionary of the class.
+    """
+    if sys.version_info >= (3, 14):
+        return annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
+    return dict(cls.__dict__.get("__annotations__", {}))
 
 
 def sanitize_index(
