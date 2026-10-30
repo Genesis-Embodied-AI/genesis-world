@@ -35,18 +35,6 @@ def V(*args, **kwargs):
     return qd.tensor(*args, backend=_tensor_backend(), **kwargs)
 
 
-def V_VEC(*args, **kwargs):
-    return qd.Vector.tensor(*args, backend=_tensor_backend(), **kwargs)
-
-
-def V_MAT(*args, **kwargs):
-    return qd.Matrix.tensor(*args, backend=_tensor_backend(), **kwargs)
-
-
-def maybe_shape(shape, is_on):
-    return shape if is_on else ()
-
-
 @dataclass_transform(eq_default=True, kw_only_default=True, frozen_default=True)
 class _StaticConfigMeta(type):
     """Generate the keyword-only constructor, the equality and the hash of a static config from its annotations."""
@@ -232,18 +220,18 @@ class FieldRef:
         return f"FieldRef({'.'.join(self._path)})"
 
 
+# Metadata key under which 'field' stores its spec
+SPEC = "spec"
+
+
 class FieldSpec(NamedTuple):
     dtype: Any = None
     shape: tuple | None = None
+    kind: "DataKind | None" = None
     labels: tuple[Label, ...] = ()
     grad: bool = False
     ndarray: bool = False
     lazy: bool = False
-
-
-# Metadata keys under which 'field' stores the kind and the spec of a struct field
-KIND = "kind"
-SPEC = "spec"
 
 
 def field(
@@ -260,16 +248,16 @@ def field(
     Declare a field of a struct (see Data).
 
     `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
-    type, or such a type paired with an element shape, `(float, 3)` for a vector and `(float, (3, 3))` for a matrix.
-    `shape` lists the sizes of the dimensions of the array (see Size), replacing the default shape of its struct, and a field of
-    shape () and kind CONSTANT or INFO is a constant the constructor fills. `kind` replaces the kind of its struct (see
-    DataKind). `labels` are the families of the array, or of every array of a member, for the property tables of the
-    constructor. `grad` gives it gradients when the constructor requires them. An
-    `ndarray` array is an ndarray whatever the backend of the solver data. A `lazy` member is allocated the first time
-    it is read, from the sizes and the gradients of its struct alone, for a scratch most scenes never need.
+    type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
+    `(float, (3, 3))` for a matrix. `shape` lists the sizes of its dimensions (see Size), and a field of shape () and kind
+    CONSTANT or INFO is a constant the constructor fills from its values. `kind` and `shape` replace the defaults of the
+    struct, for every array of a member. `labels` select the array, or every array of a member, in the property tables
+    of the constructor. `grad` gives the array gradients when the constructor requires them. `ndarray` allocates an
+    ndarray on every backend. A `lazy` member is allocated when first read, from the sizes and the gradient requirement
+    of its struct.
     """
     labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
-    return dataclasses.field(metadata={KIND: kind, SPEC: FieldSpec(dtype, shape, labels, grad, ndarray, lazy)})
+    return dataclasses.field(metadata={SPEC: FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy)})
 
 
 def _resolve_dtype(dtype):
@@ -284,20 +272,19 @@ def _resolve_dtype(dtype):
     return {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
 
 
-def _member_shape(spec, member_cls, shape):
-    """Return the default shape of the fields of a member: that of its field, else of its class, else of its holder."""
-    for member_shape in (spec.shape, member_cls._shape):
-        if member_shape is not None:
-            return member_shape
-    return shape
+class _Node(NamedTuple):
+    """A field of a struct tree: an array, or a member struct when 'member' is set."""
 
-
-class _Leaf(NamedTuple):
     path: tuple[str, ...]
+    member: "type[Data] | None"
     spec: FieldSpec
     kind: "DataKind"
     shape: tuple
     labels: tuple[Label, ...]
+
+    @property
+    def is_constant(self) -> bool:
+        return self.member is None and self.shape == () and self.kind in (DataKind.CONSTANT, DataKind.INFO)
 
 
 class Data:
@@ -305,25 +292,24 @@ class Data:
     Base of the structs of solver data, which kernels take as arguments.
 
     A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), and its members as fields annotated
-    with another struct. The class keywords `kind` and `shape` set the default kind and shape of its fields (see
-    DataKind), a member taking the shape of its field, else the default shape of its own class, else that of the
-    struct holding it.
+    with another struct. The class keywords `kind` and `shape` set the defaults of its fields (see DataKind). A member
+    takes the shape of its field, else the default of its class, else that of its holder, and the kind of its field,
+    else that of its holder, else the default of its class.
 
-    The constructor allocates every array of the tree in declaration order, once and for all. `sizes` maps the name of
-    each size to its value, those no array uses being ignored. `values` holds the constants nested like the struct,
-    validated strictly. `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a
-    selection of arrays to a value: `env_first` stores the environment axis first or last, `layout` stores the dimensions in
-    the given permutation of their canonical order, and `unused` leaves the arrays no kernel reads as 0-d placeholders,
-    to spare their memory. A selection is a label or its name, matching any number of arrays, a reference to a field of
-    the struct (see FieldRef), which must exist, a tuple of them, or None for every array, and no two keys may select
-    the same array. `_binds` maps the path of a field to an array or a struct allocated elsewhere,
-    bound in its place, an alias no kernel may access along with its original, since Quadrants assumes distinct kernel
-    arguments never alias.
+    The constructor allocates every array of the tree in declaration order. `sizes` maps the name of each size to its
+    value, those no array uses being ignored. `values` holds the constants nested like the struct, validated strictly.
+    `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a selection of arrays to
+    a value: `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the given
+    permutation of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders. A
+    selection is a label or its name, matching any number of arrays, a reference to a field of the struct (see FieldRef),
+    a tuple of them, or None for every array. No two keys of a table may select the same array. `_binds` maps the path
+    of a field to an array or a struct allocated elsewhere, bound in its place: no kernel may access both, since
+    Quadrants assumes distinct kernel arguments never alias.
     """
 
-    kind: ClassVar["DataKind"]
+    kind: ClassVar["DataKind | None"] = None
     _shape: ClassVar[tuple | None] = None
-    _lazy: ClassVar[dict[str, tuple[type, FieldSpec]]] = {}
+    _lazy: ClassVar[dict[str, type]] = {}
 
     def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -336,8 +322,7 @@ class Data:
         for name in list(annotations):
             default = cls.__dict__.get(name)
             if isinstance(default, dataclasses.Field) and default.metadata[SPEC].lazy:
-                cls._lazy[name] = (annotations.pop(name), default.metadata[SPEC])
-                delattr(cls, name)
+                cls._lazy[name] = annotations.pop(name)
                 setattr(cls, name, property(lambda self, name=name: self._get_lazy(name)))
         dataclasses.dataclass(init=False, eq=True, frozen=True)(cls)
         # An instance shadows them with its arrays and members
@@ -355,130 +340,82 @@ class Data:
         requires_grad: bool = False,
         _binds: "Mapping[tuple[str, ...], Data | qd.Tensor] | None" = None,
     ):
-        cls = type(self)
-        context = (sizes or {}, values or {}, env_first or {}, layout or {}, unused or {}, requires_grad)
-        object.__setattr__(self, "_context", context)
-        cls._build(self, () if cls._shape is None else cls._shape, (), (), None, context, _binds or {})
-
-    @classmethod
-    def _leaves(cls, shape, labels, path, kind):
-        """Yield the arrays of the struct, with the shape, the kind and the labels they take within it."""
-        for data_field in dataclasses.fields(cls):
-            spec = data_field.metadata.get(SPEC, FieldSpec())
-            field_kind = data_field.metadata.get(KIND)
-            field_kind = kind if field_kind is None else field_kind
-            field_labels = labels + spec.labels
-            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                member_shape = _member_shape(spec, data_field.type, shape)
-                yield from data_field.type._leaves(member_shape, field_labels, (*path, data_field.name), field_kind)
-            else:
-                field_shape = spec.shape if spec.shape is not None else shape
-                field_kind = cls.kind if field_kind is None else field_kind
-                yield _Leaf((*path, data_field.name), spec, field_kind, field_shape, field_labels)
-
-    @classmethod
-    def _properties(cls, leaves, context):
-        """Return the runtime properties of the arrays, by path, from the property tables of the constructor."""
-        _, _, env_first, layout, unused, _ = context
+        cls, sizes, binds = type(self), sizes or {}, _binds or {}
+        nodes = list(cls._nodes((), (), None, () if cls._shape is None else cls._shape))
+        leaves = [node for node in nodes if node.member is None]
         properties = {leaf.path: {} for leaf in leaves}
         for name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
-            selected = {}
-            for key, value in table.items():
-                for ref in [item for item in (key if isinstance(key, tuple) else (key,)) if isinstance(item, FieldRef)]:
-                    if not any(_is_selected(ref, leaf) for leaf in leaves):
-                        raise TypeError(f"{cls.__name__}() '{name}' selects {ref}, which is no field of it.")
-                for leaf in leaves:
-                    if _is_selected(key, leaf):
-                        if leaf.path in selected:
-                            raise TypeError(f"{cls.__name__}() '{name}' selects {'.'.join(leaf.path)} twice.")
-                        selected[leaf.path] = value
-            for path, value in selected.items():
+            for path, value in _select(cls.__name__, name, table or {}, leaves).items():
                 if name == "layout" and "env_first" in properties[path]:
                     raise TypeError(f"{cls.__name__}() sets both 'env_first' and 'layout' of {'.'.join(path)}.")
                 properties[path][name] = value
-        return properties
+        constants = [leaf for leaf in leaves if leaf.is_constant]
+        is_optional = {leaf.path: properties[leaf.path].get("unused", False) for leaf in constants}
+        values = _values_model(cls.__name__, constants, is_optional).model_validate(values or {}).model_dump()
+
+        # The members first, then the arrays in declaration order, under the struct holding each
+        structs = {(): self}
+        for node in nodes:
+            is_bound = any([node.path[: len(path)] == path for path in binds])
+            if node.member is not None and not is_bound:
+                structs[node.path] = object.__new__(node.member)
+        for struct in structs.values():
+            object.__setattr__(struct, "_context", (sizes, requires_grad))
+        for node in nodes:
+            holder = structs.get(node.path[:-1])
+            if holder is None:
+                continue
+            if node.path in binds:
+                value = binds[node.path]
+            elif node.member is not None:
+                value = structs[node.path]
+            else:
+                value = _allocate(cls.__name__, node, properties[node.path], sizes, values, requires_grad)
+            object.__setattr__(holder, node.path[-1], value)
 
     @classmethod
-    def _build(cls, self, shape, labels, path, kind, context, binds, leaves=None):
-        """Allocate the arrays of the struct in declaration order, then bind them and its members to it."""
-        sizes, values, _, _, _, requires_grad = context
-        if leaves is None:
-            leaves = list(cls._leaves(shape, labels, path, kind))
-            properties = cls._properties(leaves, context)
-            unused_paths = frozenset([leaf.path for leaf in leaves if properties[leaf.path].get("unused")])
-            values = _values_model(cls, shape, path, kind, unused_paths).model_validate(values).model_dump()
-            context = (sizes, values, *context[2:])
-            object.__setattr__(self, "_properties", properties)
-        properties = self._properties
+    def _nodes(cls, path, labels, kind, shape):
+        """Yield the fields of the struct tree in declaration order, a member before its own fields."""
         for data_field in dataclasses.fields(cls):
-            field_path = (*path, data_field.name)
             spec = data_field.metadata.get(SPEC, FieldSpec())
-            if field_path in binds:
-                object.__setattr__(self, data_field.name, binds[field_path])
-                continue
-            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                member = object.__new__(data_field.type)
-                object.__setattr__(member, "_properties", properties)
-                object.__setattr__(member, "_context", context)
-                member_shape = _member_shape(spec, data_field.type, shape)
-                field_kind = data_field.metadata.get(KIND)
-                field_kind = kind if field_kind is None else field_kind
-                data_field.type._build(
-                    member, member_shape, labels + spec.labels, field_path, field_kind, context, binds, leaves=()
+            node_path, node_labels = (*path, data_field.name), labels + spec.labels
+            node_kind = spec.kind if spec.kind is not None else kind
+            member = (
+                data_field.type if isinstance(data_field.type, type) and issubclass(data_field.type, Data) else None
+            )
+            if member is None:
+                node_shape = spec.shape if spec.shape is not None else shape
+                yield _Node(
+                    node_path, None, spec, cls.kind if node_kind is None else node_kind, node_shape, node_labels
                 )
-                object.__setattr__(self, data_field.name, member)
                 continue
-            leaf_properties = properties[field_path]
-            field_shape = spec.shape if spec.shape is not None else shape
-            field_kind = data_field.metadata.get(KIND)
-            field_kind = (cls.kind if kind is None else kind) if field_kind is None else field_kind
-            dtype = _resolve_dtype(spec.dtype)
-            if leaf_properties.get("unused"):
-                array = V(dtype=dtype, shape=())
-            elif field_shape == () and field_kind in (DataKind.CONSTANT, DataKind.INFO):
-                value = values
-                for name in field_path:
-                    value = value[name]
-                array = V_SCALAR_FROM(dtype=dtype, value=value)
-            else:
-                dims, axes = [], []
-                for dim in field_shape:
-                    if isinstance(dim, Size) and isinstance(sizes.get(str(dim)), tuple):
-                        continue
-                    if isinstance(dim, _SizeArithmetic):
-                        try:
-                            dims.append(dim.size(sizes))
-                        except TypeError as err:
-                            raise TypeError(f"{cls.__name__}.{data_field.name}: {err}") from None
-                    else:
-                        dims.append(dim)
-                    axes.append(dim)
-                array_layout = leaf_properties.get("layout")
-                if leaf_properties.get("env_first") is not None:
-                    if ENVS not in axes:
-                        raise TypeError(
-                            f"'env_first' selects {'.'.join(field_path)}, which spans no environment dimension."
-                        )
-                    order = [i for i, dim in enumerate(axes) if dim != ENVS]
-                    i_env = axes.index(ENVS)
-                    order = [i_env, *order] if leaf_properties["env_first"] else [*order, i_env]
-                    array_layout = tuple(order) if order != list(range(len(axes))) else None
-                if spec.ndarray:
-                    array = qd.tensor(dtype, shape=tuple(dims), backend=qd.Backend.NDARRAY)
-                else:
-                    array = V(
-                        dtype=dtype, shape=tuple(dims), layout=array_layout, needs_grad=spec.grad and requires_grad
-                    )
-            object.__setattr__(self, data_field.name, array)
+            node_shape = next(iter([s for s in (spec.shape, member._shape) if s is not None]), shape)
+            yield _Node(node_path, member, spec, node_kind, node_shape, node_labels)
+            yield from member._nodes(node_path, node_labels, node_kind, node_shape)
 
     def _get_lazy(self, name):
         member = self.__dict__.get(f"_lazy_{name}")
         if member is None:
-            member_cls, spec = type(self)._lazy[name]
-            sizes, *_, requires_grad = self._context
-            member = member_cls(sizes=sizes, requires_grad=requires_grad)
+            sizes, requires_grad = self._context
+            member = type(self)._lazy[name](sizes=sizes, requires_grad=requires_grad)
             object.__setattr__(self, f"_lazy_{name}", member)
         return member
+
+
+def _select(struct_name, table_name, table, leaves):
+    """Return the value a property table of a struct constructor gives each array it selects, by path (see Data)."""
+    selected = {}
+    for key, value in table.items():
+        refs = [item for item in (key if isinstance(key, tuple) else (key,)) if isinstance(item, FieldRef)]
+        for ref in refs:
+            if not any([_is_selected(ref, leaf) for leaf in leaves]):
+                raise TypeError(f"{struct_name}() '{table_name}' selects {ref}, which is no field of it.")
+        for leaf in leaves:
+            if _is_selected(key, leaf):
+                if leaf.path in selected:
+                    raise TypeError(f"{struct_name}() '{table_name}' selects {'.'.join(leaf.path)} twice.")
+                selected[leaf.path] = value
+    return selected
 
 
 def _is_selected(key, leaf) -> bool:
@@ -486,53 +423,78 @@ def _is_selected(key, leaf) -> bool:
     if key is None:
         return True
     if isinstance(key, tuple):
-        return any(_is_selected(item, leaf) for item in key)
+        return any([_is_selected(item, leaf) for item in key])
     if isinstance(key, FieldRef):
         return leaf.path[: len(key._path)] == key._path
     return Label(str(key)) in leaf.labels
 
 
+def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
+    """Allocate an array of a struct tree (see Data)."""
+    dtype = _resolve_dtype(leaf.spec.dtype)
+    if properties.get("unused"):
+        return V(dtype=dtype, shape=())
+    if leaf.is_constant:
+        value = values
+        for name in leaf.path:
+            value = value[name]
+        return _scalar_from(dtype, value)
+    dims, axes = [], []
+    for dim in leaf.shape:
+        # A size given as () drops its dimension
+        if isinstance(dim, Size) and isinstance(sizes.get(str(dim)), tuple):
+            continue
+        try:
+            dims.append(dim.size(sizes) if isinstance(dim, _SizeArithmetic) else dim)
+        except TypeError as err:
+            raise TypeError(f"{struct_name}.{'.'.join(leaf.path)}: {err}") from None
+        axes.append(dim)
+    layout = properties.get("layout")
+    if properties.get("env_first") is not None:
+        if ENVS not in axes:
+            raise TypeError(f"'env_first' selects {'.'.join(leaf.path)}, which spans no environment dimension.")
+        order = [i for i, dim in enumerate(axes) if dim != ENVS]
+        i_env = axes.index(ENVS)
+        order = [i_env, *order] if properties["env_first"] else [*order, i_env]
+        layout = tuple(order) if order != list(range(len(axes))) else None
+    if leaf.spec.ndarray:
+        return qd.tensor(dtype, shape=tuple(dims), backend=qd.Backend.NDARRAY)
+    return V(dtype=dtype, shape=tuple(dims), layout=layout, needs_grad=leaf.spec.grad and requires_grad)
+
+
 _VALUES_MODELS = {}
 
 
-def _values_model(cls, shape, path, kind, unused_paths):
+def _values_model(struct_name, constants, is_optional, depth=0):
     """Return the pydantic model validating the constants of a struct, nested like it, those left unused optional."""
-    model_key = (cls, unused_paths)
+    model_key = (struct_name, depth, tuple([(leaf.path, is_optional[leaf.path]) for leaf in constants]))
     model = _VALUES_MODELS.get(model_key)
     if model is not None:
         return model
     fields = {}
-    for data_field in dataclasses.fields(cls):
-        spec = data_field.metadata.get(SPEC, FieldSpec())
-        field_path = (*path, data_field.name)
-        field_kind = data_field.metadata.get(KIND)
-        field_kind = kind if field_kind is None else field_kind
-        if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-            member_shape = _member_shape(spec, data_field.type, shape)
-            member_model = _values_model(data_field.type, member_shape, field_path, field_kind, unused_paths)
-            if member_model.model_fields:
-                is_required = any(info.is_required() for info in member_model.model_fields.values())
-                fields[data_field.name] = (member_model, ...) if is_required else (member_model, member_model())
+    for name in dict.fromkeys([leaf.path[depth] for leaf in constants]):
+        children = [leaf for leaf in constants if leaf.path[depth] == name]
+        if len(children[0].path) > depth + 1:
+            member_model = _values_model(f"{struct_name}.{name}", children, is_optional, depth + 1)
+            is_required = any([info.is_required() for info in member_model.model_fields.values()])
+            fields[name] = (member_model, ...) if is_required else (member_model, member_model())
             continue
-        field_shape = spec.shape if spec.shape is not None else shape
-        field_kind = cls.kind if field_kind is None else field_kind
-        if field_shape != () or field_kind not in (DataKind.CONSTANT, DataKind.INFO):
-            continue
-        base = spec.dtype if not isinstance(spec.dtype, tuple) else spec.dtype[0]
+        (leaf,) = children
+        base = leaf.spec.dtype[0] if isinstance(leaf.spec.dtype, tuple) else leaf.spec.dtype
         if base is bool or base == qd.u1:
             value_type = StrictBool
         elif base is int or (not isinstance(base, type) and base in qd.types.primitive_types.integer_types):
             value_type = StrictInt
         else:
             value_type = ValidFloat
-        fields[data_field.name] = (value_type | None, None) if field_path in unused_paths else (value_type, ...)
-    model = pydantic.create_model(f"{cls.__name__}Values", __config__=pydantic.ConfigDict(extra="forbid"), **fields)
+        fields[name] = (value_type | None, None) if is_optional[leaf.path] else (value_type, ...)
+    model = pydantic.create_model(f"{struct_name}Values", __config__=pydantic.ConfigDict(extra="forbid"), **fields)
     _VALUES_MODELS[model_key] = model
     return model
 
 
 # FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
-# constant. 'V_SCALAR_FROM' defers it to the next materialization instead, at the cost of one synchronization there.
+# constant. '_scalar_from' defers it to the next materialization instead, at the cost of one synchronization there.
 _pending_fields_fill: list[tuple[qd.Tensor, Any]] = []
 _materialize = impl.PyQuadrants.materialize
 _clear = impl.PyQuadrants.clear
@@ -560,7 +522,7 @@ impl.PyQuadrants.materialize = _materialize_then_fill
 impl.PyQuadrants.clear = _clear_then_drop_fills
 
 
-def V_SCALAR_FROM(dtype, value):
+def _scalar_from(dtype, value):
     data = V(dtype=dtype, shape=())
     # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
     # materialization (see quadrants#941 above). An ndarray is filled right away: its zero-copy export runs no
@@ -600,17 +562,11 @@ class DataKind(IntEnum):
 CHECKPOINT_KINDS = frozenset((DataKind.INFO, DataKind.STATE, DataKind.DERIVED))
 
 
-def of_kind(kind: DataKind):
-    """Declare a struct field whose kind differs from the default its struct states (see DataKind)."""
-    return dataclasses.field(metadata={KIND: kind})
-
-
 class ArrayItem(NamedTuple):
     """An array of a solver or of the simulator, under the dotted name of the slot and fields reaching it.
 
-    It lives on the device of the backend, and a restore fills it in place (see 'iter_data'). It is a quadrants array,
-    or a torch tensor such as the step counts of the simulator. An unused quadrants array is the 0-d placeholder of a
-    feature switched off (see 'maybe_shape'), which a restore leaves as built (see 'check_data').
+    It is a quadrants array, or a torch tensor such as the step counts of the simulator, which a restore fills in place
+    (see 'fill_data'). An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built.
     """
 
     name: str
@@ -647,13 +603,11 @@ class ConfigItem(NamedTuple):
 def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterator[DataItem | ConfigItem]:
     """Yield the data of an attribute, one item per array if it is a struct, named by the fields reaching it.
 
-    The attribute is 'attr' of 'owner', and an item of a struct is named by 'attr' plus field names joined with dots.
-    Structs are the frozen dataclasses and named tuples of this module, nested to any depth. The class attribute 'kind'
-    gives the default kind of a struct's fields, and 'of_kind' on a field overrides it. An override on a struct-valued
-    field applies to every array of that struct. An array is a quadrants array or a torch tensor, and a quadrants array
-    carrying gradients yields them as one more item of its kind, named 'grad'. A Python native scalar of an object that
-    is no struct, such as a flag, yields an item of the given kind, which a restore sets back as the attribute. A static
-    config yields a ConfigItem. Anything else raises and names the offending attribute.
+    The attribute is 'attr' of 'owner', and an item of a struct is named by 'attr' and the fields reaching it, joined
+    with dots. Structs are dataclasses and named tuples, nested to any depth, whose arrays take the kind of their field
+    (see 'field') else that of their struct. A quadrants array carrying gradients yields them as one more item named
+    'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
+    which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
     value = getattr(owner, attr)
     if isinstance(value, StaticConfig):
@@ -666,7 +620,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
             yield ArrayItem(f"{attr}.grad", kind, value.grad)
     elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
         if dataclasses.is_dataclass(value):
-            members = [(field.name, field.metadata.get(KIND)) for field in dataclasses.fields(value)]
+            members = [(field.name, field.metadata.get(SPEC, FieldSpec()).kind) for field in dataclasses.fields(value)]
         else:
             members = [(member, None) for member in value._fields]
         for member, stated_kind in members:
@@ -692,7 +646,8 @@ def iter_state_arrays(
     """
     for field in dataclasses.fields(struct):
         value = getattr(struct, field.name)
-        field_kind = field.metadata.get(KIND, kind)
+        field_kind = field.metadata.get(SPEC, FieldSpec()).kind
+        field_kind = kind if field_kind is None else field_kind
         if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
             if field_kind is None:
                 field_kind = type(struct).kind
@@ -709,8 +664,8 @@ def check_data(
 
     A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may
     differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
-    and so does a name on one side only, since the record comes from another build or version. 'maybe_shape' shapes an
-    unused array as (), so an array with that shape on either side stays as built, and is left out. With
+    and so does a name on one side only, since the record comes from another build or version. An unused array, of
+    shape () on either side, stays as built. With
     `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
     """
     items = tuple(items)

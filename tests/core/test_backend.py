@@ -39,7 +39,7 @@ def test_switching(backend, order):
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
 
-            from genesis.utils.data import V, V_VEC, _tensor_backend
+            from genesis.utils.data import V, _tensor_backend
 
             expected_backend = qd.Backend.NDARRAY if use_nd else qd.Backend.FIELD
             assert _tensor_backend() == expected_backend, (
@@ -51,8 +51,10 @@ def test_switching(backend, order):
             arr = t.to_numpy()
             np.testing.assert_array_equal(arr, np.full(4, cycle_idx + 1))
 
-            v = V_VEC(3, qd.f32, (2,))
-            assert v.to_numpy().shape == (2, 3), f"Cycle {cycle_idx}: unexpected V_VEC shape {v.to_numpy().shape}"
+            v = V(qd.types.vector(3, qd.f32), (2,))
+            assert v.to_numpy().shape == (2, 3), (
+                f"Cycle {cycle_idx}: unexpected vector tensor shape {v.to_numpy().shape}"
+            )
 
             scene = gs.Scene(show_viewer=False)
             scene.add_entity(gs.morphs.Plane())

@@ -1,28 +1,12 @@
 import dataclasses
-import math
 from enum import IntEnum
-from typing import ClassVar
 
 import numpy as np
 
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import (
-    ENVS,
-    Data,
-    DataKind,
-    Label,
-    Size,
-    StaticConfig,
-    V,
-    V_SCALAR_FROM,
-    V_VEC,
-    field,
-    is_tensor_addressable,
-    maybe_shape,
-    of_kind,
-)
+from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field, is_tensor_addressable
 
 
 def _timer_dtype():
@@ -49,8 +33,6 @@ class ErrorCode(IntEnum):
 # =========================================== RigidInfo ===========================================
 
 
-# Sizes of the rigid solver data, sized by the solver counts padded to one (see the trailing-underscore counts of
-# KinematicSolver)
 QS = Size("qs")
 DOFS = Size("dofs")
 LINKS = Size("links")
@@ -73,55 +55,46 @@ TILED_MASS = Label("tiled_mass")
 class RigidInfo(Data, kind=DataKind.CONSTANT):
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
     meaninertia: qd.Tensor = field(float, shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
-    # *_bw: Cache for backward pass
-    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env whose
-    # count is zero has every body asleep and skips the passes that gate on it whole. An env whose count is the dof
-    # count has no sleeper and skips the passes that look for one (the chain edges and the wake pass of the island
-    # build, the pair filter of the broad phase, the contact advection, the inert rows), so hibernation costs it one
-    # read per pass until something sleeps in it. A dof-less scene pads its dof buffers to one slot and takes the slow
-    # path.
+    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env at zero
+    # skips the passes gated on it. An env at the dof count skips the passes looking for a sleeper (the chain edges and
+    # the wake pass of the island build, the pair filter of the broad phase, the contact advection, the inert rows). A
+    # dof-less scene pads its dof buffers to one slot and takes the slow path.
     n_awake_dofs: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
     qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
     links_T: qd.Tensor = field((float, (4, 4)), shape=(LINKS,), kind=DataKind.DERIVED)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
-    # Flipped from canonical (n_dofs(i_d1), n_dofs(i_d2), _B) to physical (_B, n_dofs(i_d2), n_dofs(i_d1)) under the
-    # cooperative constraint kernels: i_d1 becomes innermost / stride-1, which coalesces consumer
-    # kernels whose lanes stride i_d1 with a serial inner i_d2 loop. The trade-off is regression on writer-side kernels
-    # that pair with cooperative rewrites to recover under the same enable_cooperative_constraint_kernels flag.
+    # Stored reversed under the cooperative constraint kernels (see DataManager), i_d1 innermost, for their readers
+    # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.
     mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
-    # Canonical. Its dominant consumer is a serial Cholesky-style back-substitution that is already coalesced under
-    # (n_dofs, n_dofs, _B) with lanes varying i_b, so flipping L would regress that path more than the corresponding
-    # writer-side win on the tiled factor_mass.
+    # Stored in declared order whatever the kernels: its main reader, a serial back-substitution with lanes varying
+    # i_b, would lose more from the reversed order than the tiled factor gains.
     mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
     mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
-    # Batch-first scratch for the register-tiled mass factor (qd.simt tile ops are batch-first, so the factorization
-    # cannot run in place on the batch-last mass_mat_L), with the constraint Hessian's shape so nt_H can alias it (see
-    # ConstraintState) instead of allocating a second buffer. The factor only touches it before the constraint solve
-    # repopulates it in the same step.
+    # Scratch of the register-tiled mass factor, environment-first like the tile operations. The constraint Hessian
+    # aliases it (see nt_H in ConstraintState).
     mass_mat_tiled_scratch: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, labels=TILED_MASS)
     # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
-    # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
-    # link on its root). The composite inertia and the center of mass are per root.
+    # [root, links_root_end[root]), which may interleave links of other roots, so the walks gate each link on its root.
+    # The composite inertia and the center of mass are per root.
     roots_link_idx: qd.Tensor = field(int, shape=(ROOTS,))
     links_root_end: qd.Tensor = field(int, shape=(LINKS,))
-    # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
-    # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
+    # Kinematic trees: the links a chain of moving joints connects, a static link belonging to none (links_tree_idx -1)
+    # and each branch of a fixed base being a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
     # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
-    # trees_dof_start[i_t] + trees_n_dofs[i_t]), in ascending dof order. The islands are built on the trees. A scene
-    # without any tree keeps one padded slot at root 0 and link end 0, so every tree walk is empty.
+    # trees_dof_start[i_t] + trees_n_dofs[i_t]). The islands are built on the trees. A scene without any tree keeps
+    # one padded slot at root 0 and link end 0, so every tree walk is empty.
     trees_root_idx: qd.Tensor = field(int, shape=(TREES,))
     trees_link_end: qd.Tensor = field(int, shape=(TREES,))
     trees_n_links: qd.Tensor = field(int, shape=(TREES,))
     trees_dof_start: qd.Tensor = field(int, shape=(TREES,))
     trees_n_dofs: qd.Tensor = field(int, shape=(TREES,))
     links_tree_idx: qd.Tensor = field(int, shape=(LINKS,))
-    # trees_levels_links_idx lists the links of every tree level by level for the level sweep (see
-    # func_sweep_links_by_level and KinematicSolver._init_tree_fields). The levels of tree i_t start at entry
-    # trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before entry
-    # trees_levels_links_end[i_k]. The root tables list all the links of every root the same way, and the level of entry
-    # i_k starts at entry roots_levels_links_start[i_k]. Empty where the level sweep does not run.
+    # The links of every tree level by level, for the level sweep (see func_sweep_links_by_level). The levels of tree
+    # i_t start at entry trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before
+    # entry trees_levels_links_end[i_k]. The root tables list the links of every root the same way, the level of entry
+    # i_k starting at entry roots_levels_links_start[i_k].
     trees_level_start: qd.Tensor = field(int, shape=(TREES,), labels=LEVEL_SWEEP)
     trees_n_levels: qd.Tensor = field(int, shape=(TREES,), labels=LEVEL_SWEEP)
     trees_levels_links_idx: qd.Tensor = field(int, shape=(TREES_LEVELS_LINKS,), labels=LEVEL_SWEEP)
@@ -135,19 +108,18 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     # order: the leaf-to-root folds of the level sweep add them into their parent in the order of the serial folds.
     links_child_start: qd.Tensor = field(int, shape=(LINKS + 1,), labels=LEVEL_SWEEP)
     links_child_idx: qd.Tensor = field(int, shape=(CHILD_LINKS,), labels=LEVEL_SWEEP)
-    # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
-    # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
-    # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
-    # aligned free body splits into one block per dof), so the assemble/factor/solve walk the blocks of a tree and
-    # restrict to these bounds.
+    # Bounds of the mass block of each dof: the dofs of its branch rooted where the fixed structure ends, deeper
+    # branches staying in the enclosing block, merged across entities and kept contiguous by attach(). The blocks
+    # partition the dof range of a kinematic tree (an aligned free body splits into one block per dof), and the
+    # assembly, the factor and the solve of the mass matrix walk them.
     dofs_mass_block_start: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
     dofs_mass_block_end: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
     dofs_mass_envelope_start: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
-    # Mass parent of each dof, -1 for none: the previous dof of its link, else the last dof of its nearest ancestor link
-    # holding one, when it lies in the same mass block.
+    # Mass parent of each dof within its mass block, -1 for none: the previous dof of its link, else the last dof of
+    # its nearest ancestor link holding one.
     dofs_mass_parent: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
-    # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
-    # the dofs of its own link, within its mass block.
+    # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and the
+    # dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor = field(float, shape=(DOFS, DOFS), labels=DYNAMICS)
     # Runtime constants
     substep_dt: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
@@ -206,9 +178,9 @@ BACKWARD = Label("backward")
 
 
 class IslandSlices(Data, kind=DataKind.SCRATCH, shape=(TREES, ENVS)):
-    # Per-(island, env) slices into a packed id array: island i_island's items are id[start[i_island, i_b] : start +
-    # n[i_island, i_b]]. curr is the write cursor the partition build advances while filling each slice; once built,
-    # curr == start + n. Indexed [n_trees, B] since an island holds at least one tree (see trees_root_idx in RigidInfo).
+    # Slices of a packed id array per (island, env): the items of island i_island are id[start[i_island, i_b] :
+    # start[i_island, i_b] + n[i_island, i_b]]. curr is the write cursor of the partition build, start + n once built.
+    # An island holds at least one tree, hence one slice per tree.
     curr: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
     n: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
     start: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
@@ -243,18 +215,17 @@ class IslandState(Data, kind=DataKind.SCRATCH):
     # truncates), so only the CPU per-island path reads it.
     dof_env_start_local: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     dof_env_col_end: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
-    # Per-island contact lists of the CPU per-island skyline reorder (see rcm_tree_pos below, empty otherwise).
-    # contact_id also carries the input order of the cooperative contact sort (see func_sort_contacts_coop in
-    # island.py).
+    # Contact lists of the islands, for the CPU skyline reorder (see rcm_tree_pos). contact_id also carries the input
+    # order of the cooperative contact sort (see func_sort_contacts_coop in island.py).
     contact_slices: IslandSlices = field(labels=RCM)
     contact_id: qd.Tensor = field(int, shape=(CONTACTS, ENVS), labels=(COOPERATIVE_ROWS, ISLAND_CONTACTS))
     constraint_slices: IslandSlices
     constraint_id: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Island of each constraint, -1 for one touching no island
     constraint_island_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
-    # Hibernation (empty unless use_hibernation): is_hibernated marks an island whose every link is asleep, and
-    # hibernated_next_link is the per-link daisy chain the partition build re-unions before labeling, which keeps a
-    # sleeping component, whose bodies generate no live contacts, one island across steps.
+    # is_hibernated marks an island whose every link is asleep. hibernated_next_link chains the links of a sleeping
+    # component, which the partition build re-unions before labeling, so the component stays one island across steps
+    # although its bodies generate no live contacts.
     is_hibernated: qd.Tensor = field(int, shape=(TREES, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
     hibernated_next_link: qd.Tensor = field(int, shape=(LINKS, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
     # (env, island) work-lists of the cooperative per-island factor+solve, one per island size class (see
@@ -264,9 +235,8 @@ class IslandState(Data, kind=DataKind.SCRATCH):
     factor_worklist_i_b: qd.Tensor = field(int, shape=(TILE_CLASSES * TREES * ENVS,), labels=WORKLISTS)
     factor_worklist_i_island: qd.Tensor = field(int, shape=(TILE_CLASSES * TREES * ENVS,), labels=WORKLISTS)
     factor_worklist_size: qd.Tensor = field(int, shape=(TILE_CLASSES,), labels=WORKLISTS)
-    # Scratch of the reverse Cuthill-McKee tree reorder of the CPU per-island skyline path: a tree's island-local slot,
-    # contact degree and ordered flag, and the resulting visit order. Distinct buffers, since quadrants assumes
-    # distinct kernel arguments never alias.
+    # Scratch of the reverse Cuthill-McKee tree reorder of the CPU per-island skyline path: the island-local slot, the
+    # contact degree and the ordered flag of each tree, and the resulting visit order.
     rcm_tree_pos: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
     rcm_tree_degree: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
     rcm_tree_is_ordered: qd.Tensor = field(bool, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
@@ -294,42 +264,37 @@ IK_ERRORS = Size("ik_errors")
 
 
 class IKState(Data, kind=DataKind.SCRATCH):
-    """Damped-least-squares inverse-kinematics scratch, one column per parallel solve.
+    """Damped-least-squares inverse-kinematics scratch, one column per environment or per restart of the planner."""
 
-    A column is an environment for the entity API or a candidate restart for the planner.
-    """
-
-    # Single-target spatial Jacobian (6 x n_dofs), rebuilt per target link and copied into the stacked block.
+    # Spatial Jacobian of one target, rebuilt per target link and copied into the stacked block
     jacobian: qd.Tensor = field(float, shape=(6, IK_DOFS, ENVS))
-    # Stacked multi-target Jacobian and its transpose, feeding the damped normal-equations solve.
+    # Jacobian of all targets stacked, and its transpose
     jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, IK_DOFS, ENVS))
     jacobian_stacked_t: qd.Tensor = field(float, shape=(IK_DOFS, IK_ERRORS, ENVS))
-    # Damped normal matrix J J^T + damping^2 I, its lower / upper LU factors and forward-substitution scratch, and
-    # its inverse.
+    # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
     mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     lu_upper: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     lu_y: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     inv: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    # Stacked pose residual, the best residual seen across restarts, and inv @ residual.
+    # Pose residual of all targets stacked, the best one across restarts, and inv @ residual
     err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
-    # Joint-space step and the best configuration found across restarts.
+    # Joint-space step, and the best configuration across restarts
     delta_qpos: qd.Tensor = field(float, shape=(IK_DOFS, ENVS))
     qpos_best: qd.Tensor = field(float, shape=(IK_QS, ENVS))
 
 
 class IKScratchFK(Data, kind=DataKind.SCRATCH):
-    """Per-column forward-kinematics scratch for the entity inverse-kinematics solve.
+    """Forward kinematics of the inverse-kinematics solve of an entity, apart from the state of the solver.
 
-    Holds the working configuration and the link / joint frames it produces, so each Gauss-Newton step evaluates
-    and integrates poses on caller-owned buffers without mutating live solver state. A column is an environment.
+    It holds the configuration the solve iterates and the link and joint frames of that configuration, one column per
+    environment.
     """
 
-    # Entity-local working configuration iterated by the solve.
     qpos: qd.Tensor = field(float, shape=(IK_QS, ENVS))
-    # Link poses and joint frames placed by func_forward_kinematics_scratch, feeding the error and the Jacobian.
+    # Written by func_forward_kinematics_scratch
     links_pos: qd.Tensor = field((float, 3), shape=(IK_LINKS, ENVS))
     links_quat: qd.Tensor = field((float, 4), shape=(IK_LINKS, ENVS))
     joints_xanchor: qd.Tensor = field((float, 3), shape=(IK_JOINTS, ENVS))
@@ -337,24 +302,22 @@ class IKScratchFK(Data, kind=DataKind.SCRATCH):
 
 
 class IKTargets(Data, kind=DataKind.SCRATCH):
-    """Inverse-kinematics targets and DOF selection for one solve batch, one column per parallel solve.
+    """Targets and dofs of an inverse-kinematics solve, one column per environment or per restart of the planner.
 
-    A column is an environment for the entity API or a candidate restart for the planner. Positions and
-    orientations are vec-typed so the solver reads a target pose per (link, column) directly; the host populates
-    every field before the solve.
+    The caller writes every field before the solve.
     """
 
-    # Global indices of the target links, the effective DOFs to move, and the columns (solver envs) to solve.
+    # Global indices of the target links, of the dofs to move and of the columns to solve
     links_idx: qd.Tensor = field(int, shape=(IK_TARGETS,))
     dofs_idx: qd.Tensor = field(int, shape=(IK_DOFS,))
     envs_idx: qd.Tensor = field(int, shape=(ENVS,))
-    # Target pose per (link, column) and the link-local point whose pose is driven, in the world frame.
+    # Target pose per (link, column) in the world frame, and the link-local point it drives
     pos: qd.Tensor = field((float, 3), shape=(IK_TARGETS, ENVS))
     quat: qd.Tensor = field((float, 4), shape=(IK_TARGETS, ENVS))
     local_point: qd.Tensor = field((float, 3), shape=(IK_TARGETS,))
-    # Optional custom initial configuration per (column, q); used only when custom_init_qpos is set.
+    # Initial configuration per column, read when custom_init_qpos is set
     init_qpos: qd.Tensor = field(float, shape=(ENVS, IK_QS))
-    # Which position / rotation axes to solve (shared across links), and per-link position / rotation enables.
+    # The position and rotation axes to solve for all links, and the position and rotation switches of each link
     pos_mask: qd.Tensor = field(float, shape=(3,))
     rot_mask: qd.Tensor = field(float, shape=(3,))
     link_pos_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
@@ -362,10 +325,9 @@ class IKTargets(Data, kind=DataKind.SCRATCH):
 
 
 class IKScratch(Data, kind=DataKind.SCRATCH):
-    """The three solve-time buffers an inverse-kinematics call needs, shared by every entity of one solver.
+    """The scratch of the inverse-kinematics solves of every entity of a solver.
 
-    Sized by the largest entity the solver holds and by the target cap, so each solve writes the leading rows its own
-    entity spans; a column is an environment.
+    It spans the largest entity and the target cap, and a solve writes the leading rows its entity spans.
     """
 
     state: IKState
@@ -379,10 +341,10 @@ KINEMATICS = Label("kinematics")
 
 
 class KinematicsScratch(Data, kind=DataKind.SCRATCH):
-    """Buffers backing the kinematics queries of every entity of one solver.
+    """The scratch of the kinematics queries of every entity of a solver, one column per environment.
 
-    A column is an environment. The Jacobian spans the widest entity, and the configuration cache spans the solver
-    configuration so the global q indices callers already work in index it directly.
+    The Jacobian spans the widest entity, and the configuration cache spans the configuration of the solver, indexed
+    by global q indices.
     """
 
     jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS), labels=KINEMATICS)
@@ -390,10 +352,7 @@ class KinematicsScratch(Data, kind=DataKind.SCRATCH):
 
 
 class WeightScratch(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
-    """Buffers used to compute the constraint inverse weights of one solver.
-
-    One weight needs one row of a link Jacobian and the mass-matrix solve against that row.
-    """
+    """The scratch of the inverse weights of a solver: a row of a link Jacobian and the mass-matrix solve against it."""
 
     jac_row: qd.Tensor = field(float)
     solve_out: qd.Tensor = field(float)
@@ -405,23 +364,19 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     qd_n_equalities: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     n_constraints_equality: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     n_constraints_frictionloss: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
-    # Number of elliptic-cone contact rows (rows_per_contact per contact), laid out contiguously at the start of the
-    # collision segment. Zero for the pyramidal cone. The cone rows occupy
-    # [ne + n_frictionloss, ne + n_frictionloss + n_cone).
+    # Elliptic-cone contact rows, rows_per_contact per contact, zero for the pyramidal cone. They occupy
+    # [ne + n_frictionloss, ne + n_frictionloss + n_cone), the start of the collision segment.
     n_constraints_cone: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     is_warmstart: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.STATE)
     improved: qd.Tensor = field(bool, shape=(ENVS,))
     cost_ws: qd.Tensor = field(float, shape=(ENVS,))
     cost: qd.Tensor = field(float, shape=(ENVS,))
-    # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_). Adjacent-lane reads striding i_d in
-    # cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on a per-consumer
-    # basis under the same enable_cooperative_constraint_kernels flag.
     Ma: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     Ma_ws: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     grad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     Mgrad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
-    # Previous-iteration cone-row residuals, kept only for the CPU elliptic cone so the incremental factor can downdate
-    # the prior coupled cone block by a per-iteration rank-3 update (Jaref is overwritten by the linesearch apply).
+    # Cone-row residuals of the previous iteration, for the CPU elliptic cone: the incremental factor downdates the
+    # previous coupled cone block by a rank-3 update, after the linesearch overwrote Jaref.
     cone_prev_jaref: qd.Tensor = field(float, shape=(CONE_ROWS, ENVS), labels=(SERIAL_ROWS, CONE_INCREMENTAL))
     # Per contact under 'signorini': the latched normal force scaling its friction discs (negative until seeded, see
     # func_relatch_cone in solver.py), and the gap between the iterate's normal force and the latch at the last update.
@@ -432,57 +387,46 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
     qacc_ws: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
     mv: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
-    # Optional CG fields
     cg_prev_grad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     cg_prev_Mgrad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
-    # Optional Newton fields
-    # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
-    # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
-    # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
+    # Rank-1 vectors of the incremental Cholesky update, slot-minor at [i_d * n_slots + i_u]: one slot per fused update
+    # of the per-island factor (see func_rank_batch_update_island), one for the factor of a single-island scene. The
+    # flat index keeps the rank and the layout of the other dof vectors.
     nt_vec: qd.Tensor = field(float, shape=(DOFS * NT_VEC_SLOTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
-    # Hessian matrix of the optimization problem as a dense 2D tensor.
-    # Note that only the lower triangular part is updated for efficiency because this matrix is symmetric by definition.
-    # As a result, the values of the strictly upper triangular part is undefined - except under
-    # enable_cone_free_hessian_reuse, where each used lower-triangle slot's mirror persists the cone-free assembled
-    # Hessian (M + J^T D J of the active rows only), maintained across a step's Newton iterations by signed flip
-    # scatters; its diagonal lives in nt_H_cone_free_diag since the lower diagonal belongs to the factor. A rebuild
-    # restores the mirror into the lower triangle and bakes the current cone blocks on top, skipping the full
-    # J^T D J reassembly.
-    # In practice, this variable is re-purposed to store the Cholesky factor L st H = L @ L.T to spare memory resources.
-    # Under the register-tiled mass factor it is the scratch of the factor (see the constraint solver build).
-    # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
+    # Cholesky factor L of the Hessian H = L @ L.T, in its lower triangle. The strictly upper triangle is undefined,
+    # except under enable_cone_free_hessian_reuse: the mirror of each used slot holds the Hessian without its cone
+    # blocks (M + J^T D J of the active rows), kept across the Newton iterations of a step by signed flip scatters,
+    # its diagonal in nt_H_cone_free_diag. A rebuild restores the mirror into the lower triangle and adds the current
+    # cone blocks, skipping the full J^T D J assembly. It aliases the scratch of the register-tiled mass factor when
+    # there is one (see the constraint solver).
+    # TODO: Allocate the lower triangle alone.
     nt_H: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), labels=NEWTON)
-    # Per-DOF Jacobi scale s_i = 1/sqrt(diag(M + J^T D J)_i), at natural DOF id, refreshed ahead of every direct
-    # rebuild (func_jacobi_scale, 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
-    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A
-    # unit diagonal keeps the Hessian's mixed-unit spread within float32's conditioning capability at any geometry
-    # scale and makes the bare-EPS pivot floor scale-relative. Only meaningful with enable_jacobi_equilibration.
+    # Jacobi scale of each dof under enable_jacobi_equilibration, s_i = 1 / sqrt(diag(M + J^T D J)_i), 1 on an empty
+    # diagonal, refreshed before every rebuild (see func_jacobi_scale). The assembly writes H scaled, nt_H holds the
+    # factor of S H S, the update vectors are scaled when built, and the batch solve scales grad and Mgrad, so Mgrad =
+    # H^-1 grad exactly. The unit diagonal keeps the mixed units of the Hessian within float32 conditioning at any
+    # geometry scale and makes the EPS pivot floor relative.
     nt_jacobi: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
-    # Compacted list of constraints whose active state changed, used by incremental Cholesky update
-    # to reduce GPU thread divergence by iterating only over constraints that need processing.
+    # The constraints whose active state changed, which the incremental Cholesky update iterates over
     incr_changed_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
     incr_n_changed: qd.Tensor = field(int, shape=(ENVS,))
-    # Layout-flippable constraint-state tensors: canonical shape (len_constraints_, _B), physically stored as
-    # (_B, len_constraints_) under BATCH_FIRST, kernel-body indexing ``Jaref[i_c, i_b]`` being rewritten accordingly.
     active: qd.Tensor = field(bool, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, labels=COOPERATIVE_ROWS)
     prev_active: qd.Tensor = field(bool, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
     diag: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     aref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     Jaref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
-    # Frictionloss rows store their friction loss; elliptic-cone head (normal) rows reuse the field to carry the
-    # contact sliding friction coefficient read by the cone solver, and with torsional friction the spin row carries
-    # the torsional coefficient the same way (the tangent rows hold 0).
+    # The friction loss of a frictionloss row. The normal row of an elliptic cone holds the sliding friction coefficient
+    # of its contact and its spin row the torsional one, its tangent rows 0.
     efc_frictionloss: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     efc_force: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, grad=True, labels=COOPERATIVE_ROWS)
     efc_D: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     jv: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
-    # Canonical (len_constraints_, n_dofs_, _B), physical (_B, len_constraints_, n_dofs_) under JAC_ENV_FIRST, each row
-    # of an env stored whole. The cooperative kernels then read the per-iteration J^T @ efc_force and the Hessian
-    # staging with lanes on consecutive dofs of one row, and a row's support spans a cache line or two. Serialized
-    # execution reads and writes the rows dof by dof for a fixed env.
+    # Stored environment-first for the cooperative kernels and serialized execution (see JACOBIAN_ROWS). The lanes of
+    # the cooperative J^T @ efc_force and Hessian staging then read consecutive dofs of a row, whose support spans a
+    # cache line or two.
     jac: qd.Tensor = field(float, shape=(CONSTRAINTS, DOFS, ENVS), labels=JACOBIAN_ROWS)
-    # The support of each row: a row lists the dofs of the kinematic chains of the two links it couples, or at most two
-    # dofs for a joint equality.
+    # The support of each row: the dofs of the kinematic chains of the two links it couples, or the two dofs of a joint
+    # equality
     jac_dofs_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, JAC_DOFS, ENVS), labels=JACOBIAN_ROWS)
     jac_n_dofs: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Backward gradients
@@ -492,7 +436,7 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     dL_daref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     dL_defc_D: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     dL_dforce: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
-    # Backward buffers for linear system solver
+    # Scratch of the linear solve of the backward pass
     bw_u: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
     bw_r: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
     bw_p: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
@@ -500,27 +444,23 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     bw_Ju: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     bw_y: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     bw_w: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
-    # Timers for profiling
     timers: qd.Tensor = field(_timer_dtype, shape=(10, ENVS))
-    # Solver loop iteration counter (0-indexed, increments each iteration in the graph loop)
+    # Iteration of the solver loop, from 0
     solver_iter_counter: qd.Tensor = field(qd.i32, shape=())
-    # Always ndarray (not field): graph.do_while requires the same physical ndarray on every call.
+    # An ndarray on every backend, since graph.do_while takes the same ndarray on every call
     graph_counter: qd.Tensor = field(qd.i32, shape=(), ndarray=True)
-    # Iterations left to the graph loop past the current one, which it resumes with once an env iterates on
+    # Iterations left to the graph loop past the current one, resumed once an env iterates on
     graph_counter_next: qd.Tensor = field(qd.i32, shape=())
-    # Diagonal of the persisted cone-free Hessian packed in nt_H's mirror slots (see nt_H). Only meaningful with
-    # enable_cone_free_hessian_reuse.
+    # Diagonal of the Hessian without its cone blocks (see nt_H)
     nt_H_cone_free_diag: qd.Tensor = field(float, shape=(ENVS, DOFS), labels=CONE_FREE_REUSE)
-    # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the two rows of the pair being updated, in
-    # the two columns of the env, or of the lane of the cooperative sweep at [i_d, 2 * (i_b * 32 + tid) + i_r] (see
-    # func_noslip_update_row in noslip.py).
+    # M^-1 J^T of the two rows of the pair the noslip sweep updates, in the two columns of the env, or of the lane of
+    # the cooperative sweep at [i_d, 2 * (i_b * 32 + tid) + i_r] (see func_noslip_update_row in noslip.py)
     noslip_MinvJT: qd.Tensor = field(float, shape=(DOFS, 2 * NOSLIP_LANES * ENVS), labels=NOSLIP)
-    # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
-    # of each row, the color count of each island and the next free color of the mass block starting at each dof.
+    # Row coloring of the cooperative noslip sweep (see func_color_rows_batch in noslip.py): the color of each row, the
+    # color count of each island and the next free color of the mass block starting at each dof
     noslip_rows_color: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
     noslip_islands_n_colors: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
     noslip_blocks_n_colors: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
-    # Union-find partition of links into contact islands, read by the per-island Newton solve and hibernation.
     island: IslandState
 
 
@@ -573,29 +513,25 @@ class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS))
 
 
 class DiffContactInput(Data, kind=DataKind.SCRATCH):
-    ### Non-differentiable input data
-    # Geom id of the two geometries
     geom_a: qd.Tensor = field(int)
     geom_b: qd.Tensor = field(int)
-    # Local positions of the 3 vertices from the two geometries that define the face on the Minkowski difference
+    # Local positions of the vertices of the two geoms defining the face of the Minkowski difference
     local_pos1_a: qd.Tensor = field((float, 3))
     local_pos1_b: qd.Tensor = field((float, 3))
     local_pos1_c: qd.Tensor = field((float, 3))
     local_pos2_a: qd.Tensor = field((float, 3))
     local_pos2_b: qd.Tensor = field((float, 3))
     local_pos2_c: qd.Tensor = field((float, 3))
-    # Local positions of the 1 vertex from the two geometries that define the support point for the face above
+    # Local positions of the vertices of the two geoms defining the support point of that face
     w_local_pos1: qd.Tensor = field((float, 3))
     w_local_pos2: qd.Tensor = field((float, 3))
-    # Plane-convex contacts only: the convex support "core" (box vertex / sphere center / capsule nearest endpoint)
-    # in the convex geom's local frame.
+    # Support core of the convex geom of a plane-convex contact (box vertex, sphere center, nearest capsule endpoint),
+    # in its local frame
     core_local: qd.Tensor = field((float, 3))
-    # Reference id of the contact point, which is needed for the backward pass
     ref_id: qd.Tensor = field(int)
-    # Flag whether the contact data can be computed in numerically stable way in both the forward and backward passes
+    # Whether the forward and backward passes compute the contact stably
     valid: qd.Tensor = field(int)
-    ### Differentiable input data
-    # Reference penetration depth, which is needed for computing the weight of the contact point
+    # Penetration depth weighting the contact, the input the gradients flow to
     ref_penetration: qd.Tensor = field(float, grad=True)
 
 
@@ -607,7 +543,7 @@ class SortBuffer(Data, kind=DataKind.STATE, shape=(2 * LINKS, ENVS)):
 
 class ContactCache(Data, kind=DataKind.STATE, shape=(POSSIBLE_PAIRS, ENVS)):
     normal: qd.Tensor = field((float, 3))
-    # Previous-step penetration per pair (reset to 0 when out of contact), the warm-start for the MPR->GJK gate.
+    # Penetration of each pair at the previous step, 0 out of contact, which gates the fallback from MPR to GJK
     penetration: qd.Tensor = field(float)
 
 
@@ -674,9 +610,8 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
     contact_proj_v: qd.Tensor = field(float, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
     contact_keep: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
     contact_hull_stack: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
-    # Per-bucket lex sort permutation used by the cooperative dedup kernel
-    # (func_clamp_prune_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_candidate_contacts because
-    # each env writes its own permutation.
+    # Permutation of the (u, v) lexicographic sort of the cooperative contact deduplication (see
+    # func_clamp_prune_contacts_coop)
     contact_lex_idx: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
 
 
@@ -695,20 +630,17 @@ class VertsSpatialGrid(Data, kind=DataKind.CONSTANT):
 @qd.data_oriented
 class ColliderStaticConfig(StaticConfig):
     has_terrain: bool
-    # True when a convex-convex pair escapes func_narrow_phase_convex_specializations (box-box, plane-box) and reaches
-    # the general narrowphase: the split narrowphase on GPU (contact0 + multicontact + sort), the monolithic
-    # func_narrow_phase_convex_vs_convex on CPU. Also gates the deterministic contact sort (see func_sort_contacts),
-    # which orders the contacts independently of the racy narrowphase layout. See its resolution in collider.py.
+    # Whether a convex-convex pair reaches the general narrowphase past the box-box and plane-box specializations: the
+    # split narrowphase on GPU, func_narrow_phase_convex_vs_convex on CPU. It also gates the deterministic contact sort
+    # (see func_sort_contacts). See its resolution in collider.py.
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
     # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # maximum number of contact pairs per collision pair
+    # Contacts a convex pair and a nonconvex (vertex-versus-SDF) pair hold at most, the second one at least the first
     n_contacts_per_convex_pair: int
-    # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair
     n_contacts_per_nonconvex_pair: int
-    # ccd algorithm
     ccd_algorithm: int
     # GPU core count and cores per compute unit, sizing the split narrow phase launches and scratch states
     gpu_cores: int
@@ -727,8 +659,8 @@ class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, ENVS)):
 class MPRState(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     simplex_support: MPRSimplexSupport
     simplex_size: qd.Tensor = field(int)
-    # What the depth of the contact in simplex_support[1..3] is worth, a PORTAL_STATUS value. Zero means no portal.
-    # Only VALID portals are reused (perturbation reconstruction, EPA seeding); INVALID forces a GJK refine.
+    # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
+    # perturbation reconstruction and the EPA, an INVALID one forces a GJK refinement.
     portal_status: qd.Tensor = field(int)
 
 
@@ -753,7 +685,8 @@ EPA = Label("epa")
 
 
 class MDVertex(Data, kind=DataKind.SCRATCH):
-    # Vertex of the Minkowski difference
+    """A vertex of the Minkowski difference."""
+
     obj1: qd.Tensor = field((float, 3))
     obj2: qd.Tensor = field((float, 3))
     local_obj1: qd.Tensor = field((float, 3))
@@ -844,13 +777,13 @@ class GJKState(Data, kind=DataKind.SCRATCH):
     polytope_faces_map: qd.Tensor = field(int, shape=(ENVS, POLYTOPE_FACES), labels=EPA)
     polytope_horizon_data: EPAPolytopeHorizonData = field(shape=(ENVS, POLYTOPE_HORIZONS), labels=EPA)
     polytope_horizon_stack: EPAPolytopeHorizonData = field(shape=(ENVS, 3 * POLYTOPE_FACES), labels=EPA)
-    # Multi-contact detection (MuJoCo compatibility)
+    # Multi-contact detection by the contact patch
     contact_faces: ContactFace = field(labels=EPA)
     contact_normals: ContactNormal = field(labels=EPA)
     contact_halfspaces: ContactHalfspace = field(labels=EPA)
     contact_clipped_polygons: qd.Tensor = field((float, 3), shape=(ENVS, 2, POLYGON_VERTS), labels=EPA)
     multi_contact_flag: qd.Tensor = field(bool, shape=(ENVS,))
-    # Final results
+    # Results
     witness: Witness
     n_witness: qd.Tensor = field(int, shape=(ENVS,))
     n_contacts: qd.Tensor = field(int, shape=(ENVS,), labels=EPA)
@@ -859,8 +792,8 @@ class GJKState(Data, kind=DataKind.SCRATCH):
     is_col: qd.Tensor = field(bool, shape=(ENVS,), labels=EPA)
     penetration: qd.Tensor = field(float, shape=(ENVS,), labels=EPA)
     distance: qd.Tensor = field(float, shape=(ENVS,))
-    # Index of the EPA polytope face nearest to the origin (the penetration face), or -1 when EPA did not run. Lets the
-    # multi-contact perturbation reconstruct the exact unperturbed normal from that face's un-rotated support simplex.
+    # The EPA polytope face nearest to the origin, -1 when EPA did not run, from whose support simplex the multi-contact
+    # perturbation recovers the exact unperturbed normal
     nearest_face: qd.Tensor = field(int, shape=(ENVS,))
     # Differentiable contact detection
     diff_contact_input: DiffContactInput = field(shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
@@ -871,53 +804,40 @@ class GJKState(Data, kind=DataKind.SCRATCH):
 class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
     max_contacts_per_pair: qd.Tensor = field(int)
     max_contact_polygon_verts: qd.Tensor = field(int)
-    # Maximum number of iterations for GJK and EPA algorithms
+    # Iteration caps of GJK and EPA
     gjk_max_iterations: qd.Tensor = field(int)
     epa_max_iterations: qd.Tensor = field(int)
     FLOAT_MIN: qd.Tensor = field(float)
     FLOAT_MIN_SQ: qd.Tensor = field(float)
     FLOAT_MAX: qd.Tensor = field(float)
     FLOAT_MAX_SQ: qd.Tensor = field(float)
-    # Tolerance for stopping GJK and EPA algorithms when they converge (only for non-discrete geometries).
+    # Convergence tolerance of GJK and EPA on smooth geometries
     tolerance: qd.Tensor = field(float)
-    # If the distance between two objects is smaller than this value, we consider them colliding.
+    # Distance below which two geoms collide
     collision_eps: qd.Tensor = field(float)
-    # In safe GJK, we do not allow degenerate simplex to happen, because it becomes the main reason of EPA errors.
-    # To prevent degeneracy, we throw away the simplex that has smaller degeneracy measure (e.g. colinearity,
-    # coplanarity) than this threshold.
+    # Degeneracy measure (colinearity, coplanarity) below which safe GJK discards a simplex, degenerate simplices being
+    # the main source of EPA errors
     simplex_max_degeneracy_sq: qd.Tensor = field(float)
     polytope_max_faces: qd.Tensor = field(int)
-    # Threshold for reprojection error when we compute the witness points from the polytope. In computing the
-    # witness points, we project the origin onto the polytope faces and compute the barycentric coordinates of the
-    # projected point. To confirm the projection is valid, we compute the projected point using the barycentric
-    # coordinates and compare it with the original projected point. If the difference is larger than this threshold,
-    # we consider the projection invalid, because it means numerical errors are too large.
-    # We check both relative and absolute errors: the relative error catches numerically degenerate faces,
-    # while the absolute error prevents false rejections on smooth geometries (e.g. spheres) where
-    # polytope faces become extremely small near convergence, amplifying the relative error.
+    # Reprojection errors above which the projection of the origin onto a polytope face is rejected when computing the
+    # witness points: the point rebuilt from its barycentric coordinates must match it. The relative error catches
+    # degenerate faces, and the absolute one keeps the tiny faces of smooth geometries near convergence.
     polytope_max_rel_reprojection_error: qd.Tensor = field(float)
     polytope_max_abs_reprojection_error: qd.Tensor = field(float)
-    # Tolerance for normal alignment between (face-face) or (edge-face). The normals should align within this
-    # tolerance to be considered as a valid parallel contact.
+    # Alignment tolerances of the normals of a face-face and an edge-face parallel contact
     contact_face_tol: qd.Tensor = field(float)
     contact_edge_tol: qd.Tensor = field(float)
-    # Epsilon values for differentiable contact. [eps_boundary] denotes the maximum distance between the face
-    # and the support point in the direction of the face normal. If this distance is 0, the face is on the
-    # boundary of the Minkowski difference. For [eps_distance], the distance between the origin and the face
-    # should not exceed this eps value plus the default EPA depth. For [eps_affine], the affine coordinates
-    # of the origin's projection onto the face should not violate [0, 1] range by this eps value.
-    # FIXME: Adjust these values based on the case study.
+    # Tolerances of the differentiable contact: the distance along its normal from a face to the support point, zero on
+    # the boundary of the Minkowski difference, the excess of the distance from the origin to the face over the EPA
+    # depth, and the excursion of the affine coordinates of the projection of the origin outside [0, 1].
+    # FIXME: Calibrate these values on real scenes.
     diff_contact_eps_boundary: qd.Tensor = field(float)
     diff_contact_eps_distance: qd.Tensor = field(float)
     diff_contact_eps_affine: qd.Tensor = field(float)
-    # The minimum norm of the normal to be considered as a valid normal in the differentiable formulation.
+    # Minimum norm of a valid normal of the differentiable contact
     diff_contact_min_normal_norm: qd.Tensor = field(float)
-    # The minimum penetration depth to be considered as a valid contact in the differentiable formulation.
-    # The contact with penetration depth smaller than this value is ignored in the differentiable formulation.
-    # This should be large enough to be safe from numerical errors, because in the backward pass, the computed
-    # penetration depth could be different from the forward pass due to the numerical errors. If this value is
-    # too small, the non-zero penetration depth could be falsely computed to 0 in the backward pass and thus
-    # produce nan values for the contact normal.
+    # Minimum penetration of a differentiable contact. It must exceed the rounding gap between the depths of the forward
+    # and backward passes, since a depth the backward pass computes as zero yields a NaN normal.
     diff_contact_min_penetration: qd.Tensor = field(float)
 
 
@@ -961,7 +881,7 @@ class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
     sdf_max: qd.Tensor = field(float)
     sdf_cell_size: qd.Tensor = field((float, 3))
     sdf_cell_start: qd.Tensor = field(int)
-    # Coarse min-grid companion: per-block minima over grid nodes, a certified lower bound of the trilinear sd.
+    # Coarse grid of the block minima of the nodes, a lower bound of the trilinear signed distance
     sdf_coarse_res: qd.Tensor = field((int, 3))
     sdf_coarse_cell_start: qd.Tensor = field(int)
 
@@ -984,7 +904,6 @@ TERRAIN_COLS = Size("terrain_cols")
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
-    # The narrowphase sub-components, filled by their builders (SDF, SupportField) once allocated
     sdf: SDFInfo
     mpr: MPRInfo
     gjk: GJKInfo
@@ -993,9 +912,9 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
     vert_n_neighbors: qd.Tensor = field(int, shape=(VERTS,))
     verts_spatial_grid: VertsSpatialGrid
-    # (i_ga, i_gb) -> dense pair index, or -1 if invalid. Used by the broadphase, the narrowphase and the contact cache.
+    # Index of the pair of geoms (i_ga, i_gb) among the possible pairs, -1 for an invalid pair
     collision_pair_idx: qd.Tensor = field(int, shape=(GEOMS, GEOMS))
-    # (i_la, i_lb) -> index into valid_link_pairs, or -1 if no geom pair between the two links is valid
+    # Index of the pair of links (i_la, i_lb) in valid_link_pairs, -1 for a pair without a valid geom pair
     link_pair_idx: qd.Tensor = field(int, shape=(LINKS, LINKS))
     # Lower and upper corners of the box of every link in its own frame, bounding the boxes of its geoms
     links_init_aabb_min: qd.Tensor = field((float, 3), shape=(LINKS,))
@@ -1004,8 +923,8 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     max_collision_pairs: qd.Tensor = field(int, shape=())
     max_candidate_contacts: qd.Tensor = field(int, shape=())
     max_collision_pairs_broad: qd.Tensor = field(int, shape=())
-    # Post-pruning contact-point budget per environment, which sizes the contact constraint buffers (4 constraints per
-    # contact point). Smaller than max_candidate_contacts when contact pruning is enabled or 'max_contacts' is set.
+    # Contacts per environment after pruning, which sizes the contact rows of the constraint solve. Below
+    # max_candidate_contacts under contact pruning or the option 'max_contacts'.
     max_contacts: qd.Tensor = field(int, shape=())
     # Link pairs holding at least one valid geom pair, the link carrying most geoms first (see func_broad_phase_geoms)
     n_valid_link_pairs: qd.Tensor = field(int, shape=())
@@ -1014,774 +933,344 @@ class ColliderInfo(Data, kind=DataKind.CONSTANT):
     terrain_rc: qd.Tensor = field(int, shape=(2,))
     terrain_scale: qd.Tensor = field(float, shape=(2,))
     terrain_xyz_maxmin: qd.Tensor = field(float, shape=(6,))
-    # multi contact perturbation and tolerance
+    # Perturbation and tolerance of the multi-contact detection
     mc_perturbation: qd.Tensor = field(float, shape=())
     mc_tolerance: qd.Tensor = field(float, shape=())
-    # differentiable contact tolerance
+    # Tolerances of the differentiable contact
     diff_pos_tolerance: qd.Tensor = field(float, shape=())
     diff_normal_tolerance: qd.Tensor = field(float, shape=())
-    # link-pair contact pruning
+    # Link-pair contact pruning
     contact_pruning_tolerance: qd.Tensor = field(float, shape=())
     prune_deep_penetration_ratio: qd.Tensor = field(float, shape=())
-
-
-# =========================================== DofsInfo and DofsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class DofsInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    entity_idx: qd.Tensor
-    stiffness: qd.Tensor
-    invweight: qd.Tensor
-    armature: qd.Tensor
-    damping: qd.Tensor
-    frictionloss: qd.Tensor
-    motion_ang: qd.Tensor
-    motion_vel: qd.Tensor
-    limit: qd.Tensor
-    act_gain: qd.Tensor
-    act_bias: qd.Tensor
-    force_range: qd.Tensor
-    dof_length: qd.Tensor
-
-
-def get_dofs_info(solver):
-    shape = (solver.n_dofs_, solver._B) if solver._options.batch_dofs_info else (solver.n_dofs_,)
-
-    return DofsInfo(
-        entity_idx=V(dtype=gs.qd_int, shape=shape),
-        stiffness=V(dtype=gs.qd_float, shape=shape),
-        invweight=V(dtype=gs.qd_float, shape=shape),
-        armature=V(dtype=gs.qd_float, shape=shape),
-        damping=V(dtype=gs.qd_float, shape=shape),
-        frictionloss=V(dtype=gs.qd_float, shape=shape),
-        motion_ang=V(dtype=gs.qd_vec3, shape=shape),
-        motion_vel=V(dtype=gs.qd_vec3, shape=shape),
-        limit=V(dtype=gs.qd_vec2, shape=shape),
-        act_gain=V(dtype=gs.qd_float, shape=shape),
-        act_bias=V(dtype=gs.qd_vec3, shape=shape),
-        force_range=V(dtype=gs.qd_vec2, shape=shape),
-        dof_length=V(dtype=gs.qd_float, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class DofsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    # *_bw: Cache to avoid overwriting for backward pass
-    force: qd.Tensor
-    qf_bias: qd.Tensor
-    qf_passive: qd.Tensor
-    qf_applied: qd.Tensor
-    pos: qd.Tensor
-    vel: qd.Tensor = of_kind(DataKind.STATE)
-    vel_prev: qd.Tensor = of_kind(DataKind.SCRATCH)
-    vel_next: qd.Tensor = of_kind(DataKind.SCRATCH)
-    acc: qd.Tensor = of_kind(DataKind.STATE)
-    acc_smooth: qd.Tensor
-    acc_smooth_bw: qd.Tensor
-    qf_smooth: qd.Tensor
-    qf_constraint: qd.Tensor
-    # Implicit damping correction (see func_implicit_damping in forward_dynamics.py): qf_damping_implicit holds the
-    # implicit share of the damping force, h D qacc for the diagonal D the damped mass factor adds, and
-    # qacc_damping_implicit the correction (M + hD)^-1 h D qacc subtracted from the acceleration.
-    qf_damping_implicit: qd.Tensor = of_kind(DataKind.SCRATCH)
-    qacc_damping_implicit: qd.Tensor = of_kind(DataKind.SCRATCH)
-    cdof_ang: qd.Tensor
-    cdof_vel: qd.Tensor
-    cdofd_ang: qd.Tensor
-    cdofd_vel: qd.Tensor
-    f_vel: qd.Tensor
-    f_ang: qd.Tensor
-    ctrl_force: qd.Tensor = of_kind(DataKind.STATE)
-    ctrl_pos: qd.Tensor = of_kind(DataKind.STATE)
-    ctrl_vel: qd.Tensor = of_kind(DataKind.STATE)
-    ctrl_mode: qd.Tensor = of_kind(DataKind.STATE)
-    is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
-
-
-def get_dofs_state(solver):
-    shape = (solver.n_dofs_, solver._B)
-    requires_grad = solver._requires_grad
-    shape_bw = maybe_shape((2, *shape), requires_grad)
-
-    return DofsState(
-        force=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_bias=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_passive=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_applied=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel_prev=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel_next=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
-        qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_constraint=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_damping_implicit=V(dtype=gs.qd_float, shape=shape),
-        qacc_damping_implicit=V(dtype=gs.qd_float, shape=shape),
-        cdof_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdof_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdofd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdofd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        f_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        f_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        ctrl_force=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_mode=V(dtype=gs.qd_int, shape=shape),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-# =========================================== LinksState and LinksInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class LinksState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    # *_bw: Cache to avoid overwriting for backward pass
-    cinr_inertial: qd.Tensor
-    cinr_pos: qd.Tensor
-    cinr_quat: qd.Tensor
-    cinr_mass: qd.Tensor
-    crb_inertial: qd.Tensor
-    crb_pos: qd.Tensor
-    crb_quat: qd.Tensor
-    crb_mass: qd.Tensor
-    cdd_vel: qd.Tensor
-    cdd_ang: qd.Tensor
-    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
-    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
-    pos: qd.Tensor = of_kind(DataKind.STATE)
-    quat: qd.Tensor = of_kind(DataKind.STATE)
-    pos_bw: qd.Tensor
-    quat_bw: qd.Tensor
-    i_pos: qd.Tensor
-    i_pos_bw: qd.Tensor
-    i_quat: qd.Tensor
-    cd_ang: qd.Tensor
-    cd_vel: qd.Tensor
-    # Whether any contact or connect/weld equality row involves the link this step. Written by the constraint
-    # assembly (the deterministic post-sort view of the contacts), consumed by the midpoint-integration eligibility;
-    # the raw collider contact buffer is only valid through the contact_sort_idx indirection.
-    is_constrained: qd.Tensor
-    # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
-    # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
-    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated for the dynamic
-    # solvers integrating with the midpoint rule only.
-    midpoint_ang: qd.Tensor = of_kind(DataKind.SCRATCH)
-    midpoint_res: qd.Tensor = of_kind(DataKind.SCRATCH)
-    cd_ang_bw: qd.Tensor
-    cd_vel_bw: qd.Tensor
-    mass_sum: qd.Tensor
-    root_COM: qd.Tensor  # COM of the kinematic tree
-    root_COM_bw: qd.Tensor
-    cacc_ang: qd.Tensor
-    cacc_lin: qd.Tensor
-    cfrc_ang: qd.Tensor
-    cfrc_vel: qd.Tensor
-    cfrc_applied_ang: qd.Tensor = of_kind(DataKind.STATE)
-    cfrc_applied_vel: qd.Tensor = of_kind(DataKind.STATE)
-    # The wrench the couplers accumulate during a substep, which the next substep consumes
-    cfrc_coupling_ang: qd.Tensor = of_kind(DataKind.STATE)
-    cfrc_coupling_vel: qd.Tensor = of_kind(DataKind.STATE)
-    contact_force: qd.Tensor
-    # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
-    # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
-    # again the step it exceeds the tolerance or wakes.
-    is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
-    awake_steps: qd.Tensor = of_kind(DataKind.STATE)
-
-
-def get_links_state(solver, kinematic_only):
-    shape = (solver.n_links_, solver._B)
-    requires_grad = solver._requires_grad
-    is_midpoint = not kinematic_only and solver.rigid_config.integrator != gs.integrator.Euler
-    # The backward joint buffers hold one slot per joint of a link plus the link itself; collapsed when grad is off.
-    n_joints_bw = (max(link.n_joints for link in solver.links) + 1) if requires_grad and solver.n_links else 1
-    shape_bw = (solver.n_links_, n_joints_bw, solver._B)
-
-    return LinksState(
-        cinr_inertial=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        cinr_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cinr_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        cinr_mass=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        crb_inertial=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        crb_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        crb_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        crb_mass=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        cdd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        pos_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, needs_grad=requires_grad),
-        i_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        i_pos_bw=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        i_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        is_constrained=V(dtype=gs.qd_bool, shape=shape),
-        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
-        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
-        cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        mass_sum=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        root_COM=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        root_COM_bw=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cacc_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cacc_lin=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_applied_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_applied_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_coupling_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_coupling_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        contact_force=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
-        awake_steps=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class LinksInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    parent_idx: qd.Tensor
-    root_idx: qd.Tensor
-    q_start: qd.Tensor
-    dof_start: qd.Tensor
-    joint_start: qd.Tensor
-    q_end: qd.Tensor
-    dof_end: qd.Tensor
-    joint_end: qd.Tensor
-    n_dofs: qd.Tensor
-    pos: qd.Tensor
-    quat: qd.Tensor
-    invweight: qd.Tensor
-    is_fixed: qd.Tensor
-    inertial_pos: qd.Tensor
-    inertial_quat: qd.Tensor
-    inertial_i: qd.Tensor
-    inertial_mass: qd.Tensor
-    entity_idx: qd.Tensor
-    # Heterogeneous simulation support: per-link geom/vgeom index ranges
-    geom_start: qd.Tensor
-    geom_end: qd.Tensor
-    vgeom_start: qd.Tensor
-    vgeom_end: qd.Tensor
-
-
-def get_links_info(solver):
-    links_info_shape = (solver.n_links_, solver._B) if solver._options.batch_links_info else solver.n_links_
-
-    return LinksInfo(
-        parent_idx=V(dtype=gs.qd_int, shape=links_info_shape),
-        root_idx=V(dtype=gs.qd_int, shape=links_info_shape),
-        q_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        dof_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        joint_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        q_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        dof_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        joint_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        n_dofs=V(dtype=gs.qd_int, shape=links_info_shape),
-        pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
-        invweight=V(dtype=gs.qd_vec2, shape=links_info_shape),
-        is_fixed=V(dtype=gs.qd_bool, shape=links_info_shape),
-        inertial_pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        inertial_quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
-        inertial_i=V(dtype=gs.qd_mat3, shape=links_info_shape),
-        inertial_mass=V(dtype=gs.qd_float, shape=links_info_shape),
-        entity_idx=V(dtype=gs.qd_int, shape=links_info_shape),
-        # Heterogeneous simulation support: per-link geom/vgeom index ranges
-        geom_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        geom_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        vgeom_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        vgeom_end=V(dtype=gs.qd_int, shape=links_info_shape),
-    )
-
-
-# =========================================== JointsInfo and JointsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class JointsInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    type: qd.Tensor
-    sol_params: qd.Tensor
-    q_start: qd.Tensor
-    dof_start: qd.Tensor
-    q_end: qd.Tensor
-    dof_end: qd.Tensor
-    n_dofs: qd.Tensor
-    pos: qd.Tensor
-
-
-def get_joints_info(solver):
-    shape = (solver.n_joints_, solver._B) if solver._options.batch_joints_info else (solver.n_joints_,)
-
-    return JointsInfo(
-        type=V(dtype=gs.qd_int, shape=shape),
-        sol_params=V(dtype=gs.qd_vec7, shape=shape),
-        q_start=V(dtype=gs.qd_int, shape=shape),
-        dof_start=V(dtype=gs.qd_int, shape=shape),
-        q_end=V(dtype=gs.qd_int, shape=shape),
-        dof_end=V(dtype=gs.qd_int, shape=shape),
-        n_dofs=V(dtype=gs.qd_int, shape=shape),
-        pos=V(dtype=gs.qd_vec3, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class JointsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    xanchor: qd.Tensor
-    xaxis: qd.Tensor
-
-
-def get_joints_state(solver):
-    shape = (solver.n_joints_, solver._B)
-    requires_grad = solver._requires_grad
-
-    return JointsState(
-        xanchor=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        xaxis=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-    )
-
-
-# =========================================== GeomsInfo and GeomsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GeomsInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    pos: qd.Tensor
-    center: qd.Tensor
-    quat: qd.Tensor
-    data: qd.Tensor
-    link_idx: qd.Tensor
-    type: qd.Tensor
-    friction: qd.Tensor
-    friction_torsional: qd.Tensor
-    friction_rolling: qd.Tensor
-    sol_params: qd.Tensor
-    vert_num: qd.Tensor
-    vert_start: qd.Tensor
-    vert_end: qd.Tensor
-    verts_state_start: qd.Tensor
-    verts_state_end: qd.Tensor
-    face_num: qd.Tensor
-    face_start: qd.Tensor
-    face_end: qd.Tensor
-    edge_num: qd.Tensor
-    edge_start: qd.Tensor
-    edge_end: qd.Tensor
-    is_convex: qd.Tensor
-    contype: qd.Tensor
-    conaffinity: qd.Tensor
-    is_fixed: qd.Tensor
-    is_decomposed: qd.Tensor
-    is_hollow: qd.Tensor
-    needs_coup: qd.Tensor
-    coup_friction: qd.Tensor
-    coup_softness: qd.Tensor
-    coup_restitution: qd.Tensor
-
-
-def get_geoms_info(solver, is_active=True):
-    shape = (solver.n_geoms_,) if is_active else ()
-
-    return GeomsInfo(
-        pos=V(dtype=gs.qd_vec3, shape=shape),
-        center=V(dtype=gs.qd_vec3, shape=shape),
-        quat=V(dtype=gs.qd_vec4, shape=shape),
-        data=V(dtype=gs.qd_vec7, shape=shape),
-        link_idx=V(dtype=gs.qd_int, shape=shape),
-        type=V(dtype=gs.qd_int, shape=shape),
-        friction=V(dtype=gs.qd_float, shape=shape),
-        friction_torsional=V(dtype=gs.qd_float, shape=shape),
-        friction_rolling=V(dtype=gs.qd_float, shape=shape),
-        sol_params=V(dtype=gs.qd_vec7, shape=shape),
-        vert_num=V(dtype=gs.qd_int, shape=shape),
-        vert_start=V(dtype=gs.qd_int, shape=shape),
-        vert_end=V(dtype=gs.qd_int, shape=shape),
-        verts_state_start=V(dtype=gs.qd_int, shape=shape),
-        verts_state_end=V(dtype=gs.qd_int, shape=shape),
-        face_num=V(dtype=gs.qd_int, shape=shape),
-        face_start=V(dtype=gs.qd_int, shape=shape),
-        face_end=V(dtype=gs.qd_int, shape=shape),
-        edge_num=V(dtype=gs.qd_int, shape=shape),
-        edge_start=V(dtype=gs.qd_int, shape=shape),
-        edge_end=V(dtype=gs.qd_int, shape=shape),
-        is_convex=V(dtype=gs.qd_bool, shape=shape),
-        contype=V(dtype=gs.qd_int, shape=shape),
-        conaffinity=V(dtype=gs.qd_int, shape=shape),
-        is_fixed=V(dtype=gs.qd_bool, shape=shape),
-        is_decomposed=V(dtype=gs.qd_bool, shape=shape),
-        is_hollow=V(dtype=gs.qd_bool, shape=shape),
-        needs_coup=V(dtype=gs.qd_int, shape=shape),
-        coup_friction=V(dtype=gs.qd_float, shape=shape),
-        coup_softness=V(dtype=gs.qd_float, shape=shape),
-        coup_restitution=V(dtype=gs.qd_float, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GeomsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    pos: qd.Tensor
-    quat: qd.Tensor
-    aabb_min: qd.Tensor
-    aabb_max: qd.Tensor
-    verts_updated: qd.Tensor
-    is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
-    friction_ratio: qd.Tensor = of_kind(DataKind.INFO)
-
-
-def get_geoms_state(solver, is_active=True):
-    shape = (solver.n_geoms_, solver._B) if is_active else ()
-    requires_grad = solver.rigid_config.requires_grad
-
-    return GeomsState(
-        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        aabb_min=V(dtype=gs.qd_vec3, shape=shape),
-        aabb_max=V(dtype=gs.qd_vec3, shape=shape),
-        verts_updated=V(dtype=gs.qd_bool, shape=shape),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
-        friction_ratio=V(dtype=gs.qd_float, shape=shape),
-    )
-
-
-# =========================================== VertsInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VertsInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    init_pos: qd.Tensor
-    init_normal: qd.Tensor
-    geom_idx: qd.Tensor
-    init_center_pos: qd.Tensor
-    verts_state_idx: qd.Tensor
-    is_fixed: qd.Tensor
-
-
-def get_verts_info(solver, is_active=True):
-    shape = (solver.n_verts_,) if is_active else ()
-
-    return VertsInfo(
-        init_pos=V(dtype=gs.qd_vec3, shape=shape),
-        init_normal=V(dtype=gs.qd_vec3, shape=shape),
-        geom_idx=V(dtype=gs.qd_int, shape=shape),
-        init_center_pos=V(dtype=gs.qd_vec3, shape=shape),
-        verts_state_idx=V(dtype=gs.qd_int, shape=shape),
-        is_fixed=V(dtype=gs.qd_bool, shape=shape),
-    )
-
-
-# =========================================== FacesInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class FacesInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    verts_idx: qd.Tensor
-    geom_idx: qd.Tensor
-
-
-def get_faces_info(solver, is_active=True):
-    shape = (solver.n_faces_,) if is_active else ()
-
-    return FacesInfo(verts_idx=V(dtype=gs.qd_ivec3, shape=shape), geom_idx=V(dtype=gs.qd_int, shape=shape))
-
-
-# =========================================== EdgesInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EdgesInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    v0: qd.Tensor
-    v1: qd.Tensor
-    length: qd.Tensor
-
-
-def get_edges_info(solver, is_active=True):
-    shape = (solver.n_edges_,) if is_active else ()
-
-    return EdgesInfo(
-        v0=V(dtype=gs.qd_int, shape=shape), v1=V(dtype=gs.qd_int, shape=shape), length=V(dtype=gs.qd_float, shape=shape)
-    )
-
-
-# =========================================== VertsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VertsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    pos: qd.Tensor
-
-
-def get_free_verts_state(solver, is_active=True):
-    return VertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_free_verts_, solver._B) if is_active else ()))
-
-
-def get_fixed_verts_state(solver, is_active=True):
-    return VertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_fixed_verts_,) if is_active else ()))
-
-
-# =========================================== VvertsInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VVertsInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    init_pos: qd.Tensor
-    init_vnormal: qd.Tensor
-    vgeom_idx: qd.Tensor
-    vverts_state_idx: qd.Tensor
-
-
-def get_vverts_info(solver):
-    shape = (solver.n_vverts_,)
-
-    return VVertsInfo(
-        init_pos=V(dtype=gs.qd_vec3, shape=shape),
-        init_vnormal=V(dtype=gs.qd_vec3, shape=shape),
-        vgeom_idx=V(dtype=gs.qd_int, shape=shape),
-        vverts_state_idx=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-# =========================================== VVertsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VVertsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    pos: qd.Tensor
-
-
-def get_vverts_state(solver, is_active=True):
-    if not is_active:
-        return VVertsState(pos=V(dtype=gs.qd_vec3, shape=()))
-    if not is_tensor_addressable((solver.n_custom_vverts_, solver._B, 3), gs.np_float):
-        gs.raise_exception(
-            f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
-            "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
-        )
-    return VVertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_custom_vverts_, solver._B)))
-
-
-# =========================================== VfacesInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VFacesInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    vverts_idx: qd.Tensor
-    vgeom_idx: qd.Tensor
-
-
-def get_vfaces_info(solver):
-    shape = (solver.n_vfaces_,)
-
-    return VFacesInfo(vverts_idx=V(dtype=gs.qd_ivec3, shape=shape), vgeom_idx=V(dtype=gs.qd_int, shape=shape))
-
-
-# =========================================== VgeomsInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VGeomsInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    pos: qd.Tensor
-    quat: qd.Tensor
-    link_idx: qd.Tensor
-    vvert_num: qd.Tensor
-    vvert_start: qd.Tensor
-    vvert_end: qd.Tensor
-    vface_num: qd.Tensor
-    vface_start: qd.Tensor
-    vface_end: qd.Tensor
-    color: qd.Tensor
-
-
-def get_vgeoms_info(solver):
-    shape = (solver.n_vgeoms_,)
-
-    return VGeomsInfo(
-        pos=V(dtype=gs.qd_vec3, shape=shape),
-        quat=V(dtype=gs.qd_vec4, shape=shape),
-        link_idx=V(dtype=gs.qd_int, shape=shape),
-        vvert_num=V(dtype=gs.qd_int, shape=shape),
-        vvert_start=V(dtype=gs.qd_int, shape=shape),
-        vvert_end=V(dtype=gs.qd_int, shape=shape),
-        vface_num=V(dtype=gs.qd_int, shape=shape),
-        vface_start=V(dtype=gs.qd_int, shape=shape),
-        vface_end=V(dtype=gs.qd_int, shape=shape),
-        color=V(dtype=gs.qd_vec4, shape=shape),
-    )
-
-
-# =========================================== VGeomsState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VGeomsState:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
-
-    pos: qd.Tensor
-    quat: qd.Tensor
-
-
-def get_vgeoms_state(solver, is_active=True):
-    shape = (solver.n_vgeoms_, solver._B) if is_active else ()
-
-    return VGeomsState(pos=V(dtype=gs.qd_vec3, shape=shape), quat=V(dtype=gs.qd_vec4, shape=shape))
-
-
-# =========================================== EqualitiesInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EqualitiesInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    eq_obj1id: qd.Tensor
-    eq_obj2id: qd.Tensor
-    # The data of a screw constraint, the largest one, sizes the entries of all equalities (see func_screw_frame in
-    # constraint/solver.py)
-    eq_data: qd.Tensor
-    eq_type: qd.Tensor
-    sol_params: qd.Tensor
-
-
-def get_equalities_info(solver, is_active=True):
-    shape = (solver.n_candidate_equalities_, solver._B) if is_active else ()
-
-    return EqualitiesInfo(
-        eq_obj1id=V(dtype=gs.qd_int, shape=shape),
-        eq_obj2id=V(dtype=gs.qd_int, shape=shape),
-        eq_data=V(dtype=gs.qd_vec18, shape=shape),
-        eq_type=V(dtype=gs.qd_int, shape=shape),
-        sol_params=V(dtype=gs.qd_vec7, shape=shape),
-    )
-
-
-# =========================================== EntitiesInfo ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EntitiesInfo:
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    dof_start: qd.Tensor
-    dof_end: qd.Tensor
-    n_dofs: qd.Tensor
-    link_start: qd.Tensor
-    link_end: qd.Tensor
-    n_links: qd.Tensor
-    geom_start: qd.Tensor
-    geom_end: qd.Tensor
-    n_geoms: qd.Tensor
-    gravity_compensation: qd.Tensor
-    is_local_collision_mask: qd.Tensor
-
-
-def get_entities_info(solver):
-    shape = (solver.n_entities_,)
-
-    return EntitiesInfo(
-        dof_start=V(dtype=gs.qd_int, shape=shape),
-        dof_end=V(dtype=gs.qd_int, shape=shape),
-        n_dofs=V(dtype=gs.qd_int, shape=shape),
-        link_start=V(dtype=gs.qd_int, shape=shape),
-        link_end=V(dtype=gs.qd_int, shape=shape),
-        n_links=V(dtype=gs.qd_int, shape=shape),
-        geom_start=V(dtype=gs.qd_int, shape=shape),
-        geom_end=V(dtype=gs.qd_int, shape=shape),
-        n_geoms=V(dtype=gs.qd_int, shape=shape),
-        gravity_compensation=V(dtype=gs.qd_float, shape=shape),
-        is_local_collision_mask=V(dtype=gs.qd_bool, shape=shape),
-    )
-
-
-# =========================================== EntitiesState ===========================================
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EntitiesState:
-    kind: ClassVar[DataKind] = DataKind.STATE
-
-    is_hibernated: qd.Tensor
-
-
-def get_entities_state(solver, is_active=True):
-    return EntitiesState(is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_, solver._B) if is_active else ()))
 
 
 # =========================================== DynInfo and DynState ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class DynInfo:
-    """Build-time model description of the kinematics+dynamics component, one leaf struct per element type.
+# Sizes of the elements of the rigid solver, and of the environments of the model parameters the options batch (see
+# 'batch_dofs_info', 'batch_links_info' and 'batch_joints_info' in RigidOptions)
+ENTITIES = Size("entities")
+FACES = Size("faces")
+EDGES = Size("edges")
+FREE_VERTS = Size("free_verts")
+FIXED_VERTS = Size("fixed_verts")
+VVERTS = Size("vverts")
+CUSTOM_VVERTS = Size("custom_vverts")
+VFACES = Size("vfaces")
+VGEOMS = Size("vgeoms")
+CANDIDATE_EQUALITIES = Size("candidate_equalities")
+DOFS_INFO_ENVS = Size("dofs_info_envs")
+LINKS_INFO_ENVS = Size("links_info_envs")
+JOINTS_INFO_ENVS = Size("joints_info_envs")
+# The backward slots of a link, one per joint plus the link itself
+LINK_BW_SLOTS = Size("link_bw_slots")
 
-    Kinematic-only solvers allocate the collision-related leaves (geoms, verts, faces, edges, equalities) as scalar
-    dummies: the fields must exist for kernel argument flattening, while unused ones are pruned per compiled kernel.
-    """
+# The arrays the midpoint integration of free bodies reads (see func_midpoint_free_body)
+MIDPOINT = Label("midpoint")
+
+
+class DofsInfo(Data, kind=DataKind.INFO, shape=(DOFS, DOFS_INFO_ENVS)):
+    entity_idx: qd.Tensor = field(int)
+    stiffness: qd.Tensor = field(float)
+    invweight: qd.Tensor = field(float)
+    armature: qd.Tensor = field(float)
+    damping: qd.Tensor = field(float)
+    frictionloss: qd.Tensor = field(float)
+    motion_ang: qd.Tensor = field((float, 3))
+    motion_vel: qd.Tensor = field((float, 3))
+    limit: qd.Tensor = field((float, 2))
+    act_gain: qd.Tensor = field(float)
+    act_bias: qd.Tensor = field((float, 3))
+    force_range: qd.Tensor = field((float, 2))
+    dof_length: qd.Tensor = field(float)
+
+
+class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
+    # A *_bw array keeps what the backward pass reads and the forward pass overwrites
+    force: qd.Tensor = field(float, grad=True)
+    qf_bias: qd.Tensor = field(float, grad=True)
+    qf_passive: qd.Tensor = field(float, grad=True)
+    qf_applied: qd.Tensor = field(float, grad=True)
+    pos: qd.Tensor = field(float, grad=True)
+    vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    vel_prev: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
+    vel_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
+    acc: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    acc_smooth: qd.Tensor = field(float, grad=True)
+    acc_smooth_bw: qd.Tensor = field(float, shape=(2, DOFS, ENVS), labels=BACKWARD, grad=True)
+    qf_smooth: qd.Tensor = field(float, grad=True)
+    qf_constraint: qd.Tensor = field(float, grad=True)
+    # Implicit damping (see func_implicit_damping in forward_dynamics.py): the implicit share h D qacc of the damping
+    # force, D being the diagonal the damped mass factor adds, and the correction (M + hD)^-1 h D qacc subtracted from
+    # the acceleration
+    qf_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    qacc_damping_implicit: qd.Tensor = field(float, kind=DataKind.SCRATCH)
+    cdof_ang: qd.Tensor = field((float, 3), grad=True)
+    cdof_vel: qd.Tensor = field((float, 3), grad=True)
+    cdofd_ang: qd.Tensor = field((float, 3), grad=True)
+    cdofd_vel: qd.Tensor = field((float, 3), grad=True)
+    f_vel: qd.Tensor = field((float, 3), grad=True)
+    f_ang: qd.Tensor = field((float, 3), grad=True)
+    ctrl_force: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    ctrl_pos: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    ctrl_mode: qd.Tensor = field(int, kind=DataKind.STATE)
+    is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
+
+
+class LinksInfo(Data, kind=DataKind.INFO, shape=(LINKS, LINKS_INFO_ENVS)):
+    parent_idx: qd.Tensor = field(int)
+    root_idx: qd.Tensor = field(int)
+    q_start: qd.Tensor = field(int)
+    dof_start: qd.Tensor = field(int)
+    joint_start: qd.Tensor = field(int)
+    q_end: qd.Tensor = field(int)
+    dof_end: qd.Tensor = field(int)
+    joint_end: qd.Tensor = field(int)
+    n_dofs: qd.Tensor = field(int)
+    pos: qd.Tensor = field((float, 3))
+    quat: qd.Tensor = field((float, 4))
+    invweight: qd.Tensor = field((float, 2))
+    is_fixed: qd.Tensor = field(bool)
+    inertial_pos: qd.Tensor = field((float, 3))
+    inertial_quat: qd.Tensor = field((float, 4))
+    inertial_i: qd.Tensor = field((float, (3, 3)))
+    inertial_mass: qd.Tensor = field(float)
+    entity_idx: qd.Tensor = field(int)
+    # The geoms and visual geoms of each link, which heterogeneous environments vary
+    geom_start: qd.Tensor = field(int)
+    geom_end: qd.Tensor = field(int)
+    vgeom_start: qd.Tensor = field(int)
+    vgeom_end: qd.Tensor = field(int)
+
+
+class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
+    # A *_bw array keeps what the backward pass reads and the forward pass overwrites
+    cinr_inertial: qd.Tensor = field((float, (3, 3)), grad=True)
+    cinr_pos: qd.Tensor = field((float, 3), grad=True)
+    cinr_quat: qd.Tensor = field((float, 4), grad=True)
+    cinr_mass: qd.Tensor = field(float, grad=True)
+    crb_inertial: qd.Tensor = field((float, (3, 3)), grad=True)
+    crb_pos: qd.Tensor = field((float, 3), grad=True)
+    crb_quat: qd.Tensor = field((float, 4), grad=True)
+    crb_mass: qd.Tensor = field(float, grad=True)
+    cdd_vel: qd.Tensor = field((float, 3), grad=True)
+    cdd_ang: qd.Tensor = field((float, 3), grad=True)
+    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
+    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
+    pos: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    quat: qd.Tensor = field((float, 4), kind=DataKind.STATE, grad=True)
+    pos_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
+    quat_bw: qd.Tensor = field((float, 4), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
+    i_pos: qd.Tensor = field((float, 3), grad=True)
+    i_pos_bw: qd.Tensor = field((float, 3), grad=True)
+    i_quat: qd.Tensor = field((float, 4), grad=True)
+    cd_ang: qd.Tensor = field((float, 3), grad=True)
+    cd_vel: qd.Tensor = field((float, 3), grad=True)
+    # Whether a contact or a connect or weld equality row involves the link this step, written by the constraint
+    # assembly from the sorted contacts and read by the midpoint integration
+    is_constrained: qd.Tensor = field(bool)
+    # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
+    # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
+    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body).
+    midpoint_ang: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, labels=MIDPOINT)
+    midpoint_res: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, labels=MIDPOINT)
+    cd_ang_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
+    cd_vel_bw: qd.Tensor = field((float, 3), shape=(LINKS, LINK_BW_SLOTS, ENVS), grad=True)
+    mass_sum: qd.Tensor = field(float, grad=True)
+    # Center of mass of the kinematic tree
+    root_COM: qd.Tensor = field((float, 3), grad=True)
+    root_COM_bw: qd.Tensor = field((float, 3), grad=True)
+    cacc_ang: qd.Tensor = field((float, 3), grad=True)
+    cacc_lin: qd.Tensor = field((float, 3), grad=True)
+    cfrc_ang: qd.Tensor = field((float, 3), grad=True)
+    cfrc_vel: qd.Tensor = field((float, 3), grad=True)
+    cfrc_applied_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    cfrc_applied_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    # The wrench the couplers accumulate during a substep, which the next substep consumes
+    cfrc_coupling_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    cfrc_coupling_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    contact_force: qd.Tensor = field((float, 3), grad=True)
+    # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
+    # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
+    # again the step it exceeds the tolerance or wakes.
+    is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
+    awake_steps: qd.Tensor = field(int, kind=DataKind.STATE)
+
+
+class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
+    type: qd.Tensor = field(int)
+    sol_params: qd.Tensor = field((float, 7))
+    q_start: qd.Tensor = field(int)
+    dof_start: qd.Tensor = field(int)
+    q_end: qd.Tensor = field(int)
+    dof_end: qd.Tensor = field(int)
+    n_dofs: qd.Tensor = field(int)
+    pos: qd.Tensor = field((float, 3))
+
+
+class JointsState(Data, kind=DataKind.DERIVED, shape=(JOINTS, ENVS)):
+    xanchor: qd.Tensor = field((float, 3), grad=True)
+    xaxis: qd.Tensor = field((float, 3), grad=True)
+
+
+class GeomsInfo(Data, kind=DataKind.INFO, shape=(GEOMS,)):
+    pos: qd.Tensor = field((float, 3))
+    center: qd.Tensor = field((float, 3))
+    quat: qd.Tensor = field((float, 4))
+    data: qd.Tensor = field((float, 7))
+    link_idx: qd.Tensor = field(int)
+    type: qd.Tensor = field(int)
+    friction: qd.Tensor = field(float)
+    friction_torsional: qd.Tensor = field(float)
+    friction_rolling: qd.Tensor = field(float)
+    sol_params: qd.Tensor = field((float, 7))
+    vert_num: qd.Tensor = field(int)
+    vert_start: qd.Tensor = field(int)
+    vert_end: qd.Tensor = field(int)
+    verts_state_start: qd.Tensor = field(int)
+    verts_state_end: qd.Tensor = field(int)
+    face_num: qd.Tensor = field(int)
+    face_start: qd.Tensor = field(int)
+    face_end: qd.Tensor = field(int)
+    edge_num: qd.Tensor = field(int)
+    edge_start: qd.Tensor = field(int)
+    edge_end: qd.Tensor = field(int)
+    is_convex: qd.Tensor = field(bool)
+    contype: qd.Tensor = field(int)
+    conaffinity: qd.Tensor = field(int)
+    is_fixed: qd.Tensor = field(bool)
+    is_decomposed: qd.Tensor = field(bool)
+    is_hollow: qd.Tensor = field(bool)
+    needs_coup: qd.Tensor = field(int)
+    coup_friction: qd.Tensor = field(float)
+    coup_softness: qd.Tensor = field(float)
+    coup_restitution: qd.Tensor = field(float)
+
+
+class GeomsState(Data, kind=DataKind.DERIVED, shape=(GEOMS, ENVS)):
+    pos: qd.Tensor = field((float, 3), grad=True)
+    quat: qd.Tensor = field((float, 4), grad=True)
+    aabb_min: qd.Tensor = field((float, 3))
+    aabb_max: qd.Tensor = field((float, 3))
+    verts_updated: qd.Tensor = field(bool)
+    is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
+    friction_ratio: qd.Tensor = field(float, kind=DataKind.INFO)
+
+
+class VertsInfo(Data, kind=DataKind.CONSTANT, shape=(VERTS,)):
+    init_pos: qd.Tensor = field((float, 3))
+    init_normal: qd.Tensor = field((float, 3))
+    geom_idx: qd.Tensor = field(int)
+    init_center_pos: qd.Tensor = field((float, 3))
+    verts_state_idx: qd.Tensor = field(int)
+    is_fixed: qd.Tensor = field(bool)
+
+
+class FacesInfo(Data, kind=DataKind.CONSTANT, shape=(FACES,)):
+    verts_idx: qd.Tensor = field((int, 3))
+    geom_idx: qd.Tensor = field(int)
+
+
+class EdgesInfo(Data, kind=DataKind.CONSTANT, shape=(EDGES,)):
+    v0: qd.Tensor = field(int)
+    v1: qd.Tensor = field(int)
+    length: qd.Tensor = field(float)
+
+
+class VertsState(Data, kind=DataKind.DERIVED):
+    pos: qd.Tensor = field((float, 3))
+
+
+class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
+    init_pos: qd.Tensor = field((float, 3))
+    init_vnormal: qd.Tensor = field((float, 3))
+    vgeom_idx: qd.Tensor = field(int)
+    vverts_state_idx: qd.Tensor = field(int)
+
+
+class VVertsState(Data, kind=DataKind.DERIVED, shape=(CUSTOM_VVERTS, ENVS)):
+    pos: qd.Tensor = field((float, 3))
+
+
+class VFacesInfo(Data, kind=DataKind.CONSTANT, shape=(VFACES,)):
+    vverts_idx: qd.Tensor = field((int, 3))
+    vgeom_idx: qd.Tensor = field(int)
+
+
+class VGeomsInfo(Data, kind=DataKind.CONSTANT, shape=(VGEOMS,)):
+    pos: qd.Tensor = field((float, 3))
+    quat: qd.Tensor = field((float, 4))
+    link_idx: qd.Tensor = field(int)
+    vvert_num: qd.Tensor = field(int)
+    vvert_start: qd.Tensor = field(int)
+    vvert_end: qd.Tensor = field(int)
+    vface_num: qd.Tensor = field(int)
+    vface_start: qd.Tensor = field(int)
+    vface_end: qd.Tensor = field(int)
+    color: qd.Tensor = field((float, 4))
+
+
+class VGeomsState(Data, kind=DataKind.DERIVED, shape=(VGEOMS, ENVS)):
+    pos: qd.Tensor = field((float, 3))
+    quat: qd.Tensor = field((float, 4))
+
+
+class EqualitiesInfo(Data, kind=DataKind.INFO, shape=(CANDIDATE_EQUALITIES, ENVS)):
+    eq_obj1id: qd.Tensor = field(int)
+    eq_obj2id: qd.Tensor = field(int)
+    # The data of a screw constraint, the largest one, sizes the entries of all equalities (see func_screw_frame in
+    # constraint/solver.py)
+    eq_data: qd.Tensor = field((float, 18))
+    eq_type: qd.Tensor = field(int)
+    sol_params: qd.Tensor = field((float, 7))
+
+
+class EntitiesInfo(Data, kind=DataKind.INFO, shape=(ENTITIES,)):
+    dof_start: qd.Tensor = field(int)
+    dof_end: qd.Tensor = field(int)
+    n_dofs: qd.Tensor = field(int)
+    link_start: qd.Tensor = field(int)
+    link_end: qd.Tensor = field(int)
+    n_links: qd.Tensor = field(int)
+    geom_start: qd.Tensor = field(int)
+    geom_end: qd.Tensor = field(int)
+    n_geoms: qd.Tensor = field(int)
+    gravity_compensation: qd.Tensor = field(float)
+    is_local_collision_mask: qd.Tensor = field(bool)
+
+
+class EntitiesState(Data, kind=DataKind.STATE, shape=(ENTITIES, ENVS)):
+    is_hibernated: qd.Tensor = field(int)
+
+
+class DynInfo(Data):
+    """The model of the kinematics and dynamics, one struct per element type."""
 
     entities: EntitiesInfo
     links: LinksInfo
     joints: JointsInfo
     dofs: DofsInfo
-    geoms: GeomsInfo
-    verts: VertsInfo
-    faces: FacesInfo
-    edges: EdgesInfo
+    geoms: GeomsInfo = field(labels=DYNAMICS)
+    verts: VertsInfo = field(labels=DYNAMICS)
+    faces: FacesInfo = field(labels=DYNAMICS)
+    edges: EdgesInfo = field(labels=DYNAMICS)
     vverts: VVertsInfo
     vfaces: VFacesInfo
     vgeoms: VGeomsInfo
-    equalities: EqualitiesInfo
+    equalities: EqualitiesInfo = field(labels=DYNAMICS)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class DynState:
-    """Runtime state of the kinematics+dynamics component, one leaf struct per element type.
-
-    Dummy-leaf allocation follows DynInfo. The adjoint cache is a second instance holding copies of the leaves
-    overwritten during a forward substep (dofs, links, joints, geoms), with every other field a scalar dummy.
-    """
+class DynState(Data):
+    """The state of the kinematics and dynamics, one struct per element type."""
 
     entities: EntitiesState
     links: LinksState
     joints: JointsState
     dofs: DofsState
-    geoms: GeomsState
-    free_verts: VertsState
-    fixed_verts: VertsState
+    geoms: GeomsState = field(labels=DYNAMICS)
+    free_verts: VertsState = field(shape=(FREE_VERTS, ENVS), labels=DYNAMICS)
+    fixed_verts: VertsState = field(shape=(FIXED_VERTS,), labels=DYNAMICS)
     vverts: VVertsState
     vgeoms: VGeomsState
 
@@ -1800,9 +1289,9 @@ class RigidSimStaticConfig(StaticConfig):
     batch_joints_info: bool
     enable_mujoco_compatibility: bool
     enable_elliptic_friction: bool
-    # Whether contact friction is bounded by the disc of radius mu * f_n taken from the normal force developed at the
-    # current iterate, instead of jointly with it through the coupled cone (see gs.contact_resolution). Implies
-    # enable_elliptic_friction: the pyramidal rows do not separate into a normal row and a friction disc.
+    # Whether contact friction is bounded by the disc of radius mu * f_n, f_n being the normal force at the current
+    # iterate, rather than jointly with it through the coupled cone (see gs.contact_resolution). It implies
+    # enable_elliptic_friction, whose rows separate the normal force from the friction disc.
     enable_signorini_contact: bool
     enable_multi_contact: bool
     enable_joint_limit: bool
@@ -1811,21 +1300,22 @@ class RigidSimStaticConfig(StaticConfig):
     integrator: int
     solver_type: int
     requires_grad: bool
-    prefer_decomposed_solver: int = -1  # -1 = None (auto), 0 = False, 1 = True
-    # Whether the cone-free assembled Hessian is persisted in nt_H's mirror slots (diagonal in nt_H_cone_free_diag);
-    # see the nt_H declaration for the packed-storage mechanics and the rigid solver's resolution for the gating.
+    # -1 to let the dispatch pick, 0 or 1 to force it
+    prefer_decomposed_solver: int = -1
+    # Whether the Hessian without its cone blocks persists in the mirror slots of nt_H (see nt_H in ConstraintState)
     enable_cone_free_hessian_reuse: bool = False
     # Whether contacts carry torsional friction rows resisting relative spin about the contact normal: one extra
     # opposing pyramid pair per contact with the pyramidal cone, one extra cone row with the elliptic cone.
     enable_torsional_friction: bool = False
     # Whether contacts also carry rolling friction rows resisting relative rotation about the two tangent axes: two
     # extra opposing pyramid pairs per contact with the pyramidal cone, two extra cone rows with the elliptic cone.
-    # Requires enable_torsional_friction (the rolling rows sit after the spin row in the contact row layout).
+    # It requires enable_torsional_friction, the rolling rows following the spin row.
     enable_rolling_friction: bool = False
-    # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
-    # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
+    # Consecutive steps the dof velocities of a body must stay below the tolerance before it hibernates, so a body
+    # momentarily slow (at the apex of a toss) stays awake
     hibernation_min_steps: int = 10
-    parallel_init: bool = False  # parallelize init over (constraints, envs) when GPU is not saturated by envs alone
+    # Whether the initialization of the solve runs over (constraint, env) pairs, for envs too few to fill the GPU
+    parallel_init: bool = False
     # Whether the walks of the kinematic trees and roots sweep them level by level (see func_sweep_links_by_level)
     enable_level_sweep: bool = False
     # Lanes of the level sweep per env, a power of two dividing its blocks of 32 lanes. Four envs per block balance the
@@ -1834,65 +1324,54 @@ class RigidSimStaticConfig(StaticConfig):
     broadphase_traversal: int = 0
     enable_tiled_cholesky_mass_matrix: bool = False
     mass_matrix_fits_shared: bool = False
-    # Register-tile width of the mass-matrix Cholesky kernels: 16 (Tile16x16) or 32 (Tile32x32), see
-    # cholesky_tile_size_for.
+    # Register-tile width of the mass-matrix Cholesky kernels, 16 or 32 (see cholesky_tile_size_for)
     cholesky_tile_size: int = 32
-    # Register-streaming tiled per-entity mass factor for the >shared-cap branch of func_factor_mass (GPU forward
-    # only). When True, each entity's single-mass-block submatrix factors in registers via the same TileNxN Cholesky
-    # primitive as the Hessian, instead of the shared-pivot cooperative LDL^T. Only enabled when every entity is a
-    # single mass block (the common case: one kinematic tree). The tile width is always 32: the path is only taken
-    # when the per-entity block exceeds shared memory, which on any real GPU means well over 48 DOFs.
+    # Whether func_factor_mass factors the mass block of each entity in registers with the tiled Cholesky of the
+    # Hessian, where the block exceeds shared memory. It requires every entity to be one mass block, and its tiles are
+    # 32 wide, a block exceeding shared memory spanning well over 48 dofs.
     enable_register_tiled_mass: bool = False
-    # When True, the shared-memory mass factor also solves the smooth acceleration from the forces against the factor it
-    # holds, which runs it after the force passes, and func_compute_qacc skips its own solve. See the rigid solver's
-    # resolution for the gating.
+    # Whether the shared-memory mass factor also solves the smooth acceleration against the factor it holds, after the
+    # force passes, in place of func_compute_qacc. See its resolution in the rigid solver.
     enable_fused_smooth_acc_solve: bool = False
-    # When True, func_solve_init seeds every island's factor with the tiled per-island kernels at any env count. The
-    # solve is seeded one env per thread otherwise (see has_per_env_solve_seed). See the rigid solver's resolution for
-    # the gating.
+    # Whether func_solve_init seeds the factor of every island with the tiled per-island kernels, else one env per
+    # thread (see has_per_env_solve_seed). See its resolution in the rigid solver.
     enable_tiled_island_seed: bool = False
-    # When True, the scene holds one dof-carrying kinematic tree, so an env forms at most one island and the
-    # per-island passes of the solve read the env's plain dof and row ranges. See the rigid solver's resolution.
+    # Whether the scene holds one dof-carrying kinematic tree, an env then forming one island at most, whose passes read
+    # the dof and row ranges of the env
     is_single_island: bool = False
-    # When True, the seed kernel assembles the env's one Hessian block and the monolith factors it with the scalar
-    # dense Cholesky (see _kernel_solve_monolith), a single-island scene above the cooperative bound.
+    # Whether the seed kernel assembles the Hessian of a single-island scene too large for the cooperative factor, which
+    # the monolith factors with the scalar dense Cholesky (see _kernel_solve_monolith)
     has_scalar_seed_factor: bool = False
-    # When True, the constraint solver uses the GPU subgroup-cooperative kernel variants (warp-cooperative linesearch
-    # refinement, per-friction constraint builder, cooperative mass-matrix assembly), together with the batch-first
-    # tensor layouts they expect, eg (_B, len_constraints_) for Jaref / efc_D / ... which unlocks coalesced cross-lane
-    # reads.
+    # Whether the constraint solver runs the subgroup-cooperative GPU kernels (linesearch refinement, friction rows,
+    # mass-matrix assembly) on environment-first arrays (see COOPERATIVE_ROWS)
     enable_cooperative_constraint_kernels: bool = False
-    # When True, the noslip sweep of an island runs on a block of 32 lanes: the island's rows are colored so that the
-    # rows of a color touch disjoint mass blocks, the lanes update the rows of a color in parallel and the colors are
-    # swept in order (see func_noslip in noslip.py). The rows are visited in another order than by the one-thread
-    # sweep, so the two sweeps give different iterates. See the rigid solver's resolution for the gating.
+    # Whether the noslip sweep of an island runs on a block of 32 lanes: its rows are colored so that the rows of a
+    # color touch disjoint mass blocks, and the lanes update the rows of a color in parallel, color after color (see
+    # func_noslip in noslip.py). The visit order differs from the one-thread sweep, and so do the iterates. See its
+    # resolution in the rigid solver.
     enable_cooperative_noslip: bool = False
-    # Purely descriptive layout flag: True whenever the layout-flippable constraint-state tensors are physically
-    # batch-first, i.e. enable_cooperative_constraint_kernels or serialized execution (env loop outermost, so per-env
-    # rows must be contiguous). Consumers that only need iteration order to follow the physical layout (ndrange axes,
-    # flattened index decompositions) key on this flag, while algorithm selection (warp-cooperative vs serial
-    # reductions) keys on enable_cooperative_constraint_kernels alone.
+    # Whether the arrays labeled COOPERATIVE_ROWS are stored environment-first, under the cooperative constraint
+    # kernels or serialized execution. Loops whose order follows the memory order key on it, and the choice of the
+    # cooperative algorithms on enable_cooperative_constraint_kernels.
     constraint_layout_batch_first: bool = False
-    # Whether the Newton system is Jacobi-equilibrated: see nt_jacobi in ConstraintState for the mechanics, the rigid
-    # solver's resolution for the gating.
+    # Whether the Newton system is Jacobi-equilibrated (see nt_jacobi in ConstraintState)
     enable_jacobi_equilibration: bool = False
     tiled_n_dofs_per_block: int = -1
-    # Dof caps of the shared tiles of the cooperative per-island factor+solve, one launch per cap (see island_tile_caps
-    # below): the doublings of the first cap, the tile size doubled up to the smallest dof-carrying tree, below
-    # the last one, the largest tile-size multiple that fits GPU shared memory. Islands above the last cap factor in
-    # global memory.
+    # Dof caps of the shared tiles of the cooperative per-island factor and solve, one launch per cap (see
+    # island_tile_caps): the doublings of the first cap below the last one. The first cap is the tile size doubled up
+    # to the smallest dof-carrying tree, the last one the largest multiple of the tile size fitting GPU shared memory.
+    # An island above the last cap factors in global memory.
     island_tile_cap_first: int = 0
     island_tile_cap_last: int = 0
-    # Whether an island can hold more dofs than the last cap, which compiles the factor paths above it.
+    # Whether an island can hold more dofs than the last cap, which compiles the factor paths above it
     has_island_above_tile_cap: bool = False
 
     @property
     def rows_per_contact(self) -> int:
         """Constraint rows per contact.
 
-        The pyramidal cone carries 2 opposing friction-mixed edges per friction axis, the elliptic cone the normal
-        row plus one row per friction axis; torsional friction adds the spin axis and rolling friction the two
-        tangent axes.
+        The pyramidal cone has two opposing edges per friction axis, the elliptic cone the normal row plus one row per
+        friction axis. Torsional friction adds the spin axis, and rolling friction the two tangent axes.
         """
         n_extra_axes = int(self.enable_torsional_friction) + 2 * int(self.enable_rolling_friction)
         if self.enable_elliptic_friction:
@@ -1901,23 +1380,20 @@ class RigidSimStaticConfig(StaticConfig):
 
     @property
     def hessian_rank_update_batch(self) -> int:
-        """Number of rank-1 Cholesky updates fused into one column sweep by the per-island incremental factor.
+        """Rank-1 Cholesky updates the per-island incremental factor fuses into one column sweep.
 
-        Sizes the nt_vec slots and the static per-column unroll of func_rank_batch_update_island: 8 amortizes the
-        active-set flip batching, widened when the coupled elliptic-cone update must stage 2 slots per cone row
-        (see func_cone_rank_update_island).
+        It sizes the nt_vec slots and the unroll of func_rank_batch_update_island, and covers the two slots per cone row
+        of the coupled elliptic-cone update (see func_cone_rank_update_island).
         """
         return max(8, 2 * self.rows_per_contact)
 
     @property
     def has_per_env_solve_seed(self) -> bool:
-        """Whether func_solve_init seeds the Newton factor, the gradient and the convergence certificate one env per
-        thread, for both solve arms.
+        """Whether func_solve_init seeds the Newton factor, the gradient and the convergence test one env per thread.
 
-        This holds on GPU wherever the tiled factor seed is off or leaves the factor to the scalar dense Cholesky (see
-        has_scalar_seed_factor). The decomposed arm then factors the Hessian of every env one env per thread at each
-        iteration too, since its tiled per-iteration factor maintains the assembled Hessian that only the tiled seed
-        provides.
+        It holds on GPU wherever the tiled seed is off or leaves the factor to the scalar dense Cholesky (see
+        has_scalar_seed_factor). The decomposed arm then factors one env per thread at every iteration too, its tiled
+        factor maintaining the Hessian the tiled seed assembles.
         """
         return (
             self.solver_type == gs.constraint_solver.Newton
@@ -1930,18 +1406,20 @@ class RigidSimStaticConfig(StaticConfig):
 
 
 def cholesky_tile_size_for(n_dofs):
-    """Tile size of the register-streaming Cholesky kernels for a system of n_dofs dofs: 16 where one 16-lane tile
-    holds it or where a 32-lane tile would pad it past its lane utilization (33 to 48 dofs), 32 otherwise."""
+    """Return the tile size of the register Cholesky kernels for a system of dofs.
+
+    It is 16 where one tile of 16 lanes holds the system, or where tiles of 32 lanes would leave most lanes idle (33 to
+    48 dofs), and 32 otherwise.
+    """
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
 
 
 def cholesky_packed_tile_shape(max_dofs):
-    """Shape of the shared tile of the tiled factor of a block of up to max_dofs dofs.
+    """Return the shape of the shared tile of the tiled factor of a block of dofs.
 
-    The tile holds the blocks of the lower triangle alone, one below the other, each a square of the tile size (see
-    cholesky_tile_size_for) padded by one column against shared-memory bank conflicts, a block of a single tile being
-    the tile itself (see func_packed_tile_pos in solver.py). The sizes are native integers, as the shared array takes
-    them.
+    The tile stacks the blocks of the lower triangle, each a square of the tile size (see cholesky_tile_size_for)
+    padded by one column against bank conflicts (see func_packed_tile_pos in solver.py). The sizes are native
+    integers, as the shared array takes them.
     """
     tile_size = cholesky_tile_size_for(max_dofs)
     n_blocks = (max_dofs + tile_size - 1) // tile_size
@@ -1950,8 +1428,7 @@ def cholesky_packed_tile_shape(max_dofs):
 
 
 def island_tile_caps(cap_first, cap_last):
-    """Ascending dof caps of the shared tiles of the cooperative per-island factor+solve, see island_tile_cap_first:
-    the doublings of the first cap below the last one, then the last one."""
+    """Return the ascending dof caps of the shared tiles of the per-island factor (see island_tile_cap_first)."""
     caps = []
     cap = cap_first
     while cap < cap_last:
@@ -1961,28 +1438,70 @@ def island_tile_caps(cap_first, cap_last):
     return tuple(caps)
 
 
-@qd.data_oriented
-class DataManager:
-    def __init__(self, solver, kinematic_only):
+class DataManager(Data):
+    """Every array of a kinematic or rigid solver, allocated from the solver once its scene is built."""
+
+    rigid_info: RigidInfo
+    dyn_info: DynInfo
+    dyn_state: DynState
+    kinematics_scratch: KinematicsScratch
+    errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
+    # Scratch of the inverse-weight computation, which borrows the buffers of the constraint solver at build time, so a
+    # scene that never writes a mass, a center of mass or an inertia allocates none of it
+    weight_scratch: WeightScratch = field(lazy=True)
+    # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so a scene that never
+    # solves inverse kinematics allocates none of it
+    ik_scratch: IKScratch = field(lazy=True)
+
+    def __init__(self, solver, kinematic_only: bool):
         is_dynamic = not kinematic_only
-        mass_mat_shape = (solver.n_dofs_, solver.n_dofs_, solver._B)
-        if not is_tensor_addressable(mass_mat_shape, gs.np_float):
+        config, options = solver.rigid_config, solver._options
+        if not is_tensor_addressable((solver.n_dofs_, solver.n_dofs_, solver._B), gs.np_float):
             gs.raise_exception(
                 f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) is too large."
             )
-        config, options = solver.rigid_config, solver._options
+        if not is_tensor_addressable((solver.n_custom_vverts_, solver._B, 3), gs.np_float):
+            gs.raise_exception(
+                f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
+                "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
+            )
+        entities, n_targets = solver.entities, options.IK_max_targets
+        entity_dofs = max([entity.n_dofs for entity in entities], default=0)
         sizes = dict(
             envs=solver._B,
             qs=solver.n_qs_,
             dofs=solver.n_dofs_,
             links=solver.n_links_,
+            joints=solver.n_joints_,
             roots=solver.n_roots_,
             trees=solver.n_trees_,
+            entities=solver.n_entities_,
+            vverts=solver.n_vverts_,
+            custom_vverts=solver.n_custom_vverts_,
+            vfaces=solver.n_vfaces_,
+            vgeoms=solver.n_vgeoms_,
+            dofs_info_envs=solver._B if options.batch_dofs_info else (),
+            links_info_envs=solver._B if options.batch_links_info else (),
+            joints_info_envs=solver._B if options.batch_joints_info else (),
+            link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
+            entity_dofs=entity_dofs,
+            ik_qs=max([entity.n_qs for entity in entities], default=0),
+            ik_dofs=max([entity.n_dofs for entity in entities], default=0),
+            ik_links=max([entity.n_links for entity in entities], default=0),
+            ik_joints=max([entity.n_joints for entity in entities], default=0),
+            ik_targets=n_targets,
+            ik_errors=6 * n_targets,
         )
         values = dict(EPS=gs.EPS)
         if is_dynamic:
             sizes.update(
                 geoms=solver.n_geoms_,
+                verts=solver.n_verts_,
+                faces=solver.n_faces_,
+                edges=solver.n_edges_,
+                free_verts=solver.n_free_verts_,
+                fixed_verts=solver.n_fixed_verts_,
+                candidate_equalities=solver.n_candidate_equalities_,
                 trees_levels_links=np.count_nonzero(solver._links_tree_root_idx >= 0),
                 child_links=np.count_nonzero(solver._links_parent_idx >= 0),
             )
@@ -1999,144 +1518,34 @@ class DataManager:
                 n_candidate_equalities=solver.n_candidate_equalities_,
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )
-        self.rigid_info = RigidInfo(
+        super().__init__(
             sizes=sizes,
-            values=values,
+            values=dict(rigid_info=values),
             layout={
-                RigidInfo.mass_mat: (2, 1, 0) if is_dynamic and config.enable_cooperative_constraint_kernels else None
+                DataManager.rigid_info.mass_mat: (2, 1, 0)
+                if is_dynamic and config.enable_cooperative_constraint_kernels
+                else None
             },
             unused={
                 DYNAMICS: kinematic_only,
                 LEVEL_SWEEP: not (is_dynamic and config.enable_level_sweep),
                 TILED_MASS: not (is_dynamic and config.enable_register_tiled_mass),
+                MIDPOINT: not (is_dynamic and config.integrator != gs.integrator.Euler),
+                BACKWARD: not solver._requires_grad,
+                KINEMATICS: entity_dofs == 0,
             },
-            requires_grad=is_dynamic and solver._requires_grad,
+            requires_grad=solver._requires_grad,
         )
-
-        # Leaf structs are allocated one by one before assembling the per-component aggregates, to control the
-        # allocation order of the underlying buffers (see the warning in get_constraint_state).
-        is_dynamic = not kinematic_only
-        dofs_info = get_dofs_info(solver)
-        dofs_state = get_dofs_state(solver)
-        links_info = get_links_info(solver)
-        links_state = get_links_state(solver, kinematic_only)
-        joints_info = get_joints_info(solver)
-        joints_state = get_joints_state(solver)
-
-        entities_info = get_entities_info(solver)
-        entities_state = get_entities_state(solver)
-
-        vverts_info = get_vverts_info(solver)
-        vverts_state = get_vverts_state(solver)
-        vfaces_info = get_vfaces_info(solver)
-
-        vgeoms_info = get_vgeoms_info(solver)
-        vgeoms_state = get_vgeoms_state(solver)
-
-        geoms_info = get_geoms_info(solver, is_dynamic)
-        geoms_state = get_geoms_state(solver, is_dynamic)
-
-        verts_info = get_verts_info(solver, is_dynamic)
-        faces_info = get_faces_info(solver, is_dynamic)
-        edges_info = get_edges_info(solver, is_dynamic)
-
-        free_verts_state = get_free_verts_state(solver, is_dynamic)
-        fixed_verts_state = get_fixed_verts_state(solver, is_dynamic)
-
-        equalities_info = get_equalities_info(solver, is_dynamic)
-
-        entity_dofs = max((entity.n_dofs for entity in solver.entities), default=0)
-        self.kinematics_scratch = KinematicsScratch(
-            sizes=dict(envs=solver._B, qs=solver.n_qs, entity_dofs=entity_dofs), unused={KINEMATICS: entity_dofs == 0}
-        )
-
-        self.dyn_info = DynInfo(
-            entities=entities_info,
-            links=links_info,
-            joints=joints_info,
-            dofs=dofs_info,
-            geoms=geoms_info,
-            verts=verts_info,
-            faces=faces_info,
-            edges=edges_info,
-            vverts=vverts_info,
-            vfaces=vfaces_info,
-            vgeoms=vgeoms_info,
-            equalities=equalities_info,
-        )
-        self.dyn_state = DynState(
-            entities=entities_state,
-            links=links_state,
-            joints=joints_state,
-            dofs=dofs_state,
-            geoms=geoms_state,
-            free_verts=free_verts_state,
-            fixed_verts=fixed_verts_state,
-            vverts=vverts_state,
-            vgeoms=vgeoms_state,
-        )
-
-        self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
-
-        self._solver = solver
-        self._ik_scratch = None
-        self._weight_scratch = None
-
-    @property
-    def weight_scratch(self) -> WeightScratch:
-        """Scratch buffers for the inverse-weight computation, allocated the first time a setter triggers one.
-
-        At build time the computation borrows the buffers of the constraint solver, so a scene that never writes a
-        mass, a center of mass or an inertia allocates none of this.
-        """
-        if self._weight_scratch is None:
-            self._weight_scratch = WeightScratch(sizes=dict(envs=self._solver._B, dofs=self._solver.n_dofs_))
-        return self._weight_scratch
-
-    @property
-    def ik_scratch(self) -> IKScratch:
-        """Inverse-kinematics scratch, allocated the first time a solve asks for it.
-
-        The damped normal matrix it holds is quadratic in RigidOptions.IK_max_targets, so a scene that never solves
-        inverse kinematics carries none of it.
-        """
-        if self._ik_scratch is None:
-            entities = self._solver.entities
-            n_targets = self._solver._options.IK_max_targets
-            self._ik_scratch = IKScratch(
-                sizes=dict(
-                    envs=self._solver._B,
-                    ik_qs=max([entity.n_qs for entity in entities]),
-                    ik_dofs=max([entity.n_dofs for entity in entities]),
-                    ik_links=max([entity.n_links for entity in entities]),
-                    ik_joints=max([entity.n_joints for entity in entities]),
-                    ik_targets=n_targets,
-                    ik_errors=6 * n_targets,
-                )
-            )
-        return self._ik_scratch
 
 
 # =========================================== RaycastResult ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class RaycastResult:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    distance: qd.Tensor
-    geom_idx: qd.Tensor
-    hit_point: qd.Tensor
-    normal: qd.Tensor
-
-
-def get_raycast_result(n_envs: int):
-    return RaycastResult(
-        distance=V(dtype=gs.qd_float, shape=(n_envs,)),
-        geom_idx=V(dtype=gs.qd_int, shape=(n_envs,)),
-        hit_point=V_VEC(3, dtype=gs.qd_float, shape=(n_envs,)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(n_envs,)),
-    )
+class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    distance: qd.Tensor = field(float)
+    geom_idx: qd.Tensor = field(int)
+    hit_point: qd.Tensor = field((float, 3))
+    normal: qd.Tensor = field((float, 3))
 
 
 GeomsInitAABB = qd.Tensor
@@ -2146,10 +1555,7 @@ GeomsInitAABB = qd.Tensor
 
 
 class BVH_SORT_KIND(IntEnum):
-    """The sort ordering the leaf keys of a BVH set.
-
-    See genesis.engine.bvh.
-    """
+    """The sort ordering the leaf keys of a set of BVH trees (see genesis.engine.bvh)."""
 
     # The device-wide radix sort of quadrants over every key of the set (GPU, large trees)
     DEVICE_RADIX = 0
@@ -2160,10 +1566,7 @@ class BVH_SORT_KIND(IntEnum):
 
 
 class BVH_FIT_KIND(IntEnum):
-    """The bottom-up fit of the node boxes of a BVH set.
-
-    See genesis.engine.bvh.
-    """
+    """The bottom-up fit of the node boxes of a set of BVH trees (see genesis.engine.bvh)."""
 
     # One thread per leaf walking to the root, the arrival counters sequentially consistent (CPU)
     LEAF_WALK = 0
@@ -2175,10 +1578,9 @@ class BVH_FIT_KIND(IntEnum):
 
 @qd.data_oriented
 class BVHStaticConfig(StaticConfig):
-    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
+    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH) (see genesis.engine.bvh).
 
-    See genesis.engine.bvh. The leaf keys pack the tree, the morton code and the leaf index in that order, so one flat
-    sort orders every tree.
+    A leaf key packs the tree, the morton code and the leaf index in that order, so one flat sort orders every tree.
     """
 
     # The bits of a morton code, three interleaved coordinates of the same width
@@ -2193,137 +1595,82 @@ class BVHStaticConfig(StaticConfig):
     fit_kind: int
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHTreeState:
+# Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree, the slots of its
+# device-wide radix sort, the chunks of its per-tree radix sort and the lanes of its extent reduction
+BVH_TREES = Size("bvh_trees")
+BVH_LEAVES = Size("bvh_leaves")
+SORT_SLOTS = Size("sort_slots")
+SORT_CHUNKS = Size("sort_chunks")
+EXTENT_LANES = Size("extent_lanes")
+# The (tree, leaf, query) triplets a box query of a BVH holds
+QUERY_RESULTS = Size("query_results")
+# The scratch of each sort and fit (see BVH_SORT_KIND and BVH_FIT_KIND)
+DEVICE_RADIX_SORT = Label("device_radix_sort")
+PER_TREE_RADIX_SORT = Label("per_tree_radix_sort")
+BLOCK_SWEEP_FIT = Label("block_sweep_fit")
+
+
+class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
     """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
 
-    See genesis.engine.bvh for the build. The internal nodes come first, n_leaves - 1 of them, then the leaves, so
-    node n_leaves - 1 + i holds the i-th sorted leaf, whose leaf index is leaves_idx[i_t, i]. A leaf node holds -1 in
-    nodes_left.
+    The n_leaves - 1 internal nodes come first, then the leaves, so node n_leaves - 1 + i holds the i-th sorted leaf,
+    whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
     """
 
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    nodes_left: qd.Tensor
-    nodes_right: qd.Tensor
-    nodes_min: qd.Tensor
-    nodes_max: qd.Tensor
-    leaves_idx: qd.Tensor
+    nodes_left: qd.Tensor = field(int)
+    nodes_right: qd.Tensor = field(int)
+    nodes_min: qd.Tensor = field((float, 3))
+    nodes_max: qd.Tensor = field((float, 3))
+    leaves_idx: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES))
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHLeaves:
-    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH).
+class BVHLeaves(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, BVH_LEAVES)):
+    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH), written before a build."""
 
-    See genesis.engine.bvh. The caller writes them before a build, and a box query tests them against a tree.
-    """
-
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    aabbs_min: qd.Tensor
-    aabbs_max: qd.Tensor
+    aabbs_min: qd.Tensor = field((float, 3))
+    aabbs_max: qd.Tensor = field((float, 3))
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHState:
-    """The linear bounding volume hierarchies (LBVH) of a set of trees.
+class BVHState(Data, kind=DataKind.SCRATCH):
+    """The linear bounding volume hierarchies (LBVH) of a set of trees, built by genesis.engine.bvh."""
 
-    A build (see genesis.engine.bvh) takes the boxes of the leaves (see BVHLeaves) and produces the tree a traversal
-    reads (see BVHTreeState), plus the sorted leaf keys, the parent of each node and the scratch of the sort, the extent
-    and the fit.
-    """
-
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    leaves: BVHLeaves
     tree: BVHTreeState
-    leaves_keys: qd.Tensor
-    keys_scratch: qd.Tensor
-    sort_scratch: qd.Tensor
-    sort_hist: qd.Tensor
-    n_keys: qd.Tensor
-    nodes_parent: qd.Tensor
-    nodes_fitted: qd.Tensor
-    fit_frontier: qd.Tensor
-    lanes_min: qd.Tensor
-    lanes_max: qd.Tensor
-    trees_min: qd.Tensor
-    trees_max: qd.Tensor
+    leaves: BVHLeaves
+    leaves_keys: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
+    keys_scratch: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
+    sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
+    sort_hist: qd.Tensor = field(int, shape=(BVH_TREES, SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
+    n_keys: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT)
+    nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
+    nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
+    fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)
+    lanes_min: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    lanes_max: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    trees_min: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+    trees_max: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
 
 
-def get_bvh_state(
-    n_trees: int,
-    n_leaves: int,
-    n_sort_scratch: int,
-    n_sort_chunks: int,
-    n_extent_lanes: int,
-    bvh_config: BVHStaticConfig,
-    is_active: bool,
-) -> BVHState:
-    n_nodes = 2 * n_leaves - 1
-    is_device_radix = is_active and bvh_config.sort_kind == BVH_SORT_KIND.DEVICE_RADIX
-    is_per_tree_radix = is_active and bvh_config.sort_kind == BVH_SORT_KIND.PER_TREE_RADIX
-    is_block_sweep = is_active and bvh_config.fit_kind == BVH_FIT_KIND.BLOCK_SWEEP
-    return BVHState(
-        tree=BVHTreeState(
-            nodes_left=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
-            nodes_right=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
-            nodes_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_nodes), is_active)),
-            nodes_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_nodes), is_active)),
-            leaves_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_leaves), is_active)),
-        ),
-        leaves=BVHLeaves(
-            aabbs_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_leaves), is_active)),
-            aabbs_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_leaves), is_active)),
-        ),
-        leaves_keys=V(dtype=qd.u64, shape=maybe_shape((n_trees * n_leaves,), is_active)),
-        keys_scratch=V(dtype=qd.u64, shape=maybe_shape((n_trees * n_leaves,), is_active)),
-        sort_scratch=V(dtype=qd.u32, shape=maybe_shape((n_sort_scratch,), is_device_radix)),
-        sort_hist=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_sort_chunks, 256), is_per_tree_radix)),
-        n_keys=V_SCALAR_FROM(gs.qd_int, n_trees * n_leaves),
-        nodes_parent=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
-        nodes_fitted=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, max(n_leaves - 1, 1)), is_active)),
-        fit_frontier=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, 2, max(n_leaves - 1, 1)), is_block_sweep)),
-        lanes_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_extent_lanes), is_active)),
-        lanes_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_extent_lanes), is_active)),
-        trees_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees,), is_active)),
-        trees_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees,), is_active)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHQueryResults:
+class BVHQueryResults(Data, kind=DataKind.SCRATCH):
     """The (tree, leaf, query) triplets a box query of a BVH collects, and their count, above the capacity on overflow.
 
     See func_bvh_query_aabb in genesis.engine.bvh.
     """
 
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    triplets: qd.Tensor
-    count: qd.Tensor
+    triplets: qd.Tensor = field((int, 3), shape=(QUERY_RESULTS,))
+    count: qd.Tensor = field(int, shape=(1,))
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class BVHQueryState:
-    """A box query of a set of trees: the leaves whose boxes are tested, the trees traversed and the pairs found.
+    """A box query of a set of trees: the leaves tested, the trees traversed and the pairs found.
 
-    Leaf ``i_q`` of tree ``i_t`` of ``leaves`` is tested against tree ``i_t`` of ``tree`` (see func_bvh_query_leaves
-    in genesis.engine.bvh).
+    Leaf i_q of tree i_t of 'leaves' is tested against tree i_t of 'tree' (see func_bvh_query_leaves in
+    genesis.engine.bvh). It holds arrays of other structs, apart from its results.
     """
-
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
 
     leaves: BVHLeaves
     tree: BVHTreeState
     results: BVHQueryResults
-
-
-def get_bvh_query_results(max_results: int, is_active: bool = True) -> BVHQueryResults:
-    return BVHQueryResults(
-        triplets=V(dtype=gs.qd_ivec3, shape=maybe_shape((max_results,), is_active)),
-        count=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_active)),
-    )
 
 
 # =========================================== SAPCoupler ===========================================
@@ -2331,12 +1678,7 @@ def get_bvh_query_results(max_results: int, is_active: bool = True) -> BVHQueryR
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class SAPContactQueriesState:
-    """The box queries of the SAP coupler, one per contact handler traversing a tree.
-
-    See SAPCoupler._init_bvh.
-    """
-
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
+    """The box queries of the SAP coupler, one per contact handler traversing a tree (see SAPCoupler._init_bvh)."""
 
     fem_self: BVHQueryState
     rigid_tri: BVHQueryState

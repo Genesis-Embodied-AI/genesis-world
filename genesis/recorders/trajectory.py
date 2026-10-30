@@ -210,8 +210,7 @@ def _arrays_fields(sim: "Simulator", kinds: frozenset[DataKind], drop_unused: bo
     for item in sim.data(kinds):
         if isinstance(item, ArrayItem):
             array = data_to_array(item.array)
-            # Every unused array of the kinds a step frame holds is the placeholder of a feature switched off (see
-            # 'maybe_shape'), which a restore leaves as built (see 'check_data')
+            # An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built
             if drop_unused and not item.array.shape and not isinstance(item.array, torch.Tensor):
                 fields.append(FrameField(item.name, item.kind, (0,), array.dtype.str, offset, 0, (0,)))
                 continue
