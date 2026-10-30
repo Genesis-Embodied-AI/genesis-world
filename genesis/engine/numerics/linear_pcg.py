@@ -1,11 +1,16 @@
 import numpy as np
 import quadrants as qd
 
+import genesis as gs
+from genesis.utils.misc import qd_debug_asserts, qd_isfinite
+
 from .fsr_reduce import head_segmented_reduce_add
 from .gpu_occupancy import cuda_resident_blocks
 
 # Threads of a block of the PCG launches
 PCG_BLOCK = 256
+# Chunks of the reductions on a CPU backend, each one thread's serial pass over a contiguous range
+_CPU_CHUNKS = 256
 # Launch-resource metadata of the PCG kernels: registers per thread of the streaming loops and of the SpMV
 _STREAM_REGISTERS = 32
 _SPMV_REGISTERS = 64
@@ -20,6 +25,12 @@ class PCGWorkspace:
     updates p, zeroes the next iteration's Ap and p.Ap, and lets the last block of the grid decide convergence and
     flip the parity of the rz/rz_new slots). Every loop grid-strides over the live block rows `n_rows` with a resident
     grid, whose block count the tail's ticket needs.
+
+    The reductions (the dots, the SpMV with p.Ap, the tail's convergence decision) have one implementation per
+    backend. On a GPU they combine the values of a warp by shuffles and those of the grid by a ticket the last block
+    takes, which the CPU backend of Quadrants has no counterpart for: it runs a few dozen threads with no lanes, each of
+    which reduces a contiguous chunk of the rows serially, and the end of a parallel loop orders what follows it. The
+    elementwise loops (the copies and the x/r update) are the same for both.
     """
 
     def __init__(self, max_rows: int, value_type) -> None:
@@ -75,8 +86,46 @@ def _func_dot_into_slot(
     b: qd.template(),  # qd.Ndarray
     slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
 ):
-    """rz_slots[parity XOR slot_offset] += a . b over the live rows, one warp reduction and atomic per warp. The
-    slot was zeroed by an earlier launch."""
+    """rz_slots[parity XOR slot_offset] += a . b over the live rows. The slot was zeroed by an earlier launch.
+
+    A GPU sums a warp's products by shuffles and adds one atomic per warp; a CPU sums each of _CPU_CHUNKS contiguous
+    chunks in one thread and adds one atomic per chunk (see PCGWorkspace)."""
+    if qd.static(gs.backend == gs.cpu):
+        _func_dot_into_slot_cpu(ws, a, b, slot_offset)
+    else:
+        _func_dot_into_slot_gpu(ws, a, b, slot_offset)
+
+
+@qd.func(requires_top_level=True)
+def _func_dot_into_slot_cpu(
+    ws: qd.template(),  # PCGWorkspace
+    a: qd.template(),  # qd.Ndarray
+    b: qd.template(),  # qd.Ndarray
+    slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
+):
+    qd.loop_config(name="pcg_dot_rz_cpu")
+    for chunk in range(_CPU_CHUNKS):
+        n_rows = ws.n_rows[()]
+        size = (n_rows + _CPU_CHUNKS - 1) // _CPU_CHUNKS
+        value = ws.value_type(0.0)
+        if ws.converged[()] == 0:
+            for v in range(chunk * size, qd.min(chunk * size + size, n_rows)):
+                for d in qd.static(range(3)):
+                    value += a[3 * v + d] * b[3 * v + d]
+        if value != 0.0:
+            slot = ws.parity[()]
+            if qd.static(slot_offset != 0):
+                slot = 1 - slot
+            qd.atomic_add(ws.rz_slots[slot], value)
+
+
+@qd.func(requires_top_level=True)
+def _func_dot_into_slot_gpu(
+    ws: qd.template(),  # PCGWorkspace
+    a: qd.template(),  # qd.Ndarray
+    b: qd.template(),  # qd.Ndarray
+    slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
+):
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
         lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
@@ -179,7 +228,64 @@ def func_linear_pcg_spmv(
     matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
 ):
     """The SpMV half of func_linear_pcg_matvec_update: Ap += A p with p.Ap in energy form. A caller whose operator has
-    a term beyond the matrix adds it to Ap and p.Ap before func_linear_pcg_update_xr."""
+    a term beyond the matrix adds it to Ap and p.Ap before func_linear_pcg_update_xr.
+
+    The products of one row are summed before they reach Ap, which spares an atomic per entry: a GPU sums the runs of
+    a row inside a warp by a segmented shuffle reduction, a CPU thread sums them along its chunk of the row-sorted
+    entries, which a row only leaves at the chunk ends (see PCGWorkspace)."""
+    if qd.static(gs.backend == gs.cpu):
+        _func_linear_pcg_spmv_cpu(ws, matrix)
+    else:
+        _func_linear_pcg_spmv_gpu(ws, matrix)
+
+
+@qd.func(requires_top_level=True)
+def _func_linear_pcg_spmv_cpu(
+    ws: qd.template(),  # PCGWorkspace
+    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+):
+    """func_linear_pcg_spmv over contiguous chunks of the row-sorted entries, one thread each: the products of a row
+    accumulate in the thread and add once to Ap where the row ends, the mirrored products of the lower triangle add
+    per entry, and p.Ap adds once per chunk."""
+    qd.loop_config(name="pcg_spmv_pap_cpu")
+    for chunk in range(_CPU_CHUNKS):
+        if ws.converged[()] == 0:
+            nnz = matrix.bcoo_nnz[()]
+            size = (nnz + _CPU_CHUNKS - 1) // _CPU_CHUNKS
+            energy_sum = ws.value_type(0.0)
+            row_sum = qd.Vector.zero(ws.value_type, 3)
+            current_row = qd.i32(-1)
+            for entry in range(chunk * size, qd.min(chunk * size + size, nnz)):
+                row, col, block = matrix.read_bcoo(entry)
+                if row != current_row:
+                    if current_row >= 0:
+                        for d in qd.static(range(3)):
+                            qd.atomic_add(ws.ap[3 * current_row + d], row_sum[d])
+                    current_row = row
+                    row_sum = qd.Vector.zero(ws.value_type, 3)
+                p_col = qd.Vector([ws.p[3 * col + d] for d in qd.static(range(3))], dt=ws.value_type)
+                product = block @ p_col
+                row_sum += product
+                if row != col:
+                    p_row = qd.Vector([ws.p[3 * row + d] for d in qd.static(range(3))], dt=ws.value_type)
+                    mirrored = block.transpose() @ p_row
+                    for d in qd.static(range(3)):
+                        qd.atomic_add(ws.ap[3 * col + d], mirrored[d])
+                    energy_sum += 2.0 * p_row.dot(product)
+                else:
+                    energy_sum += p_col.dot(product)
+            if current_row >= 0:
+                for d in qd.static(range(3)):
+                    qd.atomic_add(ws.ap[3 * current_row + d], row_sum[d])
+            if energy_sum != 0.0:
+                qd.atomic_add(ws.p_dot_ap[()], energy_sum)
+
+
+@qd.func(requires_top_level=True)
+def _func_linear_pcg_spmv_gpu(
+    ws: qd.template(),  # PCGWorkspace
+    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+):
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
     for t in range(ws.n_spmv_blocks * PCG_BLOCK):
         lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
@@ -251,11 +357,59 @@ def func_linear_pcg_direction_update(
     """Second half of an iteration: rz_new = r . z, then the fused tail.
 
     The tail sets p = z + beta p with beta = rz_new / rz, zeroes Ap and p.Ap for the next iteration, and marks
-    convergence once |rz_new| falls to the threshold. Every block reads the iteration budget before its decrement;
-    the last block to take a ticket writes the decremented budget, clears the loop condition when the budget runs out
-    or the component converged, resets the ticket and flips the rz/rz_new parity.
+    convergence once |rz_new| falls to the threshold. An rz_new that is not finite fails the assertion in debug mode
+    and otherwise ends the iterations unconverged, the caller judging the non-finite solution.
+
+    The decision needs every block's update to be over. On a GPU, which cannot wait for the grid inside a launch,
+    every block reads the iteration budget before its decrement; the last block to take a ticket writes the
+    decremented budget, clears the loop condition when the budget runs out or the component converged, resets the
+    ticket and flips the rz/rz_new parity. On a CPU, the end of the parallel update orders a single thread's decision
+    after it (see PCGWorkspace).
     """
     _func_dot_into_slot(ws, ws.r, ws.z, 1)
+    if qd.static(gs.backend == gs.cpu):
+        _func_direction_update_cpu(ws)
+    else:
+        _func_direction_update_gpu(ws)
+
+
+@qd.func(requires_top_level=True)
+def _func_direction_update_cpu(
+    ws: qd.template(),  # PCGWorkspace
+):
+    """The fused tail of func_linear_pcg_direction_update without block operations: the direction update in
+    parallel, then the convergence decision once, which the end of the parallel loop orders after it."""
+    qd.loop_config(name="pcg_update_p_cpu")
+    for i in range(3 * ws.n_rows[()]):
+        parity = ws.parity[()]
+        rz = ws.rz_slots[parity]
+        beta = ws.rz_slots[1 - parity] / rz if rz != 0.0 else ws.value_type(0.0)
+        ws.ap[i] = 0.0
+        if ws.converged[()] == 0:
+            ws.p[i] = ws.z[i] + beta * ws.p[i]
+    for _ in range(1):
+        parity = ws.parity[()]
+        remaining = ws.iter_remaining[()] - 1
+        not_done = 0
+        ws.p_dot_ap[()] = 0.0
+        if ws.converged[()] == 0 and remaining > 0:
+            rz_new = ws.rz_slots[1 - parity]
+            if qd.static(qd_debug_asserts()):
+                assert qd_isfinite(rz_new), "PCG: r . z is not finite"
+            if qd.abs(rz_new) <= ws.tol_sq[()]:
+                ws.converged[()] = 1
+            elif qd_isfinite(rz_new):
+                not_done = 1
+        ws.iter_remaining[()] = remaining
+        if remaining <= 0 or not_done == 0:
+            ws.cond[()] = 0
+        ws.parity[()] = 1 - parity
+
+
+@qd.func(requires_top_level=True)
+def _func_direction_update_gpu(
+    ws: qd.template(),  # PCGWorkspace
+):
     qd.loop_config(name="pcg_update_p_converge", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
         parity = ws.parity[()]
@@ -275,9 +429,11 @@ def func_linear_pcg_direction_update(
         if t == 0:
             ws.p_dot_ap[()] = 0.0
             if not frozen and remaining > 0:
+                if qd.static(qd_debug_asserts()):
+                    assert qd_isfinite(rz_new), "PCG: r . z is not finite"
                 if qd.abs(rz_new) <= ws.tol_sq[()]:
                     ws.converged[()] = 1
-                else:
+                elif qd_isfinite(rz_new):
                     local_not_done = 1
         block_not_done = qd.simt.block.reduce_add(local_not_done, PCG_BLOCK, qd.i32)
         if qd.simt.block.thread_idx() == 0:

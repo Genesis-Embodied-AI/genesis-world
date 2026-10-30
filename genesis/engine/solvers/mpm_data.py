@@ -217,9 +217,13 @@ class MpmGrid:
     Particles are sorted by (environment, block, cell); every particle block activates its positive-octant neighbour
     blocks as node storage. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is
     `block_slot * BLOCK_CELLS + local index`.
+
+    `errno` is the error flags of the MPM solver per env, which the kernels building and reading the grid raise
+    instead of indexing out of bounds (see mpm_func.flag_env_error).
     """
 
-    def __init__(self, n_sort: int, max_blocks: int, max_particle_blocks: int) -> None:
+    def __init__(self, n_sort: int, max_blocks: int, max_particle_blocks: int, errno) -> None:
+        self.errno = errno
         self.allocate(n_sort, max_blocks, max_particle_blocks)
         # Number of particle keys sorted, n_envs * n_particles
         self.n_sort_keys = _scalar(qd.i32)
@@ -371,6 +375,9 @@ class MpmLinearSystem:
         n_bricks = max(max_nodes // BRICK_NODES, 1)
         self.brick = qd.ndarray(gs.qd_float, shape=(n_bricks * BRICK_SCALARS,))
         self.brick_mask = qd.ndarray(qd.i32, shape=(n_bricks,))
+        # The serial inversion of a CPU backend: per brick, the equilibration of its rows and the pivot column
+        n_scratch = n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1
+        self.brick_scratch = qd.ndarray(gs.qd_float, shape=(n_scratch,))
 
 
 # Links in contact with MPM per environment whose contact stiffness the Rigid preconditioner takes in; the stiffness on

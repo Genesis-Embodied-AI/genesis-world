@@ -38,7 +38,7 @@ from genesis.engine.couplers.mpm_rigid_newton import (
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.state_change import StateChange, mutates
-from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, func_sort_reduce_bcoo_graph, sort_reduce_bcoo
+from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, sort_reduce_bcoo
 from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
 from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
 from genesis.engine.numerics.linear_pcg import (
@@ -97,8 +97,8 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
-# Number of substeps between two reads of whether a Newton solve stopped before converging, each read waiting for the
-# device
+# Number of substeps between two reads of whether a Newton solve stopped before converging since the previous read,
+# each read waiting for the device
 NEWTON_FAILURE_CHECK_PERIOD = 32
 
 # Rows of the dense matrix of a direct adjoint solve at most, 3.2 GB in fp64; the option documents the value
@@ -159,6 +159,7 @@ class MpmNewtonParticipant:
         NewtonSolver.kernel_newton_loop)."""
         func_reset_newton_measures(control)
         mpm_func.func_report_extent(self.grid, self.linear)
+        mpm_func.func_check_loop_capacity(self.grid, self.linear, self.params)
         mpm_func.func_assemble(
             self.particles,
             self.particles_info,
@@ -170,7 +171,7 @@ class MpmNewtonParticipant:
             f,
             self.params.substep_dt[()],
         )
-        func_sort_reduce_bcoo_graph(self.linear.matrix)
+        func_sort_reduce_bcoo(self.linear.matrix)
 
     @qd.func(requires_top_level=True)
     def func_pcg_prepare(self):
@@ -304,6 +305,17 @@ class MPMSolver(ParticleSolver):
                 array_class.ErrorCode.INVALID_PARTICLE_NAN: (
                     "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
                 ),
+                array_class.ErrorCode.INVALID_MPM_SOLVE_NAN: (
+                    "The implicit MPM Newton solve produced non-finite values. Try reducing the time step size or "
+                    "adjusting simulation parameters."
+                ),
+                array_class.ErrorCode.OVERFLOW_MPM_GRID_RANGE: (
+                    "MPM particles have non-finite positions or left the range the sparse grid can index."
+                ),
+                array_class.ErrorCode.INVALID_MPM_GRID: (
+                    "Internal error of the implicit MPM solver: its sparse grid or matrix storage is inconsistent. "
+                    "Rerun with `gs.init(debug=True)` to stop at the faulty kernel."
+                ),
             },
         )
 
@@ -358,7 +370,7 @@ class MPMSolver(ParticleSolver):
             wall_upper=self.boundary.upper,
         )
         self._mpm_materials = get_mpm_material_table(table.reshape(-1), family, plastic)
-        self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks)
+        self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks, self.errno)
         self._mpm_newton = MpmNewton(n_sort, max_blocks * BLOCK_CELLS)
         self._rigid_query = RigidGeomQuery(rigid, self._mpm_newton, self._B, self._has_rigid)
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
@@ -475,6 +487,14 @@ class MPMSolver(ParticleSolver):
         """Raise for the configurations the implicit solver does not handle yet."""
         if self._enable_CPIC:
             gs.raise_exception("CPIC is not supported by the implicit MPM solver.")
+        if self._B > mpm_func.MAX_KEY_ENVS:
+            gs.raise_exception(f"The implicit MPM solver supports {mpm_func.MAX_KEY_ENVS} environments at most.")
+        cells = np.concatenate([self._lower_bound, self._upper_bound]) * self._grid_density
+        if cells.min() < mpm_func.CELL_MIN or cells.max() >= mpm_func.CELL_END:
+            gs.raise_exception(
+                f"The MPM domain spans the cells [{cells.min():.0f}, {cells.max():.0f}], past the range "
+                f"[{mpm_func.CELL_MIN}, {mpm_func.CELL_END}) the sparse grid of the implicit solver indexes."
+            )
         for material in self._materials:
             if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
                 gs.raise_exception(
@@ -627,6 +647,17 @@ class MPMSolver(ParticleSolver):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
                 self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
 
+    @no_grad
+    @qd.kernel
+    def _kernel_flag_newton_non_finite(self, control: qd.template()):
+        """Flag INVALID_MPM_SOLVE_NAN for every env, which share the solve, once a Newton solve since the last call
+        stopped on a non-finite measure (see NewtonControl), and clear the latch."""
+        for _ in range(1):
+            if control.failed_non_finite[()] != 0:
+                for i_b in range(self._B):
+                    self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_MPM_SOLVE_NAN
+                control.failed_non_finite[()] = 0
+
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
@@ -676,8 +707,11 @@ class MPMSolver(ParticleSolver):
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim._cur_substep_global + 1) % self._substeps == 0:
             self._kernel_flag_non_finite_pos(f + 1)
+            self._kernel_flag_newton_non_finite(self._mpm_control)
         if self._sim._cur_substep_global % NEWTON_FAILURE_CHECK_PERIOD == 0:
-            if int(self._mpm_control.failed.to_numpy()):
+            control = self._mpm_control
+            if int(control.failed_iterations.to_numpy()):
+                control.failed_iterations.from_numpy(np.array(0, dtype=np.int32))
                 gs.logger.warning("The implicit MPM Newton solve stopped before converging.")
 
     def _assemble(self, f, is_exact=False):

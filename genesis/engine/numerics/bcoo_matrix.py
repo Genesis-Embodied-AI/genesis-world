@@ -6,7 +6,6 @@ from .dynamic_radix_sort import (
     DynamicRadixSort,
     dynamic_radix_sort,
     func_dynamic_radix_sort,
-    func_dynamic_radix_sort_graph,
 )
 from .fsr_reduce import func_fsr_reduce, head_segmented_reduce_add
 
@@ -169,6 +168,30 @@ class BCOOMatrix:
                             self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] = block[j, i]
 
     @qd.func
+    def add_triplet(
+        self,
+        slot,
+        row,
+        col,
+        block: qd.template(),  # qd.Matrix
+    ):
+        """Add one block to the triplet that `write_triplet` wrote at slot for the same row and column."""
+        if slot < self.max_triplets[()]:
+            if qd.static(not self.symmetric):
+                for i in qd.static(range(self.block_rows)):
+                    for j in qd.static(range(self.block_cols)):
+                        self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] += block[i, j]
+            else:
+                if row <= col:
+                    for i in qd.static(range(self.block_rows)):
+                        for j in qd.static(range(self.block_cols)):
+                            self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] += block[i, j]
+                else:
+                    for i in qd.static(range(self.block_rows)):
+                        for j in qd.static(range(self.block_cols)):
+                            self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] += block[j, i]
+
+    @qd.func
     def read_triplet(self, slot):
         """Return one stored input triplet as (row, column, block)."""
         block = qd.Matrix.zero(self.value_type, self.block_rows, self.block_cols)
@@ -244,41 +267,10 @@ def func_extract_unique_bcoo_entries(
 def func_sort_reduce_bcoo(
     matrix: qd.template(),  # BCOOMatrix
 ):
-    """Sort the live triplets by (row, column) and sum the duplicates into the reduced BCOO entries."""
+    """Sort the live triplets by (row, column) and sum the duplicates into the reduced BCOO entries, inside a graph
+    kernel (see func_dynamic_radix_sort)."""
     func_compose_bcoo_sort_keys(matrix)
     func_dynamic_radix_sort(
-        matrix.triplet_sorter,
-        matrix.triplet_keys,
-        matrix.sort_keys_out,
-        matrix.triplet_perm,
-        matrix.sort_perm_out,
-        matrix.padded_triplets[()],
-    )
-    func_mark_bcoo_segment_flags(matrix)
-    func_dynamic_exclusive_sum(matrix.segment_scanner, matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets[()])
-    func_zero_bcoo_values(matrix)
-    func_fsr_reduce(
-        matrix.seg_ids,
-        matrix.triplet_perm,
-        matrix.triplet_keys,
-        matrix.triplet_val,
-        matrix.bcoo_val,
-        matrix.n_triplets,
-        matrix.padded_triplets,
-        matrix.triplet_keys.shape[0],
-        matrix.value_type,
-        matrix.block_scalar_count,
-    )
-    func_extract_unique_bcoo_entries(matrix)
-
-
-@qd.func(requires_top_level=True)
-def func_sort_reduce_bcoo_graph(
-    matrix: qd.template(),  # BCOOMatrix
-):
-    """func_sort_reduce_bcoo for a graph kernel, with the radix passes in a device loop."""
-    func_compose_bcoo_sort_keys(matrix)
-    func_dynamic_radix_sort_graph(
         matrix.triplet_sorter,
         matrix.triplet_keys,
         matrix.sort_keys_out,

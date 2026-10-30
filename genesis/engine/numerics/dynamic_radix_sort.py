@@ -1,9 +1,13 @@
 import numpy as np
 import quadrants as qd
 
+import genesis as gs
+
 _RADIX_DIGITS = 256
 _BLOCK_THREADS = 256
 _ITEMS_PER_THREAD = 24
+# Chunks of a radix pass on a CPU backend, each one thread's serial histogram and scatter of a contiguous range
+CPU_CHUNKS = 256
 
 
 @qd.func
@@ -70,6 +74,12 @@ class DynamicRadixSort:
     """Stable OneSweep radix sort of keys and their permutation, whose live count is read on the device.
 
     The count is a device value, so one compiled launch serves any count up to the capacity the sorter was built for.
+
+    On a CPU backend, each pass is a chunked counting sort instead: the digit histogram of each of CPU_CHUNKS
+    contiguous chunks in parallel, the digit-major exclusive sum of the histograms, then the stable scatter of each
+    chunk in parallel from its offsets. OneSweep ranks the keys of a tile by warp ballots and block-wide shared-memory
+    histograms and chains the tiles by a decoupled look-back, which the CPU backend of Quadrants has no counterpart
+    for; a CPU thread instead ranks a whole chunk serially, which keeps the scatter stable without any of them.
     """
 
     def __init__(self, key_dtype, capacity: int) -> None:
@@ -94,6 +104,9 @@ class DynamicRadixSort:
         # Device-side pass loop of kernel_radix_sort: the first of the two passes of an iteration, and its condition
         self.pass_idx = qd.ndarray(qd.i32, shape=())
         self.pass_cond = qd.ndarray(qd.i32, shape=())
+
+        # The per-chunk digit offsets of the CPU passes
+        self.chunk_offsets = qd.ndarray(qd.i32, shape=(CPU_CHUNKS if gs.backend == gs.cpu else 1, _RADIX_DIGITS))
 
         self.bins.from_numpy(np.zeros((n_passes, _RADIX_DIGITS), dtype=np.int32))
         lookback_shape = (n_blocks, _RADIX_DIGITS)
@@ -316,8 +329,54 @@ class DynamicRadixSort:
             self.pass_idx[()] = self.pass_idx[()] + 2
             self.pass_cond[()] = qd.i32(self.pass_idx[()] < self.n_passes)
 
+    @qd.func
+    def digit(self, key, radix_pass: qd.template()):
+        shift = qd.static(radix_pass * 8)
+        value = qd.i32(0)
+        if qd.static(self.key_dtype == qd.u32):
+            value = qd.i32((key >> qd.u32(shift)) & qd.u32(255))
+        else:
+            value = qd.i32((key >> qd.u64(shift)) & qd.u64(255))
+        return value
+
     @qd.func(requires_top_level=True)
-    def sort(
+    def cpu_pass(
+        self,
+        keys_in: qd.template(),  # qd.Ndarray
+        keys_out: qd.template(),  # qd.Ndarray
+        perm_in: qd.template(),  # qd.Ndarray
+        perm_out: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
+        radix_pass: qd.template(),  # int
+    ):
+        """One stable counting-sort pass of the keys on their digit radix_pass, over CPU_CHUNKS chunks."""
+        qd.loop_config(name="drs_cpu_histogram")
+        for chunk in range(CPU_CHUNKS):
+            for digit in range(_RADIX_DIGITS):
+                self.chunk_offsets[chunk, digit] = 0
+            size = (n + CPU_CHUNKS - 1) // CPU_CHUNKS
+            for i in range(chunk * size, qd.min(chunk * size + size, n)):
+                self.chunk_offsets[chunk, self.digit(keys_in[i], radix_pass)] += 1
+        for _ in range(1):
+            running = qd.i32(0)
+            for digit in range(_RADIX_DIGITS):
+                for chunk in range(CPU_CHUNKS):
+                    count = self.chunk_offsets[chunk, digit]
+                    self.chunk_offsets[chunk, digit] = running
+                    running += count
+        qd.loop_config(name="drs_cpu_scatter")
+        for chunk in range(CPU_CHUNKS):
+            size = (n + CPU_CHUNKS - 1) // CPU_CHUNKS
+            for i in range(chunk * size, qd.min(chunk * size + size, n)):
+                key = keys_in[i]
+                digit = self.digit(key, radix_pass)
+                output_index = self.chunk_offsets[chunk, digit]
+                self.chunk_offsets[chunk, digit] = output_index + 1
+                keys_out[output_index] = key
+                perm_out[output_index] = perm_in[i]
+
+    @qd.func(requires_top_level=True)
+    def cpu_sort(
         self,
         keys_a: qd.template(),  # qd.Ndarray
         keys_b: qd.template(),  # qd.Ndarray
@@ -325,15 +384,12 @@ class DynamicRadixSort:
         perm_b: qd.template(),  # qd.Ndarray
         n: qd.template(),  # int
     ):
-        self.clear_bins()
-        self.histogram(keys_a, n)
-        self.scan_bins()
+        """Every pass of func_dynamic_radix_sort on a CPU backend, unrolled, alternating between the halves."""
         for radix_pass in qd.static(range(self.n_passes)):
-            self.clear_pass(radix_pass, n)
             if qd.static(radix_pass % 2 == 0):
-                self.onesweep_pass(keys_a, keys_b, perm_a, perm_b, n, radix_pass)
+                self.cpu_pass(keys_a, keys_b, perm_a, perm_b, n, radix_pass)
             else:
-                self.onesweep_pass(keys_b, keys_a, perm_b, perm_a, n, radix_pass)
+                self.cpu_pass(keys_b, keys_a, perm_b, perm_a, n, radix_pass)
 
 
 @qd.func(requires_top_level=True)
@@ -345,35 +401,30 @@ def func_dynamic_radix_sort(
     perm_b: qd.template(),  # qd.Ndarray
     n: qd.template(),  # int
 ):
-    """Sort the first n keys of keys_a with their permutation perm_a, stably, ending in keys_a / perm_a again.
+    """Sort the first n keys of keys_a with their permutation perm_a, stably, ending in keys_a / perm_a again, inside a
+    graph kernel.
 
     keys_b and perm_b are the scratch halves of the double buffer. Every pass count is even, so the result always
     lands back in the 'a' halves.
+
+    On a GPU, the OneSweep passes run in a device loop, two per iteration (a to b, then b to a), the pass index a
+    device value: the graph holds the code of two passes whatever the key width, where unrolling the 8 passes of a u64
+    key would inline 8 copies of a pass and its shared-memory tiles, and multiply the compile time. A CPU pass is three
+    short loops (see cpu_pass), cheap to unroll, whose digit shift is a compile-time constant.
     """
-    sorter.sort(keys_a, keys_b, perm_a, perm_b, n)
-
-
-@qd.func(requires_top_level=True)
-def func_dynamic_radix_sort_graph(
-    sorter: qd.template(),  # DynamicRadixSort
-    keys_a: qd.template(),  # qd.Ndarray
-    keys_b: qd.template(),  # qd.Ndarray
-    perm_a: qd.template(),  # qd.Ndarray
-    perm_b: qd.template(),  # qd.Ndarray
-    n: qd.template(),  # int
-):
-    """func_dynamic_radix_sort for a graph kernel: the passes run in a device loop, two per iteration (a to b, then b
-    to a), so that the graph holds two passes whatever the key width."""
-    sorter.clear_bins()
-    sorter.histogram(keys_a, n)
-    sorter.scan_bins()
-    sorter.start_passes()
-    while qd.graph.do_while(sorter.pass_cond):
-        sorter.clear_pass(sorter.pass_idx[()], n)
-        sorter.onesweep_pass(keys_a, keys_b, perm_a, perm_b, n, sorter.pass_idx[()])
-        sorter.clear_pass(sorter.pass_idx[()] + 1, n)
-        sorter.onesweep_pass(keys_b, keys_a, perm_b, perm_a, n, sorter.pass_idx[()] + 1)
-        sorter.advance_passes()
+    if qd.static(gs.backend == gs.cpu):
+        sorter.cpu_sort(keys_a, keys_b, perm_a, perm_b, n)
+    else:
+        sorter.clear_bins()
+        sorter.histogram(keys_a, n)
+        sorter.scan_bins()
+        sorter.start_passes()
+        while qd.graph.do_while(sorter.pass_cond):
+            sorter.clear_pass(sorter.pass_idx[()], n)
+            sorter.onesweep_pass(keys_a, keys_b, perm_a, perm_b, n, sorter.pass_idx[()])
+            sorter.clear_pass(sorter.pass_idx[()] + 1, n)
+            sorter.onesweep_pass(keys_b, keys_a, perm_b, perm_a, n, sorter.pass_idx[()] + 1)
+            sorter.advance_passes()
 
 
 @qd.kernel(graph=True)
@@ -385,8 +436,8 @@ def kernel_radix_sort(
     perm_b: qd.types.ndarray(),
     n: qd.types.ndarray(),  # i32 scalar
 ):
-    """func_dynamic_radix_sort_graph as a graph of its own, with the count a device scalar."""
-    func_dynamic_radix_sort_graph(sorter, keys_a, keys_b, perm_a, perm_b, n[()])
+    """func_dynamic_radix_sort as a graph of its own, with the count a device scalar."""
+    func_dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n[()])
 
 
 def dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n) -> None:

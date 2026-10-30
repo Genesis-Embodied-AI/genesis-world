@@ -1,6 +1,8 @@
 import numpy as np
 import quadrants as qd
 
+from genesis.utils.misc import qd_debug_asserts
+
 EMPTY_KEY = 0xFFFFFFFFFFFFFFFF
 
 
@@ -32,24 +34,34 @@ class OpenAddressingHash:
 
     @qd.func
     def insert(self, key, value):
-        """Claim a slot for a key that this phase inserts once, then publish its value."""
+        """Claim a slot for a key that this phase inserts once, then publish its value. Return whether the key found
+        a slot: a full table, which the capacity rule excludes, fails the assertion in debug mode and inserts nothing
+        otherwise, the caller raising the error."""
+        capacity = self.keys.shape[0]
         i = self.slot_of(key)
         done = False
-        while not done:
+        probes = 0
+        while not done and probes < capacity:
             previous = qd.atomic_cas(self.keys[i], qd.u64(EMPTY_KEY), key)
             if previous == qd.u64(EMPTY_KEY) or previous == key:
                 self.vals[i] = value
                 done = True
             else:
-                i = (i + 1) & (self.keys.shape[0] - 1)
+                i = (i + 1) & (capacity - 1)
+                probes += 1
+        if qd.static(qd_debug_asserts()):
+            assert done, "OpenAddressingHash.insert: the table of %d slots is full" % capacity
+        return done
 
     @qd.func
     def lookup(self, key):
-        """Value of a key, or -1 when the key is absent."""
+        """Value of a key, or -1 when the key is absent, the probes stopping at an empty slot or after a full turn."""
+        capacity = self.keys.shape[0]
         i = self.slot_of(key)
         result = qd.i32(-1)
         searching = True
-        while searching:
+        probes = 0
+        while searching and probes < capacity:
             stored = self.keys[i]
             if stored == key:
                 result = self.vals[i]
@@ -57,7 +69,8 @@ class OpenAddressingHash:
             elif stored == qd.u64(EMPTY_KEY):
                 searching = False
             else:
-                i = (i + 1) & (self.keys.shape[0] - 1)
+                i = (i + 1) & (capacity - 1)
+                probes += 1
         return result
 
 

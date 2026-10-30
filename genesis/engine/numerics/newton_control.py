@@ -1,6 +1,12 @@
 import numpy as np
 import quadrants as qd
 
+from genesis.utils.misc import qd_debug_asserts, qd_isfinite
+
+# Values of NewtonControl.failed
+NEWTON_FAILED_ITERATIONS = 1
+NEWTON_FAILED_NON_FINITE = 2
+
 
 @qd.data_oriented
 class NewtonControl:
@@ -8,6 +14,10 @@ class NewtonControl:
 
     The participants of the solve write the measures (energy at the start point and at the trial point and the largest
     displacement update); the phases below turn them into the loop conditions.
+
+    `failed` says how the last solve stopped short: NEWTON_FAILED_ITERATIONS at the iteration cap, or
+    NEWTON_FAILED_NON_FINITE at once on a measure that is not finite, which no further iteration can recover.
+    `failed_iterations` and `failed_non_finite` latch them over the solves until their reader clears them.
     """
 
     def __init__(self, value_type) -> None:
@@ -25,6 +35,8 @@ class NewtonControl:
         # Always zero: the yield flag of the graph checkpoints that only gate a resume, never pause
         self.never_yield = scalar(qd.i32, 0, np.int32)
         self.failed = scalar(qd.i32, 0, np.int32)
+        self.failed_iterations = scalar(qd.i32, 0, np.int32)
+        self.failed_non_finite = scalar(qd.i32, 0, np.int32)
         self.newton_iter = scalar(qd.i32, 0, np.int32)
         self.ls_iter = scalar(qd.i32, 0, np.int32)
         self.max_newton_iter = scalar(qd.i32, 1024, np.int32)
@@ -61,9 +73,17 @@ def func_check_convergence(
     control: qd.template(),  # NewtonControl
 ):
     """Judge convergence on the Newton direction itself, before the line search: the largest displacement update
-    under disp_tol."""
+    under disp_tol. A direction or a start energy that is not finite fails the solve at once: the assertion in debug
+    mode, NEWTON_FAILED_NON_FINITE otherwise, which skips the line search and ends the loop."""
     for _ in range(1):
         control.converged[()] = qd.i32(control.max_disp[()] < control.disp_tol[()])
+        is_finite = qd_isfinite(control.max_disp[()]) and qd_isfinite(control.energy_start[()])
+        if qd.static(qd_debug_asserts()):
+            assert is_finite, (
+                "Newton solve: the direction or the energy is not finite at iteration %d" % (control.newton_iter[()])
+            )
+        if not is_finite:
+            control.failed[()] = NEWTON_FAILED_NON_FINITE
 
 
 @qd.func(requires_top_level=True)
@@ -90,6 +110,7 @@ def func_accept_or_backtrack(
         control.ls_iter[()] += 1
         is_done = (
             control.converged[()] != 0
+            or control.failed[()] != 0
             or control.energy_trial[()] <= control.energy_start[()]
             or control.ls_iter[()] >= control.max_ls_iter[()]
         )
@@ -104,11 +125,15 @@ def func_accept_or_backtrack(
 def func_update_convergence(
     control: qd.template(),  # NewtonControl
 ):
-    """Stop after a converged iteration; reaching the iteration cap raises the failure flag."""
+    """Stop after a converged or a non-finite iteration; reaching the iteration cap raises the failure flag."""
     for _ in range(1):
         control.newton_iter[()] += 1
-        if control.converged[()] != 0:
+        if control.failed[()] == NEWTON_FAILED_NON_FINITE:
+            control.newton_cond[()] = 0
+            control.failed_non_finite[()] = 1
+        elif control.converged[()] != 0:
             control.newton_cond[()] = 0
         elif control.newton_iter[()] >= control.max_newton_iter[()]:
             control.newton_cond[()] = 0
-            control.failed[()] = 1
+            control.failed[()] = NEWTON_FAILED_ITERATIONS
+            control.failed_iterations[()] = 1

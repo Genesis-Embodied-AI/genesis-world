@@ -1,13 +1,23 @@
 import numpy as np
 import quadrants as qd
 
+import genesis as gs
+
 _BLOCK_THREADS = 128
 _ITEMS_PER_THREAD = 24
+# Chunks of the scan on a CPU backend, each one thread's serial scan of a contiguous range
+CPU_CHUNKS = 256
 
 
 @qd.data_oriented
 class DynamicExclusiveSum:
-    """Decoupled-lookback exclusive sum over i32 data, whose live count is read on the device."""
+    """Decoupled-lookback exclusive sum over i32 data, whose live count is read on the device.
+
+    On a CPU backend, a three-phase scan over CPU_CHUNKS contiguous chunks instead: the chunk sums in parallel, their
+    exclusive sum, then the scan of each chunk in parallel from its offset. The decoupled look-back scans a tile by
+    warp and block operations and lets each tile wait on the status its predecessors publish, which the CPU backend of
+    Quadrants has no warp operations for, and which a CPU thread that waits on another one may never see progress for;
+    the three phases need neither, the ends of their parallel loops ordering them."""
 
     def __init__(self, capacity: int) -> None:
         if capacity < 1:
@@ -18,11 +28,11 @@ class DynamicExclusiveSum:
         )
 
         self.status = qd.ndarray(qd.i32, shape=(n_blocks,))
-        self.partial = qd.ndarray(qd.i32, shape=(n_blocks,))
+        self.partial = qd.ndarray(qd.i32, shape=(max(n_blocks, CPU_CHUNKS),))
         self.complete = qd.ndarray(qd.i32, shape=(n_blocks,))
         self.tile_counter = qd.ndarray(qd.i32, shape=())
         self.status.from_numpy(np.zeros(n_blocks, dtype=np.int32))
-        self.partial.from_numpy(np.zeros(n_blocks, dtype=np.int32))
+        self.partial.from_numpy(np.zeros(self.partial.shape[0], dtype=np.int32))
         self.complete.from_numpy(np.zeros(n_blocks, dtype=np.int32))
         self.tile_counter.from_numpy(np.array(0, dtype=np.int32))
 
@@ -40,6 +50,47 @@ class DynamicExclusiveSum:
 
     @qd.func(requires_top_level=True)
     def scan(
+        self,
+        values: qd.template(),  # qd.Ndarray
+        output: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
+    ):
+        if qd.static(gs.backend == gs.cpu):
+            self.scan_cpu(values, output, n)
+        else:
+            self.scan_gpu(values, output, n)
+
+    @qd.func(requires_top_level=True)
+    def scan_cpu(
+        self,
+        values: qd.template(),  # qd.Ndarray
+        output: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
+    ):
+        qd.loop_config(name="des_chunk_sums")
+        for chunk in range(CPU_CHUNKS):
+            size = (n + CPU_CHUNKS - 1) // CPU_CHUNKS
+            total = qd.i32(0)
+            for i in range(chunk * size, qd.min(chunk * size + size, n)):
+                total += values[i]
+            self.partial[chunk] = total
+        for _ in range(1):
+            running = qd.i32(0)
+            for chunk in range(CPU_CHUNKS):
+                total = self.partial[chunk]
+                self.partial[chunk] = running
+                running += total
+        qd.loop_config(name="des_chunk_scans")
+        for chunk in range(CPU_CHUNKS):
+            size = (n + CPU_CHUNKS - 1) // CPU_CHUNKS
+            running = self.partial[chunk]
+            for i in range(chunk * size, qd.min(chunk * size + size, n)):
+                value = values[i]
+                output[i] = running
+                running += value
+
+    @qd.func(requires_top_level=True)
+    def scan_gpu(
         self,
         values: qd.template(),  # qd.Ndarray
         output: qd.template(),  # qd.Ndarray

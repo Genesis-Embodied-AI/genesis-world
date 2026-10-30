@@ -1,5 +1,7 @@
 import quadrants as qd
 
+import genesis as gs
+
 
 @qd.func
 def _segment_metadata(
@@ -57,20 +59,44 @@ def func_fsr_reduce(
     """Sum the flattened blocks of each run of equal sorted keys into its segment of output.
 
     A warp reduces the runs inside its 32 consecutive sorted entries with a head-segmented shuffle tree, and only the
-    head of each run writes, so a run spanning several warps takes one atomic add per warp it spans.
+    head of each run writes, so a run spanning several warps takes one atomic add per warp it spans. A CPU has no
+    lanes to shuffle between, and its threads are few enough for each run to be one thread's work: the threads split
+    the entries, and the first entry of each run sums the whole block of every entry of the run in one ordered walk,
+    the only writer of its segment.
     """
-    qd.loop_config(name="fsr_reduce", block_dim=256)
-    for gid in range(qd.min(((padded_n[()] + 31) // 32) * 32, capacity)):
-        lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
-        if gid - lane < padded_n[()]:
-            metadata = _segment_metadata(gid, n[()], seg_ids, sorted_keys, qd.u64(0xFFFFFFFFFFFFFFFF))
-            source = qd.i32(0)
-            if metadata[0] != 0:
-                source = qd.i32(sorted_perm[gid])
-            for component in qd.static(range(block_scalar_count)):
-                value = value_type(0.0)
+    if qd.static(gs.backend == gs.cpu):
+        qd.loop_config(name="fsr_reduce_cpu")
+        for gid in range(n[()]):
+            if sorted_keys[gid] != qd.u64(0xFFFFFFFFFFFFFFFF):
+                segment = qd.i32(seg_ids[gid])
+                if gid == 0 or qd.i32(seg_ids[gid - 1]) != segment:
+                    total = qd.Vector.zero(value_type, block_scalar_count)
+                    entry = gid
+                    is_in_run = True
+                    while is_in_run:
+                        source = qd.i32(sorted_perm[entry]) * block_scalar_count
+                        for component in qd.static(range(block_scalar_count)):
+                            total[component] += values[source + component]
+                        entry += 1
+                        # Reading seg_ids only below n: a kernel 'and' does not short-circuit
+                        is_in_run = False
+                        if entry < n[()]:
+                            is_in_run = qd.i32(seg_ids[entry]) == segment
+                    for component in qd.static(range(block_scalar_count)):
+                        output[segment * block_scalar_count + component] += total[component]
+    else:
+        qd.loop_config(name="fsr_reduce", block_dim=256)
+        for gid in range(qd.min(((padded_n[()] + 31) // 32) * 32, capacity)):
+            lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
+            if gid - lane < padded_n[()]:
+                metadata = _segment_metadata(gid, n[()], seg_ids, sorted_keys, qd.u64(0xFFFFFFFFFFFFFFFF))
+                source = qd.i32(0)
                 if metadata[0] != 0:
-                    value = values[source * block_scalar_count + component]
-                reduced = head_segmented_reduce_add(value, metadata[3])
-                if metadata[0] != 0 and metadata[2] != 0:
-                    qd.atomic_add(output[metadata[1] * block_scalar_count + component], reduced)
+                    source = qd.i32(sorted_perm[gid])
+                for component in qd.static(range(block_scalar_count)):
+                    value = value_type(0.0)
+                    if metadata[0] != 0:
+                        value = values[source * block_scalar_count + component]
+                    reduced = head_segmented_reduce_add(value, metadata[3])
+                    if metadata[0] != 0 and metadata[2] != 0:
+                        qd.atomic_add(output[metadata[1] * block_scalar_count + component], reduced)
