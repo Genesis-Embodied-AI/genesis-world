@@ -687,13 +687,17 @@ class MPMSolver(ParticleSolver):
     @mutates()
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
+            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            self._kernel_set_state(
+                f, envs_idx, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active
+            )
             self.clear_errno(envs_idx)
 
     @qd.kernel
     def _kernel_set_state(
         self,
         f: qd.i32,
+        envs_idx: qd.types.ndarray(),
         pos: qd.types.ndarray(),  # shape [B, n_particles, 3]
         vel: qd.types.ndarray(),  # shape [B, n_particles, 3]
         C: qd.types.ndarray(),  # shape [B, n_particles, 3, 3]
@@ -702,7 +706,8 @@ class MPMSolver(ParticleSolver):
         actu: qd.types.ndarray(),  # shape [B, n_particles]
         active: qd.types.ndarray(),  # shape [B, n_particles]
     ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b_ in qd.ndrange(self._n_particles, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             # Write pos, vel
             for j in qd.static(range(3)):
                 self.particles[f, i_p, i_b].pos[j] = pos[i_b, i_p, j]
