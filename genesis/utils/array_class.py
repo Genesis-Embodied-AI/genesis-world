@@ -6,7 +6,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field, is_tensor_addressable, requires
+from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field, requires
 
 
 def _timer_dtype():
@@ -142,9 +142,9 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
 # Sizes of the constraint solve
 CONSTRAINTS = Size("constraints")
 CONTACTS = Size("contacts")
-# Rows of the elliptic cones, and the rows of each (see n_constraints_cone)
-CONE_ROWS = Size("cone_rows")
+# The rows of each elliptic cone, and of all of them
 ROWS_PER_CONTACT = Size("rows_per_contact")
+CONE_ROWS = CONTACTS * ROWS_PER_CONTACT
 # Fused updates of the per-island factor, one slot each (see nt_vec)
 NT_VEC_SLOTS = Size("nt_vec_slots")
 # Dofs a Jacobian row reaches at most (see jac_dofs_idx)
@@ -255,22 +255,23 @@ class IslandState(Data, kind=DataKind.SCRATCH):
 
 # Sizes of the inverse-kinematics scratch, sized by the largest entity of the solver and the target cap
 IK_QS = Size("ik_qs")
-IK_DOFS = Size("ik_dofs")
+# The dofs of the widest entity of the solver
+ENTITY_DOFS = Size("entity_dofs")
 IK_LINKS = Size("ik_links")
 IK_JOINTS = Size("ik_joints")
 IK_TARGETS = Size("ik_targets")
 # The pose residuals of the targets stacked, six per target
-IK_ERRORS = Size("ik_errors")
+IK_ERRORS = 6 * IK_TARGETS
 
 
 class IKState(Data, kind=DataKind.SCRATCH):
     """Damped-least-squares inverse-kinematics scratch, one column per environment or per restart of the planner."""
 
     # Spatial Jacobian of one target, rebuilt per target link and copied into the stacked block
-    jacobian: qd.Tensor = field(float, shape=(6, IK_DOFS, ENVS))
+    jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS))
     # Jacobian of all targets stacked, and its transpose
-    jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, IK_DOFS, ENVS))
-    jacobian_stacked_t: qd.Tensor = field(float, shape=(IK_DOFS, IK_ERRORS, ENVS))
+    jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
+    jacobian_stacked_t: qd.Tensor = field(float, shape=(ENTITY_DOFS, IK_ERRORS, ENVS))
     # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
     mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
@@ -282,7 +283,7 @@ class IKState(Data, kind=DataKind.SCRATCH):
     err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     # Joint-space step, and the best configuration across restarts
-    delta_qpos: qd.Tensor = field(float, shape=(IK_DOFS, ENVS))
+    delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
     qpos_best: qd.Tensor = field(float, shape=(IK_QS, ENVS))
 
 
@@ -309,7 +310,7 @@ class IKTargets(Data, kind=DataKind.SCRATCH):
 
     # Global indices of the target links, of the dofs to move and of the columns to solve
     links_idx: qd.Tensor = field(int, shape=(IK_TARGETS,))
-    dofs_idx: qd.Tensor = field(int, shape=(IK_DOFS,))
+    dofs_idx: qd.Tensor = field(int, shape=(ENTITY_DOFS,))
     envs_idx: qd.Tensor = field(int, shape=(ENVS,))
     # Target pose per (link, column) in the world frame, and the link-local point it drives
     pos: qd.Tensor = field((float, 3), shape=(IK_TARGETS, ENVS))
@@ -335,8 +336,7 @@ class IKScratch(Data, kind=DataKind.SCRATCH):
     targets: IKTargets
 
 
-# The dofs of the widest entity of the solver, and the scratch of its kinematics queries
-ENTITY_DOFS = Size("entity_dofs")
+# The scratch of the kinematics queries, over the dofs of the widest entity of the solver (see ENTITY_DOFS)
 KINEMATICS = Label("kinematics")
 
 
@@ -380,8 +380,8 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     cone_prev_jaref: qd.Tensor = field(float, shape=(CONE_ROWS, ENVS), labels=(SERIAL_ROWS, CONE_INCREMENTAL))
     # Per contact under 'signorini': the latched normal force scaling its friction discs (negative until seeded, see
     # func_relatch_cone in solver.py), and the gap between the iterate's normal force and the latch at the last update.
-    cone_latch: qd.Tensor = field(float, shape=(CONE_ROWS // ROWS_PER_CONTACT, ENVS), labels=SIGNORINI)
-    cone_latch_gap: qd.Tensor = field(float, shape=(CONE_ROWS // ROWS_PER_CONTACT, ENVS), labels=SIGNORINI)
+    cone_latch: qd.Tensor = field(float, shape=(CONTACTS, ENVS), labels=SIGNORINI)
+    cone_latch_gap: qd.Tensor = field(float, shape=(CONTACTS, ENVS), labels=SIGNORINI)
     search: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     qfrc_constraint: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
     qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
@@ -672,6 +672,14 @@ class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
     CCD_ITERATIONS: qd.Tensor = field(float)
 
 
+# The states MPR runs on: one per env, and those of the passes of the split narrowphase and of the terrain pass, one
+# per thread, which the collider opts in when it runs them
+class MPRScratch(Data, kind=DataKind.SCRATCH):
+    main: MPRState
+    contact0: MPRState = field(opt_in=True)
+    multicontact: MPRState = field(opt_in=True)
+
+
 # =========================================== GJK ===========================================
 
 
@@ -679,7 +687,7 @@ class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
 # faces and horizon edges of the polytope, the contacts of a pair and the vertices of a contact polygon
 POLYTOPE_VERTS = Size("polytope_verts")
 POLYTOPE_FACES = Size("polytope_faces")
-POLYTOPE_HORIZONS = Size("polytope_horizons")
+POLYTOPE_HORIZONS = POLYTOPE_VERTS + 1
 PAIR_CONTACTS = Size("pair_contacts")
 POLYGON_VERTS = Size("polygon_verts")
 # The arrays of the EPA, of the multi-contact detection and of their results, which the overlap test never reads
@@ -843,6 +851,14 @@ class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
     diff_contact_min_penetration: qd.Tensor = field(float)
 
 
+# The states GJK runs on: one per env for the single-kernel narrowphase, and those of the passes of the split
+# narrowphase, one per thread, which the collider opts in as it runs them
+class GJKScratch(Data, kind=DataKind.SCRATCH):
+    main: GJKState = field(opt_in=True)
+    contact0: GJKState = field(opt_in=True)
+    multicontact: GJKState = field(opt_in=True)
+
+
 @qd.data_oriented
 class GJKStaticConfig(StaticConfig):
     enable_contact_patch: bool
@@ -891,7 +907,11 @@ class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
 class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
     geoms_info: SDFGeomInfo
     geoms_sdf_val: qd.Tensor = field(float)
-    geoms_sdf_grad: qd.Tensor = field((float, 3))
+    geoms_sdf_grad: qd.Tensor = field(
+        (float, 3),
+        oversize_hint="Consider setting a larger 'sdf_cell_size', or a smaller 'sdf_max_res', in 'gs.materials.Rigid' "
+        "options.",
+    )
     geoms_sdf_closest_vert: qd.Tensor = field(int)
     geoms_sdf_coarse_val: qd.Tensor = field(float, shape=(SDF_COARSE_CELLS,))
 
@@ -906,10 +926,10 @@ TERRAIN_COLS = Size("terrain_cols")
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
-    sdf: SDFInfo = requires()
+    sdf: SDFInfo = requires(optional=True)
     mpr: MPRInfo = requires()
     gjk: GJKInfo = requires()
-    support_field: SupportFieldInfo = requires()
+    support_field: SupportFieldInfo = requires(optional=True)
     vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
     vert_n_neighbors: qd.Tensor = field(int, shape=(VERTS,))
@@ -1192,7 +1212,11 @@ class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
 
 
 class VVertsState(Data, kind=DataKind.DERIVED, shape=(CUSTOM_VVERTS, ENVS)):
-    pos: qd.Tensor = field((float, 3))
+    pos: qd.Tensor = field(
+        (float, 3),
+        oversize_hint="Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing "
+        "'n_envs'.",
+    )
 
 
 class VFacesInfo(Data, kind=DataKind.CONSTANT, shape=(VFACES,)):
@@ -1458,15 +1482,6 @@ class DataManager(Data):
     def __init__(self, solver, kinematic_only: bool):
         is_dynamic = not kinematic_only
         config, options = solver.rigid_config, solver._options
-        if not is_tensor_addressable((solver.n_dofs_, solver.n_dofs_, solver._B), gs.np_float):
-            gs.raise_exception(
-                f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) is too large."
-            )
-        if not is_tensor_addressable((solver.n_custom_vverts_, solver._B, 3), gs.np_float):
-            gs.raise_exception(
-                f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
-                "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
-            )
         entities, n_targets = solver.entities, options.IK_max_targets
         entity_dofs = max([entity.n_dofs for entity in entities], default=0)
         sizes = dict(
@@ -1488,11 +1503,9 @@ class DataManager(Data):
             link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
             entity_dofs=entity_dofs,
             ik_qs=max([entity.n_qs for entity in entities], default=0),
-            ik_dofs=max([entity.n_dofs for entity in entities], default=0),
             ik_links=max([entity.n_links for entity in entities], default=0),
             ik_joints=max([entity.n_joints for entity in entities], default=0),
             ik_targets=n_targets,
-            ik_errors=6 * n_targets,
         )
         values = dict(EPS=gs.EPS)
         if is_dynamic:

@@ -21,7 +21,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
-from genesis.utils.data import ConfigItem, DataItem, iter_data
+from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
@@ -78,12 +78,6 @@ class Collider:
         self._prune_max_contacts_per_link_pair = 32
         self._prune_max_contacts_floor = 512
 
-        # The narrowphase sub-components resolve the options the static configuration reads, so they are built first,
-        # each building its part of the collider info (see ColliderInfo)
-        self.sdf = SDF(rigid_solver)
-        self.mpr = mpr.MPR(rigid_solver)
-        self.gjk = gjk.GJK(rigid_solver)
-
         self._init_static_config()
         self._use_split_narrowphase = (
             self.collider_config.has_non_box_plane_convex_convex
@@ -96,17 +90,26 @@ class Collider:
         if self.collider_config.has_terrain and gs.backend != gs.cpu:
             self._n_terrain_threads = 2 * self.collider_config.gpu_cores
         # The split narrowphase launches one thread per core, its contact0 pass rounding up to whole environments. An
-        # upper-bound estimate of the core count sizes these launches (Genesis-Embodied-AI/Genesis#2616).
+        # upper-bound estimate of the core count sizes these launches (Genesis-Embodied-AI/Genesis#2616). The scratch
+        # states of the passes run are opted in before the narrowphase sub-components build their scratch.
         if self._use_split_narrowphase:
             gpu_cores = self.collider_config.gpu_cores
             n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
-            self.mpr.activate(n_contact0_threads, max(gpu_cores, self._n_terrain_threads))
-            self.gjk.activate(n_contact0_threads, gpu_cores)
+            opt_in(array_class.MPRScratch.contact0, envs=n_contact0_threads)
+            opt_in(array_class.MPRScratch.multicontact, envs=max(gpu_cores, self._n_terrain_threads))
+            opt_in(array_class.GJKScratch.contact0, envs=n_contact0_threads)
+            opt_in(array_class.GJKScratch.multicontact, envs=gpu_cores)
         else:
-            if self._n_terrain_threads > 1:
-                self.mpr.activate(None, self._n_terrain_threads)
+            if self.collider_config.has_terrain:
+                opt_in(array_class.MPRScratch.multicontact, envs=self._n_terrain_threads)
             if self.collider_config.has_non_box_plane_convex_convex:
-                self.gjk.activate()
+                opt_in(array_class.GJKScratch.main, envs=self._solver._B)
+        if self.collider_config.has_nonconvex_nonterrain:
+            opt_in(array_class.SDFInfo)
+        # Each narrowphase sub-component builds its part of the collider info (see ColliderInfo)
+        self.sdf = SDF(rigid_solver)
+        self.mpr = mpr.MPR(rigid_solver)
+        self.gjk = gjk.GJK(rigid_solver)
         self._support_field = support_field.SupportField(
             rigid_solver,
             is_active=self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex,
@@ -153,19 +156,33 @@ class Collider:
             (self.gjk, "gjk_config"),
             (self, "collider_info"),
             (self, "collider_state"),
-            (self.mpr, "mpr_state"),
+            (self.mpr, "scratch"),
+            (self.gjk, "scratch"),
         ]
-        if self._use_split_narrowphase:
-            structs += [(self.mpr, name) for name in ("contact0_mpr_state", "multicontact_mpr_state")]
-            structs += [(self.gjk, name) for name in ("contact0_gjk_state", "multicontact_gjk_state")]
-        elif self.collider_config.has_non_box_plane_convex_convex:
-            structs.append((self.gjk, "gjk_state"))
-        if self._n_terrain_threads > 1 and not self._use_split_narrowphase:
-            structs.append((self.mpr, "multicontact_mpr_state"))
         for owner, name in structs:
             yield from iter_data(owner, name)
 
     def _init_static_config(self) -> None:
+        # Resolve the 'enable_contact_patch' option in place, so later consumers (the collider's convex contact
+        # budget) read the resolved value. The contact patch (polygon clipping over the touching faces) skips
+        # perturbation whenever it ran (see multi_contact_flag). It defaults on under MuJoCo compatibility with GJK
+        # because the reference engine builds its manifolds that way inside its GJK/EPA and runs its perturbation
+        # scheme only in its legacy fallback pipeline, which the MPR compatibility pipeline mirrors. It defaults off
+        # otherwise, as the perturbation-based detection is more reliable on marginal manifolds.
+        enable_contact_patch = self._solver._options.enable_contact_patch
+        if enable_contact_patch is None:
+            enable_contact_patch = (
+                self._solver._enable_mujoco_compatibility
+                and self._solver._options.use_gjk_collision
+                and self._solver._enable_multi_contact
+            )
+        elif enable_contact_patch:
+            if not self._solver._options.use_gjk_collision:
+                gs.raise_exception("'enable_contact_patch' requires 'use_gjk_collision'.")
+            if not self._solver._enable_multi_contact:
+                gs.raise_exception("'enable_contact_patch' requires 'enable_multi_contact'.")
+        self._solver._options.enable_contact_patch = enable_contact_patch
+
         # Identify the convex collision detection (ccd) algorithm
         if self._solver._options.use_gjk_collision:
             if self._solver._enable_mujoco_compatibility:
@@ -875,13 +892,13 @@ class Collider:
             self._solver.geoms_init_AABB,
             self._solver.dyn_state,
             self.collider_state,
-            self.mpr.mpr_state,
-            self.gjk.gjk_state,
-            self.gjk.gjk_state.diff_contact_input,
-            self.mpr.contact0_mpr_state,
-            self.gjk.contact0_gjk_state,
-            self.mpr.multicontact_mpr_state,
-            self.gjk.multicontact_gjk_state,
+            self.mpr.scratch.main,
+            self.gjk.scratch.main,
+            self.gjk.scratch.main.diff_contact_input,
+            self.mpr.scratch.contact0,
+            self.gjk.scratch.contact0,
+            self.mpr.scratch.multicontact,
+            self.gjk.scratch.multicontact,
             self._solver.constraint_solver.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,

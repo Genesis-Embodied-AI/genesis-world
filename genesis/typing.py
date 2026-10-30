@@ -19,13 +19,6 @@ def _coerce_int(v):
     return v
 
 
-def _coerce_bool(v):
-    """Accept numpy booleans, reject integers."""
-    if isinstance(v, np.bool_):
-        return bool(v)
-    return v
-
-
 def _normalize(vec):
     if not is_sequence(vec):
         raise PydanticCustomError("invalid_type", "Input should be a valid sequence of scalars", {"value": vec})
@@ -148,7 +141,9 @@ else:
     NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False, strict=False)]
     PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False, strict=False)]
     StrictInt = Annotated[int, BeforeValidator(_coerce_int), Field(strict=True)]
-    StrictBool = Annotated[bool, BeforeValidator(_coerce_bool), Field(strict=True)]
+    StrictBool = Annotated[
+        bool, BeforeValidator(lambda v: bool(v) if isinstance(v, np.bool_) else v), Field(strict=True)
+    ]
     NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
     PositiveInt = Annotated[StrictInt, Field(gt=0)]
     NumericType = int | float | bool

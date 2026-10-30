@@ -16,7 +16,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.data import ArrayItem, DataKind
+from genesis.utils.data import ArrayItem, DataKind, opt_in
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .particle_solver import ParticleSolver
@@ -44,6 +44,8 @@ class MPMSolver(ParticleSolver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
+        # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
+        opt_in(array_class.SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         self._constraints_initialized = False
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors

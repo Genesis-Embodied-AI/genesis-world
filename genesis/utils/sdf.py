@@ -7,7 +7,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.data import is_tensor_addressable
+from genesis.utils.data import is_opted_in
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
@@ -22,6 +22,9 @@ class SDF:
     """
 
     def __init__(self, rigid_solver):
+        # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in
+        if not is_opted_in(array_class.SDFInfo):
+            return
         geoms = rigid_solver.geoms
         geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
         grids_idx_by_key: dict[tuple[str, "SignedDistanceFieldDescription"], int] = {}
@@ -38,19 +41,13 @@ class SDF:
         grids_n_cells = grids_n_nodes.prod(axis=-1, dtype=gs.np_int)
         grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         grids_n_coarse_cells = grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
-        n_cells = int(grids_n_cells.sum())
-        if not is_tensor_addressable((n_cells, 3), gs.np_float):
-            gs.raise_exception(
-                f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', "
-                "or a smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
-            )
         self.sdf_info = array_class.SDFInfo(
-            sizes=dict(geoms=len(geoms), sdf_cells=n_cells, sdf_coarse_cells=grids_n_coarse_cells.sum())
+            sizes=dict(geoms=len(geoms), sdf_cells=grids_n_cells.sum(), sdf_coarse_cells=grids_n_coarse_cells.sum())
         )
         if geoms:
-            # Coarse min-grid companion of each SDF: block minima over the grid nodes, with blocks overlapping by one node
-            # so that every interpolation cell's 8 nodes lie inside the block of its coarse cell. Derived from the loaded
-            # grids, so the preprocessing cache is untouched.
+            # Coarse min-grid companion of each SDF: block minima over the grid nodes, with blocks overlapping by one
+            # node so that every interpolation cell's 8 nodes lie inside the block of its coarse cell. Derived from the
+            # loaded grids, so the preprocessing cache is untouched.
             grids_sdf_coarse_val = []
             for sdf_grid, coarse_res in zip(grids_sdf, grids_sdf_coarse_res):
                 coarse_val = sdf_grid.value

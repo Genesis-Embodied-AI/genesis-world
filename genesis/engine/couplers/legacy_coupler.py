@@ -10,6 +10,7 @@ from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
 from genesis.utils.array_class import LinksState
+from genesis.utils.data import opt_in
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 if TYPE_CHECKING:
@@ -38,6 +39,20 @@ class LegacyCoupler(RBC):
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
         self.sf_solver = self.sim.sf_solver
+
+        # The particles and the FEM vertices collide with the rigid geoms through their SDF
+        opt_in(
+            array_class.SDFInfo,
+            cond=lambda: (
+                self.rigid_solver.is_active
+                and (
+                    (self.mpm_solver.is_active and self.options.rigid_mpm)
+                    or (self.sph_solver.is_active and self.options.rigid_sph)
+                    or (self.pbd_solver.is_active and self.options.rigid_pbd)
+                    or (self.fem_solver.is_active and self.options.rigid_fem)
+                )
+            ),
+        )
 
     def build(self) -> None:
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm

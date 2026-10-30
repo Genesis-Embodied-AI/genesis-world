@@ -8,7 +8,7 @@ import sys
 import types
 import typing
 import weakref
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from enum import IntEnum
 from typing import Annotated, Any, ClassVar, NamedTuple
@@ -22,6 +22,7 @@ from typing_extensions import dataclass_transform  # Made it into standard lib f
 
 import quadrants as qd
 from quadrants.lang import impl
+from quadrants.lang.util import to_numpy_type
 
 import genesis as gs
 from genesis.typing import StrictBool, StrictInt, ValidFloat
@@ -213,10 +214,11 @@ class FieldRef:
     every array of the member in the property tables of the constructor.
     """
 
-    __slots__ = ("_owner", "_path")
+    __slots__ = ("_owner", "_path", "_root")
 
-    def __init__(self, owner: type, path: tuple[str, ...]):
-        self._owner, self._path = owner, path
+    def __init__(self, owner: type, path: tuple[str, ...], root: "type | None" = None):
+        # The struct holding the last field of the path, and the one the path starts from
+        self._owner, self._path, self._root = owner, path, owner if root is None else root
 
     def __getattr__(self, name):
         member_cls = {data_field.name: data_field for data_field in _data_fields(self._owner)}[self._path[-1]].type
@@ -225,7 +227,7 @@ class FieldRef:
             or name not in member_cls.__dataclass_fields__
         ):
             raise AttributeError(f"'{'.'.join(self._path)}' has no field '{name}'.")
-        return FieldRef(member_cls, (*self._path, name))
+        return FieldRef(member_cls, (*self._path, name), self._root)
 
     def __repr__(self):
         return f"FieldRef({'.'.join(self._path)})"
@@ -243,7 +245,10 @@ class _FieldSpec(NamedTuple):
     grad: bool = False
     ndarray: bool = False
     lazy: bool = False
+    opt_in: bool = False
+    oversize_hint: str = ""
     is_required: bool = False
+    is_optional: bool = False
 
 
 def field(
@@ -255,6 +260,8 @@ def field(
     grad: bool = False,
     ndarray: bool = False,
     lazy: bool = False,
+    opt_in: bool = False,
+    oversize_hint: str = "",
 ):
     """
     Declare a field of a struct (see Data).
@@ -266,15 +273,63 @@ def field(
     constant from any sequence of its length. `kind` and `shape` replace the defaults of the struct, for every array of
     a member. `labels` select the array, or every array of a member, in the property tables of the constructor. `grad`
     gives the array gradients when the constructor requires them. `ndarray` allocates an ndarray on every backend. A
-    `lazy` member is allocated when first read, from the sizes and the gradient requirement of its struct.
+    `lazy` member is allocated when first read, from the sizes and the gradient requirement of its struct. An `opt_in`
+    array or member is unused until another component opts it in (see 'opt_in'). An array too large for a backend to
+    address raises at allocation, with `oversize_hint` appended to the message, for instance the options shrinking it.
     """
     labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
-    return dataclasses.field(metadata={_SPEC: _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy)})
+    spec = _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy, opt_in, oversize_hint)
+    return dataclasses.field(metadata={_SPEC: spec})
 
 
-def requires():
-    """Declare a field holding a struct built and owned elsewhere, which the struct binds when built (see Data)."""
-    return dataclasses.field(metadata={_SPEC: _FieldSpec(is_required=True)})
+def requires(*, optional: bool = False):
+    """Declare a field holding a struct built and owned elsewhere, which the struct binds when built (see Data).
+
+    An `optional` struct is unused when none is built, the struct then allocating its 0-d placeholders itself.
+    """
+    return dataclasses.field(metadata={_SPEC: _FieldSpec(is_required=True, is_optional=optional)})
+
+
+def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None" = None, **sizes: Any) -> None:
+    """Opt in a field declared `opt_in` (see 'field'), or a whole struct, for those built in the entered namespace.
+
+    The target is a field by reference from the struct holding it, `opt_in(GJKScratch.contact0, envs=n_threads)`, with
+    the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
+    with 'is_opted_in'. `cond` defers the decision to the moment the struct is built, the opt-in holding if it returns
+    true then, so that a component asks before it knows. It holds in the children of the namespace too, and must come
+    before any instance of the struct is built in it.
+    """
+    root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
+    entered_namespace = _ACTIVE_NAMESPACE.get()
+    if entered_namespace is None:
+        raise TypeError(f"opt_in({target!r}) needs an entered namespace (see 'namespace').")
+    if entered_namespace._structs.get(root_cls):
+        raise TypeError(
+            f"opt_in({target!r}) comes too late: a {root_cls.__name__} is already built in {entered_namespace!r}."
+        )
+    entered_namespace._opt_ins.setdefault((root_cls, path), []).append((cond, sizes))
+
+
+def is_opted_in(target: "FieldRef | type[Data]") -> bool:
+    """Return whether a field or a struct is opted in for those built in the entered namespace (see 'opt_in')."""
+    root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
+    return path in _opt_in_sizes(root_cls)
+
+
+def _opt_in_sizes(cls: type) -> dict[tuple[str, ...], dict[str, Any]]:
+    """Return the sizes of the fields of a struct opted in within the entered namespace or its ancestors, by path."""
+    opted_in = {}
+    opting_namespace = _ACTIVE_NAMESPACE.get()
+    while opting_namespace is not None:
+        for (root_cls, path), requests in opting_namespace._opt_ins.items():
+            if root_cls is not cls or path in opted_in:
+                continue
+            for cond, sizes in requests:
+                if cond is None or cond():
+                    if opted_in.setdefault(path, sizes) != sizes:
+                        raise TypeError(f"{cls.__name__}.{'.'.join(path)} is opted in with different sizes.")
+        opting_namespace = opting_namespace.parent
+    return opted_in
 
 
 # The namespace structs register in and find the structs they require from, set while one is entered (see Namespace)
@@ -298,20 +353,25 @@ class Namespace:
         self.name, self.parent = name, parent
         self._structs: dict[type, weakref.WeakSet] = {}
         self._children: dict[str, Namespace] = {}
+        # The requests opting in fields or structs, by the struct they start from and their path (see 'opt_in')
+        self._opt_ins: dict[tuple[type, tuple[str, ...]], list[tuple[Callable[[], bool] | None, dict[str, Any]]]] = {}
 
     def __repr__(self):
         return self.name if self.parent is None else f"{self.parent!r}.{self.name}"
 
 
 @contextlib.contextmanager
-def namespace(name: str, *, root: bool = False):
+def namespace(name: "str | Namespace", *, root: bool = False):
     """Enter a namespace for the structs built within the block (see Namespace).
 
-    The namespace is the child of the given name of the namespace entered, created the first time it is asked for, or
-    with `root` a new namespace, whatever namespace is entered. The namespace entered is local to the thread.
+    The namespace is the child of the given name of the namespace entered, created the first time it is asked for, with
+    `root` a new namespace, whatever namespace is entered, or a namespace given itself, kept by its owner to enter it
+    again. The namespace entered is local to the thread.
     """
     parent = _ACTIVE_NAMESPACE.get()
-    if root:
+    if isinstance(name, Namespace):
+        entered_namespace = name
+    elif root:
         entered_namespace = Namespace(name)
     elif parent is None:
         raise TypeError(f"namespace({name!r}) opens a child of the entered namespace, but none is entered.")
@@ -383,6 +443,7 @@ class Data:
     # final once an instance is built. A struct hooked into one first built without it is refused afterwards.
     _requires: ClassVar[dict[str, type]] = {}
     _hooks: ClassVar[set[str]] = set()
+    _optional_requires: ClassVar[set[str]] = set()
     _is_sealed: ClassVar[bool] = False
     _is_refused: ClassVar[bool] = False
 
@@ -399,6 +460,7 @@ class Data:
         if shape is not None:
             cls._shape = shape
         cls._lazy, cls._values_models, cls._requires, cls._hooks = dict(cls._lazy), {}, {}, set()
+        cls._optional_requires = set()
         annotations = get_own_annotations(cls)
         lazy_names = [
             name
@@ -426,8 +488,11 @@ class Data:
         for data_field in dataclasses.fields(cls):
             # An instance shadows them with its arrays and members
             setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
-            if data_field.metadata.get(_SPEC, _FieldSpec()).is_required:
+            spec = data_field.metadata.get(_SPEC, _FieldSpec())
+            if spec.is_required:
                 cls._requires[data_field.name] = data_field.type
+            if spec.is_optional:
+                cls._optional_requires.add(data_field.name)
         if into is not None:
             target, field_name = into
             target = _DATA_CLASSES.get(target) if isinstance(target, str) else target
@@ -495,6 +560,14 @@ class Data:
                 holding_namespace = holding_namespace.parent
             # A struct hooked in but built nowhere is dropped from the first instance on, and refused afterwards, so
             # that a broken plugin disables itself rather than every struct it hooks into
+            # An optional struct built nowhere is a placeholder of its own, registered in no namespace
+            if holding_namespace is None and field_name in cls._optional_requires:
+                token = _ACTIVE_NAMESPACE.set(None)
+                try:
+                    binds[(field_name,)] = required_cls(unused=True)
+                finally:
+                    _ACTIVE_NAMESPACE.reset(token)
+                continue
             if holding_namespace is None and is_first and field_name in cls._hooks:
                 gs.logger.warning(
                     f"{required_cls.__name__} hooks into {name}, but none is built: {name} goes without it, and any "
@@ -546,6 +619,12 @@ class Data:
                 raise TypeError(f"{name}() '_binds' names {key}, which is no field of it.")
             binds[key_path] = bound
         sizes = _by_path(name, "sizes", sizes or {}, paths)
+        # The fields opted in within the entered namespace or its ancestors (see 'opt_in'), the struct itself aside
+        opted_in = {path: path_sizes for path, path_sizes in _opt_in_sizes(cls).items() if path}
+        if unknown := sorted(opted_in.keys() - {node.path for node in nodes if node.spec.opt_in}):
+            raise TypeError(f"{name}() is opted in at {unknown}, which no field declares opt_in.")
+        for path, path_sizes in opted_in.items():
+            sizes.setdefault(path, {}).update(path_sizes)
         for entries in sizes.values():
             if unknown := sorted(entries.keys() - _size_names(cls)):
                 raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
@@ -558,9 +637,16 @@ class Data:
                 scope, level = pending.pop()
                 for key, value in level.items():
                     items = key if isinstance(key, tuple) else (key,)
-                    for ref in [item for item in items if isinstance(item, FieldRef)]:
-                        if (*scope, *ref._path) not in paths:
-                            raise TypeError(f"{name}() '{table_name}' selects {ref}, which is no field of it.")
+                    for item in items:
+                        if isinstance(item, FieldRef):
+                            if (*scope, *item._path) not in paths:
+                                raise TypeError(f"{name}() '{table_name}' selects {item}, which is no field of it.")
+                        elif item is not None and not any(
+                            [Label(str(item)) in leaf.labels for leaf in leaves if leaf.path[: len(scope)] == scope]
+                        ):
+                            raise TypeError(
+                                f"{name}() '{table_name}' selects the label {item}, which no array carries."
+                            )
                     if isinstance(value, Mapping):
                         key_path = (*scope, *key._path) if isinstance(key, FieldRef) else (*scope, key)
                         if key_path not in paths:
@@ -585,6 +671,13 @@ class Data:
                         raise TypeError(f"{name}() sets both 'env_first' and 'layout' of {'.'.join(leaf.path)}.")
                     selected_depths[leaf.path] = depth
                     properties[leaf.path][table_name] = value
+
+        # An opt-in field nobody opted in is unused
+        for node in nodes:
+            if node.spec.opt_in and node.path not in opted_in:
+                for leaf in leaves:
+                    if leaf.path[: len(node.path)] == node.path:
+                        properties[leaf.path]["unused"] = True
 
         constants = [leaf for leaf in leaves if leaf.is_constant]
         unused_paths = frozenset([leaf.path for leaf in constants if properties[leaf.path].get("unused")])
@@ -773,7 +866,7 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
     dtype, element_shape = leaf.spec.dtype if isinstance(leaf.spec.dtype, tuple) else (leaf.spec.dtype, ())
     if isinstance(dtype, types.FunctionType):
         dtype = dtype()
-    dtype = {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
+    dtype = base_dtype = {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
     element_dims = element_shape if isinstance(element_shape, tuple) else (element_shape,)
     element_sizes = [str(dim) for dim in element_dims if isinstance(dim, Size)]
     is_element_sized = all([sizes.get(name) is not None for name in element_sizes])
@@ -821,6 +914,17 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         i_env = axes.index(ENVS)
         order = [i_env, *order] if properties["env_first"] else [*order, i_env]
         layout = tuple(order) if order != list(range(len(axes))) else None
+    # A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal
+    # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.
+    n_elements = math.prod([*dims, *[dim for dim in element_dims if isinstance(dim, int)]])
+    if gs.backend == gs.metal:
+        is_addressable = n_elements * np.dtype(to_numpy_type(base_dtype)).itemsize <= 2**31
+    else:
+        is_addressable = n_elements <= np.iinfo(np.int32).max
+    if not is_addressable:
+        gs.raise_exception(
+            f"{struct_name}.{'.'.join(leaf.path)} shape {tuple(dims)} is too large. {leaf.spec.oversize_hint}".rstrip()
+        )
     if leaf.spec.ndarray:
         return qd.tensor(dtype, shape=tuple(dims), backend=qd.Backend.NDARRAY)
     return V(dtype=dtype, shape=tuple(dims), layout=layout, needs_grad=leaf.spec.grad and requires_grad)
@@ -1070,15 +1174,3 @@ def fill_data(
             item.array.from_torch(value)
         else:
             item.array.from_numpy(value)
-
-
-def is_tensor_addressable(shape, dtype) -> bool:
-    """
-    Whether every backend can address all the elements of a solver tensor of this shape and dtype.
-
-    A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal.
-    """
-    # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.
-    if gs.backend == gs.metal:
-        return math.prod(shape) * np.dtype(dtype).itemsize <= 2**31
-    return math.prod(shape) <= np.iinfo(np.int32).max

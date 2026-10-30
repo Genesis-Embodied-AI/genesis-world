@@ -40,7 +40,6 @@ class SupportField:
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
         if not is_active:
-            self.support_field_info = array_class.SupportFieldInfo(unused=True)
             return
 
         band_rows = self._support_res // 2

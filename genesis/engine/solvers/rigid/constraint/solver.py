@@ -21,7 +21,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     linear_to_lower_tri,
 )
 from genesis.grad.bridge import no_grad
-from genesis.utils.data import DataItem, is_tensor_addressable, iter_data
+from genesis.utils.data import DataItem, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
@@ -148,17 +148,8 @@ class ConstraintSolver:
             + self._solver._options.max_dynamic_constraints
         )
         self.len_constraints_ = max(1, self.len_constraints)
-        # Max cone rows (rows_per_contact per contact); sizes the elliptic-only previous-residual buffer to exactly
-        # the contact rows, below the full constraint count that also covers equalities, joint limits, and
-        # frictionloss.
-        self.n_cone_constraints_ = max(1, rows_per_contact * rigid_solver._options.max_contacts)
 
         solver, config = self._solver, rigid_solver.rigid_config
-        if not is_tensor_addressable((self.len_constraints_, solver.n_dofs_, solver._B), gs.np_float):
-            gs.raise_exception(
-                f"Jacobian shape (n_constraints={self.len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) "
-                "is too large."
-            )
         # A Jacobian row reaches the dofs of the kinematic chains of the two links it couples. Each pass of the walk
         # moves every link one ancestor up, adding the dofs of the ancestor it passes to its chain.
         links_n_dofs = np.array([link.n_dofs for link in solver.links], dtype=gs.np_int)
@@ -181,7 +172,6 @@ class ConstraintSolver:
                 trees=solver.n_trees_,
                 constraints=self.len_constraints_,
                 contacts=rigid_solver._options.max_contacts,
-                cone_rows=self.n_cone_constraints_,
                 rows_per_contact=rows_per_contact,
                 nt_vec_slots=nt_vec_n_slots,
                 jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),

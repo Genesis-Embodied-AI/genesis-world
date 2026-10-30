@@ -49,7 +49,7 @@ from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
 from genesis.utils import serialization
-from genesis.utils.data import DataItem, check_data, namespace
+from genesis.utils.data import DataItem, Namespace, check_data, namespace
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
@@ -240,8 +240,10 @@ class Scene(RBC):
         # description
         self._desc = SceneDescription(options=self.options)
 
-        # simulator
-        self._sim = Simulator(scene=self, options=self.options)
+        # simulator, its components opting in the data of one another within the namespace of the scene (see Namespace)
+        self._namespace = Namespace("scene")
+        with namespace(self._namespace):
+            self._sim = Simulator(scene=self, options=self.options)
         # The smoothed step rate the log reports, and the steps and stepping time of the sample being gathered
         self._step_rate_mean = RunningMean(alpha=self.options.profiling.FPS_tracker_alpha)
         self._n_sample_steps = 0
@@ -599,7 +601,8 @@ class Scene(RBC):
         sensor_options : SensorOptions
             The options for the sensor.
         """
-        return self._sim._sensor_manager.create_sensor(sensor_options)
+        with namespace(self._namespace):
+            return self._sim._sensor_manager.create_sensor(sensor_options)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
@@ -873,8 +876,7 @@ class Scene(RBC):
         with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
             self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
 
-            # The structs the components build serve those requiring them within the scene alone (see Namespace)
-            with namespace("scene", root=True):
+            with namespace(self._namespace):
                 self._sim.build()
 
             # reset state
