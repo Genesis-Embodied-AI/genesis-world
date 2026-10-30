@@ -295,8 +295,9 @@ class Data:
     arrays to a value: `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the
     given permutation of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders.
     A selection is a label or its name, matching any number of arrays, a reference to a field of the struct (see
-    FieldRef), a tuple of them, or None for every array. Where two keys of a table select the same array, the deepest
-    field wins, None being the shallowest, and a tie or a label raises. `_binds`
+    FieldRef), a tuple of them, or None for every array. A member, by its name or by a reference, also takes a nested
+    table, whose keys select within it as in its own constructor. Where two keys select the same array, the deepest
+    field wins, None selecting the struct or member it applies to, and a tie or a label raises. `_binds`
     maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in its place: no
     kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
     """
@@ -383,14 +384,28 @@ class Data:
         sizes = _by_path(name, "sizes", sizes or {}, paths)
         properties = {leaf.path: {} for leaf in leaves}
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
+            # The entries of the table with the path of the member they apply to, a member taking a nested table
+            entries = []
+            pending = [((), table or {})]
+            while pending:
+                scope, level = pending.pop()
+                for key, value in level.items():
+                    items = key if isinstance(key, tuple) else (key,)
+                    for ref in [item for item in items if isinstance(item, FieldRef)]:
+                        if (*scope, *ref._path) not in paths:
+                            raise TypeError(f"{name}() '{table_name}' selects {ref}, which is no field of it.")
+                    if isinstance(value, Mapping):
+                        key_path = (*scope, *key._path) if isinstance(key, FieldRef) else (*scope, key)
+                        if key_path not in paths:
+                            raise TypeError(f"{name}() '{table_name}' names {key}, which is no field of it.")
+                        pending.append((key_path, value))
+                    else:
+                        entries.append((scope, items, value))
             # The depth of the key setting the property of each array, the deepest field reference winning
             selected_depths = {}
-            for key, value in (table or {}).items():
-                for ref in [item for item in (key if isinstance(key, tuple) else (key,)) if isinstance(item, FieldRef)]:
-                    if ref._path not in paths:
-                        raise TypeError(f"{name}() '{table_name}' selects {ref}, which is no field of it.")
+            for scope, items, value in entries:
                 for leaf in leaves:
-                    depth = _selection_depth(key, leaf)
+                    depth = _selection_depth(scope, items, leaf)
                     if depth is None:
                         continue
                     depth_prev = selected_depths.get(leaf.path)
@@ -446,16 +461,16 @@ def _by_path(struct_name, arg_name, table, paths):
     """Return the entries of a nested table of a struct constructor by the path of the field they belong to.
 
     A key is the name of an entry, the name of a member whose nested table follows, or a reference to a field (see
-    FieldRef), whose value is its own entry or its nested table.
+    FieldRef) from the member the table applies to, whose value is its own entry or its nested table.
     """
     entries = {}
     pending = [((), table)]
     while pending:
         path, level = pending.pop()
         for key, item in level.items():
-            if isinstance(key, FieldRef) and key._path not in paths:
+            key_path = (*path, *key._path) if isinstance(key, FieldRef) else (*path, key)
+            if isinstance(key, FieldRef) and key_path not in paths:
                 raise TypeError(f"{struct_name}() '{arg_name}' names {key}, which is no field of it.")
-            key_path = key._path if isinstance(key, FieldRef) else (*path, key)
             if isinstance(item, Mapping):
                 pending.append((key_path, item))
                 continue
@@ -466,18 +481,21 @@ def _by_path(struct_name, arg_name, table, paths):
     return entries
 
 
-def _selection_depth(key, leaf) -> int | None:
-    """Return the depth of the field a key of a property table selects an array by, deepest first (see Data).
+def _selection_depth(scope, items, leaf) -> int | None:
+    """Return the depth of the field the items of a key of a property table select an array by (see Data).
 
-    None is the struct itself, of depth 0, and a label is of depth -1. It is None when the key leaves the array out.
+    The key applies to the member at the path 'scope'. None is that member, and a label is of depth -1. It is None when
+    the key leaves the array out.
     """
+    if leaf.path[: len(scope)] != scope:
+        return None
     depths = []
-    for item in key if isinstance(key, tuple) else (key,):
+    for item in items:
         if item is None:
-            depths.append(0)
+            depths.append(len(scope))
         elif isinstance(item, FieldRef):
-            if leaf.path[: len(item._path)] == item._path:
-                depths.append(len(item._path))
+            if leaf.path[len(scope) : len(scope) + len(item._path)] == item._path:
+                depths.append(len(scope) + len(item._path))
         elif Label(str(item)) in leaf.labels:
             depths.append(-1)
     return max(depths, default=None)
