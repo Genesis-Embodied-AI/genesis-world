@@ -253,12 +253,12 @@ class IslandState(Data, kind=DataKind.SCRATCH):
 # =========================================== IKState ===========================================
 
 
-# Sizes of the inverse-kinematics scratch, sized by the largest entity of the solver and the target cap
-IK_QS = Size("ik_qs")
-# The dofs of the widest entity of the solver
+# The counts of the largest entity of the solver, each taken over every entity
+ENTITY_QS = Size("entity_qs")
 ENTITY_DOFS = Size("entity_dofs")
-IK_LINKS = Size("ik_links")
-IK_JOINTS = Size("ik_joints")
+ENTITY_LINKS = Size("entity_links")
+ENTITY_JOINTS = Size("entity_joints")
+# The cap of inverse-kinematics targets
 IK_TARGETS = Size("ik_targets")
 # The pose residuals of the targets stacked, six per target
 IK_ERRORS = 6 * IK_TARGETS
@@ -284,7 +284,7 @@ class IKState(Data, kind=DataKind.SCRATCH):
     vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     # Joint-space step, and the best configuration across restarts
     delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
-    qpos_best: qd.Tensor = field(float, shape=(IK_QS, ENVS))
+    qpos_best: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
 
 
 class IKScratchFK(Data, kind=DataKind.SCRATCH):
@@ -294,12 +294,12 @@ class IKScratchFK(Data, kind=DataKind.SCRATCH):
     environment.
     """
 
-    qpos: qd.Tensor = field(float, shape=(IK_QS, ENVS))
+    qpos: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
     # Written by func_forward_kinematics_scratch
-    links_pos: qd.Tensor = field((float, 3), shape=(IK_LINKS, ENVS))
-    links_quat: qd.Tensor = field((float, 4), shape=(IK_LINKS, ENVS))
-    joints_xanchor: qd.Tensor = field((float, 3), shape=(IK_JOINTS, ENVS))
-    joints_xaxis: qd.Tensor = field((float, 3), shape=(IK_JOINTS, ENVS))
+    links_pos: qd.Tensor = field((float, 3), shape=(ENTITY_LINKS, ENVS))
+    links_quat: qd.Tensor = field((float, 4), shape=(ENTITY_LINKS, ENVS))
+    joints_xanchor: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
+    joints_xaxis: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
 
 
 class IKTargets(Data, kind=DataKind.SCRATCH):
@@ -317,7 +317,7 @@ class IKTargets(Data, kind=DataKind.SCRATCH):
     quat: qd.Tensor = field((float, 4), shape=(IK_TARGETS, ENVS))
     local_point: qd.Tensor = field((float, 3), shape=(IK_TARGETS,))
     # Initial configuration per column, read when custom_init_qpos is set
-    init_qpos: qd.Tensor = field(float, shape=(ENVS, IK_QS))
+    init_qpos: qd.Tensor = field(float, shape=(ENVS, ENTITY_QS))
     # The position and rotation axes to solve for all links, and the position and rotation switches of each link
     pos_mask: qd.Tensor = field(float, shape=(3,))
     rot_mask: qd.Tensor = field(float, shape=(3,))
@@ -1502,9 +1502,9 @@ class DataManager(Data):
             joints_info_envs=solver._B if options.batch_joints_info else (),
             link_bw_slots=max([link.n_joints for link in solver.links], default=0) + 1 if solver._requires_grad else 1,
             entity_dofs=entity_dofs,
-            ik_qs=max([entity.n_qs for entity in entities], default=0),
-            ik_links=max([entity.n_links for entity in entities], default=0),
-            ik_joints=max([entity.n_joints for entity in entities], default=0),
+            entity_qs=max([entity.n_qs for entity in entities], default=0),
+            entity_links=max([entity.n_links for entity in entities], default=0),
+            entity_joints=max([entity.n_joints for entity in entities], default=0),
             ik_targets=n_targets,
         )
         values = dict(EPS=gs.EPS)
