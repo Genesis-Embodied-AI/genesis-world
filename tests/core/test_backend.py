@@ -34,6 +34,10 @@ MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.s
 def test_switching(backend, order):
     # Each cycle rebuilds a box-on-plane scene and verifies the quadrants type wrappers re-resolve for the
     # newly selected backend.
+    @qd.kernel
+    def write_ndarray(x: qd.types.ndarray()):
+        x[0] = 0
+
     for cycle_idx, use_nd in enumerate(order):
         old_val = os.environ.get("GS_ENABLE_NDARRAY")
         os.environ["GS_ENABLE_NDARRAY"] = "1" if use_nd else "0"
@@ -43,7 +47,13 @@ def test_switching(backend, order):
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
 
+            # A kernel taking an ndarray accepts the tensor on the ndarray backend alone
             t = V(qd.i32, (4,))
+            if use_nd:
+                write_ndarray(t)
+            else:
+                with pytest.raises(qd.QuadrantsRuntimeTypeError):
+                    write_ndarray(t)
             t.fill(cycle_idx + 1)
             arr = t.to_numpy()
             np.testing.assert_array_equal(arr, np.full(4, cycle_idx + 1))
