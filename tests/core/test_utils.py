@@ -20,7 +20,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils import warnings
-from genesis.utils.data import Data, DataKind, Namespace, field, requires
+from genesis.utils.data import Data, DataKind, namespace, field, requires
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
@@ -1120,24 +1120,33 @@ def test_data_aggregation():
         info: Info = requires()
         value: qd.Tensor = field(float)
 
+    class OuterAggregate(Data, kind=DataKind.CONSTANT, shape=()):
+        info: Info = requires()
+        aggregate: Aggregate = requires()
+
     # A struct binds the struct of each required type nearest to the entered namespace, a child shadowing its ancestors
-    namespace = Namespace("root")
-    with namespace:
+    with namespace("root", root=True):
         info = Info(values=dict(value=1.0))
         hooked_info = HookedInfo(values=dict(value=2.0))
-        with namespace.child("child"):
+        with namespace("child"):
             child_info = Info(values=dict(value=3.0))
             child_aggregate = Aggregate(values=dict(value=0.0))
         aggregate = Aggregate(values=dict(value=0.0))
+        # A namespace holding several structs of a required type is ambiguous
+        with namespace("child"):
+            other_child_info = Info(values=dict(value=4.0))
+            with pytest.raises(TypeError, match="finds 2 Info"):
+                Aggregate(values=dict(value=0.0))
+        # A struct reached twice through the structs required by the required structs aliases the tree
+        with pytest.raises(TypeError, match="holds aggregate.info twice"):
+            OuterAggregate()
     assert aggregate.info is info and aggregate.hooked is hooked_info
     assert child_aggregate.info is child_info and child_aggregate.hooked is hooked_info
+    assert other_child_info is not child_info
     with pytest.raises(TypeError, match="finds no Info"):
         Aggregate(values=dict(value=0.0))
-    with namespace.child("child"):
-        other_child_info = Info(values=dict(value=4.0))
-        with pytest.raises(TypeError, match="finds 2 Info"):
-            Aggregate(values=dict(value=0.0))
-    assert other_child_info is not child_info
+    with pytest.raises(TypeError, match="none is entered"), namespace("child"):
+        pass
 
     # Hooks close once an instance is built, and a struct requires one struct per type
     with pytest.raises(TypeError, match="too late"):
@@ -1150,14 +1159,6 @@ def test_data_aggregation():
         class TwiceAggregate(Data):
             first_info: Info = requires()
             second_info: Info = requires()
-
-    # A struct reached twice through the structs required by the required structs aliases the tree
-    class OuterAggregate(Data, kind=DataKind.CONSTANT, shape=()):
-        info: Info = requires()
-        aggregate: Aggregate = requires()
-
-    with namespace, pytest.raises(TypeError, match="holds aggregate.info twice"):
-        OuterAggregate()
 
 
 @pytest.mark.required

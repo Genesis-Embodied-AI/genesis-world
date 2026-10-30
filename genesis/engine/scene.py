@@ -49,7 +49,7 @@ from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
 from genesis.utils import serialization
-from genesis.utils.data import DataItem, check_data
+from genesis.utils.data import DataItem, check_data, namespace
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
@@ -873,8 +873,9 @@ class Scene(RBC):
         with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
             self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
 
-            # simulator
-            self._sim.build()
+            # The structs the components build serve those requiring them within the scene alone (see Namespace)
+            with namespace("scene", root=True):
+                self._sim.build()
 
             # reset state
             self._reset()

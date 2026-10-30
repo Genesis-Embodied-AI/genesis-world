@@ -1,5 +1,6 @@
 """Declarative solver data: the structs kernels take as arguments, their sizes, and the records of their arrays."""
 
+import contextlib
 import dataclasses
 import math
 import operator
@@ -280,35 +281,44 @@ _PENDING_HOOKS: dict[str, list[tuple[type, str]]] = {}
 
 class Namespace:
     """
-    A named namespace of the structs built within it (see Data).
+    A named namespace of the structs built within it (see Data and 'namespace').
 
     Namespaces form a tree, each child named under its parent and kept, so that a struct registered once serves every
-    struct built later requiring it. Entering a namespace with `with` makes the structs built within it register in it,
-    and find the structs they require in it, else in its ancestors, so a child shadows the structs of the same type of
-    its ancestors and several instances of a struct serve distinct structs requiring it.
+    struct built later requiring it. The structs built within a namespace register in it and find the structs they
+    require in it, else in its ancestors, so a child shadows the structs of the same type of its ancestors and several
+    instances of a struct serve distinct structs requiring it.
     """
 
     def __init__(self, name: str, parent: "Namespace | None" = None):
         self.name, self.parent = name, parent
         self._structs: dict[type, weakref.WeakSet] = {}
         self._children: dict[str, Namespace] = {}
-        self._tokens: list = []
-
-    def child(self, name: str) -> "Namespace":
-        """Return the child namespace of the given name, created the first time it is asked for."""
-        if name not in self._children:
-            self._children[name] = Namespace(name, self)
-        return self._children[name]
-
-    def __enter__(self) -> "Namespace":
-        self._tokens.append(_ACTIVE_NAMESPACE.set(self))
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        _ACTIVE_NAMESPACE.reset(self._tokens.pop())
 
     def __repr__(self):
         return self.name if self.parent is None else f"{self.parent!r}.{self.name}"
+
+
+@contextlib.contextmanager
+def namespace(name: str, *, root: bool = False):
+    """Enter a namespace for the structs built within the block (see Namespace).
+
+    The namespace is the child of the given name of the namespace entered, created the first time it is asked for, or
+    with `root` a new namespace, whatever namespace is entered. The namespace entered is local to the thread.
+    """
+    parent = _ACTIVE_NAMESPACE.get()
+    if root:
+        entered_namespace = Namespace(name)
+    elif parent is None:
+        raise TypeError(f"namespace({name!r}) opens a child of the entered namespace, but none is entered.")
+    else:
+        if name not in parent._children:
+            parent._children[name] = Namespace(name, parent)
+        entered_namespace = parent._children[name]
+    token = _ACTIVE_NAMESPACE.set(entered_namespace)
+    try:
+        yield
+    finally:
+        _ACTIVE_NAMESPACE.reset(token)
 
 
 class _Node(NamedTuple):
@@ -476,14 +486,16 @@ class Data:
         # The required structs are bound in their fields, from the entered namespace, else from the nearest ancestor
         binds = {}
         for field_name, required_cls in cls._requires.items():
-            namespace = _ACTIVE_NAMESPACE.get()
-            while namespace is not None and not namespace._structs.get(required_cls):
-                namespace = namespace.parent
-            if namespace is None:
+            holding_namespace = _ACTIVE_NAMESPACE.get()
+            while holding_namespace is not None and not holding_namespace._structs.get(required_cls):
+                holding_namespace = holding_namespace.parent
+            if holding_namespace is None:
                 raise TypeError(f"{name}() finds no {required_cls.__name__} in {_ACTIVE_NAMESPACE.get()!r}.")
-            structs = list(namespace._structs[required_cls])
+            structs = list(holding_namespace._structs[required_cls])
             if len(structs) > 1:
-                raise TypeError(f"{name}() finds {len(structs)} {required_cls.__name__} in {namespace!r}, not one.")
+                raise TypeError(
+                    f"{name}() finds {len(structs)} {required_cls.__name__} in {holding_namespace!r}, not one."
+                )
             binds[(field_name,)] = structs[0]
 
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
@@ -609,9 +621,9 @@ class Data:
                 if isinstance(value, Data):
                     pending.append(((*path, data_field.name), value))
 
-        namespace = _ACTIVE_NAMESPACE.get()
-        if namespace is not None:
-            namespace._structs.setdefault(cls, weakref.WeakSet()).add(self)
+        entered_namespace = _ACTIVE_NAMESPACE.get()
+        if entered_namespace is not None:
+            entered_namespace._structs.setdefault(cls, weakref.WeakSet()).add(self)
 
 
 def _by_path(struct_name, arg_name, table, paths):
