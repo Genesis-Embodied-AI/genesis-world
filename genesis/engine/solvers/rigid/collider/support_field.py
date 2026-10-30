@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -34,13 +34,11 @@ class SupportField:
     """
 
     def __init__(self, rigid_solver: "RigidSolver", is_active: bool) -> None:
-        """Build the support tables of the geoms when active, allocating the support field info and its writer."""
+        """Build the support tables of the geoms into the support field info, which is a placeholder when inactive."""
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        # The writer of the tables, once every array of the solver is allocated
-        self.fill: Callable[[], None] | None = None
         if not is_active:
             self.support_field_info = array_class.SupportFieldInfo(unused=True)
             return
@@ -74,38 +72,30 @@ class SupportField:
             values=dict(support_res=self._support_res),
         )
 
-        # The tables are assembled when written, so that no host copy of them outlives the build
-        def fill():
-            # The records of the cells and the extra candidate counts are written in place, and the extra candidates
-            # of every cell start past the records of all cells, in cell order
-            records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
-            support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
-            for i_t, (slots_vid, _, cells_n_extras) in enumerate(tables):
-                cell_start = i_t * n_geom_cells
-                records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
-                support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
-            support_list_start[0] = 2 * n_support_cells
-            np.cumsum(support_list_start, out=support_list_start)
-            _kernel_init_support(
-                n_geom_cells * geoms_table_idx,
-                support_list_start,
-                np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
-                records_vid,
-                np.concatenate(
-                    [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
-                    dtype=gs.np_int,
-                ),
-                self.solver.dyn_info,
-                self.support_field_info,
-                self.solver.rigid_config,
-                n_geom_cells,
-            )
-
-        self.fill = fill
-
-    @property
-    def is_active(self) -> bool:
-        return self.fill is not None
+        # The records of the cells and the extra candidate counts are written in place, and the extra candidates
+        # of every cell start past the records of all cells, in cell order
+        records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
+        support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
+        for i_t, (slots_vid, _, cells_n_extras) in enumerate(tables):
+            cell_start = i_t * n_geom_cells
+            records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
+            support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
+        support_list_start[0] = 2 * n_support_cells
+        np.cumsum(support_list_start, out=support_list_start)
+        _kernel_init_support(
+            n_geom_cells * geoms_table_idx,
+            support_list_start,
+            np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
+            records_vid,
+            np.concatenate(
+                [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
+                dtype=gs.np_int,
+            ),
+            self.solver.dyn_info,
+            self.support_field_info,
+            self.solver.rigid_config,
+            n_geom_cells,
+        )
 
 
 @qd.kernel

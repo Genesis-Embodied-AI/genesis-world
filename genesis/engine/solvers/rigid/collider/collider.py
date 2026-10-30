@@ -350,9 +350,6 @@ class Collider:
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
         )
-        self.sdf.fill()
-        if self._support_field.is_active:
-            self._support_field.fill()
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
 
