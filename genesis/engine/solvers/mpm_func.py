@@ -84,6 +84,11 @@ N_MATERIAL_PARAMS = 7
 
 # Singular value below which the extended Hencky energy continues log(sigma) by its tangent line
 HENCKY_SIGMA_MIN = 0.05
+# Singular value below which the fixed corotated and Stable Neo-Hookean energies resist compression further, and the
+# stiffness of that resistance in units of the Young's modulus: the values of Stomakhin et al. 2012 (see
+# compression_penalty)
+EXTENSION_SIGMA_MIN = 0.4
+EXTENSION_STIFFNESS = 20.0
 # Singular values below which the return maps clamp before taking a log, those of the explicit materials
 VON_MISES_SIGMA_MIN = 0.05
 SAND_SIGMA_MIN = 1e-4
@@ -320,10 +325,51 @@ def signed_singular_values(F):
 
 
 @qd.func
+def compression_penalty(sigma, mu, lam):
+    """The resistance to crushing added to the fixed corotated and Stable Neo-Hookean energies: k / 2 |d|^2 with
+    d = min(sigma - s, 0), s = EXTENSION_SIGMA_MIN and k = EXTENSION_STIFFNESS times the Young's modulus of the Lame
+    parameters, its gradient k d and its diagonal Hessian, k where sigma_i < s.
+
+    In MPM a particle pushes its nodes by its Kirchhoff stress, tau_i = sigma_i dpsi/dsigma_i, which vanishes as the
+    particle collapses whenever dpsi/dsigma stays bounded, as both energies' does: a crushed particle then exerts
+    nothing that could restore it, as its stiffness does, and the material stays crushed. The penalty is the stiffness
+    term of the C1 extension of Stomakhin et al. 2012 (§4.1), with their s and k. Their extension also replaces the
+    energy below s by its Taylor polynomial at s, which an energy undefined across inversion needs; both energies
+    here are defined there, and keeping them whole keeps the sum bounded below, where the Taylor polynomial of the
+    fixed corotated energy is not under a large stretch of another axis, which raises the curvature it drops.
+    """
+    s = gs.qd_float(EXTENSION_SIGMA_MIN)
+    young = gs.qd_float(0.0)
+    if lam + mu > 0.0:
+        young = mu * (3.0 * lam + 2.0 * mu) / (lam + mu)
+    k = EXTENSION_STIFFNESS * young
+    d = qd.min(sigma - s, 0.0)
+    curvature = qd.Vector.zero(gs.qd_float, 3)
+    for i in qd.static(range(3)):
+        if sigma[i] < s:
+            curvature[i] = k
+    return 0.5 * k * d.dot(d), k * d, curvature
+
+
+@qd.func
+def stable_neohookean_parameters(mu, lam):
+    """mu_s, lam_s, alpha and the rest energy of the Stable Neo-Hookean energy (see stable_neohookean_principal)."""
+    mu_s = 4.0 / 3.0 * mu
+    lam_s = lam + 5.0 / 6.0 * mu
+    alpha = gs.qd_float(1.0)
+    if lam_s > 0.0:
+        alpha = 1.0 + mu_s / lam_s - mu_s / (4.0 * lam_s)
+    rest = 0.5 * lam_s * (1.0 - alpha) ** 2 - 0.5 * mu_s * qd.log(4.0)
+    return mu_s, lam_s, alpha, rest
+
+
+@qd.func
 def fixed_corotated_energy(sigma, mu, lam):
-    """Energy density of the fixed corotated energy in the signed singular values (see fixed_corotated_principal)."""
+    """Energy density of the fixed corotated energy with its compression penalty in the signed singular values (see
+    fixed_corotated_principal)."""
     J = sigma[0] * sigma[1] * sigma[2]
-    return mu * (sigma - 1.0).dot(sigma - 1.0) + 0.5 * lam * (J - 1.0) ** 2
+    penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
+    return mu * (sigma - 1.0).dot(sigma - 1.0) + 0.5 * lam * (J - 1.0) ** 2 + penalty
 
 
 @qd.func
@@ -360,32 +406,43 @@ def extended_hencky_principal(sigma, mu, lam):
 
 
 @qd.func
-def stable_neohookean_principal(sigma, mu, lam):
-    """Energy density, gradient and Hessian of the Stable Neo-Hookean energy (Smith et al. 2018) in the signed singular
-    values, defined for inverted states.
+def stable_neohookean_principal(sigma, mu, lam, is_penalized: qd.template() = True):
+    """Energy density, gradient and Hessian of the Stable Neo-Hookean energy (Smith et al. 2018, Eq. 14) in the signed
+    singular values, defined for inverted states.
 
-    psi = mu / 2 (|sigma|^2 - 3) + lam_s / 2 (J - alpha)^2 - mu^2 / (2 lam_s), with lam_s = lam + mu and
-    alpha = 1 + mu / lam_s, so that the rest state is stress-free with zero energy and the small-strain response has
-    the Lame parameters mu and lam.
+    psi = mu_s / 2 (I_C - 3) + lam_s / 2 (J - alpha)^2 - mu_s / 2 log(I_C + 1), shifted to vanish at rest, with
+    I_C = |sigma|^2. Without the regularized origin barrier log(I_C + 1), a particle crushed to F = 0 sits in a
+    stable basin, its forces vanishing and its Hessian mu I (§3.3), which a collapsed material never leaves.
+    alpha = 1 + mu_s / lam_s - mu_s / (4 lam_s) keeps the rest state stress-free, and mu_s = 4/3 mu,
+    lam_s = lam + 5/6 mu give the small-strain response of the Lame parameters mu and lam (§3.4).
+
+    The barrier only makes F = 0 meta-stable: the Kirchhoff stress of a uniformly crushed particle still vanishes as
+    the cube of its size, which leaves a crushed MPM material without a restoring force. With `is_penalized`, the
+    compression penalty adds one (see compression_penalty).
     """
-    lam_s = lam + mu
-    alpha = gs.qd_float(1.0)
-    rest = gs.qd_float(0.0)
-    if lam_s > 0.0:
-        alpha = 1.0 + mu / lam_s
-        rest = mu * mu / (2.0 * lam_s)
+    mu_s, lam_s, alpha, rest = stable_neohookean_parameters(mu, lam)
     J = sigma[0] * sigma[1] * sigma[2]
     cof = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
-    psi = 0.5 * mu * (sigma.dot(sigma) - 3.0) + 0.5 * lam_s * (J - alpha) ** 2 - rest
-    g = mu * sigma + lam_s * (J - alpha) * cof
+    I_C = sigma.dot(sigma)
+    barrier = 1.0 / (I_C + 1.0)
+    psi = 0.5 * mu_s * (I_C - 3.0) + 0.5 * lam_s * (J - alpha) ** 2 - 0.5 * mu_s * qd.log(I_C + 1.0) - rest
+    g = mu_s * (1.0 - barrier) * sigma + lam_s * (J - alpha) * cof
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i in qd.static(range(3)):
-        A[i, i] = mu + lam_s * cof[i] * cof[i]
+        A[i, i] = mu_s * (1.0 - barrier) + 2.0 * mu_s * barrier * barrier * sigma[i] * sigma[i] + lam_s * cof[i] ** 2
     for k in qd.static(range(3)):
         i, j = qd.static(_PAIRS[k])
         other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
-        A[i, j] = lam_s * (cof[i] * cof[j] + (J - alpha) * sigma[other])
+        A[i, j] = 2.0 * mu_s * barrier * barrier * sigma[i] * sigma[j] + lam_s * (
+            cof[i] * cof[j] + (J - alpha) * sigma[other]
+        )
         A[j, i] = A[i, j]
+    if qd.static(is_penalized):
+        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
+        psi += penalty
+        g += g_penalty
+        for i in qd.static(range(3)):
+            A[i, i] += A_penalty[i]
     return psi, g, A
 
 
@@ -397,14 +454,15 @@ def liquid_principal(sigma, mu, lam):
     lam_compressed = gs.qd_float(0.0)
     if sigma[0] * sigma[1] * sigma[2] < 1.0:
         lam_compressed = lam
-    return fixed_corotated_principal(sigma, mu, lam_compressed)
+    return fixed_corotated_principal(sigma, mu, lam_compressed, False)
 
 
 @qd.func
-def fixed_corotated_principal(sigma, mu, lam):
+def fixed_corotated_principal(sigma, mu, lam, is_penalized: qd.template() = True):
     """Energy density, gradient and Hessian of the fixed corotated energy in the signed singular values.
 
     psi = mu |sigma - 1|^2 + lam / 2 (J - 1)^2 with J = sigma_0 sigma_1 sigma_2, defined for inverted states too.
+    With `is_penalized`, the compression penalty keeps a crushed particle pushing back (see compression_penalty).
     """
     J = sigma[0] * sigma[1] * sigma[2]
     cof = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
@@ -418,6 +476,12 @@ def fixed_corotated_principal(sigma, mu, lam):
         other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
         A[i, j] = lam * (cof[i] * cof[j] + (J - 1.0) * sigma[other])
         A[j, i] = A[i, j]
+    if qd.static(is_penalized):
+        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
+        psi += penalty
+        g += g_penalty
+        for i in qd.static(range(3)):
+            A[i, i] += A_penalty[i]
     return psi, g, A
 
 

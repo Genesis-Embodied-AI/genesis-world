@@ -4,6 +4,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.mpm_func import (
+    EXTENSION_SIGMA_MIN,
+    EXTENSION_STIFFNESS,
     HENCKY_SIGMA_MIN,
     extended_hencky_principal,
     fixed_corotated_energy,
@@ -71,6 +73,36 @@ def _reference_psi(F, mu, lam):
     return mu * np.sum((F - R) ** 2) + 0.5 * lam * (np.linalg.det(F) - 1.0) ** 2
 
 
+def _signed_singular_values(F):
+    sigma = np.linalg.svd(F, compute_uv=False)
+    sigma[-1] *= np.sign(np.linalg.det(F))
+    return sigma
+
+
+def _reference_penalty(sigma, mu, lam):
+    """The compression penalty k / 2 |min(sigma - s, 0)|^2 of the fixed corotated and Stable Neo-Hookean energies."""
+    k = EXTENSION_STIFFNESS * mu * (3.0 * lam + 2.0 * mu) / (lam + mu)
+    d = np.minimum(sigma - EXTENSION_SIGMA_MIN, 0.0)
+    return 0.5 * k * d @ d
+
+
+def _reference_extended_corotated(sigma, mu, lam):
+    J = np.prod(sigma)
+    return mu * np.sum((sigma - 1.0) ** 2) + 0.5 * lam * (J - 1.0) ** 2 + _reference_penalty(sigma, mu, lam)
+
+
+def _reference_stable_neohookean(sigma, mu, lam):
+    """Smith et al. 2018, Eq. 14, with its Lame reparameterization, vanishing at rest, plus the compression penalty."""
+    mu_s, lam_s = 4.0 / 3.0 * mu, lam + 5.0 / 6.0 * mu
+    alpha = 1.0 + mu_s / lam_s - mu_s / (4.0 * lam_s)
+
+    def psi(x):
+        I_C = x @ x
+        return 0.5 * mu_s * (I_C - 3.0) + 0.5 * lam_s * (np.prod(x) - alpha) ** 2 - 0.5 * mu_s * np.log(I_C + 1.0)
+
+    return psi(sigma) - psi(np.ones(3)) + _reference_penalty(sigma, mu, lam)
+
+
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
@@ -118,7 +150,9 @@ def test_fixed_corotated_is_finite_and_psd_when_inverted():
             F[:, 0] *= -1
         psi, P, _ = _evaluate(F, np.zeros(3), np.zeros(3), mu, lam)
         assert np.isfinite(psi) and np.all(np.isfinite(P))
-        np.testing.assert_allclose(psi, _reference_psi(F, mu, lam), rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            psi, _reference_extended_corotated(_signed_singular_values(F), mu, lam), rtol=1e-10, atol=1e-12
+        )
         # A block r^T H r over a random r must be non-negative for the projected Hessian
         for _ in range(4):
             r = rng.standard_normal(3)
@@ -159,13 +193,31 @@ def test_energy_from_signed_singular_values():
         F_nd.from_numpy(F)
         kernel_energy_from_singular_values(F_nd, mu, lam, sigma_nd, psi_nd)
         sigma = qd_to_numpy(sigma_nd)
-        reference = np.linalg.svd(F, compute_uv=False)
-        reference[-1] *= np.sign(np.linalg.det(F))
+        reference = _signed_singular_values(F)
         np.testing.assert_allclose(sigma, reference, rtol=1e-7, atol=1e-7)
-        np.testing.assert_allclose(float(qd_to_numpy(psi_nd)), _reference_psi(F, mu, lam), rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(
+            float(qd_to_numpy(psi_nd)), _reference_extended_corotated(reference, mu, lam), rtol=1e-8, atol=1e-10
+        )
 
 
-_FAMILIES = (extended_hencky_principal, stable_neohookean_principal, liquid_principal)
+@qd.func
+def _stable_neohookean_unpenalized(sigma, mu, lam):
+    return stable_neohookean_principal(sigma, mu, lam, False)
+
+
+@qd.func
+def _fixed_corotated_unpenalized(sigma, mu, lam):
+    return fixed_corotated_principal(sigma, mu, lam, False)
+
+
+_FAMILIES = (
+    extended_hencky_principal,
+    stable_neohookean_principal,
+    liquid_principal,
+    fixed_corotated_principal,
+    _stable_neohookean_unpenalized,
+    _fixed_corotated_unpenalized,
+)
 
 
 @qd.kernel
@@ -194,12 +246,6 @@ def _reference_extended_hencky(sigma, mu, lam):
     return mu * l @ l + 0.5 * lam * l.sum() ** 2
 
 
-def _reference_stable_neohookean(sigma, mu, lam):
-    lam_s = lam + mu
-    alpha = 1.0 + mu / lam_s
-    return 0.5 * mu * (sigma @ sigma - 3.0) + 0.5 * lam_s * (np.prod(sigma) - alpha) ** 2 - mu * mu / (2.0 * lam_s)
-
-
 def _reference_liquid(sigma, mu, lam):
     J = np.prod(sigma)
     return mu * np.sum((sigma - 1.0) ** 2) + 0.5 * lam * min(J - 1.0, 0.0) ** 2
@@ -213,11 +259,15 @@ def _reference_liquid(sigma, mu, lam):
     [
         # Above and below the tangent continuation, and inverted
         (0, _reference_extended_hencky, ((0.5, 1.5), (0.01, 0.04), (-0.5, 0.04))),
-        (1, _reference_stable_neohookean, ((0.5, 1.5), (-1.2, -0.2))),
+        # Above the penalty threshold, below it along every axis, and inverted
+        (1, _reference_stable_neohookean, ((0.5, 1.5), (0.05, 0.35), (-1.2, -0.2))),
         # Compressed and expanded
         (2, _reference_liquid, ((0.6, 0.95), (1.05, 1.4))),
+        # Above the penalty threshold, below it along every axis, across it with inversion, and below it under a large
+        # stretch of another axis
+        (3, _reference_extended_corotated, ((0.5, 1.5), (0.05, 0.35), (-0.5, 0.8), (0.1, 20.0))),
     ],
-    ids=["extended_hencky", "stable_neohookean", "liquid"],
+    ids=["extended_hencky", "stable_neohookean", "liquid", "fixed_corotated"],
 )
 def test_principal_derivatives(family, reference, sigmas):
     rng = np.random.default_rng(5)
@@ -258,6 +308,30 @@ def test_stable_neohookean_rest_state():
     np.testing.assert_allclose(qd_to_numpy(g_nd), 0.0, atol=1e-12)
     # The principal Hessian of linear elasticity mu |eps|^2 + lam / 2 (tr eps)^2 is 2 mu I + lam 1 1^T
     np.testing.assert_allclose(qd_to_numpy(A_nd), 2.0 * mu * np.eye(3) + lam * np.ones((3, 3)), atol=1e-10)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+@pytest.mark.parametrize("family, unextended", [(1, 4), (3, 5)], ids=["stable_neohookean", "fixed_corotated"])
+def test_crushed_states_restore(family, unextended):
+    """A particle crushed toward a point is pushed back: under uniform compression sigma = delta 1 the energy
+    decreases toward rest down to F = 0, and the extension multiplies the Kirchhoff stress tau_i = sigma_i
+    dpsi/dsigma_i through which a particle pushes its MPM nodes, which vanishes with sigma without it."""
+    mu, lam = 3.0, 5.0
+    sigma_nd, psi_nd = qd.ndarray(qd.f64, (3,)), qd.ndarray(qd.f64, ())
+    g_nd, A_nd = qd.ndarray(qd.f64, (3,)), qd.ndarray(qd.f64, (3, 3))
+
+    def gradient(index, sigma):
+        sigma_nd.from_numpy(np.asarray(sigma, dtype=np.float64))
+        kernel_principal(index, sigma_nd, mu, lam, psi_nd, g_nd, A_nd)
+        return qd_to_numpy(g_nd).copy()
+
+    for delta in (0.0, 0.05, 0.1, 0.2, 0.3, 0.6, 0.9):
+        assert (gradient(family, np.full(3, delta)) < 0.0).all()
+    for delta in (0.1, 0.2):
+        sigma = np.full(3, delta)
+        assert (sigma * gradient(family, sigma) < 5.0 * sigma * gradient(unextended, sigma)).all()
 
 
 @qd.kernel
