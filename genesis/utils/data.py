@@ -286,8 +286,8 @@ def requires(*, opt_in: bool = False):
 def attach(target: "type[Data]", **structs: "type[Data]") -> None:
     """Add to a struct owned elsewhere the requirements of the given structs, by field name, each declared `opt_in`.
 
-    A module calls it when imported, `attach(ColliderInfo, sdf=SDFInfo)`, so that a kernel reaches the struct through the
-    target without the owner of the target declaring it, and opts the field in where it uses it (see 'requires'). A
+    A module calls it when imported, `attach(ColliderInfo, sdf=SDFInfo)`, so that a kernel reaches the struct through
+    the target without the owner of the target declaring it, and opts the field in where it uses it (see 'requires'). A
     field attached again with the same struct is left as is. The fields of a struct are final once an instance is built,
     since a kernel taking it compiles its layout in.
     """
@@ -300,8 +300,8 @@ def attach(target: "type[Data]", **structs: "type[Data]") -> None:
             continue
         if target._is_sealed:
             raise TypeError(
-                f"attach({target.__name__}, {field_name}={struct_cls.__name__}) comes too late, an instance being already "
-                f"built: import the module calling it before building any scene."
+                f"attach({target.__name__}, {field_name}={struct_cls.__name__}) comes too late, an instance being "
+                f"already built: import the module calling it before building any scene."
             )
         # The field of the requirement, taken from a dataclass declaring it alone
         target.__dataclass_fields__[field_name] = dataclasses.fields(
@@ -316,9 +316,10 @@ def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None"
 
     The target is a field by reference from the struct holding it, `opt_in(GJKScratch.contact0, envs=n_threads)`, with
     the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
-    with 'is_opted_in'. Opting in a requirement (see 'requires') opts in the struct it requires as well. `cond` defers the decision to the moment the struct is built, the opt-in holding if it returns
-    true then, so that a component asks before it knows. It holds in the children of the namespace too, and must come
-    before any instance of the struct is built in it.
+    with 'is_opted_in'. Opting in a requirement (see 'requires') opts in the struct it requires as well. `cond` defers
+    the decision to the moment the struct is built, the opt-in holding if it returns true then, so that a component asks
+    before it knows. It holds in the children of the namespace too, and must come before any instance of the struct is
+    built in it.
     """
     root_cls, path = (target._root, target._path) if isinstance(target, FieldRef) else (target, ())
     entered_namespace = _ACTIVE_NAMESPACE.get()

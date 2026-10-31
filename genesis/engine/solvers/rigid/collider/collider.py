@@ -194,7 +194,7 @@ class Collider:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MPR
 
         # The contact patch can hand back the full clipped polygon of a box-box pair, up to 8 contacts (see
-        # func_clip_polygon), which the convex budget must hold or the extra witnesses of the patch are silently dropped.
+        # func_clip_polygon), which the convex budget must hold or the extra witnesses of the patch are lost.
         if self._solver.rigid_config.requires_grad:
             n_contacts_per_convex_pair = 20
         elif self._solver._options.enable_contact_patch:
