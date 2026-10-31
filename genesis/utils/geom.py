@@ -1283,7 +1283,9 @@ def trans_quat_to_T(trans=None, quat=None, *, out=None):
     B = quat.shape[:-1] if trans is None else trans.shape[:-1]
     if is_torch:
         dtype = quat.dtype if trans is None else torch.promote_types(trans.dtype, quat.dtype)
-        quat = quat.to(dtype=dtype)
+        if trans is not None:
+            trans = trans.to(dtype=dtype, copy=True)
+        quat = quat.to(dtype=dtype, copy=True)
         if T is None:
             prototype = quat if trans is None else trans
             T = torch.zeros((*B, 4, 4), dtype=dtype, device=prototype.device)

@@ -256,24 +256,24 @@ def test_homogeneous_transforms(batch_shape):
         assert gu.trans_R_to_T(out[..., :3, 3], out[..., :3, :3], out=out) is out
         assert_equal(out, transform_true)
 
-    out = np.zeros((*batch_shape, 4, 4))
-    out[..., 0, :] = [math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)]
-    translation = np.broadcast_to([1.0, 2.0, 3.0], (*batch_shape, 3)).copy()
-    transform_true = np.broadcast_to(np.eye(4), (*batch_shape, 4, 4)).copy()
-    transform_true[..., :3, :3] = [
-        [0.0, -1.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ]
-    transform_true[..., :3, 3] = translation
-    assert gu.trans_quat_to_T(translation, out[..., 0, :], out=out) is out
-    assert_allclose(out, transform_true, atol=1e-12)
+        out = np.zeros((*batch_shape, 4, 4))
+        out[..., 0, :] = [math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)]
+        out[..., 3, :3] = [1.0, 2.0, 3.0]
+        out = convert(out)
+        transform_true[..., :3, :3] = [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        assert gu.trans_quat_to_T(out[..., 3, :3], out[..., 0, :], out=out) is out
+        assert_allclose(out, transform_true, atol=1e-12)
 
+    device = torch.device("cpu") if gs.device.type == "mps" else gs.device
     for trans_dtype, quat_dtype in ((np.float32, np.float64), (np.float64, np.float32)):
         translation = np.broadcast_to([1.25, -2.5, 3.75], (*batch_shape, 3)).astype(trans_dtype)
         quaternion = np.broadcast_to([0.35, -0.12, 0.46, 0.78], (*batch_shape, 4)).astype(quat_dtype)
         transform_true = gu.trans_quat_to_T(translation, quaternion)
-        trans_torch, quat_torch = (torch.as_tensor(value, device=gs.device) for value in (translation, quaternion))
+        trans_torch, quat_torch = (torch.as_tensor(value, device=device) for value in (translation, quaternion))
 
         transform = gu.trans_quat_to_T(trans_torch, quat_torch)
         assert transform.dtype == torch.float64
@@ -281,7 +281,7 @@ def test_homogeneous_transforms(batch_shape):
         assert_allclose(transform, transform_true, tol=1e-12)
 
         for dtype in (torch.float32, torch.float64):
-            out = torch.full((*batch_shape, 4, 4), float("nan"), dtype=dtype, device=gs.device)
+            out = torch.full((*batch_shape, 4, 4), float("nan"), dtype=dtype, device=device)
             assert gu.trans_quat_to_T(trans_torch, quat_torch, out=out) is out
             assert out.dtype == dtype
             assert_allclose(out, transform_true, tol=1e-6 if dtype == torch.float32 else 1e-12)
