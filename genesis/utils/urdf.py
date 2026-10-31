@@ -263,7 +263,7 @@ def parse_urdf(morph, surface):
                     and hash(tmesh.visual.material) == hash(trimesh.visual.material.empty_material())
                 )
                 # The material of a mesh asset tells apart the meshes of one visual, which a single URDF material spans
-                if not geom_is_col and "material_name" not in metadata:
+                if not geom_is_col and not metadata.get("material_name"):
                     if has_asset_material and isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals):
                         metadata["material_name"] = tmesh.visual.material.name or ""
                     elif geom_prop.material is not None:

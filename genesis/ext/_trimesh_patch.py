@@ -279,7 +279,11 @@ def load_obj(
 
     if len(geometry) == 1:
         # TODO : should this be removed to always return a scene?
-        return next(iter(geometry.values()))
+        # The mesh keeps in its metadata the name a scene would key it by, when the file states one
+        ((name, mesh),) = geometry.items()
+        if (material if group_material else current_object) is not None:
+            mesh["metadata"] = {"name": name}
+        return mesh
 
     # add an identity transform for every geometry
     graph = [{"geometry": k, "frame_to": k} for k in geometry.keys()]
