@@ -332,7 +332,8 @@ def test_geom_tensor_identity(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-def test_slerp(batch_shape, tol):
+@pytest.mark.parametrize("precision", ["32", "64"])
+def test_slerp(batch_shape, precision, tol):
     INTERP_RATIO = 0.7
 
     numel = math.prod(batch_shape)
@@ -360,6 +361,23 @@ def test_slerp(batch_shape, tol):
         # A single start quaternion is interpolated towards every end quaternion of the batch.
         lerp = gu.slerp(convert(q0[0]), q1_batch, convert(ratio))
         assert_allclose(lerp_from_one_true.reshape((*batch_shape, 4)), lerp, tol=tol)
+
+    q0 = torch.tensor([0.5, -0.5, 0.5, 0.5], dtype=gs.tc_float, device=gs.device)
+    tangent_projection = torch.eye(4, dtype=gs.tc_float, device=gs.device) - q0[:, None] * q0[None, :]
+    for sign in (-1.0, 1.0):
+        q1 = sign * q0
+        for ratio in (0.0, 0.3, 1.0):
+            t = torch.tensor(ratio, dtype=gs.tc_float, device=gs.device)
+            assert_allclose(gu.slerp(q0, q1, t), q0, atol=2e-7 if precision == "32" else 1e-12)
+            jac0, jac1 = torch.autograd.functional.jacobian(partial(gu.slerp, t=t), (q0, q1))
+            assert_allclose(jac0, (1 - ratio) * tangent_projection, atol=2e-7 if precision == "32" else 1e-12)
+            assert_allclose(jac1, sign * ratio * tangent_projection, atol=2e-7 if precision == "32" else 1e-12)
+
+    if precision == "64":
+        q0.requires_grad_()
+        q1 = (q0.detach() + torch.tensor([1e-9, 2e-9, -1e-9, 0.0], device=gs.device)).requires_grad_()
+        t = torch.tensor(0.3, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+        assert torch.autograd.gradcheck(gu.slerp, (q0, q1, t), eps=1e-7, atol=1e-6)
 
 
 @pytest.mark.required

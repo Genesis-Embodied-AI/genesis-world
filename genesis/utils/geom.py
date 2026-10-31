@@ -1831,12 +1831,15 @@ def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -
     q1 = q1 / torch.linalg.vector_norm(q1, ord=2, dim=-1, keepdim=True)
     dot = (q0 * q1).sum(-1, keepdim=True)
     dot_abs = dot.abs()
+    is_linear = dot_abs > 1.0 - eps
+    # Keep the unused spherical branch away from acos(1) and division by zero, including in backward
+    spherical_dot = torch.where(is_linear, torch.zeros_like(dot_abs), dot_abs)
     # Weights '1 - t' of q0 and '+-t' of q1, signed to interpolate along the shorter arc, then 1. Once multiplied by the
     # angle between q0 and q1, a single sine evaluates the numerators and the denominator of the spherical weights.
     weights_slope = torch.where(dot < 0.0, constants.slerp_weights_slope_flipped, constants.slerp_weights_slope)
     weights_linear = torch.addcmul(constants.slerp_weights_offset, t[..., None], weights_slope)
-    weights_sin = torch.sin(weights_linear * torch.acos(dot_abs))
-    weights = torch.where(dot_abs > 1.0 - eps, weights_linear[..., :2], weights_sin[..., :2] / weights_sin[..., 2:])
+    weights_sin = torch.sin(weights_linear * torch.acos(spherical_dot))
+    weights = torch.where(is_linear, weights_linear[..., :2], weights_sin[..., :2] / weights_sin[..., 2:])
     return torch.addcmul(q0 * weights[..., :1], q1, weights[..., 1:])
 
 
