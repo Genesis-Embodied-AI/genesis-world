@@ -34,7 +34,7 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization
-from genesis.utils.array_class import ArrayItem, ConfigItem, DataKind, ScalarItem
+from genesis.utils.data import ArrayItem, ConfigItem, DataKind, ScalarItem, StaticConfig
 from genesis.utils.misc import data_to_array, tensor_to_array
 from genesis.utils.tools import Rate
 
@@ -163,14 +163,28 @@ class InfoRecord(NamedTuple):
 
 
 def _json_value(value):
-    """Return a value as JSON holds it: the name of an enum member, a native for a numpy scalar, a list for a tuple."""
-    if isinstance(value, enum.Enum):
-        return value.name
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, tuple):
-        return [_json_value(item) for item in value]
-    return value
+    """Return a value as JSON holds it.
+
+    An enum member becomes its name, a numpy scalar a native, a tuple a list and a static config an object.
+    """
+    root = [value]
+    # The slots left to convert, each converted in place before its own items are queued
+    pending = [(root, 0)]
+    while pending:
+        container, key = pending.pop()
+        item = container[key]
+        if isinstance(item, StaticConfig):
+            item = {name: config_value for name, config_value in vars(item).items() if not name.startswith("_")}
+            pending += [(item, name) for name in item]
+        elif isinstance(item, tuple):
+            item = list(item)
+            pending += [(item, i) for i in range(len(item))]
+        elif isinstance(item, enum.Enum):
+            item = item.name
+        elif isinstance(item, np.generic):
+            item = item.item()
+        container[key] = item
+    return root[0]
 
 
 def _fields_to_json(fields: list[FrameField]) -> list:
@@ -210,8 +224,7 @@ def _arrays_fields(sim: "Simulator", kinds: frozenset[DataKind], drop_unused: bo
     for item in sim.data(kinds):
         if isinstance(item, ArrayItem):
             array = data_to_array(item.array)
-            # Every unused array of the kinds a step frame holds is the placeholder of a feature switched off (see
-            # 'maybe_shape'), which a restore leaves as built (see 'check_data')
+            # An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built
             if drop_unused and not item.array.shape and not isinstance(item.array, torch.Tensor):
                 fields.append(FrameField(item.name, item.kind, (0,), array.dtype.str, offset, 0, (0,)))
                 continue
@@ -453,7 +466,7 @@ def _header(
         "dt": sim.dt,
         "layout": {key: _json_value(value) for key, value in dataclasses.asdict(layout).items()},
         "configs": {
-            item.name: {key: _json_value(value) for key, value in vars(item.config).items() if not key.startswith("_")}
+            item.name: _json_value(item.config)
             for solver in sim.active_solvers
             for item in solver.data
             if isinstance(item, ConfigItem)

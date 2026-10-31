@@ -18,6 +18,7 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
+from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -1837,7 +1838,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._restart()
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
+    def data(self) -> Iterator[DataItem | ConfigItem]:
         yield from super().data
         yield from self.collider.data
         yield from self.constraint_solver.data

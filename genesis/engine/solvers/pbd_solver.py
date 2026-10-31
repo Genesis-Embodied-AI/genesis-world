@@ -224,7 +224,7 @@ class PBDSolver(ParticleSolver):
                 entity._add_to_solver()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     @qd.kernel
     def add_uvs_and_faces(

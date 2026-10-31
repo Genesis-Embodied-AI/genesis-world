@@ -25,25 +25,8 @@ class GJK:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
-        # Resolve the 'enable_contact_patch' option in place, so later consumers (the collider's convex contact
-        # budget) read the resolved value. The contact patch (polygon clipping over the touching faces) skips
-        # perturbation whenever it ran (see multi_contact_flag). It defaults on under MuJoCo compatibility with GJK
-        # because the reference engine builds its manifolds that way inside its GJK/EPA and runs its perturbation
-        # scheme only in its legacy fallback pipeline, which the MPR compatibility pipeline mirrors. It defaults off
-        # otherwise, as the perturbation-based detection is more reliable on marginal manifolds.
+        # Resolved by the collider (see '_init_static_config')
         enable_contact_patch = rigid_solver._options.enable_contact_patch
-        if enable_contact_patch is None:
-            enable_contact_patch = (
-                rigid_solver._enable_mujoco_compatibility
-                and rigid_solver._options.use_gjk_collision
-                and rigid_solver._enable_multi_contact
-            )
-        elif enable_contact_patch:
-            if not rigid_solver._options.use_gjk_collision:
-                gs.raise_exception("'enable_contact_patch' requires 'use_gjk_collision'.")
-            if not rigid_solver._enable_multi_contact:
-                gs.raise_exception("'enable_contact_patch' requires 'enable_multi_contact'.")
-        rigid_solver._options.enable_contact_patch = enable_contact_patch
         gjk_max_iterations = 50
         epa_max_iterations = 50
         # 6 * epa_max_iterations is the maximum number of faces in the polytope.
@@ -67,68 +50,70 @@ class GJK:
 
         self.gjk_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
-        # Initialize GJK info
-        self._gjk_info = array_class.get_gjk_info(
-            max_contacts_per_pair=max_contacts_per_pair,
-            max_contact_polygon_verts=max_contact_polygon_verts,
-            gjk_max_iterations=gjk_max_iterations,
-            epa_max_iterations=epa_max_iterations,
-            # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
-            # pyramid). Also, since different backends could have different precisions (e.g. computing vector norm),
-            # we use a very small value, so that there is no discrepancy between backends.
-            FLOAT_MIN=1e-15,
-            FLOAT_MAX=1e15,
-            tolerance=1e-6,
-            collision_eps=1e-6,
-            # This value has been experimentally determined based on the examples that we currently have (e.g. pyramid,
-            # tower, ...), but it could be further tuned based on the future examples.
-            simplex_max_degeneracy_sq=1e-5**2,
-            polytope_max_faces=polytope_max_faces,
-            # This value has been experimentally determined based on the examples that we currently have (e.g. pyramid,
-            # tower, ...). We observed the error usually reaches around 5e-4, so we set the threshold to 1e-4 to be
-            # safe. However, this value could be further tuned based on the future examples.
-            polytope_max_rel_reprojection_error=1e-4,
-            polytope_max_abs_reprojection_error=1e-4,
-            # The values are matching MuJoCo for compatibility. Increasing this value could be useful for detecting
-            # contact manifolds even when the normals are not perfectly aligned, but we observed that it leads to more
-            # false positives and thus not a perfect solution for the multi-contact detection.
-            contact_face_tol=math.cos(1.6e-3),
-            contact_edge_tol=math.sin(1.6e-3),
-            # FIXME: Adjust these values based on the case study.
-            diff_contact_eps_boundary=1e-2,
-            diff_contact_eps_distance=1e-2,
-            diff_contact_eps_affine=1e-2,
-            # We apply sqrt to the 10 * EPS value because we often use the square of the normal norm as the denominator.
-            diff_contact_min_normal_norm=math.sqrt(gs.EPS * 10.0),
-            diff_contact_min_penetration=gs.EPS * 100.0,
+        float_min, float_max = 1e-15, 1e15
+        self.gjk_info = array_class.GJKInfo(
+            values=dict(
+                max_contacts_per_pair=max_contacts_per_pair,
+                max_contact_polygon_verts=max_contact_polygon_verts,
+                gjk_max_iterations=gjk_max_iterations,
+                epa_max_iterations=epa_max_iterations,
+                # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
+                # pyramid). Also, since different backends could have different precisions (e.g. computing vector norm),
+                # we use a very small value, so that there is no discrepancy between backends.
+                FLOAT_MIN=float_min,
+                FLOAT_MIN_SQ=float_min**2,
+                FLOAT_MAX=float_max,
+                FLOAT_MAX_SQ=float_max**2,
+                tolerance=1e-6,
+                collision_eps=1e-6,
+                # This value has been experimentally determined based on the examples that we currently have (e.g.
+                # pyramid, tower, ...), but it could be further tuned based on the future examples.
+                simplex_max_degeneracy_sq=1e-5**2,
+                polytope_max_faces=polytope_max_faces,
+                # This value has been experimentally determined based on the examples that we currently have (e.g.
+                # pyramid, tower, ...). We observed the error usually reaches around 5e-4, so we set the threshold to
+                # 1e-4 to be safe. However, this value could be further tuned based on the future examples.
+                polytope_max_rel_reprojection_error=1e-4,
+                polytope_max_abs_reprojection_error=1e-4,
+                # The values are matching MuJoCo for compatibility. Increasing this value could be useful for detecting
+                # contact manifolds even when the normals are not perfectly aligned, but we observed that it leads to
+                # more false positives and thus not a perfect solution for the multi-contact detection.
+                contact_face_tol=math.cos(1.6e-3),
+                contact_edge_tol=math.sin(1.6e-3),
+                # FIXME: Adjust these values based on the case study.
+                diff_contact_eps_boundary=1e-2,
+                diff_contact_eps_distance=1e-2,
+                diff_contact_eps_affine=1e-2,
+                # We apply sqrt to the 10 * EPS value because we often use the square of the normal norm as the
+                # denominator.
+                diff_contact_min_normal_norm=math.sqrt(gs.EPS * 10.0),
+                diff_contact_min_penetration=gs.EPS * 100.0,
+            )
         )
 
-        # The scratch states GJK runs on, at the smallest size until 'activate' sizes those the narrowphase uses
-        # FIXME: quadrants#856 - a kernel cannot take None for a struct argument, so every state is allocated at the
-        # smallest size first, even one the scene never runs GJK on, and 'activate' allocates the used ones again.
-        self.gjk_state = array_class.get_gjk_state_contact_only(1)
-        self.contact0_gjk_state = array_class.get_gjk_state_contact_only(1)
-        self.multicontact_gjk_state = array_class.get_gjk_state_contact_only(1)
-
-    def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
-        """Allocate the scratch states GJK runs on, for the narrowphase that runs it.
-
-        Without thread counts, the single-kernel narrowphase runs GJK on one state per environment. With them, the split
-        narrowphase runs it on one state per thread of its contact0 pass (n_contact0_threads), which detects the first
-        contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
-        """
-        if n_contact0_threads > 0:
-            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(n_contact0_threads)
-            self.multicontact_gjk_state = array_class.get_gjk_state(
-                n_multicontact_threads,
-                self._solver.rigid_config,
-                self._gjk_info,
-                self._solver.rigid_config.requires_grad,
-            )
-        else:
-            self.gjk_state = array_class.get_gjk_state(
-                self._solver._B, self._solver.rigid_config, self._gjk_info, self._solver.rigid_config.requires_grad
-            )
+        # The scratch states GJK runs on, the fields of one struct so that the collider opts each in by name and with
+        # its own sizes (see GJKScratch). A state detecting overlaps alone runs neither EPA nor differentiable contacts.
+        requires_grad = rigid_solver.rigid_config.requires_grad
+        full = dict(diff_contacts=not requires_grad)
+        scratch = array_class.GJKScratch(
+            sizes=dict(
+                polytope_verts=5 + epa_max_iterations,
+                polytope_faces=polytope_max_faces,
+                pair_contacts=max_contacts_per_pair,
+                polygon_verts=max_contact_polygon_verts,
+            ),
+            unused={
+                array_class.GJKScratch.main: full,
+                array_class.GJKScratch.contact0: {("epa", "diff_contacts"): True},
+                array_class.GJKScratch.multicontact: full,
+            },
+            requires_grad=requires_grad,
+        )
+        self.gjk_state, self.contact0_gjk_state, self.multicontact_gjk_state = (
+            scratch.main,
+            scratch.contact0,
+            scratch.multicontact,
+        )
 
 
 @qd.func

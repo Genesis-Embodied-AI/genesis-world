@@ -8,8 +8,10 @@ import torch
 import torch.nn.functional as F
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
+from genesis.utils.data import opt_in
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
 
 if TYPE_CHECKING:
@@ -550,6 +552,12 @@ class ContactDepthQuerySensorMixin:
     and need not call ``resolve_contact_depth_query`` themselves. Requires ``_shared_metadata``,
     ``_options.contact_depth_query``, and a ``_shared_context`` ``RaycastContext``.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Queried through signed distance fields unless raycast
+        if self._options.contact_depth_query != "raycast":
+            opt_in(array_class.SDFInfo)
 
     def build(self):
         super().build()

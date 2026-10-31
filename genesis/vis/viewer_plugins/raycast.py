@@ -82,7 +82,7 @@ class Raycaster:
                 if n_slots == 0:
                     continue
             bvh = get_bvh_data(n_envs_max, n_slots)
-            result = array_class.get_raycast_result(n_envs_max)
+            result = array_class.RaycastResult(sizes=dict(envs=n_envs_max))
             self.targets.append(RaycastTarget(solver, bvh.state, bvh.config, result, vfaces_mask))
 
         if not self.targets:

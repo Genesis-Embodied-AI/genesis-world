@@ -8,6 +8,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.data import is_opted_in
 
 
 if TYPE_CHECKING:
@@ -34,16 +35,12 @@ class SupportField:
     """
 
     def __init__(self, rigid_solver: "RigidSolver") -> None:
+        """Build the support tables of the geoms into the support field info, for a scene opting it in."""
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        # Allocated once, when activated or else empty when first read (see 'support_field_info')
-        self._support_field_info: array_class.SupportFieldInfo | None = None
-        self._is_active = False
-
-    def activate(self) -> None:
-        if self.is_active:
+        if not is_opted_in(array_class.SupportFieldInfo):
             return
 
         band_rows = self._support_res // 2
@@ -64,52 +61,41 @@ class SupportField:
                 tables_geom.append(geom)
             geoms_table_idx[geom.idx] = i_t
         n_support_cells = n_geom_cells * len(tables_geom)
-        # The records of the cells and the extra candidate counts are written in place as the tables are built, the
-        # extra candidates alone being collected per table, since their count is unknown beforehand
+        tables = [geom.mesh.get_support_table(self._support_res) for geom in tables_geom]
+        n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
+        self.support_field_info = array_class.SupportFieldInfo(
+            sizes=dict(
+                geoms=self.solver.n_geoms,
+                support_cells=n_support_cells,
+                support_candidates=2 * n_support_cells + n_extras,
+            ),
+            values=dict(support_res=self._support_res),
+        )
+
+        # The records of the cells and the extra candidate counts are written in place, and the extra candidates
+        # of every cell start past the records of all cells, in cell order
         records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
         support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
-        extras_vid = []
-        for i_t, geom in enumerate(tables_geom):
+        for i_t, (slots_vid, _, cells_n_extras) in enumerate(tables):
             cell_start = i_t * n_geom_cells
-
-            slots_vid, table_extras_vid, cells_n_extras = geom.mesh.get_support_table(self._support_res)
             records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
-            extras_vid.append(table_extras_vid)
             support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
-
-        # The extra candidates of every cell start past the records of all cells, in cell order
         support_list_start[0] = 2 * n_support_cells
         np.cumsum(support_list_start, out=support_list_start)
-        extras_vid = np.concatenate((np.zeros((0,), dtype=gs.np_int), *extras_vid), dtype=gs.np_int)
-
-        assert self._support_field_info is None
-        self._support_field_info = array_class.get_support_field_info(
-            self.solver.n_geoms, n_support_cells, 2 * n_support_cells + len(extras_vid), self._support_res
-        )
         _kernel_init_support(
             n_geom_cells * geoms_table_idx,
             support_list_start,
             np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
             records_vid,
-            extras_vid,
+            np.concatenate(
+                [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
+                dtype=gs.np_int,
+            ),
             self.solver.dyn_info,
-            self._support_field_info,
+            self.support_field_info,
             self.solver.rigid_config,
             n_geom_cells,
         )
-
-        self._is_active = True
-
-    @property
-    def is_active(self):
-        return self._is_active
-
-    @property
-    def support_field_info(self) -> array_class.SupportFieldInfo:
-        """Support tables of the geoms, empty if the field was never activated."""
-        if self._support_field_info is None:
-            self._support_field_info = array_class.get_support_field_info(0, 0, 0, self._support_res)
-        return self._support_field_info
 
 
 @qd.kernel

@@ -21,6 +21,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     linear_to_lower_tri,
 )
 from genesis.grad.bridge import no_grad
+from genesis.utils.data import DataItem, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
@@ -137,17 +138,7 @@ class ConstraintSolver:
         # * 1 constraint per dof frictionloss
         # * up to 6 constraints per equality (weld)
         # * 1 more constraint per dynamic constraint (a screw adds a friction row and a limit row to its 5 equality rows)
-        # When 'max_contacts' is set, it overrides the post-pruning contact budget enforced by the collider.
-        # Resolve the max_contacts option in place: from the collider's post-pruning budget when unset, else clamped
-        # to the candidate budget and written back so the collider honors the user's cap. Downstream reads the option.
-        collider_info = rigid_solver.collider.collider_info
-        if rigid_solver._options.max_contacts is None:
-            rigid_solver._options.max_contacts = collider_info.max_contacts[None]
-        else:
-            rigid_solver._options.max_contacts = min(
-                rigid_solver._options.max_contacts, collider_info.max_candidate_contacts[None]
-            )
-            collider_info.max_contacts[None] = rigid_solver._options.max_contacts
+        # The collider resolves the option 'max_contacts' (see 'max_contacts' in 'Collider._init_collision_fields')
         rows_per_contact = rigid_solver.rigid_config.rows_per_contact
         self.len_constraints = (
             rows_per_contact * rigid_solver._options.max_contacts
@@ -157,12 +148,67 @@ class ConstraintSolver:
             + self._solver._options.max_dynamic_constraints
         )
         self.len_constraints_ = max(1, self.len_constraints)
-        # Max cone rows (rows_per_contact per contact); sizes the elliptic-only previous-residual buffer to exactly
-        # the contact rows, below the full constraint count that also covers equalities, joint limits, and
-        # frictionloss.
-        self.n_cone_constraints_ = max(1, rows_per_contact * rigid_solver._options.max_contacts)
 
-        self.constraint_state = array_class.get_constraint_state(self, self._solver, self._collider)
+        solver, config = self._solver, rigid_solver.rigid_config
+        # A Jacobian row reaches the dofs of the kinematic chains of the two links it couples. Each pass of the walk
+        # moves every link one ancestor up, adding the dofs of the ancestor it passes to its chain.
+        links_n_dofs = np.array([link.n_dofs for link in solver.links], dtype=gs.np_int)
+        links_parent_idx = np.array([link.parent_idx for link in solver.links], dtype=gs.np_int)
+        links_chain_n_dofs = links_n_dofs.copy()
+        links_ancestor_idx = links_parent_idx
+        while (links_ancestor_idx >= 0).any():
+            has_ancestor = links_ancestor_idx >= 0
+            links_chain_n_dofs += np.where(has_ancestor, links_n_dofs[links_ancestor_idx], 0)
+            links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
+        # One update slot per fused update of the per-island factor, one for the whole-env factor of a single island
+        nt_vec_n_slots = config.hessian_rank_update_batch if self.sparse_solve or not config.is_single_island else 1
+        n_tile_classes = len(array_class.island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
+        is_serialized = config.para_level < gs.PARA_LEVEL.ALL
+        self.constraint_state = array_class.ConstraintState(
+            sizes=dict(
+                envs=solver._B,
+                dofs=solver.n_dofs_,
+                links=solver.n_links_,
+                trees=solver.n_trees_,
+                constraints=self.len_constraints_,
+                contacts=rigid_solver._options.max_contacts,
+                rows_per_contact=rows_per_contact,
+                nt_vec_slots=nt_vec_n_slots,
+                jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
+                noslip_lanes=32 if config.enable_cooperative_noslip else 1,
+                tile_classes=n_tile_classes,
+            ),
+            env_first=dict(
+                cooperative_rows=config.constraint_layout_batch_first,
+                jacobian_rows=config.enable_cooperative_constraint_kernels or is_serialized,
+                serial_rows=is_serialized,
+            ),
+            # The noslip columns hold the environments (see noslip_MinvJT), stored first along with the rows
+            layout={
+                array_class.ConstraintState.noslip_MinvJT: (1, 0) if config.constraint_layout_batch_first else None
+            },
+            unused=dict(
+                newton=config.solver_type != gs.constraint_solver.Newton,
+                cone_incremental=not (config.enable_elliptic_friction and config.backend == gs.cpu),
+                signorini=not config.enable_signorini_contact,
+                cone_free_reuse=not config.enable_cone_free_hessian_reuse,
+                noslip=solver._options.noslip_iterations == 0,
+                noslip_cooperative=not config.enable_cooperative_noslip,
+                hibernation=not solver._use_hibernation,
+                rcm=not config.sparse_solve,
+                island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
+                worklists=not (config.enable_tiled_island_seed and not config.is_single_island),
+                backward=not solver._requires_grad,
+            ),
+            requires_grad=solver._requires_grad,
+            # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
+            # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
+            # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no
+            # kernel may access both, the factor living in forward_dynamics.py alone.
+            _binds={array_class.ConstraintState.nt_H: solver.rigid_info.mass_mat_tiled_scratch}
+            if config.enable_register_tiled_mass
+            else None,
+        )
         self.constraint_state.qd_n_equalities.from_numpy(
             np.full((self._solver._B,), self._solver.n_equalities, dtype=gs.np_int)
         )
@@ -232,9 +278,9 @@ class ConstraintSolver:
                     link_slice.from_numpy(link_slice_np)
 
     @property
-    def data(self) -> Iterator[array_class.DataItem]:
+    def data(self) -> Iterator[DataItem]:
         """Yield every array of the constraint solver, tagged by kind (see 'Solver.data')."""
-        yield from array_class.iter_data(self, "constraint_state")
+        yield from iter_data(self, "constraint_state")
 
     def reset(self, envs_idx=None):
         self._eq_const_info_cache.clear()

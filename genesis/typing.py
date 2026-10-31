@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     NonNegativeFloat = ValidFloat
     PositiveFloat = ValidFloat
     StrictInt = int | np.integer
+    StrictBool = bool | np.bool_
     NonNegativeInt = StrictInt
     PositiveInt = StrictInt
     NumericType = int | float | bool | np.number
@@ -140,6 +141,9 @@ else:
     NonNegativeFloat = Annotated[float, Field(ge=0, allow_inf_nan=False, strict=False)]
     PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False, strict=False)]
     StrictInt = Annotated[int, BeforeValidator(_coerce_int), Field(strict=True)]
+    StrictBool = Annotated[
+        bool, BeforeValidator(lambda v: bool(v) if isinstance(v, np.bool_) else v), Field(strict=True)
+    ]
     NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
     PositiveInt = Annotated[StrictInt, Field(gt=0)]
     NumericType = int | float | bool

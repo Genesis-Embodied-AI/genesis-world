@@ -46,6 +46,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider import gjk_support, support_field
+from genesis.utils.data import namespace, opt_in
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -777,6 +778,9 @@ def test_split_vs_monolithic_narrowphase(
         ),
         vis_mode="collision",
     )
+    # The monolithic arm runs GJK on one state per environment, which the split arm leaves unused
+    with namespace(scene._namespace):
+        opt_in(array_class.GJKScratch.main, envs=2)
     # Batched build: the split arm packs its work queue across environments through one global counter, a structure
     # a single environment cannot exercise.
     scene.build(n_envs=2)
@@ -814,9 +818,8 @@ def test_split_vs_monolithic_narrowphase(
         scene.step()
         contacts_split = collider.get_contacts(as_tensor=False, to_torch=False)
 
-        # Run with monolithic narrowphase, which runs GJK on the per-env state the split arm leaves unallocated
+        # Run with monolithic narrowphase
         monkeypatch.setattr(collider, "_use_split_narrowphase", False)
-        collider.gjk.activate()
         capsule_a.set_qpos((*pos_a, *quat_a))
         capsule_b.set_qpos((*pos_b, *quat_b))
         box.set_pos(pos_box)
@@ -1166,6 +1169,9 @@ def test_mesh_support_exactness(show_viewer, tol):
         )
         for i_e, mesh in enumerate((*meshes, meshes[-1]))
     ]
+    # The support queries run on the GJK state of the monolithic narrowphase, which the split one leaves unused
+    with namespace(scene._namespace):
+        opt_in(array_class.GJKScratch.main, envs=1)
     scene.build()
 
     @qd.kernel

@@ -21,6 +21,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -427,14 +428,14 @@ class KinematicSolver(Solver):
         self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
-        yield from array_class.iter_data(self, "rigid_config")
-        yield from array_class.iter_data(self.data_manager, "errno", array_class.DataKind.STATE)
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        yield from iter_data(self, "rigid_config")
+        yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         for name in ("rigid_info", "dyn_info", "dyn_state"):
-            yield from array_class.iter_data(self.data_manager, name)
+            yield from iter_data(self.data_manager, name)
         # The flags describe the derived poses and velocities, so they travel with them
-        yield from array_class.iter_data(self, "_is_forward_pos_updated", array_class.DataKind.DERIVED)
-        yield from array_class.iter_data(self, "_is_forward_vel_updated", array_class.DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -918,7 +919,7 @@ class KinematicSolver(Solver):
 
     def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
-        if array_class.DataKind.DERIVED not in checkpoint.kinds:
+        if DataKind.DERIVED not in checkpoint.kinds:
             # Without the derived arrays, the next step recomputes them from the state. A restored record runs forward
             # kinematics at once, since the scene may be drawn from it, while the replay of a step restoring a boundary
             # checkpoint recomputes them with the same kernels as its forward pass.
@@ -1466,7 +1467,8 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_state, ik_fk, targets = self.data_manager.ik_scratch
+        ik_scratch = self.data_manager.ik_scratch
+        ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

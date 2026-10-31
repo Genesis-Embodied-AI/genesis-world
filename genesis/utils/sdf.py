@@ -7,6 +7,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.data import is_opted_in
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
@@ -16,10 +17,15 @@ class SDF:
     """Build the signed distance field (SDF) grids of the rigid geoms once, at their exact size.
 
     The geoms of one trimesh share one grid whenever their grids have the same resolution, cell size and gradient flag
-    (see 'Mesh.tmesh_hash'), as the instances of an asset do.
+    (see 'Mesh.tmesh_hash'), as the instances of an asset do. The grids are loaded and written into the SDF info at
+    construction.
     """
 
     def __init__(self, rigid_solver):
+        # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in
+        if not is_opted_in(array_class.SDFInfo):
+            return
+
         geoms = rigid_solver.geoms
         geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
         grids_idx_by_key: dict[tuple[str, "SignedDistanceFieldDescription"], int] = {}
@@ -36,38 +42,38 @@ class SDF:
         grids_n_cells = grids_n_nodes.prod(axis=-1, dtype=gs.np_int)
         grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         grids_n_coarse_cells = grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
-        self.sdf_info = array_class.get_sdf_info(len(geoms), int(grids_n_cells.sum()), int(grids_n_coarse_cells.sum()))
-        if not geoms:
-            return
-
-        # Coarse min-grid companion of each SDF: block minima over the grid nodes, with blocks overlapping by one node
-        # so that every interpolation cell's 8 nodes lie inside the block of its coarse cell. Derived from the loaded
-        # grids, so the preprocessing cache is untouched.
-        grids_sdf_coarse_val = []
-        for sdf_grid, coarse_res in zip(grids_sdf, grids_sdf_coarse_res):
-            coarse_val = sdf_grid.value
-            for axis in range(3):
-                windows = np.minimum(
-                    4 * np.arange(coarse_res[axis])[:, None] + np.arange(5), coarse_val.shape[axis] - 1
-                )
-                coarse_val = np.take(coarse_val, windows, axis=axis).min(axis=axis + 1)
-            grids_sdf_coarse_val.append(coarse_val.reshape((-1,)))
-        geoms_sdf = [grids_sdf[i_grid] for i_grid in geoms_grid_idx]
-        sdf_kernel_init_geom_fields(
-            (np.cumsum(grids_n_cells, dtype=gs.np_int) - grids_n_cells)[geoms_grid_idx],
-            (np.cumsum(grids_n_coarse_cells, dtype=gs.np_int) - grids_n_coarse_cells)[geoms_grid_idx],
-            np.array([sdf_grid.T_mesh_to_sdf for sdf_grid in geoms_sdf], dtype=gs.np_float),
-            np.array([geom.desc.sdf.n_nodes for geom in geoms], dtype=gs.np_int),
-            np.concatenate([sdf_grid.value.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_float),
-            np.concatenate([sdf_grid.grad.reshape((-1, 3)) for sdf_grid in grids_sdf], dtype=gs.np_float),
-            np.array([sdf_grid.max_value for sdf_grid in geoms_sdf], dtype=gs.np_float),
-            np.array([geom.desc.sdf.cell_size for geom in geoms], dtype=gs.np_float),
-            np.concatenate([sdf_grid.closest_verts_idx.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_int),
-            grids_sdf_coarse_res[geoms_grid_idx],
-            np.concatenate(grids_sdf_coarse_val, dtype=gs.np_float),
-            self.sdf_info,
-            rigid_solver.rigid_config,
+        self.sdf_info = array_class.SDFInfo(
+            sizes=dict(geoms=len(geoms), sdf_cells=grids_n_cells.sum(), sdf_coarse_cells=grids_n_coarse_cells.sum())
         )
+        if geoms:
+            # Coarse min-grid companion of each SDF: block minima over the grid nodes, with blocks overlapping by one
+            # node so that every interpolation cell's 8 nodes lie inside the block of its coarse cell. Derived from the
+            # loaded grids, so the preprocessing cache is untouched.
+            grids_sdf_coarse_val = []
+            for sdf_grid, coarse_res in zip(grids_sdf, grids_sdf_coarse_res):
+                coarse_val = sdf_grid.value
+                for axis in range(3):
+                    windows = np.minimum(
+                        4 * np.arange(coarse_res[axis])[:, None] + np.arange(5), coarse_val.shape[axis] - 1
+                    )
+                    coarse_val = np.take(coarse_val, windows, axis=axis).min(axis=axis + 1)
+                grids_sdf_coarse_val.append(coarse_val.reshape((-1,)))
+            geoms_sdf = [grids_sdf[i_grid] for i_grid in geoms_grid_idx]
+            sdf_kernel_init_geom_fields(
+                (np.cumsum(grids_n_cells, dtype=gs.np_int) - grids_n_cells)[geoms_grid_idx],
+                (np.cumsum(grids_n_coarse_cells, dtype=gs.np_int) - grids_n_coarse_cells)[geoms_grid_idx],
+                np.array([sdf_grid.T_mesh_to_sdf for sdf_grid in geoms_sdf], dtype=gs.np_float),
+                np.array([geom.desc.sdf.n_nodes for geom in geoms], dtype=gs.np_int),
+                np.concatenate([sdf_grid.value.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_float),
+                np.concatenate([sdf_grid.grad.reshape((-1, 3)) for sdf_grid in grids_sdf], dtype=gs.np_float),
+                np.array([sdf_grid.max_value for sdf_grid in geoms_sdf], dtype=gs.np_float),
+                np.array([geom.desc.sdf.cell_size for geom in geoms], dtype=gs.np_float),
+                np.concatenate([sdf_grid.closest_verts_idx.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_int),
+                grids_sdf_coarse_res[geoms_grid_idx],
+                np.concatenate(grids_sdf_coarse_val, dtype=gs.np_float),
+                self.sdf_info,
+                rigid_solver.rigid_config,
+            )
 
 
 @qd.kernel

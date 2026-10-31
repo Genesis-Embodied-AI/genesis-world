@@ -1,3 +1,4 @@
+import argparse
 import os
 import pathlib
 import signal
@@ -6,10 +7,13 @@ import sys
 import time
 
 import numpy as np
+
 import pytest
+
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import V
 
 RET_SUCCESS = 42
 RET_SKIP = 43
@@ -30,6 +34,10 @@ MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.s
 def test_switching(backend, order):
     # Each cycle rebuilds a box-on-plane scene and verifies the quadrants type wrappers re-resolve for the
     # newly selected backend.
+    @qd.kernel
+    def write_ndarray(x: qd.types.ndarray()):
+        x[0] = 0
+
     for cycle_idx, use_nd in enumerate(order):
         old_val = os.environ.get("GS_ENABLE_NDARRAY")
         os.environ["GS_ENABLE_NDARRAY"] = "1" if use_nd else "0"
@@ -39,20 +47,21 @@ def test_switching(backend, order):
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
 
-            from genesis.utils.array_class import V, V_VEC, _tensor_backend
-
-            expected_backend = qd.Backend.NDARRAY if use_nd else qd.Backend.FIELD
-            assert _tensor_backend() == expected_backend, (
-                f"Cycle {cycle_idx}: expected _tensor_backend()={expected_backend}, got {_tensor_backend()}"
-            )
-
+            # A kernel taking an ndarray accepts the tensor on the ndarray backend alone
             t = V(qd.i32, (4,))
+            if use_nd:
+                write_ndarray(t)
+            else:
+                with pytest.raises(qd.QuadrantsRuntimeTypeError):
+                    write_ndarray(t)
             t.fill(cycle_idx + 1)
             arr = t.to_numpy()
             np.testing.assert_array_equal(arr, np.full(4, cycle_idx + 1))
 
-            v = V_VEC(3, qd.f32, (2,))
-            assert v.to_numpy().shape == (2, 3), f"Cycle {cycle_idx}: unexpected V_VEC shape {v.to_numpy().shape}"
+            v = V(qd.types.vector(3, qd.f32), (2,))
+            assert v.to_numpy().shape == (2, 3), (
+                f"Cycle {cycle_idx}: unexpected vector tensor shape {v.to_numpy().shape}"
+            )
 
             scene = gs.Scene(show_viewer=False)
             scene.add_entity(gs.morphs.Plane())
@@ -76,8 +85,6 @@ def test_switching(backend, order):
 
 def _basic_sim_child(args: list[str]):
     """Child process: init genesis, build a scene, step, destroy."""
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", type=str, choices=["cpu", "gpu"], default="cpu")
     args = parser.parse_args(args)
