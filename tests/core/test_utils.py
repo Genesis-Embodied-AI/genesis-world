@@ -331,6 +331,36 @@ def test_geom_tensor_identity(batch_shape):
 
 
 @pytest.mark.required
+def test_direction_quaternion(precision):
+    directions = np.array(
+        [[-1e-8, -2e-8, -1.0], [-1e-8, 2e-8, -1.0], [1e-8, -2e-8, -1.0], [1e-8, 2e-8, -1.0]], dtype=gs.np_float
+    )
+    directions = np.array([1e-3, 1.0, 1e5], dtype=gs.np_float)[:, None, None] * directions[None, ...]
+    for direction in (directions, directions[0, 0]):
+        unit = direction / np.linalg.norm(direction, axis=-1, keepdims=True)
+        axis = np.cross([0.0, 0.0, 1.0], unit)
+        transverse_norm = np.linalg.norm(axis, axis=-1, keepdims=True)
+        angle = np.arctan2(transverse_norm, unit[..., 2:])
+        rotation_true = Rotation.from_rotvec((axis / transverse_norm * angle).reshape((-1, 3))).as_matrix()
+        quaternion = gu.z_to_quat(direction)
+        rotation = Rotation.from_quat(quaternion.reshape((-1, 4)), scalar_first=True)
+        assert_allclose(rotation.as_matrix(), rotation_true, atol=1e-6 if precision == "32" else 1e-12)
+        assert_allclose(
+            rotation.apply([0.0, 0.0, 1.0]), unit.reshape((-1, 3)), atol=1e-6 if precision == "32" else 1e-12
+        )
+        assert_allclose(np.linalg.norm(quaternion, axis=-1), 1.0, atol=1e-6 if precision == "32" else 1e-12)
+
+    directions = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
+    out = np.full((4, 4), np.nan)
+    assert gu.z_to_quat(directions, out=out) is out
+    is_nonzero = np.linalg.norm(directions, axis=-1) > gs.EPS
+    assert_allclose(Rotation.from_quat(out[~is_nonzero], scalar_first=True).as_rotvec(), 0.0, atol=gs.EPS)
+    rotated = Rotation.from_quat(out[is_nonzero], scalar_first=True).apply([0.0, 0.0, 1.0])
+    expected = directions[is_nonzero] / np.linalg.norm(directions[is_nonzero], axis=-1, keepdims=True)
+    assert_allclose(rotated, expected, atol=1e-12)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_slerp(batch_shape, tol):
     INTERP_RATIO = 0.7

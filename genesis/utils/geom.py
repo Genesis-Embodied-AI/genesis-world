@@ -2205,8 +2205,7 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         out_ = out
 
     v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*v_a.shape[:-1], 1)))
-    v_a = v_a / v_a_norm
-    v_x, v_y, v_z = v_a[..., 0], v_a[..., 1], v_a[..., 2]
+    v_a = v_a / np.maximum(v_a_norm, gs.EPS)
 
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
@@ -2214,43 +2213,22 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
 
         if v_a_norm[i] < gs.EPS:
             quat[:] = 1.0, 0.0, 0.0, 0.0
-        elif v_z > -1.0 + gs.EPS:
+        elif v_z >= 0.0:
             s = np.sqrt(2.0 * (1.0 + v_z))
-            s_inv = 1.0 / s
-            quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
+            quat[:] = 0.5 * s, -v_y / s, v_x / s, 0.0
         else:
-            eps_thr = np.sqrt(gs.EPS)
-            eps_x = abs(v_x) < gs.EPS
-            eps_y = abs(v_y) < gs.EPS
-            if not eps_y:
-                ratio = v_x / v_y
-                if eps_x:
-                    esp_ratio = abs(ratio) < eps_thr
-            elif eps_y and not eps_x:
-                ratio = v_y / v_x
-                esp_ratio = abs(ratio) < eps_thr
-            w_2 = 0.5 * (1.0 + max(v_z, -1.0))
-            quat[0] = np.sqrt(w_2)
-            if eps_x and eps_y:
-                # Both q_x and q_y would do fine. Picking q_y arbitrarily.
-                quat[1] = 0.0
-                quat[2] = 1.0
-            elif esp_ratio:
-                coef_abs = np.sqrt(1.0 - w_2) * (1.0 - 0.5 * ratio**2)
-                if eps_x:
-                    quat[1] = -np.sign(v_y) * coef_abs
-                    quat[2] = -quat[1] * ratio
-                else:
-                    quat[2] = np.sign(v_x) * coef_abs
-                    quat[1] = -quat[2] * ratio
+            # Near -z, 1 + v_z loses the small rotation component to cancellation. Recover cos(theta/2)
+            # from the transverse direction instead, keeping both axis signs in every quadrant.
+            transverse_norm = np.hypot(v_x, v_y)
+            if transverse_norm > 0.0:
+                sin_half_angle = np.sqrt(0.5 * (1.0 - v_z))
+                quat[0] = transverse_norm / (2.0 * sin_half_angle)
+                quat[1] = -v_y / transverse_norm * sin_half_angle
+                quat[2] = v_x / transverse_norm * sin_half_angle
+                quat[3] = 0.0
             else:
-                q_x_abs = np.sqrt((1.0 - w_2) / (1.0 + ratio**2))
-                quat[1] = -np.sign(v_y) * q_x_abs
-                quat[2] = +np.sign(v_x) * q_x_abs * ratio
-            quat[3] = 0.0
-
-            # First order quaternion normalization is accurate enough
-            quat *= 0.5 * (3.0 - np.sum(np.square(quat), -1))
+                # The exact antipodal direction has no unique rotation axis. Pick y
+                quat[:] = 0.0, 0.0, 1.0, 0.0
 
     return out_
 
