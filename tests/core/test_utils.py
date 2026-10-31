@@ -229,6 +229,48 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("batch_shape", [(), (2, 3)])
+def test_homogeneous_transforms(batch_shape):
+    for convert in (lambda x: x, partial(torch.as_tensor, dtype=gs.tc_float, device=gs.device)):
+        translation = convert(np.broadcast_to([1.0, 2.0, 3.0], (*batch_shape, 3)).copy())
+        rotation = convert(np.broadcast_to(np.eye(3), (*batch_shape, 3, 3)).copy())
+        quaternion = gu.xyz_to_quat(convert(np.zeros((*batch_shape, 3))))
+        rotation_true = np.broadcast_to(np.eye(4), (*batch_shape, 4, 4)).copy()
+        transform_true = rotation_true.copy()
+        transform_true[..., :3, 3] = [1.0, 2.0, 3.0]
+        for func, args, transform in (
+            (gu.trans_R_to_T, (translation, rotation), transform_true),
+            (gu.R_to_T, (rotation,), rotation_true),
+            (gu.trans_to_T, (translation,), transform_true),
+            (gu.trans_quat_to_T, (translation, quaternion), transform_true),
+            (partial(gu.trans_quat_to_T, quat=quaternion), (), rotation_true),
+            (partial(gu.trans_quat_to_T, trans=translation), (), transform_true),
+        ):
+            for out in (None, convert(np.full((*batch_shape, 4, 4), np.nan))):
+                result = func(*args, out=out)
+                if out is not None:
+                    assert result is out
+                assert_equal(result, transform)
+
+        out = convert(transform_true.copy())
+        assert gu.trans_R_to_T(out[..., :3, 3], out[..., :3, :3], out=out) is out
+        assert_equal(out, transform_true)
+
+    out = np.zeros((*batch_shape, 4, 4))
+    out[..., 0, :] = [math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)]
+    translation = np.broadcast_to([1.0, 2.0, 3.0], (*batch_shape, 3)).copy()
+    transform_true = np.broadcast_to(np.eye(4), (*batch_shape, 4, 4)).copy()
+    transform_true[..., :3, :3] = [
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    transform_true[..., :3, 3] = translation
+    assert gu.trans_quat_to_T(translation, out[..., 0, :], out=out) is out
+    assert_allclose(out, transform_true, atol=1e-12)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_geom_quadrants_inverse(batch_shape):
     import quadrants as qd
