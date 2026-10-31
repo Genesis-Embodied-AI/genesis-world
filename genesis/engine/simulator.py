@@ -10,8 +10,8 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import DataItem, DataKind, ErrorCode, iter_data
-from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
+from genesis.utils.array_class import ArrayItem, DataItem, DataKind, ErrorCode, iter_data
+from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
@@ -26,7 +26,7 @@ from .solvers import (
     SFSolver,
     SPHSolver,
 )
-from .solvers.base_solver import GravityMixin, TimeBasedMixin, merge_errno
+from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -34,8 +34,6 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
-
-    from .solvers.base_solver import Solver
 
 
 # The kinds of the state a step or a substep starts from, from which its backward pass replays it
@@ -288,6 +286,18 @@ class Simulator(RBC):
 
     def destroy(self):
         self._sensor_manager.destroy()
+
+        # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it.
+        for solver in self._active_solvers:
+            if type(solver).data is not Solver.data:
+                arrays = [
+                    item.array
+                    for item in solver.data
+                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
+                ]
+                for array in arrays:
+                    qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):

@@ -9,6 +9,7 @@ import numbers
 import os
 import random
 import sys
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
@@ -27,6 +28,8 @@ import pyglet
 import quadrants as qd
 from quadrants.lang import kernel_impl
 from quadrants.lang._fast_caching import args_hasher, src_hasher
+from quadrants.lang._perf_dispatch import PerformanceDispatcher
+from quadrants.lang._template_mapper import TemplateMapper
 from quadrants.lang.kernel import Kernel
 from quadrants.types.enums import AutodiffMode
 
@@ -813,6 +816,18 @@ def indices_to_mask(
     return tuple(mask)
 
 
+def _reset_ndarray_with_views(ndarray):
+    """Drop the views 'qd_to_torch' and 'qd_to_numpy' cached on an ndarray, then reset it.
+
+    A view of an ndarray holds the ndarray through its DLPack capsule, which the garbage collector cannot see, so the
+    cached views would keep the ndarray alive for good. This replaces the reset of an ndarray caching views, which
+    'qd.reset' runs on every ndarray left and 'qd_destroy_data' on its own.
+    """
+    for name in ("_reset", "_tc", "_T_tc", "_np", "_T_np"):
+        vars(ndarray).pop(name, None)
+    ndarray._reset()
+
+
 def _maybe_transpose(tc, value, transpose):
     if not transpose or len(value.shape) <= 1:
         return tc
@@ -897,6 +912,8 @@ def qd_to_torch(
             else:
                 value._tc = tc
                 value._T_tc = _maybe_transpose(tc, value, True)
+                if isinstance(value, qd.Ndarray):
+                    value._reset = functools.partial(_reset_ndarray_with_views, value)
                 tensor = value._T_tc if transpose else value._tc
                 is_copy = False
 
@@ -966,6 +983,8 @@ def qd_to_numpy(
             else:
                 value._np = tc.numpy()
                 value._T_np = _maybe_transpose(tc, value, True).numpy()
+                if isinstance(value, qd.Ndarray):
+                    value._reset = functools.partial(_reset_ndarray_with_views, value)
                 array = value._T_np if transpose else value._np
                 is_copy = False
 
@@ -973,6 +992,19 @@ def qd_to_numpy(
         array = array.copy()
 
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
+
+
+def qd_destroy_data(value: qd.Tensor | qd.Field | qd.Ndarray) -> None:
+    """Free the memory of quadrants data right away, whatever still references it.
+
+    An ndarray cannot be used afterward, and every view of it, torch or numpy, points to freed memory. A field is left
+    as is, its memory belonging to the program, which 'qd.reset' frees.
+    """
+    if isinstance(value, qd.Tensor):
+        value = value._unwrap()
+    if isinstance(value, qd.Ndarray):
+        qd.lang.impl.get_runtime().prog.delete_ndarray(value.arr)
+        value._reset()
 
 
 # FIXME: quadrants#882 - the fastcache key of a torch tensor omits whether it tracks gradients, on which the argument
@@ -1018,6 +1050,39 @@ def _try_load_fastcache_by_autodiff_mode(kernel, args, key):
 
 kernel_impl._kernel_impl = _kernel_impl_with_adjoint_callable
 Kernel._try_load_fastcache = _try_load_fastcache_by_autodiff_mode
+
+# FIXME: quadrants#1037 - a kernel keeps the template arguments of every call across 'qd.reset', fields included, so
+# every scene outlives 'gs.destroy'. The mapper is rebuilt on reset, along with the data keyed by its instance ids.
+_kernel_reset = Kernel.reset
+
+
+def _kernel_reset_with_template_args(kernel):
+    _kernel_reset(kernel)
+    # The kernel constructor runs the reset before creating these containers, hence fresh ones
+    kernel.mapper = TemplateMapper(kernel.arg_metas, kernel.template_slot_locations)
+    kernel.used_py_dataclass_parameters_by_key_enforcing = {}
+    kernel._struct_ndarray_launch_info_by_key = {}
+    kernel._struct_primitive_launch_info_by_key = {}
+
+
+# FIXME: quadrants#1038 - a performance dispatcher keeps the arguments of its last call for the lifetime of the process,
+# so the last scene outlives 'gs.destroy'. They are released on reset, which only costs the next call its shortcut.
+_perf_dispatcher_init = PerformanceDispatcher.__init__
+
+
+def _release_dispatcher_args(dispatcher_ref):
+    dispatcher = dispatcher_ref()
+    if dispatcher is not None:
+        dispatcher._cached_args = dispatcher._cached_kwargs = dispatcher._cached_impl = None
+
+
+def _perf_dispatcher_init_released_on_reset(dispatcher, *args, **kwargs):
+    _perf_dispatcher_init(dispatcher, *args, **kwargs)
+    qd.lang.impl.on_reset(functools.partial(_release_dispatcher_args, weakref.ref(dispatcher)))
+
+
+Kernel.reset = _kernel_reset_with_template_args
+PerformanceDispatcher.__init__ = _perf_dispatcher_init_released_on_reset
 
 
 def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:

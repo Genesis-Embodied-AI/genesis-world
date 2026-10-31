@@ -1,12 +1,15 @@
+import gc
 import os
 import pathlib
 import signal
 import subprocess
 import sys
 import time
+import weakref
 
 import numpy as np
 import pytest
+
 import quadrants as qd
 
 import genesis as gs
@@ -39,7 +42,7 @@ def test_switching(backend, order):
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
 
-            from genesis.utils.array_class import V, V_VEC, _tensor_backend
+            from genesis.utils.array_class import V, V_VEC, ArrayItem, _tensor_backend
 
             expected_backend = qd.Backend.NDARRAY if use_nd else qd.Backend.FIELD
             assert _tensor_backend() == expected_backend, (
@@ -66,12 +69,26 @@ def test_switching(backend, order):
             for _ in range(10):
                 scene.step()
 
+            rigid_solver = scene.sim.rigid_solver
+            data_refs = {
+                item.name: weakref.ref(item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array)
+                for item in rigid_solver.data
+                if isinstance(item, ArrayItem)
+            }
+            data_refs["constraint_state"] = weakref.ref(rigid_solver.constraint_solver.constraint_state)
+            del rigid_solver
+
         finally:
             gs.destroy()
             if old_val is None:
                 os.environ.pop("GS_ENABLE_NDARRAY", None)
             else:
                 os.environ["GS_ENABLE_NDARRAY"] = old_val
+
+        # Destroying Genesis releases the data of its scenes, which a process running scenes in turn relies on
+        gc.collect()
+        data_names = [name for name, ref in data_refs.items() if ref() is not None]
+        assert not data_names, f"Cycle {cycle_idx}: the data of the scene outlives Genesis: {data_names}"
 
 
 def _basic_sim_child(args: list[str]):
