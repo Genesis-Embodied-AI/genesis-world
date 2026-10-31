@@ -2204,18 +2204,27 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         assert out.shape == (*v_a.shape[:-1], 4)
         out_ = out
 
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*v_a.shape[:-1], 1)))
-    v_a = v_a / np.maximum(v_a_norm, gs.EPS)
+    # Inputs can share storage with output entries written before later vectors are read
+    v_a = v_a.copy()
 
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
         quat = out_[i]
 
-        if not np.isfinite(v_a_norm[i]):
+        if not (np.isfinite(v_x) and np.isfinite(v_y) and np.isfinite(v_z)):
             quat[:] = np.nan
-        elif v_a_norm[i] < gs.EPS:
+            continue
+
+        # Finite directions can overflow a squared norm. Keep the zero threshold in scaled coordinates
+        scale = max(abs(v_x), abs(v_y), abs(v_z), gs.EPS)
+        v_x, v_y, v_z = v_x / scale, v_y / scale, v_z / scale
+        scaled_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if scaled_norm < gs.EPS / scale:
             quat[:] = 1.0, 0.0, 0.0, 0.0
-        elif v_z >= 0.0:
+            continue
+
+        v_x, v_y, v_z = v_x / scaled_norm, v_y / scaled_norm, v_z / scaled_norm
+        if v_z >= 0.0:
             s = np.sqrt(2.0 * (1.0 + v_z))
             quat[:] = 0.5 * s, -v_y / s, v_x / s, 0.0
         else:

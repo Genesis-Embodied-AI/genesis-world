@@ -331,9 +331,17 @@ def test_geom_tensor_identity(batch_shape):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["32", "64"])
 def test_direction_quaternion(precision):
+    tol = 1e-6 if precision == "32" else 1e-12
     directions = np.array(
-        [[-1e-8, -2e-8, -1.0], [-1e-8, 2e-8, -1.0], [1e-8, -2e-8, -1.0], [1e-8, 2e-8, -1.0]], dtype=gs.np_float
+        [
+            [-1e-8, -2e-8, -1.0],
+            [-1e-8, 2e-8, -1.0],
+            [1e-8, -2e-8, -1.0],
+            [1e-8, 2e-8, -1.0],
+        ],
+        dtype=gs.np_float,
     )
     directions = np.array([1e-3, 1.0, 1e5], dtype=gs.np_float)[:, None, None] * directions[None, ...]
     for direction in (directions, directions[0, 0]):
@@ -344,21 +352,77 @@ def test_direction_quaternion(precision):
         rotation_true = Rotation.from_rotvec((axis / transverse_norm * angle).reshape((-1, 3))).as_matrix()
         quaternion = gu.z_to_quat(direction)
         rotation = Rotation.from_quat(quaternion.reshape((-1, 4)), scalar_first=True)
-        assert_allclose(rotation.as_matrix(), rotation_true, atol=1e-6 if precision == "32" else 1e-12)
-        assert_allclose(
-            rotation.apply([0.0, 0.0, 1.0]), unit.reshape((-1, 3)), atol=1e-6 if precision == "32" else 1e-12
-        )
-        assert_allclose(np.linalg.norm(quaternion, axis=-1), 1.0, atol=1e-6 if precision == "32" else 1e-12)
+        assert_allclose(rotation.as_matrix(), rotation_true, atol=tol)
+        assert_allclose(rotation.apply([0.0, 0.0, 1.0]), unit.reshape((-1, 3)), atol=tol)
+        assert_allclose(np.linalg.norm(quaternion, axis=-1), 1.0, atol=tol)
 
-    directions = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
-    out = np.full((4, 4), np.nan)
+    directions = np.array(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+        ],
+        dtype=gs.np_float,
+    )
+    out = np.full((4, 4), np.nan, dtype=gs.np_float)
     assert gu.z_to_quat(directions, out=out) is out
     assert_equal(out[1], [0.0, 0.0, 1.0, 0.0])
     is_nonzero = np.linalg.norm(directions, axis=-1) > gs.EPS
     assert_allclose(Rotation.from_quat(out[~is_nonzero], scalar_first=True).as_rotvec(), 0.0, atol=gs.EPS)
     rotated = Rotation.from_quat(out[is_nonzero], scalar_first=True).apply([0.0, 0.0, 1.0])
     expected = directions[is_nonzero] / np.linalg.norm(directions[is_nonzero], axis=-1, keepdims=True)
-    assert_allclose(rotated, expected, atol=1e-12)
+    assert_allclose(rotated, expected, atol=tol)
+
+    directions = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1e-8, -2e-8, -1.0],
+        ],
+        dtype=gs.np_float,
+    )
+    quaternion_true = gu.z_to_quat(directions)
+    for scale in (1.0, 1e20 if precision == "32" else 1e200, np.finfo(gs.np_float).max):
+        scaled_directions = scale * directions
+        assert_allclose(gu.z_to_quat(scaled_directions), quaternion_true, atol=tol)
+        for direction, quaternion in zip(scaled_directions, quaternion_true):
+            assert_allclose(gu.z_to_quat(direction), quaternion, atol=tol)
+        out = np.empty_like(quaternion_true)
+        assert gu.z_to_quat(scaled_directions, out=out) is out
+        assert_allclose(out, quaternion_true, atol=tol)
+
+    directions = gs.EPS * np.array(
+        [
+            [0.5, 0.5, 0.0],
+            [0.75, 0.75, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        dtype=gs.np_float,
+    )
+    quaternion_true = [
+        [1.0, 0.0, 0.0, 0.0],
+        [math.sqrt(0.5), -0.5, 0.5, 0.0],
+        [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+    assert_allclose(gu.z_to_quat(directions), quaternion_true, atol=tol)
+
+    out = np.zeros((2, 4), dtype=gs.np_float)
+    directions = out.ravel()[:6].reshape((2, 3))
+    directions[:] = [
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, -1.0],
+    ]
+    quaternion_true = gu.z_to_quat(directions.copy())
+    assert gu.z_to_quat(directions, out=out) is out
+    assert_allclose(out, quaternion_true, atol=tol)
 
     for value in (np.nan, np.inf, -np.inf):
         directions = np.array(
@@ -370,10 +434,10 @@ def test_direction_quaternion(precision):
             dtype=gs.np_float,
         )
         for direction in (*directions, directions):
-            assert_equal(np.isfinite(gu.z_to_quat(direction)).all(axis=-1), False)
+            assert_equal(np.isnan(gu.z_to_quat(direction)).all(axis=-1), True)
         out = np.zeros((3, 4), dtype=gs.np_float)
         assert gu.z_to_quat(directions, out=out) is out
-        assert_equal(np.isfinite(out).all(axis=-1), False)
+        assert_equal(np.isnan(out).all(axis=-1), True)
 
 
 @pytest.mark.required
