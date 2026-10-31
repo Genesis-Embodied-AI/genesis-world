@@ -528,12 +528,6 @@ class MPMSolver(ParticleSolver):
                 "(FEMOptions(use_implicit_solver=True)), or LegacyCouplerOptions(fem_mpm=False)."
             )
         if self._requires_grad:
-            for material in self._materials:
-                if isinstance(material, (MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
-                    gs.raise_exception(
-                        "Differentiable simulation with the implicit MPM solver does not support the plasticity of "
-                        f"the material {type(material).__name__} yet."
-                    )
             for force_field in self._ffs:
                 if not force_field.differentiable:
                     gs.raise_exception(
@@ -822,7 +816,7 @@ class MPMSolver(ParticleSolver):
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
         newton_solver = self._sim.newton_solver
-        kernel_adjoint_g2p(self.particles, grid, newton, self._mpm_params, f)
+        kernel_adjoint_g2p(self.particles, self.particles_info, self._mpm_materials, grid, newton, self._mpm_params, f)
         self._assemble(f, is_exact=is_exact)
         kernel_adjoint_rhs(grid, newton, linear)
         newton_solver.stage_adjoint(f)
@@ -1854,6 +1848,8 @@ def kernel_finalize(
 @qd.kernel
 def kernel_adjoint_g2p(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     params: qd.template(),
@@ -1862,7 +1858,7 @@ def kernel_adjoint_g2p(
     """The adjoint of u* into `newton.du` and the direct terms of the adjoint of frame f (see mpm_adjoint_func)."""
     dt = params.substep_dt[()]
     mpm_adjoint_func.func_adjoint_reset_u_bar(grid, newton)
-    mpm_adjoint_func.func_adjoint_g2p(particles, grid, newton, params, f, dt)
+    mpm_adjoint_func.func_adjoint_g2p(particles, particles_info, materials, grid, newton, params, f, dt)
 
 
 @qd.kernel

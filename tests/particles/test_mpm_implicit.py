@@ -3,10 +3,24 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.solvers.mpm_adjoint_func import return_map_vjp
+from genesis.engine.solvers.mpm_data import MpmMaterialTable, MpmParams, get_mpm_material_table
 from genesis.engine.solvers.mpm_func import (
     EXTENSION_SIGMA_MIN,
     EXTENSION_STIFFNESS,
     HENCKY_SIGMA_MIN,
+    N_MATERIAL_PARAMS,
+    PARAM_LAM,
+    PARAM_MU,
+    PARAM_SAND_ALPHA,
+    PARAM_YIELD_HIGHER,
+    PARAM_YIELD_LOWER,
+    PARAM_YIELD_STRESS,
+    PLASTIC_CLAMP,
+    PLASTIC_LIQUID,
+    PLASTIC_SAND,
+    PLASTIC_SNOW,
+    PLASTIC_VON_MISES,
     extended_hencky_principal,
     fixed_corotated_energy,
     fixed_corotated_principal,
@@ -16,6 +30,7 @@ from genesis.engine.solvers.mpm_func import (
     liquid_principal,
     q1_stencil,
     q1_weight_hessian,
+    return_map,
     signed_singular_values,
     stable_neohookean_principal,
 )
@@ -453,3 +468,96 @@ def test_first_piola_differential(family):
         _, dP = evaluate(F, dF)
         dP_fd = (evaluate(F + h * dF, dF)[0] - evaluate(F - h * dF, dF)[0]) / (2.0 * h)
         np.testing.assert_allclose(dP, dP_fd, rtol=1e-5, atol=1e-5)
+
+
+@qd.kernel
+def kernel_return_map(
+    materials: MpmMaterialTable,
+    params: qd.template(),
+    kind: qd.i32,
+    F_in: qd.types.ndarray(),
+    Jp: qd.f64,
+    F_bar_in: qd.types.ndarray(),
+    Jp_bar: qd.f64,
+    F_out: qd.types.ndarray(),
+    F_bar_out: qd.types.ndarray(),
+    Jp_out: qd.types.ndarray(),
+):
+    for _ in range(1):
+        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
+        F_bar = qd.Matrix([[F_bar_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
+        F_new, Jp_new = return_map(materials, params, 0, kind, F, Jp)
+        F_bar_old, Jp_bar_old = return_map_vjp(materials, params, 0, kind, F, Jp, F_bar, Jp_bar)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            F_out[i, j] = F_new[i, j]
+            F_bar_out[i, j] = F_bar_old[i, j]
+        Jp_out[0] = Jp_new
+        Jp_out[1] = Jp_bar_old
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+@pytest.mark.parametrize(
+    "kind, sigma, Jp",
+    [
+        (PLASTIC_VON_MISES, (1.3, 0.95, 0.8), 1.0),
+        (PLASTIC_VON_MISES, (1.03, 1.0, 0.98), 1.0),
+        (PLASTIC_CLAMP, (1.1, 0.95, 0.8), 1.0),
+        (PLASTIC_SNOW, (1.1, 0.95, 0.8), 1.2),
+        (PLASTIC_SAND, (1.2, 1.1, 1.05), -0.1),
+        (PLASTIC_SAND, (1.2, 0.9, 0.7), 0.02),
+        (PLASTIC_SAND, (0.9, 0.88, 0.86), 0.0),
+        (PLASTIC_LIQUID, (0.95, 0.9, 0.8), 1.0),
+    ],
+    ids=[
+        "von_mises_yield",
+        "von_mises_elastic",
+        "clamp",
+        "snow",
+        "sand_expand",
+        "sand_flow",
+        "sand_stick",
+        "liquid",
+    ],
+)
+def test_return_map_vjp(kind, sigma, Jp):
+    """The hand-written reverse of each return map branch is the gradient of <F_bar, F_new> + Jp_bar Jp_new."""
+    rng = np.random.default_rng(7)
+    columns = np.zeros(N_MATERIAL_PARAMS)
+    columns[[PARAM_MU, PARAM_LAM, PARAM_YIELD_LOWER, PARAM_YIELD_HIGHER, PARAM_YIELD_STRESS, PARAM_SAND_ALPHA]] = (
+        3.0,
+        5.0,
+        0.1,
+        0.05,
+        0.5,
+        0.3,
+    )
+    materials = get_mpm_material_table(columns, np.array([0]), np.array([kind]))
+    params = MpmParams(1, 1, 1e-3, 0.1, 1e-3, 1.0, 1, np.zeros(7), np.zeros(3), np.ones(3))
+    F_nd, F_bar_nd = qd.ndarray(qd.f64, (3, 3)), qd.ndarray(qd.f64, (3, 3))
+    F_out, F_bar_out, Jp_out = qd.ndarray(qd.f64, (3, 3)), qd.ndarray(qd.f64, (3, 3)), qd.ndarray(qd.f64, (2,))
+
+    U, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    V, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    F = (U * np.linalg.det(U)) @ np.diag(sigma) @ (V * np.linalg.det(V)).T
+    W, w_Jp = rng.standard_normal((3, 3)), rng.standard_normal()
+    F_bar_nd.from_numpy(W)
+
+    def evaluate(F, Jp):
+        F_nd.from_numpy(F)
+        kernel_return_map(materials, params, kind, F_nd, Jp, F_bar_nd, w_Jp, F_out, F_bar_out, Jp_out)
+        F_new, out = qd_to_numpy(F_out).copy(), qd_to_numpy(Jp_out).copy()
+        return np.sum(W * F_new) + w_Jp * out[0], qd_to_numpy(F_bar_out).copy(), out[1]
+
+    _, F_bar, Jp_bar = evaluate(F, Jp)
+    h = 1e-6
+    F_bar_fd = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            dF = np.zeros((3, 3))
+            dF[i, j] = h
+            F_bar_fd[i, j] = (evaluate(F + dF, Jp)[0] - evaluate(F - dF, Jp)[0]) / (2.0 * h)
+    Jp_bar_fd = (evaluate(F, Jp + h)[0] - evaluate(F, Jp - h)[0]) / (2.0 * h)
+    np.testing.assert_allclose(F_bar, F_bar_fd, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(Jp_bar, Jp_bar_fd, rtol=1e-6, atol=1e-7)

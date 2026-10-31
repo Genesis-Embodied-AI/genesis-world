@@ -320,6 +320,87 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize(
+    "material",
+    [
+        lambda: gs.materials.MPM.ElastoPlastic(E=5e4, von_mises_yield_stress=500.0, sampler="regular"),
+        lambda: gs.materials.MPM.ElastoPlastic(E=5e4, use_von_mises=False, sampler="regular"),
+        lambda: gs.materials.MPM.Snow(E=5e4, sampler="regular"),
+        lambda: gs.materials.MPM.Sand(E=5e4, sampler="regular"),
+        lambda: gs.materials.MPM.Liquid(E=5e4, viscous=True, sampler="regular"),
+    ],
+    ids=["von_mises", "clamp", "snow", "sand", "liquid"],
+)
+def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
+    # Two blocks collide head-on and yield, so that the gradient of the initial velocity of the first goes through the
+    # reverse of the return map of every substep after the impact, and through Jp for the snow and the sand
+    scenes, blocks = [], []
+    for requires_grad in (True, False):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=4e-3,
+                substeps=2,
+                gravity=(0.0, 0.0, 0.0),
+                requires_grad=requires_grad,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.5, -0.5, -0.5),
+                upper_bound=(0.5, 0.5, 0.5),
+                grid_density=32,
+                newton_velocity_tol=1e-10,
+                adjoint_hessian="exact",
+                adjoint_linear_solver="direct",
+            ),
+            show_viewer=show_viewer and requires_grad,
+        )
+        block = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(-0.055, 0.0, 0.0),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=material(),
+        )
+        target = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.055, 0.01, 0.0),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=material(),
+        )
+        scene.build(n_envs=2)
+        scenes.append(scene)
+        blocks.append((block, target))
+
+    goal = torch.tensor((0.1, -0.05, 0.02), dtype=gs.tc_float, device=gs.device)
+
+    def rollout(scene, entities, vels):
+        block, target = entities
+        scene.reset()
+        block.set_velocity(vels)
+        target.set_velocity(torch.tensor(((-1.5, 0.0, 0.0),) * 2, dtype=gs.tc_float, device=gs.device))
+        for _ in range(4):
+            scene.step()
+        return ((block.get_state().pos - goal) ** 2).sum(dim=(-2, -1))
+
+    vels = np.array([[1.5, -0.2, 0.3], [1.2, 0.1, -0.2]])
+    vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    rollout(scenes[0], blocks[0], vels_ana).sum().backward()
+
+    eps = 1e-5
+    fd_grad = np.zeros_like(vels)
+    for idx in np.ndindex(vels.shape):
+        losses = []
+        for sign in (+1, -1):
+            perturbed = vels.copy()
+            perturbed[idx] += sign * eps
+            losses.append(float(rollout(scenes[1], blocks[1], perturbed)[idx[0]]))
+        fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+    assert (np.abs(fd_grad) > 1e-3).all()
+    assert_allclose(vels_ana.grad, fd_grad, rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.required
 # The finite differences need the Newton iterations converged far below their default tolerance (see
 # test_deformable_inputs_grad_matches_fd)
 @pytest.mark.precision("64")

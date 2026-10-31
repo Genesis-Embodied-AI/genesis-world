@@ -13,8 +13,8 @@ the incremental potential E(u; p), `grad_u E(u*; p) = 0`. Its backward pass cons
 The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the
 adjoint solve through the Hessian and the pullback through their weights and coefficients (see
 func_wall_contact_adjoint), as the rows of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs
-through the particle position and the pose of their links (see func_constraint_adjoint). The return maps are the
-identity: only the materials without plasticity reach here.
+through the particle position and the pose of their links (see func_constraint_adjoint). The return maps of G2P reverse
+by hand (see return_map_vjp), and the snow hardening through the Lame parameters the energy reads.
 """
 
 import quadrants as qd
@@ -25,7 +25,22 @@ import genesis.utils.geom as gu
 
 from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
 from .mpm_func import (
+    LIQUID_J_MIN,
     PARAM_FIBRE,
+    PARAM_LAM,
+    PARAM_MU,
+    PARAM_SAND_ALPHA,
+    PARAM_YIELD_HIGHER,
+    PARAM_YIELD_LOWER,
+    PARAM_YIELD_STRESS,
+    PLASTIC_LIQUID,
+    PLASTIC_NONE,
+    PLASTIC_SAND,
+    PLASTIC_SNOW,
+    PLASTIC_VON_MISES,
+    SAND_SIGMA_MIN,
+    SNOW_HARDENING,
+    VON_MISES_SIGMA_MIN,
     elastic_principal,
     isotropic_first_piola_differential,
     local_offset,
@@ -39,6 +54,130 @@ from .mpm_func import (
     trial_deformation,
     unpack_block,
 )
+
+
+@qd.func
+def return_map_vjp(
+    materials: MpmMaterialTable,
+    params: qd.template(),  # MpmParams
+    slot,
+    kind,
+    F,
+    Jp,
+    F_new_bar,
+    Jp_new_bar,
+):
+    """Reverse of `return_map`: the adjoints of the trial deformation gradient F and of the plastic state Jp from
+    those of the returned F_new and Jp_new.
+
+    Every return map but the liquid's is F_new = U diag(h(sigma, Jp)) V^T on the SVD F = U diag(sigma) V^T, an
+    isotropic matrix function: its reverse is its differential (see isotropic_first_piola_differential) with the
+    transposed Jacobian dh/dsigma, the twist and flip blocks of the axis pairs being symmetric. Jp_new(sigma, Jp) adds
+    U diag(dJp_new/dsigma) V^T Jp_new_bar, and h depends on Jp for sand. The liquid's F_new = J^(1/3) I, J the volume
+    ratio clamped to [LIQUID_J_MIN, 1], reverses through det F where the clamp is inactive.
+    """
+    F_bar = F_new_bar
+    Jp_bar = Jp_new_bar
+    if kind == PLASTIC_LIQUID:
+        det = F.determinant()
+        F_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if det > qd.static(LIQUID_J_MIN) and det < 1.0:
+            # d det F / dF is its cofactor, det F F^-T
+            J_bar = (F_new_bar[0, 0] + F_new_bar[1, 1] + F_new_bar[2, 2]) / (3.0 * qd.pow(det, 2.0 / 3.0))
+            F_bar = (J_bar * det) * F.inverse().transpose()
+    elif kind != PLASTIC_NONE:
+        U, S, V = qd.svd(F, gs.qd_float)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+        h = sigma
+        dh = qd.Matrix.identity(gs.qd_float, 3)
+        dh_dJp = qd.Vector.zero(gs.qd_float, 3)
+        dJp_new_dsigma = qd.Vector.zero(gs.qd_float, 3)
+        dJp_new_dJp = gs.qd_float(1.0)
+        is_changed = True
+        mu = material_param(materials, params, PARAM_MU, slot)
+        eye = qd.Matrix.identity(gs.qd_float, 3)
+        if kind == PLASTIC_VON_MISES:
+            # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
+            eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
+            eps_hat = eps - eps.sum() / 3.0
+            n = eps_hat.norm(gs.EPS)
+            r = material_param(materials, params, PARAM_YIELD_STRESS, slot) / (2.0 * mu)
+            is_changed = n - r > 0.0
+            if is_changed:
+                h = qd.exp(eps - ((n - r) / n) * eps_hat)
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    deps = 1.0 / sigma[j] if sigma[j] > qd.static(VON_MISES_SIGMA_MIN) else 0.0
+                    projector = eye[i, j] - 1.0 / 3.0
+                    dlog = 1.0 / 3.0 + r * (projector / n - eps_hat[i] * eps_hat[j] / (n * n * n))
+                    dh[i, j] = h[i] * dlog * deps
+        elif kind == PLASTIC_SAND:
+            lam = material_param(materials, params, PARAM_LAM, slot)
+            deps = qd.Vector.zero(gs.qd_float, 3)
+            for j in qd.static(range(3)):
+                if qd.abs(sigma[j]) > qd.static(SAND_SIGMA_MIN):
+                    deps[j] = 1.0 / sigma[j]
+            eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
+            trace = eps.sum() + Jp
+            eps_hat = eps - trace / 3.0
+            n = eps_hat.norm(gs.EPS)
+            h = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+            dh = qd.Matrix.zero(gs.qd_float, 3, 3)
+            if trace >= 0.0:
+                # Jp_new = trace and h = 1
+                dJp_new_dsigma = deps
+            else:
+                dJp_new_dJp = 0.0
+                c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * material_param(materials, params, PARAM_SAND_ALPHA, slot)
+                delta_gamma = n + c * trace
+                h = qd.exp(eps - qd.max(delta_gamma, 0.0) / n * eps_hat)
+                if delta_gamma <= 0.0:
+                    for j in qd.static(range(3)):
+                        dh[j, j] = h[j] * deps[j]
+                else:
+                    # log h = trace / 3 1 - c trace u with u = eps_hat / n, whose differential is (I - u u^T) / n
+                    # d eps_hat, d eps_hat = (I - 1 1^T / 3) d eps - 1 / 3 dJp
+                    u = eps_hat / n
+                    for i in qd.static(range(3)):
+                        for j in qd.static(range(3)):
+                            tangent = gs.qd_float(0.0)
+                            for k in qd.static(range(3)):
+                                tangent += (eye[i, k] - u[i] * u[k]) * (eye[k, j] - 1.0 / 3.0)
+                            dlog = 1.0 / 3.0 - c * u[i] - c * trace / n * tangent
+                            dh[i, j] = h[i] * dlog * deps[j]
+                        tangent_Jp = gs.qd_float(0.0)
+                        for k in qd.static(range(3)):
+                            tangent_Jp += (eye[i, k] - u[i] * u[k]) * (-1.0 / 3.0)
+                        dh_dJp[i] = h[i] * (1.0 / 3.0 - c * u[i] - c * trace / n * tangent_Jp)
+        else:
+            lower = 1.0 - material_param(materials, params, PARAM_YIELD_LOWER, slot)
+            higher = 1.0 + material_param(materials, params, PARAM_YIELD_HIGHER, slot)
+            h = qd.min(qd.max(sigma, lower), higher)
+            for j in qd.static(range(3)):
+                dh[j, j] = 1.0 if sigma[j] > lower and sigma[j] < higher else 0.0
+            if kind == PLASTIC_SNOW:
+                # Jp_new = Jp prod(sigma) / prod(h)
+                h_product = h[0] * h[1] * h[2]
+                dJp_new_dJp = (sigma[0] * sigma[1] * sigma[2]) / h_product
+                Jp_new = Jp * dJp_new_dJp
+                for j in qd.static(range(3)):
+                    others = gs.qd_float(1.0)
+                    for k in qd.static(range(3)):
+                        if qd.static(k != j):
+                            others *= sigma[k]
+                    dJp_new_dsigma[j] = Jp * others / h_product - Jp_new * dh[j, j] / h[j]
+        if is_changed:
+            F_bar = isotropic_first_piola_differential(U, V, sigma, h, dh.transpose(), F_new_bar)
+            F_bar += Jp_new_bar * (
+                U
+                @ qd.Matrix(
+                    [[dJp_new_dsigma[0], 0.0, 0.0], [0.0, dJp_new_dsigma[1], 0.0], [0.0, 0.0, dJp_new_dsigma[2]]],
+                    dt=gs.qd_float,
+                )
+                @ V.transpose()
+            )
+            G = U.transpose() @ F_new_bar @ V
+            Jp_bar = Jp_new_bar * dJp_new_dJp + dh_dJp[0] * G[0, 0] + dh_dJp[1] * G[1, 1] + dh_dJp[2] * G[2, 2]
+    return F_bar, Jp_bar
 
 
 @qd.func
@@ -229,6 +368,8 @@ def func_adjoint_reset_u_bar(
 @qd.func(requires_top_level=True)
 def func_adjoint_g2p(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     params: qd.template(),  # MpmParams
@@ -236,7 +377,7 @@ def func_adjoint_g2p(
     dt,
 ):
     """Reverse of G2P and advection: x' = x + dt v, v = sum_a w_a u_a / dt, C = sum_a u_a grad w_a^T / dt and
-    F' = (I + dt C) F, given the adjoint of frame f + 1.
+    (F', Jp') = return_map((I + dt C) F, Jp), given the adjoint of frame f + 1.
 
     The direct terms add to the adjoint of frame f, the adjoint of u* to `newton.du`, by atomics over the stencil.
     The position enters through the weights and their gradients.
@@ -252,11 +393,22 @@ def func_adjoint_g2p(
             v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
             C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
         F = particles.F[f, i_p, i_b]
+        slot = particles_info.material_idx[i_p]
+        F_trial = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
+        F_trial_bar, Jp_bar = return_map_vjp(
+            materials,
+            params,
+            slot,
+            materials.mat_plastic[slot],
+            F_trial,
+            particles.Jp[f, i_p, i_b],
+            particles.F.grad[f + 1, i_p, i_b],
+            particles.Jp.grad[f + 1, i_p, i_b],
+        )
 
         x_bar_next = particles.pos.grad[f + 1, i_p, i_b]
-        F_bar_next = particles.F.grad[f + 1, i_p, i_b]
         v_bar = particles.vel.grad[f + 1, i_p, i_b] + dt * x_bar_next
-        C_bar = particles.C.grad[f + 1, i_p, i_b] + dt * F_bar_next @ F.transpose()
+        C_bar = particles.C.grad[f + 1, i_p, i_b] + dt * F_trial_bar @ F.transpose()
 
         x_bar = x_bar_next
         for a in qd.static(range(8)):
@@ -268,8 +420,8 @@ def func_adjoint_g2p(
             x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(fx, a, params.inv_dx[()]) @ (C_bar.transpose() @ v_a)
 
         particles.pos.grad[f, i_p, i_b] += x_bar
-        particles.F.grad[f, i_p, i_b] += (qd.Matrix.identity(gs.qd_float, 3) + dt * C).transpose() @ F_bar_next
-        particles.Jp.grad[f, i_p, i_b] += particles.Jp.grad[f + 1, i_p, i_b]
+        particles.F.grad[f, i_p, i_b] += (qd.Matrix.identity(gs.qd_float, 3) + dt * C).transpose() @ F_trial_bar
+        particles.Jp.grad[f, i_p, i_b] += Jp_bar
         particles.actu.grad[f, i_p, i_b] += particles.actu.grad[f + 1, i_p, i_b]
 
 
@@ -379,6 +531,14 @@ def func_adjoint_particles(
         P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
         LamF = Lam @ F
         Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, LamF)
+        # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
+        # are proportional, so phi = V dt^2 P : (Lambda F) moves by -SNOW_HARDENING phi with Jp
+        Jp_bar = gs.qd_float(0.0)
+        if materials.mat_plastic[slot] == PLASTIC_SNOW:
+            phi = gs.qd_float(0.0)
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                phi += P[i, j] * LamF[i, j]
+            Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
         stiffness = material_param(materials, params, PARAM_FIBRE, slot)
         m_dir = particles_info.muscle_direction[i_p]
         ka = stiffness * particles.actu[f, i_p, i_b]
@@ -417,6 +577,7 @@ def func_adjoint_particles(
         particles.vel.grad[f, i_p, i_b] += v_bar
         particles.C.grad[f, i_p, i_b] += C_bar
         particles.F.grad[f, i_p, i_b] += F_bar
+        particles.Jp.grad[f, i_p, i_b] += Jp_bar
         particles.actu.grad[f, i_p, i_b] += actu_bar
 
 
