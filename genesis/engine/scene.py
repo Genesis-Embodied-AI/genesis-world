@@ -334,7 +334,7 @@ class Scene(RBC):
         morph: Morph | Iterable[Morph],
         material: Kinematic,
         surface: Surface | None = ...,
-        visualize_contact: bool = ...,
+        visualize_contact: Literal[False] = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
     ) -> KinematicEntity: ...
