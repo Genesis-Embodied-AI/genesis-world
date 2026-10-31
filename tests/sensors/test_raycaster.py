@@ -144,11 +144,11 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
 
     obstacle_1 = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
-        ),
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
+            ),
             use_visual_raycasting=True,
         ),
     )
@@ -276,8 +276,9 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     #   - cam_kin -> KinematicEntity sphere. When use_visual_raycasting=True the depth camera reads the entity's
     #     visual mesh (including set_vverts overrides, which survive step() until set_vverts(None) hands control
     #     back to FK). When False the kinematic entity is completely ignored by the raycaster.
-    #   - cam_rigid -> RigidEntity whose visual mesh (sphere radius 0.2) is intentionally different from its collision
-    #     mesh (capsule radius 0.05). With use_visual_raycasting=True the depth must match the visual sphere.
+    #   - cam_rigid -> RigidEntity whose visual meshes are intentionally different from its collision mesh (capsule
+    #     radius 0.05): a sphere of radius 0.3 on its root link, and one of radius 0.2 on a child link welded to it.
+    #     Only the child sets use_visual_raycasting=True, so the depth must match the smaller sphere.
     urdf_path = tmp_path / "vis_diff.urdf"
     urdf_path.write_text(
         textwrap.dedent(
@@ -287,7 +288,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
                     <visual>
                         <origin rpy="0 0 0" xyz="0 0 0"/>
                         <geometry>
-                            <sphere radius="0.2"/>
+                            <sphere radius="0.3"/>
                         </geometry>
                     </visual>
                     <collision>
@@ -297,6 +298,18 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
                         </geometry>
                     </collision>
                 </link>
+                <link name="child">
+                    <visual>
+                        <origin rpy="0 0 0" xyz="0 0 0"/>
+                        <geometry>
+                            <sphere radius="0.2"/>
+                        </geometry>
+                    </visual>
+                </link>
+                <joint name="weld" type="fixed">
+                    <parent link="root"/>
+                    <child link="child"/>
+                </joint>
             </robot>
             """
         )
@@ -310,25 +323,30 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     )
     plane = scene.add_entity(gs.morphs.Plane())
     kin_sphere = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            enable_custom_vverts=True,
-        ),
-        material=gs.materials.Kinematic(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.2,
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
             use_visual_raycasting=kin_raycastable,
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=str(urdf_path),
-            pos=(0.0, 0.0, 1.5),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file=str(urdf_path),
+                pos=(0.0, 0.0, 1.5),
+                fixed=True,
+                merge_fixed_links=False,
+            ),
+            links={
+                "child": gs.options.LinkOptions(
+                    use_visual_raycasting=True,
+                ),
+            },
         ),
     )
     cam_kin = scene.add_sensor(
@@ -525,13 +543,13 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
     # The visual box lives on the kinematic solver, whose links are all fixed: its visual BVH is static and groups
     # across envs even though the rigid solver hosts a movable entity.
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(6.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Kinematic(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(6.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
             use_visual_raycasting=True,
         ),
     )
@@ -669,12 +687,12 @@ def test_heterogeneous_object(show_viewer, tol):
     # variants are concentric obstacles of decreasing near-face distance, so each env's own variant is the farthest
     # hit. A missing mask is then observable as an env shadowing its variant with a nearer one belonging to another env.
     het_obstacle = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
+            ),
             use_visual_raycasting=True,
         ),
     )
@@ -683,12 +701,12 @@ def test_heterogeneous_object(show_viewer, tol):
     # only in rest-pose vverts, which are shared across envs: the active vgeom range is the sole discriminator the
     # grouping signature can read.
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Kinematic(
+        options=gs.options.KinematicEntityOptions(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
+            ),
             use_visual_raycasting=True,
         ),
     )
@@ -781,13 +799,13 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
         )
     )
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 0.5),
-            pos=(0.0, 0.0, 0.25),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 0.5),
+                pos=(0.0, 0.0, 0.25),
+                fixed=True,
+                collision=False,
+            ),
             use_visual_raycasting=True,
         ),
     )

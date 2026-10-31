@@ -37,49 +37,59 @@ def main():
         )
     )
     stick = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            scale=1.0,
-            pos=(0.5, 0.5, 0.05),
-            euler=(90.0, 0.0, 0.0),
-        ),
-        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
-        material=gs.materials.Rigid(
-            rho=1e6,
-            coup_friction=8.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                scale=1.0,
+                pos=(0.5, 0.5, 0.05),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.85, 0.2, 0.15, 1.0),
+            ),
+            # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+            material=gs.materials.Material(
+                density=1e6,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=8.0,
+            ),
             gravity_compensation=1.0,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.85, 0.2, 0.15, 1.0),
         ),
     )
     obj1 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.05),
+                upper=(0.4, 0.3, 0.15),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.9, 0.9, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
+                youngs_modulus=3e5,
+            ),
         ),
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.05),
-            upper=(0.4, 0.3, 0.15),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.9, 0.9, 1.0),
-        ),
-        vis_mode="particle",
     )
     obj2 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                pos=(0.4, 0.55, 0.056),
+                scale=0.07,
+                euler=(90.0, 0.0, 90.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
+                youngs_modulus=3e5,
+            ),
         ),
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            pos=(0.4, 0.55, 0.056),
-            scale=0.07,
-            euler=(90.0, 0.0, 90.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
-        ),
-        vis_mode="particle",
     )
 
     cam_0 = scene.add_camera(

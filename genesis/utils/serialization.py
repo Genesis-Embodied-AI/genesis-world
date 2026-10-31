@@ -399,7 +399,10 @@ def _export_value(value, expect, exported: "Exported"):
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -511,7 +514,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)

@@ -16,7 +16,6 @@ import xml.etree.ElementTree as ET
 import genesis as gs
 from genesis.utils.misc import get_assets_dir
 
-
 GRAVITY = 9.81
 DT = 1e-2
 RADIUS = 0.1
@@ -85,7 +84,7 @@ def measure_stiction(friction_cone, show_viewer):
             file=checkered_ball_mjcf(),
             pos=(0.6, 0.0, RADIUS),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction_torsional=0.05,
         ),
     )
@@ -94,7 +93,7 @@ def measure_stiction(friction_cone, show_viewer):
             file=checkered_ball_mjcf(),
             pos=(1.2, 0.0, RADIUS),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction_rolling=0.05,
         ),
     )

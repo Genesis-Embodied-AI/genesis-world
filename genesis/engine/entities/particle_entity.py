@@ -12,6 +12,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.options.entities import MPMEntityOptions
 from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
@@ -42,8 +43,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
-        The material definition, including sampling strategy and physical properties.
+    material : gs.materials.BaseMaterial
+        The physical law of the entity and its parameters.
     morph : Morph
         Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
     surface : Surface
@@ -76,8 +77,10 @@ class ParticleEntity(Entity):
         vface_start=None,
         need_skinning=True,
         name: str | None = None,
+        *,
+        options,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
         self._particle_size = particle_size
         self._particle_start = particle_start
@@ -113,14 +116,17 @@ class ParticleEntity(Entity):
 
     def init_sampler(self):
         """
-        Initialize the particle sampling strategy based on the material's sampler field.
+        Initialize the particle sampling strategy from the sampler the entity options resolve to.
 
         Raises
         ------
         GenesisException
             If the specified sampler is not supported or incorrectly formatted.
         """
-        self.sampler = self._material.sampler
+        if isinstance(self._options, MPMEntityOptions):
+            self.sampler = self._options.material_params.sampler
+        else:
+            self.sampler = self._options.solver_options.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:

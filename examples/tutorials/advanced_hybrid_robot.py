@@ -3,7 +3,6 @@ import os
 import numpy as np
 import genesis as gs
 
-
 gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
 scene = gs.Scene(
@@ -44,23 +43,21 @@ scene.add_entity(
 )
 
 robot = scene.add_entity(
-    morph=gs.morphs.URDF(
-        file="urdf/simple/two_link_arm.urdf",
-        pos=(0.5, 0.5, 0.3),
-        euler=(0.0, 0.0, 0.0),
-        scale=0.2,
-        fixed=True,
-    ),
-    material=gs.materials.Hybrid(
-        material_rigid=gs.materials.Rigid(
-            gravity_compensation=1.0,
+    options=gs.options.HybridEntityOptions(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(0.5, 0.5, 0.3),
+            euler=(0.0, 0.0, 0.0),
+            scale=0.2,
+            fixed=True,
         ),
-        material_soft=gs.materials.MPM.Muscle(  # to allow setting group
-            E=1e4,
-            nu=0.45,
-            rho=1000.0,
-            model="neohooken",
+        # A muscle material lets each link actuate its own group of the skin
+        material_soft=gs.materials.Muscle(
+            density=1000.0,
+            youngs_modulus=1e4,
+            poisson_ratio=0.45,
         ),
+        gravity_compensation=1.0,
         damping=1000.0,
         thickness=0.05,
     ),
@@ -71,8 +68,8 @@ ball = scene.add_entity(
         pos=(0.8, 0.6, 0.1),
         radius=0.1,
     ),
-    material=gs.materials.Rigid(
-        rho=1000,
+    material=gs.materials.Material(
+        density=1000,
         friction=0.5,
     ),
 )

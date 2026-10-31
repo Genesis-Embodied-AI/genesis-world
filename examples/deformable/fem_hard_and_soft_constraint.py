@@ -42,28 +42,61 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=SCENE_POS + np.array([-0.3, -0.3, 0]),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=SCENE_POS + np.array([-0.3, -0.3, 0]),
+                radius=0.1,
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e4,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
 
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=SCENE_POS + np.array([0.3, 0.3, 0]),
-            size=(0.2, 0.2, 0.2),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=SCENE_POS + np.array([0.3, 0.3, 0]),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e6,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e6,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+    )
+
+    # A beam clamped by its left end face, which the vertex options hold at its initial position from the first step on
+    scene.add_entity(
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=SCENE_POS + np.array([0.3, -0.3, 0]),
+                size=(0.4, 0.06, 0.06),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
+            vertices={
+                gs.VertexIndex.in_box(lower=(-0.2, -0.03, -0.03), upper=(-0.2, 0.03, 0.03)): gs.options.VertexOptions(
+                    solver_options=gs.options.FEMVertexSolverOptions(
+                        is_fixed=True,
+                    ),
+                ),
+            },
         ),
     )
 

@@ -68,9 +68,13 @@ class _FrozenDictValidator:
     def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
         args = get_args(source_type)
         dict_type = dict[args[0], args[1]] if args else dict
+        # The C implementation of frozendict, which Python 3.10 uses, does not subclass dict, so a frozendict
+        # validated again (e.g. copying the options that hold it) must go through dict first.
         frozendict_schema = core_schema.chain_schema(
             [
-                handler.generate_schema(dict_type),
+                core_schema.no_info_before_validator_function(
+                    lambda d: dict(d) if isinstance(d, frozendict) else d, handler.generate_schema(dict_type)
+                ),
                 core_schema.no_info_plain_validator_function(lambda d: frozendict(d)),
                 core_schema.is_instance_schema(frozendict),
             ]

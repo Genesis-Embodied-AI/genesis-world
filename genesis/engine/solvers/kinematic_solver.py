@@ -9,7 +9,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -165,7 +164,6 @@ class KinematicSolver(Solver):
     # The rigid solver deriving from this one reverses its own dynamics.
     is_differentiable = True
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
@@ -193,19 +191,26 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name=None, *, options, desc=None
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
+        deciding the kind of entity among those the solver builds ('_entity_classes'). The entity options the other
+        arguments were taken from are kept in the description as authored. The class of a given description
         says which kind it holds. Creation from a description reads no asset.
         """
         if desc is None:
             morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
             entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
             desc = entity_cls._description_cls.resolve(
-                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
+                morphs,
+                surface,
+                self._options,
+                self._enable_mujoco_compatibility,
+                visualize_contact,
+                name,
+                options=options,
             )
         else:
             for _, entity_cls in self._entity_classes:
@@ -831,10 +836,10 @@ class KinematicSolver(Solver):
         """
         vgeom_enabled = torch.zeros(self.n_vgeoms_, dtype=gs.tc_bool, device=gs.device)
         for entity in self.entities:
-            if not entity.material.use_visual_raycasting:
-                continue
-            for vgeom in entity.vgeoms:
-                vgeom_enabled[vgeom.idx] = 1
+            for link in entity.links:
+                if entity._options.get_link_use_visual_raycasting(entity._links_path[link.idx_local]):
+                    for vgeom in link.vgeoms:
+                        vgeom_enabled[vgeom.idx] = 1
         self._vfaces_raycast_mask = vgeom_enabled[qd_to_torch(self.dyn_info.vfaces.vgeom_idx)]
 
     def _init_entity_fields(self):
@@ -1578,10 +1583,10 @@ class KinematicSolver(Solver):
     def vfaces_raycast_mask(self) -> torch.Tensor:
         """Per-vface mask, shape (n_vfaces,), selecting the vfaces opted into visual raycasting.
 
-        A vface is opted in iff its owning vgeom belongs to an entity whose material has use_visual_raycasting=True.
-        Both the entity materials and the vface-to-vgeom mapping are fixed once the scene is built, so the mask is
-        fitted at build time and shared by every visual raycast BVH (raycaster sensors, viewer plugins) to gate which
-        vfaces contribute.
+        A vface is opted in iff its owning vgeom belongs to a link whose options, or those of its entity, set
+        use_visual_raycasting=True. Both the entity options and the vface-to-vgeom mapping are fixed once the scene is
+        built, so the mask is fitted at build time and shared by every visual raycast BVH (raycaster sensors, viewer
+        plugins) to gate which vfaces contribute.
         """
         return self._vfaces_raycast_mask
 

@@ -143,8 +143,8 @@ def test_plotter(tmp_path, monkeypatch, mpl_agg_backend, png_snapshot):
             size=(0.1, 0.1, 0.1),
             pos=(0.0, 0.0, 0.5),
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
     )
 

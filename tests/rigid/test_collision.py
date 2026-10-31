@@ -1525,8 +1525,8 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
             pos=pole_pos,
             file_meshes_are_zup=True,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        material=gs.materials.Material(
+            density=600.0,
         ),
         vis_mode="collision",
     )
@@ -1545,8 +1545,8 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
                 euler=(0.0, 0.0, ring_yaw),
                 file_meshes_are_zup=True,
             ),
-            material=gs.materials.Rigid(
-                rho=600.0,
+            material=gs.materials.Material(
+                density=600.0,
             ),
             vis_mode="collision",
             visualize_contact=True,
@@ -1562,8 +1562,8 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
             pos=ball_pos,
             file_meshes_are_zup=True,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        material=gs.materials.Material(
+            density=600.0,
         ),
         vis_mode="collision",
     )
@@ -2074,8 +2074,8 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
             pos=(0.0, 0.0, BASE_HEIGHT / 2),
             file_meshes_are_zup=True,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        material=gs.materials.Material(
+            density=600.0,
         ),
     )
     height = BASE_HEIGHT
@@ -2088,8 +2088,8 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
                 euler=(0.0, 0.0, 180 / N_WEDGES * (i % 2)),
                 file_meshes_are_zup=True,
             ),
-            material=gs.materials.Rigid(
-                rho=600.0,
+            material=gs.materials.Material(
+                density=600.0,
             ),
         )
         height += RING_HEIGHT - 1e-4
@@ -2099,8 +2099,8 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
             pos=(0.0, 0.0, height + BALL_HEIGHT),
             file_meshes_are_zup=True,
         ),
-        material=gs.materials.Rigid(
-            rho=600.0,
+        material=gs.materials.Material(
+            density=600.0,
         ),
     )
     scene.build()

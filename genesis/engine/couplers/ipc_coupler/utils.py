@@ -16,7 +16,7 @@ from uipc.core import Scene
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
-    from genesis.engine.materials.rigid import CoupType
+    from genesis.options.entities import CoupType
 
 
 def has_articulation_dofs(entity: "RigidEntity") -> bool:
@@ -29,7 +29,7 @@ def has_articulation_dofs(entity: "RigidEntity") -> bool:
 
 
 def default_coup_type(entity: "RigidEntity") -> "CoupType":
-    """Auto-select coup_type when material.coup_type is None. See has_articulation_dofs."""
+    """Auto-select coup_type when the entity solver options leave it None. See has_articulation_dofs."""
     if has_articulation_dofs(entity):
         if entity.base_link.is_fixed:
             return "external_articulation"

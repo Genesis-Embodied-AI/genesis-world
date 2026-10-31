@@ -18,14 +18,14 @@ except ImportError as e:
     pytest.skip("USD is not supported because 'pxr' module is not available.", allow_module_level=True)
 
 from pxr import Gf, Sdf, UsdGeom, UsdPhysics
-from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
-from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
 from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import tensor_to_array
 from genesis.utils.serialization import MANIFEST_NAME
+from genesis.utils.usd import HAS_OMNIVERSE_KIT_SUPPORT, UsdContext
 
+from ..conftest import SKIP_NO_OMNIVERSE_KIT
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
@@ -36,7 +36,6 @@ from .conftest import (
     compare_mesh_scene,
     compare_scene,
 )
-
 
 # ==================== Primitive Tests ====================
 
@@ -97,9 +96,11 @@ def test_parse_nodegraph(usd_file):
 def test_usdz_packaged_texture_resolution(usdz_packaged_texture_usd):
     scene_file, texture_image = usdz_packaged_texture_usd
     usd_scene = build_usd_scene(scene_file, scale=1.0, vis_mode="visual", fixed=True)
-    texture = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
-    assert isinstance(texture, gs.textures.ImageTexture)
-    assert_equal(texture.image_array, texture_image)
+    vgeom = usd_scene.entities[0].vgeoms[0]
+    assert isinstance(vgeom.vmesh.surface.diffuse_texture, gs.textures.ImageTexture)
+    assert_equal(vgeom.vmesh.surface.diffuse_texture.image_array, texture_image)
+    # A visual geom selection matches the material by its path in the stage, the package referencing it included
+    assert vgeom.metadata["material_name"] == "/world/asset/material"
 
 
 @pytest.mark.slow  # ~400s
@@ -388,7 +389,7 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
     # An explicitly authored dynamic_friction = 0 is honored (frictionless collider).
     assert_allclose(entities["/root/frictionless_body"].geoms[0].desc.friction, 0.0, tol=gs.EPS)
 
-    # The explicitly set entity material density (rho=1000 in build_usd_scene) overrides the authored
+    # The explicitly set entity material density (density=1000 in build_usd_scene) overrides the authored
     # per-geom densities, as material friction does for authored frictions: unit cubes weigh 1000 kg.
     assert_allclose(entities["/root/material_body"].get_mass(), 1000.0, tol=gs.EPS)
     assert_allclose(entities["/root/density_body"].get_mass(), 1000.0, tol=gs.EPS)
@@ -435,12 +436,13 @@ def test_align_anchor_with_geom_densities(density_align_usd):
         ),
     )
     ghost = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/uniform_body",
-            align=True,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.USD(
+                file=density_align_usd,
+                prim_path="/root/uniform_body",
+                align=True,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build()
     # Two unit cubes at x = -0.5 / +0.5 with densities 100 / 300: mass 400, center of mass at
@@ -469,7 +471,7 @@ def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho
         with pytest.raises(gs.GenesisException, match="with and without an authored density"):
             scene.add_entity(
                 gs.morphs.USD(file=density_align_usd, prim_path="/root/mixed_body", align=align),
-                material=gs.materials.Rigid(rho=rho),
+                material=gs.materials.Material(density=rho),
             )
         return
 
@@ -479,8 +481,8 @@ def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho
             prim_path="/root/mixed_body",
             align=align,
         ),
-        material=gs.materials.Rigid(
-            rho=rho,
+        material=gs.materials.Material(
+            density=rho,
         ),
     )
 
@@ -572,7 +574,22 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
             pos=(0.0, 0.0, 0.05),
         ),
     )
+    ghosts = scene.add_stage(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
+    )
+    with pytest.raises(gs.GenesisException, match="no link options"):
+        scene.add_stage(
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.USD(file=collision_filtering_usd), links={"base": gs.options.LinkOptions()}
+            )
+        )
     scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
@@ -581,6 +598,10 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
     for entity in entities:
         aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from kinematic options keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -606,8 +627,8 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
             file=oriented_capsule_usd,
             pos=(0, 0, 0.5),
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
     )
     scene.build()
@@ -646,8 +667,8 @@ def test_ant_capsule_axis_collision(show_viewer):
             file=os.path.join(asset_path, "usd/Ant/ant.usd"),
             pos=(0, 0, 0.75),
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
     )
     scene.build()

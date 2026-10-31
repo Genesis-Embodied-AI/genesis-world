@@ -642,14 +642,15 @@ class Mesh(URDFType):
         kwargs = cls._parse(node, root, path)
 
         # Load the mesh, combining collision geometry meshes but keeping
-        # visual ones separate to preserve colors and textures
+        # visual ones separate to preserve colors and textures. A visual keeps
+        # the objects of its file apart as well, each named after its object.
         fn = get_filename(path, kwargs["filename"])
         parent = next((p for p in root.iter() if node in p))
         grandparent = next((p for p in root.iter() if parent in p))
         assert grandparent.tag in (Visual._TAG, Collision._TAG)
         combine = grandparent.tag == Collision._TAG
 
-        meshes = load_meshes(fn)
+        meshes = load_meshes(fn, group_material=combine)
         if combine:
             # Delete visuals for simplicity
             for m in meshes:

@@ -57,8 +57,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
             size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
             pos=(1.0, 0.0, 0.4),
         ),
-        material=gs.materials.Rigid(
-            rho=100.0,  # mass = 0.8 kg
+        material=gs.materials.Material(
+            density=100.0,  # mass = 0.8 kg
         ),
         surface=gs.surfaces.Default(
             color=(0.0, 1.0, 0.0, 1.0),
@@ -69,8 +69,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
             size=(0.2, 0.2, 0.2),  # volume = 0.008 m^3
             pos=(1.0, 0.0, 0.61),
         ),
-        material=gs.materials.Rigid(
-            rho=25.0,  # mass = 0.2 kg
+        material=gs.materials.Material(
+            density=25.0,  # mass = 0.2 kg
         ),
         surface=gs.surfaces.Default(
             color=(0.0, 0.0, 1.0, 1.0),

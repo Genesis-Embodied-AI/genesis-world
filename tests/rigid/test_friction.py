@@ -191,16 +191,17 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
             )
         scene.add_entity(
             morph,
-            material=gs.materials.Rigid(
-                rho=200.0,
+            material=gs.materials.Material(
+                density=200.0,
                 friction=friction,
             ),
             vis_mode="collision",
             visualize_contact=True,
         )
         scene.add_entity(
-            kinematic_morph,
-            material=gs.materials.Kinematic(),
+            options=gs.options.KinematicEntityOptions(
+                morph=kinematic_morph,
+            ),
         )
 
     boxes = scene.rigid_solver.entities
@@ -361,7 +362,7 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
     )
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
     )
@@ -371,7 +372,7 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
             pos=(0.0, 0.0, 0.5 * WALL[2]),
             fixed=True,
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
     )
@@ -380,7 +381,7 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
             size=(BOX, BOX, BOX),
             pos=(0.5 * (WALL[0] + BOX), 0.0, 0.75 * WALL[2]),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
     )
@@ -389,7 +390,7 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
             size=(PRESS_SIZE, PRESS_SIZE, PRESS_SIZE),
             pos=(0.5, 0.0, 0.5 * PRESS_SIZE),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
     )
@@ -462,7 +463,7 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, show_viewer):
     )
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=MU,
         ),
     )
@@ -471,7 +472,7 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, show_viewer):
             size=(0.2, 0.2, 0.2),
             pos=(0.0, 0.0, 0.1),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=MU,
         ),
     )
@@ -559,7 +560,7 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
     )
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction_torsional=0.0,
         ),
     )
@@ -572,7 +573,7 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
                     radius=RADIUS,
                     pos=(0.5 * i_s, 0.0, RADIUS),
                 ),
-                material=gs.materials.Rigid(
+                material=gs.materials.Material(
                     friction_torsional=friction_torsional,
                 ),
             )
@@ -653,7 +654,7 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     )
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction_torsional=0.0,
             friction_rolling=0.0,
         ),
@@ -667,7 +668,7 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
                     radius=RADIUS,
                     pos=(0.5 * i_s, 0.0, RADIUS),
                 ),
-                material=gs.materials.Rigid(
+                material=gs.materials.Material(
                     friction_rolling=friction_rolling,
                 ),
             )
@@ -773,7 +774,7 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
     )
     ground = scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
     )
@@ -792,7 +793,7 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
         )
     box = scene.add_entity(
         box_morph,
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
         visualize_contact=True,
@@ -806,7 +807,7 @@ def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer,
             files=(trimesh.creation.cylinder(radius=PILLAR_RADIUS, height=PILLAR_HEIGHT, sections=3),),
             pos=PUSH_START_LOCAL,
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=FRICTION,
         ),
         surface=gs.surfaces.Default(
@@ -989,7 +990,7 @@ def test_kinetic_friction(n_envs, show_viewer):
     )
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.01,
         ),
     )
@@ -1000,7 +1001,7 @@ def test_kinetic_friction(n_envs, show_viewer):
                 pos=(0.0, 4.0 * SIZE * i_box, 0.5 * SIZE),
                 size=(SIZE, SIZE, SIZE),
             ),
-            material=gs.materials.Rigid(
+            material=gs.materials.Material(
                 friction=friction,
             ),
         )

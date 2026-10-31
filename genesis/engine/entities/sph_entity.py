@@ -17,7 +17,7 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    material : Material
+    material : gs.materials.Liquid
         Material properties (e.g., density, stiffness).
     morph : Morph
         Morphological configuration.
@@ -32,50 +32,45 @@ class SPHEntity(ParticleEntity):
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        particle_size,
+        idx,
+        particle_start,
+        name: str | None = None,
+        *,
+        options,
     ):
         super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
+            scene,
+            solver,
+            material,
+            morph,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            need_skinning=False,
+            name=name,
+            options=options,
         )
 
-    def init_sampler(self):
-        """
-        Initialize the particle sampler based on the material's sampling method.
-
-        Raises
-        ------
-        GenesisException
-            If the sampler is not one of the supported types: 'regular', 'pbs', or 'pbs-sdf_res'.
-        """
-        self.sampler = self._material.sampler
-
-        match self.sampler.split("-"):
-            case ["regular"]:
-                pass
-            case ["random"]:
-                pass
-            case ["pbs"]:
-                # using default sdf_res=32
-                self.sampler += "-32"
-            case ["pbs", num] if num.isnumeric():
-                pass
-            case _:
-                gs.raise_exception(
-                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                    f"Got: {self.sampler}."
-                )
-
     def _add_particles_to_solver(self):
+        material_params = self._options.material_params
         self._solver.add_particles(
             self._sim.cur_substep_local,
             self.active,
             self._particle_start,
             self._n_particles,
-            self._material.rho,
-            self._material.stiffness,
-            self._material.exponent,
-            self._material.mu,
-            self._material.gamma,
+            self._material.density,
+            material_params.stiffness,
+            self._options.solver_options.exponent,
+            material_params.viscosity,
+            material_params.surface_tension,
             self._particles,
         )
 

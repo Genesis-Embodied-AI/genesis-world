@@ -168,7 +168,12 @@ class Morph(Options):
 ############################ Nowhere ############################
 class Nowhere(Morph):
     """
-    Reserved for emitter. Internal use only.
+    The morph of the particles of an emitter (see ``Scene.add_emitter``), which start outside of the scene.
+
+    Parameters
+    ----------
+    n_particles : int
+        The number of particles, which is the maximum number of particles the emitter holds at once.
     """
 
     n_particles: StrictInt = Field(ge=1)
@@ -1337,7 +1342,7 @@ class Terrain(Morph):
     Note
     ----
     Rigid terrain will also be represented as SDF for collision checking, but its resolution is auto-computed and
-    ignores the value specified in `gs.materials.Rigid()`.
+    ignores the values specified in `gs.options.RigidEntitySolverOptions`.
 
     Parameters
     ----------

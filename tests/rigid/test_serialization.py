@@ -68,13 +68,15 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     )
     # A kinematic entity, whose solver holds state of its own. The runtime crashes when it builds one with gradients
     # after another scene in the same process, so a gradient scene holds a rigid box there.
+    options_cls = gs.options.RigidEntityOptions if requires_grad else gs.options.KinematicEntityOptions
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.6, 0.5),
-            quat=(1.0, 0.0, 0.0, 1.0),
-            size=(0.1, 0.1, 0.1),
+        options=options_cls(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.6, 0.5),
+                quat=(1.0, 0.0, 0.0, 1.0),
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
-        material=gs.materials.Rigid() if requires_grad else gs.materials.Kinematic(),
     )
     return scene
 
@@ -102,7 +104,7 @@ def test_export_and_load_rigid(
             pos=(0.0, 0.0, 0.5),
             size=(0.2, 0.2, 0.2),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.7,
         ),
         surface=gs.surfaces.Default(
@@ -195,11 +197,12 @@ def test_export_and_load_rigid(
         ),
     )
     kinematic_arm = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=ET.tostring(mimic_hinges, encoding="unicode"),
-            pos=(40.0, 40.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(mimic_hinges, encoding="unicode"),
+                pos=(40.0, 40.0, 1.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     # A second entity from the same asset as 'anchored', so both share its geometry in the written file
     twin = scene.add_entity(
@@ -372,7 +375,7 @@ def test_export_and_load_rigid(
     # A kinematic entity's description holds its frames, the geoms that render it, and no dynamics. The restored
     # entity keeps the same links and degrees of freedom, with nothing simulated behind them.
     ghost = restored.entities[10]
-    assert isinstance(ghost.material, gs.materials.Kinematic)
+    assert ghost.material is None
     assert (ghost.n_links, ghost.n_dofs) == (kinematic_arm.n_links, kinematic_arm.n_dofs)
     # At the configuration it was authored at rather than the one it was driven to, as every restored entity is.
     assert_equal(ghost.get_dofs_position(), 0.0)
@@ -579,6 +582,16 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     with pytest.raises(gs.GenesisException, match="values a Genesis scene is not made of"):
         gs.Scene.load(exported)
 
+    # Every entity is constructed from options, so a description holding none is rejected.
+    manifest = deepcopy(original)
+    del manifest["held"]["scene"]["entities"][0]["options"]
+    members[MANIFEST_NAME] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(exported, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    with pytest.raises(gs.GenesisException, match="values a Genesis scene is not made of"):
+        gs.Scene.load(exported)
+
     # A value standing where another kind is declared is rejected as well, and so is one its field does not admit.
     manifest = deepcopy(original)
     manifest["held"]["scene"]["options"]["values"]["sim"]["values"]["dt"] = -1.0
@@ -604,7 +617,9 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
     # other physics. No description carries a particle entity either.
     checkpoint_scene.add_entity(
-        morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.Elastic()
+        )
     )
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
     with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):

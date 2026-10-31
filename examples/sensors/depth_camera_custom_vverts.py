@@ -62,17 +62,17 @@ def main():
     sphere_tri = trimesh.Trimesh(vertices=sphere_verts, faces=sphere_tri.faces, process=False)
 
     kin_sphere = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(sphere_tri,),
-            pos=(0, 0, 0),
-            fixed=True,
-            enable_custom_vverts=True,
-        ),
-        material=gs.materials.Kinematic(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MeshSet(
+                files=(sphere_tri,),
+                pos=(0, 0, 0),
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.8, 0.4),
+            ),
             use_visual_raycasting=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.8, 0.4),
         ),
     )
 
@@ -81,16 +81,16 @@ def main():
     box_tri.vertices += np.array([0.0, 1.0, 0.15], dtype=np.float32)
 
     kin_box = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(box_tri,),
-            pos=(0, 0, 0),
-            fixed=True,
-        ),
-        material=gs.materials.Kinematic(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MeshSet(
+                files=(box_tri,),
+                pos=(0, 0, 0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.3, 0.3),
+            ),
             use_visual_raycasting=True,
-        ),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.3, 0.3),
         ),
     )
 

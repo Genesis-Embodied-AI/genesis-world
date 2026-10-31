@@ -6,6 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
+from genesis.options.materials import Liquid, Muscle, Sand, Snow
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
@@ -14,8 +15,8 @@ from .particle_entity import ParticleEntity, assert_active
 def assert_muscle(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        if not isinstance(self.material, gs.materials.MPM.Muscle):
-            gs.raise_exception("This method is only supported by entities with 'MPM.Muscle' material.")
+        if not isinstance(self.material, Muscle):
+            gs.raise_exception("This method is only supported by entities with a 'Muscle' material.")
         return method(self, *args, **kwargs)
 
     return wrapper
@@ -42,6 +43,8 @@ class MPMEntity(ParticleEntity):
         Particle size for discretization.
     idx : int
         Unique index of the entity.
+    model_idx : int
+        Index of the constitutive model of the entity in the solver.
     particle_start : int
         Starting particle index.
     vvert_start : int
@@ -59,14 +62,15 @@ class MPMEntity(ParticleEntity):
         surface,
         particle_size,
         idx,
+        model_idx,
         particle_start,
         vvert_start,
         vface_start,
         name: str | None = None,
+        *,
+        options,
     ):
-        need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
+        need_skinning = not isinstance(material, (Liquid, Sand, Snow))
         super().__init__(
             scene,
             solver,
@@ -80,11 +84,15 @@ class MPMEntity(ParticleEntity):
             vface_start,
             need_skinning=need_skinning,
             name=name,
+            options=options,
         )
+        self._model_idx = model_idx
+        # The number of muscle groups, which the hybrid entity owning this one as its skin sets to its number of links
+        self._n_groups = options.solver_options.n_groups
 
     def _add_to_solver(self):
         super()._add_to_solver()
-        if isinstance(self.material, gs.materials.MPM.Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
+        if isinstance(self.material, Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
@@ -93,9 +101,9 @@ class MPMEntity(ParticleEntity):
             self.active,
             self._particle_start,
             self._n_particles,
-            self._material.idx,
-            self._material._default_Jp,
-            self._material.rho,
+            self._model_idx,
+            self._solver._models[self._model_idx].default_Jp,
+            self._material.density,
             self._particles,
         )
 
@@ -158,7 +166,7 @@ class MPMEntity(ParticleEntity):
         particles_idx = self._get_global_idx(
             particles_idx_local, self._n_particles, self._particle_start, unsafe=True, batched_idx=True
         )
-        self._solver.set_particles_actu(actus, particles_idx, envs_idx, n_groups=self.material.n_groups)
+        self._solver.set_particles_actu(actus, particles_idx, envs_idx, n_groups=self._n_groups)
 
     def get_particles_actu(self, envs_idx=None):
         particles_idx = self._get_global_idx(None, self._n_particles, self._particle_start, unsafe=True)

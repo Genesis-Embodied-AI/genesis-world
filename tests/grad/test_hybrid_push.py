@@ -37,26 +37,33 @@ def test_mpm_rigid_push_grad(show_viewer):
         )
     )
     stick = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            scale=0.6,
-            pos=(0.5, 0.5, 0.05),
-            euler=(90.0, 0.0, 0.0),
-        ),
-        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
-        material=gs.materials.Rigid(
-            rho=1e6,
-            coup_friction=8.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                scale=0.6,
+                pos=(0.5, 0.5, 0.05),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+            material=gs.materials.Material(
+                density=1e6,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=8.0,
+            ),
             gravity_compensation=1.0,
         ),
     )
     obj = scene.add_entity(
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.05),
-            upper=(0.4, 0.3, 0.15),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.05),
+                upper=(0.4, 0.3, 0.15),
+            ),
+            material=gs.materials.Elastic(
+                density=500,
+                youngs_modulus=3e5,
+            ),
         ),
     )
     # A second stick, far from the object, whose position the loss reads: it moves by its velocity times the step
@@ -136,27 +143,35 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             show_viewer=show_viewer and requires_grad,
         )
         mpm_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                lower=(-0.35, -0.1, 0.1),
-                upper=(-0.15, 0.1, 0.2),
-            ),
-            material=gs.materials.MPM.Muscle(
-                E=5e4,
-                nu=0.3,
-                rho=1000.0,
-                sampler="regular",
-                n_groups=2,
+            options=gs.options.MPMEntityOptions(
+                morph=gs.morphs.Box(
+                    lower=(-0.35, -0.1, 0.1),
+                    upper=(-0.15, 0.1, 0.2),
+                ),
+                material=gs.materials.Muscle(
+                    density=1000.0,
+                    youngs_modulus=5e4,
+                    poisson_ratio=0.3,
+                ),
+                solver_options=gs.options.MPMEntitySolverOptions(
+                    sampler="regular",
+                    n_groups=2,
+                ),
             ),
         )
         fem_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.3, 0.0, 0.3),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.FEM.Muscle(
-                E=5e4,
-                nu=0.3,
-                n_groups=2,
+            options=gs.options.FEMEntityOptions(
+                morph=gs.morphs.Box(
+                    pos=(0.3, 0.0, 0.3),
+                    size=(0.1, 0.1, 0.1),
+                ),
+                material=gs.materials.Muscle(
+                    youngs_modulus=5e4,
+                    poisson_ratio=0.3,
+                ),
+                solver_options=gs.options.FEMEntitySolverOptions(
+                    n_groups=2,
+                ),
             ),
         )
         scene.build(n_envs=2)
@@ -256,12 +271,14 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            lower=(-0.2, -0.05, -0.05),
-            upper=(-0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(-0.2, -0.05, -0.05),
+                upper=(-0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=5e4,
+            ),
         ),
     )
     box = scene.add_entity(

@@ -3,7 +3,6 @@ import os
 import torch
 import genesis as gs
 
-
 gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
 scene = gs.Scene(
@@ -31,29 +30,34 @@ scene = gs.Scene(
 )
 
 scene.add_entity(
-    morph=gs.morphs.Plane(),
-    material=gs.materials.Rigid(
-        coup_friction=5.0,
+    options=gs.options.RigidEntityOptions(
+        morph=gs.morphs.Plane(),
+        solver_options=gs.options.RigidEntitySolverOptions(
+            coup_friction=5.0,
+        ),
     ),
 )
 
 worm = scene.add_entity(
-    morph=gs.morphs.Mesh(
-        file="meshes/worm/worm.obj",
-        pos=(0.3, 0.3, 0.001),
-        scale=0.1,
-        euler=(90, 0, 0),
-    ),
-    material=gs.materials.MPM.Muscle(
-        E=5e5,
-        nu=0.45,
-        rho=10000.0,
-        model="neohooken",
-        n_groups=4,
-    ),
-    surface=gs.surfaces.Default(
-        diffuse_texture=gs.textures.ImageTexture(
-            image_path="meshes/worm/bdy_Base_Color.png",
+    options=gs.options.MPMEntityOptions(
+        morph=gs.morphs.Mesh(
+            file="meshes/worm/worm.obj",
+            pos=(0.3, 0.3, 0.001),
+            scale=0.1,
+            euler=(90, 0, 0),
+        ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path="meshes/worm/bdy_Base_Color.png",
+            ),
+        ),
+        material=gs.materials.Muscle(
+            density=10000.0,
+            youngs_modulus=5e5,
+            poisson_ratio=0.45,
+        ),
+        solver_options=gs.options.MPMEntitySolverOptions(
+            n_groups=4,
         ),
     ),
 )
@@ -61,10 +65,10 @@ worm = scene.add_entity(
 scene.build(n_envs=3)
 
 
-if isinstance(worm.material, gs.materials.MPM.Muscle):
+if isinstance(worm.options, gs.options.MPMEntityOptions):
     pos = worm.get_state().pos[0]
     n_units = worm.n_particles
-elif isinstance(worm.material, gs.materials.FEM.Muscle):
+elif isinstance(worm.options, gs.options.FEMEntityOptions):
     pos = worm.get_state().pos[0, worm.get_el2v()].mean(dim=1)
     n_units = worm.n_elements
 else:

@@ -16,6 +16,7 @@ import genesis.utils.mesh as mu
 from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
+from genesis.options.materials import Cloth, Muscle
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
 
@@ -111,8 +112,8 @@ class FEMVisGeom(RBC):
 def assert_muscle(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        if not isinstance(self.material, gs.materials.FEM.Muscle):
-            gs.raise_exception("This method is only supported by entities with 'FEM.Muscle' material.")
+        if not isinstance(self.material, Muscle):
+            gs.raise_exception("This method is only supported by entities with a 'Muscle' material.")
         return method(self, *args, **kwargs)
 
     return wrapper
@@ -133,14 +134,16 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    material : Material
-        The material properties defining elasticity, density, etc.
+    material : gs.materials.Elastic | gs.materials.Cloth | gs.materials.Muscle
+        The physical model of the entity and its parameters, the defaults of which its options resolve.
     morph : Morph
         The morph specification that defines the entity's shape.
     surface : Surface
         The surface mesh associated with the entity (for rendering or collision).
     idx : int
         Unique identifier of the entity within the scene.
+    model_idx : int
+        Index of the constitutive model of the entity in the solver.
     v_start : int, optional
         Starting index of this entity's vertices in the global vertex array (default is 0).
     el_start : int, optional
@@ -161,15 +164,19 @@ class FEMEntity(Entity):
         morph,
         surface,
         idx,
+        model_idx,
         v_start=0,
         el_start=0,
         s_start=0,
         vvert_start=0,
         vface_start=0,
         name: str | None = None,
+        *,
+        options,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
+        self._model_idx = model_idx
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
         self._s_start = s_start  # offset for surface triangles
@@ -178,7 +185,7 @@ class FEMEntity(Entity):
         self._step_global_added = None
         self.sample()
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, Cloth):
             # For cloth, elements are already surface triangles
             self._surface_tri_np = self.elems
             self._n_surfaces = len(self._surface_tri_np)
@@ -283,11 +290,12 @@ class FEMEntity(Entity):
         Exception
             If the tensor shape is not supported or per-element actuation is attempted.
         """
+        n_groups = self._options.solver_options.n_groups
         elements_idx = self._get_global_idx(None, self.n_elements, self._el_start, unsafe=True)
-        actu = broadcast_tensor(actu, gs.tc_float, (self._sim._B, self.material.n_groups), ("envs_idx", "groups"))
+        actu = broadcast_tensor(actu, gs.tc_float, (self._sim._B, n_groups), ("envs_idx", "groups"))
         # Every element of the entity takes the actuation of its muscle group
         actu = actu[:, None] if self._scene.n_envs > 0 else actu[0]
-        self._solver.set_elements_actu(actu, elements_idx, n_groups=self.material.n_groups)
+        self._solver.set_elements_actu(actu, elements_idx, n_groups=n_groups)
 
     def set_muscle(self, muscle_group=None, muscle_direction=None):
         """
@@ -306,7 +314,7 @@ class FEMEntity(Entity):
         AssertionError
             If tensor shapes are incorrect or normalization fails.
         """
-        n_groups = self.material.n_groups
+        n_groups = self._options.solver_options.n_groups
         max_group_id = muscle_group.max().item()
 
         muscle_group = broadcast_tensor(muscle_group, gs.tc_int, (self.n_elements,), ("elements_idx",))
@@ -369,6 +377,9 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
+        # The vertex options select vertices as the morph states them, relative to its position before its rotation
+        self._fixed_verts_idx_local = self._options.get_fixed_verts_idx(verts - self._morph.pos)
+
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(
             init_positions - (verts_COM + offset_shift), dtype=gs.tc_float, device=gs.device
@@ -404,7 +415,7 @@ class FEMEntity(Entity):
             vvert_start += len(mesh.verts)
             vface_start += len(mesh.faces)
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
             verts = surface_verts + self._morph.pos
             elems = surface_faces
@@ -433,7 +444,7 @@ class FEMEntity(Entity):
         # Convert to appropriate numpy array types
         verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, Cloth):
             self._solver.add_cloth(
                 f=self._sim.cur_substep_local,
                 v_start=self._v_start,
@@ -443,13 +454,15 @@ class FEMEntity(Entity):
             )
         else:
             elems_np = self.elems.astype(gs.np_int, copy=False)
+            material_params = self._options.material_params
+            mat_mu, mat_lam = eu.lame_parameters(material_params.youngs_modulus, material_params.poisson_ratio)
             self._solver.add_elements(
                 f=self._sim.cur_substep_local,
-                mat_idx=self._material.idx,
-                mat_mu=self._material.mu,
-                mat_lam=self._material.lam,
-                mat_rho=self._material.rho,
-                mat_friction_mu=self._material.friction_mu,
+                mat_idx=self._model_idx,
+                mat_mu=mat_mu,
+                mat_lam=mat_lam,
+                mat_rho=material_params.density,
+                mat_friction_mu=material_params.friction,
                 v_start=self._v_start,
                 el_start=self._el_start,
                 s_start=self._s_start,
@@ -496,7 +509,8 @@ class FEMEntity(Entity):
                 f"Pressure field max distance is too small: {max_distance}. "
                 "This might be due to a mesh having no internal vertices."
             )
-        self.pressure_field_np = unsigned_distance / max_distance * self.material.hydroelastic_modulus  # normalize
+        # normalize
+        self.pressure_field_np = unsigned_distance / max_distance * self._options.solver_options.hydroelastic_modulus
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------

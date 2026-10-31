@@ -25,10 +25,6 @@ def main():
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="64")
 
-    fem_material_linear_corotated = gs.materials.FEM.Elastic(
-        model="linear_corotated",
-    )
-
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1 / 60,
@@ -53,12 +49,17 @@ def main():
         max_workers=1,
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/cube8.obj",
-            pos=(0.0, 0.0, 0.7),
-            scale=0.1,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/cube8.obj",
+                pos=(0.0, 0.0, 0.7),
+                scale=0.1,
+            ),
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
-        material=fem_material_linear_corotated,
     )
     scene.build()
 

@@ -54,7 +54,7 @@ def main():
 
     # Realistic steel density (the default is far too light); the bolt is fixed so its inertia is moot, but the nut's
     # weight then matches a real fastener.
-    steel = gs.materials.Rigid(rho=7850.0)
+    steel = gs.materials.Material(density=7850.0)
 
     # Bolt: fixed, hex head down resting on the ground plane, threaded shaft pointing up. The mesh spans z in
     # [-11, 32] mm, so pos_z = 11 mm puts the head bottom at z = 0 (on the plane), the head top at z = 11 mm and the

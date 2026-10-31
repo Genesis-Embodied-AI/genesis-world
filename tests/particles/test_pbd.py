@@ -7,15 +7,8 @@ import genesis as gs
 from ..utils.assertions import assert_allclose
 
 
-# Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
-@pytest.fixture(scope="function")
-def pbd_material():
-    """Fixture for common FEM material properties"""
-    return gs.materials.PBD.Elastic()
-
-
 @pytest.mark.required
-def test_maxvolume(pbd_material, show_viewer, box_obj_path):
+def test_maxvolume(show_viewer, box_obj_path):
     scene = gs.Scene(
         pbd_options=gs.options.PBDOptions(
             particle_size=0.1,
@@ -25,23 +18,25 @@ def test_maxvolume(pbd_material, show_viewer, box_obj_path):
 
     # Mesh without any maximum-element-volume constraint
     pbd1 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            verbose=1,
+        options=gs.options.PBDElasticEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                verbose=1,
+            ),
         ),
-        material=pbd_material,
     )
 
     # Mesh with maximum element volume limited to 0.001
     pbd2 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            maxvolume=0.001,
-            verbose=1,
+        options=gs.options.PBDElasticEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                maxvolume=0.001,
+                verbose=1,
+            ),
         ),
-        material=pbd_material,
     )
 
     assert pbd1.n_elems < pbd2.n_elems, (
@@ -62,12 +57,13 @@ def test_get_mass(n_envs, show_viewer, tol):
     )
     scene.add_entity(gs.morphs.Plane())
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            pos=(0, 0, 0.5),
-            scale=1.0,
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                pos=(0, 0, 0.5),
+                scale=1.0,
+            ),
         ),
-        material=gs.materials.PBD.Cloth(),
     )
     scene.build(n_envs=n_envs)
 
@@ -79,7 +75,7 @@ def test_get_mass(n_envs, show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("material_type", [gs.materials.PBD.Cloth])
+@pytest.mark.parametrize("material_type", [gs.materials.Cloth])
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
     scene = gs.Scene(
@@ -93,27 +89,31 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         morph=gs.morphs.Plane(),
     )
     cloth_1 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            pos=(0, 2.0, 0.5),
-            scale=1.0,
-        ),
-        material=material_type(),
-        surface=gs.surfaces.Default(
-            color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                pos=(0, 2.0, 0.5),
+                scale=1.0,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 1.0, 0.2, 1.0),
+                vis_mode="visual",
+            ),
+            material=material_type(),
         ),
     )
     cloth_2 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            pos=(0, 0, 0.1),
-            scale=2.0,
-        ),
-        material=material_type(),
-        surface=gs.surfaces.Default(
-            color=(1.0, 1.0, 0.2, 1.0),
-            vis_mode="visual",
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                pos=(0, 0, 0.1),
+                scale=2.0,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 1.0, 0.2, 1.0),
+                vis_mode="visual",
+            ),
+            material=material_type(),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -198,32 +198,35 @@ def test_cloth_attach_rigid_link(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.0,
+            ),
         ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.25, 0.25, box_height),
-            size=(0.25, 0.25, 0.25),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.25, 0.25, box_height),
+                size=(0.25, 0.25, 0.25),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.0,
+            ),
         ),
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            pos=(0.25, 0.25, box_height + 0.125 + particle_size),
-            scale=0.5,
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                pos=(0.25, 0.25, box_height + 0.125 + particle_size),
+                scale=0.5,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
         ),
     )
     scene.build(n_envs=2)

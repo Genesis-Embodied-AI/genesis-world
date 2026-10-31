@@ -45,20 +45,38 @@ def main():
         show_viewer=args.vis,
     )
 
-    rigid_material = gs.materials.Rigid(needs_coup=True, coup_friction=0.0)
+    rigid_solver_options = gs.options.RigidEntitySolverOptions(
+        coup_friction=0.0,
+    )
 
     # create ground plane
-    scene.add_entity(gs.morphs.Plane(), rigid_material)
+    scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=rigid_solver_options,
+        ),
+    )
 
     box_morph = gs.morphs.Box(pos=[0.25, 0.25, 0.25], size=[0.25, 0.25, 0.25])
-    box = scene.add_entity(box_morph, rigid_material)
+    box = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=box_morph,
+            solver_options=rigid_solver_options,
+        ),
+    )
 
     cloth_pos = (0.25, 0.25, 0.25 + 0.125 + particle_size)
     cloth_scale = 0.5
     cloth_morph = gs.morphs.Mesh(pos=cloth_pos, scale=cloth_scale, file="meshes/cloth.obj")
-    cloth_material = gs.materials.PBD.Cloth()
+    cloth_material = gs.materials.Cloth()
     cloth_surface = gs.surfaces.Default(color=(0.2, 0.4, 0.8, 1.0))  # , vis_mode="particle")
-    cloth = scene.add_entity(cloth_morph, cloth_material, cloth_surface)
+    cloth = scene.add_entity(
+        options=gs.options.PBDClothEntityOptions(
+            morph=cloth_morph,
+            surface=cloth_surface,
+            material=cloth_material,
+        ),
+    )
 
     scene.build(n_envs=0)
 

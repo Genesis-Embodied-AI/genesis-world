@@ -16,7 +16,7 @@ from uipc import builtin
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.misc import tensor_to_array, geometric_mean, harmonic_mean
+from genesis.utils.misc import geometric_mean, harmonic_mean, tensor_to_array
 
 from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
@@ -67,51 +67,61 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 1.5),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 1.5),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(
+                density=200,
+                youngs_modulus=1e5,
+                poisson_ratio=0.499,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
         ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
-            pos=(0.0, 0.0, 0.6),
-        ),
-        material=gs.materials.Rigid(
-            rho=500.0,
-            coup_type="ipc_only",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.3, 0.2, 0.8),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.6),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.3, 0.2, 0.8),
+            ),
+            material=gs.materials.Material(
+                density=500.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.5, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.3,
-            rho=1000.0,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.5, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.3,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -144,7 +154,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     # Get initial state
     p_0 = {obj: get_ipc_positions(scene, **obj_kwargs, envs_idx=envs_idx) for obj, obj_kwargs in objs_kwargs.items()}
-    v_0 = {obj: np.zeros_like(p_0[obj]) for obj in objs_kwargs.keys()}
+    v_0 = {obj: np.zeros_like(p_0[obj]) for obj in objs_kwargs}
 
     # Run simulation and validate dynamics equations at each step
     p_prev, v_prev = p_0.copy(), v_0.copy()
@@ -175,7 +185,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
             assert_allclose(v_i, expected_v, atol=1e-3)
             assert_allclose(p_i, expected_p, tol=TOL_SINGLE)
 
-    for obj in objs_kwargs.keys():
+    for obj in objs_kwargs:
         # Validate centroid consistency
         ipc_centroid = p_prev[obj].mean(axis=-2)
         gs_centroid = obj.get_state().pos.mean(axis=-2)
@@ -218,25 +228,33 @@ def test_ground_clearance(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            rho=200.0,
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Material(
+                density=200.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     cubes = []
     for y, resistance in ((-0.4, 1e2), (-0.2, 1e3), (0.0, 1e4), (0.2, 1e5), (0.4, 1e6)):
         cube = scene.add_entity(
-            gs.morphs.Box(
-                pos=(0.0, y, 0.05),
-                size=(0.08, 0.08, 0.08),
-            ),
-            material=gs.materials.Rigid(
-                rho=200.0,
-                coup_friction=0.0,
-                coup_type="ipc_only",
-                contact_resistance=resistance,
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(
+                    pos=(0.0, y, 0.05),
+                    size=(0.08, 0.08, 0.08),
+                ),
+                material=gs.materials.Material(
+                    density=200.0,
+                ),
+                solver_options=gs.options.RigidEntitySolverOptions(
+                    coup_friction=0.0,
+                    coup_type="ipc_only",
+                    contact_resistance=resistance,
+                ),
             ),
         )
         cubes.append(cube)
@@ -286,23 +304,27 @@ def test_ground_sliding(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.25,
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.25,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     cubes = []
     for y, mu in ((-0.4, 0.0), (-0.2, 0.01), (0.0, 0.04), (0.2, 0.09), (0.4, 0.16)):
         cube = scene.add_entity(
-            gs.morphs.Box(
-                pos=(0.0, y, 0.12),
-                size=(0.08, 0.08, 0.08),
-            ),
-            material=gs.materials.Rigid(
-                coup_friction=mu,
-                coup_type="ipc_only",
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(
+                    pos=(0.0, y, 0.12),
+                    size=(0.08, 0.08, 0.08),
+                ),
+                solver_options=gs.options.RigidEntitySolverOptions(
+                    coup_friction=mu,
+                    coup_type="ipc_only",
+                ),
             ),
         )
         cubes.append(cube)
@@ -344,55 +366,67 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="ipc_only",
+            ),
         ),
     )
     rigid_a = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=0.25,
-            coup_type="ipc_only",
-            contact_resistance=9.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.25,
+                coup_type="ipc_only",
+                contact_resistance=9.0,
+            ),
         ),
     )
     rigid_b = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.2, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=0.64,
-            coup_type="ipc_only",
-            contact_resistance=16.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.2, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.64,
+                coup_type="ipc_only",
+                contact_resistance=16.0,
+            ),
         ),
     )
     rigid_c = scene.add_entity(
-        gs.morphs.Box(
-            pos=(-0.2, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=0.16,
-            coup_type="ipc_only",
-            contact_resistance=None,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-0.2, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.16,
+                coup_type="ipc_only",
+                contact_resistance=None,
+            ),
         ),
     )
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=5e4,
-            nu=0.35,
-            rho=1000.0,
-            friction_mu=0.49,
-            contact_resistance=25.0,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.49,
+                youngs_modulus=5e4,
+                poisson_ratio=0.35,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                contact_resistance=25.0,
+            ),
         ),
     )
 
@@ -411,11 +445,11 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
                     elem = coupler._ipc_ground_contacts[entity]
                 else:
                     elem = coupler._ipc_abd_contacts[entity]
-                friction = entity.material.coup_friction
+                friction = entity.options.solver_options.coup_friction
             else:
                 elem = coupler._ipc_fem_contacts[entity]
-                friction = entity.material.friction_mu
-            resistance = entity.material.contact_resistance or coupler.options.contact_resistance
+                friction = entity.material.friction
+            resistance = entity.options.solver_options.contact_resistance or coupler.options.contact_resistance
             elems_idx.append(elem.id())
             frictions.append(friction)
             resistances.append(resistance)
@@ -454,62 +488,74 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.5,
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.5,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 0.2),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 0.2),
+                euler=(90, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(
+                density=200,
+                youngs_modulus=1e5,
+                poisson_ratio=0.499,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
         ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(-0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.Rigid(
-            rho=500.0,
-            coup_friction=0.3,
-            coup_type="ipc_only",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.3, 0.2, 0.8),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(-0.25, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.3, 0.2, 0.8),
+            ),
+            material=gs.materials.Material(
+                density=500.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.3,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e3,
-            nu=0.3,
-            rho=1000.0,
-            friction_mu=0.3,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.25, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.3,
+                youngs_modulus=1.0e3,
+                poisson_ratio=0.3,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -526,7 +572,7 @@ def test_objects_colliding(n_envs, show_viewer):
             (sphere, "fem", scene.sim.fem_solver.entities.index(sphere)),
         )
     }
-    p_history = {obj: [] for obj in objs_kwargs.keys()}
+    p_history = {obj: [] for obj in objs_kwargs}
     for _i in range(NUM_STEPS):
         scene.step()
 
@@ -535,7 +581,7 @@ def test_objects_colliding(n_envs, show_viewer):
             p_history[obj].append(p_i)
 
     cloth_p_history = np.stack(p_history[cloth], axis=-3)
-    for obj in objs_kwargs.keys():
+    for obj in objs_kwargs:
         obj_p_history = np.stack(p_history[obj], axis=-3)
 
         # Make sure that all vertices are laying on the ground
@@ -583,31 +629,39 @@ def test_momentum_conservation(n_envs, show_viewer):
     )
 
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.0,
-            model="stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
     rigid_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.4),
-            size=(0.1, 0.1, 0.1),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000,
-            coup_type="two_way_soft_constraint",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.2, 0.2, 0.8),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.4),
+                size=(0.1, 0.1, 0.1),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.2, 0.2, 0.8),
+            ),
+            material=gs.materials.Material(
+                density=1000,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+            ),
         ),
     )
 
@@ -629,7 +683,7 @@ def test_momentum_conservation(n_envs, show_viewer):
 
     # Read actual FEM mass from IPC geometry (mesh mass != analytical sphere mass due to tet discretization).
     blob_radius = blob.morph.radius
-    blob_rho = blob.material.rho
+    blob_rho = blob.material.density
     blob_analytical_mass = (4.0 / 3.0) * np.pi * blob_radius**3 * blob_rho
     (fem_raw_geo,) = find_ipc_geometries(scene, solver_type="fem", idx=fem_entity_idx, env_idx=0)
     fem_mass_density = fem_raw_geo.meta().find(builtin.mass_density).view().item()
@@ -735,21 +789,25 @@ def test_single_joint(n_envs, coup_type, joint_type, fixed, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.5,
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.5,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=f"urdf/simple/two_cube_{joint_type}.urdf",
-            pos=POS,
-            fixed=fixed,
-        ),
-        material=gs.materials.Rigid(
-            coup_type=coup_type,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file=f"urdf/simple/two_cube_{joint_type}.urdf",
+                pos=POS,
+                fixed=fixed,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type=coup_type,
+            ),
         ),
     )
 
@@ -865,12 +923,14 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
     )
 
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=POS,
-        ),
-        material=gs.materials.Rigid(
-            coup_type="two_way_soft_constraint",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=POS,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+            ),
         ),
     )
 

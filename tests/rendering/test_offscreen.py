@@ -166,14 +166,16 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
         ),
     )
     fem_quad = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.5),
-            pos=(4.5, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(),
-        surface=gs.surfaces.BSDF(
-            color=(0.9, 0.0, 0.0),
-            emissive=(0.0, 0.0, 0.6),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.5),
+                pos=(4.5, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.BSDF(
+                color=(0.9, 0.0, 0.0),
+                emissive=(0.0, 0.0, 0.6),
+            ),
+            material=gs.materials.Elastic(),
         ),
     )
     camera = scene.add_camera(
@@ -244,8 +246,8 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
             file="urdf/go2/urdf/go2.urdf",
             merge_fixed_links=False,
         ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        material=gs.materials.Material(
+            density=200.0,
         ),
     )
     cam_debug = scene.add_camera(
@@ -841,34 +843,46 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     )
 
     # We don't test "recon" for vis_mode because it is hard to install.
-    materials = ((gs.materials.Rigid(), "visual"),)
+    entities_config = ((gs.options.RigidEntityOptions, gs.materials.Material(), "visual"),)
     if renderer_type == RENDERER_TYPE.RASTERIZER:
-        materials = (
-            *materials,
-            (gs.materials.FEM.Elastic(), "visual"),
-            (gs.materials.MPM.Elastic(), particle_mode),
-            (gs.materials.PBD.Cloth(), particle_mode),
-            (gs.materials.SPH.Liquid(), "particle" if particle_mode == "visual" else particle_mode),
-            (gs.materials.Kinematic(), "visual"),
+        entities_config = (
+            *entities_config,
+            (gs.options.FEMEntityOptions, gs.materials.Elastic(), "visual"),
+            (gs.options.MPMEntityOptions, gs.materials.Elastic(youngs_modulus=3e5), particle_mode),
+            (gs.options.PBDClothEntityOptions, gs.materials.Cloth(), particle_mode),
+            (
+                gs.options.SPHEntityOptions,
+                gs.materials.Liquid(),
+                "particle" if particle_mode == "visual" else particle_mode,
+            ),
+            (gs.options.KinematicEntityOptions, None, "visual"),
         )
 
     ducks = []
-    for i, (material, vis_mode) in enumerate(materials):
+    for i, (options_cls, material, vis_mode) in enumerate(entities_config):
         col_idx, row_idx = i // 3 - 1, i % 3 - 1
-        ducks.append(
-            scene.add_entity(
-                material=material,
-                morph=gs.morphs.Mesh(
-                    file="meshes/duck.obj",
-                    scale=0.1,
-                    pos=(col_idx * 0.5, row_idx * 0.5, 0.5),
-                ),
-                surface=gs.surfaces.Default(
-                    color=np.random.rand(3),
-                    vis_mode=vis_mode,
-                ),
-            )
+        morph = gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            pos=(col_idx * 0.5, row_idx * 0.5, 0.5),
         )
+        surface = gs.surfaces.Default(
+            color=np.random.rand(3),
+            vis_mode=vis_mode,
+        )
+        # A kinematic entity takes no material
+        if material is None:
+            options = options_cls(
+                morph=morph,
+                surface=surface,
+            )
+        else:
+            options = options_cls(
+                morph=morph,
+                surface=surface,
+                material=material,
+            )
+        ducks.append(scene.add_entity(options=options))
 
     camera = scene.add_camera(
         # Using very low resolution to speed up rendering
@@ -884,11 +898,16 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     # add_rigid_node (tuple keys at link/geom level), other ducks use add_static_node (int keys). The URDF has
     # 2 visual links. FEM entities use per-visual-geom tuple keys (entity.idx, i_g) only at "geom" level; at "link"
     # and "entity" levels they fall back to a plain int entity.idx.
-    n_rigid_like = sum(isinstance(m, gs.materials.Kinematic) for m, _ in materials)
-    n_fem_geom = (
-        sum(isinstance(m, gs.materials.FEM.Elastic) for m, _ in materials) if segmentation_level == "geom" else 0
+    n_rigid_like = sum(
+        options_cls in (gs.options.RigidEntityOptions, gs.options.KinematicEntityOptions)
+        for options_cls, _, _ in entities_config
     )
-    seg_num = len(materials) + (2 if segmentation_level == "entity" else 3)
+    n_fem_geom = (
+        sum(options_cls is gs.options.FEMEntityOptions for options_cls, _, _ in entities_config)
+        if segmentation_level == "geom"
+        else 0
+    )
+    seg_num = len(entities_config) + (2 if segmentation_level == "entity" else 3)
     idx_dict = scene.segmentation_idx_dict
     assert len(idx_dict) == seg_num
     comp_key = 0
@@ -924,11 +943,13 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
     # Every vertex of the scene must stay inside the camera frustum: the Apple Software Renderer misrasterizes
     # out-of-frustum geometry.
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     camera = scene.add_camera(
         res=CAM_RES,
@@ -1319,7 +1340,7 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
         obj.set_quat(quat, envs_idx=([1] if n_envs else None))
         _, _, seg, _ = cam.render(segmentation=True, force_render=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
-        assert not seg[tuple([*range(0, res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
+        assert not seg[tuple([*range(res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
 
 
 @pytest.mark.required

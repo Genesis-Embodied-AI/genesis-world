@@ -509,15 +509,17 @@ from .utils import tools
 from .utils.geom import *
 from .utils.misc import assert_built, assert_unbuilt, assert_initialized, raise_exception, raise_exception_from
 
+from .options import materials
 from .options import morphs
 from .options import sensors
 from .options import renderers
 from .options import surfaces
 from .options import textures
+from .options.indices import GeomIndex, LinkIndex, VertexIndex, VGeomIndex
 
 from .datatypes import List
 
-from .engine import states, materials, force_fields
+from .engine import states, force_fields
 from .engine.mesh import Mesh
 from .engine.scene import Scene
 

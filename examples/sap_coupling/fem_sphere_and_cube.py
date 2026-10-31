@@ -35,14 +35,18 @@ def main():
         show_viewer=args.vis,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, 0.1),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.1),
+                radius=0.1,
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = snapshot_download(
@@ -53,13 +57,16 @@ def main():
         max_workers=1,
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/cube8.obj",
-            pos=(0.0, 0.0, 0.4),
-            scale=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/cube8.obj",
+                pos=(0.0, 0.0, 0.4),
+                scale=0.1,
+            ),
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build()

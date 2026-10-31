@@ -6,7 +6,7 @@ Requires the ``render`` optional extras: ``pip install 'genesis-world[render]'``
 
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -16,6 +16,7 @@ import genesis.utils.geom as gu
 from genesis.engine.interactive_scene import InteractiveFeature, InteractiveScene
 from genesis.ext.pyrender.overlay.style import apply_dark_theme
 from genesis.ext.pyrender.overlay.types import build_entity_joint_data, EntityCacheEntry, EntityJointData
+from genesis.options.entities import EntityOptions, RigidEntityOptions
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, MouseInteractionPlugin, ViewerPlugin
 
@@ -122,7 +123,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # The Scene editor panel mutates this local mirror of the live entities; on "Rebuild Scene" it is submitted to
         # the InteractiveScene, which applies it on the stepping thread.
         self._pending_dirty = False
-        self._pending_entities_kwargs: dict[str, dict] = {}
+        self._pending_entities_options: dict[str, EntityOptions] = {}
         self._add_entity_morph_type = 0  # index into _ADD_ENTITY_TYPES
         self._add_entity_file = ""
         self._add_entity_pos = [0.0, 0.0, 0.0]
@@ -186,7 +187,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             )
         # Cache entity data now (doesn't require OpenGL)
         self._cache_entity_data()
-        self._capture_pending_entities_kwargs()
+        self._capture_pending_entities_options()
         # Wrap the scene on first build. The InteractiveScene is the controller (it owns play/pause, stepping and
         # rebuild); this overlay is just a view that reads and toggles its state. On a rebuild the plugin is re-attached
         # to the reconstructed scene (same object), so the existing wrapper still applies.
@@ -306,26 +307,26 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                     n_dofs=entity.n_dofs,
                 )
 
-    def _capture_pending_entities_kwargs(self):
-        """Capture current entity construction kwargs into ``self._pending_entities_kwargs`` for the Scene
-        editor panel. Keyed by entity name; values are the kwargs forwarded to ``scene.add_entity``."""
-        self._pending_entities_kwargs = {}
-        for entity in self.scene.entities:
-            # A heterogeneous entity has multiple morph variants; capture them all so a rebuild reproduces every
-            # variant instead of collapsing the entity to its first morph.
-            if isinstance(entity, gs.engine.entities.KinematicEntity):
-                morph = tuple(entity.morphs) if len(entity.morphs) > 1 else entity.main_morph
-            else:
-                morph = entity.morph
-            kwargs: dict[str, Any] = {"morph": morph}
-            # Carry the material and surface so a rebuild preserves the entity's solver (e.g. a Kinematic entity must
-            # not silently become Rigid, the add_entity default). visualize_contact is rigid-only.
-            if isinstance(entity, gs.engine.entities.KinematicEntity):
-                kwargs["material"] = entity.material
-                kwargs["surface"] = entity.surface
-                if isinstance(entity, gs.engine.entities.RigidEntity):
-                    kwargs["visualize_contact"] = entity.visualize_contact
-            self._pending_entities_kwargs[entity.name] = kwargs
+    def _capture_pending_entities_options(self):
+        """Capture the options of the current entities into ``self._pending_entities_options`` for the Scene editor
+        panel, keyed by entity name.
+
+        Each value is the options object the description of the entity holds, so a rebuild handed it unchanged
+        re-creates the entity from that description (see 'InteractiveScene.rebuild'). An entity without a description
+        is resolved again from its options. The parts of a hybrid entity are left out, since the hybrid entity adds
+        them itself.
+        """
+        hybrid_parts_name = {
+            part.name
+            for entity in self.scene.entities
+            if isinstance(entity, gs.engine.entities.HybridEntity)
+            for part in (entity.part_rigid, entity.part_soft)
+        }
+        self._pending_entities_options = {
+            entity.name: entity.desc.options if entity.desc is not None else entity.options
+            for entity in self.scene.entities
+            if entity.name not in hybrid_parts_name
+        }
 
     def _is_capturing(self) -> bool:
         """Check if ImGui or gizmo wants mouse/keyboard input."""
@@ -838,8 +839,8 @@ class ImGuiOverlayPlugin(ViewerPlugin):
 
         # Per-entity scale editing (FileMorph only; primitives carry size/radius/height instead).
         to_remove: str | None = None
-        for name, kwargs in self._pending_entities_kwargs.items():
-            morph = kwargs["morph"]
+        for name, options in self._pending_entities_options.items():
+            morph = options.morph
             morph_name = type(morph).__name__
             file_name = morph.file if isinstance(morph, gs.morphs.FileMorph) else ""
 
@@ -853,9 +854,12 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 imgui.end_disabled()
                 self._maybe_show_disabled_tooltip(scale_disabled)
                 if changed and not scale_disabled:
-                    # A new morph rather than an edit in place, since the rebuild re-creates an entity handed its own
-                    # morph from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
-                    kwargs["morph"] = morph.model_copy(update={"scale": new_scale})
+                    # New options rather than an edit in place, since the rebuild re-creates an entity handed the
+                    # options of its description from that description, resolved at the old scale (see
+                    # 'InteractiveScene._apply_rebuild').
+                    self._pending_entities_options[name] = options.model_copy(
+                        update={"morph": morph.model_copy(update={"scale": new_scale})}
+                    )
                     self._pending_dirty = True
 
                 imgui.same_line()
@@ -870,7 +874,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
             draw_separator(imgui)
 
         if to_remove is not None:
-            del self._pending_entities_kwargs[to_remove]
+            del self._pending_entities_options[to_remove]
             self._pending_dirty = True
 
         # Add entity / stage section
@@ -991,15 +995,10 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 # Generate a unique name based on the morph type.
                 suffix = 0
                 name = base_name
-                while name in self._pending_entities_kwargs:
+                while name in self._pending_entities_options:
                     suffix += 1
                     name = f"{base_name}_{suffix}"
-                self._pending_entities_kwargs[name] = {
-                    "morph": new_morph,
-                    "material": None,
-                    "surface": None,
-                    "visualize_contact": False,
-                }
+                self._pending_entities_options[name] = RigidEntityOptions(morph=new_morph)
                 self._pending_dirty = True
             imgui.unindent()
 
@@ -1012,7 +1011,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         imgui.end_disabled()
         self._maybe_show_disabled_tooltip(rebuild_disabled)
         if rebuild_clicked and not rebuild_disabled:
-            self.interactive_scene.rebuild(entities_kwargs=self._pending_entities_kwargs)
+            self.interactive_scene.rebuild(entities_options=self._pending_entities_options)
             self._pending_dirty = False
 
     def _render_entity_browser(self):

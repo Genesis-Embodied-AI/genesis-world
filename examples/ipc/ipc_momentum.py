@@ -36,33 +36,41 @@ def main():
     # FEM bodies use StableNeoHookean constitution, Rigid bodies use ABD constitution
     # FEM entities (added to IPC as deformable bodies)
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
     # Rigid bodies (added to both Genesis rigid solver AND IPC as ABD objects)
     # This enables contact between rigid bodies and FEM bodies through IPC
     rigid_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.4),
-            size=(0.1, 0.1, 0.1),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.Rigid(
-            rho=1000,
-            friction=0.3,
-            coup_type="two_way_soft_constraint",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.2, 0.2, 0.8),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.4),
+                size=(0.1, 0.1, 0.1),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.2, 0.2, 0.8),
+            ),
+            material=gs.materials.Material(
+                density=1000,
+                friction=0.3,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+            ),
         ),
     )
     scene.build()
@@ -76,7 +84,7 @@ def main():
     # Get FEM blob total mass from material properties
     # For a sphere: mass = (4/3) * pi * r^3 * rho
     blob_radius = blob.morph.radius
-    blob_rho = blob.material.rho
+    blob_rho = blob.material.density
     blob_mass = (4.0 / 3.0) * np.pi * (blob_radius**3) * blob_rho
     cube_mass = tensor_to_array(rigid_cube.get_mass())
 
@@ -97,9 +105,9 @@ def main():
 
         # FEM body linear momentum.
         # Get FEM vertex data from IPC using libuipc API
+        from uipc import builtin
         from uipc.backend import SceneVisitor
         from uipc.geometry import SimplicialComplexSlot, apply_transform, merge
-        from uipc import builtin
 
         # Find FEM geometry in IPC scene
         fem_vertex_positions, fem_vertex_masses = None, None
@@ -192,11 +200,11 @@ def main():
             print(f"Rigid mass:   {rigid_m:8.4f} kg")
             print(f"Rigid velocity: [{rigid_v[0]:9.5f}, {rigid_v[1]:9.5f}, {rigid_v[2]:9.5f}] m/s")
             print(f"Rigid momemtum: [{rigid_p[0]:9.5f}, {rigid_p[1]:9.5f}, {rigid_p[2]:9.5f}] kg*m/s")
-            print("")
+            print()
             print(f"FEM   mass:   {fem_m:8.4f} kg")
             print(f"FEM   velocity: [{fem_v[0]:9.5f}, {fem_v[1]:9.5f}, {fem_v[2]:9.5f}] m/s")
             print(f"FEM   momemtum: [{fem_p[0]:9.5f}, {fem_p[1]:9.5f}, {fem_p[2]:9.5f}] kg*m/s")
-            print("")
+            print()
             print(f"TOTAL momemtum: [{total_p[0]:9.5f}, {total_p[1]:9.5f}, {total_p[2]:9.5f}] kg*m/s")
             print(f"|p_total|: {np.linalg.norm(total_p):.6f} kg*m/s")
 

@@ -43,39 +43,60 @@ def main():
 
     scene.add_entity(gs.morphs.Plane())
 
-    franka_material_kwargs = dict(
-        coup_friction=0.8,
-        coup_type=args.coup_type,
-    )
-    if args.coup_type == "two_way_soft_constraint":
-        franka_material_kwargs["coup_links"] = ("left_finger", "right_finger")
-    franka_material = gs.materials.Rigid(**franka_material_kwargs) if not args.no_ipc else None
+    franka_solver_options = gs.options.RigidEntitySolverOptions()
+    franka_links_options = {}
+    if not args.no_ipc:
+        # The two-way coupling couples the fingers alone
+        franka_solver_options = gs.options.RigidEntitySolverOptions(
+            needs_coup=args.coup_type != "two_way_soft_constraint",
+            coup_friction=0.8,
+            coup_type=args.coup_type,
+        )
+        franka_links_options = {
+            gs.LinkIndex.named("left_finger", "right_finger"): gs.options.LinkOptions(
+                solver_options=gs.options.RigidLinkSolverOptions(
+                    needs_coup=True,
+                ),
+            ),
+        }
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda_non_overlap.xml",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda_non_overlap.xml",
+            ),
+            solver_options=franka_solver_options,
+            links=franka_links_options,
         ),
-        material=franka_material,
     )
 
+    cube_morph = gs.morphs.Box(
+        pos=(0.65, 0.0, 0.03),
+        size=(0.05, 0.05, 0.05),
+    )
+    cube_surface = gs.surfaces.Plastic(
+        color=(0.2, 0.8, 0.2, 0.5),
+    )
     if not args.no_ipc:
-        cube_material = gs.materials.FEM.Elastic(
-            E=5.0e4,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.5,
-            model="stable_neohookean",
+        cube_options = gs.options.FEMEntityOptions(
+            morph=cube_morph,
+            surface=cube_surface,
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.5,
+                youngs_modulus=5.0e4,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         )
     else:
-        cube_material = gs.materials.Rigid()
+        cube_options = gs.options.RigidEntityOptions(
+            morph=cube_morph,
+            surface=cube_surface,
+        )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.65, 0.0, 0.03),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=cube_material,
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.2, 0.5),
-        ),
+        options=cube_options,
     )
 
     scene.build()

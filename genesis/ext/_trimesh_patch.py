@@ -279,7 +279,11 @@ def load_obj(
 
     if len(geometry) == 1:
         # TODO : should this be removed to always return a scene?
-        return next(iter(geometry.values()))
+        # The mesh keeps in its metadata the name a scene would key it by, when the file states one
+        ((name, mesh),) = geometry.items()
+        if (material if group_material else current_object) is not None:
+            mesh["metadata"] = {"name": name}
+        return mesh
 
     # add an identity transform for every geometry
     graph = [{"geometry": k, "frame_to": k} for k in geometry.keys()]
@@ -304,7 +308,7 @@ def parse_mtl(mtl, resolver=None):
     Returns
     ------------
     mtllibs : list of dict
-      Each dict has keys: newmtl, map_Kd, Kd
+      Each dict has keys: name, map_Kd, Kd
     """
     # decode bytes into string if necessary
     mtl = util.decode_text(mtl)
@@ -332,10 +336,10 @@ def parse_mtl(mtl, resolver=None):
             # material name extracted from line like:
             # newmtl material_0
             if material is not None:
-                # save the old material by old name and remove key
-                materials[material.pop("newmtl")] = material
+                # save the old material by its name, which the material keeps
+                materials[material["name"]] = material
             # start a fresh new material
-            material = {"newmtl": " ".join(split[1:])}
+            material = {"name": " ".join(split[1:])}
 
         elif key == "map_kd":
             # represents the file name of the texture image
@@ -373,7 +377,7 @@ def parse_mtl(mtl, resolver=None):
             material[key] = split[1:]
     # reached EOF so save any existing materials
     if material:
-        materials[material.pop("newmtl")] = material
+        materials[material["name"]] = material
 
     return materials
 

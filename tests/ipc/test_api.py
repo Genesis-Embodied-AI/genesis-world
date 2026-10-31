@@ -28,18 +28,22 @@ def test_needs_coup():
         show_viewer=False,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                needs_coup=False,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-            pos=(0, 0, 0.5),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0, 0, 0.5),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                needs_coup=False,
+            ),
         ),
     )
     scene.build()
@@ -102,14 +106,19 @@ def test_link_filter_strict():
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_cube_revolute.urdf",
-            pos=(0, 0, 0.2),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            coup_type="two_way_soft_constraint",
-            coup_links=("moving",),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(0, 0, 0.2),
+                fixed=True,
+            ),
+            links={
+                "base": gs.options.LinkOptions(
+                    solver_options=gs.options.RigidLinkSolverOptions(
+                        needs_coup=False,
+                    ),
+                ),
+            },
         ),
     )
 
@@ -120,6 +129,8 @@ def test_link_filter_strict():
     base_link = robot.get_link("base")
     moving_link = robot.get_link("moving")
 
+    # Coupling some links alone resolves the coupling left to None to the two-way one
+    assert coupler._coup_type_by_entity[robot] == COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT
     assert robot in coupler._coup_links
     assert coupler._coup_links[robot] == {moving_link}
 
@@ -157,22 +168,26 @@ def test_find_target_links(coup_type, merge_fixed_links, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.5,
-            coup_type="ipc_only",
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.5,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/panda_bullet/panda_nohand.urdf",
-            pos=(0, 0, 1),
-            fixed=True,
-            merge_fixed_links=merge_fixed_links,
-        ),
-        material=gs.materials.Rigid(
-            coup_type=coup_type,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/panda_bullet/panda_nohand.urdf",
+                pos=(0, 0, 1),
+                fixed=True,
+                merge_fixed_links=merge_fixed_links,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type=coup_type,
+            ),
         ),
     )
 
@@ -217,54 +232,73 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                needs_coup=False,
+            ),
         ),
     )
 
     # Non-IPC box — always handled by rigid solver
     box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=(1.0, 0.0, 0.2),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=(1.0, 0.0, 0.2),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                needs_coup=False,
+            ),
         ),
     )
 
     if coup_type == "two_way_soft_constraint":
         entity = scene.add_entity(
-            gs.morphs.MJCF(
-                file="xml/franka_emika_panda/panda_non_overlap.xml",
-            ),
-            material=gs.materials.Rigid(
-                coup_type="two_way_soft_constraint",
-                coup_links=("left_finger", "right_finger"),
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.MJCF(
+                    file="xml/franka_emika_panda/panda_non_overlap.xml",
+                ),
+                solver_options=gs.options.RigidEntitySolverOptions(
+                    needs_coup=False,
+                    coup_type="two_way_soft_constraint",
+                ),
+                links={
+                    ("left_finger", "right_finger"): gs.options.LinkOptions(
+                        solver_options=gs.options.RigidLinkSolverOptions(
+                            needs_coup=True,
+                        ),
+                    ),
+                },
             ),
         )
 
-        ipc_excluded_geoms = {geom.idx for name in entity.material.coup_links for geom in entity.get_link(name).geoms}
+        ipc_excluded_geoms = {
+            geom.idx for name in ("left_finger", "right_finger") for geom in entity.get_link(name).geoms
+        }
     else:
         with pytest.raises(gs.GenesisException):
             entity = scene.add_entity(
-                gs.morphs.URDF(
-                    file="urdf/go2/urdf/go2.urdf",
-                    pos=(0.0, 0.0, 1.0),
-                ),
-                material=gs.materials.Rigid(
-                    coup_type="ipc_only",
+                options=gs.options.RigidEntityOptions(
+                    morph=gs.morphs.URDF(
+                        file="urdf/go2/urdf/go2.urdf",
+                        pos=(0.0, 0.0, 1.0),
+                    ),
+                    solver_options=gs.options.RigidEntitySolverOptions(
+                        coup_type="ipc_only",
+                    ),
                 ),
             )
 
         entity = scene.add_entity(
-            morph=gs.morphs.Box(
-                size=(0.2, 0.2, 0.2),
-                pos=(0.0, 0.0, 0.6),
-            ),
-            material=gs.materials.Rigid(
-                coup_type="ipc_only",
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(
+                    size=(0.2, 0.2, 0.2),
+                    pos=(0.0, 0.0, 0.6),
+                ),
+                solver_options=gs.options.RigidEntitySolverOptions(
+                    coup_type="ipc_only",
+                ),
             ),
         )
 
@@ -319,7 +353,7 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
 
 
 @pytest.mark.required
-def test_coup_collision_links():
+def test_link_coup_collision():
     scene = gs.Scene(
         coupler_options=gs.options.IPCCouplerOptions(
             enable_rigid_rigid_contact=False,
@@ -329,26 +363,64 @@ def test_coup_collision_links():
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_cube_revolute.urdf",
-            pos=(0, 0, 0.2),
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(0, 0, 0.2),
+                fixed=True,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+            ),
+            links={
+                "base": gs.options.LinkOptions(
+                    solver_options=gs.options.RigidLinkSolverOptions(
+                        enable_coup_collision=False,
+                    ),
+                ),
+            },
         ),
-        material=gs.materials.Rigid(
-            coup_type="two_way_soft_constraint",
-            coup_collision_links=("moving",),
+    )
+    # Collision disabled for the entity and enabled again for the links a glob pattern selects
+    robot_collision_on_links = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(1.0, 0, 0.2),
+                fixed=True,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+                enable_coup_collision=False,
+            ),
+            links={
+                "mov*": gs.options.LinkOptions(
+                    solver_options=gs.options.RigidLinkSolverOptions(
+                        enable_coup_collision=True,
+                    ),
+                ),
+            },
         ),
     )
     scene.build()
     assert scene.sim is not None
 
-    # Verify the collision settings were applied
+    # "base" should be disabled, "moving" should not be in the disabled dict
     coupler = cast("IPCCoupler", scene.sim.coupler)
-    collision_settings = coupler._coupling_collision_settings[robot]
-    base_link = robot.get_link("base")
-    moving_link = robot.get_link("moving")
+    for entity in (robot, robot_collision_on_links):
+        collision_settings = coupler._coupling_collision_settings[entity]
+        assert collision_settings[entity.get_link("base")] is False
+        assert entity.get_link("moving") not in collision_settings
 
-    # "base" should be disabled (not in coup_collision_links), "moving" should not be in the disabled dict
-    assert base_link in collision_settings
-    assert collision_settings[base_link] is False
-    assert moving_link not in collision_settings
+    # A link density would weigh the link differently in the rigid solver and in IPC, which holds one per entity, even
+    # on a link IPC merges into the affine body of its parent
+    scene_with_link_density = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(two_way_coupling=True))
+    scene_with_link_density.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda_non_overlap.xml"),
+            solver_options=gs.options.RigidEntitySolverOptions(coup_type="two_way_soft_constraint"),
+            links={"hand": gs.options.LinkOptions(material=gs.materials.Material(density=2000.0))},
+        )
+    )
+    with pytest.raises(gs.GenesisException, match="density"):
+        scene_with_link_density.build()

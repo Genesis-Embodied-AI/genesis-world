@@ -458,7 +458,7 @@ def test_concentric_contact(direction, show_viewer):
     )
     scene.add_entity(gs.morphs.Plane())
     # Realistic steel density so the nut carries a real fastener's mass and inertia.
-    steel = gs.materials.Rigid(rho=7850.0)
+    steel = gs.materials.Material(density=7850.0)
     scene.add_entity(
         gs.morphs.Mesh(
             # Head bottom rests on the plane (z = 0), head top at z = 11 mm, shaft tip at z = 43 mm.

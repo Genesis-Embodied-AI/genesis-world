@@ -11,7 +11,6 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
-from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
@@ -199,8 +198,6 @@ class GravityMixin:
 
 
 class Solver(RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
     # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
     is_differentiable: bool = False
     # Whether the solver holds its state in frames, one per substep of a window of them (see 'n_frames'), frame 0

@@ -1,79 +1,77 @@
-from typing import Any, Literal
+"""Constitutive models of the finite element method (FEM) solver, bound from the material and the solver options."""
+
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, ClassVar
 
 import quadrants as qd
-from pydantic import PrivateAttr, model_validator
 
 import genesis as gs
+from genesis.options.materials import Cloth, Elastic, Muscle
 
-from .base import Base
-
-
-@qd.func
-def partialJpartialF(F):
-    pJpF0 = F[:, 1].cross(F[:, 2])
-    pJpF1 = F[:, 2].cross(F[:, 0])
-    pJpF2 = F[:, 0].cross(F[:, 1])
-    pJpF = qd.Matrix.cols([pJpF0, pJpF1, pJpF2])
-    return pJpF
+if TYPE_CHECKING:
+    from genesis.options.entities import FEMEntityOptions
 
 
 @qd.data_oriented
-class Elastic(Base):
-    """
-    The elastic material class for FEM.
+class FEMModel:
+    """The constitutive model of a material without volumetric response, whose physics the IPC coupler owns.
 
-    Parameters
-    ----------
-    E : float, optional
-        Young's modulus, which controls stiffness. Default is 1e6.
-    nu : float, optional
-        Poisson ratio, describing the material's volume change under stress. Default is 0.2.
-    rho : float, optional
-        Material density (kg/m³). Default is 1000.
-    hydroelastic_modulus : float, optional
-        Hydroelastic modulus for hydroelastic contact. Default is 1e7.
-    friction_mu : float, optional
-        Friction coefficient. Default is 0.1.
-    model : str, optional
-        Constitutive model to use for stress computation. Options are:
-        - 'linear': Linear elasticity model
-        - 'stable_neohookean': A numerically stable Neo-Hookean model
-        - 'linear_corotated': Linear corotated elasticity model
-        Default is 'linear'.
-    contact_resistance : float | None, optional
-        IPC contact resistance/stiffness override. ``None`` uses the coupler global
-        default. Default is None.
+    The explicit solver compiles the stress of every model into its static loop over models, even one no element
+    executes, so the stress of this model returns zero rather than raise, which quadrants cannot compile.
     """
 
-    model: Literal["linear", "stable_neohookean", "linear_corotated"] = "linear"
+    def __init__(self) -> None:
+        self.hessian_invariant = False
+        self.is_hessian_ready = False
 
-    # Internal buffer for linear corotated rotation matrix
-    _R: Any = PrivateAttr(default=None)
+    def build(self, fem_solver) -> None:
+        pass
 
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_deprecated_model(cls, data: dict) -> dict:
-        if data.get("model") == "stable_neohooken":
-            gs.logger.warning("The 'stable_neohooken' model is deprecated. Use 'stable_neohookean' instead.")
-            data["model"] = "stable_neohookean"
-        return data
+    @qd.func
+    def pre_compute(self, J, F, i_e, i_b):
+        pass
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
+    @qd.func
+    def update_stress(self, mu, lam, J, F, actu, m_dir):
+        return qd.Matrix.zero(gs.qd_float, 3, 3)
 
-        if self.model == "linear":
+    @qd.func
+    def compute_energy_gradient_hessian(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
+        raise NotImplementedError
+
+    @qd.func
+    def compute_energy_gradient(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+        raise NotImplementedError
+
+    @qd.func
+    def compute_energy(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+        raise NotImplementedError
+
+
+@qd.data_oriented
+class FEMElasticModel(FEMModel):
+    """The stress and energy of an Elastic material, under the constitutive model its entity solver options choose.
+
+    The Hessian of the elastic energy is constant under the linear model alone, which lets the implicit solver compute
+    it once and reuse it at every step.
+    """
+
+    def __init__(self, model: str) -> None:
+        super().__init__()
+        self.hessian_invariant = model == "linear"
+        # The rotation of each element under the linear corotated model, allocated once the element count is known
+        self._R = None
+        if model == "linear":
             self.update_stress = self._update_stress_linear
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear
             self.compute_energy_gradient = self._compute_energy_gradient_linear
             self.compute_energy = self._compute_energy_linear
-            self.hessian_invariant = True
-        elif self.model == "stable_neohookean":
+        elif model == "stable_neohookean":
             self.update_stress = self._update_stress_stable_neohookean
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_stable_neohookean
             self.compute_energy_gradient = self._compute_energy_gradient_stable_neohookean
             self.compute_energy = self._compute_energy_stable_neohookean
-            self.hessian_invariant = False
-        elif self.model == "linear_corotated":
+        elif model == "linear_corotated":
             self.build = self._build_linear_corotated
             self.pre_compute = self._pre_compute_linear_corotated
             self.update_stress = self._update_stress_linear_corotated
@@ -81,7 +79,7 @@ class Elastic(Base):
             self.compute_energy_gradient = self._compute_energy_gradient_linear_corotated
             self.compute_energy = self._compute_energy_linear_corotated
 
-    def _build_linear_corotated(self, fem_solver):
+    def _build_linear_corotated(self, fem_solver) -> None:
         self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
 
     @qd.func
@@ -90,7 +88,7 @@ class Elastic(Base):
         R = U @ V.transpose()
         self._R[i_b, i_e] = R
 
-    # ─── Linear model ───
+    # --- Linear model ---
 
     @qd.func
     def _update_stress_linear(self, mu, lam, J, F, actu, m_dir):
@@ -142,7 +140,7 @@ class Elastic(Base):
         energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
         return energy
 
-    # ─── Stable Neo-Hookean model ───
+    # --- Stable Neo-Hookean model ---
 
     @qd.func
     def _update_stress_stable_neohookean(self, mu, lam, J, F, actu, m_dir):
@@ -172,7 +170,7 @@ class Elastic(Base):
         energy = 0.5 * (mu * (Ic - 3.0) + _lambda * Jminus1**2)
         return energy
 
-    # ─── Linear Corotated model ───
+    # --- Linear corotated model ---
 
     @qd.func
     def _update_stress_linear_corotated(self, mu, lam, J, F, actu, m_dir):
@@ -220,3 +218,70 @@ class Elastic(Base):
         trEps = eps.trace()
         energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
         return energy
+
+
+@qd.data_oriented
+class FEMMuscleModel(FEMElasticModel):
+    """The model of a Muscle material: its elastic model plus an active stress along the fiber direction.
+
+    The active stress scales with the Young's modulus of the material.
+    """
+
+    def __init__(self, model: str, stiffness: float) -> None:
+        super().__init__(model)
+        self.stiffness = stiffness
+        self._update_stress_without_actuation = self.update_stress
+        self.update_stress = self._update_stress_with_actuation
+
+    @qd.func
+    def _update_stress_with_actuation(self, mu, lam, J, F, actu, m_dir):
+        stress = self._update_stress_without_actuation(mu, lam, J, F, actu, m_dir)
+
+        l = (F @ m_dir).norm(1e-12)
+        mmT = m_dir.outer_product(m_dir)
+        stress += self.stiffness * (actu / l) * F @ mmT
+
+        return stress
+
+
+@dataclass(frozen=True)
+class FEMModelKey:
+    """The parameters of the model of an entity, equal for the entities sharing one compiled model.
+
+    Each subclass holds the constructor parameters of its model class, which keys of another subclass never equal.
+    """
+
+    model_cls: ClassVar[type[FEMModel]]
+
+
+@dataclass(frozen=True)
+class FEMClothModelKey(FEMModelKey):
+    model_cls: ClassVar[type[FEMModel]] = FEMModel
+
+
+@dataclass(frozen=True)
+class FEMElasticModelKey(FEMModelKey):
+    model_cls: ClassVar[type[FEMModel]] = FEMElasticModel
+    model: str
+
+
+@dataclass(frozen=True)
+class FEMMuscleModelKey(FEMModelKey):
+    model_cls: ClassVar[type[FEMModel]] = FEMMuscleModel
+    model: str
+    stiffness: float
+
+
+def get_fem_model_key(options: "FEMEntityOptions") -> FEMModelKey:
+    """Return what decides the model of an entity, so that the entities sharing it share one compiled model."""
+    material, model = options.material, options.solver_options.model
+    if isinstance(material, Cloth):
+        return FEMClothModelKey()
+    if isinstance(material, Muscle):
+        return FEMMuscleModelKey(model, material.youngs_modulus)
+    return FEMElasticModelKey(model)
+
+
+def build_fem_model(key: FEMModelKey) -> FEMModel:
+    """Bind the model that a key returned by 'get_fem_model_key' names."""
+    return key.model_cls(**asdict(key))

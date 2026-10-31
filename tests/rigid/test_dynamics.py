@@ -3,13 +3,12 @@ import math
 import numpy as np
 import pytest
 import torch
-
 from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
+from genesis.utils import array_class
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -21,10 +20,11 @@ def test_gravity(show_viewer, tol):
 
     sphere = scene.add_entity(gs.morphs.Sphere())
     ghost = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(1.0, 0.0, 0.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(1.0, 0.0, 0.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build(n_envs=3)
 
@@ -712,8 +712,8 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
             size=(0.05, 0.05, 0.05),
             pos=(0.03, 0.33, 0.57),
         ),
-        material=gs.materials.Rigid(
-            rho=400.0,
+        material=gs.materials.Material(
+            density=400.0,
         ),
     )
     scene.build()
