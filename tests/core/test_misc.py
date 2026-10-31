@@ -59,6 +59,25 @@ def three_objects_urdf(three_objects_obj):
 
 
 @pytest.fixture
+def lamp_urdf(asset_tmp_path):
+    # A visual of a single object, and a visual whose asset has no material, which the URDF material names
+    bulb_path = asset_tmp_path / "bulb.obj"
+    bulb_path.write_text("o bulb\nv 0.0 0.0 0.0\nv 0.05 0.0 0.0\nv 0.0 0.05 0.0\nf 1 2 3\n")
+    shade_path = asset_tmp_path / "shade.glb"
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(shade_path)
+    robot = ET.Element("robot", name="lamp")
+    link = ET.SubElement(robot, "link", name="lamp")
+    for mesh_path in (bulb_path, shade_path):
+        visual = ET.SubElement(link, "visual")
+        ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(mesh_path))
+    material = ET.SubElement(visual, "material", name="steel")
+    ET.SubElement(material, "color", rgba="0.5 0.5 0.5 1.0")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.05 0.05 0.05")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture
 def torus_box_sphere_mjcf(asset_tmp_path):
     torus_path = asset_tmp_path / "torus.obj"
     trimesh.creation.torus(major_radius=0.1, minor_radius=0.03).export(torus_path)
@@ -80,7 +99,14 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 @pytest.mark.required
 def test_entity_options(
-    tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf, three_objects_obj, three_objects_urdf
+    tmp_path,
+    show_viewer,
+    tol,
+    two_box_free_mjcf,
+    torus_box_sphere_mjcf,
+    three_objects_obj,
+    three_objects_urdf,
+    lamp_urdf,
 ):
     DT = 1e-2
     SUBSTEPS = 10
@@ -410,6 +436,27 @@ def test_entity_options(
             },
         ),
     )
+    # The visual geom of an OBJ file of a single object is named after it, and a URDF material selects the visual geom
+    # whose asset has no material
+    lamp = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file=lamp_urdf,
+                pos=(5.0, 4.0, 0.6),
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.named("bulb"): gs.options.VGeomOptions(
+                    surface=knob_surface,
+                ),
+                gs.VGeomIndex.with_material("steel"): gs.options.VGeomOptions(
+                    surface=gs.surfaces.Default(
+                        color=(0.0, 0.0, 1.0),
+                    ),
+                ),
+            },
+        ),
+    )
     # An OBJ material selects the visual geom it is assigned to by its name in the material library
     boat = scene.add_entity(
         options=gs.options.RigidEntityOptions(
@@ -707,6 +754,8 @@ def test_entity_options(
         for vgeom in entity.vgeoms:
             is_knob_color = np.allclose(vgeom.surface.get_rgba().color[:3], (0.0, 1.0, 0.0), atol=gs.EPS)
             assert is_knob_color == (vgeom.metadata["name"] == "knob")
+    lamp_vgeoms_color = [vgeom.surface.get_rgba().color[:3] for vgeom in lamp.vgeoms]
+    assert_allclose(lamp_vgeoms_color, ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), tol=gs.EPS)
     # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
     # face sags under gravity
     for box in (rotated_box, hanging_box):
