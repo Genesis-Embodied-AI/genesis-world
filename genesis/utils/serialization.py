@@ -12,7 +12,6 @@ import io
 import json
 import os
 import pathlib
-import sys
 import types
 import typing
 import xml.etree.ElementTree as ET
@@ -152,29 +151,11 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
     return TypeAdapter(admitted)
 
 
-def _resolve_quoted(hint, namespace: dict):
-    """Returns a declaration holding the classes it names, where Python 3.10 left a quoted name unresolved.
-
-    Until Python 3.11, a name quoted inside a generic - 'list["Joint"]' - stays the string it was written as, and a
-    declaration read as a string states nothing about what it holds.
-    """
-    if not isinstance(hint, types.GenericAlias):
-        return hint
-    args = typing.get_args(hint)
-    return typing.get_origin(hint)[
-        tuple(namespace[arg] if isinstance(arg, str) else _resolve_quoted(arg, namespace) for arg in args)
-    ]
-
-
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
         return {name: info.annotation for name, info in cls.model_fields.items()}
-    hints = typing.get_type_hints(cls)
-    if sys.version_info < (3, 11):
-        namespace = vars(sys.modules[cls.__module__])
-        return {name: _resolve_quoted(hint, namespace) for name, hint in hints.items()}
-    return hints
+    return typing.get_type_hints(cls)
 
 
 def _unwrap_annotation(expect):

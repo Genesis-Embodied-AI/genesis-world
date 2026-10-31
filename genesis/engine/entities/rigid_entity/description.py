@@ -14,11 +14,10 @@ import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, fields
 from itertools import chain
-from typing import Any, Sequence, TypeVar
+from typing import Any, Self, Sequence, TypeVar
 
 import numpy as np
 import trimesh
-from typing_extensions import Self
 
 import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE

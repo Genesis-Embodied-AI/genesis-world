@@ -2,12 +2,10 @@ import dataclasses
 import math
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, dataclass_transform
 
 import numpy as np
 import torch
-
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 
 import quadrants as qd
 from quadrants.lang import impl

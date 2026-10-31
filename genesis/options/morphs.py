@@ -8,8 +8,7 @@ rigid object / MPM object / FEM object.
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal
-from typing_extensions import Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 import numpy as np
 from pydantic import Field, StrictBool, StrictInt, model_validator

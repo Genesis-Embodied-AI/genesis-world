@@ -7,7 +7,7 @@ name = "genesis-world"
 version = "1.4.5"
 description = "A universal and generative physics engine"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "psutil",
     "quadrants==1.3.3",
@@ -113,7 +113,7 @@ dev = [
     # Used for ground truth validation in unit tests
     "scipy",
     # The ImGui overlay snapshots are rendered with imgui-bundle 1.93.0, which draws tab corners differently from 1.92
-    "imgui-bundle>=1.93.0; python_version >= '3.11'",
+    "imgui-bundle>=1.93.0",
     # Used for code formatting during commits
     "pre_commit",
 ]
@@ -140,8 +140,7 @@ render = [
     "pybind11[global]",
     # Pre-compiled wheels are only published for cp38-cp312 on macOS (universal2), Linux x86_64, and Windows.
     "open3d; python_version < '3.13' and platform_machine != 'aarch64'",
-    # No pre-compiled wheels are published for Python 3.10, and the source build needs CMake.
-    "imgui-bundle; python_version >= '3.11'",
+    "imgui-bundle",
 ]
 usd = [
     # Used for parsing `.usd` mesh files
