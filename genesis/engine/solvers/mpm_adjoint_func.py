@@ -28,6 +28,7 @@ from .mpm_func import (
     PARAM_FIBRE,
     elastic_principal,
     isotropic_first_piola_differential,
+    local_offset,
     material_param,
     material_params,
     node_offset,
@@ -36,6 +37,7 @@ from .mpm_func import (
     q1_weight_hessian,
     stencil_node_slots,
     trial_deformation,
+    unpack_block,
 )
 
 
@@ -292,13 +294,18 @@ def func_adjoint_nodes(
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     linear: qd.template(),  # MpmLinearSystem
+    force_fields: qd.template(),  # MpmForceFields
+    params: qd.template(),  # MpmParams
+    t,
     dt,
 ):
-    """The kinetic pullback of lambda (`linear.solution`) and the reverse of v_free = mom / m on every node.
+    """The kinetic pullback of lambda (`linear.solution`) and the reverse of v_free = v + dt acc(x_a, v), v = mom / m,
+    on every node.
 
     grad_{u_a} E = m_a (u_a - dt v_free_a) gives v_free_bar = m_a dt lambda_a and m_bar = -lambda_a . (u_a - dt
-    v_free_a), so mom_bar = v_free_bar / m_a and m_bar -= v_free_a . v_free_bar / m_a. A fixed or massless node, whose
-    velocity is zero, gets none.
+    v_free_a). The force fields add dt (d acc / dv)^T v_free_bar to v_bar = v_free_bar (see
+    'ForceField.get_acc_vel_vjp'), the node position x_a being fixed, so mom_bar = v_bar / m_a and
+    m_bar -= v_a . v_bar / m_a. A fixed or massless node, whose velocity is zero, gets none.
     """
     qd.loop_config(name="mpm_adjoint_nodes")
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):
@@ -308,10 +315,17 @@ def func_adjoint_nodes(
         if mass > 0.0 and grid.node_fixed[node] == 0:
             lam = qd.Vector([linear.solution[3 * (linear.row_offset + node) + d] for d in qd.static(range(3))])
             u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            v = qd.Vector([grid.node_v[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
             v_free = qd.Vector([grid.node_v_free[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
             v_free_bar = (mass * dt) * lam
-            mom_bar = v_free_bar / mass
-            mass_bar = -lam.dot(u - dt * v_free) - v_free.dot(v_free_bar) / mass
+            v_bar = v_free_bar
+            if qd.static(len(force_fields.force_fields) > 0):
+                env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+                x_n = (block * 4 + local_offset(node % BLOCK_CELLS)).cast(gs.qd_float) * params.dx[()]
+                for i_ff in qd.static(range(len(force_fields.force_fields))):
+                    v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
+            mom_bar = v_bar / mass
+            mass_bar = -lam.dot(u - dt * v_free) - v.dot(v_bar) / mass
         for d in qd.static(range(3)):
             newton.adj_mom[3 * node + d] = mom_bar[d]
         newton.adj_mass[node] = mass_bar

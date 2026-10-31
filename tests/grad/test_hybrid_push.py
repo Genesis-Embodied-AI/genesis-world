@@ -245,6 +245,160 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
+# The finite differences need the Newton iterations converged far below their default tolerance (see
+# test_deformable_inputs_grad_matches_fd)
+@pytest.mark.precision("64")
+def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
+    # The force fields act on the grid velocity before the Newton solve, so the gradient of the initial velocity goes
+    # through their derivative with respect to the velocity: zero for the constant field, the drag's |v| v and the
+    # flow of the point attractor otherwise
+    scenes, blocks = [], []
+    for requires_grad in (True, False):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=4e-3,
+                substeps=2,
+                gravity=(0.0, 0.0, 0.0),
+                requires_grad=requires_grad,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.5, -0.5, -0.5),
+                upper_bound=(0.5, 0.5, 0.5),
+                grid_density=32,
+                newton_velocity_tol=1e-10,
+                adjoint_hessian="exact",
+                adjoint_linear_solver="direct",
+            ),
+            show_viewer=show_viewer and requires_grad,
+        )
+        block = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.0),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                sampler="regular",
+            ),
+        )
+        for force_field in (
+            gs.force_fields.Constant(direction=(0.0, 0.0, 1.0), strength=2.0),
+            gs.force_fields.Drag(linear=3.0, quadratic=5.0),
+            gs.force_fields.Point(strength=1.0, position=(0.3, 0.2, 0.1), flow=2.0),
+        ):
+            scene.add_force_field(force_field).activate()
+        scene.build(n_envs=2)
+        scenes.append(scene)
+        blocks.append(block)
+
+    goal = torch.tensor((0.1, -0.05, 0.02), dtype=gs.tc_float, device=gs.device)
+
+    def rollout(scene, block, vels):
+        scene.reset()
+        block.set_velocity(vels)
+        for _ in range(3):
+            scene.step()
+        return ((block.get_state().pos - goal) ** 2).sum(dim=(-2, -1))
+
+    vels = np.array([[0.3, -0.2, 0.4], [-0.5, 0.1, 0.2]])
+    vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    rollout(scenes[0], blocks[0], vels_ana).sum().backward()
+
+    eps = 1e-5
+    fd_grad = np.zeros_like(vels)
+    for idx in np.ndindex(vels.shape):
+        losses = []
+        for sign in (+1, -1):
+            perturbed = vels.copy()
+            perturbed[idx] += sign * eps
+            losses.append(float(rollout(scenes[1], blocks[1], perturbed)[idx[0]]))
+        fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+    assert (np.abs(fd_grad) > 1e-3).all()
+    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
+    assert_allclose(vels_ana.grad, fd_grad, rtol=2e-6, atol=2e-6)
+
+
+@pytest.mark.required
+# The finite differences need the Newton iterations converged far below their default tolerance (see
+# test_deformable_inputs_grad_matches_fd)
+@pytest.mark.precision("64")
+def test_hybrid_grad_matches_fd(precision, show_viewer):
+    # The links of a Rigid arm drive the MPM muscle around them after G2P, so the gradient goes from the soft particles
+    # to the arm's dofs through that coupling and the implicit MPM solve
+    scenes, robots = [], []
+    for requires_grad in (True, False):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=3e-3,
+                substeps=2,
+                requires_grad=requires_grad,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                gravity=(0.0, 0.0, 0.0),
+                lower_bound=(0.0, 0.0, -0.2),
+                upper_bound=(1.0, 1.0, 1.0),
+                newton_velocity_tol=1e-10,
+                adjoint_hessian="exact",
+                adjoint_linear_solver="direct",
+            ),
+            show_viewer=show_viewer and requires_grad,
+        )
+        robot = scene.add_entity(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(0.45, 0.45, 0.2),
+                scale=0.2,
+                fixed=True,
+            ),
+            material=gs.materials.Hybrid(
+                material_rigid=gs.materials.Rigid(
+                    gravity_compensation=1.0,
+                ),
+                # Both scenes must sample the same particles for the finite differences
+                material_soft=gs.materials.MPM.Muscle(
+                    E=1e4,
+                    nu=0.45,
+                    rho=1000.0,
+                    model="neohooken",
+                    sampler="regular",
+                ),
+                damping=1000.0,
+                thickness=0.05,
+            ),
+        )
+        scene.build()
+        scenes.append(scene)
+        robots.append(robot)
+
+    goal = torch.tensor((0.5, 0.5, 0.25), dtype=gs.tc_float, device=gs.device)
+
+    def rollout(scene, robot, vel):
+        scene.reset()
+        robot.set_dofs_velocity(vel)
+        for _ in range(3):
+            scene.step()
+        return ((robot.part_soft.get_state().pos - goal) ** 2).sum()
+
+    vel = np.array([1.5, -0.8])
+    vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    rollout(scenes[0], robots[0], vel_ana).backward()
+
+    eps = 1e-5
+    fd_grad = np.zeros_like(vel)
+    for i in range(len(vel)):
+        losses = []
+        for sign in (+1, -1):
+            perturbed = vel.copy()
+            perturbed[i] += sign * eps
+            losses.append(float(rollout(scenes[1], robots[1], perturbed)))
+        fd_grad[i] = (losses[0] - losses[1]) / (2.0 * eps)
+    assert (np.abs(fd_grad) > 1e-4).all()
+    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
+    assert_allclose(vel_ana.grad, fd_grad, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.required
 # The joint Newton solve of MPM and Rigid converges far below its default tolerance for the finite differences, which
 # fp32 cannot resolve, and its adjoint solves by the joint PCG on the exact MPM Hessian (see
 # test_deformable_inputs_grad_matches_fd).

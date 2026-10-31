@@ -534,10 +534,11 @@ class MPMSolver(ParticleSolver):
                         "Differentiable simulation with the implicit MPM solver does not support the plasticity of "
                         f"the material {type(material).__name__} yet."
                     )
-            if self._ffs:
-                gs.raise_exception(
-                    "Differentiable simulation with the implicit MPM solver does not support force fields yet."
-                )
+            for force_field in self._ffs:
+                if not force_field.differentiable:
+                    gs.raise_exception(
+                        f"Differentiable simulation does not support the force field {type(force_field).__name__}."
+                    )
 
     def build(self):
         super().build()
@@ -874,9 +875,11 @@ class MPMSolver(ParticleSolver):
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
+            self._mpm_force_fields,
             self._mpm_params,
             self._gravity,
             f,
+            self._sim.cur_t,
         )
 
     def _solve_adjoint_direct(self):
@@ -1880,14 +1883,17 @@ def kernel_adjoint_pullback(
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
+    force_fields: qd.template(),
     params: qd.template(),
     gravity: qd.Tensor,
     f: qd.i32,
+    t: qd.f32,
 ):
     """The pullback of the adjoint solution, its share of the wall rows and the reverse of P2G into frame f, then the
-    adjoint of frame f + 1 cleared (see mpm_adjoint_func)."""
+    adjoint of frame f + 1 cleared (see mpm_adjoint_func). `t` is the time the forward substep evaluated the force
+    fields at."""
     dt = params.substep_dt[()]
-    mpm_adjoint_func.func_adjoint_nodes(grid, newton, linear, dt)
+    mpm_adjoint_func.func_adjoint_nodes(grid, newton, linear, force_fields, params, t, dt)
     mpm_adjoint_func.func_adjoint_particles(
         particles, particles_info, materials, grid, newton, linear, params, gravity, f, dt
     )
