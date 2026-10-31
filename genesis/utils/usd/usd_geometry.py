@@ -264,7 +264,7 @@ def parse_prim_geoms(
                     {
                         "mesh_path": context.stage_file,  # unbaked file or cache
                         "name": subset_name,
-                        "material_name": subset_material_path or "",
+                        "material_name": subset_material_path,
                         "bake_success": bool(subset_bake_success),
                     }
                 )
@@ -343,7 +343,7 @@ def parse_prim_geoms(
             tmesh.apply_transform(geom_ST)
             metadata = {
                 "name": prim.GetPath().pathString,
-                "material_name": geom_material_path or "",
+                "material_name": geom_material_path,
                 "bake_success": bool(bake_success),
             }
             meshes.append(gs.Mesh.from_trimesh(tmesh, surface=geom_surface, metadata=metadata))
