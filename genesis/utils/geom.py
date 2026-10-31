@@ -1247,9 +1247,13 @@ def trans_R_to_T(trans=None, R=None, *, out=None):
         assert T.shape == (*B, 4, 4)
 
     T[..., 3, 3] = 1.0
+    T[..., 3, :3] = 0.0
     if trans is not None:
         T[..., :3, 3] = trans
+    else:
+        T[..., :3, 3] = 0.0
     if R is None:
+        T[..., :3, :3] = 0.0
         if is_torch:
             torch.diagonal(T, dim1=-2, dim2=-1).fill_(1.0)
         else:
@@ -1269,17 +1273,28 @@ def trans_to_T(trans, *, out=None):
 
 
 def trans_quat_to_T(trans=None, quat=None, *, out=None):
+    if quat is None:
+        return trans_R_to_T(trans, out=out)
+
     is_torch = all(isinstance(e, torch.Tensor) for e in (trans, quat) if e is not None)
     is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, quat) if e is not None)
 
     T = out
-    B = () if trans is None and quat is None else quat.shape[:-2] if trans is None else trans.shape[:-1]
+    B = quat.shape[:-1] if trans is None else trans.shape[:-1]
     if is_torch:
+        dtype = quat.dtype if trans is None else torch.promote_types(trans.dtype, quat.dtype)
+        if trans is not None:
+            trans = trans.to(dtype=dtype, copy=True)
+        quat = quat.to(dtype=dtype, copy=True)
         if T is None:
-            T = torch.zeros((*B, 4, 4), dtype=trans.dtype, device=trans.device)
+            prototype = quat if trans is None else trans
+            T = torch.zeros((*B, 4, 4), dtype=dtype, device=prototype.device)
     elif is_numpy:
-        dtype = np.result_type(trans, quat)
-        trans, quat = trans.astype(dtype), quat.astype(dtype)
+        dtype = quat.dtype if trans is None else np.result_type(trans, quat)
+        # Inputs can share storage with the output, which is overwritten before quaternion conversion
+        if trans is not None:
+            trans = trans.astype(dtype)
+        quat = quat.astype(dtype)
         if T is None:
             T = np.zeros((*B, 4, 4), dtype=dtype)
     else:
@@ -1290,10 +1305,12 @@ def trans_quat_to_T(trans=None, quat=None, *, out=None):
         assert T.shape == (*B, 4, 4)
 
     T[..., 3, 3] = 1.0
+    T[..., 3, :3] = 0.0
     if trans is not None:
         T[..., :3, 3] = trans
-    if quat is not None:
-        quat_to_R(quat, out=T[..., :3, :3])
+    else:
+        T[..., :3, 3] = 0.0
+    quat_to_R(quat, out=T[..., :3, :3])
 
     return T
 
