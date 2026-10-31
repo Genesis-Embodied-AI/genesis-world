@@ -2211,7 +2211,9 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         v_x, v_y, v_z = v_a[i]
         quat = out_[i]
 
-        if v_a_norm[i] < gs.EPS:
+        if not np.isfinite(v_a_norm[i]):
+            quat[:] = np.nan
+        elif v_a_norm[i] < gs.EPS:
             quat[:] = 1.0, 0.0, 0.0, 0.0
         elif v_z >= 0.0:
             s = np.sqrt(2.0 * (1.0 + v_z))

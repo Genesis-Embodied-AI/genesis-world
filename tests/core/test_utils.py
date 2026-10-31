@@ -353,11 +353,27 @@ def test_direction_quaternion(precision):
     directions = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
     out = np.full((4, 4), np.nan)
     assert gu.z_to_quat(directions, out=out) is out
+    assert_equal(out[1], [0.0, 0.0, 1.0, 0.0])
     is_nonzero = np.linalg.norm(directions, axis=-1) > gs.EPS
     assert_allclose(Rotation.from_quat(out[~is_nonzero], scalar_first=True).as_rotvec(), 0.0, atol=gs.EPS)
     rotated = Rotation.from_quat(out[is_nonzero], scalar_first=True).apply([0.0, 0.0, 1.0])
     expected = directions[is_nonzero] / np.linalg.norm(directions[is_nonzero], axis=-1, keepdims=True)
     assert_allclose(rotated, expected, atol=1e-12)
+
+    for value in (np.nan, np.inf, -np.inf):
+        directions = np.array(
+            [
+                [value, 0.0, -1.0],
+                [0.0, value, -1.0],
+                [0.0, 0.0, value],
+            ],
+            dtype=gs.np_float,
+        )
+        for direction in (*directions, directions):
+            assert_equal(np.isfinite(gu.z_to_quat(direction)).all(axis=-1), False)
+        out = np.zeros((3, 4), dtype=gs.np_float)
+        assert gu.z_to_quat(directions, out=out) is out
+        assert_equal(np.isfinite(out).all(axis=-1), False)
 
 
 @pytest.mark.required
