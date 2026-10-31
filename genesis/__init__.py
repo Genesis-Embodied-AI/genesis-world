@@ -8,7 +8,7 @@ import traceback
 import weakref
 from contextlib import redirect_stdout
 from functools import partial
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 from warnings import warn
 
 # Import quadrants while collecting its output without printing directly
@@ -18,8 +18,6 @@ os.environ.setdefault("QD_ENABLE_PYBUF", "0" if sys.stdout is sys.__stdout__ els
 
 with redirect_stdout(_qd_outputs):
     import quadrants as qd
-    from quadrants._lib.core.quadrants_python import DataTypeCxx
-    from quadrants.lang.matrix import MatrixType, VectorType
 
 try:
     import torch
@@ -33,6 +31,10 @@ from .constants import backend as _gs_backend
 from .logging import Logger
 from .utils import ZeroCopyMode, get_device, redirect_libc_stderr, set_environ, set_random_seed
 from .version import __version__
+
+if TYPE_CHECKING:
+    from quadrants._lib.core.quadrants_python import DataTypeCxx
+    from quadrants.lang.matrix import MatrixType, VectorType
 
 
 _IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
@@ -55,26 +57,26 @@ use_zerocopy: ZeroCopyMode | None = None
 use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
-SEED: int
-qd_float: DataTypeCxx
+SEED: int | None = None
+qd_float: "DataTypeCxx"
 np_float: type[np.floating]
 tc_float: torch.dtype
-qd_int: DataTypeCxx
+qd_int: "DataTypeCxx"
 np_int: type[np.integer]
 tc_int: torch.dtype
-qd_bool: DataTypeCxx
+qd_bool: "DataTypeCxx"
 np_bool: type[np.generic]
 tc_bool: torch.dtype
-qd_vec2: VectorType
-qd_vec4: VectorType
-qd_vec6: VectorType
-qd_vec7: VectorType
-qd_vec18: VectorType
-qd_mat3: MatrixType
-qd_mat4: MatrixType
-qd_ivec2: VectorType
-qd_ivec3: VectorType
-qd_ivec4: VectorType
+qd_vec2: "VectorType"
+qd_vec4: "VectorType"
+qd_vec6: "VectorType"
+qd_vec7: "VectorType"
+qd_vec18: "VectorType"
+qd_mat3: "MatrixType"
+qd_mat4: "MatrixType"
+qd_ivec2: "VectorType"
+qd_ivec3: "VectorType"
+qd_ivec4: "VectorType"
 
 
 ########################## init ##########################
@@ -278,9 +280,9 @@ def init(
     ):
         qd_init_environ["QD_ENABLE_HIP_MEMPOOL"] = "0"
 
+    global SEED
+    SEED = seed
     if seed is not None:
-        global SEED
-        SEED = seed
         set_random_seed(SEED)
         qd_init_kwargs.update(
             random_seed=seed,
