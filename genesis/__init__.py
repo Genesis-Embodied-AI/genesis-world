@@ -8,7 +8,7 @@ import traceback
 import weakref
 from contextlib import redirect_stdout
 from functools import partial
-from typing import TYPE_CHECKING, Callable
+from typing import Any, Callable
 from warnings import warn
 
 # Import quadrants while collecting its output without printing directly
@@ -32,10 +32,6 @@ from .logging import Logger
 from .utils import ZeroCopyMode, get_device, redirect_libc_stderr, set_environ, set_random_seed
 from .version import __version__
 
-if TYPE_CHECKING:
-    from quadrants._lib.core.quadrants_python import DataTypeCxx
-    from quadrants.lang.matrix import MatrixType, VectorType
-
 
 _IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
 # FIXME: qd.Field does not support zero-copy on Metal for 'torch<=2.9.1'.
@@ -58,25 +54,27 @@ use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
 SEED: int | None = None
-qd_float: "DataTypeCxx"
+# FIXME: The quadrants stub types the call of a scalar dtype as returning None, so `gs.qd_float(x)` would type as None.
+# Annotating the scalar dtypes as Any keeps those calls untyped.
+qd_float: Any
 np_float: type[np.floating]
 tc_float: torch.dtype
-qd_int: "DataTypeCxx"
+qd_int: Any
 np_int: type[np.integer]
 tc_int: torch.dtype
-qd_bool: "DataTypeCxx"
+qd_bool: Any
 np_bool: type[np.generic]
 tc_bool: torch.dtype
-qd_vec2: "VectorType"
-qd_vec4: "VectorType"
-qd_vec6: "VectorType"
-qd_vec7: "VectorType"
-qd_vec18: "VectorType"
-qd_mat3: "MatrixType"
-qd_mat4: "MatrixType"
-qd_ivec2: "VectorType"
-qd_ivec3: "VectorType"
-qd_ivec4: "VectorType"
+qd_vec2: qd.lang.matrix.VectorType
+qd_vec4: qd.lang.matrix.VectorType
+qd_vec6: qd.lang.matrix.VectorType
+qd_vec7: qd.lang.matrix.VectorType
+qd_vec18: qd.lang.matrix.VectorType
+qd_mat3: qd.lang.matrix.MatrixType
+qd_mat4: qd.lang.matrix.MatrixType
+qd_ivec2: qd.lang.matrix.VectorType
+qd_ivec3: qd.lang.matrix.VectorType
+qd_ivec4: qd.lang.matrix.VectorType
 
 
 ########################## init ##########################
