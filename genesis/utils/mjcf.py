@@ -117,6 +117,19 @@ def build_model(
                 mjcf.remove(elem)
                 root_parent_stack.append((include_root, include_path))
 
+        # The solver options come from the scene options, so the ones the model sets in <option> are dropped, apart from
+        # the friction cone, which has its own warning (see parse_xml). Reading the source rather than the compiled model
+        # names exactly what the model sets, wherever it lives once the included files are inlined.
+        options_name = sorted(
+            {name for option in mjcf.findall("option") for name in (*option.attrib, *(child.tag for child in option))}
+            - {"cone"}
+        )
+        if options_name:
+            gs.logger.warning(
+                f"(MJCF) The model sets solver options in <option> that Genesis ignores: {', '.join(options_name)}. Use "
+                "'gs.options.SimOptions' and 'gs.options.RigidOptions' instead."
+            )
+
         # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
         # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
         # planes authored under child bodies untouched, even when the compiler fuses them into the worldbody.
