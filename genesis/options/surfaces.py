@@ -1,10 +1,9 @@
 import math
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 import numpy as np
 
 from pydantic import Field, StrictBool, model_validator
-from typing_extensions import Self
 
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
@@ -13,7 +12,7 @@ from genesis.utils.cache import SizeCappedCache
 
 from .misc import FoamOptions
 from .options import Options
-from .textures import Texture, ColorTexture, ImageTexture, BatchTexture
+from .textures import BatchTexture, ColorTexture, ImageTexture, Texture
 
 MetalType = Literal["aluminium", "gold", "copper", "brass", "iron", "titanium", "vanadium", "lithium"]
 

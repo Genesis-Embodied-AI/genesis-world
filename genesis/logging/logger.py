@@ -52,9 +52,9 @@ class Logger:
             logging_level = logging_level.upper()
 
         # The theme is set before the formatter is created, which reads the colors of its levels once and for all.
-        if theme not in THEME.__members__ and theme not in tuple(THEME):
+        if theme not in THEME:
             gs.raise_exception(f"Unsupported theme: ~<{theme}>~")
-        style.theme = THEME[theme] if isinstance(theme, str) else THEME(theme)
+        style.theme = THEME(theme)
 
         self._logger = logging.getLogger("genesis")
         self._logger.setLevel(logging_level)
