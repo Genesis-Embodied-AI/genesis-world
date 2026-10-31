@@ -269,6 +269,23 @@ def test_homogeneous_transforms(batch_shape):
     assert gu.trans_quat_to_T(translation, out[..., 0, :], out=out) is out
     assert_allclose(out, transform_true, atol=1e-12)
 
+    for trans_dtype, quat_dtype in ((np.float32, np.float64), (np.float64, np.float32)):
+        translation = np.broadcast_to([1.25, -2.5, 3.75], (*batch_shape, 3)).astype(trans_dtype)
+        quaternion = np.broadcast_to([0.35, -0.12, 0.46, 0.78], (*batch_shape, 4)).astype(quat_dtype)
+        transform_true = gu.trans_quat_to_T(translation, quaternion)
+        trans_torch, quat_torch = (torch.as_tensor(value, device=gs.device) for value in (translation, quaternion))
+
+        transform = gu.trans_quat_to_T(trans_torch, quat_torch)
+        assert transform.dtype == torch.float64
+        assert transform.device == trans_torch.device
+        assert_allclose(transform, transform_true, tol=1e-12)
+
+        for dtype in (torch.float32, torch.float64):
+            out = torch.full((*batch_shape, 4, 4), float("nan"), dtype=dtype, device=gs.device)
+            assert gu.trans_quat_to_T(trans_torch, quat_torch, out=out) is out
+            assert out.dtype == dtype
+            assert_allclose(out, transform_true, tol=1e-6 if dtype == torch.float32 else 1e-12)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])

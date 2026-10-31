@@ -1282,9 +1282,11 @@ def trans_quat_to_T(trans=None, quat=None, *, out=None):
     T = out
     B = quat.shape[:-1] if trans is None else trans.shape[:-1]
     if is_torch:
+        dtype = quat.dtype if trans is None else torch.promote_types(trans.dtype, quat.dtype)
+        quat = quat.to(dtype=dtype)
         if T is None:
             prototype = quat if trans is None else trans
-            T = torch.zeros((*B, 4, 4), dtype=prototype.dtype, device=prototype.device)
+            T = torch.zeros((*B, 4, 4), dtype=dtype, device=prototype.device)
     elif is_numpy:
         dtype = quat.dtype if trans is None else np.result_type(trans, quat)
         # Inputs can share storage with the output, which is overwritten before quaternion conversion
