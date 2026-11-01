@@ -1,10 +1,8 @@
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
-from typing_extensions import Self
 
 import genesis as gs
-
 from genesis.typing import NonNegativeInt, PositiveInt, Vec4FType
 
 from .options import Options
