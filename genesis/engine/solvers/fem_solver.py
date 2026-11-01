@@ -15,7 +15,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.utils.array_class import ArrayItem, DataKind, LinksState
-from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
+from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import broadcast_tensor, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
@@ -1519,7 +1519,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 quat = links_state.quat[i_l, i_b]
 
                 offset_pos = vc.link_offset_pos
-                offset_quat = qd_transform_quat_by_quat(vc.link_init_quat, quat)
+                offset_quat = qd_transform_quat_by_quat(qd_inv_quat(vc.link_init_quat), quat)
                 self.vertex_constraints[i_v, i_b].target_pos = pos + qd_transform_by_quat(offset_pos, offset_quat)
 
     @no_grad
