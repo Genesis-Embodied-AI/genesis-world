@@ -28,7 +28,7 @@ WT_CACHE_VERSION = 7
 WTH_CACHE_VERSION = 2
 # Bumped when the particles sampled for a fixed key change or when the layout of an entry does: forces a cache miss on
 # stale entries.
-PTC_CACHE_VERSION = 2
+PTC_CACHE_VERSION = 3
 
 
 def get_cache_dir():

@@ -53,9 +53,9 @@ dependencies = [
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
     "tetgen==0.8.2",
     # Used for some advanced mesh processing such as `skeletonization`
-    "PyGEL3D",
-    # Used to convert VTK output to numpy when converting volume to particles for PBS
-    "vtk",
+    # * 0.8.0 is the first release with native binaries for each platform, Linux ARM included, and requires Python 3.11
+    "PyGEL3D>=0.8.0; python_version >= '3.11'",
+    "PyGEL3D; python_version < '3.11'",
     # Used here and there to load and export images
     # * 11.0 dramatically improves performance when exporting images to PNG
     "Pillow>11.0",
@@ -162,7 +162,6 @@ genesis = [
     "assets/*",
     "ext/pyrender/fonts/*",
     "ext/pyrender/shaders/*",
-    "ext/VolumeSampling",
 ]
 
 [tool.black]

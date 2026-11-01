@@ -1,6 +1,3 @@
-import platform
-import sys
-
 import numpy as np
 import pytest
 import torch
@@ -163,15 +160,8 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
-@pytest.mark.skipif(
-    sys.platform == "linux" and platform.machine() == "aarch64",
-    reason="pygel3d is not supported on Linux ARM (aarch64)",
-)
 def test_mesh_mpm_build(show_viewer):
-    # FIXME: This test is crashing on Linux (x86 & aarch64) Github-hosted runners
-
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
