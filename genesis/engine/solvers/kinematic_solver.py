@@ -20,7 +20,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
-from genesis.utils.array_class import ConfigItem, DataItem, DataKind, DataManager, RigidSimStaticConfig, iter_data
+from genesis.utils.array_class import ConfigItem, DataItem, DataKind, RigidData, RigidSimStaticConfig, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -420,7 +420,7 @@ class KinematicSolver(Solver):
         )
 
     def _create_data_manager(self):
-        self.data_manager = DataManager(self, kinematic_only=True)
+        self.data_manager = RigidData(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state

@@ -3166,7 +3166,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
         )
 
 
-# =========================================== DataManager ===========================================
+# =========================================== RigidData ===========================================
 
 
 def cholesky_tile_size_for(n_dofs):
@@ -3202,7 +3202,7 @@ def island_tile_caps(cap_first, cap_last):
 
 
 @qd.data_oriented
-class DataManager:
+class RigidData:
     def __init__(self, solver, kinematic_only):
         self.rigid_info = get_rigid_info(solver, kinematic_only)
 

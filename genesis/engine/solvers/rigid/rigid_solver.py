@@ -22,7 +22,7 @@ from genesis.utils.array_class import (
     ConfigItem,
     ConstraintState,
     DataItem,
-    DataManager,
+    RigidData,
     DynInfo,
     DynState,
     ErrorCode,
@@ -782,7 +782,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = DataManager(self, kinematic_only=False)
+        self.data_manager = RigidData(self, kinematic_only=False)
         self._errno = self.data_manager.errno
 
         self.rigid_info = self.data_manager.rigid_info
