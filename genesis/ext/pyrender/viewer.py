@@ -836,6 +836,7 @@ class Viewer(pyglet.window.Window):
         if self._renderer is None:
             return
 
+        # The plugins read the scene, which a threaded render loop would otherwise race with its rebuild or teardown
         with self.render_lock if self._run_in_thread or not self.auto_start else nullcontext():
             # Make OpenGL context current
             self.switch_to()
@@ -846,34 +847,34 @@ class Viewer(pyglet.window.Window):
             self.clear()
             self._render()
 
-        # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
-        # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
-        if self.viewer_flags["record"]:
-            self._record()
+            # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
+            # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
+            if self.viewer_flags["record"]:
+                self._record()
 
-        if self.viewer_flags["caption"] is not None:
-            for caption in self.viewer_flags["caption"]:
-                xpos, ypos = self._location_to_x_y(caption["location"])
-                self._renderer.render_text(
-                    caption["text"],
-                    xpos,
-                    ypos,
-                    font_name=caption["font_name"],
-                    font_pt=caption["font_pt"],
-                    color=caption["color"],
-                    scale=caption["scale"],
-                    align=caption["location"],
-                )
+            if self.viewer_flags["caption"] is not None:
+                for caption in self.viewer_flags["caption"]:
+                    xpos, ypos = self._location_to_x_y(caption["location"])
+                    self._renderer.render_text(
+                        caption["text"],
+                        xpos,
+                        ypos,
+                        font_name=caption["font_name"],
+                        font_pt=caption["font_pt"],
+                        color=caption["color"],
+                        scale=caption["scale"],
+                        align=caption["location"],
+                    )
 
-        # Render help text
-        self._render_help_text()
+            # Render help text
+            self._render_help_text()
 
-        # Drive plugins only once the viewer is committed and initialized. start() renders the scene to probe GL
-        # configs before that point, and a rejected config must not leave a plugin's GL/ImGui state dangling for the
-        # next attempt (e.g. an ImGui frame opened but never ended). _initialized_event is set at the end of start().
-        if self._initialized_event.is_set():
-            for plugin in self.plugins:
-                plugin.on_draw()
+            # Drive plugins only once the viewer is committed and initialized. start() renders the scene to probe GL
+            # configs before that point, and a rejected config must not leave a plugin's GL/ImGui state dangling for
+            # the next attempt (e.g. an ImGui frame opened but never ended). start() sets _initialized_event last.
+            if self._initialized_event.is_set():
+                for plugin in self.plugins:
+                    plugin.on_draw()
 
     def on_resize(self, width: int, height: int) -> EVENT_HANDLE_STATE:
         """Resize the camera and trackball when the window is resized."""
