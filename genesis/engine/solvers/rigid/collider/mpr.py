@@ -43,13 +43,8 @@ class MPR:
         self.multicontact_mpr_state = array_class.get_mpr_state(n_multicontact_threads)
 
 
-@qd.kernel
-def clear(mpr_state: qd.template()):
-    mpr_state.simplex_size.fill(0)
-
-
 @qd.func
-def mpr_swap(i_ga: int, i_gb: int, i_b: int, i: int, j: int, mpr_state: array_class.MPRState):
+def mpr_swap(i_b: int, i: int, j: int, mpr_state: array_class.MPRState):
     mpr_state.simplex_support.v1[i, i_b], mpr_state.simplex_support.v1[j, i_b] = (
         mpr_state.simplex_support.v1[j, i_b],
         mpr_state.simplex_support.v1[i, i_b],
@@ -136,7 +131,7 @@ def mpr_point_tri_depth(
 
 
 @qd.func
-def mpr_portal_dir(i_ga: int, i_gb: int, i_b: int, mpr_state: array_class.MPRState):
+def mpr_portal_dir(i_b: int, mpr_state: array_class.MPRState):
     v2v1 = mpr_state.simplex_support.v[2, i_b] - mpr_state.simplex_support.v[1, i_b]
     v3v1 = mpr_state.simplex_support.v[3, i_b] - mpr_state.simplex_support.v[1, i_b]
     direction = v2v1.cross(v3v1).normalized()
@@ -144,14 +139,7 @@ def mpr_portal_dir(i_ga: int, i_gb: int, i_b: int, mpr_state: array_class.MPRSta
 
 
 @qd.func
-def mpr_portal_encapsules_origin(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    direction: qd.types.vector(3),
-    mpr_state: array_class.MPRState,
-    collider_info: array_class.ColliderInfo,
-):
+def mpr_portal_encapsules_origin(i_b: int, direction: qd.types.vector(3), mpr_state: array_class.MPRState):
     # Pure sign test: at the boundary both outcomes are equally valid and the result is value-continuous, so any
     # epsilon would only shift the decision without protecting anything.
     dot = mpr_state.simplex_support.v[1, i_b].dot(direction)
@@ -159,9 +147,7 @@ def mpr_portal_encapsules_origin(
 
 
 @qd.func
-def mpr_portal_can_encapsule_origin(
-    v: qd.types.vector(3), direction: qd.types.vector(3), collider_info: array_class.ColliderInfo
-):
+def mpr_portal_can_encapsule_origin(v: qd.types.vector(3), direction: qd.types.vector(3)):
     # Pure sign test (see mpr_portal_encapsules_origin).
     dot = v.dot(direction)
     return dot > 0.0
@@ -286,12 +272,7 @@ def func_geom_support(
 
 @qd.func
 def mpr_find_pos(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    mpr_state: array_class.MPRState,
-    collider_info: array_class.ColliderInfo,
-    rigid_config: qd.template(),
+    i_b: int, mpr_state: array_class.MPRState, collider_info: array_class.ColliderInfo, rigid_config: qd.template()
 ):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 
@@ -307,7 +288,7 @@ def mpr_find_pos(
     # Must use <= so that the all-zero weights of the non-mujoco-compatible path (which skips the tetrahedron
     # volumes above) still enter the portal-direction fallback.
     if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
-        direction = mpr_portal_dir(i_ga, i_gb, i_b, mpr_state)
+        direction = mpr_portal_dir(i_b, mpr_state)
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
             i1, i2 = i % 3 + 1, (i + 1) % 3 + 1
@@ -357,7 +338,7 @@ def mpr_find_pos(
 
 
 @qd.func
-def mpr_find_penetr_touch(i_ga: int, i_gb: int, i_b: int, mpr_state: array_class.MPRState):
+def mpr_find_penetr_touch(i_b: int, mpr_state: array_class.MPRState):
     is_col = True
     penetration = gs.qd_float(0.0)
     normal = -mpr_state.simplex_support.v[0, i_b].normalized()
@@ -366,7 +347,7 @@ def mpr_find_penetr_touch(i_ga: int, i_gb: int, i_b: int, mpr_state: array_class
 
 
 @qd.func
-def mpr_find_penetr_segment(i_ga: int, i_gb: int, i_b: int, mpr_state: array_class.MPRState):
+def mpr_find_penetr_segment(i_b: int, mpr_state: array_class.MPRState):
     is_col = True
     # Anchor the contact direction to the ray (v1 - v0) rather than the raw support point: a degenerate flat-face
     # support tie can leave v1 with an arbitrary lateral offset, making its direction noise while the ray stays
@@ -502,7 +483,6 @@ def func_mpr_contact_from_centers(
     mpr_state.simplex_support.v1[0, i_b] = center_a
     mpr_state.simplex_support.v2[0, i_b] = center_b
     mpr_state.simplex_support.v[0, i_b] = center_a - center_b
-    mpr_state.simplex_size[i_b] = 1
 
     # Every stage (see MPR_STAGE in constants.py) queries its support points through the single query of the loop below,
     # each stage setting the direction of the next query and the stage it serves.
@@ -526,9 +506,9 @@ def func_mpr_contact_from_centers(
             direction = qd.Vector.zero(gs.qd_float, 3)
             direction[i_axis] = 1.0
         elif stage == MPR_STAGE.REFINE or stage == MPR_STAGE.PENETRATION:
-            direction = mpr_portal_dir(i_ga, i_gb, i_b, mpr_state)
+            direction = mpr_portal_dir(i_b, mpr_state)
             if stage == MPR_STAGE.REFINE:
-                if mpr_portal_encapsules_origin(i_ga, i_gb, i_b, direction, mpr_state, collider_info):
+                if mpr_portal_encapsules_origin(i_b, direction, mpr_state):
                     stage = MPR_STAGE.PENETRATION
 
         v, v1, v2 = compute_support(
@@ -561,7 +541,6 @@ def func_mpr_contact_from_centers(
             mpr_state.simplex_support.v1[1, i_b] = v1
             mpr_state.simplex_support.v2[1, i_b] = v2
             mpr_state.simplex_support.v[1, i_b] = v
-            mpr_state.simplex_size[i_b] = 2
 
             if v.dot(direction) < 0.0:
                 support_type = MPR_SUPPORT_TYPE.NONE
@@ -598,7 +577,6 @@ def func_mpr_contact_from_centers(
                 mpr_state.simplex_support.v1[2, i_b] = v1
                 mpr_state.simplex_support.v2[2, i_b] = v2
                 mpr_state.simplex_support.v[2, i_b] = v
-                mpr_state.simplex_size[i_b] = 3
 
                 va = mpr_state.simplex_support.v[1, i_b] - mpr_state.simplex_support.v[0, i_b]
                 vb = mpr_state.simplex_support.v[2, i_b] - mpr_state.simplex_support.v[0, i_b]
@@ -606,7 +584,7 @@ def func_mpr_contact_from_centers(
                 direction = direction.normalized()
 
                 if direction.dot(mpr_state.simplex_support.v[0, i_b]) > 0:
-                    mpr_swap(i_ga, i_gb, i_b, 1, 2, mpr_state)
+                    mpr_swap(i_b, 1, 2, mpr_state)
                     direction = -direction
                 stage = MPR_STAGE.PORTAL_VERTEX_3
         elif stage == MPR_STAGE.PORTAL_VERTEX_3:
@@ -644,7 +622,6 @@ def func_mpr_contact_from_centers(
                     mpr_state.simplex_support.v1[3, i_b] = v1
                     mpr_state.simplex_support.v2[3, i_b] = v2
                     mpr_state.simplex_support.v[3, i_b] = v
-                    mpr_state.simplex_size[i_b] = 4
                     stage = MPR_STAGE.REFINE
         else:
             # The refinement reaches the surface of the Minkowski difference when the new support point gains less than
@@ -666,7 +643,7 @@ def func_mpr_contact_from_centers(
 
             is_portal_expanded = False
             if stage == MPR_STAGE.REFINE:
-                if not mpr_portal_can_encapsule_origin(v, direction, collider_info) or is_tolerance_reached:
+                if not mpr_portal_can_encapsule_origin(v, direction) or is_tolerance_reached:
                     support_type = MPR_SUPPORT_TYPE.NONE
                     stage = MPR_STAGE.DONE
                 else:
@@ -718,7 +695,7 @@ def func_mpr_contact_from_centers(
                 else:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.APPROXIMATE
 
-                pos = mpr_find_pos(i_ga, i_gb, i_b, mpr_state, collider_info, rigid_config)
+                pos = mpr_find_pos(i_b, mpr_state, collider_info, rigid_config)
                 is_col = True
                 stage = MPR_STAGE.DONE
             else:
@@ -741,9 +718,9 @@ def func_mpr_contact_from_centers(
                 mpr_state.simplex_support.v[i_s, i_b] = v
 
     if support_type == MPR_SUPPORT_TYPE.VERTEX:
-        is_col, normal, penetration, pos = mpr_find_penetr_touch(i_ga, i_gb, i_b, mpr_state)
+        is_col, normal, penetration, pos = mpr_find_penetr_touch(i_b, mpr_state)
     elif support_type == MPR_SUPPORT_TYPE.EDGE:
-        is_col, normal, penetration, pos = mpr_find_penetr_segment(i_ga, i_gb, i_b, mpr_state)
+        is_col, normal, penetration, pos = mpr_find_penetr_segment(i_b, mpr_state)
     return is_col, normal, penetration, pos
 
 

@@ -774,7 +774,6 @@ def func_add_polytope_vertex_contacts_sdf(
                                 collider_state,
                                 dyn_info,
                                 rigid_info,
-                                collider_info,
                                 errno,
                             )
                         # Every lane reads the contact back, for the repeated-contact check and the seeds.
@@ -820,7 +819,6 @@ def func_add_polytope_vertex_contacts_sdf(
                                     collider_state,
                                     dyn_info,
                                     rigid_info,
-                                    collider_info,
                                     errno,
                                 )
                         n_emitted_before = n_emitted_before + qd.cast(qd.math.popcnt(lanes), gs.qd_int)
@@ -2781,7 +2779,6 @@ def func_convex_convex_contact(
         # criteria to get rid of redundant contact points seems to be a better option.
         multi_contact = (
             rigid_config.enable_multi_contact
-            # and not (self._solver.dyn_info.geoms[i_ga].is_decomposed and self._solver.dyn_info.geoms[i_gb].is_decomposed)
             and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.SPHERE
             and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.ELLIPSOID
             and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.SPHERE
@@ -2899,25 +2896,11 @@ def func_convex_convex_contact(
                     and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
                 ):
                     is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
-                        i_ga,
-                        i_gb,
-                        ga_pos_current,
-                        ga_quat_current,
-                        gb_pos_current,
-                        gb_quat_current,
-                        dyn_info,
-                        rigid_info,
+                        i_ga, i_gb, ga_pos_current, gb_pos_current, gb_quat_current, dyn_info, rigid_info
                     )
                 elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
                     is_col, normal, contact_pos, penetration = func_sphere_box_contact(
-                        i_ga,
-                        i_gb,
-                        ga_pos_current,
-                        ga_quat_current,
-                        gb_pos_current,
-                        gb_quat_current,
-                        dyn_info,
-                        rigid_info,
+                        i_ga, i_gb, ga_pos_current, gb_pos_current, gb_quat_current, dyn_info, rigid_info
                     )
                 elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                     plane_dir = qd.Vector(
@@ -3342,11 +3325,11 @@ def _func_multicontact_run_detection(
         )
     elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
         is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
-            i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+            i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
         )
     elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
         is_col, normal, contact_pos, penetration = func_sphere_box_contact(
-            i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+            i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
         )
     elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
         plane_dir = qd.Vector(
@@ -3928,7 +3911,6 @@ def _func_multicontact_write(
                     collider_state,
                     dyn_info,
                     rigid_info,
-                    collider_info,
                     errno,
                 )
 
@@ -4307,7 +4289,6 @@ def func_narrowphase_contact0(
             )
 
             geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
-            tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
 
             ga_pos = dyn_state.geoms.pos[i_ga, i_b]
             ga_quat = dyn_state.geoms.quat[i_ga, i_b]
@@ -4335,11 +4316,11 @@ def func_narrowphase_contact0(
                 )
             elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
                 is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
-                    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+                    i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
                 )
             elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
                 is_col, normal, contact_pos, penetration = func_sphere_box_contact(
-                    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info, rigid_info
+                    i_ga, i_gb, ga_pos, gb_pos, gb_quat, dyn_info, rigid_info
                 )
             elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                 plane_dir = qd.Vector(
@@ -4625,7 +4606,6 @@ def func_narrow_phase_diff_convex_vs_convex(
                         collider_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         errno,
                     )
 
@@ -4659,7 +4639,6 @@ def func_narrow_phase_diff_convex_vs_convex(
                         collider_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         errno,
                     )
 
@@ -4867,8 +4846,6 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
     collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
-    EPS = rigid_info.EPS[None]
-
     if qd.static(collider_static_config.has_nonconvex_nonterrain):
         n_max = qd.static(
             collider_static_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1

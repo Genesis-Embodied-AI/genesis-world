@@ -444,10 +444,6 @@ class KinematicSolver(Solver):
         """Hook: sanitize joint constraint solver params. No-op in base (no constraints)."""
         return sol_params
 
-    def _sanitize_geom_sol_params(self, sol_params):
-        """Hook: sanitize geom constraint solver params. No-op in base (no constraints)."""
-        return sol_params
-
     # ------------------------------------------------------------------------------------
     # --------------------------------- init methods -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -457,10 +453,6 @@ class KinematicSolver(Solver):
         has_dofs = sum(joint.n_dofs for joint in joints) > 0
         if has_dofs:
             kernel_init_dof_fields(
-                np.concatenate(
-                    [(joint.link._entity_idx_in_solver,) * joint.n_dofs for joint in joints if joint.n_dofs],
-                    dtype=gs.np_int,
-                ),
                 np.concatenate([joint.desc.dofs_motion_ang for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_motion_vel for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_limit for joint in joints], dtype=gs.np_float),
@@ -628,7 +620,6 @@ class KinematicSolver(Solver):
                 np.array([link.desc.quat for link in links], dtype=gs.np_float),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -640,7 +631,6 @@ class KinematicSolver(Solver):
             kernel_init_joint_fields(
                 np.array([joint.q_start for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_start for joint in joints], dtype=gs.np_int),
-                np.array([joint.q_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.type for joint in joints], dtype=gs.np_int),
                 joints_sol_params,
@@ -679,8 +669,6 @@ class KinematicSolver(Solver):
             if is_init_qpos_out_of_bounds:
                 gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
             self.qpos.from_numpy(init_qpos)
-
-        self.links_T = self.rigid_info.links_T
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
@@ -848,10 +836,8 @@ class KinematicSolver(Solver):
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0.0 for entity in entities], dtype=gs.np_float),
-                np.array([False for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -1273,17 +1259,6 @@ class KinematicSolver(Solver):
     def get_links_ang(self, links_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
-
-    def _build_dof_to_q_map(self, dofs_idx_t):
-        """Build a mapping from DOF indices to qpos indices for revolute/prismatic joints."""
-        dof_to_q = torch.zeros(self.n_dofs, dtype=torch.long, device=gs.device)
-        for entity in self._entities:
-            for joint in entity.joints:
-                if joint.n_dofs == 0:
-                    continue
-                for i in range(joint.n_dofs):
-                    dof_to_q[joint.dof_start - entity.dof_start + i] = joint.q_start - entity.q_start + i
-        return dof_to_q[dofs_idx_t]
 
     def get_qpos(self, qs_idx=None, envs_idx=None):
         tensor = self._read_data(self.qpos, envs_idx, qs_idx, copy=True)

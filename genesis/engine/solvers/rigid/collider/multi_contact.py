@@ -140,7 +140,7 @@ def func_multi_contact(
                 pos = pos_a if is_edge_face else pos_b
                 quat = quat_a if is_edge_face else quat_b
                 nnorms = func_potential_mesh_edge_normals(
-                    i_g, i_b, nface, v1i, v2i, pos, quat, v1, v2, gjk_state, dyn_info, collider_info
+                    i_g, i_b, nface, v1i, pos, quat, v1, v2, gjk_state, dyn_info, collider_info
                 )
 
             if is_edge_face:
@@ -216,7 +216,7 @@ def func_multi_contact(
                 elif geom_type == gs.GEOM_TYPE.MESH:
                     pos = pos_a if k == 0 else pos_b
                     quat = quat_a if k == 0 else quat_b
-                    nface = func_mesh_face(i_g, i_b, k, normal_face_idx, pos, quat, gjk_state, dyn_info)
+                    nface = func_mesh_face(i_b, k, normal_face_idx, pos, quat, gjk_state, dyn_info)
 
             if k == 0:
                 nface1 = nface
@@ -243,9 +243,7 @@ def func_multi_contact(
         max_contacts = 8 if geom_type_a == gs.GEOM_TYPE.BOX and geom_type_b == gs.GEOM_TYPE.BOX else 4
 
         # Clip polygon
-        func_clip_polygon(
-            i_b, nface1, nface2, max_contacts, normal, approx_dir, gjk_state, collider_info, edgecon1, edgecon2
-        )
+        func_clip_polygon(i_b, nface1, nface2, max_contacts, normal, approx_dir, gjk_state, collider_info, edgecon1)
 
 
 @qd.func
@@ -397,8 +395,7 @@ def func_potential_box_normals(
     if is_degenerate_simplex:
         n_normals = (
             1
-            if func_box_normal_from_collision_normal(i_g, i_b, quat, dir, gjk_state, collider_info)
-            == RETURN_CODE.SUCCESS
+            if func_box_normal_from_collision_normal(i_b, quat, dir, gjk_state, collider_info) == RETURN_CODE.SUCCESS
             else 0
         )
 
@@ -441,7 +438,6 @@ def func_cmp_bit(v1: int, v2: int, v3: int, n: int, shift: int):
 
 @qd.func
 def func_box_normal_from_collision_normal(
-    i_g: int,
     i_b: int,
     quat: qd.types.vector(4),
     dir: qd.types.vector(3),
@@ -651,7 +647,6 @@ def func_potential_mesh_edge_normals(
     i_b: int,
     dim: int,
     v1i: int,
-    v2i: int,
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
     v1: qd.types.vector(3),
@@ -838,7 +833,6 @@ def func_box_face(
 
 @qd.func
 def func_mesh_face(
-    i_g: int,
     i_b: int,
     i_o: int,
     face_idx: int,
@@ -898,7 +892,6 @@ def func_clip_polygon(
     gjk_state: array_class.GJKState,
     collider_info: array_class.ColliderInfo,
     edgecon1: bool,
-    edgecon2: bool,
 ):
     """
     Clip a polygon against the another polygon using Sutherland-Hodgman algorithm.

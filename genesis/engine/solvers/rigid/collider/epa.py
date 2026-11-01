@@ -9,21 +9,19 @@ Includes both standard and numerically robust ("safe") variants.
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
 
-from .constants import RETURN_CODE, EPA_POLY_INIT_RETURN_CODE, GJK_RETURN_CODE
+from .constants import EPA_POLY_INIT_RETURN_CODE, RETURN_CODE
+from .gjk_support import func_support
 from .gjk_utils import (
-    func_triangle_affine_coords,
-    func_ray_triangle_intersection,
-    func_point_triangle_intersection,
     func_origin_tetra_intersection,
+    func_point_triangle_intersection,
     func_project_origin_to_plane,
+    func_ray_triangle_intersection,
+    func_triangle_affine_coords,
 )
 from .utils import func_is_discrete_geoms
-
-# Import func_support from gjk_support to avoid circular dependency
-from .gjk_support import func_support
 
 
 @qd.func
@@ -210,7 +208,7 @@ def func_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        func_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state)
+        func_epa_witness(i_b, i_f_nearest, gjk_state)
         gjk_state.n_witness[i_b] = 1
         gjk_state.distance[i_b] = -qd.sqrt(dist2)
     else:
@@ -222,7 +220,7 @@ def func_epa(
 
 
 @qd.func
-def func_epa_witness(i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: array_class.GJKState):
+def func_epa_witness(i_b: int, i_f: int, gjk_state: array_class.GJKState):
     """
     Compute the witness points from the geometries for the face i_f of the polytope.
     """
@@ -719,9 +717,7 @@ def func_epa_init_polytope_3d(
 
 
 @qd.func
-def func_epa_init_polytope_4d(
-    i_ga: int, i_gb: int, i_b: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo
-):
+def func_epa_init_polytope_4d(i_b: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo):
     """
     Create the polytope for EPA from a 3-simplex (tetrahedron).
 
@@ -1195,7 +1191,7 @@ def func_safe_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        flag = func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, collider_info)
+        flag = func_safe_epa_witness(i_b, i_f_nearest, gjk_state, collider_info)
         if flag == RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
@@ -1213,9 +1209,7 @@ def func_safe_epa(
 
 
 @qd.func
-def func_safe_epa_witness(
-    i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo
-):
+def func_safe_epa_witness(i_b: int, i_f: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo):
     """
     Compute the witness points from the geometries for the face i_f of the polytope.
     """
@@ -1275,9 +1269,7 @@ def func_safe_epa_witness(
 
 
 @qd.func
-def func_safe_epa_init(
-    i_ga: int, i_gb: int, i_b: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo
-):
+def func_safe_epa_init(i_b: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo):
     """
     Create the polytope for safe EPA from a 3-simplex (tetrahedron).
 

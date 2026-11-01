@@ -475,7 +475,6 @@ def func_add_contact(
             collider_state,
             dyn_info,
             rigid_info,
-            collider_info,
             errno,
         )
     return i_c_added
@@ -522,7 +521,6 @@ def func_set_contact(
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     errno: qd.Tensor,
 ):
     """
