@@ -1,8 +1,7 @@
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import numpy as np
-from typing_extensions import override
 
 import genesis as gs
 import genesis.utils.geom as gu
