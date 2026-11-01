@@ -378,10 +378,10 @@ class SAPCoupler(RBC):
                 rigid_volume_elems.append(elems + offset)
                 rigid_volume_verts_geom_idx.append(np.full(len(verts), geom.idx, dtype=gs.np_int))
                 rigid_volume_elems_geom_idx.append(np.full(len(elems), geom.idx, dtype=gs.np_int))
-                signed_distance, *_ = igl.signed_distance(verts, geom.init_verts, geom.init_faces)
-                signed_distance = signed_distance.astype(gs.np_float, copy=False)
-
-                distance_unsigned = np.abs(signed_distance)
+                distance_unsigned, *_ = igl.signed_distance(
+                    verts, geom.init_verts, geom.init_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
+                )
+                distance_unsigned = distance_unsigned.astype(gs.np_float, copy=False)
                 distance_max = np.max(distance_unsigned)
                 if distance_max < gs.EPS:
                     gs.raise_exception(
