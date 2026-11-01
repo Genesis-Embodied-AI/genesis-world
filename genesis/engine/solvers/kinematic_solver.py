@@ -453,10 +453,6 @@ class KinematicSolver(Solver):
         has_dofs = sum(joint.n_dofs for joint in joints) > 0
         if has_dofs:
             kernel_init_dof_fields(
-                np.concatenate(
-                    [(joint.link._entity_idx_in_solver,) * joint.n_dofs for joint in joints if joint.n_dofs],
-                    dtype=gs.np_int,
-                ),
                 np.concatenate([joint.desc.dofs_motion_ang for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_motion_vel for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_limit for joint in joints], dtype=gs.np_float),
@@ -636,7 +632,6 @@ class KinematicSolver(Solver):
             kernel_init_joint_fields(
                 np.array([joint.q_start for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_start for joint in joints], dtype=gs.np_int),
-                np.array([joint.q_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.type for joint in joints], dtype=gs.np_int),
                 joints_sol_params,
@@ -675,8 +670,6 @@ class KinematicSolver(Solver):
             if is_init_qpos_out_of_bounds:
                 gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
             self.qpos.from_numpy(init_qpos)
-
-        self.links_T = self.rigid_info.links_T
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
@@ -844,7 +837,6 @@ class KinematicSolver(Solver):
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0.0 for entity in entities], dtype=gs.np_float),
-                np.array([False for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
                 self.rigid_info,

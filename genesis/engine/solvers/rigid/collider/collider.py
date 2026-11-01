@@ -24,7 +24,6 @@ from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,
-    get_gpu_cores_per_unit,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -237,7 +236,6 @@ class Collider:
         # Note that updating any of them will trigger recompilation.
         self.collider_config = array_class.ColliderStaticConfig(
             gpu_cores=get_gpu_core_count(),
-            gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
             # narrowphase finding nothing in a scene whose convex pairs all take a box specialization.

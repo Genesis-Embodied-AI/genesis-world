@@ -395,7 +395,6 @@ class RigidInfo:
     qpos0: qd.Tensor = of_kind(DataKind.INFO)
     qpos: qd.Tensor = of_kind(DataKind.STATE)
     qpos_next: qd.Tensor = of_kind(DataKind.SCRATCH)
-    links_T: qd.Tensor = of_kind(DataKind.DERIVED)
     geoms_init_AABB: qd.Tensor
     mass_mat: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_L: qd.Tensor = of_kind(DataKind.DERIVED)
@@ -532,7 +531,6 @@ def get_rigid_info(solver, kinematic_only):
             qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-            links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
             geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=()),
             mass_mat=V(dtype=gs.qd_float, shape=()),
             mass_mat_L=V(dtype=gs.qd_float, shape=()),
@@ -583,7 +581,6 @@ def get_rigid_info(solver, kinematic_only):
         qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
         qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
         qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
-        links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
         geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_geoms_, 8)),
         mass_mat=V(dtype=gs.qd_float, shape=mass_mat_shape, layout=mass_mat_layout, needs_grad=requires_grad),
         mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, needs_grad=requires_grad),
@@ -1079,8 +1076,6 @@ class ConstraintState:
     bw_p: qd.Tensor
     bw_Ap: qd.Tensor
     bw_Ju: qd.Tensor
-    bw_y: qd.Tensor
-    bw_w: qd.Tensor
     # Timers for profiling
     timers: qd.Tensor
     # Solver loop iteration counter (0-indexed, increments each iteration in the graph loop)
@@ -1252,8 +1247,6 @@ def get_constraint_state(constraint_solver, solver, collider):
         bw_p=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
         bw_Ap=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
         bw_Ju=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        bw_y=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        bw_w=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
         # Timers
         timers=V(dtype=qd.i64 if gs.backend != gs.metal else qd.i32, shape=(10, _B)),
         solver_iter_counter=V(dtype=qd.i32, shape=()),
@@ -1633,9 +1626,8 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     n_contacts_per_nonconvex_pair: int
     # ccd algorithm
     ccd_algorithm: int
-    # GPU core count and cores per compute unit, sizing the split narrow phase launches and scratch states
+    # GPU core count, sizing the split narrow phase launches and scratch states
     gpu_cores: int
-    gpu_cores_per_unit: int
 
 
 # =========================================== MPR ===========================================
@@ -1663,7 +1655,6 @@ class MPRState:
     kind: ClassVar[DataKind] = DataKind.SCRATCH
 
     simplex_support: MPRSimplexSupport
-    simplex_size: qd.Tensor
     # What the depth of the contact in simplex_support[1..3] is worth, a PORTAL_STATUS value. Zero means no portal.
     # Only VALID portals are reused (perturbation reconstruction, EPA seeding); INVALID forces a GJK refine.
     portal_status: qd.Tensor
@@ -1672,7 +1663,6 @@ class MPRState:
 def get_mpr_state(B_):
     return MPRState(
         simplex_support=get_mpr_simplex_support(B_),
-        simplex_size=V(dtype=gs.qd_int, shape=(B_,)),
         portal_status=V(dtype=gs.qd_int, shape=(B_,)),
     )
 
@@ -2322,7 +2312,6 @@ def get_collider_info(
 class DofsInfo:
     kind: ClassVar[DataKind] = DataKind.INFO
 
-    entity_idx: qd.Tensor
     stiffness: qd.Tensor
     invweight: qd.Tensor
     armature: qd.Tensor
@@ -2341,7 +2330,6 @@ def get_dofs_info(solver):
     shape = (solver.n_dofs_, solver._B) if solver._options.batch_dofs_info else (solver.n_dofs_,)
 
     return DofsInfo(
-        entity_idx=V(dtype=gs.qd_int, shape=shape),
         stiffness=V(dtype=gs.qd_float, shape=shape),
         invweight=V(dtype=gs.qd_float, shape=shape),
         armature=V(dtype=gs.qd_float, shape=shape),
@@ -2374,7 +2362,6 @@ class DofsState:
     acc_smooth: qd.Tensor
     acc_smooth_bw: qd.Tensor
     qf_smooth: qd.Tensor
-    qf_constraint: qd.Tensor
     # Implicit damping correction (see func_implicit_damping in forward_dynamics.py): qf_damping_implicit holds the
     # implicit share of the damping force, h D qacc for the diagonal D the damped mass factor adds, and
     # qacc_damping_implicit the correction (M + hD)^-1 h D qacc subtracted from the acceleration.
@@ -2411,7 +2398,6 @@ def get_dofs_state(solver):
         acc_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
         qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_constraint=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         qf_damping_implicit=V(dtype=gs.qd_float, shape=shape),
         qacc_damping_implicit=V(dtype=gs.qd_float, shape=shape),
         cdof_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
@@ -2609,9 +2595,7 @@ class JointsInfo:
     sol_params: qd.Tensor
     q_start: qd.Tensor
     dof_start: qd.Tensor
-    q_end: qd.Tensor
     dof_end: qd.Tensor
-    n_dofs: qd.Tensor
     pos: qd.Tensor
 
 
@@ -2623,9 +2607,7 @@ def get_joints_info(solver):
         sol_params=V(dtype=gs.qd_vec7, shape=shape),
         q_start=V(dtype=gs.qd_int, shape=shape),
         dof_start=V(dtype=gs.qd_int, shape=shape),
-        q_end=V(dtype=gs.qd_int, shape=shape),
         dof_end=V(dtype=gs.qd_int, shape=shape),
-        n_dofs=V(dtype=gs.qd_int, shape=shape),
         pos=V(dtype=gs.qd_vec3, shape=shape),
     )
 
@@ -2665,12 +2647,9 @@ class GeomsInfo:
     friction_torsional: qd.Tensor
     friction_rolling: qd.Tensor
     sol_params: qd.Tensor
-    vert_num: qd.Tensor
     vert_start: qd.Tensor
     vert_end: qd.Tensor
     verts_state_start: qd.Tensor
-    verts_state_end: qd.Tensor
-    face_num: qd.Tensor
     face_start: qd.Tensor
     face_end: qd.Tensor
     edge_num: qd.Tensor
@@ -2680,7 +2659,6 @@ class GeomsInfo:
     contype: qd.Tensor
     conaffinity: qd.Tensor
     is_fixed: qd.Tensor
-    is_decomposed: qd.Tensor
     is_hollow: qd.Tensor
     needs_coup: qd.Tensor
     coup_friction: qd.Tensor
@@ -2702,12 +2680,9 @@ def get_geoms_info(solver, is_active=True):
         friction_torsional=V(dtype=gs.qd_float, shape=shape),
         friction_rolling=V(dtype=gs.qd_float, shape=shape),
         sol_params=V(dtype=gs.qd_vec7, shape=shape),
-        vert_num=V(dtype=gs.qd_int, shape=shape),
         vert_start=V(dtype=gs.qd_int, shape=shape),
         vert_end=V(dtype=gs.qd_int, shape=shape),
         verts_state_start=V(dtype=gs.qd_int, shape=shape),
-        verts_state_end=V(dtype=gs.qd_int, shape=shape),
-        face_num=V(dtype=gs.qd_int, shape=shape),
         face_start=V(dtype=gs.qd_int, shape=shape),
         face_end=V(dtype=gs.qd_int, shape=shape),
         edge_num=V(dtype=gs.qd_int, shape=shape),
@@ -2717,7 +2692,6 @@ def get_geoms_info(solver, is_active=True):
         contype=V(dtype=gs.qd_int, shape=shape),
         conaffinity=V(dtype=gs.qd_int, shape=shape),
         is_fixed=V(dtype=gs.qd_bool, shape=shape),
-        is_decomposed=V(dtype=gs.qd_bool, shape=shape),
         is_hollow=V(dtype=gs.qd_bool, shape=shape),
         needs_coup=V(dtype=gs.qd_int, shape=shape),
         coup_friction=V(dtype=gs.qd_float, shape=shape),
@@ -2764,7 +2738,6 @@ class VertsInfo:
     init_pos: qd.Tensor
     init_normal: qd.Tensor
     geom_idx: qd.Tensor
-    init_center_pos: qd.Tensor
     verts_state_idx: qd.Tensor
     is_fixed: qd.Tensor
 
@@ -2776,7 +2749,6 @@ def get_verts_info(solver, is_active=True):
         init_pos=V(dtype=gs.qd_vec3, shape=shape),
         init_normal=V(dtype=gs.qd_vec3, shape=shape),
         geom_idx=V(dtype=gs.qd_int, shape=shape),
-        init_center_pos=V(dtype=gs.qd_vec3, shape=shape),
         verts_state_idx=V(dtype=gs.qd_int, shape=shape),
         is_fixed=V(dtype=gs.qd_bool, shape=shape),
     )
@@ -2909,10 +2881,8 @@ class VGeomsInfo:
     pos: qd.Tensor
     quat: qd.Tensor
     link_idx: qd.Tensor
-    vvert_num: qd.Tensor
     vvert_start: qd.Tensor
     vvert_end: qd.Tensor
-    vface_num: qd.Tensor
     vface_start: qd.Tensor
     vface_end: qd.Tensor
     color: qd.Tensor
@@ -2925,10 +2895,8 @@ def get_vgeoms_info(solver):
         pos=V(dtype=gs.qd_vec3, shape=shape),
         quat=V(dtype=gs.qd_vec4, shape=shape),
         link_idx=V(dtype=gs.qd_int, shape=shape),
-        vvert_num=V(dtype=gs.qd_int, shape=shape),
         vvert_start=V(dtype=gs.qd_int, shape=shape),
         vvert_end=V(dtype=gs.qd_int, shape=shape),
-        vface_num=V(dtype=gs.qd_int, shape=shape),
         vface_start=V(dtype=gs.qd_int, shape=shape),
         vface_end=V(dtype=gs.qd_int, shape=shape),
         color=V(dtype=gs.qd_vec4, shape=shape),
@@ -2992,12 +2960,9 @@ class EntitiesInfo:
     n_dofs: qd.Tensor
     link_start: qd.Tensor
     link_end: qd.Tensor
-    n_links: qd.Tensor
     geom_start: qd.Tensor
     geom_end: qd.Tensor
-    n_geoms: qd.Tensor
     gravity_compensation: qd.Tensor
-    is_local_collision_mask: qd.Tensor
 
 
 def get_entities_info(solver):
@@ -3009,12 +2974,9 @@ def get_entities_info(solver):
         n_dofs=V(dtype=gs.qd_int, shape=shape),
         link_start=V(dtype=gs.qd_int, shape=shape),
         link_end=V(dtype=gs.qd_int, shape=shape),
-        n_links=V(dtype=gs.qd_int, shape=shape),
         geom_start=V(dtype=gs.qd_int, shape=shape),
         geom_end=V(dtype=gs.qd_int, shape=shape),
-        n_geoms=V(dtype=gs.qd_int, shape=shape),
         gravity_compensation=V(dtype=gs.qd_float, shape=shape),
-        is_local_collision_mask=V(dtype=gs.qd_bool, shape=shape),
     )
 
 

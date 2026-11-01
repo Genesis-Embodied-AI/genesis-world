@@ -2781,7 +2781,6 @@ def func_convex_convex_contact(
         # criteria to get rid of redundant contact points seems to be a better option.
         multi_contact = (
             rigid_config.enable_multi_contact
-            # and not (self._solver.dyn_info.geoms[i_ga].is_decomposed and self._solver.dyn_info.geoms[i_gb].is_decomposed)
             and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.SPHERE
             and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.ELLIPSOID
             and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.SPHERE

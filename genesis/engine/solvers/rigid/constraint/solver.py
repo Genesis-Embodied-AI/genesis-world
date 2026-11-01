@@ -6214,7 +6214,6 @@ def func_update_qacc(
             if dyn_state.dofs.is_hibernated[i_d, i_b]:
                 continue
         dyn_state.dofs.acc[i_d, i_b] = constraint_state.qacc[i_d, i_b]
-        dyn_state.dofs.qf_constraint[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
         dyn_state.dofs.force[i_d, i_b] = dyn_state.dofs.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
         constraint_state.qacc_ws[i_d, i_b] = constraint_state.qacc[i_d, i_b]
         if qd.math.isnan(constraint_state.qacc[i_d, i_b]):

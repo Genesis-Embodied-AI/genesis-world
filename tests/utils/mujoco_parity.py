@@ -716,7 +716,7 @@ def check_mujoco_data_consistency(
                 # Must relax tolerance because of compounding of errors.
                 assert_allclose(gs_improvement, mj_improvement, tol=tol * 1e2)
 
-    gs_qfrc_constraint = gs_sim.rigid_solver.dyn_state.dofs.qf_constraint.to_numpy()[:, 0]
+    gs_qfrc_constraint = gs_sim.rigid_solver.constraint_solver.qfrc_constraint.to_numpy()[:, 0]
     mj_qfrc_constraint = mj_sim.data.qfrc_constraint
     assert_allclose(gs_qfrc_constraint[gs_dofs_idx], mj_qfrc_constraint[mj_dofs_idx], atol=efc_atol, rtol=tol)
 
