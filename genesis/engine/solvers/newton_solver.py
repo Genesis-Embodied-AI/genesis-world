@@ -23,7 +23,6 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.grad.bridge import custom_backward
 from genesis.engine.numerics.newton_control import (
     NewtonControl,
     func_accept_or_backtrack,
@@ -31,6 +30,8 @@ from genesis.engine.numerics.newton_control import (
     func_init_line_search,
     func_update_convergence,
 )
+from genesis.grad.bridge import custom_backward
+from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
 
@@ -485,7 +486,7 @@ class NewtonSolver(Solver):
         The primary reverses the solve. A secondary participant's own reverse of the part of its substep the joint
         solve took over wraps it, its adjoint solve being the joint one (see 'stage_adjoint')."""
         hosts = [host for host, _ in self._secondaries + self._couplings]
-        if not all(getattr(host, "is_differentiable", False) for host in hosts):
+        if not all(host.is_differentiable for host in hosts):
             gs.raise_exception(
                 "The backward pass of the joint Newton solve supports the participants of Rigid alone besides MPM."
             )
@@ -521,7 +522,7 @@ class NewtonSolver(Solver):
         non-positive curvature, otherwise True."""
         primary, secondary, coupling = self._slots()
         ws = primary.ws
-        tol_rate = ws.tol_rate.to_numpy()
+        tol_rate = qd_to_numpy(ws.tol_rate, copy=True)
         bits = 64 if gs.qd_float == qd.f64 else 32
         ws.tol_rate.from_numpy(np.array(ADJOINT_PCG_TOL_RATE[bits], dtype=tol_rate.dtype))
         ws.check_curvature.from_numpy(np.array(int(check_curvature), dtype=np.int32))
@@ -530,7 +531,7 @@ class NewtonSolver(Solver):
         if not check_curvature:
             return True
         ws.check_curvature.from_numpy(np.array(0, dtype=np.int32))
-        return not int(ws.breakdown.to_numpy())
+        return not int(qd_to_numpy(ws.breakdown))
 
     def _step(self, f):
         control = self.control
@@ -569,7 +570,7 @@ class NewtonSolver(Solver):
             return
         while True:
             kernel_pcg_iteration(primary, *secondary, *coupling, f)
-            if not int(primary.ws.cond.to_numpy()):
+            if not int(qd_to_numpy(primary.ws.cond)):
                 break
 
     def _newton_loop_launches(self, f):
@@ -587,8 +588,8 @@ class NewtonSolver(Solver):
                 kernel_step_forward(control, primary, *secondary, *coupling, f)
                 kernel_energy(control, primary, *secondary, f, 1)
                 kernel_accept_or_backtrack(control)
-                if not int(control.ls_cond.to_numpy()):
+                if not int(qd_to_numpy(control.ls_cond)):
                     break
             kernel_update_convergence(control)
-            if not int(control.newton_cond.to_numpy()):
+            if not int(qd_to_numpy(control.newton_cond)):
                 break

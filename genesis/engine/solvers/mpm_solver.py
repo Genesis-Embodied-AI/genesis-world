@@ -64,6 +64,7 @@ from genesis.utils.misc import (
     broadcast_tensor,
     qd_from_torch,
     qd_isfinite,
+    qd_to_numpy,
     qd_to_torch,
     qd_zero_grad,
 )
@@ -342,7 +343,7 @@ class MPMSolver(ParticleSolver):
 
         rigid = self._sim.rigid_solver
         # A Rigid solver without any coupled geom gives no contact rows
-        if self._has_rigid and not rigid.dyn_info.geoms.needs_coup.to_numpy().any():
+        if self._has_rigid and not any(geom.needs_coup for geom in rigid.geoms):
             self._has_rigid = False
         self._mpm_config = MpmStaticConfig(
             has_rigid=self._has_rigid,
@@ -571,7 +572,7 @@ class MPMSolver(ParticleSolver):
         grid, params = self._mpm_grid, self._mpm_params
         self._size_to_particles(f)
         build_grid(self.particles, self.particles_ng, grid, params, f)
-        while int(grid.grid_overflow.to_numpy()):
+        while int(qd_to_numpy(grid.grid_overflow)):
             self._grow_grid()
             build_grid(self.particles, self.particles_ng, grid, params, f)
         kernel_predict(
@@ -669,7 +670,7 @@ class MPMSolver(ParticleSolver):
         self._mpm_linear.allocate_rows(max_blocks * BLOCK_CELLS)
 
     def _size_to_particles(self, f):
-        positions = self.particles.pos.to_numpy()[f].transpose(1, 0, 2)
+        positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
         max_blocks, max_triplets = initial_capacities(positions, self._inv_dx)
         self._resize_blocks(max_blocks)
         self._mpm_linear.matrix.grow(max_triplets)
@@ -677,14 +678,14 @@ class MPMSolver(ParticleSolver):
 
     def _grow_grid(self):
         grid = self._mpm_grid
-        demand = max(int(grid.grid_demand.to_numpy()), int(grid.n_particle_blocks.to_numpy()))
+        demand = max(int(qd_to_numpy(grid.grid_demand)), int(qd_to_numpy(grid.n_particle_blocks)))
         self._resize_blocks(max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), grid.max_blocks + 1))
         grid.grid_overflow.from_numpy(np.array(0, dtype=np.int32))
 
     def _grow_triplets(self):
         matrix = self._mpm_linear.matrix
-        demand = int(matrix.triplet_demand.to_numpy())
-        matrix.grow(max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), int(matrix.max_triplets.to_numpy()) + 1))
+        demand = int(qd_to_numpy(matrix.triplet_demand))
+        matrix.grow(max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), int(qd_to_numpy(matrix.max_triplets)) + 1))
         matrix.triplet_overflow.from_numpy(np.array(0, dtype=np.int32))
 
     def substep_post_coupling(self, f):
@@ -703,7 +704,7 @@ class MPMSolver(ParticleSolver):
             self._kernel_flag_newton_non_finite(self._mpm_control)
         if self._sim._cur_substep_global % NEWTON_FAILURE_CHECK_PERIOD == 0:
             control = self._mpm_control
-            if int(control.failed_iterations.to_numpy()):
+            if int(qd_to_numpy(control.failed_iterations)):
                 control.failed_iterations.from_numpy(np.array(0, dtype=np.int32))
                 gs.logger.warning("The implicit MPM Newton solve stopped before converging.")
 
@@ -723,7 +724,7 @@ class MPMSolver(ParticleSolver):
             is_exact,
         )
         kernel_assemble(*args)
-        while int(self._mpm_linear.matrix.triplet_overflow.to_numpy()):
+        while int(qd_to_numpy(self._mpm_linear.matrix.triplet_overflow)):
             self._grow_triplets()
             kernel_assemble(*args)
         sort_reduce_bcoo(self._mpm_linear.matrix)
@@ -881,17 +882,17 @@ class MPMSolver(ParticleSolver):
         of the matrix on the device, the symmetric matrix rebuilt from its stored diagonal and upper blocks."""
         linear = self._mpm_linear
         matrix = linear.matrix
-        n_rows = 3 * int(linear.pcg.n_rows.to_numpy())
+        n_rows = 3 * int(qd_to_numpy(linear.pcg.n_rows))
         if n_rows > ADJOINT_DIRECT_MAX_ROWS:
             gs.raise_exception(
                 f"The direct adjoint solve of the implicit MPM solver, meant for gradient tests on small scenes, holds "
                 f"{ADJOINT_DIRECT_MAX_ROWS} rows at most, got {n_rows}: shrink the scene or its environments, or use "
                 "MPMOptions(adjoint_linear_solver='pcg')."
             )
-        nnz = int(matrix.bcoo_nnz.to_numpy())
-        rows = qd_to_torch(matrix.bcoo_row, copy=True)[:nnz].long()
-        cols = qd_to_torch(matrix.bcoo_col, copy=True)[:nnz].long()
-        blocks = qd_to_torch(matrix.bcoo_val, copy=True)[: 9 * nnz].reshape(nnz, 3, 3)
+        nnz = int(qd_to_numpy(matrix.bcoo_nnz))
+        rows = qd_to_torch(matrix.bcoo_row)[:nnz]
+        cols = qd_to_torch(matrix.bcoo_col)[:nnz]
+        blocks = qd_to_torch(matrix.bcoo_val)[: 9 * nnz].reshape(nnz, 3, 3)
         offsets = torch.arange(3, device=gs.device)
         block_rows = (3 * rows[:, None, None] + offsets[None, :, None]).expand(nnz, 3, 3)
         block_cols = (3 * cols[:, None, None] + offsets[None, None, :]).expand(nnz, 3, 3)
@@ -903,7 +904,7 @@ class MPMSolver(ParticleSolver):
             blocks[is_off].reshape(-1),
             accumulate=True,
         )
-        rhs = qd_to_torch(linear.b_rhs, copy=True)
+        rhs = qd_to_torch(linear.b_rhs)
         solution = qd_to_torch(linear.solution, copy=True)
         solution[:n_rows] = torch.linalg.solve(H, rhs[:n_rows])
         qd_from_torch(linear.solution, solution)

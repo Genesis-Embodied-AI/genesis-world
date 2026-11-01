@@ -196,13 +196,11 @@ class RigidGeomQuery:
     not active holds no geom and builds nothing."""
 
     def __init__(self, rigid, newton, n_envs, is_active):
-        coupled_geoms = np.zeros(0, dtype=np.int32)
-        if is_active:
-            coupled_geoms = np.flatnonzero(rigid.dyn_info.geoms.needs_coup.to_numpy()).astype(np.int32)
+        coupled_geoms = [geom.idx for geom in rigid.geoms if geom.needs_coup] if is_active else []
         self.n_coupled = len(coupled_geoms)
-        self.coupled_geoms = qd.ndarray(qd.i32, shape=(max(self.n_coupled, 1),))
+        self.coupled_geoms = qd.ndarray(gs.qd_int, shape=(max(self.n_coupled, 1),))
         if self.n_coupled:
-            self.coupled_geoms.from_numpy(coupled_geoms)
+            self.coupled_geoms.from_numpy(np.array(coupled_geoms, dtype=gs.np_int))
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(self.n_coupled, 1), is_active=self.n_coupled > 0)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves

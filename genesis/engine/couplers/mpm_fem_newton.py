@@ -140,6 +140,8 @@ class FemNewtonHost:
     from the solved positions after, and then the part of the coupler's step on FEM that FEM's own solve would have
     preceded."""
 
+    is_differentiable = False
+
     def __init__(self, fem_solver, coupler):
         self._fem_solver = fem_solver
         self._coupler = coupler
@@ -162,6 +164,8 @@ class FemNewtonHost:
 class MpmFemContactHost:
     """Host stages of the MPM-FEM contact rows before the joint solve: the triangle trees, then the rows and their
     contact point displacement at the start point. The rows' force on FEM is in the joint solve itself."""
+
+    is_differentiable = False
 
     def __init__(self, device: MpmFemContact):
         self._device = device

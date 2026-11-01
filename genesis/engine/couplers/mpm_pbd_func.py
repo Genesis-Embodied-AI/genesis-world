@@ -774,6 +774,8 @@ class PbdNewtonHost:
     """Host stages of PBD around the joint solve: the projection of its substep as the inertia target before, its
     velocities from the solved positions after."""
 
+    is_differentiable = False
+
     def __init__(self, pd: PbdNewtonData, params):
         self._pd = pd
         self._params = params
@@ -794,6 +796,8 @@ class PbdNewtonHost:
 class MpmPbdContactHost:
     """Host stages of the MPM-PBD contact rows before the joint solve: the PBD trees, then the rows and the PBD
     particle displacement at the start point."""
+
+    is_differentiable = False
 
     def __init__(self, device: MpmPbdContact):
         self._device = device
