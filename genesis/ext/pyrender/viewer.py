@@ -836,8 +836,8 @@ class Viewer(pyglet.window.Window):
         if self._renderer is None:
             return
 
-        # The plugins read the scene, which a threaded render loop would otherwise race with its rebuild or teardown
-        with self.render_lock if self._run_in_thread or not self.auto_start else nullcontext():
+        render_lock = self.render_lock if self._run_in_thread or not self.auto_start else nullcontext()
+        with render_lock:
             # Make OpenGL context current
             self.switch_to()
 
@@ -849,30 +849,35 @@ class Viewer(pyglet.window.Window):
 
             # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
             # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
-            if self.viewer_flags["record"]:
-                self._record()
+            record_frame = self._read_record_frame() if self.viewer_flags["record"] else None
 
-            if self.viewer_flags["caption"] is not None:
-                for caption in self.viewer_flags["caption"]:
-                    xpos, ypos = self._location_to_x_y(caption["location"])
-                    self._renderer.render_text(
-                        caption["text"],
-                        xpos,
-                        ypos,
-                        font_name=caption["font_name"],
-                        font_pt=caption["font_pt"],
-                        color=caption["color"],
-                        scale=caption["scale"],
-                        align=caption["location"],
-                    )
+        # The frame is encoded once the lock is released, so that a slow encoder does not hold up the simulation.
+        if record_frame is not None:
+            self._video_recorder.write_frame(record_frame)
 
-            # Render help text
-            self._render_help_text()
+        if self.viewer_flags["caption"] is not None:
+            for caption in self.viewer_flags["caption"]:
+                xpos, ypos = self._location_to_x_y(caption["location"])
+                self._renderer.render_text(
+                    caption["text"],
+                    xpos,
+                    ypos,
+                    font_name=caption["font_name"],
+                    font_pt=caption["font_pt"],
+                    color=caption["color"],
+                    scale=caption["scale"],
+                    align=caption["location"],
+                )
 
-            # Drive plugins only once the viewer is committed and initialized. start() renders the scene to probe GL
-            # configs before that point, and a rejected config must not leave a plugin's GL/ImGui state dangling for
-            # the next attempt (e.g. an ImGui frame opened but never ended). start() sets _initialized_event last.
-            if self._initialized_event.is_set():
+        # Render help text
+        self._render_help_text()
+
+        # Drive plugins only once the viewer is committed and initialized. start() renders the scene to probe GL
+        # configs before that point, and a rejected config must not leave a plugin's GL/ImGui state dangling for the
+        # next attempt (e.g. an ImGui frame opened but never ended). _initialized_event is set at the end of start().
+        if self._initialized_event.is_set():
+            # The plugins read the scene, so a threaded render loop draws them only while the scene is not updated
+            with render_lock:
                 for plugin in self.plugins:
                     plugin.on_draw()
 
@@ -1040,16 +1045,17 @@ class Viewer(pyglet.window.Window):
             data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
             cv2.imwrite(filename, np.flip(data, axis=-1))
 
-    def _record(self):
-        """Append the current frame to the video, unless the simulation has not advanced since the last recorded
-        frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
+    def _read_record_frame(self):
+        """Read the current frame to append to the video, or None if the simulation has not advanced since the last
+        recorded frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
         t = self.gs_context.scene.sim.cur_step_global
         if t == self._last_recorded_t:
-            return
+            return None
         self._last_recorded_t = t
         data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
-        if not np.all(data == 0.0):
-            self._video_recorder.write_frame(data)
+        if np.all(data == 0.0):
+            return None
+        return data
 
     def _rotate(self):
         """Animate the scene by rotating the camera."""
