@@ -4,8 +4,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from frozendict import frozendict
-
 import quadrants as qd
 
 import genesis as gs
@@ -5809,8 +5807,14 @@ def _get_static_config(*args, **kwargs):
     return args[4] if len(args) > 4 else kwargs["rigid_config"]
 
 
+def _get_geometry_hash(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
+    # The dispatcher keeps the key of every geometry it has timed for the lifetime of the process, so the key must hold
+    # no reference to the solver data, which would outlive the scene otherwise.
+    return hash((constraint_state.jac.shape, rigid_config, _n_iterations))
+
+
 @qd.perf_dispatch(
-    get_geometry_hash=lambda *args, **kwargs: (*args, frozendict(kwargs)),
+    get_geometry_hash=_get_geometry_hash,
     first_warmup=1,
     warmup=0,
     active=2,
