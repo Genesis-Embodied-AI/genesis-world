@@ -81,11 +81,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_held_by_links,
 )
-from .abd.diff import (
-    func_copy_next_to_curr,
-    func_integrate_dq_entity,
-    kernel_copy_next_to_curr_clear_coupling,
-)
+from .abd.diff import func_copy_next_to_curr, kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
     func_clear_coupling_wrench,
     func_forward_dynamics,
@@ -93,7 +89,6 @@ from .abd.forward_dynamics import (
     func_update_acc,
     func_vel_at_point,
     kernel_compute_smooth_qacc,
-    kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
@@ -1524,21 +1519,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
                 enable_collision=self._enable_collision,
             )
-
-    def _func_forward_dynamics(self):
-        kernel_forward_dynamics(
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-        )
-
-    def _func_update_acc(self):
-        kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-
-    def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
-        func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
 
     @mutates()
     def apply_links_external_wrench(

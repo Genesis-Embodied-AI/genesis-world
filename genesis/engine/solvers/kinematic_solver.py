@@ -444,10 +444,6 @@ class KinematicSolver(Solver):
         """Hook: sanitize joint constraint solver params. No-op in base (no constraints)."""
         return sol_params
 
-    def _sanitize_geom_sol_params(self, sol_params):
-        """Hook: sanitize geom constraint solver params. No-op in base (no constraints)."""
-        return sol_params
-
     # ------------------------------------------------------------------------------------
     # --------------------------------- init methods -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1273,17 +1269,6 @@ class KinematicSolver(Solver):
     def get_links_ang(self, links_idx=None, envs_idx=None):
         tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
-
-    def _build_dof_to_q_map(self, dofs_idx_t):
-        """Build a mapping from DOF indices to qpos indices for revolute/prismatic joints."""
-        dof_to_q = torch.zeros(self.n_dofs, dtype=torch.long, device=gs.device)
-        for entity in self._entities:
-            for joint in entity.joints:
-                if joint.n_dofs == 0:
-                    continue
-                for i in range(joint.n_dofs):
-                    dof_to_q[joint.dof_start - entity.dof_start + i] = joint.q_start - entity.q_start + i
-        return dof_to_q[dofs_idx_t]
 
     def get_qpos(self, qs_idx=None, envs_idx=None):
         tensor = self._read_data(self.qpos, envs_idx, qs_idx, copy=True)

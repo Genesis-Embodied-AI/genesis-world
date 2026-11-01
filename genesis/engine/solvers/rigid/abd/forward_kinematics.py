@@ -650,21 +650,6 @@ def func_update_geoms(
             dyn_state.geoms.verts_updated[i_g, i_b] = False
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_geoms(
-    envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    force_update_all_geoms: qd.template(),
-):
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
-        i_b = qd.cast(envs_idx[i_b_], qd.i32)
-        func_update_geoms_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
-
-
 @qd.func
 def func_forward_velocity_link(
     i_l: int,

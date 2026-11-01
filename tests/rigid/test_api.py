@@ -113,9 +113,6 @@ def test_data_accessor(n_envs, batched, tol):
                     assert len(pad_i) == capacity
                     assert_equal(pad_i[:n_contacts], trim_i[:n_contacts])
 
-    gs_s._func_forward_dynamics()
-    gs_s._func_constraint_force()
-
     # Make sure that all the robots ends up in the different state
     qposs = gs_robot.get_qpos()
     for i in range(n_envs - 1):
