@@ -71,7 +71,10 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
         box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
         positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
         # reject out-of-boundary particles
-        sd, *_ = igl.signed_distance(positions, mesh.vertices, mesh.faces)
+        # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
+        sd, *_ = igl.signed_distance(
+            positions, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+        )
         positions = positions[sd < 0.0]
 
         cache.save((positions, np.random.get_state() if sampler == "random" else None))

@@ -486,10 +486,10 @@ class FEMEntity(Entity):
         Drake's implementation of margin seems buggy.
         """
         init_positions = tensor_to_array(self.init_positions)
-        signed_distance, *_ = igl.signed_distance(init_positions, init_positions, self._surface_tri_np)
-        signed_distance = signed_distance.astype(gs.np_float, copy=False)
-
-        unsigned_distance = np.abs(signed_distance)
+        unsigned_distance, *_ = igl.signed_distance(
+            init_positions, init_positions, self._surface_tri_np, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
+        )
+        unsigned_distance = unsigned_distance.astype(gs.np_float, copy=False)
         max_distance = np.max(unsigned_distance)
         if max_distance < gs.EPS:
             gs.raise_exception(
