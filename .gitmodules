@@ -4,6 +4,3 @@
 [submodule "genesis/ext/LuisaRender"]
 	path = genesis/ext/LuisaRender
 	url = https://github.com/Alif-01/LuisaRender
-[submodule "genesis/ext/ParticleMesher"]
-	path = genesis/ext/ParticleMesher
-	url = https://github.com/ACMLCZH/ParticleMesher
