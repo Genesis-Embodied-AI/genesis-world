@@ -4,8 +4,8 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
+from genesis.utils.array_class import BVHQueryState, get_bvh_query_results
 from genesis.utils.misc import qd_to_numpy
 
 from ..utils.assertions import assert_equal
@@ -82,14 +82,12 @@ def test_build_tree(bvh):
 def test_query(bvh):
     bvh_state, bvh_config = bvh
     n_trees, n_leaves = bvh_state.leaves.aabbs_min.shape
-    query_state = array_class.BVHQueryState(
-        leaves=bvh_state.leaves,
-        tree=bvh_state.tree,
-        results=array_class.get_bvh_query_results(n_trees * n_leaves * n_leaves),
+    query_state = BVHQueryState(
+        leaves=bvh_state.leaves, tree=bvh_state.tree, results=get_bvh_query_results(n_trees * n_leaves * n_leaves)
     )
 
     @qd.kernel
-    def query_leaves(query_state: array_class.BVHQueryState) -> bool:
+    def query_leaves(query_state: BVHQueryState) -> bool:
         query_state.results.count[0] = 0
         func_bvh_query_leaves(query_state, func_no_filter, 0)
         return query_state.results.count[0] > query_state.results.triplets.shape[0]
@@ -108,8 +106,6 @@ def test_query(bvh):
     assert_equal(is_found, is_hit)
 
     # A result list holding one pair reports the overflow exactly when there are more, and the pair it holds is genuine
-    short_query_state = array_class.BVHQueryState(
-        leaves=bvh_state.leaves, tree=bvh_state.tree, results=array_class.get_bvh_query_results(1)
-    )
+    short_query_state = BVHQueryState(leaves=bvh_state.leaves, tree=bvh_state.tree, results=get_bvh_query_results(1))
     assert query_leaves(short_query_state) == (is_hit.sum() > 1)
     assert is_hit[tuple(qd_to_numpy(short_query_state.results.triplets)[0])]

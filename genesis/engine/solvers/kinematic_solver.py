@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
@@ -21,6 +20,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.utils.array_class import ConfigItem, DataItem, DataKind, DataManager, RigidSimStaticConfig, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -399,7 +399,7 @@ class KinematicSolver(Solver):
 
     def _build_static_config(self):
         # Static config with all physics disabled
-        self.rigid_config = array_class.RigidSimStaticConfig(
+        self.rigid_config = RigidSimStaticConfig(
             backend=gs.backend,
             para_level=self.sim._para_level,
             requires_grad=False,
@@ -420,21 +420,21 @@ class KinematicSolver(Solver):
         )
 
     def _create_data_manager(self):
-        self.data_manager = array_class.DataManager(self, kinematic_only=True)
+        self.data_manager = DataManager(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
-        yield from array_class.iter_data(self, "rigid_config")
-        yield from array_class.iter_data(self.data_manager, "errno", array_class.DataKind.STATE)
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        yield from iter_data(self, "rigid_config")
+        yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         for name in ("rigid_info", "dyn_info", "dyn_state"):
-            yield from array_class.iter_data(self.data_manager, name)
+            yield from iter_data(self.data_manager, name)
         # The flags describe the derived poses and velocities, so they travel with them
-        yield from array_class.iter_data(self, "_is_forward_pos_updated", array_class.DataKind.DERIVED)
-        yield from array_class.iter_data(self, "_is_forward_vel_updated", array_class.DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -904,7 +904,7 @@ class KinematicSolver(Solver):
 
     def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
-        if array_class.DataKind.DERIVED not in checkpoint.kinds:
+        if DataKind.DERIVED not in checkpoint.kinds:
             # Without the derived arrays, the next step recomputes them from the state. A restored record runs forward
             # kinematics at once, since the scene may be drawn from it, while the replay of a step restoring a boundary
             # checkpoint recomputes them with the same kernels as its forward pass.

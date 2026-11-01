@@ -43,9 +43,9 @@ from scipy.spatial import ConvexHull
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider import gjk_support, support_field
+from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKState
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -1175,8 +1175,8 @@ def test_mesh_support_exactness(show_viewer, tol):
         supports: qd.types.ndarray(),
         supports_count: qd.types.ndarray(),
         supports_idx: qd.types.ndarray(),
-        dyn_info: array_class.DynInfo,
-        collider_info: array_class.ColliderInfo,
+        dyn_info: DynInfo,
+        collider_info: ColliderInfo,
     ):
         for i_d in range(directions.shape[0]):
             direction = qd.Vector([directions[i_d, 0], directions[i_d, 1], directions[i_d, 2]], dt=gs.qd_float)
@@ -1192,10 +1192,10 @@ def test_mesh_support_exactness(show_viewer, tol):
         directions: qd.types.ndarray(),
         supports_world: qd.types.ndarray(),
         supports_local: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
-        gjk_state: array_class.GJKState,
-        dyn_info: array_class.DynInfo,
-        collider_info: array_class.ColliderInfo,
+        collider_state: ColliderState,
+        gjk_state: GJKState,
+        dyn_info: DynInfo,
+        collider_info: ColliderInfo,
         rigid_config: qd.template(),
         collider_config: qd.template(),
     ):

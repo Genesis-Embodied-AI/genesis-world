@@ -6,9 +6,9 @@ import quadrants as qd
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors import SurfaceDistanceProbe as SurfaceDistanceProbeOptions
+from genesis.utils.array_class import DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.raycast_qd import closest_point_on_triangle
 
@@ -183,7 +183,7 @@ def _kernel_surface_distance_probe_bvh(
     positions_measured: qd.types.ndarray(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
+    dyn_state: DynState,
     eps: float,
 ):
     """

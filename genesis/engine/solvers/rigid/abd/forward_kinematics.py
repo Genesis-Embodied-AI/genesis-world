@@ -19,9 +19,9 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.grad.bridge import register_custom_backward
+from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
 
 from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forward_velocity_bw
 from .misc import (
@@ -76,9 +76,9 @@ def reverse_forward_velocity(envs, dyn_state, dyn_info, rigid_info, rigid_config
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_links_geoms(
     envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -103,9 +103,9 @@ def kernel_forward_kinematics_links_geoms(
 @qd.kernel(fastcache=True)
 def kernel_masked_forward_kinematics_links_geoms(
     envs_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -129,9 +129,9 @@ def kernel_masked_forward_kinematics_links_geoms(
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics(
     envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -144,9 +144,9 @@ def kernel_forward_kinematics(
 @qd.kernel(fastcache=True)
 def kernel_masked_forward_kinematics(
     envs_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -160,9 +160,9 @@ def kernel_masked_forward_kinematics(
 @qd.kernel(fastcache=True)
 def kernel_forward_velocity(
     envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -177,9 +177,9 @@ def kernel_forward_velocity(
 @qd.kernel(fastcache=True)
 def kernel_masked_forward_velocity(
     envs_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -192,12 +192,7 @@ def kernel_masked_forward_velocity(
 
 @qd.func
 def func_update_kinematics_root(
-    i_l_root: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the poses of the links of kinematic root i_l_root of env i_b, its center of mass and its link velocities.
 
@@ -215,12 +210,7 @@ def func_update_kinematics_root(
 
 @qd.func
 def func_COM_root_sum(
-    i_l_root,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the mass and the center of mass of a kinematic root.
 
@@ -251,14 +241,7 @@ def func_COM_root_sum(
 
 
 @qd.func
-def func_COM_link(
-    i_l,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_COM_link(i_l, i_b, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Compute the quantities of a link that follow from the center of mass of its kinematic root.
 
     Writes, for link i_l of env i_b, the center of mass of its root, its inertia about it and the motion subspace of its
@@ -319,12 +302,7 @@ def func_COM_link(
 
 @qd.func
 def func_COM_root(
-    i_l_root: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_l_root: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Compute the center of mass of a kinematic root and the inertia of each of its links about it.
 
@@ -356,12 +334,7 @@ def func_COM_root(
 
 
 @qd.func
-def func_COM_links(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_COM_links(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Compute the center of mass of every kinematic root and the inertia of each of its links about it.
 
     The computation runs in three sweeps so that only the mass-weighted sum walks the links of a root serially: one
@@ -406,9 +379,9 @@ def func_forward_kinematics_link(
     i_l: int,
     i_b: int,
     qpos: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -532,9 +505,9 @@ def func_forward_kinematics_root(
     i_l_root: int,
     i_b: int,
     qpos: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -555,8 +528,8 @@ def func_forward_kinematics_root(
 def func_update_geoms_link(
     i_l: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
 ):
@@ -594,9 +567,9 @@ def func_update_geoms_link(
 def func_update_geoms_root(
     i_l_root: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
 ):
@@ -613,10 +586,7 @@ def func_update_geoms_root(
 
 @qd.func
 def func_update_geoms(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
-    force_update_all_geoms: qd.template(),
+    dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), force_update_all_geoms: qd.template()
 ):
     """Place the movable geoms of every awake link of every env on their link, one thread per geom.
 
@@ -652,12 +622,7 @@ def func_update_geoms(
 
 @qd.func
 def func_forward_velocity_link(
-    i_l: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template(), is_backward: qd.template()
 ):
     """Compute the Cartesian velocity of link i_l of env i_b from its parent's velocity and its dof velocities.
 
@@ -754,9 +719,9 @@ def func_forward_velocity_link(
 def func_update_acc_link(
     i_l: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     update_cacc: qd.template(),
     is_backward: qd.template(),
@@ -812,9 +777,9 @@ def func_update_acc_link(
 def func_forward_velocity_root(
     i_l_root: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -832,9 +797,9 @@ def func_forward_velocity_root(
 
 @qd.func
 def func_forward_velocity(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -878,10 +843,7 @@ def func_forward_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_update_verts_for_geoms(
-    geoms_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
+    geoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     n_geoms = geoms_idx.shape[0]
     _B = dyn_state.geoms.verts_updated.shape[1]
@@ -893,13 +855,7 @@ def kernel_update_verts_for_geoms(
 
 
 @qd.func
-def func_update_verts_for_geom(
-    i_g: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
-):
+def func_update_verts_for_geom(i_g: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     _B = dyn_state.geoms.verts_updated.shape[1]
 
     if not dyn_state.geoms.verts_updated[i_g, i_b]:
@@ -929,7 +885,7 @@ def func_update_verts_for_geom(
 
 
 @qd.func
-def func_update_all_verts(dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+def func_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     n_geoms, _B = dyn_state.geoms.pos.shape
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -938,18 +894,13 @@ def func_update_all_verts(dyn_state: array_class.DynState, dyn_info: array_class
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_all_verts(
-    dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
-):
+def kernel_update_all_verts(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     func_update_all_verts(dyn_state, dyn_info, rigid_config)
 
 
 @qd.func
 def func_update_geom_aabbs(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
+    geoms_init_AABB: GeomsInitAABB, dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """Fit the world-frame axis-aligned bounding box (AABB) of every geom in every environment.
 
@@ -981,7 +932,7 @@ def func_update_geom_aabbs(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_vgeoms(dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+def kernel_update_vgeoms(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     """
     Vgeoms are only for visualization purposes. Updates vgeom world transforms from link state.
     """
@@ -1004,10 +955,7 @@ def kernel_update_vgeoms(dyn_state: array_class.DynState, dyn_info: array_class.
 
 @qd.kernel(fastcache=True)
 def kernel_update_vverts_for_vgeoms(
-    vgeoms_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
+    vgeoms_idx: qd.types.ndarray(), dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()
 ):
     """
     Refresh vverts_state.pos for the requested vgeom range from FK output. Only iterates vverts that have a slot in
@@ -1035,9 +983,9 @@ def func_update_cartesian_space_root(
     i_l_root: int,
     i_b: int,
     qpos: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
     is_backward: qd.template(),
@@ -1057,9 +1005,9 @@ def func_update_cartesian_space_root(
 
 @qd.func
 def func_sweep_links_by_level(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     sweep_pass: qd.template(),
     update_cacc: qd.template(),
@@ -1195,9 +1143,9 @@ def func_sweep_links_by_level(
 
 @qd.func
 def func_update_cartesian_space(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
     is_backward: qd.template(),
@@ -1261,9 +1209,9 @@ def func_update_cartesian_space(
 
 @qd.kernel(fastcache=True)
 def kernel_update_cartesian_space(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
     is_backward: qd.template(),
@@ -1280,9 +1228,9 @@ def kernel_update_cartesian_space(
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_replay(
     envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -1297,18 +1245,11 @@ def kernel_forward_kinematics_replay(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_geoms_replay(
-    dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
-):
+def kernel_update_geoms_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.template()):
     # The reversed kernels place every geom (see reverse_cartesian_space)
     func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)
 
 
 @qd.kernel(fastcache=True)
-def kernel_COM_links_replay(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
+def kernel_COM_links_replay(dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()):
     func_COM_links(dyn_state, dyn_info, rigid_info, rigid_config)

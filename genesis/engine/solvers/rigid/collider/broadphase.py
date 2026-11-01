@@ -9,8 +9,17 @@ under the link pairs whose boxes overlap, spread over the geoms of the larger li
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.array_class import (
+    ColliderInfo,
+    ColliderState,
+    ConstraintState,
+    DynInfo,
+    DynState,
+    ErrorCode,
+    GeomsInitAABB,
+    RigidInfo,
+)
 
 from .contact import func_collider_clear_env, func_is_link_pair_hibernated
 from .utils import func_is_geom_boxes_overlap
@@ -21,10 +30,10 @@ def func_check_links_collision_valid(
     i_la: int,
     i_lb: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Check whether the geoms of two links of a valid link pair may collide in an environment at this step.
@@ -54,12 +63,12 @@ def func_check_links_collision_valid(
 
 @qd.func
 def func_collision_clear(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
@@ -121,12 +130,12 @@ def func_add_broad_link_pair(
     i_la: int,
     i_lb: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
     """Record a link pair as a candidate of an environment when it is valid and the boxes of its links overlap."""
@@ -147,12 +156,12 @@ def func_add_broad_link_pair(
 
 @qd.func
 def _func_broad_phase_links_sap(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
     """Find the link pairs of every environment whose boxes overlap by sweep-and-prune (SAP) along the x axis.
@@ -232,12 +241,12 @@ def _func_broad_phase_links_sap(
 
 @qd.func
 def _func_broad_phase_links_all_vs_all(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
     """Find the link pairs of every environment whose boxes overlap by testing every valid link pair in parallel."""
@@ -266,12 +275,12 @@ def _func_broad_phase_links_all_vs_all(
 
 @qd.func
 def func_broad_phase_geoms(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
@@ -313,18 +322,18 @@ def func_broad_phase_geoms(
                                     collider_state.broad_collision_pairs[n_broad, i_b][0] = i_ga
                                     collider_state.broad_collision_pairs[n_broad, i_b][1] = i_gb
                                 else:
-                                    errno[i_b] = errno[i_b] | array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS
+                                    errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_CANDIDATE_CONTACTS
 
 
 @qd.func
 def func_broad_phase(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     errno: qd.Tensor,

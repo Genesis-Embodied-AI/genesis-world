@@ -8,8 +8,7 @@ import genesis.utils.sdf as sdf
 
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils import array_class
-from genesis.utils.array_class import LinksState
+from genesis.utils.array_class import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 if TYPE_CHECKING:
@@ -126,11 +125,11 @@ class LegacyCoupler(RBC):
         vel,
         mass,
         i_b,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         for i_g in range(self.rigid_solver.n_geoms):
@@ -158,11 +157,11 @@ class LegacyCoupler(RBC):
         mass,
         geom_idx,
         batch_idx,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
@@ -190,12 +189,12 @@ class LegacyCoupler(RBC):
         normal_prev,
         geom_idx,
         batch_idx,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        links_info: array_class.LinksInfo,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        links_info: LinksInfo,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         """
@@ -254,9 +253,9 @@ class LegacyCoupler(RBC):
         influence,
         geom_idx,
         i_b,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
     ):
         """
         Resolves collision when a particle is already in collision with a rigid object.
@@ -308,11 +307,11 @@ class LegacyCoupler(RBC):
         self,
         f: qd.i32,
         t: qd.f32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         for ii, jj, kk, i_b in qd.ndrange(*self.mpm_solver.grid_res, self.mpm_solver._B):
@@ -450,10 +449,10 @@ class LegacyCoupler(RBC):
     def mpm_surface_to_particle(
         self,
         f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        sdf_info: array_class.SDFInfo,
-        rigid_info: array_class.RigidInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        sdf_info: SDFInfo,
+        rigid_info: RigidInfo,
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.mpm_solver.n_particles, self.mpm_solver._B):
@@ -482,11 +481,11 @@ class LegacyCoupler(RBC):
     def fem_surface_force(
         self,
         f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         # TODO: all collisions are on vertices instead of surface and edge
@@ -648,12 +647,12 @@ class LegacyCoupler(RBC):
     def sph_rigid(
         self,
         f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        links_info: array_class.LinksInfo,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        links_info: LinksInfo,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.sph_solver._n_particles, self.sph_solver._B):
@@ -683,11 +682,11 @@ class LegacyCoupler(RBC):
     @qd.kernel
     def kernel_pbd_rigid_collide(
         self,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        sdf_info: array_class.SDFInfo,
-        rigid_info: array_class.RigidInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        sdf_info: SDFInfo,
+        rigid_info: RigidInfo,
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.pbd_solver._n_particles, self.sph_solver._B):
@@ -803,11 +802,11 @@ class LegacyCoupler(RBC):
         normal_prev,
         geom_idx,
         batch_idx,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        sdf_info: array_class.SDFInfo,
-        rigid_info: array_class.RigidInfo,
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        sdf_info: SDFInfo,
+        rigid_info: RigidInfo,
         collider_static_config: qd.template(),
     ):
         """

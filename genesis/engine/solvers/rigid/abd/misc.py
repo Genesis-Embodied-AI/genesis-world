@@ -1,8 +1,8 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.array_class import ConstraintState, DynInfo, DynState, GeomsInitAABB, LinksState, RigidInfo
 
 
 @qd.func
@@ -32,7 +32,7 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 
 @qd.func
-def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: DynInfo, rigid_config: qd.template()):
     """Return the pair of links coupled by equality constraint i_eq of env i_b, -1 standing for a missing link.
 
     CONNECT, WELD and SCREW equalities reference links. JOINT equalities reference joints, each mapped to the link whose
@@ -64,10 +64,10 @@ def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class
 def func_wakeup_island(
     i_island: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Wake every link of island i_island of env i_b (see func_wakeup_link).
@@ -86,10 +86,10 @@ def func_wakeup_island(
 def func_wakeup_link(
     i_l: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Wake link i_l of env i_b where it sleeps: its dofs and geoms are revived, the owning entity's flag cleared, the
@@ -121,7 +121,7 @@ def func_wakeup_link(
 
 
 @qd.func
-def func_is_awake_link(i_l: int, i_b: int, dyn_state: array_class.DynState, rigid_config: qd.template()):
+def func_is_awake_link(i_l: int, i_b: int, dyn_state: DynState, rigid_config: qd.template()):
     """Whether link i_l of env i_b is awake.
 
     A static link never sleeps: only the links of a contact island do (see func_hibernate_island_if_settled).
@@ -133,9 +133,7 @@ def func_is_awake_link(i_l: int, i_b: int, dyn_state: array_class.DynState, rigi
 
 
 @qd.func
-def func_is_awake_tree(
-    i_t: int, i_b: int, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
-):
+def func_is_awake_tree(i_t: int, i_b: int, dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     """Whether kinematic tree i_t of env i_b is awake.
 
     The links of a tree sleep as a unit (see func_hibernate_island_if_settled), so the flag of the root link stands for
@@ -151,12 +149,7 @@ def func_is_awake_tree(
 
 @qd.func
 def func_hibernate_link(
-    i_l: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Put link i_l of env i_b to sleep: the link, its dofs and its geoms are flagged, the dof and link velocities and
     accelerations zeroed, and its dofs counted asleep (see n_awake_dofs in array_class.py).
@@ -188,10 +181,10 @@ def func_hibernate_link(
 def func_hibernate_island_if_settled(
     i_island: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Put awake island i_island of env i_b to sleep once every one of its links has stayed below the hibernation speed
@@ -251,9 +244,9 @@ def kernel_init_dof_fields(
     dofs_act_gain: qd.types.ndarray(),
     dofs_act_bias: qd.types.ndarray(),
     dofs_force_range: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
@@ -297,10 +290,10 @@ def kernel_init_dof_fields(
 @qd.kernel(fastcache=True)
 def kernel_reset_hibernation(
     envs_idx: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     # Wake every body in the given envs. A scene whose state is set (reset or set_state) must resume fully awake: the
@@ -351,8 +344,8 @@ def kernel_init_link_fields(
     links_is_fixed: qd.types.ndarray(),
     links_pos: qd.types.ndarray(),
     links_quat: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_links = links_parent_idx.shape[0]
@@ -410,7 +403,7 @@ def kernel_init_link_dynamics(
     links_inertial_i: qd.types.ndarray(),
     links_inertial_mass: qd.types.ndarray(),
     # Quadrants variables
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
 ):
     """Write each simulated link's inertial frame, inertia, mass and inverse weight."""
     for I_l in qd.grouped(dyn_info.links.invweight):
@@ -436,7 +429,7 @@ def kernel_update_heterogeneous_links_vgeom(
     links_vgeom_start: qd.types.ndarray(),
     links_vgeom_end: qd.types.ndarray(),
     # Quadrants variables
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Update per-environment links vgeom for heterogeneous entities."""
@@ -460,7 +453,7 @@ def kernel_update_heterogeneous_link_info(
     links_inertial_quat: qd.types.ndarray(),
     links_inertial_i: qd.types.ndarray(),
     # Quadrants variables
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Update per-environment link info for heterogeneous entities."""
@@ -492,7 +485,7 @@ def kernel_init_joint_fields(
     joints_type: qd.types.ndarray(),
     joints_sol_params: qd.types.ndarray(),
     joints_pos: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -519,7 +512,7 @@ def kernel_init_vert_fields(
     edges: qd.types.ndarray(),
     normals: qd.types.ndarray(),
     is_fixed: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_verts = verts.shape[0]
@@ -561,7 +554,7 @@ def kernel_init_vvert_fields(
     vverts: qd.types.ndarray(),
     vfaces: qd.types.ndarray(),
     vnormals: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_vverts = vverts.shape[0]
@@ -611,9 +604,9 @@ def kernel_init_geom_fields(
     geoms_coup_restitution: qd.types.ndarray(),
     geoms_is_fixed: qd.types.ndarray(),
     geoms_is_hollow: qd.types.ndarray(),
-    geoms_init_AABB: array_class.GeomsInitAABB,  # TODO: move to rigid global info
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    geoms_init_AABB: GeomsInitAABB,  # TODO: move to rigid global info
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_geoms = geoms_pos.shape[0]
@@ -719,7 +712,7 @@ def kernel_init_vgeom_fields(
     vgeoms_pos: qd.types.ndarray(),
     vgeoms_quat: qd.types.ndarray(),
     vgeoms_color: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_vgeoms = vgeoms_pos.shape[0]
@@ -752,8 +745,8 @@ def kernel_init_entity_fields(
     entities_geom_start: qd.types.ndarray(),
     entities_geom_end: qd.types.ndarray(),
     entities_gravity_compensation: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_entities = entities_dof_start.shape[0]
@@ -788,7 +781,7 @@ def kernel_init_equality_fields(
     equalities_eq_type: qd.types.ndarray(),
     equalities_sol_params: qd.types.ndarray(),
     # Quadrants variables
-    dyn_info: array_class.DynInfo,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     n_equalities = equalities_eq_obj1id.shape[0]
@@ -816,7 +809,7 @@ def kernel_apply_links_external_wrench(
     envs_idx: qd.types.ndarray(),
     force: qd.types.ndarray(),
     torque: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
+    dyn_state: DynState,
     rigid_config: qd.template(),
     ref: qd.template(),
     local: qd.template(),
@@ -845,7 +838,7 @@ def kernel_apply_links_external_wrench_at_pos(
     pos: qd.types.ndarray(),
     force: qd.types.ndarray(),
     torque: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
+    dyn_state: DynState,
     rigid_config: qd.template(),
     ref: qd.template(),
     local: qd.template(),
@@ -862,7 +855,7 @@ def kernel_apply_links_external_wrench_at_pos(
 
 @qd.func
 def func_apply_coupling_force(
-    link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: array_class.LinksState
+    link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: LinksState
 ):
     torque = (pos - links_state.root_COM[link_idx, env_idx]).cross(force)
     links_state.cfrc_coupling_ang[link_idx, env_idx] -= torque
@@ -871,10 +864,10 @@ def func_apply_coupling_force(
 
 @qd.kernel(fastcache=True)
 def kernel_wakeup_coupled_links(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """
@@ -909,7 +902,7 @@ def func_apply_link_external_wrench(
     pos: qd.types.vector(3),
     force: qd.types.vector(3),
     torque: qd.types.vector(3),
-    dyn_state: array_class.DynState,
+    dyn_state: DynState,
     ref: qd.template(),
     local: qd.template(),
     has_pos: qd.template(),
@@ -946,7 +939,7 @@ def func_apply_link_external_wrench(
 
 
 @qd.func
-def func_clear_external_force(dyn_state: array_class.DynState, rigid_config: qd.template()):
+def func_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
@@ -997,7 +990,7 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_external_force(dyn_state: array_class.DynState, rigid_config: qd.template()):
+def kernel_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
     func_clear_external_force(dyn_state, rigid_config)
 
 

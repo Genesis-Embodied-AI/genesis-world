@@ -7,9 +7,9 @@ import torch
 from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
+from genesis.utils.array_class import RigidSimStaticConfig
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1074,7 +1074,7 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
 @pytest.mark.parametrize("precision", ["32", "64"])
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_cholesky_tiling(monkeypatch, tol):
-    rigid_sim_static_config_init_orig = array_class.RigidSimStaticConfig.__init__
+    rigid_sim_static_config_init_orig = RigidSimStaticConfig.__init__
 
     values = []
     for enable_tiled_cholesky in (True, False):
@@ -1086,7 +1086,7 @@ def test_cholesky_tiling(monkeypatch, tol):
                 kwargs["enable_fused_smooth_acc_solve"] = False
             rigid_sim_static_config_init_orig(self, **kwargs)
 
-        monkeypatch.setattr(array_class.RigidSimStaticConfig, "__init__", rigid_sim_static_config_init)
+        monkeypatch.setattr(RigidSimStaticConfig, "__init__", rigid_sim_static_config_init)
 
         scene = gs.Scene(
             rigid_options=gs.options.RigidOptions(
@@ -1135,13 +1135,13 @@ def test_solve_arm_equivalence(n_stack, n_grid, monkeypatch, show_viewer, tol):
     N_STEPS = 12
 
     # The choice of arm is left open, so that the dispatcher deems both of them eligible whatever the scene
-    init_orig = array_class.RigidSimStaticConfig.__init__
+    init_orig = RigidSimStaticConfig.__init__
 
     def init_open_choice(self, *args, **kwargs):
         kwargs["prefer_decomposed_solver"] = -1
         init_orig(self, *args, **kwargs)
 
-    monkeypatch.setattr(array_class.RigidSimStaticConfig, "__init__", init_open_choice)
+    monkeypatch.setattr(RigidSimStaticConfig, "__init__", init_open_choice)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

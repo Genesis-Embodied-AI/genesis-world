@@ -11,7 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, DynState, GeomsInitAABB, RigidInfo
 from . import support_field
 
 from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
@@ -24,8 +24,8 @@ def func_sphere_box_contact(
     ga_pos: qd.types.vector(3),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-box collision detection.
@@ -109,12 +109,12 @@ def func_plane_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     errno: qd.Tensor,
@@ -190,11 +190,11 @@ def func_box_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):

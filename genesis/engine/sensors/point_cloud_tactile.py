@@ -7,13 +7,13 @@ import quadrants as qd
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
 )
+from genesis.utils.array_class import BVHTreeState, ColliderInfo, DynInfo, DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
@@ -370,7 +370,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
     taxel_signal_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
+    dyn_state: DynState,
     eps: float,
 ):
     total_n_probes = probe_positions_local.shape[0]
@@ -827,9 +827,9 @@ def _func_elastomer_min_sdf_over_active_geoms(
     point_world: qd.types.vector(3),
     geom_n: int,
     geom_active_envs_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    collider_info: ColliderInfo,
 ) -> float:
     min_sdf = float(1.0e6)
     geom_end = geom_start + geom_n
@@ -1078,9 +1078,9 @@ def _func_elastomer_min_signed_dist_bvh(
     i_s: int,
     probe_world: qd.types.vector(3),
     track_geom_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    bvh_tree_state: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
     max_query_dist: float,
 ) -> float:
     """
@@ -1157,10 +1157,10 @@ def _kernel_elastomer_probe_depth_bvh(
     probe_radii: qd.types.ndarray(),
     track_geom_mask: qd.types.ndarray(),
     probe_depth_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    bvh_tree_state_a: array_class.BVHTreeState,
-    bvh_tree_state_b: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state_a: BVHTreeState,
+    bvh_tree_state_b: BVHTreeState,
+    dyn_info: DynInfo,
     max_query_dist: float,
     is_split: qd.template(),
 ):
@@ -1226,9 +1226,9 @@ def _kernel_elastomer_probe_depth(
     sensor_track_geom_n: qd.types.ndarray(),
     track_geom_active_envs_mask: qd.types.ndarray(),
     probe_depth_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    collider_info: ColliderInfo,
 ):
     """Per-probe contact depth from track-geom SDF, parallel over (env, probe).
 
@@ -1358,9 +1358,9 @@ def _kernel_elastomer_surface_state_bvh(
     surface_depth_buf: qd.types.ndarray(),
     surface_initialized_buf: qd.types.ndarray(),
     surface_candidate_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    collider_info: ColliderInfo,
     aabb_margin: float,
     bvh_stack_size: qd.template(),
 ):
@@ -1519,10 +1519,10 @@ def _kernel_elastomer_surface_state_via_global_bvh(
     surface_depth_buf: qd.types.ndarray(),
     surface_initialized_buf: qd.types.ndarray(),
     surface_candidate_buf: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    global_bvh_tree_a: array_class.BVHTreeState,
-    global_bvh_tree_b: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    global_bvh_tree_a: BVHTreeState,
+    global_bvh_tree_b: BVHTreeState,
+    dyn_info: DynInfo,
     aabb_margin: float,
     max_query_dist: float,
     bvh_stack_size: qd.template(),

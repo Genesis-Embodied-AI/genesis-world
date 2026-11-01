@@ -6,13 +6,13 @@ import numpy as np
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.bvh import BVHData, get_bvh_data
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
+from genesis.utils.array_class import BVHState, BVHStaticConfig
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
 from genesis.utils.raycast_qd import (
@@ -50,8 +50,8 @@ class BVHContext:
     solver: "KinematicSolver"
     # None for a static entry until the first RaycastContext.update sizes them to the detected tree count (one tree
     # per distinct per-env geometry); allocated per env up front for movable entries.
-    bvh_state: array_class.BVHState | None = None
-    bvh_config: array_class.BVHStaticConfig | None = None
+    bvh_state: BVHState | None = None
+    bvh_config: BVHStaticConfig | None = None
     # The number of trees of the set, one per environment or one per distinct geometry (see env_bvh_idx)
     n_trees: int = 0
     # None for a collision BVH (faces_info / verts_info, no per-face mask), else an int8 (n_vfaces,) tensor selecting

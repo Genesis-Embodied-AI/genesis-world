@@ -2,8 +2,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.array_class import DynInfo, RigidInfo
 from . import utils
-import genesis.utils.array_class as array_class
 
 
 @qd.func
@@ -14,8 +14,8 @@ def func_capsule_capsule_contact(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical capsule-capsule collision detection.
@@ -102,8 +102,8 @@ def func_sphere_sphere_contact(
     i_gb: int,
     ga_pos: qd.types.vector(3),
     gb_pos: qd.types.vector(3),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-sphere collision detection.
@@ -156,8 +156,8 @@ def func_sphere_capsule_contact(
     ga_pos: qd.types.vector(3),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-capsule collision detection.

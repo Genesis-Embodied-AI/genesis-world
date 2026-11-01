@@ -8,13 +8,30 @@ import igl
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
+from genesis.utils.array_class import (
+    BVHQueryResults,
+    BVHQueryState,
+    DofsState,
+    EntitiesInfo,
+    EqualitiesInfo,
+    FacesInfo,
+    GeomsInfo,
+    GeomsState,
+    JointsInfo,
+    LinksInfo,
+    LinksState,
+    RigidInfo,
+    SAPContactQueriesState,
+    VertsInfo,
+    VertsState,
+    get_bvh_query_results,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -405,7 +422,7 @@ class SAPCoupler(RBC):
         self._rigid_compliant = True
 
     @qd.kernel
-    def rigid_update_volume_verts_pressure_gradient(self, geoms_state: array_class.GeomsState):
+    def rigid_update_volume_verts_pressure_gradient(self, geoms_state: GeomsState):
         for i_b, i_v in qd.ndrange(self._B, self.n_rigid_volume_verts):
             i_g = self.rigid_volume_verts_geom_idx[i_v]
             pos = geoms_state.pos[i_g, i_b]
@@ -456,10 +473,10 @@ class SAPCoupler(RBC):
         )
         max_results = min(n_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
         # The surface tets of each environment queried against their own tree
-        fem_self_query = array_class.BVHQueryState(
+        fem_self_query = BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.fem_surface_tet_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_fem_self_tet_contact),
+            results=get_bvh_query_results(max_results, is_active=self._enable_fem_self_tet_contact),
         )
 
         n_faces = self.rigid_solver.n_faces
@@ -472,10 +489,10 @@ class SAPCoupler(RBC):
         else:
             max_results = 0
         # The surface tets of each environment queried against the rigid triangle tree of that environment
-        rigid_tri_query = array_class.BVHQueryState(
+        rigid_tri_query = BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.rigid_tri_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_rigid_fem_contact),
+            results=get_bvh_query_results(max_results, is_active=self._enable_rigid_fem_contact),
         )
 
         has_rigid_tet_tree = self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
@@ -485,12 +502,12 @@ class SAPCoupler(RBC):
         )
         max_results = min(n_rigid_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
         # The rigid tets of each environment queried against their own tree
-        rigid_tet_query = array_class.BVHQueryState(
+        rigid_tet_query = BVHQueryState(
             leaves=self.rigid_tet_bvh_state.leaves,
             tree=self.rigid_tet_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results, is_active=has_rigid_tet_tree),
+            results=get_bvh_query_results(max_results, is_active=has_rigid_tet_tree),
         )
-        self.contact_queries_state = array_class.SAPContactQueriesState(
+        self.contact_queries_state = SAPContactQueriesState(
             fem_self=fem_self_query, rigid_tri=rigid_tri_query, rigid_tet=rigid_tet_query
         )
 
@@ -676,15 +693,15 @@ class SAPCoupler(RBC):
     def update_contact(
         self,
         i_step: qd.i32,
-        links_info: array_class.LinksInfo,
-        faces_info: array_class.FacesInfo,
-        verts_info: array_class.VertsInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        dofs_state: array_class.DofsState,
-        links_state: array_class.LinksState,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        faces_info: FacesInfo,
+        verts_info: VertsInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        contact_queries_state: SAPContactQueriesState,
     ) -> tuple[bool, bool]:
         # The queries come in as arguments: a struct held by the instance indexes fine in a kernel, but quadrants binds
         # the struct parameter of a func from kernel arguments only, so self.contact_queries_state would fail at the
@@ -712,7 +729,7 @@ class SAPCoupler(RBC):
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
 
     @qd.kernel
-    def update_vel(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def update_vel(self, i_step: qd.i32, dofs_state: DofsState):
         if qd.static(self.fem_solver.is_active):
             self.update_fem_vel(i_step)
         if qd.static(self.rigid_solver.is_active):
@@ -724,7 +741,7 @@ class SAPCoupler(RBC):
             self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel = self.fem_state_v.v[i_b, i_v]
 
     @qd.func
-    def update_rigid_vel(self, dofs_state: array_class.DofsState):
+    def update_rigid_vel(self, dofs_state: DofsState):
         for i_b, i_d in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs):
             dofs_state.vel[i_d, i_b] = self.rigid_state_dof.v[i_b, i_d]
 
@@ -799,11 +816,7 @@ class SAPCoupler(RBC):
 
     @qd.kernel
     def compute_rigid_tri_aabb(
-        self,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        verts_info: array_class.VertsInfo,
+        self, faces_info: FacesInfo, free_verts_state: VertsState, fixed_verts_state: VertsState, verts_info: VertsInfo
     ):
         for i_b, i_f in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_faces):
             tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -853,7 +866,7 @@ class SAPCoupler(RBC):
             self.exact_linesearch(i_step)
 
     @qd.kernel
-    def check_sap_convergence(self, rigid_info: array_class.RigidInfo):
+    def check_sap_convergence(self, rigid_info: RigidInfo):
         self.clear_sap_norms()
         if qd.static(self.fem_solver.is_active):
             self.add_fem_norms()
@@ -886,7 +899,7 @@ class SAPCoupler(RBC):
             )
 
     @qd.func
-    def add_rigid_norms(self, rigid_info: array_class.RigidInfo):
+    def add_rigid_norms(self, rigid_info: RigidInfo):
         for i_b, i_d in qd.ndrange(self._B, self.rigid_solver.n_dofs):
             if not self.batch_active[i_b]:
                 continue
@@ -911,24 +924,19 @@ class SAPCoupler(RBC):
             self.batch_active[i_b] = self.sap_state[i_b].gradient_norm >= norm_thr
 
     @qd.kernel
-    def compute_regularization(
-        self,
-        dofs_state: array_class.DofsState,
-        entities_info: array_class.EntitiesInfo,
-        rigid_info: array_class.RigidInfo,
-    ):
+    def compute_regularization(self, dofs_state: DofsState, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         for contact in qd.static(self.contact_handlers):
             contact.compute_regularization(entities_info=entities_info, rigid_info=rigid_info)
         if qd.static(self.rigid_solver.is_active and self.rigid_solver.n_equalities > 0):
             self.equality_constraint_handler.compute_regularization(dofs_state=dofs_state)
 
     @qd.kernel
-    def _init_sap_solve(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def _init_sap_solve(self, i_step: qd.i32, dofs_state: DofsState):
         self._init_v(i_step, dofs_state=dofs_state)
         self.batch_active.fill(True)
 
     @qd.func
-    def _init_v(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def _init_v(self, i_step: qd.i32, dofs_state: DofsState):
         if qd.static(self.fem_solver.is_active):
             self._init_v_fem(i_step)
         if qd.static(self.rigid_solver.is_active):
@@ -940,7 +948,7 @@ class SAPCoupler(RBC):
             self.fem_state_v.v[i_b, i_v] = self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel
 
     @qd.func
-    def _init_v_rigid(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def _init_v_rigid(self, i_step: qd.i32, dofs_state: DofsState):
         for i_b, i_d in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs):
             self.rigid_state_dof.v[i_b, i_d] = dofs_state.vel[i_d, i_b]
 
@@ -968,7 +976,7 @@ class SAPCoupler(RBC):
             )
 
     @qd.kernel
-    def init_rigid_unconstrained_gradient(self, dofs_state: array_class.DofsState):
+    def init_rigid_unconstrained_gradient(self, dofs_state: DofsState):
         for i_b, i_d in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs):
             self.rigid_state_dof.gradient[i_b, i_d] = 0.0
             self.rigid_state_dof.v_diff[i_b, i_d] = self.rigid_state_dof.v[i_b, i_d] - dofs_state.vel[i_d, i_b]
@@ -984,7 +992,7 @@ class SAPCoupler(RBC):
         self.compute_fem_matrix_vector_product(self.fem_state_v.v_diff, self.fem_state_v.gradient, self.batch_active)
 
     @qd.kernel
-    def compute_rigid_unconstrained_gradient(self, rigid_info: array_class.RigidInfo):
+    def compute_rigid_unconstrained_gradient(self, rigid_info: RigidInfo):
         self.pcg_rigid_state_dof.Ap.fill(0.0)
         for i_b, i_d0, i_d1 in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs, self.rigid_solver.n_dofs):
             if not self.batch_active[i_b]:
@@ -1040,7 +1048,7 @@ class SAPCoupler(RBC):
         self.compute_fem_matrix_vector_product(self.pcg_fem_state_v.p, self.pcg_fem_state_v.Ap, self.batch_pcg_active)
 
     @qd.func
-    def compute_rigid_pcg_matrix_vector_product(self, rigid_info: array_class.RigidInfo):
+    def compute_rigid_pcg_matrix_vector_product(self, rigid_info: RigidInfo):
         self.compute_rigid_mass_mat_vec_product(
             self.pcg_rigid_state_dof.p, self.pcg_rigid_state_dof.Ap, self.batch_pcg_active, rigid_info=rigid_info
         )
@@ -1099,7 +1107,7 @@ class SAPCoupler(RBC):
                 dst[i_b, i_vs[i]] += (S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]) * scale
 
     @qd.kernel
-    def init_pcg_solve(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def init_pcg_solve(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         self.init_pcg_state()
         if qd.static(self.fem_solver.is_active):
             self.init_fem_pcg_solve()
@@ -1129,7 +1137,7 @@ class SAPCoupler(RBC):
             self.pcg_state[i_b].rTz += self.pcg_fem_state_v[i_b, i_v].r.dot(self.pcg_fem_state_v[i_b, i_v].z)
 
     @qd.func
-    def compute_rigid_mass_mat_vec_product(self, vec, out, active, rigid_info: array_class.RigidInfo):
+    def compute_rigid_mass_mat_vec_product(self, vec, out, active, rigid_info: RigidInfo):
         """
         Compute the rigid mass matrix-vector product.
         """
@@ -1142,7 +1150,7 @@ class SAPCoupler(RBC):
     # FIXME: This following two rigid solves are duplicated with the one in rigid_solver.py:func_solve_mass_batched
     # Consider refactoring.
     @qd.func
-    def rigid_solve_pcg(self, vec, out, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def rigid_solve_pcg(self, vec, out, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         # Step 1: Solve w st. L^T @ w = y
         for i_b, i_e in qd.ndrange(self._B, self.rigid_solver.n_entities):
             if not self.batch_pcg_active[i_b]:
@@ -1175,14 +1183,7 @@ class SAPCoupler(RBC):
 
     @qd.func
     def rigid_solve_jacobian(
-        self,
-        vec,
-        out,
-        n_contact_pairs,
-        i_bs,
-        dim,
-        entities_info: array_class.EntitiesInfo,
-        rigid_info: array_class.RigidInfo,
+        self, vec, out, n_contact_pairs, i_bs, dim, entities_info: EntitiesInfo, rigid_info: RigidInfo
     ):
         # Step 1: Solve w st. L^T @ w = y
         for i_p, i_e, k in qd.ndrange(n_contact_pairs, self.rigid_solver.n_entities, dim):
@@ -1212,7 +1213,7 @@ class SAPCoupler(RBC):
                     out[i_p, i_d][k] -= rigid_info.mass_mat_L[i_d, j_d, i_b] * out[i_p, j_d][k]
 
     @qd.func
-    def init_rigid_pcg_solve(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def init_rigid_pcg_solve(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         for i_b, i_d in qd.ndrange(self._B, self.rigid_solver.n_dofs):
             if not self.batch_pcg_active[i_b]:
                 continue
@@ -1243,7 +1244,7 @@ class SAPCoupler(RBC):
         )
 
     @qd.kernel
-    def _kernel_one_pcg_iter(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def _kernel_one_pcg_iter(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         self.compute_pcg_matrix_vector_product(rigid_info=rigid_info)
         self.clear_pcg_state()
         self.compute_pcg_pTAp()
@@ -1253,7 +1254,7 @@ class SAPCoupler(RBC):
         self.compute_p()
 
     @qd.func
-    def compute_pcg_matrix_vector_product(self, rigid_info: array_class.RigidInfo):
+    def compute_pcg_matrix_vector_product(self, rigid_info: RigidInfo):
         """
         Compute the matrix-vector product Ap used in the Preconditioned Conjugate Gradient method.
         """
@@ -1313,7 +1314,7 @@ class SAPCoupler(RBC):
             self.pcg_state[i_b].alpha = self.pcg_state[i_b].rTz / self.pcg_state[i_b].pTAp
 
     @qd.func
-    def compute_pcg_state(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_pcg_state(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         if qd.static(self.fem_solver.is_active):
             self.compute_fem_pcg_state()
         if qd.static(self.rigid_solver.is_active):
@@ -1335,7 +1336,7 @@ class SAPCoupler(RBC):
             self.pcg_state[i_b].rTz_new += self.pcg_fem_state_v[i_b, i_v].r.dot(self.pcg_fem_state_v[i_b, i_v].z)
 
     @qd.func
-    def compute_rigid_pcg_state(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_rigid_pcg_state(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         for i_b, i_d in qd.ndrange(self._B, self.rigid_solver.n_dofs):
             if not self.batch_pcg_active[i_b]:
                 continue
@@ -1402,13 +1403,7 @@ class SAPCoupler(RBC):
             self.one_pcg_iter()
 
     @qd.func
-    def compute_total_energy(
-        self,
-        i_step: qd.i32,
-        energy: qd.template(),
-        dofs_state: array_class.DofsState,
-        rigid_info: array_class.RigidInfo,
-    ):
+    def compute_total_energy(self, i_step: qd.i32, energy: qd.template(), dofs_state: DofsState, rigid_info: RigidInfo):
         energy.fill(0.0)
         if qd.static(self.fem_solver.is_active):
             self.compute_fem_energy(i_step, energy)
@@ -1463,9 +1458,7 @@ class SAPCoupler(RBC):
             energy[i_b] += 0.5 * p9.dot(H9_p9) * damping_beta_factor * V_dt2
 
     @qd.func
-    def compute_rigid_energy(
-        self, energy: qd.template(), dofs_state: array_class.DofsState, rigid_info: array_class.RigidInfo
-    ):
+    def compute_rigid_energy(self, energy: qd.template(), dofs_state: DofsState, rigid_info: RigidInfo):
         # Kinetic energy
         for i_b, i_d in qd.ndrange(self._B, self.rigid_solver.n_dofs):
             if not self.batch_linesearch_active[i_b]:
@@ -1483,9 +1476,7 @@ class SAPCoupler(RBC):
             energy[i_b] += 0.5 * self.rigid_state_dof.v_diff[i_b, i_d] * self.rigid_state_dof.mass_v_diff[i_b, i_d]
 
     @qd.kernel
-    def init_exact_linesearch(
-        self, i_step: qd.i32, dofs_state: array_class.DofsState, rigid_info: array_class.RigidInfo
-    ):
+    def init_exact_linesearch(self, i_step: qd.i32, dofs_state: DofsState, rigid_info: RigidInfo):
         self._func_init_linesearch(self._linesearch_max_step_size)
         self.compute_total_energy(
             i_step, self.linesearch_state.prev_energy, dofs_state=dofs_state, rigid_info=rigid_info
@@ -1524,7 +1515,7 @@ class SAPCoupler(RBC):
                 self.linesearch_state[i_b].step_size = self.linesearch_state[i_b].alpha_max
 
     @qd.func
-    def compute_line_energy_gradient_hessian(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def compute_line_energy_gradient_hessian(self, i_step: qd.i32, dofs_state: DofsState):
         self.init_linesearch_energy_gradient_hessian()
         if qd.static(self.fem_solver.is_active):
             self.compute_fem_energy_alpha(i_step, self.linesearch_state.energy)
@@ -1573,7 +1564,7 @@ class SAPCoupler(RBC):
             self.linesearch_state.dell_dalpha[i_b] += dp[i_b, i_v].dot(v[i_b, i_v] - v_star[i_step + 1, i_v, i_b])
 
     @qd.func
-    def compute_rigid_gradient_alpha(self, dofs_state: array_class.DofsState):
+    def compute_rigid_gradient_alpha(self, dofs_state: DofsState):
         dp = qd.static(self.linesearch_rigid_state_dof.dp)
         v = qd.static(self.rigid_state_dof.v)
         v_star = qd.static(dofs_state.vel)
@@ -1594,7 +1585,7 @@ class SAPCoupler(RBC):
             energy[i_b] += alpha[i_b] * dp[i_b, i_v].dot(v[i_b, i_v] - v_star[i_step + 1, i_v, i_b])
 
     @qd.func
-    def compute_rigid_energy_alpha(self, energy: qd.template(), dofs_state: array_class.DofsState):
+    def compute_rigid_energy_alpha(self, energy: qd.template(), dofs_state: DofsState):
         alpha = qd.static(self.linesearch_state.step_size)
         dp = qd.static(self.linesearch_rigid_state_dof.dp)
         v = qd.static(self.rigid_state_dof.v)
@@ -1605,7 +1596,7 @@ class SAPCoupler(RBC):
             energy[i_b] += alpha[i_b] * dp[i_b, i_d] * (v[i_b, i_d] - v_star[i_d, i_b])
 
     @qd.func
-    def prepare_search_direction_data(self, rigid_info: array_class.RigidInfo):
+    def prepare_search_direction_data(self, rigid_info: RigidInfo):
         if qd.static(self.fem_solver.is_active):
             self.prepare_fem_search_direction_data()
         if qd.static(self.rigid_solver.is_active):
@@ -1652,7 +1643,7 @@ class SAPCoupler(RBC):
         )
 
     @qd.func
-    def prepare_rigid_search_direction_data(self, rigid_info: array_class.RigidInfo):
+    def prepare_rigid_search_direction_data(self, rigid_info: RigidInfo):
         self.compute_rigid_mass_mat_vec_product(
             self.pcg_rigid_state_dof.x,
             self.linesearch_rigid_state_dof.dp,
@@ -1789,7 +1780,7 @@ class SAPCoupler(RBC):
             self.one_exact_linesearch_iter(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
 
     @qd.kernel
-    def one_exact_linesearch_iter(self, i_step: qd.i32, dofs_state: array_class.DofsState):
+    def one_exact_linesearch_iter(self, i_step: qd.i32, dofs_state: DofsState):
         self.update_velocity_linesearch()
         self.compute_line_energy_gradient_hessian(i_step, dofs_state=dofs_state)
         self.compute_f_df_bracket()
@@ -1946,12 +1937,7 @@ class RigidConstraintHandler(BaseConstraintHandler):
         self.W = qd.field(gs.qd_float, shape=(self.max_constraints,))
 
     @qd.kernel
-    def build_constraints(
-        self,
-        equalities_info: array_class.EqualitiesInfo,
-        joints_info: array_class.JointsInfo,
-        rigid_config: qd.template(),
-    ):
+    def build_constraints(self, equalities_info: EqualitiesInfo, joints_info: JointsInfo, rigid_config: qd.template()):
         self.n_constraints[None] = 0
         self.Jt.fill(0.0)
         # TODO: Maybe support different constraints for each batch in the future.
@@ -1983,7 +1969,7 @@ class RigidConstraintHandler(BaseConstraintHandler):
                 self.Jt[i_c, i_dof2] = -1.0
 
     @qd.func
-    def compute_regularization(self, dofs_state: array_class.DofsState):
+    def compute_regularization(self, dofs_state: DofsState):
         dt_inv = 1.0 / self.sim._substep_dt
         q = qd.static(dofs_state.pos)
         sap_info = qd.static(self.constraints.sap_info)
@@ -1995,7 +1981,7 @@ class RigidConstraintHandler(BaseConstraintHandler):
             self.compute_constraint_regularization(sap_info, i_c, W, self.sim._substep_dt)
 
     @qd.func
-    def compute_delassus_world_frame(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_delassus_world_frame(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         self.coupler.rigid_solve_jacobian(
             self.Jt,
             self.M_inv_Jt,
@@ -2123,9 +2109,7 @@ class BaseContactHandler(RBC):
         )
 
     @qd.func
-    def compute_jacobian(
-        self, links_info: array_class.LinksInfo, dofs_state: array_class.DofsState, links_state: array_class.LinksState
-    ):
+    def compute_jacobian(self, links_info: LinksInfo, dofs_state: DofsState, links_state: LinksState):
         pass
 
     @qd.func
@@ -2140,11 +2124,11 @@ class BaseContactHandler(RBC):
                 self.coupler.linesearch_state.d2ell_dalpha2[i_b] += dvc[i_p].dot(G[i_p] @ dvc[i_p])
 
     @qd.func
-    def compute_delassus_world_frame(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_delassus_world_frame(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         pass
 
     @qd.func
-    def compute_regularization(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_regularization(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         self.compute_delassus_world_frame(entities_info=entities_info, rigid_info=rigid_info)
         for i_p in range(self.n_contact_pairs[None]):
             W = self.compute_delassus(i_p)
@@ -2276,9 +2260,7 @@ class RigidContactHandler(BaseContactHandler):
     # FIXME This function is similar to the one in constraint_solver.py:add_collision_constraints.
     # Consider refactoring, using better naming, and removing while.
     @qd.func
-    def compute_jacobian(
-        self, links_info: array_class.LinksInfo, dofs_state: array_class.DofsState, links_state: array_class.LinksState
-    ):
+    def compute_jacobian(self, links_info: LinksInfo, dofs_state: DofsState, links_state: LinksState):
         self.Jt.fill(0.0)
         for i_p in range(self.n_contact_pairs[None]):
             link = self.contact_pairs[i_p].link_idx
@@ -2335,7 +2317,7 @@ class RigidContactHandler(BaseContactHandler):
                 sap_info[i_p].dvc = self.compute_Jx(i_p, self.coupler.pcg_rigid_state_dof.x)
 
     @qd.func
-    def compute_delassus_world_frame(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_delassus_world_frame(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         self.coupler.rigid_solve_jacobian(
             self.Jt,
             self.M_inv_Jt,
@@ -2376,9 +2358,7 @@ class RigidRigidContactHandler(RigidContactHandler):
         super().__init__(simulator)
 
     @qd.func
-    def compute_jacobian(
-        self, links_info: array_class.LinksInfo, dofs_state: array_class.DofsState, links_state: array_class.LinksState
-    ):
+    def compute_jacobian(self, links_info: LinksInfo, dofs_state: DofsState, links_state: LinksState):
         self.Jt.fill(0.0)
         pairs = qd.static(self.contact_pairs)
         for i_p in range(self.n_contact_pairs[None]):
@@ -2583,13 +2563,13 @@ class FEMFloorTetContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         # Compute contact pairs
@@ -2773,7 +2753,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         self.contact_pairs = self.contact_pair_type.field(shape=(self.max_contact_pairs,))
 
     @qd.func
-    def compute_candidates(self, f: qd.i32, query_results: array_class.BVHQueryResults):
+    def compute_candidates(self, f: qd.i32, query_results: BVHQueryResults):
         overflow = False
         self.n_contact_candidates[None] = 0
         result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
@@ -2982,13 +2962,13 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         contact_queries_state.fem_self.results.count[0] = 0
@@ -3121,13 +3101,13 @@ class FEMFloorVertContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3214,13 +3194,13 @@ class RigidFloorVertContactHandler(RigidContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3284,13 +3264,13 @@ class RigidFloorTetContactHandler(RigidContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         candidates = qd.static(self.contact_candidates)
@@ -3445,11 +3425,11 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     def compute_candidates(
         self,
         f: qd.i32,
-        faces_info: array_class.FacesInfo,
-        verts_info: array_class.VertsInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        query_results: array_class.BVHQueryResults,
+        faces_info: FacesInfo,
+        verts_info: VertsInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        query_results: BVHQueryResults,
     ):
         self.n_contact_candidates[None] = 0
         overflow = False
@@ -3505,10 +3485,10 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     def compute_pairs(
         self,
         f: qd.i32,
-        verts_info: array_class.VertsInfo,
-        geoms_info: array_class.GeomsInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
+        verts_info: VertsInfo,
+        geoms_info: GeomsInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
     ):
         """
         Computes the tet triangle intersection pair and their properties.
@@ -3627,13 +3607,13 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         contact_queries_state.rigid_tri.results.count[0] = 0
@@ -3648,7 +3628,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         return overflow
 
     @qd.func
-    def compute_delassus_world_frame(self, entities_info: array_class.EntitiesInfo, rigid_info: array_class.RigidInfo):
+    def compute_delassus_world_frame(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         dt2_inv = 1.0 / self.sim._substep_dt**2
         # rigid
         self.coupler.rigid_solve_jacobian(
@@ -3781,7 +3761,7 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         self.W = qd.field(gs.qd_mat3, shape=(self.max_contact_pairs,))
 
     @qd.func
-    def compute_candidates(self, f: qd.i32, query_results: array_class.BVHQueryResults):
+    def compute_candidates(self, f: qd.i32, query_results: BVHQueryResults):
         overflow = False
         candidates = qd.static(self.contact_candidates)
         self.n_contact_candidates[None] = 0
@@ -3851,7 +3831,7 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         return overflow
 
     @qd.func
-    def compute_pairs(self, i_step: qd.i32, geoms_info: array_class.GeomsInfo):
+    def compute_pairs(self, i_step: qd.i32, geoms_info: GeomsInfo):
         overflow = False
         candidates = qd.static(self.contact_candidates)
         pairs = qd.static(self.contact_pairs)
@@ -3992,13 +3972,13 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
     def detection(
         self,
         f: qd.i32,
-        links_info: array_class.LinksInfo,
-        verts_info: array_class.VertsInfo,
-        faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
-        geoms_info: array_class.GeomsInfo,
-        contact_queries_state: array_class.SAPContactQueriesState,
+        links_info: LinksInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        geoms_info: GeomsInfo,
+        contact_queries_state: SAPContactQueriesState,
     ):
         overflow = False
         contact_queries_state.rigid_tet.results.count[0] = 0
