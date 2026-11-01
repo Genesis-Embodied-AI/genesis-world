@@ -1,7 +1,8 @@
 import importlib
 import pkgutil
 import sys
-from typing import TYPE_CHECKING, ForwardRef, get_args, get_origin
+import traceback
+from typing import ForwardRef, get_args, get_origin
 
 import torch
 
@@ -11,9 +12,6 @@ from genesis.options.sensors.options import SensorOptions
 from genesis.utils.ring_buffer import TensorRingBuffer
 
 from .base_sensor import Sensor, SharedSensorContext, SharedSensorMetadata
-
-if TYPE_CHECKING:
-    from genesis.vis.rasterizer_context import RasterizerContext
 
 
 class SensorManager:
@@ -108,7 +106,10 @@ class SensorManager:
                 f"e.g. `class {options_cls.__name__}(SensorOptions['MySensor']): ...`"
             )
 
-        # Try to discover the sensor module from sibling modules of the options package.
+        # Try to discover the sensor module from sibling modules of the options package. A sibling module lacking an
+        # optional dependency is skipped, and reported if no other sibling registers the sensor class. Any other import
+        # error is logged with its traceback and skipped as well, so that a broken external plugin never crashes Genesis.
+        skipped_modules_error = []
         options_module = options_cls.__module__
         if "." in options_module:
             pkg_name = options_module.rsplit(".", 1)[0]
@@ -120,7 +121,13 @@ class SensorManager:
                         if modname not in sys.modules:
                             try:
                                 importlib.import_module(modname)
+                            except ModuleNotFoundError as e:
+                                skipped_modules_error.append(f"{modname}: {e}")
+                                continue
                             except Exception:
+                                gs.logger.warning(
+                                    f"Failed to import sensor module '{modname}':\n{traceback.format_exc()}"
+                                )
                                 continue
                         if options_cls in SensorManager.SENSOR_TYPES_MAP:
                             return SensorManager.SENSOR_TYPES_MAP[options_cls]
@@ -128,9 +135,12 @@ class SensorManager:
         gs.raise_exception(
             f"No sensor class registered for {options_cls.__name__}. Ensure the sensor module is in the same "
             "package as the options module, or import the sensor class manually before calling add_sensor()."
+            + "".join(f"\nSkipped for a missing dependency: {error}" for error in skipped_modules_error)
         )
 
     def build(self):
+        self._sim.step_timer.add_phases(*(f"sensors/{sensor_cls.__name__}" for sensor_cls in self._sensors_by_type))
+
         # Sort each class by entity_idx so sensors attached to the same entity occupy a contiguous slice of the class
         # cache. Static sensors have entity_idx=-1 and group together. Python's sort is stable, so registration order is
         # preserved within each entity bucket.
@@ -325,9 +335,9 @@ class SensorManager:
         for context in self._shared_contexts.values():
             context.update()
 
-        fps_tracker = self._sim.fps_tracker
+        step_timer = self._sim.step_timer
         for sensor_cls, sensors in self._sensors_by_type.items():
-            fps_tracker.start_phase(f"sensors/{sensor_cls.__name__}")
+            step_timer.start_phase(f"sensors/{sensor_cls.__name__}")
             dtype = sensor_cls._get_intermediate_dtype()
             cache_slice = self._cache_slices_by_type[sensor_cls]
             ground_truth_slice = self._ground_truth_intermediate_cache[dtype][cache_slice]
@@ -379,12 +389,7 @@ class SensorManager:
             # for any return space (bool, uint8, quantized float, ...).
             sensor_cls._apply_delay(metadata, measured_return_ring, self._return_cache[sensor_cls])
 
-        fps_tracker.stop_phase()
-
-    def draw_debug(self, context: "RasterizerContext"):
-        for sensor in self.sensors:
-            if sensor._options.draw_debug:
-                sensor._draw_debug(context)
+        step_timer.stop_phase()
 
     def get_cloned_from_cache(self, sensor: "Sensor", is_ground_truth: bool = False) -> torch.Tensor:
         sensor_cls = type(sensor)

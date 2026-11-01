@@ -19,6 +19,7 @@ from .base_sensor import SimpleSensor, RigidSensorMetadataMixin, RigidSensorMixi
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
@@ -512,7 +513,6 @@ class TemperatureGridSensor(
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
         self._link: "RigidLink | None" = None
-        self._debug_objects: list = []
         self._debug_t_min: float = self._options.debug_temperature_range[0]
         self._debug_t_range: float = self._options.debug_temperature_range[1] - self._debug_t_min
         self._debug_cell_local_positions: np.ndarray = np.array([])  # set in build
@@ -788,20 +788,11 @@ class TemperatureGridSensor(
         )
         data.copy_(previous)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw a single flat mesh colored by temperature (cool=blue, hot=red).
-
-        Only draws for the first rendered environment.
-        """
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make a flat mesh colored by temperature (cool=blue, hot=red), for the first rendered environment."""
+        if 0 not in envs_idx or self._link is None:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-        if self._link is None:
-            return
-
-        for obj in self._debug_objects:
-            if obj is not None:
-                context.clear_debug_object(obj)
-        self._debug_objects = []
 
         link_pos = self._link.get_pos(env_idx, relative=False)
         link_quat = self._link.get_quat(env_idx, relative=False)
@@ -836,7 +827,7 @@ class TemperatureGridSensor(
         face_colors_u8[1::2] = face_colors_u8[0::2]
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, face_colors=face_colors_u8)
-        self._debug_objects.append(context.draw_debug_mesh(mesh, T=link_T))
+        return [(None, context.make_debug_mesh(mesh, T=link_T), None)]
 
     @property
     def link_temperatures(self) -> torch.Tensor:

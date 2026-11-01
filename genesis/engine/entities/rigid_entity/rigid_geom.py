@@ -1,16 +1,15 @@
-import os
-import pickle as pkl
+from functools import cached_property
 from typing import TYPE_CHECKING
 
-import igl
 import numpy as np
-import skimage
 import torch
+
+import skimage
 import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
+from genesis.engine.mesh import Mesh
 from genesis.repr_base import RBC
 from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 
@@ -18,7 +17,6 @@ from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
     from genesis.engine.materials.rigid import Rigid as RigidMaterial
-    from genesis.engine.mesh import Mesh
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
     from .rigid_entity import RigidEntity
@@ -38,7 +36,6 @@ class RigidGeom(RBC):
         self,
         link: "RigidLink",
         idx,
-        cell_start: int,
         vert_start: int,
         face_start: int,
         edge_start: int,
@@ -57,7 +54,6 @@ class RigidGeom(RBC):
         self._idx = idx
         self._needs_coup: bool = needs_coup
         self._is_convex: bool = mesh.is_convex
-        self._cell_start: int = cell_start
         self._vert_start: int = vert_start
         self._face_start: int = face_start
         self._edge_start: int = edge_start
@@ -88,194 +84,44 @@ class RigidGeom(RBC):
         if desc.data is not None:
             self._data[: len(desc.data)] = desc.data
 
-        # verts and faces for sdf genertaion
-        if "sdf_mesh" in self._metadata:
-            self._sdf_verts = np.ascontiguousarray(self._metadata["sdf_mesh"].vertices)
-            self._sdf_faces = np.ascontiguousarray(self._metadata["sdf_mesh"].faces)
-        else:
-            self._sdf_verts = np.array(self._init_verts)
-            self._sdf_faces = np.array(self._init_faces)
-
-        if len(self._sdf_faces) > 50000:
-            mesh_descr = f"({mesh.metadata['mesh_path']})" if "mesh_path" in mesh.metadata else ""
-            gs.logger.warning(
-                f"Beware that SDF pre-processing of mesh {mesh_descr} having more than 50000 vertices may take a very "
-                "long time (>10min) and require large RAM allocation (>20Gb). Please either enable convexify or "
-                "decimation. (see FileMorph options)"
-            )
-
         # Adjacency graph, shared by reference with sibling geoms that back the same processed geometry.
         self.vert_neighbors, self.vert_n_neighbors, self.vert_neighbor_start = mesh.get_vert_adjacency()
         assert self.n_verts == len(self.vert_n_neighbors)
 
-        # NOTE: sdf size is from the center of the lower voxel cell to the center of the upper voxel cell. Add
-        # padding. The cell size is anisotropic - each axis is sized independently to its own extent - so a thin
-        # slab gets fine resolution perpendicular to its surface without bloating the cell count along the long axes
-        # (which a uniform `grid_size.max() / sdf_max_res` cell size would force, leaving primitive-vs-mesh contacts
-        # noisy when the primitive's smallest dimension is below the cell size).
-        padding_ratio = 0.2
-        lower = self._init_verts.min(axis=0)
-        upper = self._init_verts.max(axis=0)
-        grid_size = (upper - lower).max() * padding_ratio + (upper - lower)
-        per_axis_lower = grid_size / (self._material.sdf_max_res - 1)
-        per_axis_upper = grid_size / max(self._material.sdf_min_res - 1, 2)
-        # The material cell size is the target. A convex geom has no thin wall to tunnel through, so it keeps that
-        # target. A non-convex geom tunnels when the cell is coarser than its thinnest wall, so the target is shrunk
-        # to fit 2 cells across the wall (its area-weighted p25 thickness) whenever that is finer; the per-axis clip
-        # below still bounds it to [sdf_min_res, sdf_max_res]. The shrink applies to all three axes, not just the
-        # wall's normal axis: the certified penetration bounds that hold shell contacts apart need lattice points
-        # near the contact in every direction, so a wall must be finely sampled along its tangent axes too (see
-        # get_wall_thickness).
-        cell_size_target = self._material.sdf_cell_size
-        if not self._is_convex:
-            # The wall-thickness probe only makes sense on a closed surface: on an open mesh the inward rays escape
-            # through the holes, so keep the material target there. The sdf mesh probed by 'get_wall_thickness' is a
-            # proxy for this collision mesh and must share its watertightness, hence it raises if that does not hold.
-            if self.desc.mesh.is_watertight:
-                wall_thickness = mu.get_wall_thickness(self._sdf_verts, self._sdf_faces)
-                cell_size_target = min(cell_size_target, wall_thickness / 2.0)
-            else:
-                gs.logger.warning(f"Geom idx {self._idx} is not watertight; skipping wall-thickness SDF refinement.")
-        self._sdf_cell_size = gs.EPS + np.clip(cell_size_target, per_axis_lower, per_axis_upper)
-        self._sdf_res = np.ceil(grid_size / self._sdf_cell_size).astype(gs.np_int) + 1
-        # Constant once the SDF resolution is fixed. Cached because the solver re-reads it for every geom on each
-        # 'add_entity' (to lay out cell offsets), which would otherwise recompute the product for every prior geom.
-        self._n_cells = int(np.prod(self._sdf_res))
-        self._sdf_grad_delta = (
-            np.zeros(3, dtype=gs.np_float) if self.type == gs.GEOM_TYPE.TERRAIN else self._sdf_cell_size * 1e-2
-        )
-        self._is_preprocessed = False
-
     def _build(self):
         pass
 
-    def _preprocess(self):
-        # compute file name via hashing for caching
-        self._gsd_path = mu.get_gsd_path(self._init_verts, self._init_faces, self._sdf_res, self._sdf_cell_size)
-
-        # loading pre-computed cache if available
-        is_cached_loaded = False
-        if os.path.exists(self._gsd_path):
-            gs.logger.debug(f"Preprocessed file (`.gsd`) found in cache for geom idx {self._idx}.")
-            try:
-                with open(self._gsd_path, "rb") as file:
-                    gsd_dict = pkl.load(file)
-                is_cached_loaded = True
-            except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
-                gs.logger.info("Ignoring corrupted cache.")
-
-        if not is_cached_loaded:
-            with gs.logger.timer(f"Preprocessing geom idx ~<{self._idx}>~."):
-                ######## sdf ########
-                lower = self._init_verts.min(axis=0)
-                upper = self._init_verts.max(axis=0)
-                center = (upper + lower) / 2.0
-
-                # NOTE: sdf size is from the center of the lower voxel cell to the center of the upper voxel cell
-                # add padding. Adjust the cell size to keep resolution within bounds.
-                padding_ratio = 0.2
-                grid_size = (upper - lower).max() * padding_ratio + (upper - lower)
-
-                # round up to multiple of sdf_cell_size
-                grid_size = (self._sdf_res - 1) * self._sdf_cell_size
-
-                halfsize = grid_size / 2.0
-                voxel_lower = center - halfsize
-                voxel_upper = center + halfsize
-
-                x = np.linspace(voxel_lower[0], voxel_upper[0], self._sdf_res[0])
-                y = np.linspace(voxel_lower[1], voxel_upper[1], self._sdf_res[1])
-                z = np.linspace(voxel_lower[2], voxel_upper[2], self._sdf_res[2])
-                X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
-                query_points = np.stack([X, Y, Z], axis=-1).reshape((-1, 3))
-
-                sdf_val = self._compute_sd(query_points)
-                sdf_closest_vert = self._compute_closest_verts(query_points)
-                sdf_val = sdf_val.reshape(self._sdf_res)
-                sdf_closest_vert = sdf_closest_vert.reshape(self._sdf_res)
-                T_mesh_to_centered = np.eye(4)
-                T_mesh_to_centered[:3, 3] = -center
-                T_centered_to_sdf = np.eye(4)
-                T_centered_to_sdf[:3, :3] *= (self._sdf_res - 1) / grid_size
-                T_centered_to_sdf[:3, 3] = (self._sdf_res - 1) / 2
-                T_mesh_to_sdf = T_centered_to_sdf @ T_mesh_to_centered
-
-                ######## sdf gradient ########
-                if self.type == gs.GEOM_TYPE.TERRAIN:  # terrain uses finite difference for sdf gradient computation
-                    # dummy
-                    sdf_grad = np.zeros((*self._sdf_res, 3), dtype=gs.np_float)
-                else:
-                    sdf_grad = self._compute_sd_grad(query_points, self._sdf_grad_delta).reshape((*self._sdf_res, 3))
-
-                # caching
-                gsd_dict = {
-                    "sdf_val": sdf_val,
-                    "sdf_grad": sdf_grad,
-                    "sdf_max": np.max(sdf_val),
-                    "sdf_closest_vert": sdf_closest_vert,
-                    "T_mesh_to_sdf": T_mesh_to_sdf,
-                }
-                os.makedirs(os.path.dirname(self._gsd_path), exist_ok=True)
-                with open(self._gsd_path, "wb") as file:
-                    pkl.dump(gsd_dict, file)
-
-        self._sdf_val = gsd_dict["sdf_val"]
-        self._sdf_grad = gsd_dict["sdf_grad"]
-        self._sdf_max = gsd_dict["sdf_max"]
-        self._sdf_closest_vert = gsd_dict["sdf_closest_vert"]
-        self._T_mesh_to_sdf = gsd_dict["T_mesh_to_sdf"]
-
-        self._is_preprocessed = True
-
-    def _compute_sd(self, query_points):
-        signed_distance, *_ = igl.signed_distance(query_points, self._sdf_verts, self._sdf_faces)
-        return signed_distance.astype(gs.np_float, copy=False)
-
-    def _compute_closest_verts(self, query_points):
-        _, closest_faces, *_ = igl.signed_distance(query_points, self._init_verts, self._init_faces)
-        verts_ids = self._init_faces[closest_faces]
-        verts_ids = verts_ids[
-            np.arange(len(query_points), dtype=gs.np_int),
-            np.argmin(np.linalg.norm(self._init_verts[verts_ids] - query_points[:, None, :], axis=-1), axis=-1),
-        ]
-        return verts_ids
-
-    def _compute_sd_grad(self, query_points, delta=5e-4):
-        ######## sdf gradient via finite differencing ########
-        # `delta` can be a scalar or a per-axis array (anisotropic SDF cells).
-        delta_arr = np.broadcast_to(np.asarray(delta, dtype=gs.np_float), (3,))
-        dx, dy, dz = float(delta_arr[0]), float(delta_arr[1]), float(delta_arr[2])
-        sd_val_xpos = self._compute_sd(query_points + np.array((dx, 0.0, 0.0), dtype=gs.np_float))
-        sd_val_xneg = self._compute_sd(query_points - np.array((dx, 0.0, 0.0), dtype=gs.np_float))
-        sd_val_ypos = self._compute_sd(query_points + np.array((0.0, dy, 0.0), dtype=gs.np_float))
-        sd_val_yneg = self._compute_sd(query_points - np.array((0.0, dy, 0.0), dtype=gs.np_float))
-        sd_val_zpos = self._compute_sd(query_points + np.array((0.0, 0.0, dz), dtype=gs.np_float))
-        sd_val_zneg = self._compute_sd(query_points - np.array((0.0, 0.0, dz), dtype=gs.np_float))
-
-        sd_grad_x = (sd_val_xpos - sd_val_xneg) / (2 * dx)
-        sd_grad_y = (sd_val_ypos - sd_val_yneg) / (2 * dy)
-        sd_grad_z = (sd_val_zpos - sd_val_zneg) / (2 * dz)
-        sd_grad = np.stack([sd_grad_x, sd_grad_y, sd_grad_z], -1)
-        return sd_grad
-
-    def get_trimesh(self):
+    @property
+    def trimesh(self):
         """
-        Get the geom's trimesh object.
+        The trimesh object of the geom.
         """
         return self.desc.mesh.trimesh
 
-    def get_sdf_trimesh(self, color=[1.0, 1.0, 0.6, 1.0]):
+    def get_trimesh(self):
         """
-        Reconstruct trimesh object from sdf.
+        The trimesh object of the geom. Deprecated: use the 'trimesh' property instead.
         """
-        if self.sdf_val.min() >= 0:
+        gs.logger.warning("'get_trimesh' is deprecated and will be removed in a future release. Use 'trimesh' instead.")
+        return self.trimesh
+
+    @cached_property
+    def sdf_trimesh(self):
+        """
+        The trimesh object reconstructed from the signed distance field (SDF) of the geom.
+        """
+        sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
+        if sdf_grid.value.min() >= 0:
             gs.logger.warning("SDF is positive everywhere. Returning empty mesh.")
             return trimesh.Trimesh(vertices=[], faces=[])
         else:
-            vertices, faces, _, _ = skimage.measure.marching_cubes(self.sdf_val, level=0)
-            vertices = (np.linalg.inv(self.T_mesh_to_sdf) @ np.hstack([vertices, np.ones([len(vertices), 1])]).T)[:3].T
+            vertices, faces, _, _ = skimage.measure.marching_cubes(sdf_grid.value, level=0)
+            T_sdf_to_mesh = np.linalg.inv(sdf_grid.T_mesh_to_sdf)
+            vertices = (T_sdf_to_mesh @ np.hstack([vertices, np.ones([len(vertices), 1])]).T)[:3].T
             mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-            mesh.visual = trimesh.visual.ColorVisuals(vertex_colors=np.tile(np.array([color]), [len(vertices), 1]))
+            mesh.visual = trimesh.visual.ColorVisuals(
+                vertex_colors=np.tile(np.array([[1.0, 1.0, 0.6, 1.0]]), [len(vertices), 1])
+            )
             return mesh
 
     def visualize_sdf(
@@ -298,7 +144,10 @@ class RigidGeom(RBC):
         if self._solver.n_envs > 0:
             gs.raise_exception("Batched scene does not support sdf visualization.")
 
-        sdf_mesh = self.get_sdf_trimesh(color)
+        sdf_mesh = self.sdf_trimesh.copy()
+        sdf_mesh.visual = trimesh.visual.ColorVisuals(
+            vertex_colors=np.tile(np.array([color]), [len(sdf_mesh.vertices), 1])
+        )
         if T is None:
             if pos is None:
                 T = gu.trans_quat_to_T(
@@ -318,9 +167,10 @@ class RigidGeom(RBC):
             self._solver.scene.draw_debug_mesh(axis_mesh, T=T)
 
         if show_boundary:
+            sdf_grid = self.desc.mesh.get_sdf_grid(self.desc.sdf)
             boundary_mesh = trimesh.creation.box(extents=[1, 1, 1])
             boundary_mesh.vertices = gu.inv_transform_by_T(
-                (boundary_mesh.vertices + 0.5) * (self.sdf_res - 1), self.T_mesh_to_sdf
+                (boundary_mesh.vertices + 0.5) * np.subtract(self.desc.sdf.n_nodes, 1), sdf_grid.T_mesh_to_sdf
             )
             boundary_mesh.visual = trimesh.visual.ColorVisuals(
                 vertex_colors=np.tile(np.array([boundary_color]), [len(boundary_mesh.vertices), 1])
@@ -640,107 +490,6 @@ class RigidGeom(RBC):
         return self._surface
 
     @property
-    def gsd_path(self):
-        """
-        Get the path to the preprocessed `.gsd` file.
-        """
-        return self._gsd_path
-
-    @property
-    def sdf_res(self):
-        """
-        Get the resolution of the geom's signed distance field (SDF).
-        """
-        return self._sdf_res
-
-    @property
-    def sdf_val(self):
-        """
-        Get the signed distance field (SDF) of the geom.
-        """
-        if not self._is_preprocessed:
-            self._preprocess()
-        return self._sdf_val
-
-    @property
-    def sdf_val_flattened(self):
-        """
-        Get the flattened signed distance field (SDF) of the geom.
-        """
-        return self.sdf_val.reshape((-1,))
-
-    @property
-    def sdf_grad(self):
-        """
-        Get the gradient of the geom's signed distance field (SDF).
-        """
-        if not self._is_preprocessed:
-            self._preprocess()
-        return self._sdf_grad
-
-    @property
-    def sdf_grad_flattened(self):
-        """
-        Get the flattened gradient of the geom's signed distance field (SDF).
-        """
-        return self.sdf_grad.reshape(-1, 3)
-
-    @property
-    def sdf_max(self):
-        """
-        Get the maximum value of the geom's signed distance field (SDF).
-        """
-        if not self._is_preprocessed:
-            self._preprocess()
-        return self._sdf_max
-
-    @property
-    def sdf_cell_size(self):
-        """
-        Get the cell size of the geom's signed distance field (SDF).
-        """
-        return self._sdf_cell_size
-
-    @property
-    def sdf_grad_delta(self):
-        """
-        Get the delta value for computing the gradient of the geom's signed distance field (SDF).
-        """
-        return self._sdf_grad_delta
-
-    @property
-    def sdf_closest_vert(self):
-        """
-        Get the closest vertex of each cell of the geom's signed distance field (SDF).
-        """
-        if not self._is_preprocessed:
-            self._preprocess()
-        return self._sdf_closest_vert
-
-    @property
-    def sdf_closest_vert_flattened(self):
-        """
-        Get the flattened closest vertex of each cell of the geom's signed distance field (SDF).
-        """
-        return self.sdf_closest_vert.reshape((-1,))
-
-    @property
-    def T_mesh_to_sdf(self):
-        """
-        Get the transformation matrix of the geom's mesh frame w.r.t its signed distance field (SDF) frame.
-        """
-        if not self._is_preprocessed:
-            self._preprocess()
-        return self._T_mesh_to_sdf
-
-    @property
-    def n_cells(self):
-        """
-        Number of cells in the geom's signed distance field (SDF).
-        """
-        return self._n_cells
-
-    @property
     def n_verts(self) -> int:
         """
         Number of vertices of the geom.
@@ -760,13 +509,6 @@ class RigidGeom(RBC):
         Number of edges of the geom.
         """
         return len(self._init_edges)
-
-    @property
-    def cell_start(self):
-        """
-        Get the starting index of the cells of the signed distance field (SDF) in the rigid solver.
-        """
-        return self._cell_start
 
     @property
     def vert_start(self):
@@ -795,13 +537,6 @@ class RigidGeom(RBC):
         Get the starting index of the geom's vertices in the rigid solver.
         """
         return self._verts_state_start
-
-    @property
-    def cell_end(self):
-        """
-        Get the ending index of the cells of the signed distance field (SDF) in the rigid solver.
-        """
-        return self.n_cells + self.cell_start
 
     @property
     def vert_end(self):
@@ -887,11 +622,19 @@ class RigidVisGeom(RBC):
     def _build(self):
         pass
 
-    def get_trimesh(self):
+    @property
+    def trimesh(self):
         """
-        Get trimesh object.
+        The trimesh object of the visual geom.
         """
         return self.desc.vmesh.trimesh
+
+    def get_trimesh(self):
+        """
+        The trimesh object of the visual geom. Deprecated: use the 'trimesh' property instead.
+        """
+        gs.logger.warning("'get_trimesh' is deprecated and will be removed in a future release. Use 'trimesh' instead.")
+        return self.trimesh
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------

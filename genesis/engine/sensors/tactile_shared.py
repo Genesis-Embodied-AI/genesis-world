@@ -545,7 +545,7 @@ class ContactDepthQuerySensorMixin:
     Sensor-side counterpart to ``ContactDepthQueryMetadataMixin``.
 
     Its ``build()`` resolves the class-wide contact-depth backend (raising if this class's sensors disagree) and
-    activates only the chosen backend: the shared ``RaycastContext`` BVH in raycast mode, else the collider SDF.
+    activates the shared ``RaycastContext`` BVH in raycast mode. The collider holds the SDF of every geom.
     Mixing this in (alongside the metadata mixin) means subclasses get the resolution from the super-``build()`` chain
     and need not call ``resolve_contact_depth_query`` themselves. Requires ``_shared_metadata``,
     ``_options.contact_depth_query``, and a ``_shared_context`` ``RaycastContext``.
@@ -556,8 +556,6 @@ class ContactDepthQuerySensorMixin:
         resolve_contact_depth_query(self._shared_metadata, self._options.contact_depth_query, type(self).__name__)
         if self._shared_metadata.contact_depth_query == "raycast":
             self._shared_context.activate()  # builds the BVH lazily, only on raycast opt-in
-        else:
-            self._shared_metadata.solver.collider.activate_sdf()
 
 
 # ============================ ViscoelasticHysteresis ============================

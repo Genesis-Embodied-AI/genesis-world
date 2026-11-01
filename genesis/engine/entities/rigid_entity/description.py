@@ -27,11 +27,13 @@ from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
+from genesis.typing import PositiveVec3FType, PositiveVec3IType
 from genesis.utils import geom as gu
 from genesis.utils import mesh as mu
 from genesis.utils import mjcf as mju
 from genesis.utils import terrain as tu
 from genesis.utils import urdf as uu
+from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
@@ -71,6 +73,63 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     vmesh: "gs.Mesh"
 
 
+@dataclass(frozen=True, kw_only=True)
+class SignedDistanceFieldDescription:
+    """Describe the grid sampling the signed distance field (SDF) of a geometry (see 'Mesh.get_sdf_grid')."""
+
+    n_nodes: PositiveVec3IType
+    """Number of nodes along each axis of the grid."""
+    cell_size: PositiveVec3FType
+    """Spacing between two nodes along each axis of the grid."""
+    has_grad: bool
+    """Whether the grid carries the gradient of the field."""
+
+    @classmethod
+    def from_geometry(cls, mesh: "gs.Mesh", geom_type: GEOM_TYPE, material: Material) -> Self:
+        """Resolve the grid sampling the signed distance field (SDF) of a geometry, at the resolution its material asks.
+
+        The grid extends past the bounding box of the geometry by a margin along each axis. Its cells have the size the
+        material asks, refined further for a closed non-convex geometry to fit 2 across its thinnest walls, and clipped
+        along each axis to the minimum and maximum resolutions of the material. A terrain carries no gradient, since it
+        derives its gradient from its height field instead.
+        """
+        # The vertices are a trimesh array subclass, which the grid parameters derived from them would carry into an
+        # exported description
+        verts = mesh.verts.view(np.ndarray)
+        lower, upper = verts.min(axis=0), verts.max(axis=0)
+        grid_size = 0.2 * (upper - lower).max() + (upper - lower)
+        # The cell size is anisotropic, each axis being sized to its own extent, so a thin slab gets fine resolution
+        # perpendicular to its surface without bloating the cell count along its long axes. A uniform cell size would
+        # leave primitive-vs-mesh contacts noisy whenever the smallest dimension of the primitive is below it.
+        cell_size_lower = grid_size / (material.sdf_max_res - 1)
+        cell_size_upper = grid_size / max(material.sdf_min_res - 1, 2)
+        # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
+        # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
+        # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
+        # so a wall is finely sampled along its tangent axes too (see get_wall_thickness). The probe needs a closed
+        # surface, since inward rays escape an open mesh through its holes, and the mesh it probes stands for this
+        # collision mesh, so both share their watertightness.
+        sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
+        cell_size_target = material.sdf_cell_size
+        if not mesh.is_convex:
+            if mesh.is_watertight:
+                wall_thickness = mu.get_wall_thickness(
+                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+                )
+                cell_size_target = min(cell_size_target, wall_thickness / 2.0)
+            else:
+                mesh_descr = f" ({mesh.metadata['mesh_path']})" if "mesh_path" in mesh.metadata else ""
+                gs.logger.warning(
+                    f"Mesh{mesh_descr} is not watertight. Skipping the refinement of its SDF grid to its walls."
+                )
+        cell_size = gs.EPS + np.clip(cell_size_target, cell_size_lower, cell_size_upper)
+        return cls(
+            n_nodes=tuple((np.ceil(grid_size / cell_size).astype(gs.np_int) + 1).tolist()),
+            cell_size=tuple(cell_size.tolist()),
+            has_grad=geom_type != GEOM_TYPE.TERRAIN,
+        )
+
+
 @dataclass(kw_only=True)
 class RigidGeomDescription(BaseRigidGeomDescription):
     """Describe one geometry a link collides with: where it sits on the link, its shape, and how it is simulated.
@@ -81,11 +140,15 @@ class RigidGeomDescription(BaseRigidGeomDescription):
 
     'density' is the density of this geometry alone, which the link inertial is resolved against. It is None where
     neither the asset nor the material states one, leaving the geom to take the density of its entity.
+
+    'sdf' describes the grid sampling the signed distance field (SDF) of the geometry, resolved from its mesh, its
+    type and its material (see 'SignedDistanceFieldDescription.from_geometry').
     """
 
     type: GEOM_TYPE
     data: np.ndarray | None
     mesh: "gs.Mesh"
+    sdf: SignedDistanceFieldDescription
     contype: int
     conaffinity: int
     density: float | None
@@ -1378,7 +1441,7 @@ class KinematicEntityDescription(EntityDescription):
                 threshold = g_info.pop("decompose_error_threshold", decompose_error_threshold)
                 for options, options_cg_infos in cg_infos_by_options:
                     if options[:2] == (convexify, decimate) and math.isclose(
-                        options[2], threshold, rel_tol=mu.MESH_CACHE_MATCH_RTOL
+                        options[2], threshold, rel_tol=MESH_CACHE_MATCH_RTOL
                     ):
                         options_cg_infos.append(g_info)
                         break
@@ -1603,6 +1666,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     friction_torsional=friction_torsional,
                     friction_rolling=friction_rolling,
                     sol_params=g_info.get("sol_params", gu.default_solver_params()),
+                    sdf=SignedDistanceFieldDescription.from_geometry(g_info["mesh"], g_info["type"], self.material),
                 )
             )
         return cg_descs

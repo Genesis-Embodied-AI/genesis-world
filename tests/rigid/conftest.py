@@ -6,6 +6,7 @@ import pytest
 import trimesh
 from PIL import Image
 
+import genesis.utils.geom as gu
 from genesis.utils.misc import get_assets_dir
 
 
@@ -271,6 +272,27 @@ def urdf_with_external_assets(asset_tmp_path):
 
 
 @pytest.fixture(scope="session")
+def urdf_with_legacy_parsed_primitives(asset_tmp_path):
+    """Generate a URDF that falls back to the legacy parser while holding a primitive collision geometry.
+
+    Its GLB collision mesh makes MuJoCo reject the model, so the legacy parser builds every collision geometry, the
+    box included. The link authors no inertial element, so its mass and inertia derive from these geometries.
+    """
+    assets = asset_tmp_path / "urdf_with_legacy_parsed_primitives"
+    assets.mkdir(exist_ok=True)
+    mesh_path = str(assets / "cube.glb")
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(mesh_path)
+    urdf = ET.Element("robot", name="urdf_with_legacy_parsed_primitives")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.1 0.2 0.3")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(collision, "origin", xyz="0.5 0 0")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "mesh", filename=mesh_path)
+    return urdf
+
+
+@pytest.fixture(scope="session")
 def mimic_hinges():
     mjcf = ET.Element("mujoco", model="mimic_hinges")
     ET.SubElement(mjcf, "compiler", angle="degree")
@@ -286,6 +308,48 @@ def mimic_hinges():
     equality = ET.SubElement(mjcf, "equality")
     ET.SubElement(equality, "joint", name="joint_equality", joint1="joint1", joint2="joint2")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def connected_boxes():
+    # The hung box starts lifted away from the fixed box by a rotation about its pivot, the top edge of the 5 mm gap
+    # between their facing sides
+    fixed_pos = np.array((0.0, 0.0, 0.3))
+    pivot_pos = np.array((0.0225, 0.0, 0.02))
+    hung_angle = -1.2
+    hung_quat = gu.xyz_to_quat(np.array((0.0, hung_angle, 0.0)))
+    hung_pos = fixed_pos + pivot_pos - gu.transform_by_quat(np.array((-0.0225, 0.0, 0.02)), hung_quat)
+    mjcf = ET.Element("mujoco", model="connected_boxes")
+    ET.SubElement(mjcf, "compiler", angle="radian")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    box_fixed = ET.SubElement(worldbody, "body", name="box_fixed", pos=" ".join(map(str, fixed_pos)))
+    ET.SubElement(box_fixed, "geom", type="box", size="0.02 0.02 0.02")
+    box_hung = ET.SubElement(
+        worldbody, "body", name="box_hung", pos=" ".join(map(str, hung_pos)), axisangle=f"0 1 0 {hung_angle}"
+    )
+    ET.SubElement(box_hung, "freejoint")
+    ET.SubElement(box_hung, "geom", type="box", size="0.02 0.02 0.02")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "connect", body1="box_fixed", body2="box_hung", anchor=" ".join(map(str, pivot_pos)))
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def swinging_spindle():
+    mjcf = ET.Element("mujoco", model="swinging_spindle")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    spindle = ET.SubElement(worldbody, "body", name="spindle", pos="0 0 1.0")
+    ET.SubElement(spindle, "joint", name="swing", type="hinge", axis="1 0 0")
+    ET.SubElement(spindle, "geom", type="box", size="0.01 0.01 0.3", pos="0 0 -0.3")
+    nut = ET.SubElement(spindle, "body", name="nut", pos="0 0 -0.3")
+    ET.SubElement(nut, "joint", name="travel", type="slide", axis="0 0 1")
+    ET.SubElement(nut, "joint", name="turn", type="hinge", axis="0 0 1")
+    ET.SubElement(nut, "geom", type="box", size="0.05 0.05 0.01")
+    # The spindle passes through the solid free nut, which only stays on it because the screw stops their collision
+    free_nut = ET.SubElement(worldbody, "body", name="free_nut", pos="0 0 0.5")
+    ET.SubElement(free_nut, "freejoint")
+    ET.SubElement(free_nut, "geom", type="box", size="0.05 0.05 0.01")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")

@@ -91,7 +91,7 @@ def test_rigid_mpm_muscle(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("substeps", [1, 10])
-def test_rigid_mpm_legacy_coupling(substeps, show_viewer):
+def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     # This test is aimining at two things:
     # 1) When substep = 1, the rigid object should be affected by the MPM particles
     # 2) Regardless of substeps, as far as the substep dt is the same, they should give consistent results
@@ -156,6 +156,12 @@ def test_rigid_mpm_legacy_coupling(substeps, show_viewer):
     pos = tensor_to_array(obj_rigid.get_pos())
     assert pos[1] + 0.25 < 0.0
 
+    # A rollout after a reset starts free of the coupling wrench the previous one left
+    scene.reset()
+    for i in range(horizon):
+        scene.step()
+    assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
+
 
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
@@ -187,7 +193,6 @@ def test_mesh_mpm_build(show_viewer):
     scene.build()
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.debug(False)  # Disable debug for speedup
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.gpu])
@@ -305,15 +310,14 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "n_envs, material_type",
     [
-        (0, gs.materials.SPH.Liquid),
+        pytest.param(0, gs.materials.SPH.Liquid, marks=pytest.mark.required),
         (1, gs.materials.SPH.Liquid),
         (2, gs.materials.SPH.Liquid),
-        (2, gs.materials.PBD.Liquid),
-        (2, gs.materials.MPM.Liquid),
+        pytest.param(2, gs.materials.PBD.Liquid, marks=pytest.mark.required),
+        pytest.param(2, gs.materials.MPM.Liquid, marks=pytest.mark.required),
         (2, gs.materials.MPM.Sand),
         (2, gs.materials.MPM.Snow),
         (2, gs.materials.MPM.Elastic),  # This makes little sense but nothing prevents doing this
@@ -441,7 +445,6 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
     assert robot_2_max_corner[2] > robot_1_max_corner[2] + 0.05
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 def test_sap_fem_vs_robot(show_viewer):

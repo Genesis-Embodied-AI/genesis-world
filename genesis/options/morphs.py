@@ -849,11 +849,9 @@ class Mesh(FileMorph, TetGenMixin):
                     "'offset_quat'. Consider fixing your asset to use the standard Y-up convention instead."
                 )
                 y_up_quat = (1.0, -1.0, 0.0, 0.0)
-                self.offset_quat = tuple(
-                    gu.transform_quat_by_quat(
-                        np.array(y_up_quat, dtype=gs.np_float), np.array(self.offset_quat, dtype=gs.np_float)
-                    )
-                )
+                # Composed in double precision whatever the simulation precision, as every option value is, so the
+                # description reads back unchanged from a file
+                self.offset_quat = tuple(gu.transform_quat_by_quat(np.array(y_up_quat), np.array(self.offset_quat)))
                 if self.scale is not None:
                     scale_arr = np.atleast_1d(np.array(self.scale))
                     if scale_arr.size == 3:
@@ -1739,16 +1737,10 @@ class USD(FileMorph):
 def _exported_urdf(robot: urdfpy.URDF, exporting: serialization.Exporting) -> str:
     """Export a URDF model built in memory as the document it stands for.
 
-    Relative asset paths stay as written: an in-memory model resolves them against the working directory when it is
-    read (see '_loaded_urdf').
+    The model loads back as that document given inline, since recreating the model would read every mesh it names and
+    a file reads no asset (see 'serialization.export'). The description of the entity carries the geometry anyway.
     """
     return ET.tostring(robot.to_xml(), encoding="unicode")
 
 
-def _loaded_urdf(raw: str, loading: serialization.Loading) -> urdfpy.URDF:
-    """Recreate the URDF model from its document, as an inline document is read."""
-    node = ET.fromstring(raw)
-    return urdfpy.URDF._from_xml(node, node, os.getcwd())
-
-
-serialization.register(urdfpy.URDF, _exported_urdf, _loaded_urdf)
+serialization.register(urdfpy.URDF, _exported_urdf, None)

@@ -9,9 +9,7 @@ from genesis.utils.misc import gaussian_crosstalk_kernel, tensor_to_array
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
     SPHERE_RADIUS = 0.05
     BOX_SIZE = 0.1
@@ -159,9 +157,7 @@ def test_surface_distance_sensor_box_sphere(show_viewer, tol, n_envs):
     )
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_kinematic_contact_probe_box_sphere_support(show_viewer, tol, n_envs):
     BOX_SIZE = 0.5
     PROBE_RADIUS = 0.05
@@ -635,9 +631,7 @@ def test_contact_depth_probe_hysteresis_gain_and_dead_resample(show_viewer, tol)
     assert not torch.allclose(dead_a, dead_b, atol=1e-3)
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_filler_probes_radius_zero(show_viewer, tol, n_envs):
     # probe_radius == 0 marks inactive filler probes on ElastomerTaxel / KinematicTaxel: they read 0 and are
     # excluded from dilation / force, letting an irregular taxel set be padded into a regular grid for FFT.
@@ -870,8 +864,7 @@ def test_contact_depth_query_sdf_vs_raycast_parity(show_viewer):
     assert_allclose(sdf_e, ray_e, tol=0.1 * PROBE_R)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_filtered_contact_survives_prefilter_cap(show_viewer, monkeypatch, n_envs):
     # The raycast contact-depth path prefilters the sensor link's contacts into a capped per-sensor list before
     # querying depth. The counterpart filter must run before that cap: otherwise a filtered manifold can fill the
@@ -1191,8 +1184,7 @@ def test_proximity_taxel_crosstalk(show_viewer):
     assert (ck_mag[plain_zero] > 1e-4).any()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_proximity_taxel_twist_torque(show_viewer, tol, n_envs):
     PAD_SIZE = 0.2
     PAD_TOP = PAD_SIZE
@@ -1283,8 +1275,7 @@ def test_proximity_taxel_twist_torque(show_viewer, tol, n_envs):
     assert torch.linalg.norm(twist0.read().torque, dim=-1).max() > tol
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_proximity_sensor_box_on_box(show_viewer, tol, n_envs):
     BOX_SIZE = 0.2
     PENETRATION = 0.01
@@ -1361,8 +1352,7 @@ def test_proximity_sensor_box_on_box(show_viewer, tol, n_envs):
     assert_allclose(force_norm, 0.0, tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_elastomer_sensor_sphere_ground_dilate_shear(show_viewer, tol, n_envs):
     SPHERE_RADIUS = 0.2
     PROBE_RADIUS = 0.02
@@ -1484,8 +1474,7 @@ def test_elastomer_sensor_sphere_ground_dilate_shear(show_viewer, tol, n_envs):
     assert_equal(combined_sensor.read_ground_truth(), 0.0, err_msg="ElastomerTaxel should be zero with no contact.")
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_elastomer_sensor_grid_box_sphere(show_viewer, tol, n_envs):
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.1

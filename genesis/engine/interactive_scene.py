@@ -3,11 +3,12 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Iterable
 
 import genesis as gs
+from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release, is_owned_cache_release_enabled
 from genesis.utils.misc import with_lock
 from genesis.vis.viewer_plugins.plugins import DefaultControlsPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
+    from genesis.engine.entities.rigid_entity import KinematicEntity
     from genesis.engine.scene import Scene
     from genesis.options.sensors.options import SensorOptions
 
@@ -45,6 +46,7 @@ class InteractiveScene:
         self._pending_steps: int = 0
         self._rebuild_pending: bool = False
         self._reset_pending: bool = False
+        self._has_new_scene_kwargs: bool = False
         self._entities_kwargs: dict[str, dict[str, Any]] = {}
         self._sensors_kwargs: list["SensorOptions"] = []
         scene.register_pre_step_callback(self._pre_step)
@@ -109,7 +111,7 @@ class InteractiveScene:
             return True
         if self._reset_pending:
             self._reset_pending = False
-            self._apply_reset()
+            self.scene.reset()
             return True
         if self._pending_steps > 0:
             self._pending_steps -= 1
@@ -156,20 +158,6 @@ class InteractiveScene:
     def _ctx(self):
         return self.scene.viewer.context
 
-    @with_lock
-    def refresh_visual_transforms(self):
-        """Refresh the visual geom poses and the drawn nodes so visuals reflect the latest qpos. Idempotent."""
-        self._refresh_visual_transforms_unlocked()
-
-    def _refresh_visual_transforms_unlocked(self):
-        rigid_solver = self.scene.rigid_solver
-        if not rigid_solver.is_active:
-            return
-        rigid_solver.update_vgeoms()
-        ctx = self._ctx
-        ctx.update_link_frame()
-        ctx.update_rigid()
-
     def reset(self):
         """Queue a reset of the wrapped scene to its initial state.
 
@@ -179,28 +167,7 @@ class InteractiveScene:
         self._reset_pending = True
 
     @with_lock
-    def _apply_reset(self):
-        """Reset the wrapped scene and refresh visuals, on the stepping thread.
-
-        Clears contact arrows and other transient render nodes."""
-        self.scene.reset()
-        self._ctx.clear_dynamic_nodes(only_outdated=False)
-        self._refresh_visual_transforms_unlocked()
-
-    @with_lock
-    def set_entity_qpos(self, entity: "RigidEntity", qpos, env_idx: int | None = None):
-        """Set the entity's qpos and refresh visuals."""
-        entity.set_qpos(qpos, envs_idx=env_idx)
-        self._refresh_visual_transforms_unlocked()
-
-    @with_lock
-    def set_entity_dofs_position(self, entity: "RigidEntity", dofs_position, env_idx: int | None = None):
-        """Set the entity's DOF positions and refresh visuals."""
-        entity.set_dofs_position(dofs_position, envs_idx=env_idx)
-        self._refresh_visual_transforms_unlocked()
-
-    @with_lock
-    def set_entity_vis_mode(self, entity: "RigidEntity", mode: str):
+    def set_entity_vis_mode(self, entity: "KinematicEntity", mode: str):
         """Switch entity rendering between ``"visual"`` and ``"collision"``."""
         if not isinstance(entity.surface, gs.surfaces.Surface):
             return
@@ -209,18 +176,18 @@ class InteractiveScene:
             return
 
         ctx = self._ctx
-        rigid_solver = self.scene.rigid_solver
+        solver = entity.solver
 
         old_geoms = entity.vgeoms if old_mode == "visual" else entity.geoms
         for geom in old_geoms:
             ctx.remove_rigid_node(geom)
 
         entity.surface.vis_mode = mode
-        rigid_solver.update_vgeoms()
+        solver.update_vgeoms()
 
         is_visual = mode == "visual"
         geoms = entity.vgeoms if is_visual else entity.geoms
-        geoms_T = ctx.rigid_geoms_T(rigid_solver, is_visual)
+        geoms_T = ctx.rigid_geoms_T(solver, is_visual)
         for geom in geoms:
             ctx.add_geom_node(geom, geoms_T)
 
@@ -240,6 +207,10 @@ class InteractiveScene:
         Any argument left as ``None`` reuses what was supplied previously. Pass an empty ``dict`` / iterable to
         explicitly clear stored state.
 
+        An entity whose kwargs hold the same morph, material and surface objects as at the previous build is
+        re-created from the description resolved then, without reading its asset again, unless ``scene_kwargs`` is
+        given. To edit an entity, pass new objects (e.g. ``morph.model_copy(update=...)``) rather than mutating them.
+
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
             entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``
@@ -253,6 +224,7 @@ class InteractiveScene:
             )
         if scene_kwargs is not None:
             self._scene_kwargs = dict(scene_kwargs)
+            self._has_new_scene_kwargs = True
         if entities_kwargs is not None:
             self._entities_kwargs = dict(entities_kwargs)
         if sensors_kwargs is not None:
@@ -278,6 +250,10 @@ class InteractiveScene:
             # Preserve the live window/GL context so the rebuild does not close and reopen it.
             pyrender_window = viewer._pyrender_viewer
 
+        # The scene options take part in resolving a description, so new ones leave none of the previous ones valid
+        entities_desc = {} if self._has_new_scene_kwargs else {entity.name: entity.desc for entity in scene.entities}
+        self._has_new_scene_kwargs = False
+
         # Serialize against a threaded render loop (run_in_thread=True): holding the preserved window's render_lock
         # blocks on_draw so it never draws the scene while it is being torn down, rebuilt and re-pointed. No-op when
         # there is no window (headless) or the viewer runs on the main thread.
@@ -285,24 +261,48 @@ class InteractiveScene:
             if pyrender_window is not None:
                 # Detach so scene.destroy() does not close the preserved window.
                 scene.viewer._pyrender_viewer = None
-            scene.destroy()
-            # Re-initialize the SAME object in place so external references survive the rebuild.
-            scene.__init__(**self._scene_kwargs)
-            # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
-            scene.register_pre_step_callback(self._pre_step)
-            for name, kwargs in self._entities_kwargs.items():
-                # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
-                # takes no name. Every other morph is a single entity added by name.
-                if isinstance(kwargs["morph"], gs.morphs.USD):
-                    scene.add_stage(**kwargs)
-                else:
-                    scene.add_entity(name=name, **kwargs)
-            for sensor_opts in self._sensors_kwargs:
-                scene.add_sensor(sensor_opts)
-            # Hand the preserved window to the new viewer so build() reuses it instead of opening a new one.
-            if pyrender_window is not None and scene.viewer is not None:
-                scene.viewer._pyrender_viewer = pyrender_window
-            scene.build(**self._build_kwargs)
+            # The data cached for the destroyed scene is kept until the rebuilt one owns what it uses again
+            was_owned_cache_release_enabled = is_owned_cache_release_enabled()
+            disable_owned_cache_release()
+            try:
+                scene.destroy()
+                # Re-initialize the SAME object in place so external references survive the rebuild.
+                scene.__init__(**self._scene_kwargs)
+                # The in-place re-init keeps the digest cached for the previous description
+                scene.__dict__.pop("_desc_digest", None)
+                # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
+                scene.register_pre_step_callback(self._pre_step)
+                for name, kwargs in self._entities_kwargs.items():
+                    morph = kwargs["morph"]
+                    morphs = (morph,) if isinstance(morph, gs.morphs.Morph) else tuple(morph)  # heterogeneous entity
+                    desc = entities_desc.get(name)
+                    # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
+                    # takes no name. Every other morph is a single entity added by name.
+                    if isinstance(morph, gs.morphs.USD):
+                        scene.add_stage(**kwargs)
+                    # An entity handed the very objects its description was resolved from is unchanged by the edit, so
+                    # it is created from that description without reading its asset again. An edit hands in new objects.
+                    elif (
+                        desc is not None
+                        and len(morphs) == len(desc.morphs)
+                        and all(kwargs_morph is desc_morph for kwargs_morph, desc_morph in zip(morphs, desc.morphs))
+                        and kwargs.get("material") is desc.material
+                        and kwargs.get("surface") is desc.surface
+                        and kwargs.get("visualize_contact", False) == desc.visualize_contact
+                        and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
+                    ):
+                        scene._sim._add_entity(desc=desc)
+                    else:
+                        scene.add_entity(name=name, **kwargs)
+                for sensor_opts in self._sensors_kwargs:
+                    scene.add_sensor(sensor_opts)
+                # Hand the preserved window to the new viewer so build() reuses it instead of opening a new one.
+                if pyrender_window is not None and scene.viewer is not None:
+                    scene.viewer._pyrender_viewer = pyrender_window
+                scene.build(**self._build_kwargs)
+            finally:
+                if was_owned_cache_release_enabled:
+                    enable_owned_cache_release()
 
             new_viewer = scene.viewer
             if new_viewer is not None:

@@ -56,7 +56,7 @@ def support_mesh(
     gjk_state.support_mesh_prev_vertex_id[i_b, i_o] = vid
 
     v_world = gu.qd_transform_by_trans_quat(v, pos, quat)
-    return v_world, vid
+    return v_world, v, vid
 
 
 @qd.func
@@ -96,18 +96,17 @@ def support_driver(
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
         if qd.static(collider_static_config.has_terrain):
             v, vid = support_field._func_support_prism(i_b, direction, collider_state)
-    elif geom_type == gs.GEOM_TYPE.MESH and rigid_config.enable_mujoco_compatibility:
+    elif qd.static(rigid_config.enable_mujoco_compatibility):
         # If mujoco-compatible, do exhaustive search for the vertex
-        v, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, collider_info)
+        if geom_type == gs.GEOM_TYPE.MESH:
+            v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, collider_info)
+        else:
+            v, v_, vid = support_field._func_support_world(
+                i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=True
+            )
     else:
         v, v_, vid = support_field._func_support_world(
-            i_g,
-            direction,
-            pos,
-            quat,
-            dyn_info,
-            collider_info,
-            exhaustive=qd.static(rigid_config.enable_mujoco_compatibility),
+            i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=False
         )
     return v, v_, vid
 
@@ -151,7 +150,7 @@ def func_support(
         pos = pos_a if i == 0 else pos_b
         quat = quat_a if i == 0 else quat_b
 
-        sp, sp_, si = support_driver(
+        support_pos, support_localpos, support_id = support_driver(
             i_g,
             i_b,
             i,
@@ -168,13 +167,13 @@ def func_support(
         )
 
         if i == 0:
-            support_point_obj1 = sp
-            support_point_id_obj1 = si
-            support_point_localpos1 = sp_
+            support_point_obj1 = support_pos
+            support_point_id_obj1 = support_id
+            support_point_localpos1 = support_localpos
         else:
-            support_point_obj2 = sp
-            support_point_id_obj2 = si
-            support_point_localpos2 = sp_
+            support_point_obj2 = support_pos
+            support_point_id_obj2 = support_id
+            support_point_localpos2 = support_localpos
 
     support_point_minkowski = support_point_obj1 - support_point_obj2
 

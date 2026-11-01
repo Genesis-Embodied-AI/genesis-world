@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 
 from ..utils.assets import get_git_commit_timestamp, get_hf_dataset
@@ -939,8 +941,6 @@ def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
 
 
 def run_benchmark(step_fn, *, n_envs, meta):
-    import quadrants as qd
-
     qd.sync()
 
     # Force CUDA-context init / lazy module load / first kernel SASS JIT to

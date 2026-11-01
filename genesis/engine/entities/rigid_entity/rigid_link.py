@@ -420,7 +420,6 @@ class RigidLink(KinematicLink):
         joint_start: int,
         n_joints: int,
         geom_start: int,
-        cell_start: int,
         vert_start: int,
         face_start: int,
         edge_start: int,
@@ -442,7 +441,6 @@ class RigidLink(KinematicLink):
             verts_state_start = free_verts_state_start
 
         self._geom_start: int = geom_start
-        self._cell_start: int = cell_start
         self._vert_start: int = vert_start
         self._face_start: int = face_start
         self._edge_start: int = edge_start
@@ -486,7 +484,6 @@ class RigidLink(KinematicLink):
         geom = RigidGeom(
             link=self,
             idx=self.n_geoms + self._geom_start,
-            cell_start=self.n_cells + self._cell_start,
             vert_start=self.n_verts + self._vert_start,
             face_start=self.n_faces + self._face_start,
             edge_start=self.n_edges + self._edge_start,
@@ -748,13 +745,6 @@ class RigidLink(KinematicLink):
         The end index of the link's collision geometries in the RigidSolver.
         """
         return self._geom_start + self.n_geoms
-
-    @property
-    def n_cells(self):
-        """
-        Number of sdf cells of all the link's geoms.
-        """
-        return sum([geom.n_cells for geom in self._geoms])
 
     @property
     def n_verts(self) -> int:

@@ -1,10 +1,12 @@
 from itertools import chain
 from typing import Literal, Sequence
 
-import mujoco
 import numpy as np
+
+import mujoco
 import pytest
 import scipy.optimize
+import scipy.sparse.csgraph
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -749,12 +751,23 @@ def check_mujoco_data_consistency(
     # Genesis mirrors in dofs.acc; the smooth+constraint acceleration is only observable on the remaining DOFs.
     midpoint_mask = get_mujoco_midpoint_dofs_mask(mj_sim)[mj_dofs_idx]
     gs_qacc_post = gs_sim.rigid_solver.dyn_state.dofs.acc.to_numpy()[:, 0]
-    assert_allclose(
-        gs_qacc_pre[gs_dofs_idx][~midpoint_mask], mj_qacc_pre[mj_dofs_idx][~midpoint_mask], atol=efc_atol, rtol=tol
-    )
-    assert_allclose(
-        gs_qacc_post[gs_dofs_idx][midpoint_mask], mj_qacc_pre[mj_dofs_idx][midpoint_mask], atol=efc_atol, rtol=tol
-    )
+    # The constraint solve rounds every acceleration at the scale of the largest one it is solved jointly with: the
+    # degrees of freedom (DOFs) of a kinematic tree, and the DOFs a constraint row couples. A small component of such a
+    # group spanning several decades carries that rounding as a relative error far above the tolerance.
+    mj_jac_mask = np.abs(mj_sim.data.efc_J.reshape((mj_sim.data.nefc, mj_sim.model.nv))) > 0.0
+    dofs_tree = mj_sim.model.dof_treeid
+    dofs_coupling = (dofs_tree[:, None] == dofs_tree[None]) | (mj_jac_mask.T @ mj_jac_mask)
+    n_groups, dofs_group = scipy.sparse.csgraph.connected_components(dofs_coupling, directed=False)
+    groups_qacc_max = np.zeros(n_groups)
+    np.maximum.at(groups_qacc_max, dofs_group, np.abs(mj_qacc_pre))
+    gs_qacc_pre, gs_qacc_post = gs_qacc_pre[gs_dofs_idx], gs_qacc_post[gs_dofs_idx]
+    mj_qacc_pre, dofs_group = mj_qacc_pre[mj_dofs_idx], dofs_group[mj_dofs_idx]
+    for i_group in range(n_groups):
+        qacc_atol = max(efc_atol, tol * groups_qacc_max[i_group])
+        is_pre = (dofs_group == i_group) & ~midpoint_mask
+        is_post = (dofs_group == i_group) & midpoint_mask
+        assert_allclose(gs_qacc_pre[is_pre], mj_qacc_pre[is_pre], atol=qacc_atol, rtol=tol)
+        assert_allclose(gs_qacc_post[is_post], mj_qacc_pre[is_post], atol=qacc_atol, rtol=tol)
 
     gs_qvel = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
     mj_qvel = mj_sim.data.qvel

@@ -533,9 +533,9 @@ class MPLLinePlotter(BaseMPLPlotter):
                 )
                 ax.yaxis.set_minor_formatter(
                     ticker.FuncFormatter(
-                        lambda y, pos: minor_formatter(y, pos)
-                        if round(y / 10 ** math.floor(math.log10(y))) in (2, 5)
-                        else ""
+                        lambda y, pos: (
+                            minor_formatter(y, pos) if round(y / 10 ** math.floor(math.log10(y))) in (2, 5) else ""
+                        )
                     )
                 )
                 ax.grid(True, which="minor", alpha=0.3, linestyle="--")

@@ -12,6 +12,8 @@ is_available().
 import warnings
 from abc import ABC, abstractmethod
 
+import psutil
+
 
 class GpuBackend(ABC):
     """Vendor-specific accessor for the GPUs visible to the current process."""
@@ -69,7 +71,15 @@ class NvidiaBackend(GpuBackend):
         return len(self._handles)
 
     def get_device_vram_mib(self) -> tuple[int, ...]:
-        return tuple(self._pynvml.nvmlDeviceGetMemoryInfo(handle).total >> 20 for handle in self._handles)
+        # A GPU sharing the system memory (e.g. NVIDIA GB10) has no dedicated memory for NVML to report, so it gets the
+        # size of the system memory, as an Apple Silicon GPU does (see pytest_xdist_auto_num_workers).
+        devices_vram_mib = []
+        for handle in self._handles:
+            try:
+                devices_vram_mib.append(self._pynvml.nvmlDeviceGetMemoryInfo(handle).total >> 20)
+            except self._pynvml.NVMLError_NotSupported:
+                devices_vram_mib.append(psutil.virtual_memory().total >> 20)
+        return tuple(devices_vram_mib)
 
     def get_device_index_from_uuid(self, device_uuid: str) -> int:
         target = device_uuid.replace("-", "").lower()

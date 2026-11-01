@@ -17,6 +17,7 @@ import trimesh
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
+from genesis.utils.tools import RunningMean
 
 
 DT = 1e-2
@@ -142,11 +143,13 @@ def main():
         help="Record the scene and the step-rate plot to 'out/wrecking_ball*.mp4'",
     )
     args = parser.parse_args()
+    if "PYTEST_VERSION" in os.environ:
+        args.pile_width, args.pile_depth, args.pile_height = 2, 2, 2
     # The step rate the plot shows is averaged over a fifth of a simulated second
-    timings_window = round(0.2 / DT)
-    if args.steps <= timings_window:
-        parser.error(f"--steps must exceed {timings_window}, the number of steps the step rate is averaged over.")
-    horizon = timings_window + 1 if "PYTEST_VERSION" in os.environ else args.steps
+    n_window = round(0.2 / DT)
+    if args.steps <= n_window:
+        parser.error(f"--steps must exceed {n_window}, the number of steps the step rate is averaged over.")
+    horizon = n_window + 1 if "PYTEST_VERSION" in os.environ else args.steps
 
     # The step rate is the point of the script, so the solver runs on field storage, its fastest layout on CPU.
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, performance_mode=True)
@@ -175,7 +178,6 @@ def main():
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
-            timings_window=timings_window,
         ),
         show_viewer=args.vis,
     )
@@ -245,19 +247,19 @@ def main():
     plot_values["awake_bodies"][0] = n_bodies
     if camera is not None:
         camera.start_recording(save_to_filename="out/wrecking_ball.mp4", fps=RECORDING_FPS)
-    # The step rate of the physics alone, read once the first step, which carries the kernel compilation, has left
-    # the averaging window
+    # The step rate of the physics alone, averaged over a window of steps and undefined until a full window has run
     step_times = np.full(horizon, np.nan)
+    physics_time = RunningMean(window=n_window)
     for i_step in range(horizon):
         scene.step()
-        if i_step >= timings_window:
-            step_times[i_step] = scene.timings["physics"]
-            plot_values["step_rate"][0] = 1.0 / step_times[i_step]
+        physics_time.update(scene.timings["physics"])
+        step_times[i_step] = physics_time.value
+        plot_values["step_rate"][0] = 1.0 / step_times[i_step]
         plot_values["awake_bodies"][0] = n_bodies - qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated).sum()
     if camera is not None:
         camera.stop_recording()
 
-    step_times = step_times[timings_window:]
+    step_times = step_times[n_window - 1 :]
     n_cubes = args.pile_width * args.pile_depth * args.pile_height
     gs.logger.info(
         f"{n_cubes} cubes: mean step {1e3 * step_times.mean():.2f} ms, slowest window {1e3 * step_times.max():.2f} ms, "

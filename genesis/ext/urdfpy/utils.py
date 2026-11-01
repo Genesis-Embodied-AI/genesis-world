@@ -3,10 +3,11 @@
 import os
 import xml.etree.ElementTree as ET
 
-import trimesh
 import numpy as np
+import trimesh
 
 import genesis as gs
+from genesis.utils.mesh import load_trimesh
 
 
 def rpy_to_matrix(coords):
@@ -238,7 +239,7 @@ def load_meshes(filename):
     meshes : list of :class:`~trimesh.base.Trimesh`
         The meshes loaded from the file.
     """
-    meshes = trimesh.load(filename, process=False)
+    meshes = load_trimesh(filename, process=False)
 
     if isinstance(meshes, trimesh.Scene):
         # FIXME: Scene.dump() has bug that uses copy without include_cache=True,

@@ -48,6 +48,7 @@ class EQUALITY_TYPE(IntEnum):
     CONNECT = 0
     WELD = 1
     JOINT = 2
+    SCREW = 3
 
 
 class CTRL_MODE(IntEnum):
@@ -125,29 +126,31 @@ class broadphase_traversal(IntEnum):
     Broad-phase quickly eliminates geometry pairs that cannot collide before the more expensive narrow-phase runs.
 
     At init time, geometry pairs that can never collide are filtered out (same-link, fixed-vs-fixed, contype/conaffinity
-    mismatch, etc.), producing a list of *valid pairs*.  The number of valid pairs can be up to O(n_geoms^2) but is
-    typically much smaller after filtering.  The two strategies differ in how they search these valid pairs each step:
+    mismatch, etc.), producing a list of *valid pairs*. The geometries of a link keep their pose in the link, so the
+    links are swept first, each with the box bounding all its geometries, and the geometry pairs are only tested under
+    the link pairs whose boxes overlap. The two strategies differ in how they sweep the links each step:
 
     Attributes
     ----------
     SAP : int
-        Sweep-and-prune.  Sorts geometry AABBs along one axis (O(n_geoms log n_geoms)) then only checks pairs that
-        overlap on that axis.  The sort and sweep are single-threaded, which utilizes GPU cores poorly. However the
-        cost per step is only O(n_geoms log n_geoms + k) where k is the number of axis-overlapping pairs — typically
-        much less than the full set of valid pairs.
+        Sweep-and-prune. Sorts the link boxes along one axis then only checks the link pairs that overlap on that axis.
+        The sort and sweep are single-threaded per environment, which uses GPU cores poorly when there are few
+        environments. The boxes stay nearly sorted from one step to the next, so the sort usually runs in near-linear
+        time, up to O(n_links^2) after a large reordering, and the sweep checks the k link pairs overlapping along
+        the axis.
     ALL_VS_ALL : int
-        Checks every valid pair every step (AABB overlap test), dispatching them in parallel across GPU threads.  Cost
-        per step is O(n_valid_pairs) which is efficient on GPU when the pair count is moderate, but becomes expensive
-        in scenes with many geometries since the valid pair count grows quadratically. With heterogeneous entities,
-        every environment also checks the pairs of the variants it does not carry.
+        Checks every valid link pair every step, in parallel across GPU threads. The cost per step grows with the number
+        of valid link pairs, which grows quadratically with the number of independent bodies in the scene. With
+        heterogeneous entities, every environment also checks the link pairs of the variants it does not carry.
 
     Notes
     -----
     ``RigidOptions.broadphase_traversal`` defaults to ``None``, which lets the solver choose automatically:
 
-    - **CPU backend** → ``SAP`` (sequential sweep is efficient on CPU).
-    - **GPU backend** → ``ALL_VS_ALL`` (parallel pair checking is faster).
-    - **GPU with heterogeneous entities** → ``SAP`` (it sweeps only the geoms an environment carries).
+    - **CPU backend** -> ``SAP`` (sequential sweep is efficient on CPU).
+    - **GPU backend** -> ``ALL_VS_ALL`` (parallel pair checking is faster).
+    - **GPU with heterogeneous entities** -> ``SAP`` (the links of the variants an environment does not carry have
+      empty boxes, which yield no candidate pair).
     """
 
     SAP = 0

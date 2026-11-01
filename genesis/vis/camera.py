@@ -102,12 +102,15 @@ class Camera(RBC):
         self._denoise = denoise
         self._near = near
         self._far = far
-        self._initial_pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
-        self._initial_lookat = torch.as_tensor(lookat, dtype=gs.tc_float, device=gs.device)
-        self._initial_up = torch.as_tensor(up, dtype=gs.tc_float, device=gs.device)
+        # The pose is kept in double precision whatever the precision of the simulation, so that the rendered view does
+        # not depend on it: a rounding error of single precision on the camera pose is enough to move the edges of the
+        # geometry across the samples of a pixel. The public getters return the precision of the simulation.
+        self._initial_pos = tensor_to_array(pos, dtype=np.float64)
+        self._initial_lookat = tensor_to_array(lookat, dtype=np.float64)
+        self._initial_up = tensor_to_array(up, dtype=np.float64)
         self._initial_transform = None
         if transform is not None:
-            self._initial_transform = torch.as_tensor(transform, dtype=gs.tc_float, device=gs.device)
+            self._initial_transform = tensor_to_array(transform, dtype=np.float64)
         self._aspect_ratio = self._res[0] / self._res[1]  # width / height
         self._visualizer = visualizer
         self._debug = debug
@@ -177,17 +180,17 @@ class Camera(RBC):
             batch_size = (len(self._visualizer._context.rendered_envs_idx),)
         else:
             batch_size = ()
-        self._pos = torch.empty((*batch_size, 3), dtype=gs.tc_float, device=gs.device)
-        self._lookat = torch.empty((*batch_size, 3), dtype=gs.tc_float, device=gs.device)
-        self._up = torch.empty((*batch_size, 3), dtype=gs.tc_float, device=gs.device)
-        self._transform = torch.empty((*batch_size, 4, 4), dtype=gs.tc_float, device=gs.device)
-        self._quat = torch.empty((*batch_size, 4), dtype=gs.tc_float, device=gs.device)
+        self._pos = np.empty((*batch_size, 3), dtype=np.float64)
+        self._lookat = np.empty((*batch_size, 3), dtype=np.float64)
+        self._up = np.empty((*batch_size, 3), dtype=np.float64)
+        self._transform = np.empty((*batch_size, 4, 4), dtype=np.float64)
+        self._quat = np.empty((*batch_size, 4), dtype=np.float64)
 
         if self._is_batched and self._env_idx is None:
             envs_offset = self._visualizer._scene.envs_offset[self._visualizer._context.rendered_envs_idx]
         else:
             envs_offset = self._visualizer._scene.envs_offset[self._env_idx or 0]
-        self._envs_offset = torch.as_tensor(envs_offset, dtype=gs.tc_float, device=gs.device)
+        self._envs_offset = tensor_to_array(envs_offset, dtype=np.float64)
 
         # Must consider the building process done before setting initial pose, otherwise it will fail
         self._is_built = True
@@ -233,7 +236,7 @@ class Camera(RBC):
             gs.raise_exception("Impossible to attach a camera that is already following an entity.")
 
         self._attached_link = rigid_link
-        self._attached_offset_T = torch.as_tensor(offset_T, dtype=gs.tc_float, device=gs.device)
+        self._attached_offset_T = tensor_to_array(offset_T, dtype=np.float64)
 
     def detach(self):
         """
@@ -266,8 +269,10 @@ class Camera(RBC):
         else:
             link_pos = self._attached_link.get_pos(self._env_idx, relative=False).reshape((-1,))
             link_quat = self._attached_link.get_quat(self._env_idx, relative=False).reshape((-1,))
-        link_T = gu.trans_quat_to_T(link_pos, link_quat)
-        transform = torch.matmul(link_T, self._attached_offset_T)
+        link_T = gu.trans_quat_to_T(
+            tensor_to_array(link_pos, dtype=np.float64), tensor_to_array(link_quat, dtype=np.float64)
+        )
+        transform = link_T @ self._attached_offset_T
         self.set_pose(transform=transform)
 
     def follow_entity(self, entity, fixed_axis=(None, None, None), smoothing=None, fix_orientation=False):
@@ -299,8 +304,8 @@ class Camera(RBC):
                 entity_pos = entity.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
             else:
                 entity_pos = entity.get_pos(self._env_idx, relative=False).reshape((-1,))
-            pos_rel = self._pos - entity_pos
-            if (pos_rel.abs() < gs.EPS).all(dim=-1).any():
+            pos_rel = self._pos - tensor_to_array(entity_pos, dtype=np.float64)
+            if (np.abs(pos_rel) < gs.EPS).all(axis=-1).any():
                 gs.raise_exception("Camera must not be co-located with base link of entity to which it is attached.")
 
         self._followed_entity = entity
@@ -332,18 +337,19 @@ class Camera(RBC):
         # Keep the camera orientation fixed by overriding the lookat point if requested
         env_idx = self._env_idx if self._is_batched and self._env_idx is not None else ()
         if self._follow_fix_orientation:
-            camera_transform = self._transform[env_idx].clone()
+            camera_transform = self._transform[env_idx].copy()
             camera_lookat = None
             camera_pos = camera_transform[..., :3, 3]
         else:
-            camera_lookat = self._lookat[env_idx].clone()
-            camera_pos = self._pos[env_idx].clone()
+            camera_lookat = self._lookat[env_idx].copy()
+            camera_pos = self._pos[env_idx].copy()
 
         # Query entity and relative camera positions
         if self._is_batched and self._env_idx is None:
             entity_pos = self._followed_entity.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
         else:
             entity_pos = self._followed_entity.get_pos(self._env_idx, relative=False).reshape((-1,))
+        entity_pos = tensor_to_array(entity_pos, dtype=np.float64)
         follow_pos_rel = self._follow_pos_rel
 
         # Smooth camera movement with a low-pass filter, in particular Exponential Moving Average (EMA) if requested
@@ -619,40 +625,44 @@ class Camera(RBC):
                 envs_idx = (self._env_idx,) if self._env_idx is not None else ()
                 n_envs = len(self._visualizer._context.rendered_envs_idx)
             else:
-                envs_idx = self._visualizer._scene._sanitize_envs_idx(envs_idx)
-                if set(envs_idx).issubset(self._visualizer._context.rendered_envs_idx):
+                envs_idx = tensor_to_array(self._visualizer._scene._sanitize_envs_idx(envs_idx))
+                rendered_envs_idx = np.array(self._visualizer._context.rendered_envs_idx)
+                is_rendered = envs_idx[:, None] == rendered_envs_idx
+                if not is_rendered.any(axis=1).all():
                     gs.raise_exception("Environment index not in 'VisOptions.rendered_envs_idx'.")
+                # The pose of the camera is stored per rendered environment, in the order of 'rendered_envs_idx'
+                envs_idx = is_rendered.argmax(axis=1)
                 n_envs = len(envs_idx)
         else:
             envs_idx = ()
 
         # Sanitize 'pos', 'lookat', 'up', 'transform' input arguments
         if pos is not None:
-            pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
+            pos = tensor_to_array(pos, dtype=np.float64)
             if pos.ndim > (1 + self._is_batched) or pos.shape[-1] != 3:
                 gs.raise_exception(f"Pos shape {pos.shape} does not match (N, 3)")
             if self._is_batched and pos.ndim == 1:
-                pos = pos.expand((n_envs, 3))
+                pos = np.broadcast_to(pos, (n_envs, 3))
         if lookat is not None:
-            lookat = torch.as_tensor(lookat, dtype=gs.tc_float, device=gs.device)
+            lookat = tensor_to_array(lookat, dtype=np.float64)
             if lookat.ndim > (1 + self._is_batched) or lookat.shape[-1] != 3:
                 gs.raise_exception(f"Lookat shape {lookat.shape} does not match (N, 3)")
             if self._is_batched and lookat.ndim == 1:
-                lookat = lookat.expand((n_envs, 3))
+                lookat = np.broadcast_to(lookat, (n_envs, 3))
         if up is not None:
-            up = torch.as_tensor(up, dtype=gs.tc_float, device=gs.device)
+            up = tensor_to_array(up, dtype=np.float64)
             if up.ndim > (1 + self._is_batched) or up.shape[-1] != 3:
                 gs.raise_exception(f"Up shape {up.shape} does not match (N, 3)")
             if self._is_batched and up.ndim == 1:
-                up = up.expand((n_envs, 3))
+                up = np.broadcast_to(up, (n_envs, 3))
         if transform is not None:
             if any(data is not None for data in (pos, lookat, up)):
                 gs.raise_exception("Must specify either 'transform', or ('pos', 'lookat', 'up').")
-            transform = torch.as_tensor(transform, dtype=gs.tc_float, device=gs.device)
+            transform = tensor_to_array(transform, dtype=np.float64)
             if transform.ndim > (2 + self._is_batched) or transform.shape[-2:] != (4, 4):
                 gs.raise_exception(f"Transform shape {transform.shape} does not match (N, 4, 4)")
             if self._is_batched and transform.ndim == 2:
-                transform = transform.expand((n_envs, 4, 4))
+                transform = np.broadcast_to(transform, (n_envs, 4, 4))
         if self._is_batched:
             for data in (transform, pos, lookat, up):
                 if data is not None and len(data) != n_envs:
@@ -831,44 +841,44 @@ class Camera(RBC):
     def get_pos(self, envs_idx=None):
         """The current position of the camera."""
         assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        pos = self._pos[envs_idx]
+        pos = self._pos
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
-            pos = pos + self._envs_offset[envs_idx]
-        return pos
+            pos = pos + self._envs_offset
+        tensor = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
+        return tensor if envs_idx is None else tensor[envs_idx]
 
     def get_lookat(self, envs_idx=None):
         """The current lookat point of the camera."""
         assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        lookat = self._lookat[envs_idx]
+        lookat = self._lookat
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
-            lookat = lookat + self._envs_offset[envs_idx]
-        return lookat
+            lookat = lookat + self._envs_offset
+        tensor = torch.as_tensor(lookat, dtype=gs.tc_float, device=gs.device)
+        return tensor if envs_idx is None else tensor[envs_idx]
 
     def get_up(self, envs_idx=None):
         """The current up vector of the camera."""
         assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        return self._up[envs_idx]
+        tensor = torch.as_tensor(self._up, dtype=gs.tc_float, device=gs.device)
+        return tensor if envs_idx is None else tensor[envs_idx]
 
     def get_quat(self, envs_idx=None):
         """The current quaternion of the camera."""
         assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        return self._quat[envs_idx]
+        tensor = torch.as_tensor(self._quat, dtype=gs.tc_float, device=gs.device)
+        return tensor if envs_idx is None else tensor[envs_idx]
 
     def get_transform(self, envs_idx=None):
         """
         The current transform matrix of the camera.
         """
         assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        transform = self._transform[envs_idx]
+        transform = self._transform
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
-            transform = transform.clone()
-            transform[..., :3, 3] += self._envs_offset[envs_idx]
-        return transform
+            transform = transform.copy()
+            transform[..., :3, 3] += self._envs_offset
+        tensor = torch.as_tensor(transform, dtype=gs.tc_float, device=gs.device)
+        return tensor if envs_idx is None else tensor[envs_idx]
 
     def _repr_brief(self):
         return f"{self.__repr_name__()}: idx: {self._idx}, pos: {self.pos}, lookat: {self.lookat}"

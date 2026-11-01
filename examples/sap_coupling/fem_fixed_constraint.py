@@ -3,8 +3,11 @@ import math
 import os
 
 import torch
-import genesis as gs
+
 from huggingface_hub import snapshot_download
+
+import genesis as gs
+import genesis.utils.geom as gu
 
 
 def main():
@@ -60,6 +63,11 @@ def main():
     scene.build()
 
     verts_idx = [0]
+    if args.vis:
+        # The sphere marks the target that the constrained vertex follows
+        target_sphere = scene.draw_debug_sphere(
+            pos=cube.init_positions[verts_idx[0]], radius=0.01, color=(1, 0, 1, 0.8)
+        )
 
     # Run simulation
     for i in range(n_steps):
@@ -69,9 +77,7 @@ def main():
         cube.set_vertex_constraints(verts_idx, target_poss)
         scene.step(update_visualizer=False)
         if args.vis:
-            scene.visualizer.context.draw_debug_sphere(
-                pos=target_poss.squeeze(), radius=0.01, color=(1, 0, 1, 0.8), persistent=False
-            )
+            scene.update_debug_objects((target_sphere,), (gu.trans_to_T(target_poss[0]),))
             scene.visualizer.update(force=False, auto=True)
 
 

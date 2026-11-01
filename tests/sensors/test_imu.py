@@ -199,8 +199,7 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
     assert_allclose(imu.read().mag, MAG_FIELD, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_lone_sensor_resolution_and_offset_setter(show_viewer, n_envs):
     # IMU with only `*_resolution` set (no other noise/delay) returns acceleration components quantized to that
     # resolution. Being the only sensor of its class, this scene also covers the per-sensor metadata tables in the

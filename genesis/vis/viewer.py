@@ -44,9 +44,9 @@ class Viewer(RBC):
         self._run_in_thread = options.run_in_thread
         self._refresh_rate = options.refresh_rate
         self._realtime_factor = options.realtime_factor
-        self._camera_init_pos = np.asarray(options.camera_pos, dtype=gs.np_float)
-        self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=gs.np_float)
-        self._camera_up = np.asarray(options.camera_up, dtype=gs.np_float)
+        self._camera_init_pos = np.asarray(options.camera_pos, dtype=np.float64)
+        self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=np.float64)
+        self._camera_up = np.asarray(options.camera_up, dtype=np.float64)
         self._camera_fov = options.camera_fov
 
         self._enable_help_text = options.enable_help_text
@@ -74,7 +74,7 @@ class Viewer(RBC):
         # background-thread viewer paces its own redraws). Real-time pacing waits until the scene is built so the
         # physics dt is known.
         self._last_refresh_time = None
-        self._realtime_pacer = None
+        self._step_pacer = None
 
     def build(self, scene):
         self.scene = scene
@@ -82,7 +82,7 @@ class Viewer(RBC):
         # When the viewer is shown, hold the stepping loop to realtime_factor x wall-clock real time: each step advances
         # dt seconds of simulation, so it should take dt / realtime_factor seconds of wall time. Rate skips sleeping
         # when already behind, so a sim that cannot keep up simply runs as fast as it can.
-        self._realtime_pacer = None if self._realtime_factor is None else Rate(self._realtime_factor / scene.sim.dt)
+        self._step_pacer = None if self._realtime_factor is None else Rate(self._realtime_factor / scene.sim.dt)
 
         # set viewer camera
         self.setup_camera()
@@ -208,13 +208,17 @@ class Viewer(RBC):
         self._camera_node = self.context.add_node(pyrender.PerspectiveCamera(yfov=yfov), pose=pose)
 
     def update(self, auto_refresh=None, force=False):
+        """Sync the drawn scene with the scene and repaint the window, at most refresh_rate times per second.
+
+        'force' refreshes right away instead of waiting for the next refresh. 'auto_refresh' repaints the window from
+        the calling thread, for a viewer that has no thread of its own. If None, it is True when called from the viewer
+        thread. It raises once the window is closed, which ends the script that shows it at its next step or setter.
+        """
         if not self.is_alive():
             gs.raise_exception("Viewer closed.")
 
         if self._followed_entity is not None:
             self.update_following()
-
-        self._pyrender_viewer.update_on_sim_step()
 
         # Sync the drawn scene with the simulation at most refresh_rate times per second, independently of how often
         # the simulation steps: a redraw is the only consumer of the sync, and stepping runs far more often than the
@@ -224,7 +228,9 @@ class Viewer(RBC):
         if force or is_refresh_due:
             self._last_refresh_time = now
             with self.lock:
-                self.context.update(force)
+                # A step changes the state of every solver, so every solver is synced at each refresh. A setter syncs
+                # its own solver right away (see 'Visualizer.build').
+                self.context.update(force_render=True)
 
                 # Refresh viewer by default if and if this is possible
                 if auto_refresh is None:
@@ -234,11 +240,40 @@ class Viewer(RBC):
                 if auto_refresh and not self._pyrender_viewer.run_in_thread:
                     self._pyrender_viewer.refresh()
 
-        # Pace the stepping loop to real time when a factor is set (no effect once the sim falls behind). Read the
-        # pacer once: the realtime_factor setter may swap it from the viewer thread between the check and the call.
-        realtime_pacer = self._realtime_pacer
-        if realtime_pacer is not None:
-            realtime_pacer.sleep()
+    def update_on_sim_step(self, advanced):
+        """Run the per-step callbacks of the viewer, then pace the stepping loop.
+
+        The callbacks of held keys and of plugins run first. If the step 'advanced' the simulation, the loop is then
+        paced to real time scaled by realtime_factor. Otherwise (a paused scene), it waits one refresh period of the
+        viewer, so that a paused loop does not spin. The window stays responsive during the wait (see 'sleep').
+        """
+        self._pyrender_viewer.update_on_sim_step()
+
+        # Read the pacer once, since the realtime_factor setter may swap it from the viewer thread
+        step_pacer = self._step_pacer
+        if not advanced:
+            duration = 1.0 / self._refresh_rate
+        elif step_pacer is not None:
+            duration = step_pacer.advance()
+        else:
+            duration = 0.0
+        self.sleep(duration)
+
+    def sleep(self, duration):
+        """Wait for 'duration' seconds while keeping the window responsive.
+
+        A window without a thread of its own is serviced only by the calling thread, so it is refreshed meanwhile at the
+        refresh rate, which repaints it and handles the user input. A window with a thread of its own is serviced by
+        that thread, and the caller just sleeps.
+        """
+        time_end = time.perf_counter() + duration
+        if not self._pyrender_viewer.run_in_thread:
+            time_refresh = self._last_refresh_time + 1.0 / self._refresh_rate
+            while time_refresh < time_end:
+                time.sleep(max(time_refresh - time.perf_counter(), 0.0))
+                self.update()
+                time_refresh = self._last_refresh_time + 1.0 / self._refresh_rate
+        time.sleep(max(time_end - time.perf_counter(), 0.0))
 
     def close_offscreen(self, render_target):
         return self._pyrender_viewer.close_offscreen(render_target)
@@ -279,14 +314,14 @@ class Viewer(RBC):
             Camera lookat point.
         """
         if pose is None:
-            pos = self._camera_init_pos if pos is None else tensor_to_array(pos, dtype=gs.np_float)
-            lookat = self._camera_init_lookat if lookat is None else tensor_to_array(lookat, dtype=gs.np_float)
+            pos = self._camera_init_pos if pos is None else tensor_to_array(pos, dtype=np.float64)
+            lookat = self._camera_init_lookat if lookat is None else tensor_to_array(lookat, dtype=np.float64)
             up = self._camera_up
 
             pose = gu.pos_lookat_up_to_T(pos, lookat, up)
             self._camera_up = pose[:3, 1].copy()
         else:
-            pose = tensor_to_array(pose, dtype=gs.np_float)
+            pose = tensor_to_array(pose, dtype=np.float64)
             if pose.shape != (4, 4):
                 gs.raise_exception("pose should be a 4x4 matrix.")
 
@@ -481,12 +516,12 @@ class Viewer(RBC):
     @realtime_factor.setter
     def realtime_factor(self, value):
         # Rebuild the pacer for the new factor (None -> uncapped). Reassigning the pacer reference is atomic, so
-        # update() reading it on the stepping thread always sees a consistent object.
+        # update_on_sim_step() reading it on the stepping thread always sees a consistent object.
         self._realtime_factor = value
         if value is None or self.scene is None:
-            self._realtime_pacer = None
+            self._step_pacer = None
         else:
-            self._realtime_pacer = Rate(value / self.scene.sim.dt)
+            self._step_pacer = Rate(value / self.scene.sim.dt)
 
     @property
     def camera_pos(self):

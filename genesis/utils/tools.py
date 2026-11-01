@@ -167,59 +167,117 @@ def create_timer(name=None, new=False, level=0, qd_sync=False, skip_first_call=F
 class Rate:
     """Fixed-frequency loop limiter: call ``sleep`` once per iteration to hold the loop at ``rate`` Hz.
 
-    Each wake-up is scheduled against an ideal clock advanced by exactly one period per tick, rather than from the
-    actual (over-slept) wake time, so ``time.sleep`` overshoot does not accumulate and the average rate stays on target.
-    When an iteration runs longer than one period the limiter does not sleep and resets its schedule from the current
-    time, so a loop that cannot keep up simply runs as fast as it can without building a sleep debt to burn off
-    afterwards.
+    Each wake-up is scheduled against an ideal clock advanced by exactly the periods slept per tick, rather than from
+    the actual (over-slept) wake time, so ``time.sleep`` overshoot does not accumulate and the average rate stays on
+    target. When an iteration runs longer than the periods it sleeps, the limiter does not sleep and resets its schedule
+    from the current time, so a loop that cannot keep up simply runs as fast as it can without building a sleep debt to
+    burn off afterwards. ``period`` may be changed between two ticks, the next one following the new value.
     """
 
     def __init__(self, rate):
-        self.rate = rate
         self.period = 1.0 / rate
-        self.next_time = time.perf_counter() + self.period
+        self.last_time = time.perf_counter()
 
-    def sleep(self):
+    @property
+    def rate(self):
+        """The frequency in Hz the loop is held at."""
+        return 1.0 / self.period
+
+    @rate.setter
+    def rate(self, rate):
+        self.period = 1.0 / rate
+
+    def advance(self, n_periods=1):
+        """Schedule the next tick 'n_periods' periods after the previous one, and return the time left until it.
+
+        The time left is 0 when the loop is behind, and the schedule then starts anew from the current time. A caller
+        that waits the time left in a way of its own, such as keeping a window responsive (see 'Viewer.sleep'), uses it
+        in place of 'sleep'.
+        """
         now = time.perf_counter()
-        sleep_duration = self.next_time - now
-        if sleep_duration > 0:
-            time.sleep(sleep_duration)
-            self.next_time += self.period
-        else:
-            self.next_time = now + self.period
+        next_time = self.last_time + n_periods * self.period
+        if next_time > now:
+            self.last_time = next_time
+            return next_time - now
+        self.last_time = now
+        return 0.0
+
+    def sleep(self, n_periods=1):
+        """Sleep until 'n_periods' periods have passed since the previous tick, or not at all if they already have."""
+        duration = self.advance(n_periods)
+        if duration > 0.0:
+            time.sleep(duration)
 
 
-class FPSTracker:
-    """Times the phases of a stepped process and logs its achieved step rate.
+class RunningMean:
+    """Mean of a scalar fed one sample at a time, over the latest samples or exponentially weighted.
 
-    A step opens with `start`, its phases run under `phase`, named freely, or between `start_phase` and the next
-    `start_phase` or `stop_phase` where a `with` block would indent too much, and `step` closes it: the wall time of
-    every phase timed in the step and of the whole step, under the name `total`, is kept, and `timings` averages the
-    latest `timings_window` of them. When `log` is set, the step rate is logged over fixed wall-clock windows: the
-    per-window rate is the actual step count divided by the actual window duration (so it is phase-stable, unlike
-    dividing a raw count by a smoothed time), then lightly EMA-smoothed for readability.
+    Exactly one of 'window' and 'alpha' is given. With 'window', 'value' is the mean of the latest 'window' samples,
+    NaN until that many have arrived, and it follows a change fully after that many samples. With 'alpha', it is the
+    exponential moving average, the value so far weighing 'alpha' and each new sample '1 - alpha', starting from the
+    first sample and NaN before it: it never forgets a sample entirely, and costs nothing per sample whatever the
+    smoothing.
     """
 
-    def __init__(
-        self,
-        n_envs,
-        alpha=0.95,
-        minimum_interval_seconds: float | None = 0.05,
-        timings_window: int = 1,
-        log: bool = True,
-    ):
-        self.n_envs = n_envs
-        self.alpha = alpha
-        self.minimum_interval_seconds = minimum_interval_seconds
-        self.log = log
-        self.window_start = None
-        self.steps_since_last_print: int = 0
-        self.fps_ema = None
-        self.total_fps = 0.0
-        self._step_start = None
+    def __init__(self, window: int | None = None, alpha: float | None = None):
+        if (window is None) == (alpha is None):
+            gs.raise_exception("Exactly one of 'window' and 'alpha' must be given.")
+        if window is not None and window < 1:
+            gs.raise_exception(f"The window of a mean holds one sample at least, got {window}.")
+        self._alpha = alpha
+        self._samples: collections.deque[float] = collections.deque(maxlen=window)
+        self._value = math.nan
+
+    def update(self, sample: float):
+        """Add a sample."""
+        if self._alpha is not None:
+            self._value = (
+                sample if math.isnan(self._value) else self._alpha * self._value + (1.0 - self._alpha) * sample
+            )
+        else:
+            self._samples.append(sample)
+            if len(self._samples) == self._samples.maxlen:
+                self._value = sum(self._samples) / len(self._samples)
+
+    @property
+    def value(self) -> float:
+        """The mean of the samples so far, NaN until there are enough of them (see the class)."""
+        return self._value
+
+
+class StepTimer:
+    """Times the phases of the steps of a stepped process.
+
+    A step opens with `start`, its phases run under `phase`, named freely, or between `start_phase` and the next
+    `start_phase` or `stop_phase` where a `with` block would indent too much, and `step` closes it. A closed step leaves
+    in `timings`, until the next one, the wall time of every phase it timed, of the whole step under `step`, and of the
+    period from the start of the previous step to its own under `period`. The period covers the time spent between the
+    two steps as well, so its inverse is the rate the loop achieves. A step that `start` opens and `step` never closes
+    leaves no trace, as the next `start` discards it. The first step has no period. The code timing a phase declares it
+    with `add_phases` before the first step, so that a log laid out once lists every phase a step may time.
+    """
+
+    def __init__(self):
+        self._step_start: float | None = None
+        self._previous_step_start: float | None = None
         self._phase_open: tuple[str, float] | None = None
         self._phases_time: dict[str, float] = {}
-        self._timings_history: collections.deque[dict[str, float]] = collections.deque(maxlen=timings_window)
+        self._timings: dict[str, float] = {}
+        self._phases: list[str] = ["step", "period"]
+
+    @property
+    def phases(self) -> tuple[str, ...]:
+        """Every phase a step may time, `step` and `period` first, in declaration order (see `add_phases`)."""
+        return tuple(self._phases)
+
+    def add_phases(self, *phases: str):
+        """Declare phases the steps time, ahead of the first step."""
+        self._phases.extend(phase for phase in phases if phase not in self._phases)
+
+    @property
+    def timings(self) -> dict[str, float]:
+        """Wall time in seconds of every phase the latest recorded step timed, by phase, empty before any."""
+        return self._timings
 
     def start(self):
         """Open a step: the phases timed from here on belong to it."""
@@ -228,9 +286,11 @@ class FPSTracker:
         self._phases_time.clear()
 
     def start_phase(self, phase: str):
-        """Time the code that follows as part of the phase, until the next `start_phase` or `stop_phase`, which lets
-        a loop time each of its iterations under its own phase without a `with` block. A phase running from a previous
-        `start_phase` stops here."""
+        """Time the code that follows as part of a phase, until the next `start_phase` or `stop_phase`.
+
+        It lets a loop time each of its iterations under its own phase without a `with` block. A phase running from a
+        previous `start_phase` stops here.
+        """
         self.stop_phase()
         self._phase_open = (phase, time.perf_counter())
 
@@ -243,60 +303,21 @@ class FPSTracker:
 
     @contextlib.contextmanager
     def phase(self, phase: str):
-        """Time the enclosed code as part of the phase of the current step, adding to the time the phase already
-        took in this step. Blocks nest, each adding to its own phase."""
+        """Time the enclosed code as part of a phase of the current step, adding to what the phase already took.
+
+        Blocks nest, each adding to its own phase.
+        """
         tic = time.perf_counter()
         try:
             yield
         finally:
             self._phases_time[phase] = self._phases_time.get(phase, 0.0) + time.perf_counter() - tic
 
-    def step(self, count: bool = True, current_time: float | None = None) -> float | None:
-        """Close the step and keep its timings. A counted step enters the step rate, which is logged once the
-        wall-clock window is long enough for a stable estimate, and returned then. current_time stands in for the
-        clock, for a step whose phases were not timed."""
+    def step(self):
+        """Close the step, keeping its timings in `timings` until the next one."""
         self.stop_phase()
-        if current_time is None:
-            current_time = time.perf_counter()
-        if self._step_start is not None:
-            self._phases_time["total"] = current_time - self._step_start
-        self._timings_history.append(dict(self._phases_time))
-        if not self.log or not count:
-            return None
-
-        if self.window_start is None:
-            self.window_start = current_time
-            return None
-
-        self.steps_since_last_print += 1
-
-        # Accumulate until the window is long enough to give a stable estimate.
-        window_dt = current_time - self.window_start
-        if self.minimum_interval_seconds and window_dt < self.minimum_interval_seconds:
-            return None
-
-        window_fps = self.steps_since_last_print / window_dt
-        self.fps_ema = window_fps if self.fps_ema is None else self.alpha * self.fps_ema + (1 - self.alpha) * window_fps
-
-        if self.n_envs > 0:
-            self.total_fps = self.fps_ema * self.n_envs
-            gs.logger.info(
-                f"Running at ~<{self.total_fps:,.2f}>~ FPS (~<{self.fps_ema:.2f}>~ FPS per env, ~<{self.n_envs}>~ envs)."
-            )
-        else:
-            self.total_fps = self.fps_ema
-            gs.logger.info(f"Running at ~<{self.fps_ema:.2f}>~ FPS.")
-
-        self.window_start = current_time
-        self.steps_since_last_print = 0
-        return self.total_fps
-
-    @property
-    def timings(self) -> dict[str, float]:
-        """Wall time in seconds of every phase timed in the latest `timings_window` steps, averaged over the steps that
-        timed it."""
-        phases_time = collections.defaultdict(list)
-        for step_phases_time in self._timings_history:
-            for phase, phase_time in step_phases_time.items():
-                phases_time[phase].append(phase_time)
-        return {phase: sum(phase_times) / len(phase_times) for phase, phase_times in phases_time.items()}
+        self._phases_time["step"] = time.perf_counter() - self._step_start
+        if self._previous_step_start is not None:
+            self._phases_time["period"] = self._step_start - self._previous_step_start
+        self._timings = dict(self._phases_time)
+        self._previous_step_start = self._step_start

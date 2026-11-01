@@ -97,6 +97,9 @@ class IPCCoupler(RBC):
     including rigid bodies (as ABD objects) and FEM bodies in a unified contact framework.
     """
 
+    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    is_differentiable = False
+
     def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:
         """
         Initialize IPC Coupler.
@@ -854,11 +857,6 @@ class IPCCoupler(RBC):
             ps.frame_tick()
             self._ipc_gui.update()
 
-    def couple_grad(self, f):
-        """Gradient computation for coupling"""
-        # IPC doesn't support gradients yet
-        pass
-
     def reset(self, envs_idx=None):
         """Reset coupling state"""
         assert gs.logger is not None
@@ -1067,7 +1065,7 @@ class IPCCoupler(RBC):
         # Update FEM entities using filtered geometries
         for entity, geom_positions in fem_positions_by_entity.items():
             geom_positions = np.stack(geom_positions, axis=0, dtype=gs.np_float)
-            entity.set_pos(0, geom_positions)
+            entity.set_verts_pos(geom_positions if self.sim.n_envs > 0 else geom_positions[0])
 
     def _retrieve_rigid_states(self):
         """

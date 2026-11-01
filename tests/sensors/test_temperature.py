@@ -6,8 +6,7 @@ import genesis as gs
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
     BOX_SIZE = 0.06
     PLATFORM_SIZE = 0.2
@@ -111,8 +110,7 @@ def test_grid_sensor_contact_and_reset(show_viewer, tol, n_envs):
     assert_allclose(data, BASE_TEMP, tol=5e-2)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_grid_simulate_all_link_temps(show_viewer, tol, n_envs):
     BOX_SIZE = 0.06
     BASE_TEMP = 22.0

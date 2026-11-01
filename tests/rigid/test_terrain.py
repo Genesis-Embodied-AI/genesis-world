@@ -202,7 +202,7 @@ def test_get_terrain_height(n_envs, tol):
         (10.375, 20.25),
         (11.0, 21.5),
     )
-    terrain_mesh = terrain.geoms[0].get_trimesh().copy()
+    terrain_mesh = terrain.geoms[0].trimesh.copy()
     terrain_mesh.apply_transform(gu.trans_quat_to_T(np.array((10.0, 20.0, 1.0)), gu.identity_quat()))
     ray_origins = np.column_stack((positions, np.full(len(positions), terrain_mesh.bounds[1, 2] + 1.0)))
     ray_directions = np.tile((0.0, 0.0, -1.0), (len(positions), 1))

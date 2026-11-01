@@ -55,6 +55,8 @@ def main():
 
     ee_link = robot.get_link("hand")
 
+    # The poses follow the target along a continuous path, so they are shown at the pace of the simulation
+    rate = gs.tools.Rate(1.0 / scene.dt)
     for i in range(720):
         target_pos = np.zeros([n_envs, 3])
         target_pos[:, 0] = center[:, 0] + np.cos(i / 360 * np.pi * angular_speed) * r
@@ -71,7 +73,8 @@ def main():
         )
 
         robot.set_qpos(q)
-        scene.visualizer.update(force=True)
+        if args.vis:
+            rate.sleep()
 
 
 if __name__ == "__main__":

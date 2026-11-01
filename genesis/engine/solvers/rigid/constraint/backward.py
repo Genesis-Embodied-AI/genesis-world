@@ -120,9 +120,20 @@ def kernel_solve_adjoint_u(
     we use CG solver.
 
     Specifically, A = M + J^T * diag(D) * J, where M = mass matrix, J = Jacobian, diag(D) = diagonal matrix of efc_D.
+    The gradient g sums the one of the acceleration and the direct one of the constraint forces: efc_force is
+    -D * (J qacc - aref) on an active row and a constant otherwise, so g += J^T * (-D * dL/defc_force).
     """
     n_dofs = constraint_state.bw_u.shape[0]
     _B = constraint_state.bw_u.shape[1]
+    len_constraints = constraint_state.bw_Ju.shape[0]
+
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_c, i_b in qd.ndrange(len_constraints, _B):
+        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
+            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -168,82 +179,61 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
     - dL_daref = Ju \odot D
     - dL_defc_D = -Ju \odot (Jqacc - aref)
     - dL_dforce = u
+    The gradient of the constraint forces efc_force adds to Ju in the terms of aref, efc_D and J (see
+    kernel_solve_adjoint_u), and is cleared once consumed, since every substep overwrites efc_force.
     """
     _B = constraint_state.bw_u.shape[1]
     n_dofs = constraint_state.bw_u.shape[0]
-    n_constraints = constraint_state.bw_Ju.shape[0]
+    len_constraints = constraint_state.bw_Ju.shape[0]
 
-    # clear grads
+    # The adjoint of the mass matrix is read whole (see kernel_accumulate_constraint_solver_grads), so it is cleared
+    # whole before the mass blocks are written
     for i_d0, i_d1, i_b in qd.ndrange(n_dofs, n_dofs, _B):
         constraint_state.dL_dM[i_d0, i_d1, i_b] = gs.qd_float(0.0)
-    for i_c, i_d, i_b in qd.ndrange(n_constraints, n_dofs, _B):
-        constraint_state.dL_djac[i_c, i_d, i_b] = gs.qd_float(0.0)
-    for i_c, i_b in qd.ndrange(n_constraints, _B):
-        constraint_state.dL_daref[i_c, i_b] = gs.qd_float(0.0)
-        constraint_state.dL_defc_D[i_c, i_b] = gs.qd_float(0.0)
-        constraint_state.bw_Ju[i_c, i_b] = gs.qd_float(0.0)
-        constraint_state.bw_y[i_c, i_b] = gs.qd_float(0.0)
-        constraint_state.bw_w[i_c, i_b] = gs.qd_float(0.0)
+
+    # force: u
     for i_d, i_b in qd.ndrange(n_dofs, _B):
-        constraint_state.dL_dforce[i_d, i_b] = gs.qd_float(0.0)
+        constraint_state.dL_dforce[i_d, i_b] = constraint_state.bw_u[i_d, i_b]
 
-    # Ju, w, y. Every Jacobian product runs over the row's support (jac_dofs_idx), as the forward's do: an entry
-    # outside it is structurally zero and moves nothing, so its gradient is zero.
-    for i_b in range(_B):
-        # Ju
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            s = gs.qd_float(0.0)
+    # One thread per row of every env. The reverses of the row assembly read the rows of the env alone, each over its
+    # support (jac_dofs_idx), so the adjoints of a row are written there alone, zero for an inactive row: an entry
+    # outside the support is structurally zero and moves nothing.
+    for i_c, i_b in qd.ndrange(len_constraints, _B):
+        if i_c < constraint_state.n_constraints[i_b]:
+            # Ju, and w = J qacc - aref
+            Ju = gs.qd_float(0.0)
+            Jqacc = gs.qd_float(0.0)
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
                 i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                s += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_u[i_d, i_b]
-            constraint_state.bw_Ju[i_c, i_b] = s
+                Ju += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_u[i_d, i_b]
+                Jqacc += constraint_state.jac[i_c, i_d, i_b] * constraint_state.qacc[i_d, i_b]
+            w = Jqacc - constraint_state.aref[i_c, i_b]
+            # y = D \odot w
+            y = constraint_state.efc_D[i_c, i_b] * w
+            constraint_state.bw_Ju[i_c, i_b] = Ju
+            constraint_state.bw_w[i_c, i_b] = w
+            constraint_state.bw_y[i_c, i_b] = y
 
-        # w = J qacc - aref
-        # y = D \odot w
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            t = gs.qd_float(0.0)
+            is_active = constraint_state.active[i_c, i_b] != 0
+            # aref: Ju \odot D, D: -Ju \odot w, the gradient of efc_force adding to Ju
+            Ju_force = Ju + constraint_state.efc_force.grad[i_c, i_b]
+            DJu = constraint_state.efc_D[i_c, i_b] * Ju_force
+            constraint_state.dL_daref[i_c, i_b] = DJu if is_active else gs.qd_float(0.0)
+            constraint_state.dL_defc_D[i_c, i_b] = -Ju_force * w if is_active else gs.qd_float(0.0)
+            # J: -[u * y^T + qacc * (D \odot (Ju))^T]
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
                 i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                t += constraint_state.jac[i_c, i_d, i_b] * constraint_state.qacc[i_d, i_b]
-            constraint_state.bw_w[i_c, i_b] = t - constraint_state.aref[i_c, i_b]
-            constraint_state.bw_y[i_c, i_b] = constraint_state.efc_D[i_c, i_b] * constraint_state.bw_w[i_c, i_b]
+                dL_djac = -(constraint_state.bw_u[i_d, i_b] * y + constraint_state.qacc[i_d, i_b] * DJu)
+                constraint_state.dL_djac[i_c, i_d, i_b] = dL_djac if is_active else gs.qd_float(0.0)
+        constraint_state.efc_force.grad[i_c, i_b] = gs.qd_float(0.0)
 
-        # grads
-        # force: u
-        for i_d in range(n_dofs):
-            constraint_state.dL_dforce[i_d, i_b] += constraint_state.bw_u[i_d, i_b]
-
-        # per-constraint (mask by active)
-        # aref: Ju \odot D
-        # D: -Ju \odot w
-        # J: -[u * y^T + qacc * (D \odot (Ju)^T)]
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            if constraint_state.active[i_c, i_b] != 0:
-                # aref: Ju \odot D
-                constraint_state.dL_daref[i_c, i_b] += (
-                    constraint_state.efc_D[i_c, i_b] * constraint_state.bw_Ju[i_c, i_b]
-                )
-                # D: -Ju \odot w
-                constraint_state.dL_defc_D[i_c, i_b] -= (
-                    constraint_state.bw_Ju[i_c, i_b] * constraint_state.bw_w[i_c, i_b]
-                )
-
-                # J: -[u * y^T + qacc * (D \odot (Ju))^T]
-                DJu_i = constraint_state.efc_D[i_c, i_b] * constraint_state.bw_Ju[i_c, i_b]
-                y_i = constraint_state.bw_y[i_c, i_b]
-                for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                    i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                    constraint_state.dL_djac[i_c, i_d, i_b] += -(
-                        constraint_state.bw_u[i_d, i_b] * y_i + constraint_state.qacc[i_d, i_b] * DJu_i
-                    )
-
-        # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
-        # outside them is structurally zero and moves nothing, so its gradient is zero.
-        for i in range(n_dofs):
-            for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
-                val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
-                val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
-                constraint_state.dL_dM[i, j, i_b] += (val0 + val1) * 0.5  # symmetrize
+    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
+    # outside them is structurally zero and moves nothing, so its gradient is zero.
+    for i, i_b in qd.ndrange(n_dofs, _B):
+        for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
+            val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
+            val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
+            constraint_state.dL_dM[i, j, i_b] = (val0 + val1) * 0.5  # symmetrize
 
 
 @qd.kernel(fastcache=True)
@@ -326,7 +316,7 @@ def kernel_manual_add_joint_limit_constraints_bw(
     rigid_config: qd.template(),
     enable_collision: qd.template(),
 ):
-    """Manual reverse of `add_joint_limit_constraints`. See the section header
+    """Manual reverse of the joint rows of `add_limit_constraints`. See the section header
     above for the shared `n_con` layout and upstream-grad conventions.
 
     Accumulates into rigid_info.qpos.grad[i_q] and dyn_state.dofs.vel.grad[i_d].
@@ -996,7 +986,7 @@ def kernel_manual_add_equality_constraints_bw(
                 # dyn_state.links.{pos,quat} only once per anchor.
                 g_ga1 = gs.qd_vec3(0.0, 0.0, 0.0)
                 g_ga2 = gs.qd_vec3(0.0, 0.0, 0.0)
-                # The stored rows are aref - jdotv[i_3] (see func_equality_connect in solver.py); collect the bias
+                # The stored rows are aref - jdotv[i_3] (see func_equality_links in solver.py); collect the bias
                 # gradient per row and reverse it through both chains after the row loop.
                 g_jdotv = gs.qd_vec3(0.0, 0.0, 0.0)
 
@@ -1199,7 +1189,7 @@ def kernel_manual_add_equality_constraints_bw(
                 # Per-row jac_qvel grad (for the orientation chain walk below).
                 dL_d_jac_qvel_orient = gs.qd_vec3(0.0, 0.0, 0.0)
                 # The stored position rows are aref - jdotv[i_3] and the rotation rows carry the rotational bias
-                # 0.5 * (t1 + t2 + t3)[i_3 + 1] * torquescale (see func_equality_weld in solver.py); collect both
+                # 0.5 * (t1 + t2 + t3)[i_3 + 1] * torquescale (see func_equality_links in solver.py); collect both
                 # bias gradients per row and reverse them after the row loops.
                 g_jdotv = gs.qd_vec3(0.0, 0.0, 0.0)
                 g_t_quat = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
@@ -1386,7 +1376,7 @@ def kernel_manual_add_equality_constraints_bw(
                 g_inv_q2 = g_inv_q2 + g_inv_q2_eq
                 g_q = g_q + g_q_eq
 
-                # ---- Rotational bias t1 + t2 + t3 (see func_equality_weld in solver.py) ----
+                # ---- Rotational bias t1 + t2 + t3 (see func_equality_links in solver.py) ----
                 # Replay the bias intermediates from the same state the forward read.
                 omega1 = dyn_state.links.cd_ang[link1_idx, i_b]
                 omega2 = dyn_state.links.cd_ang[link2_idx, i_b]

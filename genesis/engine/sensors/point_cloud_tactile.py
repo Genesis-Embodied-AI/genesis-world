@@ -56,6 +56,7 @@ from .tactile_shared import (
 _ELASTOMER_RAYCAST_QUERY_DIST = 0.1
 
 if TYPE_CHECKING:
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
@@ -633,12 +634,17 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
         self._shared_metadata.pc_bvh.append_sensor(pc_start_row=pc_start_row, idx_cat=idx_cat, pos_cat=pos_cat)
 
     def _draw_debug_probes(
-        self, context: "RasterizerContext", color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None
-    ) -> tuple[list[int] | None, int, np.ndarray | None]:
-        envs_idx, n_debug_envs, env_offsets = super()._draw_debug_probes(context, color_groups_fn)
+        self,
+        context: "RasterizerContext",
+        rendered_envs_idx: list[int],
+        color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None,
+    ) -> tuple[list["Mesh"], list[int] | None, int, np.ndarray | None]:
+        nodes, envs_idx, n_debug_envs, env_offsets = super()._draw_debug_probes(
+            context, rendered_envs_idx, color_groups_fn
+        )
 
         if self._debug_pc_chunks is None:
-            return envs_idx, n_debug_envs, env_offsets
+            return nodes, envs_idx, n_debug_envs, env_offsets
         world_chunks: list[np.ndarray] = []
         for link_idx, pos_local, active_envs_mask in self._debug_pc_chunks:
             track_link = self._shared_metadata.solver.links[link_idx]
@@ -660,14 +666,14 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
                 track_quat = track_link.get_quat(envs_idx, relative=False).reshape(4)
                 world_chunks.append(tensor_to_array(gu.transform_by_trans_quat(pos_active, track_pos, track_quat)))
         if world_chunks:
-            self._debug_objects.append(
-                context.draw_debug_spheres(
+            nodes.append(
+                context.make_debug_spheres(
                     poss=np.concatenate(world_chunks, axis=0),
                     radius=float(self._options.debug_point_cloud_radius),
                     color=self._options.debug_point_cloud_color,
                 )
             )
-        return envs_idx, n_debug_envs, env_offsets
+        return nodes, envs_idx, n_debug_envs, env_offsets
 
     def _debug_probe_buffer_magnitudes(self, buffer: torch.Tensor, envs_idx: list[int] | None) -> np.ndarray:
         values = buffer[self._probe_start_idx : self._probe_start_idx + self._n_probes]
@@ -799,15 +805,18 @@ class ProximityTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(measured_cols_b.T)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        self._draw_debug_probes(
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        nodes, *_ = self._draw_debug_probes(
             context,
+            envs_idx,
             self._tactile_color_groups_fn(
-                lambda envs_idx: (
-                    self._debug_probe_buffer_magnitudes(self._shared_metadata.taxel_signal_buf, envs_idx) >= gs.EPS
+                lambda batch_envs_idx: (
+                    self._debug_probe_buffer_magnitudes(self._shared_metadata.taxel_signal_buf, batch_envs_idx)
+                    >= gs.EPS
                 )
             ),
         )
+        return [(None, node, None) for node in nodes]
 
 
 @qd.func
@@ -1979,7 +1988,7 @@ class ElastomerTaxelSensor(
         B = self._manager._sim._B
         if self._link is None:
             gs.raise_exception("ElastomerTaxel must be attached to a rigid link with collision geometry.")
-        # The class-wide contact_depth_query backend is resolved + activated by ContactDepthQuerySensorMixin.build.
+        # The class-wide contact_depth_query backend is resolved by ContactDepthQuerySensorMixin.build.
 
         elastomer_geom_start_row = self._shared_metadata.elastomer_geom_idx.shape[0]
         elastomer_geom_idx, elastomer_geom_active_envs_mask = _collect_collision_geom_idx(
@@ -2398,11 +2407,12 @@ class ElastomerTaxelSensor(
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
         measured.copy_(current_ground_truth_data_T.T)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        def mask(envs_idx):
-            disp = self.read_ground_truth(envs_idx)
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        def mask(batch_envs_idx):
+            disp = self.read_ground_truth(batch_envs_idx)
             if self._options.history_length > 0:
                 disp = disp.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
             return torch.linalg.norm(disp, dim=-1) >= gs.EPS
 
-        self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
+        nodes, *_ = self._draw_debug_probes(context, envs_idx, self._tactile_color_groups_fn(mask))
+        return [(None, node, None) for node in nodes]

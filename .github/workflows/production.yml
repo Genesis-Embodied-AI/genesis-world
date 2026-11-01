@@ -273,11 +273,15 @@ jobs:
           ${{ github.workspace }}:/root/workspace,\
           ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
           ${HOME}/.cache/${CACHE_VERSION}/genesis:/root/.cache/genesis,\
-          ${HOME}/.cache/${CACHE_VERSION}/quadrants:/root/.cache/quadrants,\
           ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
+          # The kernels compiled by a test are reused by the following ones through a cache in the workspace, which goes
+          # away with the runner once the job ends. It is never cleaned up during the job, since the kernels of the unit
+          # tests outgrow any size bound of the cache that Quadrants accepts.
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_FILE_PATH=/root/workspace/.cache/quadrants"
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_CLEANING_POLICY=never"
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
@@ -286,7 +290,6 @@ jobs:
           mkdir -p \
             "${HOME}/.cache/${CACHE_VERSION}/uv" \
             "${HOME}/.cache/${CACHE_VERSION}/genesis" \
-            "${HOME}/.cache/${CACHE_VERSION}/quadrants" \
             "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
@@ -324,7 +327,7 @@ jobs:
             # tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
 
             # Given no expression, the selection of 'pyproject.toml' stays in charge.
-            pytest -v -ra --backend gpu --dev --forked ./tests \
+            pytest -v -ra --backend gpu ${{ matrix.GS_ENABLE_NDARRAY != '0' && '--dev' || '' }} --forked ./tests \
                 ${{ inputs.unit_tests_markexpr && format('-m "{0}"', inputs.unit_tests_markexpr) }}
 
             # tmate -S /tmp/tmate.sock wait tmate-exit

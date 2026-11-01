@@ -32,6 +32,35 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 
 @qd.func
+def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+    """Return the pair of links coupled by equality constraint i_eq of env i_b, -1 standing for a missing link.
+
+    CONNECT, WELD and SCREW equalities reference links. JOINT equalities reference joints, each mapped to the link whose
+    dof range owns its first dof. The linear scan this takes stays cheap, since joint equalities are rare and link
+    counts are small.
+    """
+    i_l_a = dyn_info.equalities.eq_obj1id[i_eq, i_b]
+    i_l_b = dyn_info.equalities.eq_obj2id[i_eq, i_b]
+    if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.JOINT:
+        for i_side in qd.static(range(2)):
+            i_j = i_l_a if qd.static(i_side == 0) else i_l_b
+            i_l_joint = -1
+            if i_j >= 0:
+                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                i_d = dyn_info.joints.dof_start[I_j]
+                for i_l in range(n_links):
+                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                    if dyn_info.links.dof_start[I_l] <= i_d < dyn_info.links.dof_end[I_l]:
+                        i_l_joint = i_l
+                        break
+            if qd.static(i_side == 0):
+                i_l_a = i_l_joint
+            else:
+                i_l_b = i_l_joint
+    return i_l_a, i_l_b
+
+
+@qd.func
 def func_wakeup_island(
     i_island: int,
     i_b: int,
@@ -411,10 +440,12 @@ def kernel_update_heterogeneous_links_vgeom(
     links_vgeom_end: qd.types.ndarray(),
     # Quadrants variables
     dyn_info: array_class.DynInfo,
+    rigid_config: qd.template(),
 ):
     """Update per-environment links vgeom for heterogeneous entities."""
     _B = links_vgeom_start.shape[0]
 
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
         dyn_info.links.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
         dyn_info.links.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
@@ -433,10 +464,12 @@ def kernel_update_heterogeneous_link_info(
     links_inertial_i: qd.types.ndarray(),
     # Quadrants variables
     dyn_info: array_class.DynInfo,
+    rigid_config: qd.template(),
 ):
     """Update per-environment link info for heterogeneous entities."""
     _B = links_geom_start.shape[0]
 
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
         dyn_info.links.geom_start[i_l, i_b] = links_geom_start[i_b]
         dyn_info.links.geom_end[i_l, i_b] = links_geom_end[i_b]
@@ -938,12 +971,9 @@ def func_apply_link_external_wrench(
 def func_clear_external_force(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
-    n_links = dyn_state.links.pos.shape[0]
-    _B = dyn_state.links.pos.shape[1]
-
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
@@ -951,21 +981,6 @@ def func_clear_external_force(
 # --------------------------------------------------------------------------------------
 # Render transform kernels
 # --------------------------------------------------------------------------------------
-
-
-@qd.kernel(fastcache=True)
-def kernel_bit_reduction(tensor: qd.Tensor) -> qd.i32:
-    flag = qd.i32(0)
-    for i in range(tensor.shape[0]):
-        qd.atomic_or(flag, tensor[i])
-    return flag
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_zero(envs_idx: qd.types.ndarray(), tensor: qd.Tensor):
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        tensor[i_b] = 0
 
 
 @qd.func
@@ -1003,12 +1018,6 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
     if qd.static(cond):
         field[I] = value
     return field[I] if qd.static(cond) else value
-
-
-@qd.func
-def func_check_index_range(idx: qd.i32, min: qd.i32, max: qd.i32, cond: qd.template()):
-    # Conditionally check if the index is in the range [min, max) to save computational cost
-    return (idx >= min and idx < max) if qd.static(cond) else True
 
 
 @qd.kernel(fastcache=True)

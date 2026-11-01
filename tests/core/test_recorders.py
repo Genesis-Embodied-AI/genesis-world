@@ -9,7 +9,7 @@ import av
 import genesis as gs
 from genesis.utils.image_exporter import as_grayscale_image
 
-from ..utils.assertions import assert_allclose, rgb_array_to_png_bytes
+from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 
 
 @pytest.fixture
@@ -249,7 +249,10 @@ def test_file_writers(tmp_path):
     timings = scene.timings
     assert timings["physics"] > 0.0 and timings["recorders"] > 0.0
     assert timings["sensors"] >= timings[f"sensors/{type(contact_sensor).__name__}"] > 0.0
-    assert timings["total"] >= sum(time for phase, time in timings.items() if phase != "total" and "/" not in phase)
+    assert timings["step"] >= sum(
+        time for phase, time in timings.items() if phase not in ("step", "period") and "/" not in phase
+    )
+    assert timings["period"] > 0.0
 
     scene.stop_recording()
 
@@ -283,9 +286,21 @@ def test_file_writers(tmp_path):
     assert_allclose(data["scale"], 0.5, tol=gs.EPS)
     assert len(data["timestamp"]) == STEPS + 1
 
+    # A step a pre-step callback vetoes leaves no trace, and the next step measures its period from the last one that
+    # advanced, the vetoed one in between included
+    timings = scene.timings
+    is_paused = True
+    scene.register_pre_step_callback(lambda: is_paused)
+    scene.step()
+    assert scene.timings.keys() == timings.keys()
+    assert_equal(list(scene.timings.values()), list(timings.values()))
+    is_paused = False
+    scene.step()
+    assert scene.timings["period"] > timings["step"] > 0.0
+
 
 @pytest.mark.required
-def test_error_handling(tmp_path):
+def test_error_handling(tmp_path, caplog):
     scene = gs.Scene(
         show_viewer=False,
     )
@@ -361,8 +376,11 @@ def test_error_handling(tmp_path):
         scene.step()
     with pytest.raises(gs.GenesisException, match="Unsupported data type"):
         scene.step()
-    # A reset restarts the recorders that did not fail
-    scene.reset()
+    # A reset leaves the recorders that failed out, and the others keep recording through it
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        scene.reset()
+    assert len(caplog.records) == 0
     scene.step()
     scene.step()
 

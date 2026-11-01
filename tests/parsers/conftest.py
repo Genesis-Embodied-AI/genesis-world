@@ -30,7 +30,8 @@ except ImportError:
 def mesh_path(mesh_file):
     path = os.path.join(get_assets_dir(), mesh_file)
     if not os.path.exists(path):
-        path = os.path.join(get_hf_dataset(pattern=mesh_file), mesh_file)
+        # Fetch the files sharing the name of the mesh, such as the material library of an OBJ
+        path = os.path.join(get_hf_dataset(pattern=f"{os.path.splitext(mesh_file)[0]}.*"), mesh_file)
     return path
 
 
@@ -385,8 +386,13 @@ def compare_mesh_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float
 
 def build_mjcf_scene(xml_path: str, scale: float):
     """Build a MJCF scene from its file path."""
-    # Create MJCF scene
-    mjcf_scene = gs.Scene()
+    # The scene is only built to compare the parsed model, which does not depend on collision detection, whose kernels
+    # take most of the time spent building a scene.
+    mjcf_scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+    )
 
     mjcf_scene.add_entity(
         gs.morphs.MJCF(
@@ -414,8 +420,11 @@ def build_usd_scene(
     show_viewer: bool = False,
 ):
     """Build a USD scene from its file path."""
-    # Create USD scene
+    # See build_mjcf_scene for collision detection.
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
         show_viewer=show_viewer,
     )
 
@@ -452,7 +461,12 @@ def build_usd_scene(
 
 def build_mesh_scene(mesh_file: str, scale: float):
     """Build a mesh scene from its file path."""
-    mesh_scene = gs.Scene()
+    # See build_mjcf_scene for collision detection.
+    mesh_scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+    )
     mesh_morph = gs.morphs.Mesh(
         file=mesh_file,
         scale=scale,

@@ -1,16 +1,23 @@
+import os
 from io import BytesIO
 from urllib import request
+from urllib.parse import unquote
+
+import numpy as np
 
 import DracoPy
-import numpy as np
 import pygltflib
 import trimesh
 from PIL import Image
 
 import genesis as gs
 
-from . import mesh as mu
 from . import geom as gu
+from . import mesh as mu
+from .cache import OwnedCache
+
+# Images of the glTF files, decoded once for all the meshes built from them, and kept as long as any of them lives
+_GLB_IMAGES_CACHE = OwnedCache()
 
 
 ctype_to_numpy = {
@@ -38,12 +45,6 @@ alpha_modes = {
     "MASK": 1,
     "BLEND": 2,
 }
-
-
-def uri_to_PIL(data_uri):
-    with request.urlopen(data_uri) as response:
-        data = response.read()
-    return BytesIO(data)
 
 
 def get_glb_bufferview_data(glb, buffer_view):
@@ -86,16 +87,53 @@ def get_glb_data_from_accessor(glb, accessor_index):
     return array
 
 
-def get_glb_image(glb, image_index, image_type=None):
-    if image_index is not None:
-        image = Image.open(uri_to_PIL(glb.images[image_index].uri))
-        if image_type is not None:
-            image = image.convert(image_type)
-        return mu.PIL_to_array(image)
-    return None
+def get_glb_image(glb, image_index, images, image_type=None):
+    """Return an image of a glTF file as an array, or None if no image is given.
+
+    'images' collects the images a parse of the file reads, by their key in the cache of the decoded images, for the
+    meshes it builds to own them (see 'parse_mesh_glb'). An image collected this way is decoded unless the meshes of a
+    former parse still own it, and is read-only because every mesh owning it shares it. With no 'images', the image is
+    decoded anew. 'image_type' is the mode of PIL the image is converted to, if any.
+    """
+    if image_index is None:
+        return None
+    # An image is stored in a buffer view of the binary chunk, inline as a data URL, or in a file next to the asset
+    glb_image = glb.images[image_index]
+    image_path = None
+    if glb_image.bufferView is None and not glb_image.uri.startswith("data:"):
+        image_path = os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri))
+    if images is None:
+        return _decode_glb_image(glb, glb_image, image_path, image_type)
+    # An image stored in a file of its own changes along with that file, whatever the glTF file does
+    image_mtime = None if image_path is None else os.path.getmtime(image_path)
+    key = (glb.path, os.path.getmtime(glb.path), image_index, image_type, image_mtime)
+    image_array = _GLB_IMAGES_CACHE.find(key)
+    if image_array is None:
+        image_array = _decode_glb_image(glb, glb_image, image_path, image_type)
+        image_array.flags.writeable = False
+    images[key] = image_array
+    return image_array
 
 
-def parse_glb_material(glb, material_index, surface):
+def _decode_glb_image(glb, glb_image, image_path, image_type):
+    """Decode an image of a glTF file, read from 'image_path' if given, converted to a mode of PIL if one is given."""
+    if image_path is not None:
+        image_file = image_path
+    elif glb_image.bufferView is not None:
+        buffer_view = glb.bufferViews[glb_image.bufferView]
+        byte_offset = buffer_view.byteOffset or 0
+        buffer_data = get_glb_bufferview_data(glb, buffer_view)
+        image_file = BytesIO(buffer_data[byte_offset : byte_offset + buffer_view.byteLength])
+    else:
+        with request.urlopen(glb_image.uri) as response:
+            image_file = BytesIO(response.read())
+    image = Image.open(image_file)
+    if image_type is not None:
+        image = image.convert(image_type)
+    return mu.PIL_to_array(image)
+
+
+def parse_glb_material(glb, material_index, surface, images=None):
     # parse images
     color_texture = None
     opacity_texture = None
@@ -116,7 +154,7 @@ def parse_glb_material(glb, material_index, surface):
         texture = glb.textures[material.normalTexture.index]
         if material.normalTexture.texCoord is not None:
             uvs_used = material.normalTexture.texCoord
-        normal_image = get_glb_image(glb, texture.source)
+        normal_image = get_glb_image(glb, texture.source, images)
         if normal_image is not None:
             normal_texture = mu.create_texture(normal_image, None, "linear")
 
@@ -125,7 +163,7 @@ def parse_glb_material(glb, material_index, surface):
         texture = glb.textures[material.occlusionTexture.index]
         if material.occlusionTexture.texCoord is not None:
             uvs_used = material.occlusionTexture.texCoord
-        occlusion_image = get_glb_image(glb, texture.source)
+        occlusion_image = get_glb_image(glb, texture.source, images)
         if occlusion_image is not None:
             occlusion_texture = mu.create_texture(occlusion_image, None, "linear")
 
@@ -144,7 +182,7 @@ def parse_glb_material(glb, material_index, surface):
             if pbr_texture.metallicRoughnessTexture.texCoord is not None:
                 uvs_used = pbr_texture.metallicRoughnessTexture.texCoord
 
-            combined_image = get_glb_image(glb, texture.source)
+            combined_image = get_glb_image(glb, texture.source, images)
             if combined_image is not None:
                 if combined_image.ndim == 2:
                     roughness_image = combined_image
@@ -175,7 +213,7 @@ def parse_glb_material(glb, material_index, surface):
                     f"Mesh file `{glb.path}` uses 'KHR_texture_basisu' extension for supercompression of texture "
                     "images, which is unsupported. Ignoring texture."
                 )
-            color_image = get_glb_image(glb, texture.source, "RGBA")
+            color_image = get_glb_image(glb, texture.source, images, image_type="RGBA")
 
         # parse color
         color_factor = None
@@ -191,7 +229,7 @@ def parse_glb_material(glb, material_index, surface):
             texture = extension_material["diffuseTexture"]
             if texture.get("texCoord") is not None:
                 uvs_used = texture["texCoord"]
-            color_image = get_glb_image(glb, texture.get("index"), "RGBA")
+            color_image = get_glb_image(glb, texture.get("index"), images, image_type="RGBA")
 
         color_factor = None
         if "diffuseFactor" in extension_material:
@@ -224,7 +262,7 @@ def parse_glb_material(glb, material_index, surface):
             base_owns_uvs = color_texture is not None and not color_texture.is_black and color_texture.requires_uv
             if material.emissiveTexture.texCoord is not None and not base_owns_uvs:
                 uvs_used = material.emissiveTexture.texCoord
-            emissive_image = get_glb_image(glb, texture.source, "RGB")
+            emissive_image = get_glb_image(glb, texture.source, images, image_type="RGB")
 
         emissive_factor = None
         if material.emissiveFactor is not None:
@@ -305,7 +343,6 @@ def parse_glb_tree(glb, node_index):
 def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
     glb = pygltflib.GLTF2().load(path)
     assert glb is not None
-    glb.convert_images(pygltflib.ImageFormat.DATAURI)
     glb.path = path
 
     glb_scene = glb.scene or 0
@@ -317,6 +354,8 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
 
     mesh_infos = mu.MeshInfoGroup()
     materials = {}
+    # The images each material reads, by their key in the cache of the decoded images (see 'get_glb_image')
+    materials_images = {}
     is_visual_overwritten = surface.texture is not None
 
     for i_node, (mesh_index, mesh_transform) in enumerate(mesh_list):
@@ -327,8 +366,9 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
             if primitive.material is not None:
                 material, uv_used, material_name = materials.get(primitive.material, (None, 0, ""))
                 if material is None:
+                    material_images = materials_images.setdefault(primitive.material, {})
                     material, uv_used, material_name = materials.setdefault(
-                        primitive.material, parse_glb_material(glb, primitive.material, surface)
+                        primitive.material, parse_glb_material(glb, primitive.material, surface, material_images)
                     )
             else:
                 material, uv_used, material_name = surface.model_copy(), 0, ""
@@ -412,6 +452,10 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
                 mesh_info.set_property(surface=material, metadata=metadata)
             mesh_info.append(points, triangles, normals, uvs)
     meshes = mesh_infos.export_meshes(scale=scale, is_mesh_zup=is_mesh_zup)
-    for mesh in meshes:
+    # The meshes come in the order of their groups, each mesh owning the images of its material alone
+    for group_idx, mesh in zip(mesh_infos.infos, meshes):
         mesh.metadata["is_visual_overwritten"] = is_visual_overwritten
+        material_idx = group_idx if group_by_material else group_idx[1]
+        for key, image_array in materials_images.get(material_idx, {}).items():
+            _GLB_IMAGES_CACHE.own(mesh, key, image_array)
     return meshes

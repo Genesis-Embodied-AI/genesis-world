@@ -201,8 +201,6 @@ def test_hanging_rigid_cable(show_viewer, tol):
     links_quat_0 /= np.linalg.norm(links_quat_0, axis=-1, keepdims=True)
 
     robot.set_dofs_position(robot.get_dofs_position())
-    if show_viewer:
-        scene.visualizer.update()
     for _ in range(100):
         scene.step()
 
@@ -216,7 +214,6 @@ def test_hanging_rigid_cable(show_viewer, tol):
     assert_allclose(links_quat_err, 0.0, tol=1e-3)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.parametrize("primitive_type", ["box", "sphere"])
 @pytest.mark.parametrize("precision", ["64"])
 def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):

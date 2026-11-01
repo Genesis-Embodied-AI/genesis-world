@@ -1,21 +1,22 @@
 import ctypes
 import os
 import platform
+import shutil
 import subprocess
 import sys
-import shutil
 import tempfile
 from multiprocessing import Process, Queue
 
-import igl
 import numpy as np
+
+import igl
 import trimesh
 
 import genesis as gs
 
 from . import geom as gu
-from . import mesh as msu
 from . import misc as miu
+from .cache import get_ptc_cache
 
 # Make sure ParticleMesherPy shared libary can be found in search path
 LD_LIBRARY_PATH = os.path.join(miu.get_src_dir(), "ext/ParticleMesher/ParticleMesherPy")
@@ -50,13 +51,18 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
     """
     assert sampler in ("random", "regular")
 
-    # compute file name via hashing for caching
-    cache = msu.get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler)
+    # The particles the random sampler draws follow the state of the global generator, which 'gs.init' seeds and the
+    # sampling advances. An entry is therefore keyed on the state the sampling starts from and holds the state it ends
+    # at, which a hit restores, so that a run draws exactly what it would draw without the cache.
+    random_state = np.random.get_state() if sampler == "random" else None
+    cache = get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler, random_state)
 
-    # loading pre-computed cache if available
-    positions = cache.load()
-    if positions is not None:
+    entry = cache.load()
+    if entry is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
+        positions, random_state_end = entry
+        if random_state_end is not None:
+            np.random.set_state(random_state_end)
         return positions
 
     with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
@@ -68,7 +74,7 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
         sd, *_ = igl.signed_distance(positions, mesh.vertices, mesh.faces)
         positions = positions[sd < 0.0]
 
-        cache.save(positions)
+        cache.save((positions, np.random.get_state() if sampler == "random" else None))
 
     return positions
 
@@ -84,8 +90,8 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
     if not (sys.platform == "linux" and platform.machine() == "x86_64"):
         gs.raise_exception(f"Physics-based particle sampler '{sampler}' is only supported on Linux x86.")
 
-    # compute file name via hashing for caching
-    cache = msu.get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler)
+    # The physics-based sampler draws nothing from the global generator, which its entries leave out of their key
+    cache = get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler, None)
 
     # loading pre-computed cache if available
     positions = cache.load()
@@ -171,7 +177,9 @@ def _box_to_particles(p_size, pos, size, sampler):
 
     if sampler == "random":
         n_particles = n_particles_3D(p_size, size)
-        positions = np.random.uniform(low=lower, high=upper, size=(n_particles, 3))
+        # The draws are scaled by separate numpy operations, each rounded exactly, so that every platform samples the
+        # same positions. The compiled scaling of 'np.random.uniform' rounds differently from one platform to another.
+        positions = lower + np.random.random((n_particles, 3)) * (upper - lower)
 
     elif sampler == "regular":
         n_x = n_particles_1D(p_size, size[0])

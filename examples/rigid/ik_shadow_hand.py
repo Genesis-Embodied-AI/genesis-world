@@ -75,6 +75,8 @@ def main():
     r1 = 0.1
     r2 = 0.13
 
+    # The poses follow the target along a continuous path, so they are shown at the pace of the simulation
+    rate = gs.tools.Rate(1.0 / scene.dt)
     for i in range(100):
         index_finger_pos = center + np.array([np.cos(i / 90 * np.pi), np.sin(i / 90 * np.pi), 0]) * r1
         middle_finger_pos = center + np.array([np.cos(i / 90 * np.pi), np.sin(i / 90 * np.pi), 0]) * r2
@@ -90,7 +92,8 @@ def main():
         )
 
         robot.set_qpos(qpos)
-        scene.visualizer.update(force=True)
+        if args.vis:
+            rate.sleep()
 
 
 if __name__ == "__main__":

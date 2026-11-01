@@ -1,10 +1,7 @@
-import hashlib
-import marshal
+import inspect
 import math
 import os
-import pickle as pkl
-from collections import OrderedDict
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 
 import numpy as np
@@ -20,28 +17,19 @@ from PIL import Image
 import genesis as gs
 
 from . import geom as gu
-from .misc import (
+from .cache import (
+    OwnedCache,
     SizeCappedCache,
-    get_assets_dir,
-    get_cvx_cache_dir,
-    get_exr_cache_dir,
-    get_gnd_cache_dir,
-    get_gsd_cache_dir,
-    get_ptc_cache_dir,
-    get_remesh_cache_dir,
-    get_src_dir,
-    get_tet_cache_dir,
-    get_usd_cache_dir,
-    get_wt_cache_dir,
-    get_wth_cache_dir,
+    get_cvx_cache,
+    get_exr_path,
+    get_hashkey,
+    get_wt_cache,
+    get_wth_cache,
     register_cache_clear,
 )
+from .misc import get_assets_dir, get_src_dir, unique_rows
 
 MESH_REPAIR_ERROR_THRESHOLD = 0.01
-# Largest coordinate discrepancy, as a fraction of the bounding-box diagonal, under which two meshes are considered
-# identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
-# magnitude above the last-significant-digit noise separating two exports of the same model.
-MESH_CACHE_MATCH_RTOL = 1e-6
 # Vertex welding quantum: co-located vertices are authored with identical coordinates, so a tight absolute quantum
 # absorbs sub-nanometer parsing noise while keeping genuinely distinct vertices separate.
 VERT_WELD_QUANTIZE_FACTOR = 1e-8
@@ -49,11 +37,9 @@ Y_UP_TRANSFORM = np.asarray(  # translation on the bottom row
     [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], dtype=np.float32
 )
 DEFAULT_PLANE_TEXTURE_PATH = "textures/checker.png"  # use checkerboard texture by default
-
-# Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
-WT_CACHE_VERSION = 7
-# Bumped when the wall-thickness estimate changes for a fixed (mesh, quantile): forces a cache miss on stale entries.
-WTH_CACHE_VERSION = 1
+# The GPU interpolates the attributes of a triangle in low precision, so a triangle hundreds of meters wide makes the
+# edges of its texture flicker and shift under a rounding change of the camera pose. Cells of this size keep them still.
+PLANE_MAX_CELL_SIZE = 50.0
 
 
 def color_f32_to_u8(color) -> np.ndarray:
@@ -66,6 +52,36 @@ def color_u8_to_f32(color) -> np.ndarray:
 
 def glossiness_to_roughness(glossiness: float) -> float:
     return (2 / (glossiness + 2)) ** (1.0 / 4.0)
+
+
+def get_signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
+    """Compute the volume a closed triangle mesh encloses, positive when its faces wind outward.
+
+    'verts' holds the positions of the vertices and 'faces' the indices of the vertices of each triangle. The volume is
+    the sum of the signed volumes of the tetrahedra each face spans with the centroid of the vertices (divergence
+    theorem).
+    """
+    # The volume is computed alone, which spares the division by the volume that the center of mass of a mesh
+    # enclosing no volume would require. The vertices are centered first: the volume of a closed mesh does not depend on
+    # its position, while the products of coordinates far from the origin cancel at the scale of those coordinates.
+    tris = (verts - verts.mean(axis=0))[faces]
+    return np.einsum("ij,ij->", tris[:, 0], np.cross(tris[:, 1], tris[:, 2])) / 6.0
+
+
+def convex_hull(tmesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Compute the convex hull of a mesh, with its faces wound outward unless the vertices are coplanar.
+
+    The winding of a hull is repaired from the sign of the volume it encloses, which a flat hull does not have, so a
+    hull of coplanar vertices keeps the winding of each face as qhull computed it. The vertices are coplanar when the
+    thickness of their cloud relative to its extent is below the tolerance trimesh merges vertices with, since the
+    rounding of the coordinates alone already spreads the vertices of a flat mesh above machine precision.
+    """
+    # Fewer than 4 vertices enclose no volume
+    is_flat = len(tmesh.vertices) < 4
+    if not is_flat:
+        singular_values = np.linalg.svd(tmesh.vertices - tmesh.vertices.mean(axis=0), compute_uv=False)
+        is_flat = singular_values[-1] <= trimesh.tol.merge * singular_values[0]
+    return trimesh.convex.convex_hull(tmesh, repair=not is_flat)
 
 
 def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float = 0.25) -> float:
@@ -94,6 +110,9 @@ def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float = 0
     mesh = trimesh.Trimesh(verts, faces, process=False)
     if not mesh.is_watertight:
         gs.raise_exception("Wall-thickness estimation requires a watertight mesh.")
+    # A face of no area has no normal to cast a ray along, and a ray hitting it divides by its area, so the faces of no
+    # area are left out of the probe, the surface they cover being none
+    mesh.update_faces(mesh.nondegenerate_faces())
     diag = np.linalg.norm(verts.max(axis=0) - verts.min(axis=0))
     stride = max(1, len(faces) // 1000)
     centers = mesh.triangles_center[::stride]
@@ -179,170 +198,47 @@ def get_asset_path(file):
     return os.path.join(get_src_dir(), "assets", file)
 
 
-def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
-    # The grid is fully determined by the mesh plus the resolved per-axis resolution and cell size, so the key is
-    # built from those rather than the material defaults: the resolution now also depends on wall thickness, so the
-    # defaults no longer identify the grid. Schema tag bumped when the on-disk SDF layout changes (e.g. scalar ->
-    # per-axis cell size); forces a cache miss on stale entries without manually clearing the cache.
-    schema = "v3-res-keyed"
-    hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema)
-    return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
+@wraps(trimesh.load, assigned=())
+def load_trimesh(*args, skip_materials_on_failure=False, **kwargs):
+    """Load a mesh file through 'trimesh.load', reading by default the files it references wherever they are on disk.
 
-
-def get_gnd_path(
-    name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
-):
-    hashkey = get_hashkey(
-        name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
-    )
-    return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
-
-
-def get_cvx_cache(verts, faces, coacd_options):
-    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__)
-
-
-def get_ptc_cache(verts, faces, p_size, sampler):
-    return MeshCache(get_ptc_cache_dir(), "ptc", verts, faces, p_size, sampler)
-
-
-def get_tet_cache(verts, faces, tet_cfg):
-    return MeshCache(get_tet_cache_dir(), "tet", verts, faces, tet_cfg)
-
-
-def get_remesh_cache(verts, faces, edge_len_abs, edge_len_ratio, fix):
-    return MeshCache(get_remesh_cache_dir(), "rm", verts, faces, edge_len_abs, edge_len_ratio, fix)
-
-
-def get_wt_cache(verts, faces, aggressiveness):
-    return MeshCache(get_wt_cache_dir(), "wt", verts, faces, aggressiveness, WT_CACHE_VERSION)
-
-
-def get_wth_cache(verts, faces, quantile):
-    return MeshCache(get_wth_cache_dir(), "wth", verts, faces, quantile, WTH_CACHE_VERSION)
-
-
-def get_exr_path(file_path):
-    hashkey = get_hashkey(Path(file_path))
-    return os.path.join(get_exr_cache_dir(), f"{hashkey}.exr")
-
-
-def get_usd_zip_path(file_path):
-    hashkey = get_hashkey(Path(file_path))
-    return os.path.join(get_usd_cache_dir(), "zip", hashkey)
-
-
-def get_usd_bake_path(file_path):
-    hashkey = get_hashkey(Path(file_path))
-    return os.path.join(get_usd_cache_dir(), "bake", hashkey)
-
-
-def get_hashkey(*args):
-    # Containers are replaced by the tuples of their items, sorted for sets and for dicts other than OrderedDict since
-    # equal ones may iterate in different orders (string hashes are salted per process). Items are replaced before their
-    # container, so that sorting compares canonical representations, which order items of any type.
-    values, nodes = [], [(args, False)]
-    while nodes:
-        node, is_expanded = nodes.pop()
-        if is_expanded:
-            items = [values.pop() for _ in range(len(node))]
-            if isinstance(node, (set, frozenset)) or (isinstance(node, dict) and not isinstance(node, OrderedDict)):
-                items.sort(key=repr)
-            values.append(tuple(items))
-        elif isinstance(node, (dict, list, tuple, set, frozenset)):
-            nodes.append((node, True))
-            nodes.extend((item, False) for item in (node.items() if isinstance(node, dict) else node))
-        else:
-            values.append(node)
-
-    hasher = hashlib.sha256()
-    for arg in (*values[0], gs.__version__.encode()):
-        if isinstance(arg, Path):
-            file_stats = arg.stat()
-            arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)
-        if isinstance(arg, str):
-            arg = arg.encode()
-        elif not isinstance(arg, bytes):
-            try:
-                arg = bytes(memoryview(arg))
-            except TypeError:
-                arg = marshal.dumps(arg)
-        hasher.update(arg)
-    return hasher.hexdigest()
-
-
-class MeshCache:
-    """On-disk cache of data derived from a mesh, keyed on its geometry up to the noise of a re-export.
-
-    Exporting the same model twice from an authoring tool perturbs its coordinates in the last significant digits,
-    which changes any exact hash of them and forces every derived artifact to be recomputed from scratch. Rounding
-    the coordinates onto a grid before hashing does not fix this: a coordinate lying near a grid boundary changes
-    bucket under an arbitrarily small perturbation, and a single such coordinate out of the tens of thousands of a
-    mesh already changes the key. Entries are therefore grouped into buckets keyed on what is exactly reproducible -
-    the vertex count, the face connectivity and the generation parameters - and a lookup that misses the exact vertex
-    key scans its bucket, accepting the first candidate matching within 'MESH_CACHE_MATCH_RTOL'. Both arms compare
-    the vertices, so a hit is always verified rather than inferred from a key.
-
-    An entry stores its reference vertices ahead of the payload in the same file, so the scan deserializes only that
-    leading record for the candidates it rejects.
+    trimesh refuses a referenced file (glTF buffer, OBJ material library, texture) whose resolved path leaves the folder
+    of the mesh file. The Hugging Face cache stores every file as a symlink to a blob elsewhere, and assets commonly
+    reference '../textures/...', so the default resolver of a file path accepts any path, at the cost of letting an
+    asset read any file on disk. A resolver given by the caller is used as is.
 
     Parameters
     ----------
-    cache_dir : str
-        Directory holding the buckets of this kind of derived data.
-    ext : str
-        Extension of the cache files, identifying the kind of derived data they hold.
-    verts : np.ndarray
-        Vertices identifying the mesh, in the frame the derived data is expressed in. Pass them normalized whenever
-        the derived data is invariant to a transform, so that meshes related by one share a single entry.
-    faces : np.ndarray
-        Face connectivity identifying the mesh.
-    *params
-        Every generation parameter the derived data depends on. Must be exactly reproducible across runs.
+    *args, **kwargs
+        Arguments of 'trimesh.load', forwarded to it and to the loader of the format.
+    skip_materials_on_failure : bool
+        Whether to load the file again without its materials and textures, with a warning, when loading it with them
+        fails. A format whose trimesh loader cannot skip materials (e.g. COLLADA) fails again with the same error.
+
+    Returns
+    -------
+    trimesh.Trimesh | trimesh.Scene
+        The loaded geometry, a mesh or a scene depending on the file and on 'force'.
     """
+    # Name the arguments, since the file and the resolver may each be passed either positionally or by keyword
+    load_args = inspect.signature(trimesh.load).bind(*args, **kwargs)
 
-    def __init__(self, cache_dir: str, ext: str, verts: np.ndarray, faces: np.ndarray, *params):
-        self._verts = np.ascontiguousarray(verts)
-        bucket_key = get_hashkey(len(self._verts), np.ascontiguousarray(faces), *params)
-        self._bucket_dir = os.path.join(cache_dir, bucket_key)
-        self._filename = f"{get_hashkey(self._verts)}.{ext}"
-
-    def load(self):
-        """Return the payload of the matching entry, or None if this bucket holds none."""
-        if not os.path.isdir(self._bucket_dir):
-            return None
-        atol = MESH_CACHE_MATCH_RTOL * np.linalg.norm(self._verts.max(axis=0) - self._verts.min(axis=0))
-        # Trying the exact key first keeps an unchanged asset from ever paying for the scan.
-        for filename in sorted(os.listdir(self._bucket_dir), key=lambda name: name != self._filename):
-            try:
-                with open(os.path.join(self._bucket_dir, filename), "rb") as file:
-                    # Each record needs its own unpickler: one reused across both would carry its memo from the
-                    # vertices into the payload and misread it.
-                    verts_ref = pkl.load(file)
-                    if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
-                        continue
-                    return pkl.load(file)
-            except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
-                gs.logger.info("Ignoring corrupted cache.")
-        return None
-
-    def save(self, payload) -> None:
-        """Store the payload as the entry of this mesh. It must not be None, which 'load' reserves for a miss."""
-        assert payload is not None
-        os.makedirs(self._bucket_dir, exist_ok=True)
-        with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            pkl.dump(self._verts, file, protocol=pkl.HIGHEST_PROTOCOL)
-            pkl.dump(payload, file, protocol=pkl.HIGHEST_PROTOCOL)
+    file_obj = load_args.arguments["file_obj"]
+    if load_args.arguments.get("resolver") is None and isinstance(file_obj, (str, Path)):
+        load_args.arguments["resolver"] = trimesh.resolvers.FilePathResolver(file_obj, allow_anywhere=True)
+    try:
+        return trimesh.load(*load_args.args, **load_args.kwargs)
+    except Exception as e:
+        if not skip_materials_on_failure:
+            raise
+        gs.logger.warning(f"Failed to load mesh '{file_obj}' with its materials, loading it without them: {e}")
+        load_args.arguments["kwargs"] = {**load_args.arguments.get("kwargs", {}), "skip_materials": True}
+        return trimesh.load(*load_args.args, **load_args.kwargs)
 
 
 def load_mesh(file):
     if isinstance(file, (str, Path)):
-        try:
-            return trimesh.load_mesh(file, force="mesh", skip_texture=False)
-        except Exception as e:
-            gs.logger.warning(f"Failed to load mesh with texture: {e}")
-            # try loading without texture data
-            return trimesh.load_mesh(file, force="mesh", skip_texture=True)
+        return load_trimesh(file, force="mesh", skip_materials_on_failure=True)
     return file
 
 
@@ -558,27 +454,35 @@ def postprocess_collision_geoms(
             coacd_options,
             watertighten,
         )
-        n_bytes = sum(g_info["mesh"].verts.nbytes + g_info["mesh"].faces.nbytes for g_info in cached)
+        # The normals the geoms built from the cache share are computed on it, the vertex normals from the face
+        # normals, so both count in what it holds
+        n_bytes = sum(
+            g_info["mesh"].verts.nbytes
+            + g_info["mesh"].faces.nbytes
+            + g_info["mesh"].trimesh.face_normals.nbytes
+            + g_info["mesh"].trimesh.vertex_normals.nbytes
+            for g_info in cached
+        )
         _COLLISION_GEOMS_CACHE.put(key, cached, n_bytes)
 
-    # Hand back per-entity geoms that share the cached geometry and its derived data (edges, vertex adjacency, inertia)
-    # with the template, but own their trimesh and surface. This keeps appearance per-entity (each entity gets an
-    # independent, e.g. randomized, collision color) while the heavy geometry is computed once and its arrays are
-    # shared. Edges and adjacency are always needed, so they are populated up front; inertia is queried lazily through
-    # the template (only entities that align their link frame need it) to avoid eager convex-hull work.
+    # Hand back per-entity geoms that share the arrays of the cached geometry, and the data derived from it since they
+    # have its hash (see 'Mesh.tmesh_hash'), but own their trimesh and surface. This keeps appearance per-entity (each
+    # entity gets an independent, e.g. randomized, collision color) while the heavy geometry is computed once.
     result = []
     for g_info in cached:
         template = g_info["mesh"]
         template_tmesh = template.trimesh
         mesh = gs.Mesh(
-            mesh=trimesh.Trimesh(vertices=template_tmesh.vertices, faces=template_tmesh.faces, process=False),
+            mesh=trimesh.Trimesh(
+                vertices=template_tmesh.vertices,
+                faces=template_tmesh.faces,
+                vertex_normals=template_tmesh.vertex_normals,
+                process=False,
+            ),
             surface=gs.surfaces.Collision(),
             uvs=template.uvs,
             metadata=template.metadata.copy(),
         )
-        mesh._unique_edges = template.get_unique_edges()
-        mesh._vert_adjacency = template.get_vert_adjacency()
-        mesh._inertial_source = template
         result.append({**g_info, "mesh": mesh})
     return result
 
@@ -634,13 +538,11 @@ def _postprocess_collision_geoms_impl(
             if g_info["type"] != gs.GEOM_TYPE.MESH:
                 continue
             if tmesh.is_winding_consistent and not tmesh.is_watertight:
-                tmesh_repaired = tmesh.copy()
-                tmesh_repaired.update_faces(tmesh_repaired.unique_faces())
-                if tmesh_repaired.volume < 0.0:
-                    tmesh_repaired.invert()
-                if abs(tmesh_repaired.volume) < gs.EPS:
+                volume_repaired = get_signed_volume(tmesh.vertices, tmesh.faces[tmesh.unique_faces()])
+                if abs(volume_repaired) < gs.EPS:
                     continue
-                if abs(abs(tmesh.volume / tmesh_repaired.volume) - 1.0) > MESH_REPAIR_ERROR_THRESHOLD:
+                volume = get_signed_volume(tmesh.vertices, tmesh.faces)
+                if abs(abs(volume / volume_repaired) - 1.0) > MESH_REPAIR_ERROR_THRESHOLD:
                     gs.logger.info(
                         "Collision mesh is not watertight and has ill-defined volume. It will be repaired by removing "
                         "duplicate faces."
@@ -660,8 +562,9 @@ def _postprocess_collision_geoms_impl(
             # Skip geometries that do not corresponds to mesh or have no enclosed volume
             if g_info["type"] != gs.GEOM_TYPE.MESH:
                 continue
-            cmesh = trimesh.convex.convex_hull(tmesh)
-            if abs(cmesh.volume) < gs.EPS:
+            cmesh = convex_hull(tmesh)
+            cmesh_volume = get_signed_volume(cmesh.vertices, cmesh.faces)
+            if abs(cmesh_volume) < gs.EPS:
                 continue
 
             # Fix mesh temporarily to make volume computation more reliable
@@ -669,18 +572,14 @@ def _postprocess_collision_geoms_impl(
                 tmesh = tmesh.copy()
                 tmesh.process(validate=True)
 
-            # Fix negative volume by inverting faces
-            if tmesh.volume < 0.0:
-                tmesh = tmesh.copy()
-                tmesh.invert()
-
-            # Compute volume approximation error between true geometry and its convex hull conservatively
+            # Compute volume approximation error between true geometry and its convex hull conservatively. The volume
+            # of a mesh wound inward is negative.
             if not tmesh.is_winding_consistent:
                 if not math.isinf(decompose_error_threshold):
                     geoms_must_decompose[i_g] = True
                     volume_err_max = float("inf")
-            elif abs(tmesh.volume) > gs.EPS:
-                volume_err = abs(cmesh.volume / abs(tmesh.volume) - 1.0)
+            elif abs(volume := get_signed_volume(tmesh.vertices, tmesh.faces)) > gs.EPS:
+                volume_err = abs(cmesh_volume / abs(volume) - 1.0)
                 if volume_err > decompose_error_threshold:
                     geoms_must_decompose[i_g] = True
                     volume_err_max = max(volume_err_max, volume_err)
@@ -810,11 +709,11 @@ def _postprocess_collision_geoms_impl(
                 volume_err = 0.0
             elif not tmesh.is_winding_consistent:
                 volume_err = float("inf")
-            elif abs(tmesh.volume) < gs.EPS:
+            elif abs(volume := get_signed_volume(tmesh.vertices, tmesh.faces)) < gs.EPS:
                 volume_err = 0.0
             else:
-                cmesh = trimesh.convex.convex_hull(tmesh)
-                volume_err = abs(cmesh.volume / abs(tmesh.volume) - 1.0)
+                cmesh = convex_hull(tmesh)
+                volume_err = abs(get_signed_volume(cmesh.vertices, cmesh.faces) / abs(volume) - 1.0)
             if volume_err > decompose_error_threshold:  # Note that 'inf' is not larger than 'inf'
                 tmeshes = convex_decompose(tmesh, coacd_options)
                 meshes = [
@@ -876,22 +775,62 @@ def _load_trimesh_scene_cached(path, group_by_material, mtime) -> "trimesh.Scene
     # exact same bytes for every entity. The result is keyed by file modification time so an edited asset is reloaded.
     # The returned scene is treated as an immutable template - callers copy each geometry out before applying scale or
     # surface - so it is never mutated and is safe to share across entities.
-    return trimesh.load(path, force="scene", group_material=group_by_material, process=False)
+    return load_trimesh(path, force="scene", group_material=group_by_material, process=False)
 
 
 register_cache_clear(_load_trimesh_scene_cached.cache_clear)
 
 
-def parse_mesh_trimesh(path, group_by_material, scale, is_mesh_zup, surface) -> "list[gs.Mesh]":
-    meshes: list[gs.Mesh] = []
-    scene = _load_trimesh_scene_cached(path, group_by_material, os.path.getmtime(path))
+# Meshes of a file brought to the z-up frame and scaled, kept as long as any mesh built from them lives
+_FILE_TMESHES_CACHE = OwnedCache()
+
+
+def _load_trimesh_geometries(path, group_by_material, scale, is_mesh_zup, mtime) -> "tuple[trimesh.Trimesh, ...]":
+    """Load the meshes of a file, brought to the z-up frame and scaled.
+
+    Their arrays are read-only, the meshes built from them sharing them (see 'Mesh.from_trimesh'), so that writing
+    into them raises rather than changing every one of those meshes.
+    """
+    scene = _load_trimesh_scene_cached(path, group_by_material, mtime)
+    tmeshes = []
     for tmesh in scene.geometry.values():
         if not isinstance(tmesh, trimesh.Trimesh):
             gs.raise_exception(f"Mesh type not supported: {path}")
-        mesh = gs.Mesh.from_trimesh(
-            mesh=tmesh, scale=scale, surface=surface, is_mesh_zup=is_mesh_zup, metadata={"mesh_path": path}
+        tmesh = tmesh.copy(include_cache=True)
+        if not is_mesh_zup:
+            tmesh.apply_transform(Y_UP_TRANSFORM.T)
+        tmesh.apply_scale(np.atleast_1d(scale))
+        # The transforms leave the normals stored in the file strided, which every trimesh wrapping them would copy back
+        # to contiguous (see 'Mesh.from_trimesh' for the cache read)
+        face_normals, vertex_normals = tmesh._cache["face_normals"], tmesh._cache["vertex_normals"]
+        if face_normals is not None:
+            tmesh.face_normals = np.ascontiguousarray(face_normals)
+        if vertex_normals is not None:
+            tmesh.vertex_normals = np.ascontiguousarray(vertex_normals)
+        for array in (tmesh.vertices, tmesh.faces, tmesh._cache["face_normals"], tmesh._cache["vertex_normals"]):
+            if array is not None:
+                array.flags.writeable = False
+        tmeshes.append(tmesh)
+    return tuple(tmeshes)
+
+
+def parse_mesh_trimesh(path, group_by_material, scale, is_mesh_zup, surface) -> "list[gs.Mesh]":
+    # The meshes of a file are processed once for all the entities instantiating it at one scale, which share them
+    key = (path, group_by_material, scale, is_mesh_zup, os.path.getmtime(path))
+    tmeshes = _FILE_TMESHES_CACHE.find(key)
+    if tmeshes is None:
+        tmeshes = _load_trimesh_geometries(*key)
+    meshes = [
+        gs.Mesh.from_trimesh(
+            mesh=tmesh,
+            surface=surface,
+            metadata={"mesh_path": path, "imported_as_zup": is_mesh_zup},
+            share_arrays=True,
         )
-        meshes.append(mesh)
+        for tmesh in tmeshes
+    ]
+    for mesh in meshes:
+        _FILE_TMESHES_CACHE.own(mesh, key, tmeshes)
     return meshes
 
 
@@ -986,7 +925,7 @@ def create_frame(
 
 def create_camera_frustum(camera, color):
     # camera
-    camera_mesh = trimesh.load(os.path.join(get_src_dir(), "assets", "meshes", "camera/camera.glb"), force="mesh")
+    camera_mesh = load_trimesh(os.path.join(get_src_dir(), "assets", "meshes", "camera/camera.glb"), force="mesh")
     camera_mesh.visual = camera_mesh.visual.to_color()
     camera_mesh.apply_translation([0.0, 0.0, 1.0])
     camera_mesh.apply_scale(0.05)
@@ -1329,19 +1268,16 @@ def create_plane(
     mesh.vertices[:, 2] -= thickness / 2
     mesh.vertices = gu.transform_by_R(mesh.vertices, gu.z_up_to_R(np.asarray(normal, dtype=np.float32)))
 
-    half_x, half_y = (plane_size[0] * 0.5, plane_size[1] * 0.5)
-    verts = np.array(
-        [
-            [-half_x, -half_y, 0.0],
-            [half_x, -half_y, 0.0],
-            [half_x, half_y, 0.0],
-            [-half_x, -half_y, 0.0],
-            [half_x, half_y, 0.0],
-            [-half_x, half_y, 0.0],
-        ],
-        dtype=np.float32,
-    )
-    faces = np.arange(6, dtype=np.int32).reshape(-1, 3)
+    # Grid of vertices spanning the plane, split in cells no larger than PLANE_MAX_CELL_SIZE (see its definition)
+    n_cells_x, n_cells_y = (math.ceil(size / PLANE_MAX_CELL_SIZE) for size in plane_size)
+    verts_x = np.linspace(-0.5 * plane_size[0], 0.5 * plane_size[0], n_cells_x + 1)
+    verts_y = np.linspace(-0.5 * plane_size[1], 0.5 * plane_size[1], n_cells_y + 1)
+    verts = np.zeros((n_cells_x + 1, n_cells_y + 1, 3), dtype=np.float32)
+    verts[..., 0], verts[..., 1] = np.meshgrid(verts_x, verts_y, indexing="ij")
+    verts = verts.reshape((-1, 3))
+    verts_idx = np.arange(len(verts), dtype=np.int32).reshape((n_cells_x + 1, n_cells_y + 1))
+    v00, v10, v11, v01 = verts_idx[:-1, :-1], verts_idx[1:, :-1], verts_idx[1:, 1:], verts_idx[:-1, 1:]
+    faces = np.stack((np.stack((v00, v10, v11), axis=-1), np.stack((v00, v11, v01), axis=-1)), axis=-2).reshape((-1, 3))
 
     if double_sided:
         # Add reversed faces for back-facing visibility
@@ -1353,22 +1289,8 @@ def create_plane(
     vmesh.vertices = gu.transform_by_R(vmesh.vertices, gu.z_up_to_R(np.asarray(normal, dtype=np.float32)))
 
     if texture_path is not None:
-        n_tile_x, n_tile_y = plane_size[0] / tile_size[0], plane_size[1] / tile_size[1]
-        uv_coords = np.array(
-            [
-                [0, 0],
-                [n_tile_x, 0],
-                [n_tile_x, n_tile_y],
-                [0, 0],
-                [n_tile_x, n_tile_y],
-                [0, n_tile_y],
-            ],
-            dtype=np.float32,
-        )
-        if double_sided:
-            # Duplicate UV coords for back faces
-            uv_coords = np.vstack([uv_coords, uv_coords])
-
+        # One texture tile per 'tile_size', counted from the corner of the plane. The back faces share the vertices.
+        uv_coords = (verts[:, :2] - verts[0, :2]) / tile_size
         vmesh.visual = trimesh.visual.TextureVisuals(
             uv=uv_coords,
             material=trimesh.visual.material.SimpleMaterial(
@@ -1455,8 +1377,8 @@ def merge_submeshes(verts_list, faces_list):
     # Weld by quantized position (see VERT_WELD_QUANTIZE_FACTOR). int64 is required: quantized metre-scale
     # coordinates overflow int32.
     quantized = np.round(stacked_verts / VERT_WELD_QUANTIZE_FACTOR).astype(np.int64)
-    _, unique_idx, remap = np.unique(quantized, axis=0, return_index=True, return_inverse=True)
-    # np.unique orders groups by quantized key; rank the first-occurrence indices to restore input order instead.
+    _, unique_idx, remap, _ = unique_rows(quantized)
+    # The groups come ordered by quantized position; rank the first-occurrence indices to restore input order instead.
     rank = np.empty(len(unique_idx), dtype=gs.np_int)
     rank[np.argsort(unique_idx)] = np.arange(len(unique_idx))
     remap = rank[remap]

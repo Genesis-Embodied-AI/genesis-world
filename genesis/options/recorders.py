@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import av
 from pydantic import BeforeValidator, Field, StrictBool
@@ -141,18 +141,19 @@ class TrajectoryFile(BaseFileWriterOptions):
     previous one, so recording slows the simulation only when the disk cannot keep up, and a crash keeps every completed
     chunk.
 
-    Exact mode records everything a step reads or writes: replay is bit-for-bit and the simulation resumes from any
-    frame. Compressed mode records the model parameters, configuration, velocities, accelerations, control inputs,
-    contacts and constraint forces. Its file is several times smaller, which matters for batched scenes, and a load
-    recomputes the poses of links and geoms, which may differ at the last bits.
+    Exact mode replays bit-for-bit, and the simulation resumes from any frame exactly as it ran, but recording slows the
+    simulation down significantly for large batch sizes. Minimal mode stores only the bare minimum state, which makes
+    its frames far smaller: everything else is recovered by running a full simulation step, and may differ at the last
+    bits, except the contacts of hibernated links, which are taken from the scene as it stood before the seek. A replay
+    that plays the frames in order from the first one in a freshly loaded scene is unaffected.
 
     Parameters
     ----------
     filename : str
         The '.gstraj' file to write.
-    exact : bool, optional
-        Whether to record in exact mode. If None, resolved based on the number of environments: exact for a single
-        environment, compressed for a batched scene, with a warning. Defaults to None.
+    mode : str, optional
+        What each frame records: 'exact' or 'minimal'. If None, exact if its frame stays within 4 MiB, minimal
+        otherwise. Defaults to None.
     chunk_size : int, optional
         Frames per chunk. Larger chunks compress better and seek slower, and a crash loses at most one. Defaults to 64.
     max_size : int, optional
@@ -162,7 +163,7 @@ class TrajectoryFile(BaseFileWriterOptions):
     """
 
     filename: PathType = Field(pattern=r"(?i).*\.gstraj$")
-    exact: StrictBool | None = None
+    mode: Literal["exact", "minimal"] | None = None
     chunk_size: PositiveInt = 64
     max_size: PositiveInt | None = 2**31
 

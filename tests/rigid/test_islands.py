@@ -64,8 +64,7 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
     assert constraint_solver.constraint_state.island.constraint_id.shape[0] >= constraint_solver.len_constraints
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     # The welded pair never touches, so only the equality edge couples them: without it the partition would split them
     # and the weld would be solved across two islands. A fixed body carries no dofs and joins no island. The
@@ -197,8 +196,13 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
 def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
     # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
-    # arms of the first env start lower, so its islands merge first.
+    # arms of the first env start lower, so its islands merge first. The arms start off mirror images, since their
+    # contact would otherwise have two directions of least penetration, and the elliptic friction cone holds them at
+    # rest against each other, where the pyramidal one lets them creep at a rate that differs between the twins.
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            friction_cone=gs.friction_cone.elliptic,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, -4.0, 1.5),
             camera_lookat=(1.5, 0.0, 0.8),
@@ -221,8 +225,8 @@ def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     )
     scene.build(n_envs=2)
     scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
-    dual_arm.set_dofs_position([[0.9, -0.9], [0.0, 0.0]])
-    dual_arm_welded.set_dofs_position([[0.9, -0.9], [0.0, 0.0]], dofs_idx_local=[6, 7])
+    dual_arm.set_dofs_position([[0.9, -0.8], [0.1, 0.0]])
+    dual_arm_welded.set_dofs_position([[0.9, -0.8], [0.1, 0.0]], dofs_idx_local=[6, 7])
     n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
 
     # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
@@ -245,8 +249,7 @@ def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_partition_track_changes(show_viewer, n_envs):
     # The partition is rebuilt every step, so it must track contacts forming (merge) and breaking (split).
     scene = gs.Scene(
@@ -287,7 +290,7 @@ def test_partition_track_changes(show_viewer, n_envs):
     assert_equal(qd_to_numpy(island_state.n_islands), 2)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("noslip_iterations", [0, 5])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
@@ -348,8 +351,7 @@ def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
     assert (scene.rigid_solver.get_dofs_velocity().abs() < 1e-4).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_islands_converge_independently(show_viewer, n_envs):
     # Each island converges on its own criterion: a 1 g die resting beside a Franka settles to the residual its own
     # inertia allows, whatever the arm beside it tolerates. CG converges gradually, so its exit is where this shows.
@@ -397,8 +399,8 @@ def test_islands_converge_independently(show_viewer, n_envs):
 def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     # enable_cooperative_constraint_kernels is bounded by get_gpu_core_count(), so faking extreme GPU saturation
     # (get_gpu_core_count -> 1) disables the cooperative kernels at 2 envs - a small-scale stand-in for the
-    # >get_gpu_core_count() env regime. With the monolith arm pinned, the seed factor + gradient come from the
-    # monolith body itself (see is_self_seeding in func_solve_init); a stale Mgrad drops the boxes through the floor.
+    # >get_gpu_core_count() env regime. With the monolith arm pinned, the seed factor + gradient come from the monolith
+    # body itself (see has_per_env_solve_seed in array_class.py). A stale Mgrad drops the boxes through the floor.
     import genesis.engine.solvers.rigid.rigid_solver as rigid_solver
     from genesis.utils.array_class import RigidSimStaticConfig
 
@@ -482,8 +484,7 @@ def test_pruning(show_viewer, n_envs):
         assert_allclose(box.get_pos()[..., 2], half, atol=5e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_hibernation_with_pruning(show_viewer, n_envs):
     # A convexified duck is a compound body whose many ground contacts pile into one (duck, plane) link-pair bucket,
     # so link-pair pruning collapses them into a logical permutation in contact_sort_idx. Islands read contacts through
@@ -583,8 +584,7 @@ def test_dof_length_scales_with_body_size(offset_hinge_box, mujoco_compatibility
     assert_allclose(dof_length[het_hinge.dof_start], np.repeat(hinge_scales, 2) * hinge_radius, tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_weld_coupling(show_viewer, n_envs):
     # box2 hangs from a weld onto the anchored box1 at a horizontal offset, never touching it. Without the equality
     # edge in the partition the two land in different islands and the weld is dropped, letting box2 free-fall.
@@ -679,7 +679,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(gs.morphs.Plane())
     box_force = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
@@ -734,96 +734,202 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
             pos=(8.0, 0.0, 0.1),
         )
     )
+    box_base_pos = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(9.0, 0.0, 0.1),
+        )
+    )
+    box_weld = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(11.0, 0.0, 0.5),
+        )
+    )
+    box_on_platform = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(10.0, 0.0, 0.35),
+        )
+    )
+    box_held_by_platform = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(10.0, 0.4, 0.6),
+        )
+    )
+    platform = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.3, 0.3, 0.1),
+            pos=(10.0, 0.0, 0.25),
+            fixed=True,
+        )
+    )
     scene.build(n_envs=n_envs)
 
     solver = scene.rigid_solver
+    solver.add_weld_constraint(box_weld.base_link_idx, plane.base_link_idx)
+    solver.add_weld_constraint(box_held_by_platform.base_link_idx, platform.base_link_idx)
 
-    def asleep(entity):
-        return qd_to_numpy(solver.dyn_state.entities.is_hibernated, entity.idx).all()
-
-    def z_of(entity):
-        return entity.get_pos()[..., 2]
+    # The forced box carries an armature while it sleeps, which its mass matrix must hold once, whatever the time spent
+    # asleep, when the force wakes it.
+    ARMATURE = 0.5
+    box_cforce.set_dofs_armature(ARMATURE)
 
     # Velocity/position control need PD gains to produce a force; index 2 of each free joint is the world-z dof.
     for box in (box_cvel, box_cpos):
         box.set_dofs_kp([0.0, 0.0, 400.0, 0.0, 0.0, 0.0])
         box.set_dofs_kv([40.0, 40.0, 40.0, 4.0, 4.0, 4.0])
 
+    # Semi-implicit Euler integration drops a box falling from rest by g * dt^2 * n * (n + 1) / 2 over n steps
     n_fall = 8
-    free_fall_drop = 0.5 * G * (n_fall * DT) ** 2
+    free_fall_drop = 0.5 * G * DT**2 * n_fall * (n_fall + 1)
 
     for _ in range(90):
         scene.step()
-    assert all(
-        map(asleep, (box_force, box_pos, box_vel, box_qpos, box_cforce, box_cvel, box_cpos, box_mass, box_armature))
-    )
+    # Every box sleeps, the plane and the platform aside
+    assert qd_to_numpy(solver.dyn_state.entities.is_hibernated, [box.idx for box in scene.entities[1:-1]]).all()
 
-    z0 = z_of(box_force)
+    z0 = box_force.get_pos()[..., 2]
     for _ in range(6):
         solver.apply_links_external_wrench([0.0, 0.0, 40.0], links_idx=box_force.base_link_idx)
         scene.step()
-    assert not asleep(box_force) and (z_of(box_force) > z0 + 0.02).all()
-    assert all(map(asleep, (box_pos, box_vel, box_qpos, box_cforce, box_cvel, box_cpos)))
+    assert (
+        not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_force.idx).all()
+        and (box_force.get_pos()[..., 2] > z0 + 0.02).all()
+    )
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated,
+        [box.idx for box in (box_pos, box_vel, box_qpos, box_cforce, box_cvel, box_cpos)],
+    ).all()
 
     box_pos.set_dofs_position([1.0, 0.0, 0.5, 0.0, 0.0, 0.0])
-    assert not asleep(box_pos)
-    z0 = z_of(box_pos)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_pos.idx).all()
+    # A body moved by a setter loses the contacts found at its previous pose, with their forces, while a body still
+    # asleep keeps those it rests on
+    assert not box_pos.get_contacts(is_padded=True)["valid_mask"].any()
+    assert_allclose(box_pos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
+    assert box_vel.get_contacts(is_padded=True)["valid_mask"].any()
+    assert (box_vel.get_links_net_contact_force()[..., 2] > 0.5 * box_vel.get_mass() * G).all()
+    z0 = box_pos.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
-    assert_allclose(z0 - z_of(box_pos), free_fall_drop, rtol=0.2)
-    assert all(map(asleep, (box_vel, box_qpos, box_cforce, box_cvel, box_cpos)))
+    assert_allclose(z0 - box_pos.get_pos()[..., 2], free_fall_drop, tol=tol)
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated,
+        [box.idx for box in (box_vel, box_qpos, box_cforce, box_cvel, box_cpos)],
+    ).all()
 
     box_vel.set_dofs_velocity([0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
-    assert not asleep(box_vel)
-    z0 = z_of(box_vel)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_vel.idx).all()
+    z0 = box_vel.get_pos()[..., 2]
     for _ in range(5):
         scene.step()
-    assert (z_of(box_vel) > z0 + 0.05).all()
-    assert all(map(asleep, (box_qpos, box_cforce, box_cvel, box_cpos)))
+    assert (box_vel.get_pos()[..., 2] > z0 + 0.05).all()
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_qpos, box_cforce, box_cvel, box_cpos)]
+    ).all()
 
     box_qpos.set_qpos([3.0, 0.0, 0.6, 1.0, 0.0, 0.0, 0.0])
-    assert not asleep(box_qpos)
-    z0 = z_of(box_qpos)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_qpos.idx).all()
+    assert not box_qpos.get_contacts(is_padded=True)["valid_mask"].any()
+    assert_allclose(box_qpos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
+    assert (box_base_pos.get_links_net_contact_force()[..., 2] > 0.5 * box_base_pos.get_mass() * G).all()
+    z0 = box_qpos.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
-    assert_allclose(z0 - z_of(box_qpos), free_fall_drop, rtol=0.2)
-    assert all(map(asleep, (box_cforce, box_cvel, box_cpos)))
+    assert_allclose(z0 - box_qpos.get_pos()[..., 2], free_fall_drop, tol=tol)
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
+    ).all()
 
-    z0 = z_of(box_cforce)
+    box_base_pos.set_pos([9.0, 0.0, 0.6])
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_base_pos.idx).all()
+    assert not box_base_pos.get_contacts(is_padded=True)["valid_mask"].any()
+    assert_allclose(box_base_pos.get_links_net_contact_force(), 0.0, tol=gs.EPS)
+    z0 = box_base_pos.get_pos()[..., 2]
+    for _ in range(n_fall):
+        scene.step()
+    assert_allclose(z0 - box_base_pos.get_pos()[..., 2], free_fall_drop, tol=tol)
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
+    ).all()
+
+    # A fixed link has no state to wake, but a box resting on it or welded to it wakes when it moves rather than float
+    # where it was. The weld pulls its box down faster than gravity alone, without overshooting the platform drop.
+    z0_platform = platform.get_pos()[..., 2]
+    z0_held = box_held_by_platform.get_pos()[..., 2]
+    platform.set_pos((10.0, 0.0, -0.15))
+    assert not qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_on_platform, box_held_by_platform)]
+    ).any()
+    z0 = box_on_platform.get_pos()[..., 2]
+    for _ in range(n_fall):
+        scene.step()
+    assert_allclose(z0 - box_on_platform.get_pos()[..., 2], free_fall_drop, tol=tol)
+    held_drop = z0_held - box_held_by_platform.get_pos()[..., 2]
+    assert ((free_fall_drop < held_drop) & (held_drop < z0_platform - platform.get_pos()[..., 2])).all()
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
+    ).all()
+
+    # A box held in the air by a weld falls once the weld is deleted, in the selected environment only
+    solver.delete_weld_constraint(box_weld.base_link_idx, plane.base_link_idx, envs_idx=0 if n_envs else None)
+    is_weld_selected = np.arange(max(n_envs, 1)) == 0
+    assert_equal(qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_weld.idx, keepdim=False), ~is_weld_selected)
+    z0 = box_weld.get_pos()[..., 2]
+    for _ in range(n_fall):
+        scene.step()
+    assert_allclose(z0 - box_weld.get_pos()[..., 2], is_weld_selected * free_fall_drop, tol=tol)
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
+    ).all()
+
+    z0 = box_cforce.get_pos()[..., 2]
     for _ in range(8):
         box_cforce.control_dofs_force([0.0, 0.0, 30.0, 0.0, 0.0, 0.0])
         scene.step()
-    assert not asleep(box_cforce) and (z_of(box_cforce) > z0 + 0.02).all()
-    assert all(map(asleep, (box_cvel, box_cpos)))
+    assert (
+        not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_cforce.idx).all()
+        and (box_cforce.get_pos()[..., 2] > z0 + 0.02).all()
+    )
+    mass = float(box_cforce.get_mass())
+    assert_allclose(box_cforce.get_dofs_velocity()[..., 2], 8 * DT * (30.0 - mass * G) / (mass + ARMATURE), tol=tol)
+    assert qd_to_numpy(solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cvel, box_cpos)]).all()
 
-    z0 = z_of(box_cvel)
+    z0 = box_cvel.get_pos()[..., 2]
     for _ in range(8):
         box_cvel.control_dofs_velocity([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
         scene.step()
-    assert not asleep(box_cvel) and (z_of(box_cvel) > z0 + 0.02).all()
-    assert asleep(box_cpos)
+    assert (
+        not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_cvel.idx).all()
+        and (box_cvel.get_pos()[..., 2] > z0 + 0.02).all()
+    )
+    assert qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_cpos.idx).all()
 
-    z0 = z_of(box_cpos)
+    z0 = box_cpos.get_pos()[..., 2]
     for _ in range(12):
         box_cpos.control_dofs_position([6.0, 0.0, 0.6, 0.0, 0.0, 0.0])
         scene.step()
-    assert not asleep(box_cpos) and (z_of(box_cpos) > z0 + 0.05).all()
+    assert (
+        not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_cpos.idx).all()
+        and (box_cpos.get_pos()[..., 2] > z0 + 0.05).all()
+    )
 
     # A body its controller holds at the target stays awake for as long as the hold lasts, since the actuation pass
     # wakes any sleeping link it actuates. It settles where the controller's stiffness carries its weight.
     for _ in range(40):
         scene.step()
-        assert not asleep(box_cpos)
-    assert_allclose(z_of(box_cpos), 0.6 - box_cpos.get_mass() * G / 400.0, atol=0.01)
+        assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_cpos.idx).all()
+    assert_allclose(box_cpos.get_pos()[..., 2], 0.6 - box_cpos.get_mass() * G / 400.0, atol=0.01)
 
     # A mass or an armature written moves the equilibrium a resting body found, so a body it is written on must wake
     # to settle into the new one. Both writes are made while the body sleeps, and the weight they land on is the
     # analytic one of a free body.
     MASS = 4.0
-    ARMATURE = 0.5
     invweight_before = solver.get_links_invweight(box_mass.base_link_idx)
     box_mass.set_mass(MASS)
-    assert not asleep(box_mass)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_mass.idx).all()
     assert_allclose(solver.get_links_invweight(box_mass.base_link_idx)[..., 0], 1.0 / MASS, tol=gs.EPS)
     assert ((invweight_before - solver.get_links_invweight(box_mass.base_link_idx)).abs() > 1e-3).all()
 
@@ -835,7 +941,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     invweight_before = box_armature.get_dofs_invweight()
     box_armature.set_dofs_armature([ARMATURE] * 6)
-    assert not asleep(box_armature)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_armature.idx).all()
     # An armature adds to the mass matrix without belonging to any link, so a translational degree of freedom of a
     # free body weighs the mass it carries plus the armature on it.
     mass_armature = float(box_armature.get_mass()) + ARMATURE
@@ -851,8 +957,7 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     # pass. The multi-free-body entity (offset clear of the boxes) checks per-component hibernation: its free bodies
     # sleep independently and disturbing one wakes only its island, which needs the wake/daisy chain to act per link
     # rather than per entity. ALL_VS_ALL exercises hibernation under the non-default traversal: it advects and skips
-    # hibernated-fixed pairs exactly like SAP, and the hibernated-vs-hibernated pairs it traverses instead of skipping
-    # are inert (both bodies frozen).
+    # the pairs of a sleeper against a fixed link or another sleeper exactly like SAP.
     GRAVITY = -9.81
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1059,7 +1164,11 @@ def test_hibernation_repartitioning(show_viewer, n_envs):
     # Full lifecycle of hibernation and the partition together: two boxes sleep apart (2 islands); moving one onto the
     # other wakes it, it collides, and the stack sleeps as one merged island; moving a box off the hibernated stack
     # must wake the WHOLE merged island (else the stale daisy chain keeps re-connecting both); they then split back.
+    GRAVITY = -9.81
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, GRAVITY),
+        ),
         rigid_options=gs.options.RigidOptions(
             use_hibernation=True,
         ),
@@ -1124,6 +1233,14 @@ def test_hibernation_repartitioning(show_viewer, n_envs):
     assert asleep(box1_idx)
     assert asleep(box2_idx)
     assert_equal(qd_to_numpy(island_state.n_islands), 1)
+
+    # The sleeping stack keeps the contact between its boxes, and the upper box keeps reporting the support force
+    # balancing its weight.
+    for _ in range(5):
+        scene.step()
+    assert asleep(box1_idx)
+    assert tensor_to_array(box1.get_contacts(with_entity=box2, is_padded=True)["valid_mask"]).any(axis=-1).all()
+    assert_allclose(box1.get_links_net_contact_force()[..., 0, 2], -GRAVITY * box1.get_mass(), tol=2e-3)
 
     box1.set_pos([1.0, 0.0, 0.15])
     assert awake(box1_idx)

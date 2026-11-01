@@ -384,9 +384,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         # Update the viewer if requested
         if show_viewer:
             if it % max(int(1e-3 / (MOTION_SPEED * DT)), 1) == 0:
-                scene.visualizer.context.draw_debug_spheres(
-                    poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8), persistent=True
-                )
+                scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
 
     # Disable constraints
@@ -668,9 +666,7 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
         # Update the viewer if requested
         if show_viewer:
             if it % max(int(1e-3 / (MOTION_SPEED * DT)), 1) == 0:
-                scene.visualizer.context.draw_debug_spheres(
-                    poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8), persistent=True
-                )
+                scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
 
     # Wait for a few extra steps

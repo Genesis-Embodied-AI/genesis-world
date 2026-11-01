@@ -8,6 +8,7 @@ import torch
 from typing_extensions import TypeVar as TypeVarWithDefault
 
 import genesis as gs
+from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
     from genesis.engine.solvers import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors.options import SensorOptions
     from genesis.recorders.base_recorder import Recorder, RecorderOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
@@ -186,6 +188,9 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     # Subclasses whose `_update_shared_cache` bypasses the rings (e.g. cameras handling rendering lazily) explicitly set
     # this to ``False``.
     uses_ring_pipeline: ClassVar[bool] = True
+    # The changes of state, made outside of a step, that make the data of this sensor stale until the next step updates
+    # it. Every kind of change by default, which a sensor depending on part of the state only may narrow.
+    invalidated_by: ClassVar[frozenset[StateChange]] = frozenset(StateChange)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -463,9 +468,14 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         """
         return tensor
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw debug shapes for the sensor in the scene.
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[int | None, "Mesh", None]]:
+        """Make the debug nodes of the sensor in the rendered environments 'envs_idx', without adding them to the scene.
+
+        The nodes are made with the 'make_debug_*' methods of 'context'. Returns one (env_idx, node, None) triple per
+        node, 'env_idx' being the rendered environment the node belongs to, or None for a node spanning several of
+        them. The nodes are drawn anew at every sync of the visualizer, and a change of state in 'invalidated_by'
+        of a rigid or kinematic solver, which makes the data they show stale, hides them in the environments it touches
+        until the next step (see TrackedNodeList).
         """
         raise NotImplementedError(f"{type(self).__name__} has not implemented `draw_debug()`.")
 

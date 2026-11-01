@@ -1,5 +1,7 @@
 import os
+
 import numpy as np
+
 import genesis as gs
 import genesis.utils.geom as gu
 
@@ -52,6 +54,8 @@ r = 0.1
 left_finger = robot.get_link("left_finger")
 right_finger = robot.get_link("right_finger")
 
+# The poses follow the target along a continuous path, so they are shown at the pace of the simulation
+rate = gs.tools.Rate(1.0 / scene.dt)
 horizon = 2000 if "PYTEST_VERSION" not in os.environ else 5
 for i in range(horizon):
     target_pos_left = center + np.array([np.cos(i / 360 * np.pi), np.sin(i / 360 * np.pi), 0]) * r
@@ -68,7 +72,8 @@ for i in range(horizon):
         rot_mask=[False, False, True],  # only restrict direction of z-axis
     )
 
-    # Note that this IK is for visualization purposes, so here we do not call scene.step(), but only update the state and the visualizer
-    # In actual control applications, you should instead use robot.control_dofs_position() and scene.step()
+    # Note that this IK is for visualization purposes, so here we do not call scene.step(), but only set the state,
+    # which redraws the viewer. In actual control applications, you should instead use robot.control_dofs_position()
+    # and scene.step().
     robot.set_dofs_position(q)
-    scene.visualizer.update()
+    rate.sleep()
