@@ -8,13 +8,13 @@ import igl
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
+from genesis.utils.array_class import ArrayItem, DataKind, LinksState
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import broadcast_tensor, qd_to_torch
 
@@ -998,7 +998,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             ("elements_v.vel", self.elements_v.vel),
             ("elements_el.actu", self.elements_el.actu),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -1510,10 +1510,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     @qd.kernel
-    def _kernel_update_linked_vertex_constraints(
-        self,
-        links_state: array_class.LinksState,
-    ):
+    def _kernel_update_linked_vertex_constraints(self, links_state: LinksState):
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             vc = self.vertex_constraints[i_v, i_b]
             if vc.is_constrained and vc.link_idx >= 0:

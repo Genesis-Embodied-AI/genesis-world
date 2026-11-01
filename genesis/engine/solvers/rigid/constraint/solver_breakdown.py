@@ -3,7 +3,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
 from genesis.utils.misc import qd_to_torch
 from . import linesearch
 from . import solver
@@ -20,7 +20,7 @@ LS_ALPHA_MAX = 1e4
 
 @qd.func
 def _func_update_constraint_forces_body(
-    i_c: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_c: int, i_b: int, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Per-element body for ``_func_update_constraint_forces``. Factored out so the two
     ndrange orderings (coalescing-optimal for each layout) share a single implementation."""
@@ -62,7 +62,7 @@ def _func_update_constraint_forces_body(
 
 @qd.func
 def _func_update_constraint_forces_row(
-    i_c: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_c: int, i_b: int, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Update the active flag and the force of one row of an iterating env, a row standing still keeping both."""
     if solver.func_is_row_moving(i_c, i_b, constraint_state, skip_settled_islands=True):
@@ -74,7 +74,7 @@ def _func_update_constraint_forces_row(
 
 
 @qd.func
-def _func_update_constraint_forces(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+def _func_update_constraint_forces(constraint_state: ConstraintState, rigid_config: qd.template()):
     """Compute active flags and efc_force, parallelized over (constraint, env).
 
     The cooperative kernels update the rows in the line search instead, see _func_update_constraint_forces_batch.
@@ -101,7 +101,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
 
 @qd.func
 def _func_update_constraint_forces_batch(
-    i_b: int, tid: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_b: int, tid: int, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Compute the active flags and efc_force of the rows of one env that moved, by the _K lanes of its block.
 
@@ -126,10 +126,7 @@ def _func_update_constraint_forces_batch(
 
 @qd.func
 def _func_update_qfrc_constraint_per_dof(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_config: qd.template(),
-    update_gradient: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template(), update_gradient: qd.template()
 ):
     """Compute qfrc_constraint = J^T @ efc_force with one thread per (dof, env).
 
@@ -176,10 +173,7 @@ def _func_update_qfrc_constraint_per_dof(
 
 @qd.func
 def _func_update_gradient(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Step 5: update the gradient of every env still iterating, one env per thread.
 
@@ -198,9 +192,9 @@ def _func_update_gradient(
 @qd.func
 def _func_islands_linesearch_and_apply(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Steps 1 to 4: the lockstep line search of every island of an env and the step applied, by the lanes of the env's
@@ -275,8 +269,8 @@ def _func_islands_linesearch_and_apply(
 @qd.func
 def _func_islands_update_search_direction(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Step 6: every island's exit test and next direction, see _func_islands_linesearch_and_apply for the lane
@@ -326,9 +320,9 @@ def _func_islands_update_search_direction(
 @qd.kernel(graph=True, fastcache=True)
 def _kernel_solve_graph(
     graph_counter: qd.types.ndarray(qd.i32, ndim=0),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     while qd.graph.do_while(graph_counter):

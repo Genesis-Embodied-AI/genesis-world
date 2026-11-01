@@ -8,10 +8,10 @@ import torch
 import trimesh
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions
 from genesis.options.sensors import TemperatureProperties
+from genesis.utils.array_class import ColliderState, DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.ring_buffer import TensorRingBuffer
 
@@ -204,8 +204,8 @@ def _qd_polygon_area_from_points_3d(i_b: int, n: int, scratch: qd.types.ndarray(
 def _kernel_compute_contact_areas(
     contact_area: qd.types.ndarray(),
     scratch: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
+    dyn_state: DynState,
+    collider_state: ColliderState,
     eps: float,
 ):
     # contact_area shape (n_c_max, n_batches). scratch (n_batches, n_c_max, len(_ScratchIdx)).
@@ -298,8 +298,8 @@ def _kernel_contact_heat(
     link_rho_cp: qd.types.ndarray(),
     contact_area: qd.types.ndarray(),
     output: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
+    dyn_state: DynState,
+    collider_state: ColliderState,
     dt: float,
     eps: float,
 ):

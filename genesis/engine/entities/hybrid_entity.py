@@ -9,10 +9,10 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
+from genesis.utils.array_class import GeomsInfo, LinksState
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -394,9 +394,7 @@ class HybridEntity(Entity):
             raise NotImplementedError
 
     @qd.kernel
-    def _kernel_update_soft_part_mpm(
-        self, f: qd.i32, geoms_info: array_class.GeomsInfo, links_state: array_class.LinksState
-    ):
+    def _kernel_update_soft_part_mpm(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState):
         for i_p_, i_b in qd.ndrange(self._part_soft.n_particles, self._part_soft._sim._B):
             if self._solver_soft.particles_ng[f, i_p_, i_b].active:
                 i_global = i_p_ + self._part_soft.particle_start

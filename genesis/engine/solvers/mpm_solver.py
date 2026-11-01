@@ -6,7 +6,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
@@ -16,6 +15,16 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
+from genesis.utils.array_class import (
+    ArrayItem,
+    DataKind,
+    ErrorCode,
+    GeomsInfo,
+    GeomsState,
+    LinksState,
+    RigidInfo,
+    SDFInfo,
+)
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .particle_solver import ParticleSolver
@@ -142,7 +151,7 @@ class MPMSolver(ParticleSolver):
         self.register_errors(
             self.errno,
             {
-                array_class.ErrorCode.INVALID_PARTICLE_NAN: (
+                ErrorCode.INVALID_PARTICLE_NAN: (
                     "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
                 ),
             },
@@ -367,12 +376,12 @@ class MPMSolver(ParticleSolver):
     def p2g(
         self,
         f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
-        collider_static_config: qd.template(),
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
@@ -448,14 +457,7 @@ class MPMSolver(ParticleSolver):
                             if geoms_info.needs_coup[i_g]:
                                 sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
                                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g,
-                                    i_b,
-                                    cell_pos,
-                                    geoms_state,
-                                    geoms_info,
-                                    rigid_info,
-                                    sdf_info,
-                                    collider_static_config,
+                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
                                 )
 
                                 if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g
@@ -488,13 +490,7 @@ class MPMSolver(ParticleSolver):
                         self.grid[f, base - self._grid_offset + offset, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
-    def g2p(
-        self,
-        f: qd.i32,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-    ):
+    def g2p(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState, rigid_info: RigidInfo):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
                 base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
@@ -554,7 +550,7 @@ class MPMSolver(ParticleSolver):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             pos = self.particles[f, i_p, i_b].pos
             if not qd_isfinite(pos):
-                self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
+                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_PARTICLE_NAN
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -678,7 +674,7 @@ class MPMSolver(ParticleSolver):
             ("particles.actu", self.particles.actu),
             ("particles_ng.active", self.particles_ng.active),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -1119,7 +1115,7 @@ class MPMSolver(ParticleSolver):
                 self.particle_constraints[i_p, i_b].link_idx = -1
 
     @qd.kernel
-    def apply_particle_constraints(self, f: qd.i32, links_state: array_class.LinksState):
+    def apply_particle_constraints(self, f: qd.i32, links_state: LinksState):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particle_constraints[i_p, i_b].is_constrained:
                 # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot

@@ -1,19 +1,14 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
 
 from . import solver
 
 
 @qd.func
-def func_matvec_Ap(
-    i_b: int,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-):
+def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo):
     """
     Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
 
@@ -48,10 +43,7 @@ def func_matvec_Ap(
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b: int,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo
 ):
     """Conjugate-gradient (CG) solve of A u = g for a single environment [i_b].
 
@@ -104,10 +96,7 @@ def func_solve_adjoint_u_cg_batch(
 
 @qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     r"""
     Solve for the adjoint vector [u] from Au = g, where A = dF/dqacc (primal Hessian on the active set) and g = dL/dqacc.
@@ -166,7 +155,7 @@ def kernel_solve_adjoint_u(
 
 
 @qd.kernel(fastcache=True)
-def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: RigidInfo):
     r"""
     Compute gradients of the loss with respect to the input variables to this solver. Note that we use the intermediate
     adjoint vector [u] computed in [kernel_solve_adjoint_u] to compute these gradients.
@@ -234,9 +223,7 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
 
 @qd.kernel(fastcache=True)
 def kernel_load_dL_dqacc_from_acc_grad(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template()
 ):
     """Copy the acc grad into constraint_state.dL_dqacc (the input buffer consumed by kernel_solve_adjoint_u) and
     zero the source grad so the downstream implicit-function-theorem path does not re-consume it.
@@ -254,10 +241,7 @@ def kernel_load_dL_dqacc_from_acc_grad(
 
 @qd.kernel(fastcache=True)
 def kernel_accumulate_constraint_solver_grads(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
     dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce
@@ -304,11 +288,11 @@ def kernel_accumulate_constraint_solver_grads(
 # ---------------------------------------------------------------------------
 @qd.kernel(fastcache=True)
 def kernel_manual_add_joint_limit_constraints_bw(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     enable_collision: qd.template(),
 ):
@@ -430,11 +414,11 @@ def kernel_manual_add_joint_limit_constraints_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_collision_constraints_bw(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_collision_constraints`. See the section header
@@ -629,10 +613,10 @@ def kernel_manual_add_collision_constraints_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_frictionloss_constraints_bw(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_frictionloss_constraints`. See the section header
@@ -696,8 +680,8 @@ def func_cddb_ang_bw(
     i_b: int,
     link: int,
     g_cddb_ang: qd.types.vector(3),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Reverse of the chain contraction cddb_ang = sum_d cdofd_ang[d] * vel[d] (see func_equality_jdotv in
@@ -717,8 +701,8 @@ def func_equality_jdotv_bw(
     link: int,
     anchor_pos: qd.types.vector(3),
     g_jdotv: qd.types.vector(3),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Reverse of func_equality_jdotv (see solver.py) for one chain, given the upstream gradient g_jdotv of its
@@ -767,10 +751,10 @@ def func_equality_jdotv_bw(
 
 @qd.kernel(fastcache=True)
 def kernel_manual_add_equality_constraints_bw(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual reverse of `add_equality_constraints` (JOINT + CONNECT + WELD).

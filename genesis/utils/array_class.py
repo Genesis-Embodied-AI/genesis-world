@@ -1506,13 +1506,7 @@ class ColliderState:
 
 
 def get_collider_state(
-    solver,
-    rigid_config,
-    n_possible_pairs,
-    n_terrain_threads,
-    collider_info,
-    collider_static_config,
-    split_narrowphase,
+    solver, rigid_config, n_possible_pairs, n_terrain_threads, collider_info, collider_config, split_narrowphase
 ):
     _B = solver._B
     n_links = solver.n_links_
@@ -1523,12 +1517,8 @@ def get_collider_state(
     max_candidate_contacts = max(collider_info.max_candidate_contacts[None], 1)
     requires_grad = rigid_config.requires_grad
 
-    box_depth_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
-    )
-    box_points_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
-    )
+    box_depth_shape = maybe_shape((collider_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection)
+    box_points_shape = maybe_shape((collider_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection)
     box_pts_shape = maybe_shape((6, _B), rigid_config.box_box_detection)
     box_lines_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
     box_linesu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
@@ -1537,8 +1527,8 @@ def get_collider_state(
     box_pu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
     # The pruning scratch is laid out environment-first, so that the threads of the block running an environment read
     # neighbouring slots from the same cache lines (see func_clamp_prune_contacts_coop)
-    prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
-    prune_layout = (1, 0) if collider_static_config.has_prunable_contacts else None
+    prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_config.has_prunable_contacts)
+    prune_layout = (1, 0) if collider_config.has_prunable_contacts else None
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
@@ -1560,9 +1550,7 @@ def get_collider_state(
         n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
         n_contacts_hibernated=V(dtype=gs.qd_int, shape=(_B,)),
         first_time=V(dtype=gs.qd_bool, shape=(_B,)),
-        contact_cache=get_contact_cache(
-            solver, n_possible_pairs, collider_static_config.has_non_box_plane_convex_convex
-        ),
+        contact_cache=get_contact_cache(solver, n_possible_pairs, collider_config.has_non_box_plane_convex_convex),
         broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1), _B)),
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
@@ -1572,7 +1560,7 @@ def get_collider_state(
             max(max_collision_pairs_broad, 1) * _B,
             1 if solver._options.enable_contact_patch else 5,
             split_narrowphase,
-            collider_static_config.has_terrain,
+            collider_config.has_terrain,
         ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B), layout=(1, 0)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
@@ -2258,7 +2246,7 @@ def get_collider_info(
     solver,
     n_vert_neighbors,
     n_valid_link_pairs,
-    collider_static_config,
+    collider_config,
     mpr_info,
     gjk_info,
     support_field_info,
@@ -3178,7 +3166,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
         )
 
 
-# =========================================== DataManager ===========================================
+# =========================================== RigidData ===========================================
 
 
 def cholesky_tile_size_for(n_dofs):
@@ -3214,7 +3202,7 @@ def island_tile_caps(cap_first, cap_last):
 
 
 @qd.data_oriented
-class DataManager:
+class RigidData:
     def __init__(self, solver, kinematic_only):
         self.rigid_info = get_rigid_info(solver, kinematic_only)
 
