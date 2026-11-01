@@ -892,8 +892,11 @@ def use_deterministic_algorithms(request):
 
 @pytest.fixture
 def cpu_threads(request):
-    """Threads of the CPU backend, those the worker gets by default. One thread fixes the order of the reductions by
-    atomic adds, whose floating-point sums otherwise vary from one run to the next."""
+    """Number of threads of the CPU backend given by the 'cpu_threads' marker, None for the default of the worker.
+
+    One thread fixes the order of the reductions by atomic adds, whose floating-point sums vary from one run to the
+    next with several threads.
+    """
     cpu_threads = None
     for mark in request.node.iter_markers("cpu_threads"):
         if mark.args:

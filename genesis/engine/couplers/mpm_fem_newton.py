@@ -1,9 +1,11 @@
-"""Implicit FEM as a secondary participant of the NewtonSolver, and the MPM-FEM contact rows as a coupling. The stage
-functions are those of `mpm_fem_func`; this module binds them to the data of one scene.
+"""Implicit finite element method (FEM) as a secondary participant of the NewtonSolver, and the contact rows of the
+material point method (MPM) with FEM as a coupling.
 
-FEM's own implicit substep (`FEMSolver.batch_solve`) is replaced by the joint solve: FEM prepares its inertia and
-material data, the joint Newton iterations move its end-of-substep positions together with the MPM grid, and FEM takes
-its velocities from them and runs the rest of its coupling after the solve.
+The stage functions are those of `mpm_fem_func`, and this module binds them to the data of one scene.
+
+The joint solve replaces FEM's own implicit substep (`FEMSolver.batch_solve`): FEM prepares its inertia and material
+data, the joint Newton iterations move its end-of-substep positions together with the MPM grid, and FEM takes its
+velocities from them and runs the rest of its coupling after the solve.
 """
 
 import quadrants as qd
@@ -77,8 +79,8 @@ class FemNewtonParticipant:
 
 @qd.data_oriented
 class MpmFemContact:
-    """Device stages of the MPM-FEM contact rows in the joint solve: their share of the FEM gradient, their cross
-    terms in both blocks of the operator, and the contact point displacement at every iterate."""
+    """Device stages of the MPM-FEM contact rows in the joint solve: their share of the FEM gradient, their cross terms
+    in both blocks of the operator, and the contact point displacement at every iterate."""
 
     def __init__(self, mpm, fem, query):
         self.particles = mpm.particles
@@ -136,9 +138,11 @@ def kernel_fem_rows(contact: qd.template(), f: qd.i32):
 
 
 class FemNewtonHost:
-    """Host stages of FEM around the joint solve: the inertia and material data of its substep before, its velocities
-    from the solved positions after, and then the part of the coupler's step on FEM that FEM's own solve would have
-    preceded."""
+    """Host stages of FEM around the joint solve: the inertia and material data of its substep before, and its
+    velocities from the solved positions after.
+
+    Once FEM has its velocities, the host runs the part of the coupler's step on FEM that follows FEM's own solve in a
+    substep FEM solves alone (see LegacyCoupler.couple_fem)."""
 
     is_differentiable = False
 
@@ -163,7 +167,9 @@ class FemNewtonHost:
 
 class MpmFemContactHost:
     """Host stages of the MPM-FEM contact rows before the joint solve: the triangle trees, then the rows and their
-    contact point displacement at the start point. The rows' force on FEM is in the joint solve itself."""
+    contact point displacement at the start point.
+
+    The force of the rows on FEM acts in the joint solve itself."""
 
     is_differentiable = False
 

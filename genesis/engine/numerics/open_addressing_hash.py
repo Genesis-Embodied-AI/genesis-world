@@ -1,4 +1,5 @@
 import numpy as np
+
 import quadrants as qd
 
 from genesis.utils.misc import qd_debug_asserts
@@ -10,10 +11,10 @@ EMPTY_KEY = 0xFFFFFFFFFFFFFFFF
 class OpenAddressingHash:
     """Linear-probing hash table from unique u64 keys to i32 values.
 
-    The capacity is a power of two at least twice the number of keys inserted per build. Keys inserted in one phase
-    are unique, so an insert is a single compare-and-swap claim of the slot followed by the value write, and lookups
-    run in later phases only. Device code reads the capacity from the shape of the table, so that a table of another
-    capacity runs the same compiled kernels.
+    The capacity is a power of two at least twice the number of keys inserted per build. Keys inserted in one phase are
+    unique, so an insert is a single compare-and-swap claim of the slot followed by the value write, and lookups run in
+    later phases only. Device code reads the capacity from the shape of the table, so that a table of another capacity
+    runs the same compiled kernels.
     """
 
     def __init__(self, max_keys: int) -> None:
@@ -25,7 +26,7 @@ class OpenAddressingHash:
 
     @qd.func
     def slot_of(self, key):
-        """Home slot of a key: a 64-bit avalanche mix masked to the capacity."""
+        """Return the home slot of a key, a 64-bit avalanche mix masked to the capacity."""
         h = key
         h = h ^ (h >> qd.u64(33))
         h = h * qd.u64(0xFF51AFD7ED558CCD)
@@ -34,40 +35,42 @@ class OpenAddressingHash:
 
     @qd.func
     def insert(self, key, value):
-        """Claim a slot for a key that this phase inserts once, then publish its value. Return whether the key found
-        a slot: a full table, which the capacity rule excludes, fails the assertion in debug mode and inserts nothing
-        otherwise, the caller raising the error."""
+        """Claim a slot for a key that this phase inserts once, publish its value, and return whether it found a slot.
+
+        A full table, which the capacity rule excludes, fails the assertion in debug mode and inserts nothing otherwise,
+        the caller raising the error.
+        """
         capacity = self.keys.shape[0]
         i = self.slot_of(key)
-        done = False
+        is_inserted = False
         probes = 0
-        while not done and probes < capacity:
-            previous = qd.atomic_cas(self.keys[i], qd.u64(EMPTY_KEY), key)
-            if previous == qd.u64(EMPTY_KEY) or previous == key:
+        while not is_inserted and probes < capacity:
+            previous_key = qd.atomic_cas(self.keys[i], qd.u64(EMPTY_KEY), key)
+            if previous_key == qd.u64(EMPTY_KEY) or previous_key == key:
                 self.vals[i] = value
-                done = True
+                is_inserted = True
             else:
                 i = (i + 1) & (capacity - 1)
                 probes += 1
         if qd.static(qd_debug_asserts()):
-            assert done, "OpenAddressingHash.insert: the table of %d slots is full" % capacity
-        return done
+            assert is_inserted, "OpenAddressingHash.insert: the table of %d slots is full" % capacity
+        return is_inserted
 
     @qd.func
     def lookup(self, key):
-        """Value of a key, or -1 when the key is absent, the probes stopping at an empty slot or after a full turn."""
+        """Return the value of a key, or -1 for an absent key, the probes stopping at an empty slot or a full turn."""
         capacity = self.keys.shape[0]
         i = self.slot_of(key)
         result = qd.i32(-1)
-        searching = True
+        is_searching = True
         probes = 0
-        while searching and probes < capacity:
-            stored = self.keys[i]
-            if stored == key:
+        while is_searching and probes < capacity:
+            stored_key = self.keys[i]
+            if stored_key == key:
                 result = self.vals[i]
-                searching = False
-            elif stored == qd.u64(EMPTY_KEY):
-                searching = False
+                is_searching = False
+            elif stored_key == qd.u64(EMPTY_KEY):
+                is_searching = False
             else:
                 i = (i + 1) & (capacity - 1)
                 probes += 1

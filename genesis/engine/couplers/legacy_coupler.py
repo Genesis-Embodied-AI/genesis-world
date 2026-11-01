@@ -638,7 +638,9 @@ class LegacyCoupler(RBC):
 
     def couple_fem(self, f):
         """The coupling of FEM's end-of-substep velocities with the floor, Rigid and SPH, and of its vertices linked to
-        Rigid. A deferred FEM substep (see FemNewtonHost) runs it after the joint solve that gives the velocities."""
+        Rigid.
+
+        A deferred FEM substep (see FemNewtonHost) runs it after the joint solve that gives the velocities."""
         self.fem_surface_force(
             f,
             self.rigid_solver.dyn_state.geoms,
@@ -657,8 +659,8 @@ class LegacyCoupler(RBC):
 
         The couplings of the FEM solver with the rigid and SPH solvers carry no gradient: each surface triangle of an
         FEM entity overwrites the velocity of the vertices it shares with its neighbours, which the reverse pass cannot
-        undo without a race. FEM couples with MPM in the Newton solve of the implicit FEM solver, which carries none
-        either.
+        undo without a race. The coupling of FEM with MPM, in the joint Newton solve of their implicit solvers, carries
+        none either.
         """
         return not (self._rigid_fem or self._fem_sph)
 

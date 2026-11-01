@@ -10,9 +10,10 @@ def write_block_partial(
     block: qd.template(),  # int expression, the index of the calling block
     value_type: qd.template(),  # Quadrants scalar data type
 ):
-    """Reduce one value per thread of a REDUCE_BLOCK_DIM-wide block and store the block sum at partials[block].
+    """Sum one value per thread over a block of REDUCE_BLOCK_DIM threads and store the sum as the partial of the block.
 
-    Called inside a top-level range loop launched with block_dim=REDUCE_BLOCK_DIM over a whole number of blocks.
+    The sum lands at partials[block]. Called inside a top-level range loop launched with block_dim=REDUCE_BLOCK_DIM over
+    a whole number of blocks.
     """
     total = qd.simt.block.reduce_add(value, REDUCE_BLOCK_DIM, value_type)
     if qd.simt.block.thread_idx() == 0:
@@ -26,14 +27,17 @@ def func_sum_block_partials(
     out: qd.template(),  # 0-d qd.Ndarray
     value_type: qd.template(),  # Quadrants scalar data type
 ):
-    """out = sum of the first n_partials partials, in a fixed order, so the result is bitwise reproducible."""
+    """Sum the leading block partials into a scalar in a fixed order, which makes the result bitwise reproducible.
+
+    The sum of the first n_partials entries of partials lands in out.
+    """
     qd.loop_config(name="sum_block_partials", block_dim=REDUCE_BLOCK_DIM)
     for tid in range(REDUCE_BLOCK_DIM):
         value = value_type(0.0)
-        i = tid
-        while i < n_partials:
-            value += partials[i]
-            i += REDUCE_BLOCK_DIM
+        for i_chunk_ in range((n_partials + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM):
+            i = i_chunk_ * REDUCE_BLOCK_DIM + tid
+            if i < n_partials:
+                value += partials[i]
         total = qd.simt.block.reduce_add(value, REDUCE_BLOCK_DIM, value_type)
         if tid == 0:
             out[()] = total

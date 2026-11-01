@@ -494,8 +494,8 @@ class ConstraintSolver:
         """Adjoint solve of the constraint force computation.
 
         The caller must pre-populate the upstream gradient constraint_state.dL_dqacc (see
-        RigidSolver._constraint_force_grad). `solve_adjoint`, for a constraint solve another solver ran jointly with its
-        own unknowns, replaces the solve of A u = g: called once g is complete in dL_dqacc, it writes u in bw_u."""
+        RigidSolver._constraint_force_grad). `solve_adjoint`, for a constraint solve run by another solver jointly with
+        its own unknowns, replaces the solve of A u = g: called once g is complete in dL_dqacc, it writes u in bw_u."""
         if not self._solver._requires_grad:
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 

@@ -1,15 +1,16 @@
 """Data of the implicit MPM solver.
 
-The particle state keeps the layout of the solver's public fields. What the implicit step adds lives here: the material
-table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the linear system the
-Newton solve assembles. The grid, Newton and linear-system roots are mutable data-oriented objects, so that growing a
-capacity replaces an array on an existing path while every kernel keeps the same object.
+The particle state keeps the layout of the solver's public fields. This module holds the data the implicit step adds:
+the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the linear
+system the Newton solve assembles. The grid, Newton and linear-system roots are mutable data-oriented objects, so that
+growing a capacity replaces an array on an existing path while every kernel keeps the same object.
 """
 
 import dataclasses
 from typing import ClassVar
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -35,7 +36,7 @@ BRICKS_PER_BLOCK = BLOCK_CELLS // BRICK_NODES
 BRICK_SYM_BLOCKS = BRICK_NODES * (BRICK_NODES + 1) // 2
 BRICK_SCALARS = BRICK_SYM_BLOCKS * 9
 BRICK_DIM = BRICK_NODES * 3
-# Bricks inverted per block of the inversion, one warp each
+# Bricks inverted per thread block of the inversion, one warp each
 BRICK_INVERT_WARPS = 4
 
 # Soft contact rows of a particle: one domain-wall row per axis, then the pyramid rows of its deepest Rigid contact
@@ -47,13 +48,14 @@ CONTACT_ROWS = WALL_ROWS + PYRAMID_ROWS
 class MpmStaticConfig(metaclass=array_class.AutoInitMeta):
     """Compile-time switches of the implicit MPM kernels: the code paths a scene takes, never its sizes or values."""
 
-    # MPM is coupled with Rigid, in one Newton solve; Rigid's links info is batched over the environments; Rigid has
-    # constraint rows, which join the solve
+    # MPM is coupled with Rigid, in one Newton solve
     has_rigid: bool
+    # The links info of Rigid is batched over the environments
     rigid_batch_links_info: bool
+    # Rigid has constraint rows, which join the solve
     has_rigid_rows: bool
-    # The one switch of Rigid's collider configuration the SDF queries read: this config stands in for it there, so
-    # that a change of the rest of Rigid's collider configuration does not recompile MPM
+    # The one switch of Rigid's collider configuration that the signed distance field (SDF) queries read. This config
+    # stands in for it there, so that the MPM kernels compile independently of the rest of that configuration.
     has_terrain: bool
 
 
@@ -91,9 +93,9 @@ class MpmParams:
         self.mass_scale = _scalar(gs.qd_float, mass_scale)
         self.n_materials = _scalar(qd.i32, n_materials)
         # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
-        # will violate are then active at the first assembly, so that the first direction already sees them. A
-        # non-penetration barrier needs the non-penetrating start u = 0 for its continuous collision detection, so this
-        # stays a switch.
+        # will violate are then active at the first assembly, so that the first direction already sees them. A barrier
+        # against penetration needs the start u = 0, free of penetration, for its continuous collision detection, so
+        # this stays a switch.
         self.newton_start_inertial = _scalar(qd.i32, 0)
         # Thickness of the FEM surface for the MPM contact rows, in metres: a triangle has no volume of its own
         self.fem_contact_thickness = _scalar(gs.qd_float, 0.5 * dx)
@@ -105,15 +107,14 @@ class MpmParams:
         self.pbd_contact_thickness = _scalar(gs.qd_float, 0.5 * dx)
         self.pbd_contact_stiffness = _scalar(gs.qd_float, 10.0)
         self.pbd_contact_friction = _scalar(gs.qd_float, 0.15)
-        # Rigid's solref / solimp parameters of the domain-wall rows, (timeconst, dampratio, dmin, dmax, width, mid,
-        # power)
+        # Rigid's solref / solimp parameters of the wall rows: timeconst, dampratio, dmin, dmax, width, mid, power
         self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
-        self.wall_sol_params.from_numpy(np.asarray(wall_sol_params, dtype=gs.np_float))
+        self.wall_sol_params.from_numpy(np.array(wall_sol_params, dtype=gs.np_float))
         # Planes of the domain walls, `CubeBoundary.lower` / `upper`
         self.wall_lower = qd.ndarray(gs.qd_float, shape=(3,))
         self.wall_upper = qd.ndarray(gs.qd_float, shape=(3,))
-        self.wall_lower.from_numpy(np.asarray(wall_lower, dtype=gs.np_float))
-        self.wall_upper.from_numpy(np.asarray(wall_upper, dtype=gs.np_float))
+        self.wall_lower.from_numpy(wall_lower)
+        self.wall_upper.from_numpy(wall_upper)
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -214,12 +215,12 @@ def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:
 class MpmGrid:
     """Block-sparse grid rebuilt from the particles every substep.
 
-    Particles are sorted by (environment, block, cell); every particle block activates its positive-octant neighbour
+    Particles are sorted by (environment, block, cell). Every particle block activates its positive-octant neighbour
     blocks as node storage. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is
     `block_slot * BLOCK_CELLS + local index`.
 
-    `errno` is the error flags of the MPM solver per env, which the kernels building and reading the grid raise
-    instead of indexing out of bounds (see mpm_func.flag_env_error).
+    `errno` holds the error flags of the MPM solver per environment, which the kernels building and reading the grid
+    raise instead of indexing out of bounds (see mpm_func.flag_env_error).
     """
 
     def __init__(self, n_sort: int, max_blocks: int, max_particle_blocks: int, errno) -> None:
@@ -307,21 +308,22 @@ class MpmNewton:
         self.u = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.u_temp = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        # Adjoint of the node momentum and mass of P2G, which the backward pass of a substep gathers to the particles
+        # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
+        # gathers to the particles
         self.adj_mom = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.adj_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
         # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
         self.g_p = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
         # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
         self.g_contact = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs of
-        # its link, and the displacement of its contact point on the link over the substep
+        # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs
+        # of its link, and the displacement of its contact point on the link over the substep
         self.g_rigid = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
         self.h_rigid = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
         self.contact_dr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
         # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
-        # dt^2 k and damping dt c, both zero for a free particle, and the target. Zero until a substep builds them, as
-        # no substep does before the first constraint.
+        # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
+        # build them only once a constraint exists.
         self.constraint_spring = qd.ndarray(gs.qd_float, shape=(n_padded,))
         self.constraint_damping = qd.ndarray(gs.qd_float, shape=(n_padded,))
         self.constraint_target = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
@@ -341,10 +343,10 @@ class MpmNewton:
         self.contact_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
         # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
         self.contact_pbd = qd.ndarray(qd.i32, shape=(n_padded,))
-        # Nearest obstacle of each sorted particle during a BVH query: its gap, its index, and, for a triangle, the
-        # distance to it and the alignment of the triangle normal with the direction to the particle that pick it, the
-        # barycentric coordinates of the closest point and the contact normal. The query point and the frame the
-        # obstacles are read at sit alongside, for the filter that measures the gaps.
+        # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and,
+        # for a triangle, the distance to it and the alignment of its normal with the direction to the particle (which
+        # together pick the triangle), the barycentric coordinates of the closest point and the contact normal. The
+        # query point and the frame at which the obstacles are read sit alongside, for the filter measuring the gaps.
         self.query_phi = qd.ndarray(gs.qd_float, shape=(n_padded,))
         self.query_idx = qd.ndarray(qd.i32, shape=(n_padded,))
         self.query_dist = qd.ndarray(gs.qd_float, shape=(n_padded,))
@@ -357,7 +359,8 @@ class MpmNewton:
 
 @qd.data_oriented
 class MpmLinearSystem:
-    """Block-sparse Newton matrix over 3x3 node blocks, its right-hand side, solution, preconditioner and PCG state."""
+    """Block-sparse Newton matrix over 3x3 node blocks, its right-hand side, solution, preconditioner and conjugate
+    gradient state."""
 
     def __init__(self, max_nodes: int, max_triplets: int) -> None:
         self.row_offset = 0
@@ -388,34 +391,44 @@ class MpmLinearSystem:
         self.brick_scratch = qd.ndarray(gs.qd_float, shape=(n_scratch,))
 
 
-# Links in contact with MPM per environment whose contact stiffness the Rigid preconditioner takes in; the stiffness on
-# any further link is left to the PCG iterations
+# Links in contact with MPM per environment whose contact stiffness the Rigid preconditioner takes in. The stiffness on
+# any further link is left to the conjugate gradient iterations.
 MAX_PRECONDITIONED_LINKS = 16
 
 
 @qd.data_oriented
 class MpmRigidCoupling:
-    """Rigid unknowns of the joint Newton solve of MPM and Rigid, and the Rigid part of its PCG vectors.
+    """Rigid unknowns of the joint Newton solve of MPM and Rigid, and the Rigid part of its conjugate gradient vectors.
 
-    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the
-    displacement units of the MPM energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`, `p`, `ap`
-    and `sol` are the Rigid rows of the PCG residual, preconditioned residual, direction, operator image and solution.
-    Per link, `link_V` holds the spatial displacement of a dof vector and `link_F` accumulates a spatial force, linear
-    then angular about the root COM.
+    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the displacement
+    units of the MPM energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`, `p`, `ap` and `sol` are the
+    Rigid rows of the conjugate gradient residual, preconditioned residual, direction, operator image and solution. Per
+    link, `link_V` holds the spatial displacement of a dof vector and `link_F` accumulates a spatial force, linear then
+    angular about the root center of mass.
     """
 
     def __init__(self, n_dofs: int, n_links: int, n_envs: int) -> None:
         shape = (max(n_dofs, 1), n_envs)
-        for name in ("x", "x_temp", "dx", "grad", "qacc", "Ma", "r", "z", "p", "ap", "sol"):
-            setattr(self, name, qd.ndarray(gs.qd_float, shape=shape))
+        self.x = qd.ndarray(gs.qd_float, shape=shape)
+        self.x_temp = qd.ndarray(gs.qd_float, shape=shape)
+        self.dx = qd.ndarray(gs.qd_float, shape=shape)
+        self.grad = qd.ndarray(gs.qd_float, shape=shape)
+        self.qacc = qd.ndarray(gs.qd_float, shape=shape)
+        self.Ma = qd.ndarray(gs.qd_float, shape=shape)
+        self.r = qd.ndarray(gs.qd_float, shape=shape)
+        self.z = qd.ndarray(gs.qd_float, shape=shape)
+        self.p = qd.ndarray(gs.qd_float, shape=shape)
+        self.ap = qd.ndarray(gs.qd_float, shape=shape)
+        self.sol = qd.ndarray(gs.qd_float, shape=shape)
         self.cost = qd.ndarray(gs.qd_float, shape=(n_envs,))
         link_shape = (max(n_links, 1), n_envs)
         self.link_F = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
         self.link_V = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
-        # The MPM contact stiffness on the links for the preconditioner, by the Woodbury identity on Rigid's factor A:
-        # per link its 6 x 6 spatial stiffness K_l, row-major; per environment the links in contact, at most
-        # `n_contact_links`, the cdof map U of their chains, one column per spatial component, W = A^-1 U, and the LU
-        # factor of S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
+        # The MPM contact stiffness on the links for the preconditioner, by the Woodbury identity on Rigid's factor A.
+        # Per link, its 6 x 6 spatial stiffness K_l, row-major. Per environment, the links in contact (at most
+        # `n_contact_links`), the cdof map U of their chains with one column per spatial component, W = A^-1 U, and the
+        # lower-upper (LU) factor of S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of
+        # a solve.
         self.n_contact_links = min(max(n_links, 1), MAX_PRECONDITIONED_LINKS)
         n_cols = 6 * self.n_contact_links
         self.link_K = qd.ndarray(gs.qd_float, shape=(*link_shape, 36))
@@ -445,15 +458,15 @@ MIN_BLOCKS = 64
 
 
 def triplet_capacity(max_blocks: int, n_tasks: int) -> int:
-    """Triplets of one kinetic diagonal per node and STENCIL_BLOCKS per elastic task."""
+    """Count the triplets of one kinetic diagonal per node and STENCIL_BLOCKS per elastic task."""
     return max_blocks * BLOCK_CELLS + STENCIL_BLOCKS * n_tasks
 
 
 def initial_capacities(positions: np.ndarray, inv_dx: float) -> tuple[int, int]:
-    """Block and triplet capacities from the particle positions, (n_envs, n_particles, 3): twice the initial demand.
+    """Compute the block and triplet capacities from the particle positions, at twice the initial demand.
 
-    The blocks are those of the particles and their positive-octant neighbours; the elastic tasks are bounded by the
-    active cells plus one per 32 particles.
+    `positions` has shape (n_envs, n_particles, 3). The blocks are those of the particles and their positive-octant
+    neighbours. The elastic tasks are bounded by the active cells plus one per 32 particles.
     """
     n_envs, n_particles = positions.shape[:2]
     n_sort = n_envs * n_particles

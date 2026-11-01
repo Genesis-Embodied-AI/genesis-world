@@ -54,7 +54,7 @@ class redirect_libc_stderr:
     Context-manager that temporarily redirects C / C++ std::cerr (i.e. the C `stderr` file descriptor 2) to a given
     Python file-like object's fd.
 
-    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT ≥ VS2015).
+    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT >= VS2015).
     """
 
     def __init__(self, fd):

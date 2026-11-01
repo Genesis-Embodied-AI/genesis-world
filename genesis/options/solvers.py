@@ -652,21 +652,23 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
     newton_velocity_tol : float, optional
-        Largest change of the velocity of any particle, in m/s, of a Newton iteration of the implicit solve under which
-        the solve of a substep is converged. A finite-difference check of the gradients needs a much tighter value,
-        since it differentiates the solve where it stopped. Defaults to 5e-2.
+        Convergence tolerance of the implicit solve of every substep, in m/s: the solve stops once an iteration changes
+        the velocity of every particle by less than this value. A smaller value gives a more accurate motion and more
+        accurate gradients, at the cost of more iterations per substep, and a larger one is faster but less accurate.
+        Comparing the gradients against finite differences needs a much smaller value than the default, since the
+        gradients describe the motion where the solve stopped. Defaults to 5e-2.
     adjoint_hessian : str, optional
-        The Hessian of the incremental potential at the converged displacement on which the backward pass of a
-        differentiable scene solves for the adjoint: 'projected', the SPD-projected one of the forward Newton solve,
-        whose gradients are approximate where the projection clamps a mode, 'exact', which gives the exact gradients, or
-        'auto'. The exact Hessian is positive definite at a converged solution; its PCG solve raises on a direction of
-        non-positive curvature, the sign of a forward solve stopped short of convergence, where 'auto' solves that
-        substep again on the projected Hessian instead, with a warning. Defaults to 'projected'.
+        How exactly the gradients of a differentiable scene follow the response of the materials. 'projected' always
+        succeeds, but its gradients are approximate wherever the solve has to stabilize the response of a strongly
+        deformed material. 'exact' gives the exact gradients, but raises an error on a substep whose solve stopped
+        before converging (see 'newton_velocity_tol'). 'auto' gives the exact gradients, and the approximate ones with a
+        warning on the substeps where 'exact' would raise. Defaults to 'projected'.
     adjoint_linear_solver : str, optional
-        How the adjoint system is solved: 'pcg', the preconditioned conjugate gradient of the forward solve, or
-        'direct', a dense LU factorization on the device, meant for the tests that check the gradients against finite
-        differences alone. Its memory grows with the square of the grid nodes, so it is limited to 20000 rows (three per
-        active grid node and environment): a test using it keeps its scene small. Defaults to 'pcg'.
+        How the gradients of a differentiable scene are solved for at every substep. 'pcg' is an iterative solve,
+        accurate up to a tolerance, whose cost scales to large scenes. 'direct' is exact up to rounding, but its memory
+        grows with the square of the number of active grid nodes, so it is limited to 20000 unknowns (three per active
+        grid node and environment). It serves to check the gradients against finite differences on small scenes.
+        Defaults to 'pcg'.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -735,9 +737,10 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     max_density_solver_iterations : int, optional
         Maximum number of iterations for the density solver. Defaults to 100.
     n_subcycles : int, optional
-        Number of SPH integration steps per simulation substep, so that SPH can integrate at a shorter interval than
-        the solvers it couples with. The collision with Rigid and the MPM boundary act at every step, the other
-        couplings once per substep, at the last of them. Defaults to 1.
+        Number of SPH integration steps per simulation substep. More steps keep a fluid stable at a substep too large
+        for SPH alone, without shrinking the substep of the other solvers, at a cost of SPH computation proportional to
+        their number. Rigid entities collide with the fluid and MPM entities bound it at every step, and the other
+        interactions with other solvers act once per substep, at its last step. Defaults to 1.
     """
 
     particle_size: PositiveFloat = 0.02
@@ -808,29 +811,33 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
     max_viscosity_solver_iterations : int, optional
         Maximum number of iterations for the solving viscosity constraints. Defaults to 1.
     solver_iterations : int, optional
-        Iterations of the unified constraint loop (Macklin et al. 2014, "Unified Particle Physics for Real-Time
-        Applications"). Every iteration processes the stretch, bending and volume constraints, each kind as its own
-        group within its own maximum number of iterations above, then the density constraints within theirs, then the
-        contacts. Defaults to 4.
+        Number of iterations of the unified constraint loop (Macklin et al. 2014, "Unified Particle Physics for
+        Real-Time Applications"). Every iteration processes the stretch, bending and volume constraints, each kind
+        within its own maximum number of iterations above, then the density constraints within theirs, then the
+        contacts. More iterations make the constraints and the contacts stiffer and more accurate, at a cost
+        proportional to their number. Defaults to 4.
     sor_relaxation : float, optional
-        Successive over-relaxation factor of the averaged contact corrections: every particle moves by this factor
-        times the mean of the corrections of its contacts. Defaults to 1.5.
+        Successive over-relaxation factor of the averaged contact corrections: every particle moves by this factor times
+        the mean of the corrections of its contacts. A larger factor resolves the contacts in fewer iterations, and too
+        large a factor overshoots and makes them jitter. Defaults to 1.5.
     stabilization_iterations : int, optional
-        Iterations of the contact pre-stabilization, which resolves the contacts violated at the start of the substep on
-        the start positions as well, so that their resolution adds no velocity. Defaults to 1.
+        Number of iterations of the contact pre-stabilization, which also moves the start positions to resolve the
+        contacts violated at the start of the substep, so that resolving them adds no velocity. More iterations remove
+        deeper overlaps without pushing the particles apart, at the cost of extra contact iterations, and 0 disables it.
+        Defaults to 1.
     sleep_threshold : float, optional
-        Displacement over a substep in meters below which a particle stays at its start position, 0 to disable.
-        Defaults to 0.
+        Displacement over a substep in meters below which a particle stays at its start position, 0 to disable. A larger
+        value removes the jitter of particles at rest, and also freezes the particles that move slowly. Defaults to 0.
     use_xpbd : bool, optional
-        Solve the stretch, bending and volume constraints by XPBD (Macklin et al. 2016, "XPBD: Position-Based
-        Simulation of Compliant Constrained Dynamics"): every constraint accumulates its Lagrange multiplier over the
-        iterations of a substep, so that the converged stiffness follows its compliance rather than the number of
-        iterations. Under the parallel update, the mass of every particle is split over its constraints of the kind,
-        which keeps the summed corrections stable and leaves the converged solution unchanged, so that the relaxation
-        factors of the materials are not used. Defaults to False.
+        Whether to solve the stretch, bending and volume constraints by extended position-based dynamics (XPBD, Macklin
+        et al. 2016, "XPBD: Position-Based Simulation of Compliant Constrained Dynamics"). With it, the stiffness of a
+        material follows its compliances whatever the number of iterations, and the relaxation factors of the materials
+        have no effect. Without it, the stiffness also depends on the number of iterations, and the relaxation factors
+        tune it. Defaults to False.
     position_tolerance : float, optional
-        Largest particle correction of a constraint iteration in meters under which the constraint loop stops before
-        `solver_iterations`; 0 runs all of them. Defaults to 0.
+        Correction in meters under which the constraint loop stops before `solver_iterations`, once no particle moves by
+        more than this value in an iteration. A larger value saves iterations once the particles settle, at the cost of
+        accuracy, and 0 runs all the iterations. Defaults to 0.
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     hash_grid_res : tuple, optional

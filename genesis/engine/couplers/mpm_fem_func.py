@@ -1,15 +1,16 @@
-"""Stages of implicit FEM as a secondary participant of the NewtonSolver, and of the MPM-FEM contact rows as a coupling.
+"""Stages of the implicit finite element method (FEM) as a secondary participant of the NewtonSolver, and of the contact
+rows of the material point method (MPM) with FEM as a coupling.
 
-The FEM unknown is the end-of-substep vertex position x, starting at the substep start; its share of the joint energy
-is FEM's own incremental potential (inertia, elasticity and the linearized damping of its implicit solver) times dt^2,
-in the displacement units of the MPM energy. Its PCG vectors are those of FEM's own solve, which the joint solve
-replaces: pcg_state_v.r, z, p, Ap and x, the solution, whose negative is the Newton direction.
+The FEM unknown is the end-of-substep vertex position x, starting at the substep start. Its share of the joint energy is
+FEM's own incremental potential (inertia, elasticity and the linearized damping of its implicit solver) times dt^2, in
+the displacement units of the MPM energy. The joint solve replaces FEM's own solve and takes its preconditioned
+conjugate gradient (PCG) vectors: pcg_state_v.r, z, p, Ap and x, the solution, whose negative is the Newton direction.
 
 An MPM particle gets penalty rows against the nearest FEM surface triangle, at its signed distance minus a contact
-thickness: the triangles have no volume of their own, and a coarse surface would otherwise let the material slip
-between its vertices. Penetration is allowed, in proportion to the contact force over the penalty stiffness. The rows
-act on the particle displacement relative to the displacement of its closest point, the barycentric combination of the
-triangle's vertex displacements over the whole substep.
+thickness: the triangles have no volume of their own, and a coarse surface would otherwise let the material slip between
+its vertices. Penetration is allowed, in proportion to the contact force over the penalty stiffness. The rows act on the
+particle displacement relative to the displacement of its closest point, the barycentric combination of the triangle's
+vertex displacements over the whole substep.
 """
 
 import quadrants as qd
@@ -23,7 +24,7 @@ from genesis.utils import array_class
 
 from .mpm_rigid_func import particle_stencil
 
-# Smallest friction coefficient of a contact row, as Rigid floors its contacts
+# Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
 # Distances to two triangles within this fraction of the grid spacing are those to a closest point they share
 TIE_DIST_RATIO = 1e-6
@@ -34,8 +35,10 @@ TIE_DIST_RATIO = 1e-6
 
 @qd.func
 def closest_point_barycentric(p, a, b, c):
-    """Barycentric coordinates of the point of triangle abc closest to p (Ericson, Real-Time Collision Detection,
-    5.1.5)."""
+    """Barycentric coordinates of the closest point of a triangle to a point (Ericson 2005, Real-Time Collision
+    Detection, Sec. 5.1.5).
+
+    The coordinates are those of the point of triangle abc closest to p, in the order a, b, c."""
     ab = b - a
     ac = c - a
     ap = p - a
@@ -79,9 +82,12 @@ def closest_point_barycentric(p, a, b, c):
 
 @qd.func
 def is_in_element(fem: qd.template(), i_e, i_b, x, f):
-    """Whether point x lies in tet i_e at frame f, by its barycentric coordinates."""
-    v3 = fem.elements_v[f, fem.elements_i[i_e].el2v[3], i_b].pos
-    D = qd.Matrix.cols([fem.elements_v[f, fem.elements_i[i_e].el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
+    """Whether a point lies in a tetrahedral element, by its barycentric coordinates.
+
+    The point is x and the element i_e of environment i_b, at frame f. A degenerate element holds no point."""
+    el2v = fem.elements_i[i_e].el2v
+    v3 = fem.elements_v[f, el2v[3], i_b].pos
+    D = qd.Matrix.cols([fem.elements_v[f, el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
     is_inside = False
     if qd.abs(D.determinant()) > gs.EPS:
         lam = D.inverse() @ (x - v3)
@@ -91,7 +97,10 @@ def is_in_element(fem: qd.template(), i_e, i_b, x, f):
 
 @qd.func
 def triangle_point_disp(fem: qd.template(), i_s, i_b, bary, f):
-    """Displacement over the substep of the point of surface triangle i_s at barycentric coordinates bary."""
+    """Displacement over the substep of a point of a FEM surface triangle.
+
+    The point is that of surface triangle i_s of environment i_b at barycentric coordinates bary, displaced from frame f
+    to f + 1."""
     disp = qd.Vector.zero(gs.qd_float, 3)
     for k in qd.static(range(3)):
         i_v = fem.surface[i_s].tri2v[k]
@@ -104,9 +113,11 @@ def triangle_point_disp(fem: qd.template(), i_s, i_b, bary, f):
 
 @qd.data_oriented
 class FemTriangleQuery:
-    """The LBVH over the FEM surface triangles of every environment (see genesis.engine.bvh), and what the filter of
-    its queries reads: the FEM solver, the thickness, and the query point, frame and nearest triangle of each sorted
-    particle in `newton`."""
+    """The linear bounding volume hierarchy (LBVH) over the FEM surface triangles of every environment (see
+    genesis.engine.bvh).
+
+    It also holds the data the filter of its queries reads: the FEM solver, the contact thickness, and the query point,
+    frame and nearest triangle of each sorted particle in `newton`."""
 
     def __init__(self, fem, newton, params, n_envs):
         self.fem = fem
@@ -126,17 +137,20 @@ class FemTriangleQuery:
 
 @qd.kernel
 def kernel_fit_triangle_leaves(query: qd.template(), f: qd.i32):
-    """The box of every surface triangle with the element behind it, so that a particle that penetrated the surface
-    element still finds the triangle, grown by the contact thickness and by twice the distance the fastest vertex of
-    the element travels over the substep."""
+    """The box of every surface triangle over the element behind it, so that a particle that penetrated the surface
+    element still finds the triangle.
+
+    The box grows by the contact thickness and by twice the distance the fastest vertex of the element travels over the
+    substep."""
     dt = query.params.substep_dt[()]
     thickness = query.params.fem_contact_thickness[()]
     for i_b, i_s in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         lo = gu.qd_vec3(qd.math.inf)
         hi = gu.qd_vec3(-qd.math.inf)
         speed = gs.qd_float(0.0)
+        i_e = query.fem.surface[i_s].tri2el
         for k in qd.static(range(4)):
-            i_v = query.fem.elements_i[query.fem.surface[i_s].tri2el].el2v[k]
+            i_v = query.fem.elements_i[i_e].el2v[k]
             lo = qd.min(lo, query.fem.elements_v[f, i_v, i_b].pos)
             hi = qd.max(hi, query.fem.elements_v[f, i_v, i_b].pos)
             speed = qd.max(speed, query.fem.elements_v[f, i_v, i_b].vel.norm())
@@ -147,25 +161,28 @@ def kernel_fit_triangle_leaves(query: qd.template(), f: qd.i32):
 
 @qd.func
 def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) -> bool:
-    """The narrow phase of a box query of sorted particle i_q in environment i_t: keep the nearest surface triangle in
-    `newton.query_idx`, with its gap in `query_phi`, its signed distance outward along the triangle normal minus the
-    thickness, the barycentric coordinates of the closest point and the contact normal, the direction from it to a
-    particle outside, and record no pair.
+    """The narrow phase of a box query of a sorted particle, which keeps the nearest FEM surface triangle in `newton`.
 
-    The nearest triangle is that of the smallest unsigned distance, and the one of its normal most aligned with the
-    direction to the particle among those whose closest point is shared, on an edge or a vertex: the sign of the
-    distance to any other triangle of a closed surface may be wrong, as the bottom edge of a side face of a box seen
+    The query is that of sorted particle i_q in environment i_t, against surface triangle i_a. The filter keeps the
+    nearest triangle in `newton.query_idx`, with its gap in `query_phi` (its signed distance outward along the triangle
+    normal minus the thickness), the barycentric coordinates of the closest point, and the contact normal, the direction
+    from the closest point to a particle outside. It records no pair.
+
+    The nearest triangle is that of the smallest unsigned distance, and among the triangles whose closest point is
+    shared on an edge or a vertex, the one whose normal is most aligned with the direction to the particle. The sign of
+    the distance to the other ones may be wrong on a closed surface, as for the bottom edge of a side face of a box seen
     from below its bottom face.
 
-    A particle behind the plane of a triangle is inside the body only if it lies in the element behind the triangle,
-    whose box the triangle's leaf spans; behind any other found triangle, it may be far outside, when the grown box of
-    that triangle reaches it and the box of its nearest one does not, so the triangle is dropped. Penetration deeper
-    than the surface elements gives no row."""
+    A particle behind the plane of a triangle is inside the entity only if it lies in the element behind the triangle,
+    whose box the leaf of the triangle spans. Behind any other found triangle, the particle may lie far outside the
+    entity, where the grown box of that triangle reaches it and the box of its nearest triangle misses it, so the filter
+    drops that triangle. Penetration deeper than the surface elements gives no row."""
     f = query.newton.query_frame[()]
     x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    a = query.fem.elements_v[f, query.fem.surface[i_a].tri2v[0], i_t].pos
-    b = query.fem.elements_v[f, query.fem.surface[i_a].tri2v[1], i_t].pos
-    c = query.fem.elements_v[f, query.fem.surface[i_a].tri2v[2], i_t].pos
+    tri2v = query.fem.surface[i_a].tri2v
+    a = query.fem.elements_v[f, tri2v[0], i_t].pos
+    b = query.fem.elements_v[f, tri2v[1], i_t].pos
+    c = query.fem.elements_v[f, tri2v[2], i_t].pos
     bary = closest_point_barycentric(x, a, b, c)
     d = x - (bary[0] * a + bary[1] * b + bary[2] * c)
     dist = d.norm()
@@ -208,18 +225,20 @@ def func_build_fem_rows(
     dt,
 ):
     """Pyramid contact rows of every valid particle without Rigid rows against the nearest FEM surface triangle within
-    its contact range or short of it by less than `contact_band_width`, after the wall and Rigid rows. The nearest
-    triangle is found by a box query of the triangle trees: the particle's box spans its band at its own speed, the
-    grown triangle boxes the thickness and the vertex motion, so together they cover the band of the relative velocity.
+    its contact range or short of it by less than `contact_band_width`.
 
-    The gap phi is the signed distance to the triangle, outward along its normal, minus
-    `params.fem_contact_thickness`. Every row of the friction pyramid J = n +- mu d is a penalty on the gap at the end
-    of the substep, phi + J.r for the relative displacement r: its target is -phi and its stiffness
-    `params.fem_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight (see
-    func_contact_invweight) plus that of the triangle point, sum_k b_k^2 / m_k. The row energy depends on the end positions
-    alone, so it adds no energy the way a reference acceleration from the start gap does; the tangential part of a
-    pyramid row is dropped with the rows of the next substep, which makes it a dissipative friction bounded by the cone.
-    The friction coefficient is the element's."""
+    The rows follow the wall and Rigid rows. A box query of the triangle trees finds the nearest triangle: the
+    particle's box spans its band at its own speed, and the grown triangle boxes span the thickness and the vertex
+    motion, so together they cover the band of the relative velocity.
+
+    The gap phi is the signed distance to the triangle, outward along its normal, minus `params.fem_contact_thickness`.
+    Every row of the friction pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the
+    relative displacement r. Its target is -phi and its stiffness `params.fem_contact_stiffness` times the row's
+    effective mass, the inverse of the particle's inverse weight (see func_contact_invweight) plus that of the triangle
+    point, sum_k b_k^2 / m_k. The row energy depends on the end positions alone, so the rows add no energy, as a
+    reference acceleration from the start gap would. The next substep builds its rows anew and drops the tangential part
+    of a pyramid row, which makes it a dissipative friction bounded by the cone. The friction coefficient is the
+    element's, at least MIN_FRICTION."""
     for _ in range(1):
         newton.query_frame[()] = f
     qd.loop_config(name="mpm_build_fem_rows")
@@ -251,7 +270,8 @@ def func_build_fem_rows(
                     inv_mass += best_bary[k] * best_bary[k] / fem.elements_v_info[i_v].mass
                 v_rel = v_p - v_q
                 if best_phi < contact_band_width(params, -best_normal.dot(v_rel), dt):
-                    friction = qd.max(fem.elements_i[fem.surface[best_tri].tri2el].friction_mu, MIN_FRICTION)
+                    i_e = fem.surface[best_tri].tri2el
+                    friction = qd.max(fem.elements_i[i_e].friction_mu, MIN_FRICTION)
                     invweight = contact_invweight(particles, particles_info, f, i_p, i_b, best_normal) + inv_mass
                     D = params.fem_contact_stiffness[()] / invweight
                     d1, d2 = gu.qd_orthogonals(best_normal)
@@ -297,12 +317,15 @@ def func_fem_contact_gradient(
     fem: qd.template(),  # FEMSolver
     params: qd.template(),  # MpmParams
 ):
-    """The FEM rows' share of the FEM gradient and of its preconditioner, after FEM's own force and diagonal blocks
-    and the MPM assembly that staged the row gradients g and Hessians H: the closest point's vertices take -b_k g,
-    entered in FEM's force, minus the gradient over dt^2, and b_k^2 H over dt^2 on their diagonal block.
+    """Add the share of the FEM rows to the FEM gradient and to its preconditioner.
+
+    It runs after FEM's own force and diagonal blocks, and after the MPM assembly that staged the row gradients g and
+    Hessians H. The vertices of the closest point take the gradient -b_k g, entered in FEM's force (the negative
+    gradient over dt^2) as b_k g / dt^2, and b_k^2 H / dt^2 on their diagonal block.
 
     The rows of the many particles against one triangle are far stiffer than the inertia of its vertices, so a FEM
-    preconditioner without them would leave the joint PCG stopping on a direction that barely moves FEM."""
+    preconditioner without them would leave the joint preconditioned conjugate gradient (PCG) stopping on a direction
+    that barely moves FEM."""
     inv_dt_sq = 1.0 / (params.substep_dt[()] * params.substep_dt[()])
     qd.loop_config(name="mpm_fem_contact_gradient")
     for s in range(grid.n_valid[()]):
@@ -339,8 +362,12 @@ def fem_contact_terms(
     f,
     s,
 ):
-    """The row Hessian H of sorted particle s, its stencil, its trial displacement dxp = sum_a w_a p_u,a along the
-    direction and the displacement dq = sum_k b_k p_v,k of its closest point."""
+    """The operator terms of the FEM rows of a sorted particle: its stencil, row Hessian and trial displacement, and the
+    displacement of its closest point.
+
+    For sorted particle s, the func returns its environment i_b, its stencil slots and weights w, its row Hessian H, its
+    trial displacement dxp = sum_a w_a p_u,a along the direction and the displacement dq = sum_k b_k p_v,k of its
+    closest point."""
     ws = linear.pcg
     i_p, i_b, slots, w = particle_stencil(particles, grid, params, f, s)
     H = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -350,9 +377,11 @@ def fem_contact_terms(
     for a in qd.static(range(8)):
         row = 3 * (linear.row_offset + slots[a])
         dxp += w[a] * qd.Vector([ws.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    i_s = newton.contact_tri[s]
     dq = qd.Vector.zero(gs.qd_float, 3)
     for k in qd.static(range(3)):
-        dq += newton.contact_bary[3 * s + k] * fem.pcg_state_v[i_b, fem.surface[newton.contact_tri[s]].tri2v[k]].p
+        i_v = fem.surface[i_s].tri2v[k]
+        dq += newton.contact_bary[3 * s + k] * fem.pcg_state_v[i_b, i_v].p
     return i_b, slots, w, H, dxp, dq
 
 
@@ -398,8 +427,9 @@ def func_fem_contact_matvec_post(
         if newton.contact_tri[s] >= 0 and ws.converged[()] == 0:
             i_b, slots, w, H, dxp, dq = fem_contact_terms(particles, grid, newton, linear, fem, params, f, s)
             h = H @ (dq - dxp)
+            i_s = newton.contact_tri[s]
             for k in qd.static(range(3)):
-                i_v = fem.surface[newton.contact_tri[s]].tri2v[k]
+                i_v = fem.surface[i_s].tri2v[k]
                 qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, newton.contact_bary[3 * s + k] * h)
 
 
@@ -408,7 +438,8 @@ def func_fem_contact_matvec_post(
 
 @qd.func(requires_top_level=True)
 def func_fem_pcg_init(fem: qd.template(), dt):
-    """The FEM part of the PCG start from 0: r = grad = -dt^2 force, solution and Ap cleared."""
+    """The FEM part of the preconditioned conjugate gradient (PCG) start from 0: r = grad = -dt^2 force, solution and Ap
+    cleared."""
     qd.loop_config(name="mpm_fem_pcg_init")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].r = -dt * dt * fem.elements_v_energy[i_b, i_v].force
@@ -418,8 +449,10 @@ def func_fem_pcg_init(fem: qd.template(), dt):
 
 @qd.func(requires_top_level=True)
 def func_fem_precondition(fem: qd.template(), dt):
-    """z = M^-1 r by FEM's inverse 3x3 diagonal blocks, scaled to the joint energy. A vertex FEM holds at its target
-    gets z = 0, so that its direction stays 0 and no contact row moves it."""
+    """z = M^-1 r by FEM's inverse 3x3 diagonal blocks, scaled to the joint energy.
+
+    A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contact rows leave it in
+    place."""
     qd.loop_config(name="mpm_fem_precondition")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         z = (fem.pcg_state_v[i_b, i_v].prec @ fem.pcg_state_v[i_b, i_v].r) / (dt * dt)
@@ -481,7 +514,7 @@ def func_fem_pcg_dot_rz(fem: qd.template(), ws: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_fem_pcg_direction(fem: qd.template(), ws: qd.template()):
-    """p = z + beta p over the FEM vertices and Ap cleared, after func_linear_pcg_direction_update flipped the parity."""
+    """p = z + beta p and Ap cleared over the FEM vertices, after func_linear_pcg_direction_update flips the parity."""
     qd.loop_config(name="mpm_fem_pcg_direction")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
@@ -512,8 +545,10 @@ def func_fem_step_forward(fem: qd.template(), control: qd.template(), f):
 
 @qd.func(requires_top_level=True)
 def func_fem_energy(fem: qd.template(), control: qd.template(), f, is_trial, dt):
-    """Add FEM's incremental potential at the positions f + 1 times dt^2 to the start or trial energy: the inertia and
-    the linearized damping of its vertices, and the elastic energy and damping of its elements."""
+    """Add FEM's incremental potential at the end-of-substep positions, times dt^2, to the start or trial energy.
+
+    The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
+    the elements, at the positions of frame f + 1."""
     dt_sq = dt * dt
     damping_alpha_dt = fem._damping_alpha * fem._substep_dt
     qd.loop_config(name="mpm_fem_energy_vertices")

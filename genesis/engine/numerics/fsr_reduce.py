@@ -12,19 +12,19 @@ def _segment_metadata(
     sentinel: qd.template(),  # int
 ):
     lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
-    valid = gid < n and sorted_keys[gid] != sentinel
+    is_valid = gid < n and sorted_keys[gid] != sentinel
     segment = qd.i32(0)
-    previous = qd.i32(-1)
-    following = qd.i32(-2)
-    if valid:
+    previous_segment = qd.i32(-1)
+    next_segment = qd.i32(-2)
+    if is_valid:
         segment = qd.i32(seg_ids[gid])
         if lane > 0 and gid > 0:
-            previous = qd.i32(seg_ids[gid - 1])
+            previous_segment = qd.i32(seg_ids[gid - 1])
         if lane < 31 and gid + 1 < n:
-            following = qd.i32(seg_ids[gid + 1])
-    is_head = qd.i32(not valid or lane == 0 or previous != segment)
-    is_tail = valid and (lane == 31 or gid == n - 1 or following != segment)
-    return qd.Vector([qd.i32(valid), segment, is_head, qd.i32(is_tail)], dt=qd.i32)
+            next_segment = qd.i32(seg_ids[gid + 1])
+    is_head = qd.i32(not is_valid or lane == 0 or previous_segment != segment)
+    is_tail = is_valid and (lane == 31 or gid == n - 1 or next_segment != segment)
+    return qd.Vector([qd.i32(is_valid), segment, is_head, qd.i32(is_tail)], dt=qd.i32)
 
 
 @qd.func
@@ -56,13 +56,13 @@ def func_fsr_reduce(
     value_type: qd.template(),  # Quadrants scalar data type
     block_scalar_count: qd.template(),  # int
 ):
-    """Sum the flattened blocks of each run of equal sorted keys into its segment of output.
+    """Sum the flattened blocks of each run of equal sorted keys into the output entry of its segment.
 
-    A warp reduces the runs inside its 32 consecutive sorted entries with a head-segmented shuffle tree, and only the
-    head of each run writes, so a run spanning several warps takes one atomic add per warp it spans. A CPU has no
-    lanes to shuffle between, and its threads are few enough for each run to be one thread's work: the threads split
-    the entries, and the first entry of each run sums the whole block of every entry of the run in one ordered walk,
-    the only writer of its segment.
+    On a GPU, a warp reduces the runs inside its 32 consecutive sorted entries with a head-segmented shuffle tree, and
+    the head of each run writes alone, so a run spanning several warps takes one atomic add per warp it spans. A CPU
+    runs few threads and has no lanes to shuffle between, so each run is the work of one thread: the threads split the
+    entries, and the thread holding the first entry of a run sums the blocks of every entry of the run in one ordered
+    walk, as the only writer of its segment.
     """
     if qd.static(gs.backend == gs.cpu):
         qd.loop_config(name="fsr_reduce_cpu")

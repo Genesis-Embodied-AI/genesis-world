@@ -199,7 +199,7 @@ def test_mesh_mpm_build(show_viewer):
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_deformable_parallel(show_viewer):
     scene = gs.Scene(
-        # The implicit MPM runs one substep; SPH keeps the integration step of the explicit setup by its subcycles
+        # The implicit MPM solver is stable at one substep per step, which the explicit SPH solver splits into subcycles
         sim_options=gs.options.SimOptions(
             dt=2e-3,
             substeps=1,
@@ -209,12 +209,12 @@ def test_deformable_parallel(show_viewer):
             upper_bound=(0.7, 0.1, 0.3),
         ),
         sph_options=gs.options.SPHOptions(
+            n_subcycles=10,
             lower_bound=(-0.03, -0.03, -0.08),
             upper_bound=(0.33, 0.33, 1.0),
-            n_subcycles=10,
         ),
-        # The implicit MPM couples with the implicit FEM solver only; its mass-proportional Rayleigh damping is the
-        # explicit solver's velocity damping
+        # The implicit MPM solver couples with the implicit FEM solver only. Its mass-proportional Rayleigh damping
+        # matches the velocity damping of the explicit FEM solver.
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
             damping_alpha=45.0,
@@ -279,7 +279,7 @@ def test_deformable_parallel(show_viewer):
             pos=(0.8, 0.8, 0.1),
             size=(0.1, 0.1, 0.1),
         ),
-        # The implicit FEM solver has the energy Hessian of the linear models only
+        # The implicit FEM solver implements the energy Hessian of the linear models only
         material=gs.materials.FEM.Elastic(
             E=3.0e4,
             nu=0.45,

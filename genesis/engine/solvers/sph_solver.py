@@ -127,11 +127,12 @@ class SPHSolver(ParticleSolver):
         )
 
     def set_boundary(self, boundary):
-        """Make the particles of another solver boundary particles of the fluid (Akinci et al. 2012). `boundary`
-        provides `build(f)`, called at the start of every substep, `gather()`, called once the particles are reordered
-        for an integration step, to fill its per-particle sums `b_rho`, `b_grad` (`b_grad_at(k)`), `b_vel_grad` and
-        `b_count` at k = i_b n + i_p, and `scatter()`, called at the end of the step, to hand the impulses of the
-        boundary velocity coefficients `s` that the step accumulates to the boundary particles."""
+        """Make the particles of another solver boundary particles of the fluid (Akinci et al. 2012).
+
+        `boundary` provides `build(f)`, called at the start of every substep, `gather()`, called once the particles are
+        reordered for an integration step to fill its per-particle sums `b_rho`, `b_grad` (`b_grad_at(k)`), `b_vel_grad`
+        and `b_count` at k = i_b n + i_p, and `scatter()`, called at the end of the step to hand the boundary particles
+        the impulses of the boundary velocity coefficients `s` that the step accumulates."""
         self._boundary = boundary
         self._has_boundary = True
 
@@ -766,15 +767,17 @@ class SPHSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        """The SPH integration steps of the substep but the advection of the last one, which follows the couplings in
+        """The SPH integration steps of the substep except the advection of the last one, which follows the couplings in
         substep_post_coupling."""
         if self.is_active:
+            from genesis.engine.couplers import LegacyCoupler
+
             if self._has_boundary:
                 self._boundary.build(f)
             for _ in range(self._n_subcycles - 1):
                 self._advance_velocity(f)
                 # The coupler collides the last step with Rigid itself
-                if hasattr(self._coupler, "couple_sph_rigid"):
+                if isinstance(self._coupler, LegacyCoupler):
                     self._coupler.couple_sph_rigid(f)
                 self._kernel_advect_position(f)
                 self._kernel_copy_from_reordered(f)

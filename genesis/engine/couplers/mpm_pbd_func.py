@@ -1,17 +1,16 @@
-"""Coupling of the implicit MPM solver with PBD: the PBD particles as a secondary participant of the NewtonSolver with
-their inertia alone, and the MPM-PBD contact rows as a coupling.
+"""Coupling of the implicit material point method (MPM) solver with position based dynamics (PBD).
 
-PBD has projected its own constraints for the substep before the solve: its particles hold their start position
-`ipos` and the end position `pos` of the projection. The joint solve takes the end positions as unknowns, starting at
-the projection x~, with the energy 1/2 m |x - x~|^2 of the inertia around it in the dt^2-scaled units of the MPM
-energy; the contact rows push them off it. PBD's constraints stay with PBD, which projects them again the next
-substep, so the coupling is strong in the contact and staggered in the PBD constraints. After the solve, a PBD
-particle takes the velocity of its displacement over the substep.
+The PBD particles enter the NewtonSolver as a secondary participant with their inertia alone, and the MPM-PBD contact
+rows as a coupling. PBD projects its own constraints for the substep before the solve, so its particles hold their start
+position `ipos` and the end position `pos` of the projection. The joint solve takes the end positions as unknowns,
+starting at the projection x~, with the inertia energy 1/2 m |x - x~|^2 around it in the dt^2-scaled units of the MPM
+energy. The contact rows push them off it. PBD's constraints stay with PBD, which projects them again the next substep,
+so the coupling is strong in the contact and staggered in the PBD constraints. After the solve, a PBD particle takes the
+velocity of its displacement over the substep.
 
-An MPM particle gets penalty rows against the nearest PBD particle, a sphere of the PBD radius plus a contact
-thickness. The rows act on the particle displacement relative to the PBD particle's displacement over the substep,
-and solve the contact by the masses on both sides, so that a light cloth is held by a heavy block and the block does
-not yield to it.
+An MPM particle gets penalty rows against the nearest PBD particle, a sphere of the PBD radius plus a contact thickness.
+The rows act on the particle displacement relative to the PBD particle's displacement over the substep, and solve the
+contact by the masses on both sides, so that a heavy block holds a light cloth and the cloth barely moves the block.
 """
 
 import quadrants as qd
@@ -25,25 +24,32 @@ from genesis.utils import array_class
 
 from .mpm_rigid_func import EMPTY_BOX_HALF, particle_stencil
 
-# Obstacle candidates of a PBD particle over a substep: the nearest MPM particles within this many contact distances of
-# its start or predicted position
+# Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
+# OBSTACLE_REACH contact distances of its start or predicted position
 OBSTACLE_NEIGHBORS = 32
 OBSTACLE_REACH = 1.5
 
 
 @qd.data_oriented
 class PbdNewtonData:
-    """The PBD rows of the joint solve, per reordered PBD particle and environment, three scalars per particle at
-    3 (i_b n + i_q): the projection x~ of PBD's own substep, the gradient, the PCG residual, preconditioned residual,
-    direction, operator image and solution, the line-search start, and the inverse of the 3 x 3 diagonal block, nine
-    scalars per particle."""
+    """The PBD rows of the joint solve, per reordered PBD particle and environment.
+
+    Every vector holds three scalars per particle at 3 (i_b n + i_q): the projection x~ of PBD's own substep, the
+    gradient, the preconditioned conjugate gradient (PCG) residual, preconditioned residual, direction, operator image
+    and solution, and the line-search start. The inverse of the 3 x 3 diagonal block holds nine scalars per particle."""
 
     def __init__(self, pbd, n_envs):
         self.pbd = pbd
         self.n = max(pbd.n_particles, 1)
         size = 3 * self.n * n_envs
-        for name in ("target", "grad", "r", "z", "p", "ap", "sol", "x_prev"):
-            setattr(self, name, qd.ndarray(gs.qd_float, shape=(size,)))
+        self.target = qd.ndarray(gs.qd_float, shape=(size,))
+        self.grad = qd.ndarray(gs.qd_float, shape=(size,))
+        self.r = qd.ndarray(gs.qd_float, shape=(size,))
+        self.z = qd.ndarray(gs.qd_float, shape=(size,))
+        self.p = qd.ndarray(gs.qd_float, shape=(size,))
+        self.ap = qd.ndarray(gs.qd_float, shape=(size,))
+        self.sol = qd.ndarray(gs.qd_float, shape=(size,))
+        self.x_prev = qd.ndarray(gs.qd_float, shape=(size,))
         self.diag_inv = qd.ndarray(gs.qd_float, shape=(3 * size,))
 
 
@@ -63,7 +69,7 @@ def set_vec_at(a: qd.template(), k, v):
 
 @qd.func
 def is_moving(pbd: qd.template(), i_q, i_b):
-    """Whether the PBD particle is an unknown of the solve, active and free; an attached one keeps its position."""
+    """Whether a PBD particle is an unknown of the solve: active and free, an attached particle keeping its position."""
     return pbd.particles_ng_reordered[i_q, i_b].active and pbd.particles_reordered[i_q, i_b].free
 
 
@@ -110,7 +116,7 @@ def func_pbd_factor(pd: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_init(pd: qd.template()):
-    """The PBD part of the PCG start from 0: r = grad, solution and Ap cleared."""
+    """The PBD part of the preconditioned conjugate gradient (PCG) start from 0: r = grad, solution and Ap cleared."""
     qd.loop_config(name="mpm_pbd_pcg_init")
     for i in range(pd.r.shape[0]):
         pd.r[i] = pd.grad[i]
@@ -120,7 +126,7 @@ def func_pbd_pcg_init(pd: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pbd_precondition(pd: qd.template()):
-    """z = M^-1 r by the inverse diagonal blocks; an attached particle gets z = 0, so that it does not move."""
+    """z = M^-1 r by the inverse diagonal blocks, with z = 0 for an attached particle so that it keeps its position."""
     qd.loop_config(name="mpm_pbd_precondition")
     for i_q, i_b in qd.ndrange(pd.pbd._n_particles, pd.pbd._B):
         k = i_b * pd.n + i_q
@@ -247,9 +253,11 @@ def func_pbd_finish(pd: qd.template(), dt):
 
 @qd.data_oriented
 class PbdParticleQuery:
-    """The LBVH over the PBD particles of every environment (see genesis.engine.bvh), in PBD's reordered layout, and
-    what the filter of its queries reads: the PBD solver, the contact range, and the query point and nearest PBD
-    particle of each sorted MPM particle in `newton`."""
+    """The linear bounding volume hierarchy (LBVH) over the PBD particles of every environment, in PBD's reordered
+    layout (see genesis.engine.bvh).
+
+    It also holds the data the filter of its queries reads: the PBD solver, the contact range, and the query point and
+    nearest PBD particle of each sorted MPM particle in `newton`."""
 
     def __init__(self, pbd, newton, params, n_envs):
         self.pbd = pbd
@@ -271,7 +279,9 @@ class PbdParticleQuery:
 @qd.kernel
 def kernel_fit_pbd_leaves(query: qd.template()):
     """The box of every PBD particle over its sweep from its start to its projected end position, grown by its radius
-    and the contact thickness. An inactive particle gets an empty box with a finite center, for the morton code."""
+    and the contact thickness.
+
+    An inactive particle gets an empty box with a finite center, for the Morton code."""
     reach = qd.static(query.radius) + query.params.pbd_contact_thickness[()]
     for i_b, i_q in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         if query.pbd.particles_ng_reordered[i_q, i_b].active:
@@ -286,9 +296,12 @@ def kernel_fit_pbd_leaves(query: qd.template()):
 
 @qd.func
 def func_nearest_pbd_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) -> bool:
-    """The narrow phase of a box query of sorted MPM particle i_q in environment i_t: keep the PBD particle of the
-    smallest gap at the substep start, its distance minus its radius and the contact thickness, in
-    `newton.query_phi` / `query_idx`, with the normal from it to the MPM particle, and record no pair."""
+    """The narrow phase of a box query of a sorted MPM particle, which keeps the PBD particle of the smallest gap at the
+    substep start.
+
+    The query is that of sorted MPM particle i_q in environment i_t, against PBD particle i_a. The gap is the distance
+    minus the PBD radius and the contact thickness. The filter keeps it in `newton.query_phi`, the PBD particle in
+    `newton.query_idx` and the normal from it to the MPM particle in `newton.query_normal`, and records no pair."""
     x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
     d = x - query.pbd.particles_reordered[i_a, i_t].ipos
     dist = d.norm()
@@ -319,11 +332,11 @@ def func_build_pbd_rows(
     """Pyramid penalty rows of every valid particle without Rigid or FEM rows against the nearest PBD particle within
     its contact range or short of it by less than `contact_band_width`.
 
-    The particle's box spans its band at its own speed, the PBD leaves the sweep, radius and thickness, so together
-    they cover the band of the relative velocity. Every row of the pyramid J = n +- mu d is a penalty on the gap at the
-    end of the substep, phi + J.r for the relative displacement r: its target is -phi and its stiffness
-    `params.pbd_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight (see
-    func_contact_invweight) plus that of the PBD particle."""
+    A box query of the PBD trees finds the nearest PBD particle: the particle's box spans its band at its own speed, and
+    the PBD leaves span the sweep, radius and thickness, so together they cover the band of the relative velocity. Every
+    row of the pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the relative
+    displacement r. Its target is -phi and its stiffness `params.pbd_contact_stiffness` times the row's effective mass,
+    the inverse of the particle's inverse weight (see func_contact_invweight) plus that of the PBD particle."""
     friction = params.pbd_contact_friction[()]
     qd.loop_config(name="mpm_build_pbd_rows")
     for s in range(grid.n_valid[()]):
@@ -388,8 +401,10 @@ def func_pbd_contact_gradient(
     pd: qd.template(),  # PbdNewtonData
     params: qd.template(),  # MpmParams
 ):
-    """The PBD rows' share of the PBD gradient and diagonal blocks, after the inertia's and the MPM assembly that
-    staged the row gradients g and Hessians H: the PBD particle takes -g and H."""
+    """Add the share of the PBD rows to the PBD gradient and diagonal blocks.
+
+    It runs after the inertia terms and after the MPM assembly that staged the row gradients g and Hessians H. The PBD
+    particle takes -g and H."""
     qd.loop_config(name="mpm_pbd_contact_gradient")
     for s in range(grid.n_valid[()]):
         i_q = newton.contact_pbd[s]
@@ -413,8 +428,11 @@ def pbd_contact_terms(
     f,
     s,
 ):
-    """The row Hessian H of sorted particle s, its stencil, its trial displacement dxp = sum_a w_a p_u,a along the
-    direction, the PBD row index and the PBD particle's direction dq."""
+    """The operator terms of the PBD rows of a sorted particle: its stencil, row Hessian and trial displacement, and the
+    direction of its PBD particle.
+
+    For sorted particle s, the func returns its stencil slots and weights w, its row Hessian H, its trial displacement
+    dxp = sum_a w_a p_u,a along the direction, the PBD row index k and the direction dq of the PBD particle."""
     ws = linear.pcg
     i_p, i_b, slots, w = particle_stencil(particles, grid, params, f, s)
     H = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -474,19 +492,22 @@ def func_pbd_contact_matvec_post(
                 qd.atomic_add(pd.ap[3 * k + d], h[d])
 
 
-# ======================================== Layer 1: MPM obstacles of the PBD loop ========================================
+# ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
 
 
 @qd.data_oriented
 class MpmParticleObstacles:
-    """The MPM particles at the start of the substep as immovable obstacles of the PBD particles, in the contact group
-    of PBD's unified loop and in its pre-stabilization (see PBDSolver.set_particle_obstacles), at the contact distance
-    of the MPM-PBD rows of the joint solve: the PBD radius plus `params.pbd_contact_thickness`.
+    """The MPM particles at the start of the substep as immovable obstacles of the PBD particles (see
+    PBDSolver.set_particle_obstacles).
 
-    They keep PBD's own projection from pushing its particles into the MPM material, where the rows of the joint solve
-    would push them back every substep; the momentum between the two is exchanged by those rows alone. An LBVH over the
-    MPM particles of every environment finds the obstacle candidates of each PBD particle once per substep, at
-    (i_b n + i_q) OBSTACLE_NEIGHBORS + k, which every iteration of PBD's loop reuses."""
+    The obstacles act in the contact group of PBD's unified loop and in its pre-stabilization, at the contact distance
+    of the MPM-PBD rows of the joint solve: the PBD radius plus `params.pbd_contact_thickness`. They keep PBD's own
+    projection from pushing its particles into the MPM material, where the rows of the joint solve would push them back
+    every substep. Those rows alone exchange the momentum between the two.
+
+    A linear bounding volume hierarchy (LBVH) over the MPM particles of every environment finds the obstacle candidates
+    of each PBD particle once per substep, at (i_b n + i_q) OBSTACLE_NEIGHBORS + k, and every iteration of PBD's loop
+    reuses them."""
 
     def __init__(self, mpm_solver, pbd, params, n_envs):
         self.mpm_particles = mpm_solver.particles
@@ -505,8 +526,10 @@ class MpmParticleObstacles:
         self.results = array_class.get_bvh_query_results(1)
 
     def build(self, f):
-        """Fit the leaves to the MPM particles at frame f, build the trees, and gather the obstacle candidates of every
-        PBD particle, once PBD predicted its positions."""
+        """Fit the leaves to the MPM particles, build the trees, and gather the obstacle candidates of every PBD
+        particle, once PBD predicted its positions.
+
+        The leaves sit at the MPM particles of frame f."""
         kernel_fit_mpm_obstacle_leaves(self, f)
         build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
         kernel_gather_obstacle_neighbors(self)
@@ -514,17 +537,19 @@ class MpmParticleObstacles:
     @qd.func(requires_top_level=True)
     def func_project(self, pbd: qd.template(), f):
         """The contacts of every PBD particle at its current position with the MPM particles, with friction."""
-        func_pbd_obstacles(self, False)
+        func_pbd_obstacles(self, is_stabilization=False)
 
     @qd.func(requires_top_level=True)
     def func_stabilize(self, pbd: qd.template(), f):
         """The non-penetration of every PBD particle at its start position with the MPM particles."""
-        func_pbd_obstacles(self, True)
+        func_pbd_obstacles(self, is_stabilization=True)
 
 
 @qd.kernel
 def kernel_fit_mpm_obstacle_leaves(obstacles: qd.template(), f: qd.i32):
-    """A point leaf at every active MPM particle at frame f, an empty box with a finite center at the others."""
+    """A point leaf at every active MPM particle, and an empty box with a finite center at the others.
+
+    The particles are those of frame f, which the kernel stores in `obstacles.frame` for the filters."""
     for _ in range(1):
         obstacles.frame[()] = f
     for i_b, i_p in qd.ndrange(obstacles.leaves.aabbs_min.shape[0], obstacles.leaves.aabbs_min.shape[1]):
@@ -539,9 +564,12 @@ def kernel_fit_mpm_obstacle_leaves(obstacles: qd.template(), f: qd.i32):
 
 @qd.func
 def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """The contact of PBD particle i_q of environment i_t with MPM particle i_a: the projection out to the contact
-    distance along their separation, and the friction of Macklin et al. 2014 (Eq. 23-24) on the particle's
-    tangential displacement over the substep, the obstacle standing still. Records no pair."""
+    """The contact of a PBD particle with an MPM particle: the projection out to the contact distance along their
+    separation, and the friction.
+
+    The PBD particle is i_q of environment i_t and the MPM particle i_a. The friction is that of Macklin et al. 2014
+    (Eq. 23-24) on the tangential displacement of the PBD particle over the substep, the obstacle standing still. The
+    filter records no pair."""
     f = obstacles.frame[()]
     x_q = obstacles.pbd.particles_reordered[i_q, i_t].pos
     d_vec = x_q - obstacles.mpm_particles.pos[f, i_a, i_t]
@@ -564,8 +592,9 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
 
 @qd.func
 def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """The non-penetration of PBD particle i_q of environment i_t at its start position with MPM particle i_a, for the
-    pre-stabilization. Records no pair."""
+    """The non-penetration of a PBD particle at its start position with an MPM particle, for the pre-stabilization.
+
+    The PBD particle is i_q of environment i_t and the MPM particle i_a. The filter records no pair."""
     f = obstacles.frame[()]
     d_vec = obstacles.pbd.particles_reordered[i_q, i_t].ipos - obstacles.mpm_particles.pos[f, i_a, i_t]
     dist = d_vec.norm()
@@ -578,9 +607,11 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
 
 @qd.func
 def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """Keep MPM particle i_a among the nearest OBSTACLE_NEIGHBORS obstacle candidates of PBD particle i_q of
-    environment i_t, if it lies within OBSTACLE_REACH contact distances of its start or predicted position. Records no
-    pair."""
+    """Keep an MPM particle among the nearest OBSTACLE_NEIGHBORS obstacle candidates of a PBD particle, replacing the
+    farthest one once they are full.
+
+    The filter keeps MPM particle i_a for PBD particle i_q of environment i_t if it lies within OBSTACLE_REACH contact
+    distances of its start or predicted position, and records no pair."""
     f = obstacles.frame[()]
     x_m = obstacles.mpm_particles.pos[f, i_a, i_t]
     dist = qd.min(
@@ -597,13 +628,13 @@ def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.temp
             obstacles.nbr_dist[base + n] = dist
             obstacles.nbr_count[k] = n + 1
         else:
-            worst = 0
+            i_worst = 0
             for j in range(1, qd.static(OBSTACLE_NEIGHBORS)):
-                if obstacles.nbr_dist[base + j] > obstacles.nbr_dist[base + worst]:
-                    worst = j
-            if dist < obstacles.nbr_dist[base + worst]:
-                obstacles.nbr_idx[base + worst] = i_a
-                obstacles.nbr_dist[base + worst] = dist
+                if obstacles.nbr_dist[base + j] > obstacles.nbr_dist[base + i_worst]:
+                    i_worst = j
+            if dist < obstacles.nbr_dist[base + i_worst]:
+                obstacles.nbr_idx[base + i_worst] = i_a
+                obstacles.nbr_dist[base + i_worst] = dist
     return True
 
 
@@ -632,8 +663,8 @@ def kernel_gather_obstacle_neighbors(obstacles: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()):
-    """Accumulate the obstacle corrections of every free PBD particle against its obstacle candidates of the substep,
-    at its current or start position."""
+    """Accumulate the obstacle corrections of every free PBD particle against its obstacle candidates of the substep, at
+    its current or start position."""
     qd.loop_config(name="pbd_mpm_obstacles")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
         k = i_b * obstacles.n + i_q
@@ -714,8 +745,8 @@ class PbdNewtonParticipant:
 
 @qd.data_oriented
 class MpmPbdContact:
-    """Device stages of the MPM-PBD contact rows in the joint solve: their share of the PBD gradient, their cross
-    terms in both blocks of the operator, and the PBD particle displacement at every iterate."""
+    """Device stages of the MPM-PBD contact rows in the joint solve: their share of the PBD gradient, their cross terms
+    in both blocks of the operator, and the PBD particle displacement at every iterate."""
 
     def __init__(self, mpm, pbd_participant: PbdNewtonParticipant, query: PbdParticleQuery):
         self.particles = mpm.particles
@@ -771,7 +802,7 @@ def kernel_pbd_rows(contact: qd.template(), f: qd.i32):
 
 
 class PbdNewtonHost:
-    """Host stages of PBD around the joint solve: the projection of its substep as the inertia target before, its
+    """Host stages of PBD around the joint solve: the projection of its substep as the inertia target before, and its
     velocities from the solved positions after."""
 
     is_differentiable = False
@@ -794,8 +825,8 @@ class PbdNewtonHost:
 
 
 class MpmPbdContactHost:
-    """Host stages of the MPM-PBD contact rows before the joint solve: the PBD trees, then the rows and the PBD
-    particle displacement at the start point."""
+    """Host stages of the MPM-PBD contact rows before the joint solve: the PBD trees, then the rows and the PBD particle
+    displacement at the start point."""
 
     is_differentiable = False
 

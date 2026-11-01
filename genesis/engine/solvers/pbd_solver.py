@@ -2,6 +2,7 @@ import math
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -18,14 +19,15 @@ from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.geom import SpatialHasher
+from genesis.utils.misc import qd_to_numpy
 
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 
-# Collision candidates of a particle over a substep: the nearest ones, within this many particle sizes at the start or
-# predicted positions, the reach of the 27 hash cells around it
+# Collision candidates of a particle over a substep: the nearest COLLISION_NEIGHBORS particles within COLLISION_REACH
+# particle sizes at the start or predicted positions, a reach the 27 hash cells around the particle cover
 COLLISION_NEIGHBORS = 16
 COLLISION_REACH = 1.25
 
@@ -153,7 +155,8 @@ class PBDSolver(ParticleSolver):
             pos=gs.qd_vec3,  # position
             ipos=gs.qd_vec3,  # initial position
             dpos=gs.qd_vec3,  # delta position
-            dcount=gs.qd_float,  # number of constraints whose corrections dpos accumulates, for their average
+            # number of constraints whose corrections dpos accumulates, for their average
+            dcount=gs.qd_float,
             vel=gs.qd_vec3,  # velocity
             lam=gs.qd_float,
             rho=gs.qd_float,
@@ -209,7 +212,8 @@ class PBDSolver(ParticleSolver):
         )
         self.inner_edges_info = struct_inner_edge_info.field(shape=(max(self._n_inner_edges, 1),), layout=qd.Layout.SOA)
 
-        # XPBD Lagrange multipliers of the stretch and bending constraints over the substep
+        # Extended position based dynamics (XPBD) Lagrange multipliers of the stretch and bending constraints over the
+        # substep
         self.edges_lambda = qd.field(dtype=gs.qd_float, shape=(max(1, self._n_edges), self._B))
         self.inner_edges_lambda = qd.field(dtype=gs.qd_float, shape=(max(1, self._n_inner_edges), self._B))
 
@@ -226,7 +230,8 @@ class PBDSolver(ParticleSolver):
         self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
         self.elems_lambda = qd.field(dtype=gs.qd_float, shape=(max(1, self._n_elems), self._B))
 
-        # Number of stretch, bending and volume constraints of every particle, over which XPBD splits its mass
+        # Number of stretch, bending and volume constraints of every particle, over which extended position based
+        # dynamics (XPBD) splits its mass
         self.constraint_counts = qd.field(dtype=gs.qd_vec3, shape=(max(1, self._n_particles),))
         # The collision candidates of every particle over the substep (see _kernel_gather_collision_neighbors)
         self.collision_nbrs = qd.field(dtype=gs.qd_int, shape=(max(1, self._n_particles), self._B, COLLISION_NEIGHBORS))
@@ -236,10 +241,12 @@ class PBDSolver(ParticleSolver):
         self.collision_nbr_count = qd.field(dtype=gs.qd_int, shape=(max(1, self._n_particles), self._B))
 
     def set_particle_obstacles(self, obstacles):
-        """Make the PBD particles collide with the particles of another solver as immovable obstacles, in the contact
-        group of the unified loop and in the pre-stabilization. `obstacles` provides `build(f)`, called at the start of
-        every substep, and the top-level funcs `func_project(pbd, f)` and `func_stabilize(pbd, f)`, which accumulate
-        the corrections of the PBD particles in `dpos` and `dcount` of the reordered particles."""
+        """Make the PBD particles collide with the particles of another solver as immovable obstacles.
+
+        The obstacles act in the contact group of the unified loop and in the pre-stabilization. `obstacles` provides
+        `build(f)`, called at the start of every substep, and the top-level funcs `func_project(pbd, f)` and
+        `func_stabilize(pbd, f)`, which accumulate the corrections of the PBD particles in `dpos` and `dcount` of the
+        reordered particles."""
         self._particle_obstacles = obstacles
         self._has_particle_obstacles = True
 
@@ -512,22 +519,25 @@ class PBDSolver(ParticleSolver):
         for i_p in range(self._n_particles):
             self.constraint_counts[i_p] = qd.Vector.zero(gs.qd_float, 3)
         for i_e in range(self._n_edges):
-            self.constraint_counts[self.edges_info[i_e].v1][0] += 1.0
-            self.constraint_counts[self.edges_info[i_e].v2][0] += 1.0
+            edge = self.edges_info[i_e]
+            self.constraint_counts[edge.v1][0] += 1.0
+            self.constraint_counts[edge.v2][0] += 1.0
         for i_ie in range(self._n_inner_edges):
-            self.constraint_counts[self.inner_edges_info[i_ie].v1][1] += 1.0
-            self.constraint_counts[self.inner_edges_info[i_ie].v2][1] += 1.0
-            self.constraint_counts[self.inner_edges_info[i_ie].v3][1] += 1.0
-            self.constraint_counts[self.inner_edges_info[i_ie].v4][1] += 1.0
+            info = self.inner_edges_info[i_ie]
+            self.constraint_counts[info.v1][1] += 1.0
+            self.constraint_counts[info.v2][1] += 1.0
+            self.constraint_counts[info.v3][1] += 1.0
+            self.constraint_counts[info.v4][1] += 1.0
         for i_el in range(self._n_elems):
-            self.constraint_counts[self.elems_info[i_el].v1][2] += 1.0
-            self.constraint_counts[self.elems_info[i_el].v2][2] += 1.0
-            self.constraint_counts[self.elems_info[i_el].v3][2] += 1.0
-            self.constraint_counts[self.elems_info[i_el].v4][2] += 1.0
+            elem = self.elems_info[i_el]
+            self.constraint_counts[elem.v1][2] += 1.0
+            self.constraint_counts[elem.v2][2] += 1.0
+            self.constraint_counts[elem.v3][2] += 1.0
+            self.constraint_counts[elem.v4][2] += 1.0
 
     @qd.kernel
     def _kernel_reset_lambda(self):
-        """Clear the XPBD Lagrange multipliers at the start of a substep."""
+        """Clear the extended position based dynamics (XPBD) Lagrange multipliers at the start of a substep."""
         for i_e, i_b in qd.ndrange(self._n_edges, self._B):
             self.edges_lambda[i_e, i_b] = 0.0
         for i_ie, i_b in qd.ndrange(self._n_inner_edges, self._B):
@@ -586,8 +596,8 @@ class PBDSolver(ParticleSolver):
             )
 
     # The constraints of the unified loop (Macklin et al. 2014) act on the reordered particles, the topology constraints
-    # reaching their particles through the reorder index. A constraint kernel accumulates its corrections and their
-    # count in `dpos` and `dcount`, and `_kernel_apply_corrections` moves every particle by their over-relaxed mean.
+    # reaching their particles through the reorder index. A constraint func accumulates its corrections and their count
+    # in `dpos` and `dcount`, which `_func_apply_corrections` applies.
 
     @qd.func
     def _func_add_correction(self, i_r, i_b, dp):
@@ -606,178 +616,177 @@ class PBDSolver(ParticleSolver):
     @qd.func(requires_top_level=True)
     def _func_solve_stretch(self, f):
         for i_e, i_b in qd.ndrange(self._n_edges, self._B):
-            if not (
+            edge = self.edges_info[i_e]
+            is_constraint_active = (
                 self._func_within_budget(self._max_stretch_solver_iterations)
-                and self.particles_ng[self.edges_info[i_e].v1, i_b].active
-                and self.particles_ng[self.edges_info[i_e].v2, i_b].active
-            ):
-                continue
-            r1 = self.particles_ng[self.edges_info[i_e].v1, i_b].reordered_idx
-            r2 = self.particles_ng[self.edges_info[i_e].v2, i_b].reordered_idx
-            w1 = self._func_inv_mass(r1, i_b)
-            w2 = self._func_inv_mass(r2, i_b)
-            n = self.particles_reordered[r1, i_b].pos - self.particles_reordered[r2, i_b].pos
-            C = n.norm() - self.edges_info[i_e].len_rest
-            alpha = self.edges_info[i_e].stretch_compliance / (self._substep_dt**2)
-            if qd.static(self._use_xpbd):
-                # Delta lambda = (-C - alpha lambda) / (sum n_i w_i |grad C_i|^2 + alpha), with |grad C_i| = 1
-                lam = self.edges_lambda[i_e, i_b]
-                denom = (
-                    self.constraint_counts[self.edges_info[i_e].v1][0] * w1
-                    + self.constraint_counts[self.edges_info[i_e].v2][0] * w2
-                    + alpha
-                )
-                if denom > 0.0:
-                    dlam = (-C - alpha * lam) / denom
-                    self.edges_lambda[i_e, i_b] = lam + dlam
-                    dp = dlam * n / n.norm(gs.EPS)
-                    self._func_add_correction(r1, i_b, dp * w1)
-                    self._func_add_correction(r2, i_b, -dp * w2)
-            elif w1 + w2 + alpha > 0.0:
-                dp = -C / (w1 + w2 + alpha) * n / n.norm(gs.EPS) * self.edges_info[i_e].stretch_relaxation
-                self._func_add_correction(r1, i_b, dp * w1)
-                self._func_add_correction(r2, i_b, -dp * w2)
+                and self.particles_ng[edge.v1, i_b].active
+                and self.particles_ng[edge.v2, i_b].active
+            )
+            if is_constraint_active:
+                i_r1 = self.particles_ng[edge.v1, i_b].reordered_idx
+                i_r2 = self.particles_ng[edge.v2, i_b].reordered_idx
+                w1 = self._func_inv_mass(i_r1, i_b)
+                w2 = self._func_inv_mass(i_r2, i_b)
+                n = self.particles_reordered[i_r1, i_b].pos - self.particles_reordered[i_r2, i_b].pos
+                C = n.norm() - self.edges_info[i_e].len_rest
+                alpha = self.edges_info[i_e].stretch_compliance / (self._substep_dt**2)
+                if qd.static(self._use_xpbd):
+                    # Delta lambda = (-C - alpha lambda) / (sum n_i w_i |grad C_i|^2 + alpha), with |grad C_i| = 1
+                    lam = self.edges_lambda[i_e, i_b]
+                    denom = self.constraint_counts[edge.v1][0] * w1 + self.constraint_counts[edge.v2][0] * w2 + alpha
+                    if denom > 0.0:
+                        dlam = (-C - alpha * lam) / denom
+                        self.edges_lambda[i_e, i_b] = lam + dlam
+                        dp = dlam * n / n.norm(gs.EPS)
+                        self._func_add_correction(i_r1, i_b, dp * w1)
+                        self._func_add_correction(i_r2, i_b, -dp * w2)
+                elif w1 + w2 + alpha > 0.0:
+                    dp = -C / (w1 + w2 + alpha) * n / n.norm(gs.EPS) * self.edges_info[i_e].stretch_relaxation
+                    self._func_add_correction(i_r1, i_b, dp * w1)
+                    self._func_add_correction(i_r2, i_b, -dp * w2)
 
     @qd.func(requires_top_level=True)
     def _func_solve_bending(self, f):
         for i_ie, i_b in qd.ndrange(self._n_inner_edges, self._B):
             info = self.inner_edges_info[i_ie]
-            if not (
+            is_constraint_active = (
                 self._func_within_budget(self._max_bending_solver_iterations)
                 and self.particles_ng[info.v1, i_b].active
                 and self.particles_ng[info.v2, i_b].active
                 and self.particles_ng[info.v3, i_b].active
                 and self.particles_ng[info.v4, i_b].active
-            ):
-                continue
-            r1 = self.particles_ng[self.inner_edges_info[i_ie].v1, i_b].reordered_idx
-            r2 = self.particles_ng[self.inner_edges_info[i_ie].v2, i_b].reordered_idx
-            r3 = self.particles_ng[self.inner_edges_info[i_ie].v3, i_b].reordered_idx
-            r4 = self.particles_ng[self.inner_edges_info[i_ie].v4, i_b].reordered_idx
-            w1 = self._func_inv_mass(r1, i_b)
-            w2 = self._func_inv_mass(r2, i_b)
-            w3 = self._func_inv_mass(r3, i_b)
-            w4 = self._func_inv_mass(r4, i_b)
+            )
+            if is_constraint_active:
+                i_r1 = self.particles_ng[info.v1, i_b].reordered_idx
+                i_r2 = self.particles_ng[info.v2, i_b].reordered_idx
+                i_r3 = self.particles_ng[info.v3, i_b].reordered_idx
+                i_r4 = self.particles_ng[info.v4, i_b].reordered_idx
+                w1 = self._func_inv_mass(i_r1, i_b)
+                w2 = self._func_inv_mass(i_r2, i_b)
+                w3 = self._func_inv_mass(i_r3, i_b)
+                w4 = self._func_inv_mass(i_r4, i_b)
 
-            if w1 + w2 + w3 + w4 > 0.0:
-                # https://matthias-research.github.io/pages/publications/posBasedDyn.pdf
-                # Appendix A: Bending Constraint Projection
-                p2 = self.particles_reordered[r2, i_b].pos - self.particles_reordered[r1, i_b].pos
-                p3 = self.particles_reordered[r3, i_b].pos - self.particles_reordered[r1, i_b].pos
-                p4 = self.particles_reordered[r4, i_b].pos - self.particles_reordered[r1, i_b].pos
-                l23 = p2.cross(p3).norm()
-                l24 = p2.cross(p4).norm()
-                n1 = p2.cross(p3) / l23
-                n2 = p2.cross(p4) / l24
-                d = qd.math.clamp(n1.dot(n2), -1.0, 1.0)
+                if w1 + w2 + w3 + w4 > 0.0:
+                    # https://matthias-research.github.io/pages/publications/posBasedDyn.pdf
+                    # Appendix A: Bending Constraint Projection
+                    p2 = self.particles_reordered[i_r2, i_b].pos - self.particles_reordered[i_r1, i_b].pos
+                    p3 = self.particles_reordered[i_r3, i_b].pos - self.particles_reordered[i_r1, i_b].pos
+                    p4 = self.particles_reordered[i_r4, i_b].pos - self.particles_reordered[i_r1, i_b].pos
+                    l23 = p2.cross(p3).norm()
+                    l24 = p2.cross(p4).norm()
+                    n1 = p2.cross(p3) / l23
+                    n2 = p2.cross(p4) / l24
+                    d = qd.math.clamp(n1.dot(n2), -1.0, 1.0)
 
-                q3 = (p2.cross(n2) + n1.cross(p2) * d) / l23  # eq. (25)
-                q4 = (p2.cross(n1) + n2.cross(p2) * d) / l24  # eq. (26)
-                q2 = -(p3.cross(n2) + n1.cross(p3) * d) / l23 - (p4.cross(n1) + n2.cross(p4) * d) / l24  # eq. (27)
-                q1 = -q2 - q3 - q4
-                # eq. (29)
-                sum_wq = w1 * q1.norm_sqr() + w2 * q2.norm_sqr() + w3 * q3.norm_sqr() + w4 * q4.norm_sqr()
-                constraint = qd.acos(d) - qd.acos(-1.0)
+                    # eq. (25), (26) and (27)
+                    q3 = (p2.cross(n2) + n1.cross(p2) * d) / l23
+                    q4 = (p2.cross(n1) + n2.cross(p2) * d) / l24
+                    q2 = -(p3.cross(n2) + n1.cross(p3) * d) / l23 - (p4.cross(n1) + n2.cross(p4) * d) / l24
+                    q1 = -q2 - q3 - q4
+                    # eq. (29)
+                    sum_wq = w1 * q1.norm_sqr() + w2 * q2.norm_sqr() + w3 * q3.norm_sqr() + w4 * q4.norm_sqr()
+                    constraint = qd.acos(d) - qd.acos(-1.0)
 
-                alpha = self.inner_edges_info[i_ie].bending_compliance / (self._substep_dt**2)
-                if qd.static(self._use_xpbd):
-                    # grad C_i = q_i / sqrt(g), g = 1 - d^2, so with S = sum n_i w_i |q_i|^2:
-                    # Delta lambda = g (-C - alpha lambda) / (S + alpha g), Delta x_i = w_i q_i Delta lambda / sqrt(g)
-                    counts = qd.Vector(
-                        [
-                            self.constraint_counts[info.v1][1],
-                            self.constraint_counts[info.v2][1],
-                            self.constraint_counts[info.v3][1],
-                            self.constraint_counts[info.v4][1],
-                        ],
-                        dt=gs.qd_float,
-                    )
-                    g = 1.0 - d**2
-                    sum_nwq = (
-                        counts[0] * w1 * q1.norm_sqr()
-                        + counts[1] * w2 * q2.norm_sqr()
-                        + counts[2] * w3 * q3.norm_sqr()
-                        + counts[3] * w4 * q4.norm_sqr()
-                    )
-                    lam = self.inner_edges_lambda[i_ie, i_b]
-                    scale = gs.qd_float(0.0)
-                    if sum_nwq + alpha * g > 0.0:
-                        scale = (-constraint - alpha * lam) / (sum_nwq + alpha * g)
-                    self.inner_edges_lambda[i_ie, i_b] = lam + g * scale
-                    constraint = qd.sqrt(g) * scale
-                else:
-                    constraint = (
-                        -qd.sqrt(1 - d**2)
-                        * constraint
-                        / (sum_wq + alpha)
-                        * self.inner_edges_info[i_ie].bending_relaxation
-                    )
+                    alpha = self.inner_edges_info[i_ie].bending_compliance / (self._substep_dt**2)
+                    if qd.static(self._use_xpbd):
+                        # grad C_i = q_i / sqrt(g), g = 1 - d^2, so with S = sum n_i w_i |q_i|^2:
+                        # Delta lambda = g (-C - alpha lambda) / (S + alpha g)
+                        # Delta x_i = w_i q_i Delta lambda / sqrt(g)
+                        counts = qd.Vector(
+                            [
+                                self.constraint_counts[info.v1][1],
+                                self.constraint_counts[info.v2][1],
+                                self.constraint_counts[info.v3][1],
+                                self.constraint_counts[info.v4][1],
+                            ],
+                            dt=gs.qd_float,
+                        )
+                        g = 1.0 - d**2
+                        sum_nwq = (
+                            counts[0] * w1 * q1.norm_sqr()
+                            + counts[1] * w2 * q2.norm_sqr()
+                            + counts[2] * w3 * q3.norm_sqr()
+                            + counts[3] * w4 * q4.norm_sqr()
+                        )
+                        lam = self.inner_edges_lambda[i_ie, i_b]
+                        scale = gs.qd_float(0.0)
+                        if sum_nwq + alpha * g > 0.0:
+                            scale = (-constraint - alpha * lam) / (sum_nwq + alpha * g)
+                        self.inner_edges_lambda[i_ie, i_b] = lam + g * scale
+                        constraint = qd.sqrt(g) * scale
+                    else:
+                        constraint = (
+                            -qd.sqrt(1 - d**2)
+                            * constraint
+                            / (sum_wq + alpha)
+                            * self.inner_edges_info[i_ie].bending_relaxation
+                        )
 
-                self._func_add_correction(r1, i_b, w1 * constraint * q1)
-                self._func_add_correction(r2, i_b, w2 * constraint * q2)
-                self._func_add_correction(r3, i_b, w3 * constraint * q3)
-                self._func_add_correction(r4, i_b, w4 * constraint * q4)
+                    self._func_add_correction(i_r1, i_b, w1 * constraint * q1)
+                    self._func_add_correction(i_r2, i_b, w2 * constraint * q2)
+                    self._func_add_correction(i_r3, i_b, w3 * constraint * q3)
+                    self._func_add_correction(i_r4, i_b, w4 * constraint * q4)
 
     @qd.func(requires_top_level=True)
     def _func_solve_volume(self, f):
         for i_el, i_b in qd.ndrange(self._n_elems, self._B):
             elem = self.elems_info[i_el]
-            if not (
+            is_constraint_active = (
                 self._func_within_budget(self._max_volume_solver_iterations)
                 and self.particles_ng[elem.v1, i_b].active
                 and self.particles_ng[elem.v2, i_b].active
                 and self.particles_ng[elem.v3, i_b].active
                 and self.particles_ng[elem.v4, i_b].active
-            ):
-                continue
-            r1 = self.particles_ng[self.elems_info[i_el].v1, i_b].reordered_idx
-            r2 = self.particles_ng[self.elems_info[i_el].v2, i_b].reordered_idx
-            r3 = self.particles_ng[self.elems_info[i_el].v3, i_b].reordered_idx
-            r4 = self.particles_ng[self.elems_info[i_el].v4, i_b].reordered_idx
+            )
+            if is_constraint_active:
+                i_r1 = self.particles_ng[elem.v1, i_b].reordered_idx
+                i_r2 = self.particles_ng[elem.v2, i_b].reordered_idx
+                i_r3 = self.particles_ng[elem.v3, i_b].reordered_idx
+                i_r4 = self.particles_ng[elem.v4, i_b].reordered_idx
 
-            p1 = self.particles_reordered[r1, i_b].pos
-            p2 = self.particles_reordered[r2, i_b].pos
-            p3 = self.particles_reordered[r3, i_b].pos
-            p4 = self.particles_reordered[r4, i_b].pos
+                p1 = self.particles_reordered[i_r1, i_b].pos
+                p2 = self.particles_reordered[i_r2, i_b].pos
+                p3 = self.particles_reordered[i_r3, i_b].pos
+                p4 = self.particles_reordered[i_r4, i_b].pos
 
-            grad1 = (p4 - p2).cross(p3 - p2) / 6.0
-            grad2 = (p3 - p1).cross(p4 - p1) / 6.0
-            grad3 = (p4 - p1).cross(p2 - p1) / 6.0
-            grad4 = (p2 - p1).cross(p3 - p1) / 6.0
+                grad1 = (p4 - p2).cross(p3 - p2) / 6.0
+                grad2 = (p3 - p1).cross(p4 - p1) / 6.0
+                grad3 = (p4 - p1).cross(p2 - p1) / 6.0
+                grad4 = (p2 - p1).cross(p3 - p1) / 6.0
 
-            w1 = self._func_inv_mass(r1, i_b) * grad1.norm_sqr()
-            w2 = self._func_inv_mass(r2, i_b) * grad2.norm_sqr()
-            w3 = self._func_inv_mass(r3, i_b) * grad3.norm_sqr()
-            w4 = self._func_inv_mass(r4, i_b) * grad4.norm_sqr()
+                w1 = self._func_inv_mass(i_r1, i_b) * grad1.norm_sqr()
+                w2 = self._func_inv_mass(i_r2, i_b) * grad2.norm_sqr()
+                w3 = self._func_inv_mass(i_r3, i_b) * grad3.norm_sqr()
+                w4 = self._func_inv_mass(i_r4, i_b) * grad4.norm_sqr()
 
-            if w1 + w2 + w3 + w4 > 0.0:
-                vol = gu.qd_tet_vol(p1, p2, p3, p4)
-                C = vol - self.elems_info[i_el].vol_rest
-                alpha = self.elems_info[i_el].volume_compliance / (self._substep_dt**2)
-                s = gs.qd_float(0.0)
-                if qd.static(self._use_xpbd):
-                    lam = self.elems_lambda[i_el, i_b]
-                    denom = (
-                        self.constraint_counts[elem.v1][2] * w1
-                        + self.constraint_counts[elem.v2][2] * w2
-                        + self.constraint_counts[elem.v3][2] * w3
-                        + self.constraint_counts[elem.v4][2] * w4
-                        + alpha
-                    )
-                    s = (-C - alpha * lam) / denom
-                    self.elems_lambda[i_el, i_b] = lam + s
-                    # Delta x_i = w_i grad C_i Delta lambda, with the inverse mass alone
-                    w1 = self._func_inv_mass(r1, i_b)
-                    w2 = self._func_inv_mass(r2, i_b)
-                    w3 = self._func_inv_mass(r3, i_b)
-                    w4 = self._func_inv_mass(r4, i_b)
-                else:
-                    s = -C / (w1 + w2 + w3 + w4 + alpha) * self.elems_info[i_el].volume_relaxation
+                if w1 + w2 + w3 + w4 > 0.0:
+                    vol = gu.qd_tet_vol(p1, p2, p3, p4)
+                    C = vol - self.elems_info[i_el].vol_rest
+                    alpha = self.elems_info[i_el].volume_compliance / (self._substep_dt**2)
+                    s = gs.qd_float(0.0)
+                    if qd.static(self._use_xpbd):
+                        lam = self.elems_lambda[i_el, i_b]
+                        denom = (
+                            self.constraint_counts[elem.v1][2] * w1
+                            + self.constraint_counts[elem.v2][2] * w2
+                            + self.constraint_counts[elem.v3][2] * w3
+                            + self.constraint_counts[elem.v4][2] * w4
+                            + alpha
+                        )
+                        s = (-C - alpha * lam) / denom
+                        self.elems_lambda[i_el, i_b] = lam + s
+                        # Delta x_i = w_i grad C_i Delta lambda, with the inverse mass alone
+                        w1 = self._func_inv_mass(i_r1, i_b)
+                        w2 = self._func_inv_mass(i_r2, i_b)
+                        w3 = self._func_inv_mass(i_r3, i_b)
+                        w4 = self._func_inv_mass(i_r4, i_b)
+                    else:
+                        s = -C / (w1 + w2 + w3 + w4 + alpha) * self.elems_info[i_el].volume_relaxation
 
-                self._func_add_correction(r1, i_b, s * w1 * grad1)
-                self._func_add_correction(r2, i_b, s * w2 * grad2)
-                self._func_add_correction(r3, i_b, s * w3 * grad3)
-                self._func_add_correction(r4, i_b, s * w4 * grad4)
+                    self._func_add_correction(i_r1, i_b, s * w1 * grad1)
+                    self._func_add_correction(i_r2, i_b, s * w2 * grad2)
+                    self._func_add_correction(i_r3, i_b, s * w3 * grad3)
+                    self._func_add_correction(i_r4, i_b, s * w4 * grad4)
 
     @qd.kernel
     def _kernel_apply_corrections(self, f: qd.i32, is_average: qd.template(), is_stabilization: qd.template()):
@@ -785,11 +794,13 @@ class PBDSolver(ParticleSolver):
 
     @qd.func(requires_top_level=True)
     def _func_apply_corrections(self, f, is_average: qd.template(), is_stabilization: qd.template()):
-        """Move every free particle by the corrections its constraints accumulated: their over-relaxed mean for the
-        contacts (Eq. 13), which conflict under the parallel Jacobi update, or their sum for the topology constraints,
-        whose own relaxation factors keep them stable and whose mean would soften a cloth by its number of edges per
-        particle. The pre-stabilization moves the start position too, so that resolving a contact violated at the
-        start of the substep adds no velocity (Section 4.4)."""
+        """Move every free particle by the corrections its constraints accumulated, and clear them.
+
+        With `is_average`, the particle moves by the over-relaxed mean of its corrections (Macklin et al. 2014, Eq. 13),
+        which the contacts take since they conflict under the parallel Jacobi update. Otherwise it moves by their sum,
+        which the topology constraints take since their own relaxation factors keep them stable and their mean would
+        soften a cloth by its number of edges per particle. With `is_stabilization`, the start position moves too, so
+        that resolving a contact violated at the start of the substep adds no velocity (Sec. 4.4)."""
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             n_c = self.particles_reordered[i_p, i_b].dcount
             if (
@@ -811,7 +822,7 @@ class PBDSolver(ParticleSolver):
     @qd.kernel
     def _kernel_sleep(self, f: qd.i32):
         """Keep at its start position every particle that moved less than the sleep threshold over the substep, its
-        velocity kept (Eq. 14)."""
+        velocity kept (Macklin et al. 2014, Eq. 14)."""
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             ipos = self.particles_reordered[i_p, i_b].ipos
             if (self.particles_reordered[i_p, i_b].pos - ipos).norm() < self._sleep_threshold:
@@ -819,8 +830,10 @@ class PBDSolver(ParticleSolver):
 
     @qd.func
     def _func_solve_collision_start(self, i, j, i_b):
-        """The non-penetration of particles i and j at their start positions, as a correction of i, for the
-        pre-stabilization."""
+        """The non-penetration of two particles at their start positions, as a correction of the first, for the
+        pre-stabilization.
+
+        The correction moves particle i away from particle j."""
         cur_dist = (self.particles_reordered[i, i_b].ipos - self.particles_reordered[j, i_b].ipos).norm(gs.EPS)
         rest_dist = (
             self.particles_info_reordered[i, i_b].pos_rest - self.particles_info_reordered[j, i_b].pos_rest
@@ -869,10 +882,12 @@ class PBDSolver(ParticleSolver):
 
     @qd.kernel
     def _kernel_gather_collision_neighbors(self, f: qd.i32):
-        """The collision candidates of every particle for the substep, once the spatial hash holds the predicted
-        positions: the particles of the 27 hash cells around it that may collide with it, apart from its neighbors in
-        the rest shape, within `COLLISION_REACH` particle sizes at the start or predicted positions, the nearest
-        `COLLISION_NEIGHBORS` of them kept. The constraint iterations reuse them."""
+        """Gather the collision candidates of every particle for the substep, once the spatial hash holds the predicted
+        positions.
+
+        The candidates are the particles of the 27 hash cells around it that may collide with it, apart from its
+        neighbors in the rest shape, within `COLLISION_REACH` particle sizes at the start or predicted positions. The
+        nearest `COLLISION_NEIGHBORS` of them are kept, and the constraint iterations reuse them."""
         reach = qd.static(COLLISION_REACH * self._particle_size)
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             self.collision_nbr_count[i_p, i_b] = 0
@@ -898,27 +913,32 @@ class PBDSolver(ParticleSolver):
                             ).norm()
                             dist = qd.min(
                                 (self.particles_reordered[i_p, i_b].pos - self.particles_reordered[j, i_b].pos).norm(),
-                                (self.particles_reordered[i_p, i_b].ipos - self.particles_reordered[j, i_b].ipos).norm(),
+                                (
+                                    self.particles_reordered[i_p, i_b].ipos - self.particles_reordered[j, i_b].ipos
+                                ).norm(),
                             )
                             if rest_dist > self._particle_size and dist < reach:
                                 self._func_insert_collision_neighbor(i_p, i_b, j, dist)
 
     @qd.func
     def _func_insert_collision_neighbor(self, i_p, i_b, j, dist):
-        """Keep particle j among the nearest `COLLISION_NEIGHBORS` collision candidates of particle i_p."""
+        """Keep a particle among the nearest `COLLISION_NEIGHBORS` collision candidates of another, replacing the
+        farthest one once they are full.
+
+        The candidate is particle j at distance dist of particle i_p in environment i_b."""
         n = self.collision_nbr_count[i_p, i_b]
         if n < COLLISION_NEIGHBORS:
             self.collision_nbrs[i_p, i_b, n] = j
             self.collision_nbr_dist[i_p, i_b, n] = dist
             self.collision_nbr_count[i_p, i_b] = n + 1
         else:
-            worst = 0
+            i_worst = 0
             for k in range(1, COLLISION_NEIGHBORS):
-                if self.collision_nbr_dist[i_p, i_b, k] > self.collision_nbr_dist[i_p, i_b, worst]:
-                    worst = k
-            if dist < self.collision_nbr_dist[i_p, i_b, worst]:
-                self.collision_nbrs[i_p, i_b, worst] = j
-                self.collision_nbr_dist[i_p, i_b, worst] = dist
+                if self.collision_nbr_dist[i_p, i_b, k] > self.collision_nbr_dist[i_p, i_b, i_worst]:
+                    i_worst = k
+            if dist < self.collision_nbr_dist[i_p, i_b, i_worst]:
+                self.collision_nbrs[i_p, i_b, i_worst] = j
+                self.collision_nbr_dist[i_p, i_b, i_worst] = dist
 
     @qd.kernel
     def _kernel_solve_collision(self, f: qd.i32, is_stabilization: qd.template()):
@@ -926,9 +946,11 @@ class PBDSolver(ParticleSolver):
 
     @qd.func(requires_top_level=True)
     def _func_solve_collision(self, f, is_stabilization: qd.template()):
-        """The particle contacts with friction (Section 6.1) as a correction of each particle, or their
-        non-penetration at the start positions in the pre-stabilization, against its collision candidates of the
-        substep."""
+        """The particle contacts of every particle against its collision candidates of the substep, as a correction of
+        the particle.
+
+        The contacts carry friction (Macklin et al. 2014, Sec. 6.1). With `is_stabilization`, they reduce to the
+        non-penetration at the start positions, for the pre-stabilization."""
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for k in range(self.collision_nbr_count[i_p, i_b]):
                 j = self.collision_nbrs[i_p, i_b, k]
@@ -1117,9 +1139,10 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        """One substep of the unified particle solver (Macklin et al. 2014, Algorithm 1): the prediction, the spatial
-        hashing of the predicted positions, the contact pre-stabilization, the unified constraint loop, the velocities
-        from the displacements, and the sleeping."""
+        """One substep of the unified particle solver (Macklin et al. 2014, Algorithm 1).
+
+        The substep runs the prediction, the spatial hashing of the predicted positions, the contact pre-stabilization,
+        the unified constraint loop, the velocities from the displacements, and the sleeping."""
         if self.is_active:
             self._kernel_store_initial_pos(f)
             if self._use_xpbd:
@@ -1127,15 +1150,14 @@ class PBDSolver(ParticleSolver):
             self._kernel_apply_external_force(f, self._sim.cur_t)
             self._kernel_reorder_particles(f)
             self._kernel_gather_collision_neighbors(f)
-            has_obstacles = self._particle_obstacles is not None
-            if has_obstacles:
+            if self._has_particle_obstacles:
                 self._particle_obstacles.build(f)
 
             for _ in range(self._stabilization_iterations):
-                self._kernel_solve_collision(f, True)
-                if has_obstacles:
-                    self._kernel_solve_obstacles(f, True)
-                self._kernel_apply_corrections(f, True, True)
+                self._kernel_solve_collision(f, is_stabilization=True)
+                if self._has_particle_obstacles:
+                    self._kernel_solve_obstacles(f, is_stabilization=True)
+                self._kernel_apply_corrections(f, is_average=True, is_stabilization=True)
 
             self._kernel_constraint_loop(f)
 
@@ -1149,10 +1171,12 @@ class PBDSolver(ParticleSolver):
 
     @qd.kernel(graph=True)
     def _kernel_constraint_loop(self, f: qd.i32):
-        """The constraint iterations of a substep as one graph: every iteration the topology constraints, every kind as
-        its own group within its own iteration budget, then the density constraints and the contact group. The loop
-        runs `solver_iterations` iterations, or stops once the largest correction of one falls below
-        `position_tolerance`; `_loop_iter` holds the iterations it ran."""
+        """The constraint iterations of a substep as one graph.
+
+        Every iteration solves the topology constraints, every kind as its own group within its own iteration budget,
+        then the density constraints and the contact group. The loop runs `solver_iterations` iterations, or stops once
+        the largest correction of an iteration falls below `position_tolerance`. `_loop_iter` holds the number of
+        iterations it ran."""
         self._loop_iter[()] = 0
         self._loop_cond[()] = 1
         while qd.graph.do_while(self._loop_cond):
@@ -1160,19 +1184,19 @@ class PBDSolver(ParticleSolver):
                 self._max_correction[()] = 0.0
             if qd.static(self._n_edges > 0):
                 self._func_solve_stretch(f)
-                self._func_apply_corrections(f, False, False)
+                self._func_apply_corrections(f, is_average=False, is_stabilization=False)
             if qd.static(self._n_inner_edges > 0):
                 self._func_solve_bending(f)
-                self._func_apply_corrections(f, False, False)
+                self._func_apply_corrections(f, is_average=False, is_stabilization=False)
             if qd.static(self._n_elems > 0):
                 self._func_solve_volume(f)
-                self._func_apply_corrections(f, False, False)
+                self._func_apply_corrections(f, is_average=False, is_stabilization=False)
             if qd.static(self._n_fluid_particles > 0):
                 self._func_solve_density(f)
-            self._func_solve_collision(f, False)
+            self._func_solve_collision(f, is_stabilization=False)
             if qd.static(self._has_particle_obstacles):
                 self._particle_obstacles.func_project(self, f)
-            self._func_apply_corrections(f, True, False)
+            self._func_apply_corrections(f, is_average=True, is_stabilization=False)
             self._func_end_iteration()
 
     @qd.func(requires_top_level=True)
@@ -1188,8 +1212,8 @@ class PBDSolver(ParticleSolver):
 
     @property
     def n_iterations(self):
-        """Iterations the constraint loop ran in the last substep; a GPU sync."""
-        return int(self._loop_iter.to_numpy())
+        """The number of iterations the constraint loop ran in the last substep, read back from the device."""
+        return int(qd_to_numpy(self._loop_iter))
 
     def substep_post_coupling(self, f):
         if self.is_active:

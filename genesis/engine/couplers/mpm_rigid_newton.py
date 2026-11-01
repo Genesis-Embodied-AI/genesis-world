@@ -1,9 +1,8 @@
-"""Rigid's dofs as a secondary participant of the NewtonSolver, and the MPM-Rigid contact rows as a coupling (design
-§6.2.3). The stage functions are those of `mpm_rigid_func`; this module binds them to the data of one scene.
+"""Rigid's dofs as a secondary participant of the NewtonSolver, and the contact rows between the material point method
+(MPM) and Rigid as a coupling.
 
-The Rigid unknown is x = dt^2 qacc per dof, so that Rigid's convex primal cost times dt^4 joins the joint energy in the
-displacement units of the MPM energy, with Rigid's island Cholesky factor of M + J^T D J as its preconditioner. The
-contact coupling acts on the displacement of each particle relative to the motion of its contact point on the link.
+This module binds the stage functions of `mpm_rigid_func` to the data of one scene. The Rigid unknown, its share of the
+joint energy, its preconditioner and the contact coupling are described there.
 """
 
 import quadrants as qd
@@ -109,8 +108,10 @@ class RigidNewtonParticipant:
 
 @qd.data_oriented
 class MpmRigidContact:
-    """Device stages of the MPM-Rigid contact rows in the joint solve: their cross terms in the Rigid gradient and in
-    both blocks of the operator, and the contact point displacement at every iterate."""
+    """Device stages of the MPM-Rigid contact rows in the joint solve.
+
+    They add the cross terms of the rows to the Rigid gradient and to both blocks of the operator, and update the
+    contact point displacement at every iterate."""
 
     def __init__(self, mpm, rigid):
         self.particles = mpm.particles
@@ -240,11 +241,11 @@ def kernel_rigid_contact_adjoint(contact: qd.template(), f: qd.i32):
 
 
 class RigidNewtonHost:
-    """Host stages of Rigid's dofs around the joint solve: the start point from Rigid's warm start, and the hand-back
-    of the converged qacc, from which Rigid updates its accelerations and contact forces, then integrates its deferred
-    substep once the solve is over.
+    """Host stages of Rigid's dofs around the joint solve.
 
-    Its backward pass is Rigid's reverse of its constraint solve, whose adjoint solve is the joint one."""
+    They start from Rigid's warm start and hand back the converged qacc, from which Rigid updates its accelerations and
+    contact forces, then integrates its deferred substep once the solve is over. The backward pass is Rigid's reverse of
+    its constraint solve, whose adjoint solve is the joint one."""
 
     is_differentiable = True
 
@@ -265,7 +266,9 @@ class RigidNewtonHost:
         self._rigid_solver.integrate_deferred_substep()
 
     def newton_backward(self, f, solve):
-        """Reverse Rigid's constraint solve, whose adjoint solve `solve` runs jointly with the other participants."""
+        """Reverse Rigid's constraint solve, with its adjoint solve run jointly with the other participants.
+
+        `solve` runs the joint adjoint solve."""
         self._rigid_solver._constraint_force_grad(solve_adjoint=solve)
 
     def newton_adjoint_rhs(self, f):
@@ -276,9 +279,10 @@ class RigidNewtonHost:
 
 
 class MpmRigidContactHost:
-    """Host stages of the MPM-Rigid contact rows around the joint solve: the contact point displacement at the start
-    point, the MPM rows' force on Rigid at the converged solve, and its share of Rigid's reported contact forces once
-    Rigid wrote its own."""
+    """Host stages of the MPM-Rigid contact rows around the joint solve.
+
+    They set the contact point displacement at the start point, apply the force of the MPM rows on Rigid at the
+    converged solve, and add its share to Rigid's reported contact forces once Rigid wrote its own."""
 
     is_differentiable = True
 
@@ -301,5 +305,5 @@ class MpmRigidContactHost:
         pass
 
     def newton_adjoint_finish(self, f):
-        """The pullback of the contact rows into the adjoints of the particles and of Rigid's state."""
+        """Pull the contact rows back into the adjoints of the particles and of Rigid's state."""
         kernel_rigid_contact_adjoint(self._device, f)

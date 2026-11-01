@@ -341,7 +341,7 @@ class PBD2DEntity(PBDTetEntity):
         if n_supports < 3:
             super()._add_vverts_to_solver()
             return
-        faces = np.asarray(self._mesh.faces, dtype=gs.np_int)
+        faces = self._mesh.faces
         mesh = trimesh.Trimesh(vertices=self._particles, faces=faces, process=False)
         closest, _, tri_idx = trimesh.proximity.closest_point(mesh, self._vverts)
         bary = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_idx], closest)

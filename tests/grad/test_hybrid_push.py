@@ -110,9 +110,9 @@ def test_mpm_rigid_push_grad(show_viewer):
 
 @pytest.mark.required
 # The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
-# tolerance, which fp32 cannot resolve. Its adjoint solves on the exact Hessian by a direct factorization, which the
-# finite differences match, where the SPD-projected Hessian of production gradients clamps the modes of the
-# compressed muscle.
+# tolerance, which fp32 cannot resolve. The adjoint solves on the exact Hessian by a direct factorization, which the
+# finite differences match, whereas the default symmetric positive definite (SPD) projection of the Hessian clamps the
+# modes of the compressed muscle.
 @pytest.mark.precision("64")
 def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
@@ -238,15 +238,15 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
                 losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
             fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
         assert (np.abs(fd_grad) > 1e-3).all()
-    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
+    # The finite differences of the MPM box keep the error of the Newton tolerance of the implicit MPM solve
     for i_box, tol in enumerate((2e-6, 2e-9)):
-        assert_allclose(actus_ana.grad[i_box], inputs_fd_grad[0][i_box], rtol=tol, atol=tol)
-        assert_allclose(vels_ana.grad[i_box], inputs_fd_grad[1][i_box], rtol=tol, atol=tol)
+        assert_allclose(actus_ana.grad[i_box], inputs_fd_grad[0][i_box], tol=tol)
+        assert_allclose(vels_ana.grad[i_box], inputs_fd_grad[1][i_box], tol=tol)
 
 
 @pytest.mark.required
-# The finite differences need the Newton iterations converged far below their default tolerance (see
-# test_deformable_inputs_grad_matches_fd)
+# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
+# tolerance, which fp32 cannot resolve, and its adjoint on the exact Hessian by a direct factorization, which they match
 @pytest.mark.precision("64")
 def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
     # The force fields act on the grid velocity before the Newton solve, so the gradient of the initial velocity goes
@@ -262,18 +262,21 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
                 requires_grad=requires_grad,
             ),
             mpm_options=gs.options.MPMOptions(
+                grid_density=32,
                 lower_bound=(-0.5, -0.5, -0.5),
                 upper_bound=(0.5, 0.5, 0.5),
-                grid_density=32,
                 newton_velocity_tol=1e-10,
                 adjoint_hessian="exact",
                 adjoint_linear_solver="direct",
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.4, -0.4, 0.3),
+                camera_lookat=(0.0, 0.0, 0.0),
             ),
             show_viewer=show_viewer and requires_grad,
         )
         block = scene.add_entity(
             morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.0),
                 size=(0.1, 0.1, 0.1),
             ),
             material=gs.materials.MPM.Elastic(
@@ -316,7 +319,7 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
         fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-3).all()
     # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
-    assert_allclose(vels_ana.grad, fd_grad, rtol=2e-6, atol=2e-6)
+    assert_allclose(vels_ana.grad, fd_grad, tol=2e-6)
 
 
 @pytest.mark.required
@@ -324,17 +327,36 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
 @pytest.mark.parametrize(
     "material",
     [
-        lambda: gs.materials.MPM.ElastoPlastic(E=5e4, von_mises_yield_stress=500.0, sampler="regular"),
-        lambda: gs.materials.MPM.ElastoPlastic(E=5e4, use_von_mises=False, sampler="regular"),
-        lambda: gs.materials.MPM.Snow(E=5e4, sampler="regular"),
-        lambda: gs.materials.MPM.Sand(E=5e4, sampler="regular"),
-        lambda: gs.materials.MPM.Liquid(E=5e4, viscous=True, sampler="regular"),
+        lambda: gs.materials.MPM.ElastoPlastic(
+            E=5e4,
+            sampler="regular",
+            von_mises_yield_stress=500.0,
+        ),
+        lambda: gs.materials.MPM.ElastoPlastic(
+            E=5e4,
+            sampler="regular",
+            use_von_mises=False,
+        ),
+        lambda: gs.materials.MPM.Snow(
+            E=5e4,
+            sampler="regular",
+        ),
+        lambda: gs.materials.MPM.Sand(
+            E=5e4,
+            sampler="regular",
+        ),
+        lambda: gs.materials.MPM.Liquid(
+            E=5e4,
+            sampler="regular",
+            viscous=True,
+        ),
     ],
     ids=["von_mises", "clamp", "snow", "sand", "liquid"],
 )
 def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
     # Two blocks collide head-on and yield, so that the gradient of the initial velocity of the first goes through the
-    # reverse of the return map of every substep after the impact, and through Jp for the snow and the sand
+    # reverse of the return map of every substep after the impact, and through the plastic volume ratio Jp for the snow
+    # and the sand
     scenes, blocks = [], []
     for requires_grad in (True, False):
         scene = gs.Scene(
@@ -345,12 +367,16 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
                 requires_grad=requires_grad,
             ),
             mpm_options=gs.options.MPMOptions(
+                grid_density=32,
                 lower_bound=(-0.5, -0.5, -0.5),
                 upper_bound=(0.5, 0.5, 0.5),
-                grid_density=32,
                 newton_velocity_tol=1e-10,
                 adjoint_hessian="exact",
                 adjoint_linear_solver="direct",
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.4, -0.4, 0.3),
+                camera_lookat=(0.0, 0.0, 0.0),
             ),
             show_viewer=show_viewer and requires_grad,
         )
@@ -397,16 +423,16 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
             losses.append(float(rollout(scenes[1], blocks[1], perturbed)[idx[0]]))
         fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-3).all()
-    assert_allclose(vels_ana.grad, fd_grad, rtol=2e-6, atol=2e-6)
+    assert_allclose(vels_ana.grad, fd_grad, tol=2e-6)
 
 
 @pytest.mark.required
-# The finite differences need the Newton iterations converged far below their default tolerance (see
-# test_deformable_inputs_grad_matches_fd)
+# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
+# tolerance, which fp32 cannot resolve, and its adjoint on the exact Hessian by a direct factorization, which they match
 @pytest.mark.precision("64")
 def test_hybrid_grad_matches_fd(precision, show_viewer):
-    # The links of a Rigid arm drive the MPM muscle around them after G2P, so the gradient goes from the soft particles
-    # to the arm's dofs through that coupling and the implicit MPM solve
+    # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
+    # gradient goes from the soft particles to the dofs of the arm through that coupling and the implicit MPM solve
     scenes, robots = [], []
     for requires_grad in (True, False):
         scene = gs.Scene(
@@ -423,12 +449,16 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
                 adjoint_hessian="exact",
                 adjoint_linear_solver="direct",
             ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.65, -0.35, 0.6),
+                camera_lookat=(0.65, 0.45, 0.2),
+            ),
             show_viewer=show_viewer and requires_grad,
         )
         robot = scene.add_entity(
             morph=gs.morphs.URDF(
-                file="urdf/simple/two_link_arm.urdf",
                 pos=(0.45, 0.45, 0.2),
+                file="urdf/simple/two_link_arm.urdf",
                 scale=0.2,
                 fixed=True,
             ),
@@ -440,12 +470,9 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
                 material_soft=gs.materials.MPM.Muscle(
                     E=1e4,
                     nu=0.45,
-                    rho=1000.0,
-                    model="neohooken",
                     sampler="regular",
                 ),
                 damping=1000.0,
-                thickness=0.05,
             ),
         )
         scene.build()
@@ -480,9 +507,9 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-# The joint Newton solve of MPM and Rigid converges far below its default tolerance for the finite differences, which
-# fp32 cannot resolve, and its adjoint solves by the joint PCG on the exact MPM Hessian (see
-# test_deformable_inputs_grad_matches_fd).
+# The finite differences need the joint Newton solve of MPM and Rigid converged far below its default tolerance, which
+# fp32 cannot resolve, and its adjoint solved by the joint preconditioned conjugate gradient (PCG) on the exact MPM
+# Hessian, which they match.
 @pytest.mark.precision("64")
 def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     scene = gs.Scene(

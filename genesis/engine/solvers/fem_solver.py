@@ -533,7 +533,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.func
     def _func_compute_ele_hessian_gradient(self, f: qd.i32):
-        """Energy density, its gradient and its Hessian of every element at the end-of-substep positions f + 1."""
+        """Energy density, its gradient and its Hessian of every element at the end-of-substep positions.
+
+        The positions are those of frame f + 1."""
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
                 continue
@@ -641,8 +643,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.func
     def _func_accumulate_vertex_force_preconditioner(self, f: qd.i32):
-        """The force of every vertex, minus the energy gradient at the positions f + 1, and the inverse of its 3x3
-        diagonal Hessian block, after _func_compute_ele_hessian_gradient."""
+        """The force of every vertex, minus the energy gradient at the end-of-substep positions, and the inverse of its
+        3x3 diagonal Hessian block.
+
+        It runs after _func_compute_ele_hessian_gradient, on the positions of frame f + 1."""
         damping_alpha_dt = self._damping_alpha * self._substep_dt
         damping_alpha_factor = damping_alpha_dt + 1.0
         damping_beta_over_dt = self._damping_beta / self._substep_dt
@@ -971,7 +975,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if isinstance(self.sim._coupler, IPCCoupler):
                 pass  # IPC coupler handles FEM simulation
             elif self._defer_solve:
-                pass  # The NewtonSolver solves the implicit substep jointly with the implicit MPM solver
+                # The NewtonSolver solves the implicit substep jointly with the implicit MPM solver
+                pass
             elif self._use_implicit_solver:
                 self.precompute_material_data(f)
                 self.init_pos_and_inertia(f)

@@ -106,8 +106,8 @@ def func_solve_adjoint_u_cg_batch(
 
 @qd.func(requires_top_level=True)
 def func_add_constraint_force_grad(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
-    """g += J^T * (-D * dL/defc_force) over the active rows, the direct gradient of the constraint forces (see
-    kernel_solve_adjoint_u)."""
+    """Add the direct gradient of the constraint forces, J^T * (-D * dL/defc_force) over the active rows, to dL_dqacc
+    (see kernel_solve_adjoint_u)."""
     _B = constraint_state.bw_u.shape[1]
     len_constraints = constraint_state.bw_Ju.shape[0]
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

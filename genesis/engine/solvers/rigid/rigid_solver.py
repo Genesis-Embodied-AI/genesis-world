@@ -1434,8 +1434,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
 
     def finish_deferred_solve(self):
-        """Update the accelerations and the contact forces from the constraint solution a solver coupled strongly with
-        Rigid wrote.
+        """Update the accelerations and the contact forces from the constraint solution written by a solver coupled
+        strongly with Rigid.
 
         Such a solver sets `_defer_constraint_solve`: the substep then stops after assembling the constraint rows, the
         coupled solver solves them jointly with its own unknowns, writes the constraint solution (qacc, Jaref, active,
@@ -1460,7 +1460,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
     def _integrate_recorded_substep(self):
-        """The integration of a substep whose launches are recorded for its backward pass, each reversed by autodiff."""
+        """Integrate a substep whose launches are recorded for its backward pass, each launch reversed by autodiff."""
         kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
         kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
         kernel_copy_next_to_curr_clear_coupling(

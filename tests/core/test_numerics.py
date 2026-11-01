@@ -18,6 +18,8 @@ from genesis.engine.numerics.linear_pcg import (
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash, func_reset_hash
 from genesis.utils.misc import qd_to_numpy
 
+from ..utils.assertions import assert_allclose, assert_equal
+
 
 @qd.kernel(graph=True)
 def kernel_radix_sort(
@@ -63,8 +65,8 @@ def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
         qd.sync()
 
         order = np.argsort(keys[:count], kind="stable")
-        np.testing.assert_array_equal(qd_to_numpy(keys_a)[:count], keys[:count][order])
-        np.testing.assert_array_equal(qd_to_numpy(perm_a)[:count], permutation[:count][order])
+        assert_equal(qd_to_numpy(keys_a)[:count], keys[:count][order])
+        assert_equal(qd_to_numpy(perm_a)[:count], permutation[:count][order])
 
 
 @pytest.mark.required
@@ -84,7 +86,7 @@ def test_dynamic_exclusive_sum_matches_numpy():
         kernel_exclusive_sum(scanner, values, output, n)
         qd.sync()
         expected = np.concatenate(([0], np.cumsum(data[: max(count - 1, 0)], dtype=np.int32)))[:count]
-        np.testing.assert_array_equal(qd_to_numpy(output)[:count], expected)
+        assert_equal(qd_to_numpy(output)[:count], expected)
 
 
 @qd.kernel
@@ -151,11 +153,11 @@ def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
     bcoo_rows = qd_to_numpy(matrix.bcoo_row)[:nnz]
     bcoo_cols = qd_to_numpy(matrix.bcoo_col)[:nnz]
     assert np.all(bcoo_rows <= bcoo_cols)
-    keys = bcoo_rows.astype(np.int64) * n_rows + bcoo_cols
+    keys = bcoo_rows * n_rows + bcoo_cols
     assert np.all(np.diff(keys) > 0)
-    expected_keys = np.unique(np.minimum(rows, cols).astype(np.int64) * n_rows + np.maximum(rows, cols))
-    np.testing.assert_array_equal(keys, expected_keys)
-    np.testing.assert_allclose(qd_to_numpy(y_nd), dense @ x, rtol=1e-10, atol=1e-10)
+    expected_keys = np.unique(np.minimum(rows, cols) * n_rows + np.maximum(rows, cols))
+    assert_equal(keys, expected_keys)
+    assert_allclose(qd_to_numpy(y_nd), dense @ x, tol=1e-10)
 
 
 @qd.kernel
@@ -195,8 +197,8 @@ def test_open_addressing_hash_inserts_and_looks_up():
         kernel_hash_lookup(table, keys_nd, found_nd)
         kernel_hash_lookup(table, missing_nd, absent_nd)
         qd.sync()
-        np.testing.assert_array_equal(qd_to_numpy(found_nd), np.arange(len(keys)))
-        assert np.all(qd_to_numpy(absent_nd) == -1)
+        assert_equal(qd_to_numpy(found_nd), np.arange(len(keys)))
+        assert_equal(qd_to_numpy(absent_nd), -1)
 
 
 @qd.kernel
@@ -228,9 +230,12 @@ def kernel_pcg_solve(
 
 
 def _pcg_block_system(off_diagonal_scale, check_curvature):
-    """A symmetric block system with SPD diagonal blocks a^T a + c I, solved by PCG with the block-Jacobi
-    preconditioner, which they keep SPD whatever the off-diagonal blocks. Returns the dense matrix, the right-hand side,
-    the solution and the workspace."""
+    """Solve a random symmetric block system by block-Jacobi preconditioned conjugate gradient (PCG).
+
+    The diagonal blocks a^T a + c I are symmetric positive definite (SPD), which keeps the preconditioner SPD whatever
+    the off-diagonal blocks, scaled by 'off_diagonal_scale'. With 'check_curvature', the solve flags a non-positive
+    curvature in the workspace. Return the dense matrix, the right-hand side, the solution and the workspace.
+    """
     rng = np.random.default_rng(17)
     n_rows, n_triplets = 60, 400
     rows, cols, values, _ = _random_symmetric_triplets(rng, n_rows, n_triplets)
@@ -281,10 +286,10 @@ def _pcg_block_system(off_diagonal_scale, check_curvature):
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_linear_pcg_solves_spd_block_system():
-    # A dominant diagonal makes the matrix SPD, which the curvature check accepts
-    dense, b, x, ws = _pcg_block_system(0.1, check_curvature=True)
+    # A dominant diagonal makes the matrix symmetric positive definite (SPD), which the curvature check accepts
+    dense, b, x, ws = _pcg_block_system(off_diagonal_scale=0.1, check_curvature=True)
     assert np.all(np.linalg.eigvalsh(dense) > 0)
-    np.testing.assert_allclose(x, np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
+    assert_allclose(x, np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
     assert 0 < int(qd_to_numpy(ws.iter_remaining)) < int(qd_to_numpy(ws.max_iter))
     assert int(qd_to_numpy(ws.breakdown)) == 0
 
@@ -293,8 +298,9 @@ def test_linear_pcg_solves_spd_block_system():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_linear_pcg_flags_non_positive_curvature():
-    # Off-diagonal blocks large enough to make the matrix indefinite, its SPD diagonal keeping the preconditioner SPD
-    dense, b, x, ws = _pcg_block_system(10.0, check_curvature=True)
+    # Off-diagonal blocks large enough to make the matrix indefinite, its symmetric positive definite (SPD) diagonal
+    # keeping the preconditioner SPD
+    dense, b, x, ws = _pcg_block_system(off_diagonal_scale=10.0, check_curvature=True)
     assert np.linalg.eigvalsh(dense)[0] < 0
     assert int(qd_to_numpy(ws.breakdown)) == 1
 
@@ -327,5 +333,5 @@ def test_block_partial_sum_is_reproducible():
         kernel_sum(values_nd, partials, out, n)
         qd.sync()
         results.append(float(qd_to_numpy(out)))
-    assert results[0] == results[1] == results[2]
-    np.testing.assert_allclose(results[0], values.sum(), rtol=1e-12)
+    assert_equal(results[1:], results[0])
+    assert_allclose(results[0], values.sum(), rtol=1e-12)

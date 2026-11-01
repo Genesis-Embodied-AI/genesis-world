@@ -1,27 +1,29 @@
-"""Layer-1 stages of the adjoint of the implicit MPM substep (design §8.2).
+"""Layer-1 stages of the adjoint of the implicit material point method (MPM) substep.
 
-The substep maps the particle state of frame f to that of frame f + 1 through the grid displacement u* that minimizes
-the incremental potential E(u; p), `grad_u E(u*; p) = 0`. Its backward pass consumes the adjoint of frame f + 1 in the
-`.grad` of the particle arrays, clears it, and adds the adjoint of frame f:
+The substep maps the particle state p of frame f to that of frame f + 1 through the grid displacement u* that minimizes
+the incremental potential E(u, p), so that grad_u E(u*, p) = 0. Its backward pass consumes the adjoint of frame f + 1 in
+the `.grad` of the particle arrays, clears it, and adds the adjoint of frame f in four steps:
 
-1. reverse of G2P and advection, which gives the direct terms of frame f and the adjoint u_bar of u*,
-2. the adjoint solve H lambda = u_bar by the PCG of the forward solve, on its SPD-projected Hessian at u*,
-3. the implicit-function pullback p_bar = -(d grad_u E / dp)^T lambda over the kinetic and elastic terms, with the
-   exact differential of the first Piola-Kirchhoff stress,
-4. reverse of P2G from the adjoint of the node momentum and mass.
+1. the reverse of the grid-to-particle transfer (G2P) and of the advection, which gives the direct terms of frame f and
+   the adjoint u_bar of u*,
+2. the adjoint solve H lambda = u_bar by the preconditioned conjugate gradient (PCG) of the forward solve, on the
+   Hessian at u* with its symmetric positive definite (SPD) projection,
+3. the implicit-function pullback p_bar = -(d grad_u E / dp)^T lambda over the kinetic and elastic terms, with the exact
+   differential of the first Piola-Kirchhoff stress,
+4. the reverse of the particle-to-grid transfer (P2G) from the adjoint of the node momentum and mass.
 
-The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the
-adjoint solve through the Hessian and the pullback through their weights and coefficients (see
-func_wall_contact_adjoint), as the rows of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs
-through the particle position and the pose of their links (see func_constraint_adjoint). The return maps of G2P reverse
-by hand (see return_map_vjp), and the snow hardening through the Lame parameters the energy reads.
+The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the adjoint
+solve through the Hessian and the pullback through their weights and coefficients (see func_wall_contact_adjoint), as
+the rows of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs enter it through the particle
+position and the pose of their links (see func_constraint_adjoint). The return maps of G2P reverse by hand (see
+return_map_vjp), and the snow hardening reverses through the Lame parameters read by the energy.
 """
 
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils import array_class
 
 from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
 from .mpm_func import (
@@ -67,14 +69,17 @@ def return_map_vjp(
     F_new_bar,
     Jp_new_bar,
 ):
-    """Reverse of `return_map`: the adjoints of the trial deformation gradient F and of the plastic state Jp from
-    those of the returned F_new and Jp_new.
+    """Reverse of `return_map`, from the adjoints of the returned deformation gradient and plastic state.
 
-    Every return map but the liquid's is F_new = U diag(h(sigma, Jp)) V^T on the SVD F = U diag(sigma) V^T, an
-    isotropic matrix function: its reverse is its differential (see isotropic_first_piola_differential) with the
-    transposed Jacobian dh/dsigma, the twist and flip blocks of the axis pairs being symmetric. Jp_new(sigma, Jp) adds
-    U diag(dJp_new/dsigma) V^T Jp_new_bar, and h depends on Jp for sand. The liquid's F_new = J^(1/3) I, J the volume
-    ratio clamped to [LIQUID_J_MIN, 1], reverses through det F where the clamp is inactive.
+    Returns the adjoints of the trial deformation gradient F and of the plastic state Jp, given F_new_bar and
+    Jp_new_bar, the adjoints of the returned F_new and Jp_new.
+
+    Every return map but the liquid's is F_new = U diag(h(sigma, Jp)) V^T, with F = U diag(sigma) V^T the singular value
+    decomposition (SVD), an isotropic matrix function: its reverse is its differential (see
+    isotropic_first_piola_differential) with the transposed Jacobian dh/dsigma, the twist and flip blocks of the axis
+    pairs being symmetric. The dependence of Jp_new on sigma adds U diag(dJp_new/dsigma) V^T Jp_new_bar to the adjoint
+    of F, and h depends on Jp for sand. The liquid's F_new = J^(1/3) I, J being the volume ratio clamped to
+    [LIQUID_J_MIN, 1], reverses through det F where the clamp is inactive.
     """
     F_bar = F_new_bar
     Jp_bar = Jp_new_bar
@@ -134,8 +139,8 @@ def return_map_vjp(
                     for j in qd.static(range(3)):
                         dh[j, j] = h[j] * deps[j]
                 else:
-                    # log h = trace / 3 1 - c trace u with u = eps_hat / n, whose differential is (I - u u^T) / n
-                    # d eps_hat, d eps_hat = (I - 1 1^T / 3) d eps - 1 / 3 dJp
+                    # log h = trace / 3 1 - c trace u with u = eps_hat / n, the differential of u being du = (I - u u^T)
+                    # / n d_eps_hat with d_eps_hat = (I - 1 1^T / 3) d_eps - 1 / 3 d_Jp
                     u = eps_hat / n
                     for i in qd.static(range(3)):
                         for j in qd.static(range(3)):
@@ -182,7 +187,10 @@ def return_map_vjp(
 
 @qd.func
 def band_row_bw(sol_params, phi, vel, diag_coef, dt, D_bar, t_bar):
-    """Reverse of `band_row` (see soft_row): the adjoints of phi, vel and diag_coef from those of D and t."""
+    """Reverse of `band_row` (see soft_row), from the adjoints of the coefficients of a row to those of its inputs.
+
+    Returns the adjoints of phi, vel and diag_coef, given D_bar and t_bar, the adjoints of the coefficients D and t.
+    """
     phi_bar = gs.qd_float(0.0)
     vel_bar = gs.qd_float(0.0)
     diag_coef_bar = gs.qd_float(0.0)
@@ -191,7 +199,7 @@ def band_row_bw(sol_params, phi, vel, diag_coef, dt, D_bar, t_bar):
         imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, phi)
         diag_raw = diag_coef * (1.0 - imp) / imp
         D = 1.0 / qd.max(diag_raw, gs.EPS)
-        # Zero where the floor holds D
+        # Zero where diag_raw is clamped at the floor gs.EPS
         diag_raw_bar = gs.qd_float(0.0)
         if diag_raw > gs.EPS:
             diag_raw_bar = -D * D * D_bar
@@ -212,9 +220,11 @@ def band_row_bw(sol_params, phi, vel, diag_coef, dt, D_bar, t_bar):
 
 @qd.func
 def polar_rotation_bw(U, S, V, R_bar):
-    """Reverse of the rotation R = U V^T of the polar decomposition F = R S, F = U S V^T: with M = U^T dF V, dR =
-    U X V^T, X_ij = (M_ij - M_ji) / (s_i + s_j), so F_bar = U Y V^T, Y_ij = (G_ij - G_ji) / (s_i + s_j) for
-    G = U^T R_bar V."""
+    """Reverse of the rotation of the polar decomposition, from its adjoint to that of the deformation gradient.
+
+    U, S and V hold the singular value decomposition (SVD) F = U S V^T, and the rotation of the polar decomposition F =
+    R (V S V^T) is R = U V^T. With M = U^T dF V, dR = U X V^T where X_ij = (M_ij - M_ji) / (s_i + s_j), so the returned
+    adjoint of F is F_bar = U Y V^T where Y_ij = (G_ij - G_ji) / (s_i + s_j) and G = U^T R_bar V."""
     G = U.transpose() @ R_bar @ V
     Y = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i, j in qd.static(qd.ndrange(3, 3)):
@@ -234,12 +244,12 @@ def func_wall_contact_adjoint(
     f,
     dt,
 ):
-    """The pullback of the wall rows of every valid particle (see func_build_wall_rows) into the adjoint of frame f.
+    """Pull the wall rows of every valid particle (see func_build_wall_rows) back into the adjoint of the particles.
 
-    A row k on the trial displacement Delta = sum_a w_a u_a, of normal J = +-e_d, adds D c J . delta to lambda^T
-    grad_u E, c = J . Delta - t and delta = sum_a w_a lambda_a, when active. Its pullback is that of the Rigid rows
-    (see func_rigid_contact_adjoint) without the link: the weights, and the coefficients through the gap and the
-    velocity along the normal and the inverse weight of the particle."""
+    The adjoints add to frame f. A row k on the trial displacement Delta = sum_a w_a u_a, of normal J = +-e_d, adds D c
+    J . delta to lambda^T grad_u E when active, with c = J . Delta - t and delta = sum_a w_a lambda_a. Its pullback is
+    that of the Rigid rows (see func_rigid_contact_adjoint) with a fixed wall in place of the link: through the weights,
+    and through the coefficients via the gap, the velocity along the normal and the inverse weight of the particle."""
     qd.loop_config(name="mpm_wall_contact_adjoint")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
@@ -313,13 +323,13 @@ def func_constraint_adjoint(
     links_state: array_class.LinksState,
     f,
 ):
-    """The pullback of the constraint springs (see func_build_constraint_rows) into the adjoint of frame f and of the
-    pose of the links the particles are attached to.
+    """Pull the constraint springs (see func_build_constraint_rows) back into the adjoints of the particles and links.
 
-    A spring adds delta . g to lambda^T grad_u E, g = kappa (x + Delta - T) + gamma Delta with kappa = dt^2 k and
-    gamma = dt c, Delta = sum_a w_a u_a and delta = sum_a w_a lambda_a. The position enters through the weights, the
-    gap and Delta, x_bar = -[kappa delta + sum_a (lambda_a . g + (kappa + gamma) u_a . delta) grad w_a], and the target
-    through the gap, T_bar = kappa delta. The stiffness and the mass behind the damping are model constants."""
+    The adjoints add to frame f of the particles and to the poses of the links that hold them. A spring adds delta . g
+    to lambda^T grad_u E, with g = kappa (x + Delta - T) + gamma Delta, kappa = dt^2 k, gamma = dt c, Delta = sum_a w_a
+    u_a and delta = sum_a w_a lambda_a. The position enters through the weights, the gap and Delta, x_bar = -[kappa
+    delta + sum_a (lambda_a . g + (kappa + gamma) u_a . delta) grad w_a], and the target through the gap, T_bar = kappa
+    delta. The stiffness and the mass that scales the damping are model constants."""
     qd.loop_config(name="mpm_constraint_adjoint")
     for s in range(grid.n_valid[()]):
         spring = newton.constraint_spring[s]
@@ -359,7 +369,8 @@ def func_adjoint_reset_u_bar(
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
 ):
-    """Clear the adjoint of u*, which the reverse of G2P accumulates into `newton.du`, free once the solve is over."""
+    """Clear the adjoint of u*, which the reverse of the grid-to-particle transfer (G2P) accumulates into `newton.du`
+    (free once the forward solve is over)."""
     qd.loop_config(name="mpm_adjoint_reset_u_bar")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
         newton.du[i] = 0.0
@@ -376,11 +387,11 @@ def func_adjoint_g2p(
     f,
     dt,
 ):
-    """Reverse of G2P and advection: x' = x + dt v, v = sum_a w_a u_a / dt, C = sum_a u_a grad w_a^T / dt and
-    (F', Jp') = return_map((I + dt C) F, Jp), given the adjoint of frame f + 1.
+    """Reverse of the grid-to-particle transfer (G2P) and of the advection, from the adjoint of the next frame.
 
-    The direct terms add to the adjoint of frame f, the adjoint of u* to `newton.du`, by atomics over the stencil.
-    The position enters through the weights and their gradients.
+    The forward maps of frame f to frame f + 1 are x' = x + dt v, v = sum_a w_a u_a / dt, C = sum_a u_a grad w_a^T / dt
+    and (F', Jp') = return_map((I + dt C) F, Jp). The direct terms add to the adjoint of frame f, and the adjoint of u*
+    to `newton.du` by atomics over the stencil. The position enters through the weights and their gradients.
     """
     qd.loop_config(name="mpm_adjoint_g2p")
     for s in range(grid.n_valid[()]):
@@ -431,8 +442,8 @@ def func_adjoint_rhs(
     newton: qd.template(),  # MpmNewton
     linear: qd.template(),  # MpmLinearSystem
 ):
-    """The right-hand side of the adjoint solve, the adjoint of u* with its fixed components, whose rows of the Newton
-    matrix are the identity, at zero."""
+    """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed components, whose rows of
+    the Newton matrix are the identity."""
     qd.loop_config(name="mpm_adjoint_rhs")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
         value = newton.du[i]
@@ -451,13 +462,13 @@ def func_adjoint_nodes(
     t,
     dt,
 ):
-    """The kinetic pullback of lambda (`linear.solution`) and the reverse of v_free = v + dt acc(x_a, v), v = mom / m,
-    on every node.
+    """Pull lambda back through the kinetic term and reverse the free velocity of every node.
 
-    grad_{u_a} E = m_a (u_a - dt v_free_a) gives v_free_bar = m_a dt lambda_a and m_bar = -lambda_a . (u_a - dt
-    v_free_a). The force fields add dt (d acc / dv)^T v_free_bar to v_bar = v_free_bar (see
-    'ForceField.get_acc_vel_vjp'), the node position x_a being fixed, so mom_bar = v_bar / m_a and
-    m_bar -= v_a . v_bar / m_a. A fixed or massless node, whose velocity is zero, gets none.
+    The node adjoints of momentum and mass go to `newton.adj_mom` and `newton.adj_mass`. lambda is `linear.solution`,
+    and the free velocity is v_free = v + dt acc(x_a, v) with v = mom / m. grad_{u_a} E = m_a (u_a - dt v_free_a) gives
+    v_free_bar = m_a dt lambda_a and m_bar = -lambda_a . (u_a - dt v_free_a). The force fields add dt (d acc / dv)^T
+    v_free_bar to v_bar = v_free_bar (see 'ForceField.get_acc_vel_vjp'), the node position x_a being fixed, so mom_bar =
+    v_bar / m_a and m_bar -= v_a . v_bar / m_a. A fixed or massless node, whose velocity is zero, gets zero adjoints.
     """
     qd.loop_config(name="mpm_adjoint_nodes")
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):
@@ -496,13 +507,13 @@ def func_adjoint_particles(
     f,
     dt,
 ):
-    """The elastic pullback of lambda and the reverse of P2G of every valid particle, into the adjoint of frame f.
+    """Pull lambda back through the elastic term and reverse the particle-to-grid transfer (P2G) of valid particles.
 
-    With A = I + sum_a u_a grad w_a^T, Lambda = sum_a lambda_a grad w_a^T and F_trial = A F, the elastic gradient
-    gives phi = V dt^2 P(F_trial) : (Lambda F), and p_bar = -d phi / dp: F_bar -= V dt^2 (A^T Q + Lambda^T P) with
-    Q = dP[Lambda F], the actuation through the fibre stiffness, and the position through the weight Hessians H_a,
-    x_bar -= V dt^2 sum_a H_a F (Q^T u_a + P^T lambda_a). P2G spreads m_p (v_p + dt g + C_p (x_a - x_p)) and m_p
-    by w_a, which reverses into v, C and x from the node adjoints of `func_adjoint_nodes`.
+    The adjoints add to frame f. With A = I + sum_a u_a grad w_a^T, Lambda = sum_a lambda_a grad w_a^T and F_trial = A
+    F, the elastic gradient gives phi = V dt^2 P(F_trial) : (Lambda F), and p_bar = -d phi / dp. Hence F_bar -= V dt^2
+    (A^T Q + Lambda^T P) with Q = dP[Lambda F], the actuation enters through the fibre stiffness, and the position
+    through the weight Hessians H_a, x_bar -= V dt^2 sum_a H_a F (Q^T u_a + P^T lambda_a). P2G spreads m_p (v_p + dt g +
+    C_p (x_a - x_p)) and m_p by w_a, which reverses into v, C and x from the node adjoints of `func_adjoint_nodes`.
     """
     qd.loop_config(name="mpm_adjoint_particles")
     for s in range(grid.n_valid[()]):
@@ -540,12 +551,12 @@ def func_adjoint_particles(
                 phi += P[i, j] * LamF[i, j]
             Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
         stiffness = material_param(materials, params, PARAM_FIBRE, slot)
-        m_dir = particles_info.muscle_direction[i_p]
-        ka = stiffness * particles.actu[f, i_p, i_b]
-        F_tr_m = F_tr @ m_dir
-        LamF_m = LamF @ m_dir
-        P += ka * F_tr_m.outer_product(m_dir)
-        Q += ka * LamF_m.outer_product(m_dir)
+        muscle_direction = particles_info.muscle_direction[i_p]
+        active_stiffness = stiffness * particles.actu[f, i_p, i_b]
+        F_tr_m = F_tr @ muscle_direction
+        LamF_m = LamF @ muscle_direction
+        P += active_stiffness * F_tr_m.outer_product(muscle_direction)
+        Q += active_stiffness * LamF_m.outer_product(muscle_direction)
 
         scale = params.particle_volume[()] * dt * dt
         F_bar = -scale * (A_def.transpose() @ Q + Lam.transpose() @ P)
@@ -557,7 +568,7 @@ def func_adjoint_particles(
             H_a = q1_weight_hessian(fx, a, params.inv_dx[()])
             x_bar -= scale * (H_a @ (F @ (Q.transpose() @ u_a + P.transpose() @ lam_a)))
 
-        # Reverse of P2G
+        # Reverse of the particle-to-grid transfer (P2G)
         m_p = particles_info.mass[i_p] / params.mass_scale[()]
         v_p = particles.vel[f, i_p, i_b] + dt * gravity[i_b]
         C_p = particles.C[f, i_p, i_b]
@@ -588,8 +599,11 @@ def func_adjoint_consume(
     params: qd.template(),  # MpmParams
     f,
 ):
-    """Clear the adjoint of frame f + 1, which the substep consumed; an inactive particle, which the substep carries
-    over unchanged, hands it to frame f."""
+    """Clear the adjoint of the next frame, which the substep consumed.
+
+    The substep carries an inactive particle over unchanged, so its adjoint of frame f + 1 first adds to that of frame
+    f.
+    """
     qd.loop_config(name="mpm_adjoint_consume")
     for i_p, i_b in qd.ndrange(params.n_particles[()], params.n_envs[()]):
         if not particles_ng.active[f, i_p, i_b]:

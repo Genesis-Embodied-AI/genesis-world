@@ -1,10 +1,12 @@
-"""Adjoint of the MPM-Rigid contact rows of the joint Newton solve (see mpm_rigid_func), the manual reverse of the rows
-in the implicit-function pullback, as Rigid reverses the assembly of its own contact rows.
+"""Adjoint of the contact rows between the material point method (MPM) and Rigid in the joint Newton solve.
 
-The joint solve minimizes E(y; theta) over y = (u, x); its backward pass solves H lambda = y_bar and pulls back
-theta_bar = -d/dtheta [lambda^T grad_y E] at the solution, y and lambda held. The contact rows' share of lambda^T grad_y E
-is Phi = sum_s g_s . delta_s over the particles with Rigid rows, g_s = sum_k D_k c_k J_k over the active rows of
-particle s, c_k = J_k . Delta_s - t_k, with Delta_s = sum_a w_a u_a - dr(x) the displacement of the particle relative
+The rows (see mpm_rigid_func) reverse by hand in the implicit-function pullback, as Rigid reverses the assembly of its
+own contact rows.
+
+The joint solve minimizes E(y, theta) over y = (u, x). Its backward pass solves H lambda = y_bar and pulls back
+theta_bar = -d/dtheta [lambda^T grad_y E] at the solution, with y and lambda held. The contact rows' share of lambda^T
+grad_y E is Phi = sum_s g_s . delta_s over the particles with Rigid rows, g_s = sum_k D_k c_k J_k over the active rows
+of particle s, c_k = J_k . Delta_s - t_k, with Delta_s = sum_a w_a u_a - dr(x) the displacement of the particle relative
 to its contact point and delta_s the same map of lambda. Phi depends on theta through the weights and the arm of the
 particle, the cdofs of its link, and the row coefficients J, D and t, which `func_build_rigid_rows` derives from the
 particle state, the pose of the geom and the velocity of the link.
@@ -31,8 +33,10 @@ from .mpm_rigid_func import geom_normal
 
 @qd.func
 def orthogonals_bw(n, g_d1, g_d2):
-    """Reverse of `gu.qd_orthogonals` (d1 = b x n, d2 = b, b the normalized branch vector of n): the adjoint of n
-    from those of d1 and d2."""
+    """Reverse of `gu.qd_orthogonals`, from the adjoints of the two tangents to that of the normal.
+
+    The tangents are d1 = b x n and d2 = b, with b the normalized branch vector of n. Returns the adjoint of n from g_d1
+    and g_d2, the adjoints of d1 and d2."""
     is_branch_a = qd.abs(n[1]) < 0.5
     b_raw = qd.Vector.zero(gs.qd_float, 3)
     if is_branch_a:
@@ -63,34 +67,34 @@ def geom_sdf_grid_hessian(
     geoms_state: array_class.GeomsState,
     sdf_info: array_class.SDFInfo,
 ):
-    """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at world point x.
+    """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at a world point.
 
-    Inside the grid, those of the trilinear interpolant, whose pure second derivatives vanish; outside, a clamped
-    component follows the distance to the grid, whose Hessian is (I - o o^T) / |o| over the clamped components."""
+    Inside the grid, they are those of the trilinear interpolant, whose pure second derivatives vanish. Outside, a
+    clamped component follows the distance |o| to the grid, of Hessian (I - o o^T) / |o| over the clamped components."""
     pos_mesh = gu.qd_inv_transform_by_trans_quat(x, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b])
     pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_g])
-    res = sdf_info.geoms_info.sdf_res[i_g]
-    cs = sdf_info.geoms_info.sdf_cell_size[i_g]
-    upper = (res - 1).cast(gs.qd_float)
+    sdf_res = sdf_info.geoms_info.sdf_res[i_g]
+    cell_size = sdf_info.geoms_info.sdf_cell_size[i_g]
+    upper = (sdf_res - 1).cast(gs.qd_float)
     q = qd.min(qd.max(pos_sdf, 0.0), upper)
-    base = qd.max(qd.min(qd.floor(q, gs.qd_int), res - 2), 0)
+    base = qd.max(qd.min(qd.floor(q, gs.qd_int), sdf_res - 2), 0)
     grad = qd.Vector.zero(gs.qd_float, 3)
     hess = qd.Matrix.zero(gs.qd_float, 3, 3)
     for offset in qd.grouped(qd.ndrange(2, 2, 2)):
         node = base + offset
         w = 1.0 - qd.abs(q - node.cast(gs.qd_float))
-        s = (2 * offset - 1).cast(gs.qd_float)
-        val = sdf_info.geoms_sdf_val[sdf.sdf_func_ravel_cell_idx(node, i_g, res, sdf_info)]
-        grad[0] += s[0] * w[1] * w[2] * val / cs[0]
-        grad[1] += w[0] * s[1] * w[2] * val / cs[1]
-        grad[2] += w[0] * w[1] * s[2] * val / cs[2]
-        hess[0, 1] += s[0] * s[1] * w[2] * val / (cs[0] * cs[1])
-        hess[0, 2] += s[0] * w[1] * s[2] * val / (cs[0] * cs[2])
-        hess[1, 2] += w[0] * s[1] * s[2] * val / (cs[1] * cs[2])
+        sign = (2 * offset - 1).cast(gs.qd_float)
+        sdf_val = sdf_info.geoms_sdf_val[sdf.sdf_func_ravel_cell_idx(node, i_g, sdf_res, sdf_info)]
+        grad[0] += sign[0] * w[1] * w[2] * sdf_val / cell_size[0]
+        grad[1] += w[0] * sign[1] * w[2] * sdf_val / cell_size[1]
+        grad[2] += w[0] * w[1] * sign[2] * sdf_val / cell_size[2]
+        hess[0, 1] += sign[0] * sign[1] * w[2] * sdf_val / (cell_size[0] * cell_size[1])
+        hess[0, 2] += sign[0] * w[1] * sign[2] * sdf_val / (cell_size[0] * cell_size[2])
+        hess[1, 2] += w[0] * sign[1] * sign[2] * sdf_val / (cell_size[1] * cell_size[2])
     hess[1, 0] = hess[0, 1]
     hess[2, 0] = hess[0, 2]
     hess[2, 1] = hess[1, 2]
-    outside = qd.Vector([(pos_sdf[d] - q[d]) * cs[d] for d in qd.static(range(3))], dt=gs.qd_float)
+    outside = qd.Vector([(pos_sdf[d] - q[d]) * cell_size[d] for d in qd.static(range(3))], dt=gs.qd_float)
     distance = outside.norm()
     if distance > 0.0:
         o = outside / distance
@@ -119,23 +123,24 @@ def geom_contact_bw(
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
 ):
-    """Reverse of the signed distance `geom_sdf` and the normal `geom_normal` of geom i_g at world point x: returns the
-    adjoint of x and adds those of the geom's pose to its gradients."""
+    """Reverse of the signed distance `geom_sdf` and of the normal `geom_normal` of a geom at a world point.
+
+    Returns the adjoint of x from phi_bar and n_bar, and adds the adjoints of the pose of geom i_g to its gradients."""
     EPS = rigid_info.EPS[None]
-    g_pos = geoms_state.pos[i_g, i_b]
-    g_quat = geoms_state.quat[i_g, i_b]
+    geom_pos = geoms_state.pos[i_g, i_b]
+    geom_quat = geoms_state.quat[i_g, i_b]
     x_bar = qd.Vector.zero(gs.qd_float, 3)
     pos_bar = qd.Vector.zero(gs.qd_float, 3)
     quat_bar = qd.Vector.zero(gs.qd_float, 4)
     geom_type = geoms_info.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
-        e = x - g_pos
+        e = x - geom_pos
         e_norm = qd.max(e.norm(), EPS)
         n = e / e_norm
         x_bar = phi_bar * n + (n_bar - n.dot(n_bar) * n) / e_norm
         pos_bar = -x_bar
     else:
-        # The gradient of the distance in the mesh frame and its Hessian, and the world gradient the normal normalizes
+        # The mesh-frame gradient of the distance and its Hessian, and the world gradient that gives the normal
         grad_mesh = qd.Vector.zero(gs.qd_float, 3)
         hess_mesh = qd.Matrix.zero(gs.qd_float, 3, 3)
         if geom_type == gs.GEOM_TYPE.PLANE:
@@ -143,19 +148,19 @@ def geom_contact_bw(
             grad_mesh = qd.Vector([geom_data[0], geom_data[1], geom_data[2]], dt=gs.qd_float)
         else:
             grad_mesh, hess_mesh = geom_sdf_grid_hessian(i_g, i_b, x, geoms_state, sdf_info)
-        grad_world = gu.qd_transform_by_quat(grad_mesh, g_quat)
+        grad_world = gu.qd_transform_by_quat(grad_mesh, geom_quat)
         grad_world_norm = qd.max(grad_world.norm(), EPS)
         n = grad_world / grad_world_norm
         grad_world_bar = (n_bar - n.dot(n_bar) * n) / grad_world_norm
-        quat_bar += gu.qd_transform_by_quat_grad_quat(grad_mesh, g_quat, grad_world_bar)
-        q_inv = gu.qd_inv_quat(g_quat)
-        grad_mesh_bar = gu.qd_transform_by_quat(grad_world_bar, q_inv)
+        quat_bar += gu.qd_transform_by_quat_grad_quat(grad_mesh, geom_quat, grad_world_bar)
+        quat_inv = gu.qd_inv_quat(geom_quat)
+        grad_mesh_bar = gu.qd_transform_by_quat(grad_world_bar, quat_inv)
         # pos_mesh = R^T (x - pos)
         pos_mesh_bar = phi_bar * grad_mesh + hess_mesh @ grad_mesh_bar
-        x_bar = gu.qd_transform_by_quat(pos_mesh_bar, g_quat)
+        x_bar = gu.qd_transform_by_quat(pos_mesh_bar, geom_quat)
         pos_bar = -x_bar
-        q_inv_bar = gu.qd_transform_by_quat_grad_quat(x - g_pos, q_inv, pos_mesh_bar)
-        quat_bar += qd.Vector([q_inv_bar[0], -q_inv_bar[1], -q_inv_bar[2], -q_inv_bar[3]], dt=gs.qd_float)
+        quat_inv_bar = gu.qd_transform_by_quat_grad_quat(x - geom_pos, quat_inv, pos_mesh_bar)
+        quat_bar += qd.Vector([quat_inv_bar[0], -quat_inv_bar[1], -quat_inv_bar[2], -quat_inv_bar[3]], dt=gs.qd_float)
     geoms_state.pos.grad[i_g, i_b] += pos_bar
     geoms_state.quat.grad[i_g, i_b] += quat_bar
     return x_bar
@@ -170,7 +175,9 @@ def link_chain_spatial(
     dofs_state: array_class.DofsState,
     config: qd.template(),  # MpmStaticConfig
 ):
-    """Spatial displacement sum over the dofs of the chain of link i_l of cdof src_d (see func_link_spatial_disp)."""
+    """Spatial displacement of a link from a dof vector (see func_link_spatial_disp).
+
+    Returns the linear and angular parts of the sum of cdof src_d over the dofs of the chain of link i_l."""
     lin = qd.Vector.zero(gs.qd_float, 3)
     ang = qd.Vector.zero(gs.qd_float, 3)
     i_a = i_l
@@ -205,13 +212,14 @@ def func_rigid_contact_adjoint(
     params: qd.template(),  # MpmParams
     f,
 ):
-    """The pullback of the Rigid contact rows of every particle into the adjoints of frame f of the particles and of
-    Rigid's state, from the joint solution (u*, x*) and the adjoint lambda = (`linear.solution`, `coupling.sol`).
+    """Pull the Rigid contact rows of every particle back into the adjoints of the particles and of Rigid's state.
 
-    With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k, t_k_bar = D_k a_k, J_k_bar = -D_k (a_k
-    Delta + c_k delta), Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k J_k. Delta and delta move with the
-    weights and the arm r = x_p - root_COM of the particle and the cdofs of its chain; the rows with the particle state,
-    the geom pose through its distance and normal, and the link velocity at the particle."""
+    The adjoints add to frame f of the particles, from the joint solution (u*, x*) and the adjoint lambda =
+    (`linear.solution`, `coupling.sol`). With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k,
+    t_k_bar = D_k a_k, J_k_bar = -D_k (a_k Delta + c_k delta), Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k
+    J_k. Delta and delta move with the weights, the arm r = x_p - root_COM of the particle and the cdofs of its chain.
+    The rows move with the particle state, with the geom pose through its distance and normal, and with the link
+    velocity at the particle."""
     dt = params.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for s in range(grid.n_valid[()]):
@@ -230,8 +238,7 @@ def func_rigid_contact_adjoint(
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
-            com = links_state.root_COM[i_l, i_b]
-            r = x_p - com
+            r = x_p - links_state.root_COM[i_l, i_b]
             V_lin, V_ang = link_chain_spatial(coupling.x, i_l, i_b, links_info, dofs_state, config)
             L_lin, L_ang = link_chain_spatial(coupling.sol, i_l, i_b, links_info, dofs_state, config)
             Delta = dxp - (V_lin + V_ang.cross(r))
@@ -288,8 +295,7 @@ def func_rigid_contact_adjoint(
             normal = geom_normal(i_g, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, config)
             friction = qd.max(geoms_info.friction[i_g] * geoms_state.friction_ratio[i_g, i_b], 1e-2)
             friction_sq_reg = friction * friction / rigid_info.impratio[None]
-            F = particles.F[f, i_p, i_b]
-            U, S, V = qd.svd(F, gs.qd_float)
+            U, S, V = qd.svd(particles.F[f, i_p, i_b], gs.qd_float)
             R = U @ V.transpose()
             n_rest = R.transpose() @ normal
             W = particles_info.contact_invweight[i_p]

@@ -163,8 +163,8 @@ def test_perf_dispatch(variant, show_viewer):
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
     assert init_liquid_pos[..., 2].mean() - final_liquid_pos[..., 2].mean() > 0.05
 
-    # The ground (plane at z=0) holds the particles. Its soft contact rests at a penetration its impedance sets, so
-    # only a particle sinking past half a grid cell would have gone through it.
+    # The ground (plane at z=0) holds the particles. Its soft contact rests at a penetration set by its impedance, so
+    # only a particle sinking past half a grid cell has gone through it.
     dx = 1.0 / 64
     assert final_elastic_pos[..., 2].min() > -0.5 * dx
     assert final_liquid_pos[..., 2].min() > -0.5 * dx
