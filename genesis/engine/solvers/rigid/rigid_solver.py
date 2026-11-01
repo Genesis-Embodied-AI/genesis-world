@@ -1234,7 +1234,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([entity.gravity_compensation for entity in entities], dtype=gs.np_float),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -1246,7 +1245,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             _sanitize_sol_params(equalities_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
 
             kernel_init_equality_fields(
-                np.array([equality.type for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_obj1id for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_obj2id for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_data for equality in equalities], dtype=gs.np_float),
@@ -1348,14 +1346,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
             else:
                 self._func_constraint_force()
-                kernel_step_2(
-                    self.dyn_state,
-                    self.constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    self._errno,
-                )
+                kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
         else:
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
@@ -1634,14 +1625,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-            kernel_step_2(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._errno,
-            )
+            kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
@@ -3345,7 +3329,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
             return
 
-        kernel_clear_external_force(self.dyn_state, self.rigid_info, self.rigid_config)
+        kernel_clear_external_force(self.dyn_state, self.rigid_config)
 
     def update_drone_propeller_vgeoms(self, propellers_vgeom_idxs, propellers_revs, propellers_spin):
         kernel_update_drone_propeller_vgeoms(
@@ -3470,7 +3454,6 @@ def kernel_step_1(
 @qd.func
 def func_step_2(
     dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -3497,14 +3480,13 @@ def func_step_2(
 @qd.kernel(fastcache=True)
 def kernel_step_2(
     dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
     """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
 
 
 @qd.kernel(graph=True, fastcache=True)
@@ -3534,7 +3516,7 @@ def kernel_substep_dynamics(
         is_backward=False,
     )
     if qd.static(enable_constraint):
-        func_add_equality_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+        func_add_equality_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(graph=True, fastcache=True)
@@ -3574,4 +3556,4 @@ def kernel_substep_post(
         func_resolve_post(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
         )
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)

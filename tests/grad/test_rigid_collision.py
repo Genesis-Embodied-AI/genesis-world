@@ -494,7 +494,6 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         func_solve_init(
             rigid_solver.dyn_state,
             constraint_solver.constraint_state,
-            rigid_solver.dyn_info,
             rigid_solver.rigid_info,
             rigid_solver.rigid_config,
             write_L=True,

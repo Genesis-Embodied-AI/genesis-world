@@ -765,7 +765,6 @@ def func_search_single_island(
     stride: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     is_coop: qd.template(),
@@ -963,7 +962,6 @@ def func_linesearch_islands_serial(
     i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -986,7 +984,7 @@ def func_linesearch_islands_serial(
     if qd.static(rigid_config.is_single_island):
         func_mv_jv_dense(i_b, constraint_state, rigid_info)
         is_moved = func_search_single_island(
-            i_b, 0, 1, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_coop=False
+            i_b, 0, 1, dyn_state, constraint_state, rigid_info, rigid_config, is_coop=False
         )
     else:
         # mv = M @ search and jv = J @ search over the islands still moving, through the island lists. An env holding
@@ -1199,7 +1197,6 @@ def func_linesearch_islands_coop(
     sh_alpha,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
@@ -1223,7 +1220,6 @@ def func_linesearch_islands_coop(
     ncone = nef
     if qd.static(rigid_config.enable_elliptic_friction):
         ncone = ncone + constraint_state.n_constraints_cone[i_b]
-    n_con = constraint_state.n_constraints[i_b]
     func_mv_jv_coop(i_b, tid, constraint_state, rigid_info)
 
     is_moved = False

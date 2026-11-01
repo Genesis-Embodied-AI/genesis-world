@@ -130,7 +130,7 @@ def func_gjk_contact(
             gjk_state.polytope.horizon_nedges[i_b] = 0
 
             # Construct the initial polytope from the GJK simplex
-            epa.func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, collider_info)
+            epa.func_safe_epa_init(i_b, gjk_state, collider_info)
 
             if i == 0:
                 # In default configuration, we use the extended EPA algorithm to find multiple contact points.
@@ -533,7 +533,7 @@ def func_extended_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        flag = epa.func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, collider_info)
+        flag = epa.func_safe_epa_witness(i_b, i_f_nearest, gjk_state, collider_info)
         if flag == GJK.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)

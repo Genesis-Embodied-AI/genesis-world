@@ -13,7 +13,6 @@ def func_matvec_Ap(
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
 ):
     """
     Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
@@ -53,7 +52,6 @@ def func_solve_adjoint_u_cg_batch(
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
 ):
     """Conjugate-gradient (CG) solve of A u = g for a single environment [i_b].
 
@@ -79,7 +77,7 @@ def func_solve_adjoint_u_cg_batch(
     for _ in range(rigid_info.iterations[None]):
         if num <= num_target:
             break
-        func_matvec_Ap(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+        func_matvec_Ap(i_b, constraint_state, dyn_info, rigid_info)
 
         # alpha = (r,r)/(p,Ap)
         den = gs.qd_float(0.0)
@@ -147,7 +145,7 @@ def kernel_solve_adjoint_u(
                 # No active constraint: A = M. The forward's constrained-Hessian Cholesky nt_H is unreliable for
                 # these envs (the GPU tiled factorization skips them), so solve M u = g via CG, which reads mass_mat
                 # directly and never touches nt_H.
-                func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+                func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info)
             else:
                 # Reuse the forward's Cholesky factor A = L L^T through the forward's own solve, which reads L per
                 # island where the per-island factor wrote it (see func_cholesky_solve_batch).
@@ -164,7 +162,7 @@ def kernel_solve_adjoint_u(
         # CG solver for A * u = g (parallelized over the batch dimension).
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
-            func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
+            func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info)
 
 
 @qd.kernel(fastcache=True)
@@ -460,7 +458,6 @@ def kernel_manual_add_collision_constraints_bw(
     """
     EPS = rigid_info.EPS[None]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     max_contact_pairs = collider_state.contact_data.link_a.shape[0]
 
     qd.loop_config(
@@ -1036,7 +1033,6 @@ def kernel_manual_add_equality_constraints_bw(
                                 i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
 
                                 cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
-                                cdof_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
                                 t_pos = anchor_pos - dyn_state.links.root_COM[link, i_b]
 
                                 # jac_i3 = sign * vel_motion[i_3]
@@ -1235,7 +1231,6 @@ def kernel_manual_add_equality_constraints_bw(
                                 i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
 
                                 cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
-                                cdof_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
                                 t_pos = anchor_pos - dyn_state.links.root_COM[link, i_b]
 
                                 g_jac_i3 = (

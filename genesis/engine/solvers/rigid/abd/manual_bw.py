@@ -46,7 +46,6 @@ def func_forward_kinematics_link_bw(
         I_d = [dof_start, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start
 
         # Input pose to joint k (slot k), cached by the forward replay.
-        pos_in = dyn_state.links.pos_bw[i_l, k, i_b]
         quat_in = dyn_state.links.quat_bw[i_l, k, i_b]
         joint_pos_off = dyn_info.joints.pos[I_j]
         xanchor_grad = dyn_state.joints.xanchor.grad[i_j, i_b]
@@ -298,12 +297,7 @@ def func_cd_contraction_bw(
 
 @qd.func
 def func_forward_velocity_link_bw(
-    i_l: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    i_l: int, i_b: int, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
 ):
     """Reverse the forward velocity of link i_l of env i_b.
 
@@ -446,7 +440,7 @@ def kernel_manual_forward_velocity_bw(
             i_l = i_l_end - 1 - i_l_
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             if dyn_info.links.root_idx[I_l] == i_l_root:
-                func_forward_velocity_link_bw(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+                func_forward_velocity_link_bw(i_l, i_b, dyn_state, dyn_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)

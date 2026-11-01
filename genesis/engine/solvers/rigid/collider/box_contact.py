@@ -22,7 +22,6 @@ def func_sphere_box_contact(
     i_ga: int,
     i_gb: int,
     ga_pos: qd.types.vector(3),
-    ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     dyn_info: array_class.DynInfo,

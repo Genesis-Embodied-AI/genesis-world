@@ -56,12 +56,12 @@ def reverse_cartesian_space(envs, dyn_state, dyn_info, rigid_info, rigid_config)
     envs_idx = torch.arange(dyn_state.links.pos.shape[1], dtype=gs.tc_int, device=gs.device)
     kernel_forward_kinematics_replay(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
     kernel_COM_links_replay(dyn_state, dyn_info, rigid_info, rigid_config)
-    kernel_update_geoms_replay(dyn_state, dyn_info, rigid_info, rigid_config)
+    kernel_update_geoms_replay(dyn_state, dyn_info, rigid_config)
     kernel_forward_velocity(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
     # The center of mass (COM) and the geoms both read the forward kinematics alone, so they reverse in either order
     kernel_manual_forward_velocity_bw(dyn_state, dyn_info, rigid_info, rigid_config)
     kernel_COM_links_replay.grad(dyn_state, dyn_info, rigid_info, rigid_config)
-    kernel_update_geoms_replay.grad(dyn_state, dyn_info, rigid_info, rigid_config)
+    kernel_update_geoms_replay.grad(dyn_state, dyn_info, rigid_config)
     kernel_manual_forward_kinematics_bw(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
@@ -656,7 +656,6 @@ def func_forward_velocity_link(
     i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
@@ -828,7 +827,7 @@ def func_forward_velocity_root(
     for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
-            func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+            func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_config, is_backward)
 
 
 @qd.func
@@ -874,7 +873,7 @@ def func_forward_velocity(
                 i_l_end = rigid_info.trees_link_end[i_t]
                 for i_l in range(i_l_start, i_l_end):
                     if rigid_info.links_tree_idx[i_l] == i_t:
-                        func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+                        func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_config, is_backward)
 
 
 @qd.kernel(fastcache=True)
@@ -1150,9 +1149,7 @@ def func_sweep_links_by_level(
                                 is_backward=False,
                             )
                         elif qd.static(sweep_pass == LINK_SWEEP_PASS.FORWARD_VELOCITY):
-                            func_forward_velocity_link(
-                                i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
-                            )
+                            func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_config, is_backward=False)
                         elif qd.static(sweep_pass == LINK_SWEEP_PASS.ACCELERATION):
                             if func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
                                 func_update_acc_link(
@@ -1301,10 +1298,7 @@ def kernel_forward_kinematics_replay(
 
 @qd.kernel(fastcache=True)
 def kernel_update_geoms_replay(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+    dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
 ):
     # The reversed kernels place every geom (see reverse_cartesian_space)
     func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)

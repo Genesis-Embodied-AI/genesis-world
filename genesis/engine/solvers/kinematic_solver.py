@@ -620,7 +620,6 @@ class KinematicSolver(Solver):
                 np.array([link.desc.quat for link in links], dtype=gs.np_float),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -839,7 +838,6 @@ class KinematicSolver(Solver):
                 np.array([0.0 for entity in entities], dtype=gs.np_float),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
