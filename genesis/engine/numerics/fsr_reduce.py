@@ -5,11 +5,11 @@ import genesis as gs
 
 @qd.func
 def _segment_metadata(
-    gid,
+    gid: int,
     n,
-    seg_ids: qd.template(),  # qd.Ndarray
-    sorted_keys: qd.template(),  # qd.Ndarray
-    sentinel: qd.template(),  # int
+    seg_ids: qd.template(),
+    sorted_keys: qd.template(),
+    sentinel: qd.template(),
 ):
     lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
     is_valid = gid < n and sorted_keys[gid] != sentinel
@@ -45,16 +45,16 @@ def head_segmented_reduce_add(value, tail_flag):
 
 @qd.func(requires_top_level=True)
 def func_fsr_reduce(
-    seg_ids: qd.template(),  # qd.Ndarray
-    sorted_perm: qd.template(),  # qd.Ndarray
-    sorted_keys: qd.template(),  # qd.Ndarray
-    values: qd.template(),  # qd.Ndarray
-    output: qd.template(),  # qd.Ndarray
-    n: qd.template(),  # qd.Ndarray
-    padded_n: qd.template(),  # qd.Ndarray
-    capacity: qd.template(),  # int
-    value_type: qd.template(),  # Quadrants scalar data type
-    block_scalar_count: qd.template(),  # int
+    seg_ids: qd.template(),
+    sorted_perm: qd.template(),
+    sorted_keys: qd.template(),
+    values: qd.template(),
+    output: qd.template(),
+    n: qd.template(),
+    padded_n: qd.template(),
+    capacity: qd.template(),
+    value_type: qd.template(),
+    block_scalar_count: qd.template(),
 ):
     """Sum the flattened blocks of each run of equal sorted keys into the output entry of its segment.
 

@@ -21,11 +21,11 @@ class FemNewtonParticipant:
         self.fem = fem
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self, f):
+    def func_evaluate(self, f: int):
         self.fem._func_compute_ele_hessian_gradient(f)
 
     @qd.func(requires_top_level=True)
-    def func_gradient(self, f):
+    def func_gradient(self, f: int):
         self.fem._func_accumulate_vertex_force_preconditioner(f)
 
     @qd.func(requires_top_level=True)
@@ -34,11 +34,11 @@ class FemNewtonParticipant:
 
     @qd.func(requires_top_level=True)
     def func_pcg_init(self):
-        mpm_fem_func.func_fem_pcg_init(self.fem, self.fem.substep_dt)
+        mpm_fem_func.func_fem_pcg_init(self.fem.substep_dt, self.fem)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
-        mpm_fem_func.func_fem_precondition(self.fem, self.fem.substep_dt)
+        mpm_fem_func.func_fem_precondition(self.fem.substep_dt, self.fem)
 
     @qd.func(requires_top_level=True)
     def func_pcg_init_direction(self, ws: qd.template()):
@@ -46,7 +46,7 @@ class FemNewtonParticipant:
 
     @qd.func(requires_top_level=True)
     def func_matvec(self):
-        mpm_fem_func.func_fem_matvec(self.fem, self.fem.substep_dt)
+        mpm_fem_func.func_fem_matvec(self.fem.substep_dt, self.fem)
 
     @qd.func(requires_top_level=True)
     def func_matvec_dot(self, ws: qd.template()):
@@ -65,16 +65,16 @@ class FemNewtonParticipant:
         mpm_fem_func.func_fem_pcg_direction(self.fem, ws)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f):
-        mpm_fem_func.func_fem_start_line_search(self.fem, control, f)
+    def func_start_line_search(self, control: qd.template(), f: int):
+        mpm_fem_func.func_fem_start_line_search(f, self.fem, control)
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f):
-        mpm_fem_func.func_fem_step_forward(self.fem, control, f)
+    def func_step_forward(self, control: qd.template(), f: int):
+        mpm_fem_func.func_fem_step_forward(f, self.fem, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f, is_trial):
-        mpm_fem_func.func_fem_energy(self.fem, control, f, is_trial, self.fem.substep_dt)
+    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
+        mpm_fem_func.func_fem_energy(f, self.fem.substep_dt, self.fem, control, is_trial)
 
 
 @qd.data_oriented
@@ -93,24 +93,24 @@ class MpmFemContact:
         self.query = query
 
     @qd.func(requires_top_level=True)
-    def func_contact_gradient(self, f):
+    def func_contact_gradient(self, f: int):
         mpm_fem_func.func_fem_contact_gradient(self.grid, self.newton, self.fem, self.params)
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f):
+    def func_contact_matvec(self, f: int):
         mpm_fem_func.func_fem_contact_matvec(
-            self.particles, self.grid, self.newton, self.linear, self.fem, self.params, f
+            f, self.particles, self.grid, self.newton, self.linear, self.fem, self.params
         )
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self, f):
+    def func_contact_matvec_post(self, f: int):
         mpm_fem_func.func_fem_contact_matvec_post(
-            self.particles, self.grid, self.newton, self.linear, self.fem, self.params, f
+            f, self.particles, self.grid, self.newton, self.linear, self.fem, self.params
         )
 
     @qd.func(requires_top_level=True)
-    def func_after_step(self, f):
-        mpm_fem_func.func_fem_point_disp(self.grid, self.newton, self.fem, self.params, f)
+    def func_after_step(self, f: int):
+        mpm_fem_func.func_fem_point_disp(f, self.grid, self.newton, self.fem, self.params)
 
 
 @qd.kernel
@@ -122,17 +122,20 @@ def kernel_fem_begin(fem: qd.template()):
 
 
 @qd.kernel
-def kernel_fem_rows(contact: qd.template(), f: qd.i32):
+def kernel_fem_rows(
+    f: int,
+    contact: qd.template(),
+):
     mpm_fem_func.func_build_fem_rows(
+        f,
+        contact.params.substep_dt[()],
         contact.particles,
-        contact.particles_info,
         contact.grid,
         contact.newton,
         contact.fem,
-        contact.params,
         contact.query,
-        f,
-        contact.params.substep_dt[()],
+        contact.particles_info,
+        contact.params,
     )
     contact.func_after_step(f)
 
@@ -178,7 +181,7 @@ class MpmFemContactHost:
 
     def newton_prepare(self, f):
         self._device.query.build(f)
-        kernel_fem_rows(self._device, f)
+        kernel_fem_rows(f, self._device)
 
     def newton_finish(self, f):
         pass

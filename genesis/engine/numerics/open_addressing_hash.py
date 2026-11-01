@@ -79,7 +79,7 @@ class OpenAddressingHash:
 
 @qd.func(requires_top_level=True)
 def func_reset_hash(
-    table: qd.template(),  # OpenAddressingHash
+    table: qd.template(),
 ):
     qd.loop_config(name="hash_reset")
     for i in range(table.keys.shape[0]):

@@ -114,7 +114,7 @@ class BCOOMatrix:
         self.padded_triplets.fill(capacity)
 
     @qd.func
-    def report_triplet_demand(self, count):
+    def report_triplet_demand(self, count: int):
         """Record the triplet demand, the live triplet count capped at the capacity, and the padded extent of the sort.
 
         A demand above the capacity raises the overflow flag, and the writers drop the triplets past the capacity (see
@@ -129,10 +129,10 @@ class BCOOMatrix:
     @qd.func
     def write_triplet(
         self,
-        slot,
-        row,
-        col,
-        block: qd.template(),  # qd.Matrix
+        slot: int,
+        row: int,
+        col: int,
+        block: qd.template(),
     ):
         """Write one block, mirrored into the upper triangle for symmetric storage.
 
@@ -163,10 +163,10 @@ class BCOOMatrix:
     @qd.func
     def add_triplet(
         self,
-        slot,
-        row,
-        col,
-        block: qd.template(),  # qd.Matrix
+        slot: int,
+        row: int,
+        col: int,
+        block: qd.template(),
     ):
         """Add one block to a triplet that `write_triplet` wrote before for the same row and column.
 
@@ -188,7 +188,7 @@ class BCOOMatrix:
                             self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] += block[j, i]
 
     @qd.func
-    def read_triplet(self, slot):
+    def read_triplet(self, slot: int):
         """Return one stored input triplet as (row, column, block)."""
         block = qd.Matrix.zero(self.value_type, self.block_rows, self.block_cols)
         for i in qd.static(range(self.block_rows)):
@@ -197,7 +197,7 @@ class BCOOMatrix:
         return self.triplet_row[slot], self.triplet_col[slot], block
 
     @qd.func
-    def read_bcoo(self, entry):
+    def read_bcoo(self, entry: int):
         """Return one reduced block coordinate (BCOO) entry as (row, column, block)."""
         block = qd.Matrix.zero(self.value_type, self.block_rows, self.block_cols)
         for i in qd.static(range(self.block_rows)):
@@ -208,7 +208,7 @@ class BCOOMatrix:
 
 @qd.func(requires_top_level=True)
 def func_compose_bcoo_sort_keys(
-    matrix: qd.template(),  # BCOOMatrix
+    matrix: qd.template(),
 ):
     qd.loop_config(name="bcoo_compose_sort_keys")
     for i in range(matrix.padded_triplets[()]):
@@ -221,7 +221,7 @@ def func_compose_bcoo_sort_keys(
 
 @qd.func(requires_top_level=True)
 def func_mark_bcoo_segment_flags(
-    matrix: qd.template(),  # BCOOMatrix
+    matrix: qd.template(),
 ):
     qd.loop_config(name="bcoo_segment_flags")
     for i in range(matrix.padded_triplets[()]):
@@ -235,7 +235,7 @@ def func_mark_bcoo_segment_flags(
 
 @qd.func(requires_top_level=True)
 def func_zero_bcoo_values(
-    matrix: qd.template(),  # BCOOMatrix
+    matrix: qd.template(),
 ):
     for _ in range(1):
         matrix.bcoo_nnz[()] = 0
@@ -246,7 +246,7 @@ def func_zero_bcoo_values(
 
 @qd.func(requires_top_level=True)
 def func_extract_unique_bcoo_entries(
-    matrix: qd.template(),  # BCOOMatrix
+    matrix: qd.template(),
 ):
     qd.loop_config(name="bcoo_extract_unique")
     for i in range(matrix.n_triplets[()]):
@@ -261,7 +261,7 @@ def func_extract_unique_bcoo_entries(
 
 @qd.func(requires_top_level=True)
 def func_sort_reduce_bcoo(
-    matrix: qd.template(),  # BCOOMatrix
+    matrix: qd.template(),
 ):
     """Sort the live triplets by (row, column) and sum the duplicates into the reduced block coordinate (BCOO) entries.
 
@@ -269,15 +269,15 @@ def func_sort_reduce_bcoo(
     """
     func_compose_bcoo_sort_keys(matrix)
     func_dynamic_radix_sort(
-        matrix.triplet_sorter,
         matrix.triplet_keys,
         matrix.sort_keys_out,
         matrix.triplet_perm,
         matrix.sort_perm_out,
+        matrix.triplet_sorter,
         matrix.padded_triplets[()],
     )
     func_mark_bcoo_segment_flags(matrix)
-    func_dynamic_exclusive_sum(matrix.segment_scanner, matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets[()])
+    func_dynamic_exclusive_sum(matrix.seg_flags, matrix.seg_ids, matrix.segment_scanner, matrix.padded_triplets[()])
     func_zero_bcoo_values(matrix)
     func_fsr_reduce(
         matrix.seg_ids,
@@ -334,15 +334,15 @@ def sort_reduce_bcoo(matrix: BCOOMatrix) -> None:
         matrix.padded_triplets,
     )
     kernel_mark_bcoo_segment_flags(matrix)
-    kernel_dynamic_exclusive_sum(matrix.segment_scanner, matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets)
+    kernel_dynamic_exclusive_sum(matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets, matrix.segment_scanner)
     kernel_reduce_bcoo(matrix)
 
 
 @qd.func(requires_top_level=True)
 def func_sym_bcoo_spmv(
-    matrix: qd.template(),  # BCOOMatrix
-    x: qd.template(),  # qd.Ndarray
-    y: qd.template(),  # qd.Ndarray
+    x: qd.template(),
+    y: qd.template(),
+    matrix: qd.template(),
 ):
     """Add the product of a symmetric block coordinate (BCOO) matrix and a vector to an output vector.
 

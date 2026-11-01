@@ -37,7 +37,7 @@ class DynamicExclusiveSum:
     @qd.func(requires_top_level=True)
     def clear(
         self,
-        n: qd.template(),  # int
+        n: qd.template(),
     ):
         qd.loop_config(name="des_init_tile_state", block_dim=128)
         needed_blocks = qd.max((n + 3071) // 3072, 1)
@@ -49,9 +49,9 @@ class DynamicExclusiveSum:
     @qd.func(requires_top_level=True)
     def scan(
         self,
-        values: qd.template(),  # qd.Ndarray
-        output: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        values: qd.template(),
+        output: qd.template(),
+        n: qd.template(),
     ):
         if qd.static(gs.backend == gs.cpu):
             self.scan_cpu(values, output, n)
@@ -61,9 +61,9 @@ class DynamicExclusiveSum:
     @qd.func(requires_top_level=True)
     def scan_cpu(
         self,
-        values: qd.template(),  # qd.Ndarray
-        output: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        values: qd.template(),
+        output: qd.template(),
+        n: qd.template(),
     ):
         qd.loop_config(name="des_chunk_sums")
         for chunk in range(CPU_CHUNKS):
@@ -90,9 +90,9 @@ class DynamicExclusiveSum:
     @qd.func(requires_top_level=True)
     def scan_gpu(
         self,
-        values: qd.template(),  # qd.Ndarray
-        output: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        values: qd.template(),
+        output: qd.template(),
+        n: qd.template(),
     ):
         self.clear(n)
         qd.loop_config(name="des_scan", block_dim=128)
@@ -173,10 +173,10 @@ class DynamicExclusiveSum:
 
 @qd.func(requires_top_level=True)
 def func_dynamic_exclusive_sum(
-    scanner: qd.template(),  # DynamicExclusiveSum
-    values: qd.template(),  # qd.Ndarray
-    output: qd.template(),  # qd.Ndarray
-    n: qd.template(),  # int
+    values: qd.template(),
+    output: qd.template(),
+    scanner: qd.template(),
+    n: qd.template(),
 ):
     """Write the exclusive prefix sum of the leading entries of an array into another array.
 
@@ -187,10 +187,10 @@ def func_dynamic_exclusive_sum(
 
 @qd.kernel
 def kernel_dynamic_exclusive_sum(
-    scanner: qd.template(),  # DynamicExclusiveSum
     values: qd.types.ndarray(),
     output: qd.types.ndarray(),
-    n: qd.types.ndarray(),  # i32 scalar
+    n: qd.types.ndarray(),
+    scanner: qd.template(),
 ):
     """Run func_dynamic_exclusive_sum as a launch of its own, reading the count from a device scalar."""
     scanner.scan(values, output, n[()])

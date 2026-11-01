@@ -385,7 +385,7 @@ def kernel_q1_hessian(fx_in: qd.types.ndarray(), H_out: qd.types.ndarray()):
     for _ in range(1):
         fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=qd.f64)
         for a in qd.static(range(8)):
-            H = q1_weight_hessian(fx, a, inv_dx=2.0)
+            H = q1_weight_hessian(fx, inv_dx=2.0, a=a)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 H_out[a, i, j] = H[i, j]
 
@@ -484,9 +484,9 @@ def kernel_return_map(
     for _ in range(1):
         F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
         F_bar = qd.Matrix([[F_bar_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
-        F_new, Jp_new = return_map(materials, params, slot=0, kind=kind, F=F, Jp=Jp)
+        F_new, Jp_new = return_map(slot=0, kind=kind, F=F, Jp=Jp, materials=materials, params=params)
         F_bar_old, Jp_bar_old = return_map_vjp(
-            materials, params, slot=0, kind=kind, F=F, Jp=Jp, F_new_bar=F_bar, Jp_new_bar=Jp_bar
+            slot=0, kind=kind, F=F, Jp=Jp, F_new_bar=F_bar, Jp_new_bar=Jp_bar, materials=materials, params=params
         )
         for i, j in qd.static(qd.ndrange(3, 3)):
             F_out[i, j] = F_new[i, j]

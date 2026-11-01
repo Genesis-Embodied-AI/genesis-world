@@ -59,7 +59,7 @@ class NewtonControl:
 
 @qd.func(requires_top_level=True)
 def func_reset_newton_control(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     for _ in range(1):
         control.newton_iter[()] = 0
@@ -70,7 +70,7 @@ def func_reset_newton_control(
 
 @qd.func(requires_top_level=True)
 def func_reset_newton_measures(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     """Clear the measures the participants accumulate during one Newton iteration."""
     for _ in range(1):
@@ -79,7 +79,7 @@ def func_reset_newton_measures(
 
 @qd.func(requires_top_level=True)
 def func_check_convergence(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     """Judge the convergence on the Newton direction itself, before the line search.
 
@@ -100,7 +100,7 @@ def func_check_convergence(
 
 @qd.func(requires_top_level=True)
 def func_init_line_search(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     for _ in range(1):
         control.alpha[()] = 1.0
@@ -110,7 +110,7 @@ def func_init_line_search(
 
 @qd.func(requires_top_level=True)
 def func_accept_or_backtrack(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     """Accept the trial step once its energy is at most the start energy, or halve alpha for the next trial.
 
@@ -135,7 +135,7 @@ def func_accept_or_backtrack(
 
 @qd.func(requires_top_level=True)
 def func_update_convergence(
-    control: qd.template(),  # NewtonControl
+    control: qd.template(),
 ):
     """Stop the loop after a converged or a non-finite iteration, and raise the failure flag at the iteration cap."""
     for _ in range(1):

@@ -13,9 +13,9 @@ CPU_CHUNKS = 256
 
 @qd.func
 def _rank_warp_striped_items(
-    digits: qd.template(),  # qd.Vector
-    ranks: qd.template(),  # qd.Vector
-    block_prefixes: qd.template(),  # qd.simt.block.SharedArray
+    digits: qd.template(),
+    ranks: qd.template(),
+    block_prefixes: qd.template(),
 ):
     tid = qd.simt.block.thread_idx()
     lane = qd.i32(qd.simt.subgroup.invocation_id())
@@ -122,8 +122,8 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def histogram(
         self,
-        keys: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        keys: qd.template(),
+        n: qd.template(),
     ):
         qd.loop_config(name="drs_histogram", block_dim=128)
         for thread in range(128 * 128):
@@ -178,7 +178,7 @@ class DynamicRadixSort:
     def clear_pass(
         self,
         radix_pass,
-        n: qd.template(),  # int
+        n: qd.template(),
     ):
         qd.loop_config(name="drs_memset_lookback", block_dim=256)
         needed_blocks = qd.max((n + 6143) // 6144, 1)
@@ -192,11 +192,11 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def onesweep_pass(
         self,
-        keys_in: qd.template(),  # qd.Ndarray
-        keys_out: qd.template(),  # qd.Ndarray
-        perm_in: qd.template(),  # qd.Ndarray
-        perm_out: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        keys_in: qd.template(),
+        keys_out: qd.template(),
+        perm_in: qd.template(),
+        perm_out: qd.template(),
+        n: qd.template(),
         radix_pass,
     ):
         qd.loop_config(name="drs_onesweep", block_dim=256)
@@ -341,12 +341,12 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def cpu_pass(
         self,
-        keys_in: qd.template(),  # qd.Ndarray
-        keys_out: qd.template(),  # qd.Ndarray
-        perm_in: qd.template(),  # qd.Ndarray
-        perm_out: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
-        radix_pass: qd.template(),  # int
+        keys_in: qd.template(),
+        keys_out: qd.template(),
+        perm_in: qd.template(),
+        perm_out: qd.template(),
+        n: qd.template(),
+        radix_pass: qd.template(),
     ):
         """Run one stable counting-sort pass of the keys on one of their digits, over CPU_CHUNKS chunks.
 
@@ -380,11 +380,11 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def cpu_sort(
         self,
-        keys_a: qd.template(),  # qd.Ndarray
-        keys_b: qd.template(),  # qd.Ndarray
-        perm_a: qd.template(),  # qd.Ndarray
-        perm_b: qd.template(),  # qd.Ndarray
-        n: qd.template(),  # int
+        keys_a: qd.template(),
+        keys_b: qd.template(),
+        perm_a: qd.template(),
+        perm_b: qd.template(),
+        n: qd.template(),
     ):
         """Run every pass of func_dynamic_radix_sort on a CPU backend, unrolled, alternating between the two halves."""
         for radix_pass in qd.static(range(self.n_passes)):
@@ -396,12 +396,12 @@ class DynamicRadixSort:
 
 @qd.func(requires_top_level=True)
 def func_dynamic_radix_sort(
-    sorter: qd.template(),  # DynamicRadixSort
-    keys_a: qd.template(),  # qd.Ndarray
-    keys_b: qd.template(),  # qd.Ndarray
-    perm_a: qd.template(),  # qd.Ndarray
-    perm_b: qd.template(),  # qd.Ndarray
-    n: qd.template(),  # int
+    keys_a: qd.template(),
+    keys_b: qd.template(),
+    perm_a: qd.template(),
+    perm_b: qd.template(),
+    sorter: qd.template(),
+    n: qd.template(),
 ):
     """Sort keys stably together with their permutation inside a graph kernel, the result landing in the input arrays.
 
@@ -430,15 +430,15 @@ def func_dynamic_radix_sort(
 
 @qd.kernel(graph=True)
 def kernel_radix_sort(
-    sorter: qd.template(),  # DynamicRadixSort
     keys_a: qd.types.ndarray(),
     keys_b: qd.types.ndarray(),
     perm_a: qd.types.ndarray(),
     perm_b: qd.types.ndarray(),
-    n: qd.types.ndarray(),  # i32 scalar
+    n: qd.types.ndarray(),
+    sorter: qd.template(),
 ):
     """Run func_dynamic_radix_sort as a graph of its own, reading the count from a device scalar."""
-    func_dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n[()])
+    func_dynamic_radix_sort(keys_a, keys_b, perm_a, perm_b, sorter, n[()])
 
 
 def dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n) -> None:
@@ -446,4 +446,4 @@ def dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n) -> None:
 
     The first n entries of keys_a and perm_a are sorted, n being a device scalar (see func_dynamic_radix_sort).
     """
-    kernel_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n)
+    kernel_radix_sort(keys_a, keys_b, perm_a, perm_b, n, sorter)

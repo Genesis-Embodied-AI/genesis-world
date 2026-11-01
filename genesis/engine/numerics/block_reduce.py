@@ -5,10 +5,10 @@ REDUCE_BLOCK_DIM = 256
 
 @qd.func
 def write_block_partial(
+    block: qd.template(),
     value,
-    partials: qd.template(),  # qd.Ndarray, one entry per launched block
-    block: qd.template(),  # int expression, the index of the calling block
-    value_type: qd.template(),  # Quadrants scalar data type
+    partials: qd.template(),
+    value_type: qd.template(),
 ):
     """Sum one value per thread over a block of REDUCE_BLOCK_DIM threads and store the sum as the partial of the block.
 
@@ -22,10 +22,10 @@ def write_block_partial(
 
 @qd.func(requires_top_level=True)
 def func_sum_block_partials(
-    partials: qd.template(),  # qd.Ndarray
-    n_partials: qd.template(),  # int expression
-    out: qd.template(),  # 0-d qd.Ndarray
-    value_type: qd.template(),  # Quadrants scalar data type
+    partials: qd.template(),
+    out: qd.template(),
+    n_partials: qd.template(),
+    value_type: qd.template(),
 ):
     """Sum the leading block partials into a scalar in a fixed order, which makes the result bitwise reproducible.
 

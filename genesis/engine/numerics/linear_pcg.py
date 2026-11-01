@@ -87,10 +87,10 @@ def _warp_sum(value):
 
 @qd.func(requires_top_level=True)
 def _func_dot_into_slot(
-    ws: qd.template(),  # PCGWorkspace
-    a: qd.template(),  # qd.Ndarray
-    b: qd.template(),  # qd.Ndarray
-    slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
+    a: qd.template(),
+    b: qd.template(),
+    ws: qd.template(),
+    slot_offset: qd.template(),
 ):
     """Add the dot product of two vectors over the live rows to one of the two rz slots, zeroed by an earlier launch.
 
@@ -99,17 +99,17 @@ def _func_dot_into_slot(
     one thread and adds one atomic per chunk.
     """
     if qd.static(gs.backend == gs.cpu):
-        _func_dot_into_slot_cpu(ws, a, b, slot_offset)
+        _func_dot_into_slot_cpu(a, b, ws, slot_offset)
     else:
-        _func_dot_into_slot_gpu(ws, a, b, slot_offset)
+        _func_dot_into_slot_gpu(a, b, ws, slot_offset)
 
 
 @qd.func(requires_top_level=True)
 def _func_dot_into_slot_cpu(
-    ws: qd.template(),  # PCGWorkspace
-    a: qd.template(),  # qd.Ndarray
-    b: qd.template(),  # qd.Ndarray
-    slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
+    a: qd.template(),
+    b: qd.template(),
+    ws: qd.template(),
+    slot_offset: qd.template(),
 ):
     qd.loop_config(name="pcg_dot_rz_cpu")
     for chunk in range(_CPU_CHUNKS):
@@ -129,10 +129,10 @@ def _func_dot_into_slot_cpu(
 
 @qd.func(requires_top_level=True)
 def _func_dot_into_slot_gpu(
-    ws: qd.template(),  # PCGWorkspace
-    a: qd.template(),  # qd.Ndarray
-    b: qd.template(),  # qd.Ndarray
-    slot_offset: qd.template(),  # int: 0 for the rz slot, 1 for rz_new
+    a: qd.template(),
+    b: qd.template(),
+    ws: qd.template(),
+    slot_offset: qd.template(),
 ):
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
@@ -155,9 +155,9 @@ def _func_dot_into_slot_gpu(
 
 @qd.func(requires_top_level=True)
 def func_init_linear_pcg_residual(
-    ws: qd.template(),  # PCGWorkspace
-    b: qd.template(),  # qd.Ndarray
-    x: qd.template(),  # qd.Ndarray
+    b: qd.template(),
+    x: qd.template(),
+    ws: qd.template(),
 ):
     """Start a solve of the linear system from a zero solution, with the right-hand side as the residual.
 
@@ -195,7 +195,7 @@ def func_init_linear_pcg_residual(
 
 @qd.func(requires_top_level=True)
 def func_init_linear_pcg_direction(
-    ws: qd.template(),  # PCGWorkspace
+    ws: qd.template(),
 ):
     """Set the first search direction and the convergence threshold, and arm the iteration loop.
 
@@ -210,7 +210,7 @@ def func_init_linear_pcg_direction(
         if t == 0:
             parity = ws.parity[()]
             ws.rz_slots[parity] = 0.0
-    _func_dot_into_slot(ws, ws.r, ws.z, 0)
+    _func_dot_into_slot(ws.r, ws.z, ws, 0)
     for _ in range(1):
         parity = ws.parity[()]
         ws.tol_sq[()] = ws.tol_rate[()] * qd.abs(ws.rz_slots[parity])
@@ -219,9 +219,9 @@ def func_init_linear_pcg_direction(
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_matvec_update(
-    ws: qd.template(),  # PCGWorkspace
-    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
-    x: qd.template(),  # qd.Ndarray
+    x: qd.template(),
+    ws: qd.template(),
+    matrix: qd.template(),
 ):
     """Run the first half of an iteration: the product of the matrix and the search direction, then the solution update.
 
@@ -233,13 +233,13 @@ def func_linear_pcg_matvec_update(
     the second half.
     """
     func_linear_pcg_spmv(ws, matrix)
-    func_linear_pcg_update_xr(ws, x)
+    func_linear_pcg_update_xr(x, ws)
 
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_spmv(
-    ws: qd.template(),  # PCGWorkspace
-    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+    ws: qd.template(),
+    matrix: qd.template(),
 ):
     """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form.
 
@@ -258,8 +258,8 @@ def func_linear_pcg_spmv(
 
 @qd.func(requires_top_level=True)
 def _func_linear_pcg_spmv_cpu(
-    ws: qd.template(),  # PCGWorkspace
-    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+    ws: qd.template(),
+    matrix: qd.template(),
 ):
     """Run func_linear_pcg_spmv over contiguous chunks of the row-sorted entries, one thread per chunk.
 
@@ -302,8 +302,8 @@ def _func_linear_pcg_spmv_cpu(
 
 @qd.func(requires_top_level=True)
 def _func_linear_pcg_spmv_gpu(
-    ws: qd.template(),  # PCGWorkspace
-    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+    ws: qd.template(),
+    matrix: qd.template(),
 ):
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
     for t in range(ws.n_spmv_blocks * PCG_BLOCK):
@@ -347,8 +347,8 @@ def _func_linear_pcg_spmv_gpu(
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_update_xr(
-    ws: qd.template(),  # PCGWorkspace
-    x: qd.template(),  # qd.Ndarray
+    x: qd.template(),
+    ws: qd.template(),
 ):
     """Update the solution and the residual along the search direction, and zero the rz_new slot for the next dot.
 
@@ -375,7 +375,7 @@ def func_linear_pcg_update_xr(
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_direction_update(
-    ws: qd.template(),  # PCGWorkspace
+    ws: qd.template(),
 ):
     """Run the second half of an iteration: the dot of the residual and its preconditioned value, then the fused tail.
 
@@ -389,7 +389,7 @@ def func_linear_pcg_direction_update(
     rz/rz_new parity. On a CPU (see PCGWorkspace), the end of the parallel update orders the decision of a single thread
     after it.
     """
-    _func_dot_into_slot(ws, ws.r, ws.z, 1)
+    _func_dot_into_slot(ws.r, ws.z, ws, 1)
     if qd.static(gs.backend == gs.cpu):
         _func_direction_update_cpu(ws)
     else:
@@ -398,7 +398,7 @@ def func_linear_pcg_direction_update(
 
 @qd.func(requires_top_level=True)
 def _func_direction_update_cpu(
-    ws: qd.template(),  # PCGWorkspace
+    ws: qd.template(),
 ):
     """Run the fused tail of func_linear_pcg_direction_update on a CPU backend, from plain parallel loops.
 
@@ -434,7 +434,7 @@ def _func_direction_update_cpu(
 
 @qd.func(requires_top_level=True)
 def _func_direction_update_gpu(
-    ws: qd.template(),  # PCGWorkspace
+    ws: qd.template(),
 ):
     qd.loop_config(name="pcg_update_p_converge", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
@@ -478,8 +478,8 @@ def _func_direction_update_gpu(
 
 @qd.func(requires_top_level=True)
 def func_apply_block_jacobi(
-    ws: qd.template(),  # PCGWorkspace
-    precond_inv_diag: qd.template(),  # qd.Ndarray of 9 scalars per block row
+    precond_inv_diag: qd.template(),
+    ws: qd.template(),
 ):
     """Apply the block Jacobi preconditioner to the residual.
 

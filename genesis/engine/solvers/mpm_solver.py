@@ -157,7 +157,7 @@ class MpmNewtonParticipant:
         self.ws = linear.pcg
 
     @qd.func(requires_top_level=True)
-    def func_assemble(self, control: qd.template(), f):
+    def func_assemble(self, control: qd.template(), f: int):
         """Assemble the Newton system at the current iterate, inside a graph that needs no storage growth.
 
         See kernel_newton_loop in newton_solver.py."""
@@ -165,15 +165,15 @@ class MpmNewtonParticipant:
         mpm_func.func_report_extent(self.grid, self.linear)
         mpm_func.func_check_loop_capacity(self.grid, self.linear, self.params)
         mpm_func.func_assemble(
+            f,
+            self.params.substep_dt[()],
             self.particles,
-            self.particles_info,
-            self.materials,
             self.grid,
             self.newton,
             self.linear,
+            self.particles_info,
+            self.materials,
             self.params,
-            f,
-            self.params.substep_dt[()],
         )
         func_sort_reduce_bcoo(self.linear.matrix)
 
@@ -185,7 +185,7 @@ class MpmNewtonParticipant:
 
     @qd.func(requires_top_level=True)
     def func_pcg_init_residual(self):
-        func_init_linear_pcg_residual(self.ws, self.linear.b_rhs, self.linear.solution)
+        func_init_linear_pcg_residual(self.linear.b_rhs, self.linear.solution, self.ws)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
@@ -201,34 +201,34 @@ class MpmNewtonParticipant:
 
     @qd.func(requires_top_level=True)
     def func_pcg_update_xr(self):
-        func_linear_pcg_update_xr(self.ws, self.linear.solution)
+        func_linear_pcg_update_xr(self.linear.solution, self.ws)
 
     @qd.func(requires_top_level=True)
     def func_pcg_direction_update(self):
         func_linear_pcg_direction_update(self.ws)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f):
+    def func_start_line_search(self, control: qd.template(), f: int):
         mpm_func.func_negate_du(self.grid, self.newton, self.linear)
         mpm_func.func_record_start_point(self.grid, self.newton)
-        mpm_func.func_contribute_newton_max_disp(self.particles, self.grid, self.newton, control, self.params, f)
+        mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.params)
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template()):
         mpm_func.func_step_forward(self.grid, self.newton, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f, is_trial):
+    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
         mpm_func.func_energy(
+            f,
+            self.params.substep_dt[()],
             self.particles,
-            self.particles_info,
-            self.materials,
             self.grid,
             self.newton,
             control,
+            self.particles_info,
+            self.materials,
             self.params,
-            f,
-            self.params.substep_dt[()],
             is_trial,
         )
 
@@ -580,18 +580,18 @@ class MPMSolver(ParticleSolver):
             self._grow_grid()
             build_grid(self.particles, self.particles_ng, grid, params, f)
         kernel_predict(
-            self.particles,
-            self.particles_info,
-            grid,
-            self._mpm_newton,
-            self._mpm_force_fields,
-            params,
-            self._gravity,
             f,
             t=0.0,
+            gravity=self._gravity,
+            particles=self.particles,
+            grid=grid,
+            newton=self._mpm_newton,
+            particles_info=self.particles_info,
+            force_fields=self._mpm_force_fields,
+            params=params,
         )
         self._assemble(f)
-        kernel_contact_invweight(self.particles, self.particles_info, grid, self._mpm_linear, params, f)
+        kernel_contact_invweight(f, self.particles, grid, self._mpm_linear, self.particles_info, params)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -722,15 +722,15 @@ class MPMSolver(ParticleSolver):
         The elastic Hessian is projected to symmetric positive definite, or exact with `is_exact` (see
         func_elastic_assemble)."""
         args = (
+            f,
             self.particles,
-            self.particles_info,
-            self._mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
             self._mpm_control,
+            self.particles_info,
+            self._mpm_materials,
             self._mpm_params,
-            f,
             is_exact,
         )
         kernel_assemble(*args)
@@ -755,7 +755,7 @@ class MPMSolver(ParticleSolver):
         if not self._mpm_sized:
             self._size_to_particles(f)
         if self._sph_coupled:
-            kernel_apply_boundary_impulse(self._sph_boundary, f)
+            kernel_apply_boundary_impulse(f, self._sph_boundary)
         rigid = self._sim.rigid_solver
         grid, params = self._mpm_grid, self._mpm_params
         build_grid(self.particles, self.particles_ng, grid, params, f)
@@ -764,39 +764,39 @@ class MPMSolver(ParticleSolver):
             build_grid(self.particles, self.particles_ng, grid, params, f)
         if self._constraints_initialized:
             kernel_constraint_rows(
-                self.particles_info, grid, self._mpm_newton, params, self.particle_constraints, rigid.dyn_state.links
+                grid, self._mpm_newton, rigid.dyn_state.links, self.particles_info, params, self.particle_constraints
             )
         kernel_predict(
-            self.particles,
-            self.particles_info,
-            grid,
-            self._mpm_newton,
-            self._mpm_force_fields,
-            params,
-            self._gravity,
             f,
             self._sim.cur_t,
+            self._gravity,
+            self.particles,
+            grid,
+            self._mpm_newton,
+            self.particles_info,
+            self._mpm_force_fields,
+            params,
         )
         # The physical Hessian at u = 0 sizes the triplet storage for the substep's fixed grid topology, which every
         # assembly of the Newton loop shares
         self._assemble(f)
         self._rigid_query.build(params)
         kernel_contact_rows(
+            f,
             self.particles,
-            self.particles_info,
             grid,
             self._mpm_newton,
             self._mpm_control,
-            self._mpm_config,
-            params,
             rigid.dyn_state.geoms,
-            rigid.dyn_info.geoms,
             rigid.dyn_state.links,
+            self._rigid_query,
+            self.particles_info,
+            params,
+            rigid.dyn_info.geoms,
             rigid.dyn_info.links,
             rigid.rigid_info,
             rigid.collider.sdf.sdf_info,
-            self._rigid_query,
-            f,
+            self._mpm_config,
         )
 
     def newton_assemble(self, f):
@@ -805,14 +805,14 @@ class MPMSolver(ParticleSolver):
     def newton_finish(self, f):
         """Transfer the solved grid displacement back to the particles."""
         kernel_finalize(
+            f,
             self.particles,
             self.particles_ng,
-            self.particles_info,
-            self._mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
+            self.particles_info,
+            self._mpm_materials,
             self._mpm_params,
-            f,
         )
 
     def newton_after(self, f):
@@ -831,7 +831,7 @@ class MPMSolver(ParticleSolver):
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
         newton_solver = self._sim.newton_solver
-        kernel_adjoint_g2p(self.particles, self.particles_info, self._mpm_materials, grid, newton, self._mpm_params, f)
+        kernel_adjoint_g2p(f, self.particles, grid, newton, self.particles_info, self._mpm_materials, self._mpm_params)
         self._assemble(f, is_exact=is_exact)
         kernel_adjoint_rhs(grid, newton, linear)
         newton_solver.stage_adjoint(f)
@@ -864,31 +864,31 @@ class MPMSolver(ParticleSolver):
         newton_solver.finish_adjoint(f)
         # Rows on static Rigid geoms act on the particle displacement alone, outside of any coupling
         if self._has_rigid and not self._rigid_coupled:
-            kernel_rigid_contact_adjoint(self._rigid_contact, f)
+            kernel_rigid_contact_adjoint(f, self._rigid_contact)
         if self._constraints_initialized:
             kernel_constraint_adjoint(
+                f,
                 self.particles,
                 grid,
                 newton,
                 linear,
+                self._sim.rigid_solver.dyn_state.links,
                 self._mpm_params,
                 self.particle_constraints,
-                self._sim.rigid_solver.dyn_state.links,
-                f,
             )
         kernel_adjoint_pullback(
+            f,
+            self._sim.cur_t,
+            self._gravity,
             self.particles,
             self.particles_ng,
-            self.particles_info,
-            self._mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
+            self.particles_info,
+            self._mpm_materials,
             self._mpm_force_fields,
             self._mpm_params,
-            self._gravity,
-            f,
-            self._sim.cur_t,
         )
 
     def _solve_adjoint_direct(self):
@@ -937,27 +937,27 @@ class MPMSolver(ParticleSolver):
             )
         rigid = self._sim.rigid_solver
         args = (
+            f,
+            self._sim.cur_t,
+            self._gravity,
             self.particles,
             self.particles_ng,
-            self.particles_info,
-            self._mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
             self._mpm_control,
-            self._mpm_force_fields,
-            self._mpm_config,
-            self._mpm_params,
-            self._gravity,
             rigid.dyn_state.geoms,
-            rigid.dyn_info.geoms,
             rigid.dyn_state.links,
+            self._rigid_query,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_force_fields,
+            self._mpm_params,
+            rigid.dyn_info.geoms,
             rigid.dyn_info.links,
             rigid.rigid_info,
             rigid.collider.sdf.sdf_info,
-            self._rigid_query,
-            f,
-            self._sim.cur_t,
+            self._mpm_config,
         )
         # Rigid holds still over the MPM substep, so its trees are built ahead of the graph
         self._rigid_query.build(self._mpm_params)
@@ -1258,7 +1258,7 @@ class MPMSolver(ParticleSolver):
         self,
         particles_idx: qd.types.ndarray(),
         envs_idx: qd.types.ndarray(),
-        actus: qd.types.ndarray(),  # shape [B, n_particles, n_groups]
+        actus: qd.types.ndarray(),
         n_groups: int,
     ):
         for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
@@ -1400,9 +1400,9 @@ class MPMSolver(ParticleSolver):
         particles_start: int,
         link_idx: int,
         stiffness: float,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
-        link_pos: qd.types.ndarray(),  # shape [n_envs, 3]
-        link_quat: qd.types.ndarray(),  # shape [n_envs, 4]
+        particles_mask: qd.types.ndarray(),
+        link_pos: qd.types.ndarray(),
+        link_quat: qd.types.ndarray(),
     ):
         for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
             if particles_mask[i_b, i_p_]:
@@ -1430,7 +1430,7 @@ class MPMSolver(ParticleSolver):
     def _kernel_remove_particle_constraints(
         self,
         particles_start: int,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
+        particles_mask: qd.types.ndarray(),
     ):
         for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
             if particles_mask[i_b, i_p_]:
@@ -1563,27 +1563,27 @@ class MpmCheckpoint(IntEnum):
 
 @qd.kernel(graph=True, checkpoints=True)
 def kernel_substep(
+    f: int,
+    t: float,
+    gravity: qd.Tensor,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
     control: qd.template(),
-    force_fields: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    gravity: qd.Tensor,
     geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
     links_state: array_class.LinksState,
+    rigid_query: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    force_fields: qd.template(),
+    params: qd.template(),
+    geoms_info: array_class.GeomsInfo,
     links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
-    rigid_query: qd.template(),
-    f: qd.i32,
-    t: qd.f32,
+    config: qd.template(),
 ):
     """Run one implicit MPM substep as one graph, from one frame to the next.
 
@@ -1595,38 +1595,38 @@ def kernel_substep(
     # Checkpoint lowering rejects bare top-level func calls, so every checkpoint body sits under a static branch
     with qd.checkpoint(MpmCheckpoint.GRID, yield_on=grid.grid_overflow):
         if qd.static(True):
-            mpm_func.func_build_grid(particles, particles_ng, grid, params, f)
+            mpm_func.func_build_grid(f, particles, particles_ng, grid, params)
     with qd.checkpoint(MpmCheckpoint.PREDICT, yield_on=control.never_yield):
         if qd.static(True):
-            mpm_func.func_p2g(particles, particles_info, grid, params, gravity, f, dt)
-            mpm_func.func_apply_force_fields(grid, force_fields, params, t, dt)
+            mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, params)
+            mpm_func.func_apply_force_fields(t, dt, grid, force_fields, params)
             mpm_func.func_fix_nodes(grid)
             mpm_func.func_reset_contact_rows(grid, newton)
             mpm_func.func_newton_reset(grid, newton)
-            mpm_func.func_build_wall_rows(particles, particles_info, grid, newton, params, f, dt)
+            mpm_func.func_build_wall_rows(f, dt, particles, grid, newton, particles_info, params)
             if qd.static(config.has_rigid):
                 func_build_rigid_rows(
+                    f,
+                    dt,
                     particles,
-                    particles_info,
                     grid,
                     newton,
                     geoms_state,
-                    geoms_info,
                     links_state,
+                    rigid_query,
+                    particles_info,
+                    geoms_info,
                     links_info,
                     rigid_info,
                     sdf_info,
-                    config,
-                    config,
                     params,
-                    rigid_query,
-                    f,
-                    dt,
+                    config,
+                    config,
                 )
-            mpm_func.func_newton_start(grid, newton, params, dt)
+            mpm_func.func_newton_start(dt, grid, newton, params)
             func_reset_newton_control(control)
             mpm_func.func_energy(
-                particles, particles_info, materials, grid, newton, control, params, f, dt, is_trial=False
+                f, dt, particles, grid, newton, control, particles_info, materials, params, is_trial=False
             )
 
     while qd.graph.do_while(control.newton_cond):
@@ -1634,14 +1634,14 @@ def kernel_substep(
             if qd.static(True):
                 func_reset_newton_measures(control)
                 mpm_func.func_report_extent(grid, linear)
-                mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+                mpm_func.func_assemble(f, dt, particles, grid, newton, linear, particles_info, materials, params)
         with qd.checkpoint(MpmCheckpoint.SOLVE, yield_on=control.never_yield):
             if qd.static(True):
                 func_sort_reduce_bcoo(linear.matrix)
                 mpm_func.func_reset_brick(grid, linear)
                 mpm_func.func_gather_brick(linear)
                 mpm_func.func_invert_brick(grid, linear)
-                func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
+                func_init_linear_pcg_residual(linear.b_rhs, linear.solution, linear.pcg)
                 mpm_func.func_apply_brick(grid, linear)
                 func_init_linear_pcg_direction(linear.pcg)
         with qd.checkpoint(MpmCheckpoint.PCG, yield_on=control.never_yield):
@@ -1651,7 +1651,7 @@ def kernel_substep(
             if qd.static(True):
                 mpm_func.func_negate_du(grid, newton, linear)
                 mpm_func.func_record_start_point(grid, newton)
-                mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
+                mpm_func.func_contribute_newton_max_disp(f, particles, grid, newton, control, params)
                 func_check_convergence(control)
                 func_init_line_search(control)
         while qd.graph.do_while(control.ls_cond):
@@ -1659,7 +1659,7 @@ def kernel_substep(
                 if qd.static(True):
                     mpm_func.func_step_forward(grid, newton, control)
                     mpm_func.func_energy(
-                        particles, particles_info, materials, grid, newton, control, params, f, dt, is_trial=True
+                        f, dt, particles, grid, newton, control, particles_info, materials, params, is_trial=True
                     )
                     func_accept_or_backtrack(control)
         with qd.checkpoint(MpmCheckpoint.NEWTON_POST, yield_on=control.never_yield):
@@ -1668,20 +1668,20 @@ def kernel_substep(
 
     with qd.checkpoint(MpmCheckpoint.FINALIZE, yield_on=control.never_yield):
         if qd.static(True):
-            mpm_func.func_grid_velocity(grid, newton, dt)
-            mpm_func.func_g2p_advect(particles, particles_ng, particles_info, materials, grid, params, f, dt)
+            mpm_func.func_grid_velocity(dt, grid, newton)
+            mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, particles_info, materials, params)
 
 
 @qd.kernel
 def kernel_grid_keys(
+    f: int,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
     grid: qd.template(),
     params: qd.template(),
-    f: qd.i32,
 ):
     mpm_func.func_reset_grid(grid)
-    mpm_func.func_compose_particle_keys(particles, particles_ng, grid, params, f)
+    mpm_func.func_compose_particle_keys(f, particles, particles_ng, grid, params)
 
 
 @qd.kernel
@@ -1714,7 +1714,7 @@ def kernel_grid_cells(grid: qd.template()):
 
 def build_grid(particles, particles_ng, grid, params, f):
     """Build the grid as func_build_grid does, driven from the host, its sorts and scans running as shared launches."""
-    kernel_grid_keys(particles, particles_ng, grid, params, f)
+    kernel_grid_keys(f, particles, particles_ng, grid, params)
     dynamic_radix_sort(
         grid.particle_sort, grid.sort_keys, grid.sort_keys_tmp, grid.sort_ids, grid.sort_ids_tmp, grid.n_sort_keys
     )
@@ -1723,28 +1723,28 @@ def build_grid(particles, particles_ng, grid, params, f):
         grid.block_sort, grid.nbr_keys, grid.nbr_keys_tmp, grid.nbr_perm, grid.nbr_perm_tmp, grid.n_neighbor_keys
     )
     kernel_grid_block_flags(grid)
-    kernel_dynamic_exclusive_sum(grid.block_scan, grid.block_flags, grid.block_ranks, grid.n_neighbor_keys)
+    kernel_dynamic_exclusive_sum(grid.block_flags, grid.block_ranks, grid.n_neighbor_keys, grid.block_scan)
     kernel_grid_publish_blocks(grid)
-    kernel_dynamic_exclusive_sum(grid.cell_scan, grid.cell_flags, grid.cell_ranks, grid.n_valid)
-    kernel_dynamic_exclusive_sum(grid.task_scan, grid.task_flags, grid.task_ranks, grid.n_valid)
+    kernel_dynamic_exclusive_sum(grid.cell_flags, grid.cell_ranks, grid.n_valid, grid.cell_scan)
+    kernel_dynamic_exclusive_sum(grid.task_flags, grid.task_ranks, grid.n_valid, grid.task_scan)
     kernel_grid_cells(grid)
 
 
 @qd.kernel
 def kernel_predict(
+    f: int,
+    t: float,
+    gravity: qd.Tensor,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     newton: qd.template(),
+    particles_info: MpmParticlesInfo,
     force_fields: qd.template(),
     params: qd.template(),
-    gravity: qd.Tensor,
-    f: qd.i32,
-    t: qd.f32,
 ):
     dt = params.substep_dt[()]
-    mpm_func.func_p2g(particles, particles_info, grid, params, gravity, f, dt)
-    mpm_func.func_apply_force_fields(grid, force_fields, params, t, dt)
+    mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, params)
+    mpm_func.func_apply_force_fields(t, dt, grid, force_fields, params)
     mpm_func.func_fix_nodes(grid)
     mpm_func.func_reset_contact_rows(grid, newton)
     mpm_func.func_newton_reset(grid, newton)
@@ -1752,137 +1752,137 @@ def kernel_predict(
 
 @qd.kernel
 def kernel_contact_rows(
+    f: int,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     newton: qd.template(),
     control: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
     geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
     links_state: array_class.LinksState,
+    rigid_query: qd.template(),
+    particles_info: MpmParticlesInfo,
+    params: qd.template(),
+    geoms_info: array_class.GeomsInfo,
     links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
-    rigid_query: qd.template(),
-    f: qd.i32,
+    config: qd.template(),
 ):
     """Build the wall and Rigid contact rows of the substep, then reset the Newton control for the loop."""
     dt = params.substep_dt[()]
-    mpm_func.func_build_wall_rows(particles, particles_info, grid, newton, params, f, dt)
+    mpm_func.func_build_wall_rows(f, dt, particles, grid, newton, particles_info, params)
     if qd.static(config.has_rigid):
         func_build_rigid_rows(
+            f,
+            dt,
             particles,
-            particles_info,
             grid,
             newton,
             geoms_state,
-            geoms_info,
             links_state,
+            rigid_query,
+            particles_info,
+            geoms_info,
             links_info,
             rigid_info,
             sdf_info,
-            config,
-            config,
             params,
-            rigid_query,
-            f,
-            dt,
+            config,
+            config,
         )
-    mpm_func.func_newton_start(grid, newton, params, dt)
+    mpm_func.func_newton_start(dt, grid, newton, params)
     func_reset_newton_control(control)
 
 
 @qd.kernel
 def kernel_constraint_rows(
-    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     newton: qd.template(),
+    links_state: array_class.LinksState,
+    particles_info: MpmParticlesInfo,
     params: qd.template(),
     constraints: qd.template(),
-    links_state: array_class.LinksState,
 ):
-    mpm_func.func_build_constraint_rows(particles_info, grid, newton, params, constraints, links_state)
+    mpm_func.func_build_constraint_rows(grid, newton, links_state, particles_info, params, constraints)
 
 
 @qd.kernel
 def kernel_constraint_adjoint(
+    f: int,
     particles: MpmParticles,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
+    links_state: array_class.LinksState,
     params: qd.template(),
     constraints: qd.template(),
-    links_state: array_class.LinksState,
-    f: qd.i32,
 ):
-    mpm_adjoint_func.func_constraint_adjoint(particles, grid, newton, linear, params, constraints, links_state, f)
+    mpm_adjoint_func.func_constraint_adjoint(f, particles, grid, newton, linear, links_state, params, constraints)
 
 
 @qd.kernel
 def kernel_contact_invweight(
+    f: int,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     linear: qd.template(),
+    particles_info: MpmParticlesInfo,
     params: qd.template(),
-    f: qd.i32,
 ):
-    mpm_func.func_contact_invweight(particles, particles_info, grid, linear, params, f)
+    mpm_func.func_contact_invweight(f, particles, grid, linear, particles_info, params)
 
 
 @qd.kernel
 def kernel_assemble(
+    f: int,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
     control: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     params: qd.template(),
-    f: qd.i32,
     is_exact: qd.template(),
 ):
     dt = params.substep_dt[()]
     func_reset_newton_measures(control)
     mpm_func.func_report_extent(grid, linear)
-    mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt, is_exact)
+    mpm_func.func_assemble(f, dt, particles, grid, newton, linear, particles_info, materials, params, is_exact)
 
 
 @qd.kernel
 def kernel_finalize(
+    f: int,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     params: qd.template(),
-    f: qd.i32,
 ):
     dt = params.substep_dt[()]
-    mpm_func.func_grid_velocity(grid, newton, dt)
-    mpm_func.func_g2p_advect(particles, particles_ng, particles_info, materials, grid, params, f, dt)
+    mpm_func.func_grid_velocity(dt, grid, newton)
+    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, particles_info, materials, params)
 
 
 @qd.kernel
 def kernel_adjoint_g2p(
+    f: int,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     params: qd.template(),
-    f: qd.i32,
 ):
     """Compute the adjoint of u* into `newton.du` and the direct terms of the adjoint of the start frame of the substep.
 
     See mpm_adjoint_func."""
     dt = params.substep_dt[()]
     mpm_adjoint_func.func_adjoint_reset_u_bar(grid, newton)
-    mpm_adjoint_func.func_adjoint_g2p(particles, particles_info, materials, grid, newton, params, f, dt)
+    mpm_adjoint_func.func_adjoint_g2p(f, dt, particles, grid, newton, particles_info, materials, params)
 
 
 @qd.kernel
@@ -1896,18 +1896,18 @@ def kernel_adjoint_rhs(
 
 @qd.kernel
 def kernel_adjoint_pullback(
+    f: int,
+    t: float,
+    gravity: qd.Tensor,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     force_fields: qd.template(),
     params: qd.template(),
-    gravity: qd.Tensor,
-    f: qd.i32,
-    t: qd.f32,
 ):
     """Pull the adjoint solution back into the start frame of a substep, then clear the adjoint of its end frame.
 
@@ -1915,9 +1915,9 @@ def kernel_adjoint_pullback(
     and the adjoint of frame `f + 1` is cleared after it (see mpm_adjoint_func). `t` is the time at which the forward
     substep evaluated the force fields."""
     dt = params.substep_dt[()]
-    mpm_adjoint_func.func_adjoint_nodes(grid, newton, linear, force_fields, params, t, dt)
+    mpm_adjoint_func.func_adjoint_nodes(t, dt, grid, newton, linear, force_fields, params)
     mpm_adjoint_func.func_adjoint_particles(
-        particles, particles_info, materials, grid, newton, linear, params, gravity, f, dt
+        f, dt, gravity, particles, grid, newton, linear, particles_info, materials, params
     )
-    mpm_adjoint_func.func_wall_contact_adjoint(particles, particles_info, grid, newton, linear, params, f, dt)
-    mpm_adjoint_func.func_adjoint_consume(particles, particles_ng, params, f)
+    mpm_adjoint_func.func_wall_contact_adjoint(f, dt, particles, grid, newton, linear, particles_info, params)
+    mpm_adjoint_func.func_adjoint_consume(f, particles, particles_ng, params)

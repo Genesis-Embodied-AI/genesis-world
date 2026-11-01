@@ -60,11 +60,11 @@ class NullParticipant:
     """Stands in for an absent secondary participant or coupling of the composed kernels: every stage does nothing."""
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self, f):
+    def func_evaluate(self, f: int):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_gradient(self, f):
+    def func_gradient(self, f: int):
         pass
 
     @qd.func(requires_top_level=True)
@@ -116,19 +116,19 @@ class NullParticipant:
         pass
 
     @qd.func(requires_top_level=True)
-    def func_contact_gradient(self, f):
+    def func_contact_gradient(self, f: int):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f):
+    def func_contact_matvec(self, f: int):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self, f):
+    def func_contact_matvec_post(self, f: int):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_after_step(self, f):
+    def func_after_step(self, f: int):
         pass
 
 
@@ -137,13 +137,13 @@ class NullParticipant:
 
 @qd.func(requires_top_level=True)
 def func_assemble_secondary(
+    f: int,
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f,
 ):
     """Assemble the gradients and factors of the secondary participants and couplings at the current iterate.
 
@@ -189,6 +189,7 @@ def func_pcg_start(
 
 @qd.func(requires_top_level=True)
 def func_pcg_iteration(
+    f: int,
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
@@ -196,7 +197,6 @@ def func_pcg_iteration(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f,
 ):
     """Run one preconditioned conjugate gradient iteration over the rows of every participant.
 
@@ -233,12 +233,12 @@ def func_pcg_iteration(
 
 @qd.func(requires_top_level=True)
 def func_start_line_search(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
-    f,
 ):
     """Set the Newton direction of every participant from the conjugate gradient solution, then start the line search.
 
@@ -253,6 +253,7 @@ def func_start_line_search(
 
 @qd.func(requires_top_level=True)
 def func_step_forward(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
@@ -261,7 +262,6 @@ def func_step_forward(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f,
 ):
     """Move every participant to the trial point of the line-search step and update what the couplings derive of it."""
     p.func_step_forward(control)
@@ -275,13 +275,13 @@ def func_step_forward(
 
 @qd.func(requires_top_level=True)
 def func_energy(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
-    f,
-    is_trial,
+    is_trial: bool,
 ):
     """Evaluate the total energy at the start or trial point.
 
@@ -297,15 +297,15 @@ def func_energy(
 
 @qd.kernel
 def kernel_assemble_secondary(
+    f: int,
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f: qd.i32,
 ):
-    func_assemble_secondary(s0, s1, s2, c0, c1, c2, f)
+    func_assemble_secondary(f, s0, s1, s2, c0, c1, c2)
 
 
 @qd.kernel
@@ -320,6 +320,7 @@ def kernel_pcg_start(
 
 @qd.kernel(graph=True)
 def kernel_pcg_loop(
+    f: int,
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
@@ -327,15 +328,15 @@ def kernel_pcg_loop(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f: qd.i32,
 ):
     """Run the conjugate gradient iterations after kernel_pcg_start as one graph, until convergence or the budget."""
     while qd.graph.do_while(p.ws.cond):
-        func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
+        func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
 
 
 @qd.kernel
 def kernel_pcg_iteration(
+    f: int,
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
@@ -343,25 +344,25 @@ def kernel_pcg_iteration(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f: qd.i32,
 ):
-    func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
+    func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
 
 
 @qd.kernel
 def kernel_start_line_search(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
-    f: qd.i32,
 ):
-    func_start_line_search(control, p, s0, s1, s2, f)
+    func_start_line_search(f, control, p, s0, s1, s2)
 
 
 @qd.kernel
 def kernel_step_forward(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
@@ -370,22 +371,21 @@ def kernel_step_forward(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f: qd.i32,
 ):
-    func_step_forward(control, p, s0, s1, s2, c0, c1, c2, f)
+    func_step_forward(f, control, p, s0, s1, s2, c0, c1, c2)
 
 
 @qd.kernel
 def kernel_energy(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
     s2: qd.template(),
-    f: qd.i32,
-    is_trial: qd.i32,
+    is_trial: bool,
 ):
-    func_energy(control, p, s0, s1, s2, f, is_trial)
+    func_energy(f, control, p, s0, s1, s2, is_trial)
 
 
 @qd.kernel
@@ -400,6 +400,7 @@ def kernel_update_convergence(control: qd.template()):
 
 @qd.kernel(graph=True)
 def kernel_newton_loop(
+    f: int,
     control: qd.template(),
     p: qd.template(),
     s0: qd.template(),
@@ -408,7 +409,6 @@ def kernel_newton_loop(
     c0: qd.template(),
     c1: qd.template(),
     c2: qd.template(),
-    f: qd.i32,
 ):
     """Run the Newton iterations of a substep as one graph, after the evaluation of the start energy.
 
@@ -417,14 +417,14 @@ def kernel_newton_loop(
     """
     while qd.graph.do_while(control.newton_cond):
         p.func_assemble(control, f)
-        func_assemble_secondary(s0, s1, s2, c0, c1, c2, f)
+        func_assemble_secondary(f, s0, s1, s2, c0, c1, c2)
         func_pcg_start(p, s0, s1, s2)
         while qd.graph.do_while(p.ws.cond):
-            func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
-        func_start_line_search(control, p, s0, s1, s2, f)
+            func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
+        func_start_line_search(f, control, p, s0, s1, s2)
         while qd.graph.do_while(control.ls_cond):
-            func_step_forward(control, p, s0, s1, s2, c0, c1, c2, f)
-            func_energy(control, p, s0, s1, s2, f, 1)
+            func_step_forward(f, control, p, s0, s1, s2, c0, c1, c2)
+            func_energy(f, control, p, s0, s1, s2, 1)
             func_accept_or_backtrack(control)
         func_update_convergence(control)
 
@@ -514,7 +514,7 @@ class NewtonSolver(Solver):
         if not (self._secondaries or self._couplings):
             return
         primary, secondary, coupling = self._slots()
-        kernel_assemble_secondary(*secondary, *coupling, f)
+        kernel_assemble_secondary(f, *secondary, *coupling)
         for host, _ in self._secondaries + self._couplings:
             host.newton_adjoint_rhs(f)
 
@@ -554,10 +554,10 @@ class NewtonSolver(Solver):
 
         for host in hosts + coupling_hosts:
             host.newton_prepare(f)
-        kernel_energy(control, primary, *secondary, f, is_trial=0)
+        kernel_energy(f, control, primary, *secondary, is_trial=False)
 
         if USE_NEWTON_GRAPH and not self._has_grad_participants():
-            kernel_newton_loop(control, primary, *secondary, *coupling, f)
+            kernel_newton_loop(f, control, primary, *secondary, *coupling)
         else:
             self._newton_loop_launches(f)
 
@@ -578,10 +578,10 @@ class NewtonSolver(Solver):
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one,
         # with a device read each, when other participants take part in a scene tracking gradients
         if not self._has_grad_participants():
-            kernel_pcg_loop(primary, *secondary, *coupling, f)
+            kernel_pcg_loop(f, primary, *secondary, *coupling)
             return
         while True:
-            kernel_pcg_iteration(primary, *secondary, *coupling, f)
+            kernel_pcg_iteration(f, primary, *secondary, *coupling)
             if not int(qd_to_numpy(primary.ws.cond)):
                 break
 
@@ -593,12 +593,12 @@ class NewtonSolver(Solver):
         while True:
             self._primary[0].newton_assemble(f)
             if has_secondary:
-                kernel_assemble_secondary(*secondary, *coupling, f)
+                kernel_assemble_secondary(f, *secondary, *coupling)
             self._pcg(f)
-            kernel_start_line_search(control, primary, *secondary, f)
+            kernel_start_line_search(f, control, primary, *secondary)
             while True:
-                kernel_step_forward(control, primary, *secondary, *coupling, f)
-                kernel_energy(control, primary, *secondary, f, 1)
+                kernel_step_forward(f, control, primary, *secondary, *coupling)
+                kernel_energy(f, control, primary, *secondary, is_trial=True)
                 kernel_accept_or_backtrack(control)
                 if not int(qd_to_numpy(control.ls_cond)):
                     break

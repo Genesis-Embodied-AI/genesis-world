@@ -32,7 +32,7 @@ from .mpm_rigid_func import geom_normal
 
 
 @qd.func
-def orthogonals_bw(n, g_d1, g_d2):
+def orthogonals_bw(n: qd.types.vector(3), g_d1: qd.types.vector(3), g_d2: qd.types.vector(3)):
     """Reverse of `gu.qd_orthogonals`, from the adjoints of the two tangents to that of the normal.
 
     The tangents are d1 = b x n and d2 = b, with b the normalized branch vector of n. Returns the adjoint of n from g_d1
@@ -61,9 +61,9 @@ def orthogonals_bw(n, g_d1, g_d2):
 
 @qd.func
 def geom_sdf_grid_hessian(
-    i_g,
-    i_b,
-    x,
+    i_g: int,
+    i_b: int,
+    x: qd.types.vector(3),
     geoms_state: array_class.GeomsState,
     sdf_info: array_class.SDFInfo,
 ):
@@ -113,11 +113,11 @@ def geom_sdf_grid_hessian(
 
 @qd.func
 def geom_contact_bw(
-    i_g,
-    i_b,
-    x,
-    phi_bar,
-    n_bar,
+    i_g: int,
+    i_b: int,
+    x: qd.types.vector(3),
+    phi_bar: float,
+    n_bar: qd.types.vector(3),
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
     rigid_info: array_class.RigidInfo,
@@ -168,12 +168,12 @@ def geom_contact_bw(
 
 @qd.func
 def link_chain_spatial(
-    src: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
-    i_l,
-    i_b,
-    links_info: array_class.LinksInfo,
+    i_l: int,
+    i_b: int,
+    src: qd.template(),
     dofs_state: array_class.DofsState,
-    config: qd.template(),  # MpmStaticConfig
+    links_info: array_class.LinksInfo,
+    config: qd.template(),
 ):
     """Spatial displacement of a link from a dof vector (see func_link_spatial_disp).
 
@@ -195,22 +195,22 @@ def link_chain_spatial(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_adjoint(
+    f: int,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    linear: qd.template(),  # MpmLinearSystem
-    coupling: qd.template(),  # MpmRigidCoupling
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    coupling: qd.template(),
     geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
     links_state: array_class.LinksState,
-    links_info: array_class.LinksInfo,
     dofs_state: array_class.DofsState,
+    particles_info: MpmParticlesInfo,
+    geoms_info: array_class.GeomsInfo,
+    links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
-    f,
+    params: qd.template(),
+    config: qd.template(),
 ):
     """Pull the Rigid contact rows of every particle back into the adjoints of the particles and of Rigid's state.
 
@@ -225,8 +225,8 @@ def func_rigid_contact_adjoint(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
-            slots = stencil_node_slots(grid, env, cell)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            slots = stencil_node_slots(env, cell, grid)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
             w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
@@ -239,8 +239,8 @@ def func_rigid_contact_adjoint(
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
             r = x_p - links_state.root_COM[i_l, i_b]
-            V_lin, V_ang = link_chain_spatial(coupling.x, i_l, i_b, links_info, dofs_state, config)
-            L_lin, L_ang = link_chain_spatial(coupling.sol, i_l, i_b, links_info, dofs_state, config)
+            V_lin, V_ang = link_chain_spatial(i_l, i_b, coupling.x, dofs_state, links_info, config)
+            L_lin, L_ang = link_chain_spatial(i_l, i_b, coupling.sol, dofs_state, links_info, config)
             Delta = dxp - (V_lin + V_ang.cross(r))
             delta = lam_p - (L_lin + L_ang.cross(r))
 

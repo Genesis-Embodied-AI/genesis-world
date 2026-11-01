@@ -26,22 +26,22 @@ class RigidNewtonParticipant:
         self.params = params
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self, f):
+    def func_evaluate(self, f: int):
         mpm_rigid_func.func_rigid_evaluate(
             self.coupling,
             self.dyn_state,
             self.constraint_state,
             self.dyn_info,
             self.rigid_info,
+            self.params,
             self.rigid_config,
             self.config,
-            self.params,
         )
 
     @qd.func(requires_top_level=True)
-    def func_gradient(self, f):
+    def func_gradient(self, f: int):
         mpm_rigid_func.func_rigid_gradient(
-            self.coupling, self.dyn_state, self.constraint_state, self.config, self.params
+            self.coupling, self.dyn_state, self.constraint_state, self.params, self.config
         )
 
     @qd.func(requires_top_level=True)
@@ -93,15 +93,15 @@ class RigidNewtonParticipant:
         mpm_rigid_func.func_rigid_pcg_direction(self.coupling, ws)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f):
+    def func_start_line_search(self, control: qd.template(), f: int):
         mpm_rigid_func.func_rigid_start_line_search(self.coupling, control)
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f):
+    def func_step_forward(self, control: qd.template(), f: int):
         mpm_rigid_func.func_rigid_step_forward(self.coupling, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f, is_trial):
+    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
         self.func_evaluate(f)
         mpm_rigid_func.func_rigid_energy(self.coupling, control, self.params, is_trial)
 
@@ -129,22 +129,23 @@ class MpmRigidContact:
         self.params = rigid.params
 
     @qd.func(requires_top_level=True)
-    def func_contact_gradient(self, f):
+    def func_contact_gradient(self, f: int):
         mpm_rigid_func.func_rigid_contact_gradient(
+            f,
             self.particles,
             self.grid,
             self.newton,
             self.coupling,
             self.dyn_state,
             self.dyn_info,
-            self.config,
             self.params,
-            f,
+            self.config,
         )
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f):
+    def func_contact_matvec(self, f: int):
         mpm_rigid_func.func_rigid_contact_matvec(
+            f,
             self.particles,
             self.grid,
             self.newton,
@@ -152,46 +153,55 @@ class MpmRigidContact:
             self.coupling,
             self.dyn_state,
             self.dyn_info,
-            self.config,
             self.params,
-            f,
+            self.config,
         )
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self, f):
+    def func_contact_matvec_post(self, f: int):
         mpm_rigid_func.func_rigid_contact_matvec_post(self.coupling, self.dyn_state, self.dyn_info, self.config)
 
     @qd.func(requires_top_level=True)
-    def func_after_step(self, f):
+    def func_after_step(self, f: int):
         mpm_rigid_func.func_link_spatial_disp(
-            self.coupling, self.coupling.x, self.dyn_info.links, self.dyn_state.dofs, self.config
+            self.coupling.x, self.coupling, self.dyn_state.dofs, self.dyn_info.links, self.config
         )
         mpm_rigid_func.func_contact_point_disp(
-            self.particles, self.grid, self.newton, self.coupling, self.dyn_state.links, self.params, f
+            f, self.particles, self.grid, self.newton, self.coupling, self.dyn_state.links, self.params
         )
 
 
 @qd.kernel
 def kernel_rigid_begin(rigid: qd.template()):
     mpm_rigid_func.func_rigid_begin(
-        rigid.coupling, rigid.dyn_state.dofs, rigid.constraint_state, rigid.rigid_config, rigid.config, rigid.params
+        rigid.coupling, rigid.dyn_state.dofs, rigid.constraint_state, rigid.params, rigid.rigid_config, rigid.config
     )
 
 
 @qd.kernel
-def kernel_rigid_write_back(rigid: qd.template(), f: qd.i32):
+def kernel_rigid_write_back(
+    f: int,
+    rigid: qd.template(),
+):
     rigid.func_evaluate(f)
     mpm_rigid_func.func_rigid_write_back(rigid.coupling, rigid.constraint_state, rigid.config)
 
 
 @qd.kernel
-def kernel_contact_point_disp(contact: qd.template(), f: qd.i32):
+def kernel_contact_point_disp(
+    f: int,
+    contact: qd.template(),
+):
     contact.func_after_step(f)
 
 
 @qd.kernel
-def kernel_mpm_reaction(contact: qd.template(), f: qd.i32):
+def kernel_mpm_reaction(
+    f: int,
+    contact: qd.template(),
+):
     mpm_rigid_func.func_mpm_reaction(
+        f,
         contact.particles,
         contact.grid,
         contact.newton,
@@ -199,7 +209,6 @@ def kernel_mpm_reaction(contact: qd.template(), f: qd.i32):
         contact.dyn_state,
         contact.constraint_state,
         contact.params,
-        f,
     )
 
 
@@ -219,24 +228,27 @@ def kernel_rigid_adjoint_finish(rigid: qd.template()):
 
 
 @qd.kernel
-def kernel_rigid_contact_adjoint(contact: qd.template(), f: qd.i32):
+def kernel_rigid_contact_adjoint(
+    f: int,
+    contact: qd.template(),
+):
     mpm_rigid_adjoint_func.func_rigid_contact_adjoint(
+        f,
         contact.particles,
-        contact.particles_info,
         contact.grid,
         contact.newton,
         contact.linear,
         contact.coupling,
         contact.dyn_state.geoms,
-        contact.dyn_info.geoms,
         contact.dyn_state.links,
-        contact.dyn_info.links,
         contact.dyn_state.dofs,
+        contact.particles_info,
+        contact.dyn_info.geoms,
+        contact.dyn_info.links,
         contact.rigid_info,
         contact.sdf_info,
-        contact.config,
         contact.params,
-        f,
+        contact.config,
     )
 
 
@@ -257,7 +269,7 @@ class RigidNewtonHost:
         kernel_rigid_begin(self._device)
 
     def newton_finish(self, f):
-        kernel_rigid_write_back(self._device, f)
+        kernel_rigid_write_back(f, self._device)
 
     def newton_after(self, f):
         self._rigid_solver.finish_deferred_solve()
@@ -290,10 +302,10 @@ class MpmRigidContactHost:
         self._device = device
 
     def newton_prepare(self, f):
-        kernel_contact_point_disp(self._device, f)
+        kernel_contact_point_disp(f, self._device)
 
     def newton_finish(self, f):
-        kernel_mpm_reaction(self._device, f)
+        kernel_mpm_reaction(f, self._device)
 
     def newton_after(self, f):
         kernel_add_mpm_contact_force(self._device)
@@ -306,4 +318,4 @@ class MpmRigidContactHost:
 
     def newton_adjoint_finish(self, f):
         """Pull the contact rows back into the adjoints of the particles and of Rigid's state."""
-        kernel_rigid_contact_adjoint(self._device, f)
+        kernel_rigid_contact_adjoint(f, self._device)

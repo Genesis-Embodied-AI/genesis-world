@@ -57,9 +57,9 @@ EMPTY_BOX_HALF = 1e10
 
 @qd.func
 def link_spatial(
-    coupling: qd.template(),  # MpmRigidCoupling
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
+    coupling: qd.template(),
 ):
     """Linear and angular parts of the spatial displacement of a link, held in `coupling.link_V`."""
     lin = qd.Vector([coupling.link_V[i_l, i_b, d] for d in qd.static(range(3))], dt=gs.qd_float)
@@ -69,12 +69,12 @@ def link_spatial(
 
 @qd.func
 def particle_arm(
+    f: int,
+    i_p: int,
+    i_b: int,
+    i_l: int,
     particles: MpmParticles,
     links_state: array_class.LinksState,
-    f,
-    i_p,
-    i_b,
-    i_l,
 ):
     """Arm of a particle from the root center of mass (COM) of its contact link, the reference point of the link's
     spatial vectors."""
@@ -83,15 +83,15 @@ def particle_arm(
 
 @qd.func
 def particle_stencil(
+    f: int,
+    s: int,
     particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    params: qd.template(),  # MpmParams
-    f,
-    s,
+    grid: qd.template(),
+    params: qd.template(),
 ):
     """Particle index, environment, stencil node slots and weights of a sorted particle."""
-    i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
-    slots = stencil_node_slots(grid, env, cell)
+    i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+    slots = stencil_node_slots(env, cell, grid)
     w, grad_w = q1_stencil(particles.pos[f, i_p, i_b] * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
     return i_p, i_b, slots, w
 
@@ -101,9 +101,9 @@ def particle_stencil(
 
 @qd.func
 def geom_sdf_grid(
-    i_g,
-    i_b,
-    x,
+    i_g: int,
+    i_b: int,
+    x: qd.types.vector(3),
     geoms_state: array_class.GeomsState,
     sdf_info: array_class.SDFInfo,
 ):
@@ -142,9 +142,9 @@ def geom_sdf_grid(
 
 @qd.func
 def geom_sdf(
-    i_g,
-    i_b,
-    x,
+    i_g: int,
+    i_b: int,
+    x: qd.types.vector(3),
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
     sdf_info: array_class.SDFInfo,
@@ -161,9 +161,9 @@ def geom_sdf(
 
 @qd.func
 def geom_normal(
-    i_g,
-    i_b,
-    x,
+    i_g: int,
+    i_b: int,
+    x: qd.types.vector(3),
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
     rigid_info: array_class.RigidInfo,
@@ -223,8 +223,8 @@ class RigidGeomQuery:
 
 @qd.func(requires_top_level=True)
 def func_fit_geom_leaves(
-    query: qd.template(),  # RigidGeomQuery
-    dt,
+    dt: float,
+    query: qd.template(),
 ):
     """Fit the leaf box of every coupled geom, grown by its contact margin and the distance its points may travel.
 
@@ -262,7 +262,7 @@ def func_fit_geom_leaves(
 
 @qd.kernel
 def kernel_fit_geom_leaves(query: qd.template(), params: qd.template()):
-    func_fit_geom_leaves(query, params.substep_dt[()])
+    func_fit_geom_leaves(params.substep_dt[()], query)
 
 
 @qd.func
@@ -287,22 +287,22 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
 
 @qd.func(requires_top_level=True)
 def func_build_rigid_rows(
+    f: int,
+    dt: float,
     particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
+    grid: qd.template(),
+    newton: qd.template(),
     geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
     links_state: array_class.LinksState,
+    query: qd.template(),
+    particles_info: MpmParticlesInfo,
+    geoms_info: array_class.GeomsInfo,
     links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
+    params: qd.template(),
     collider_static_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
-    query: qd.template(),  # RigidGeomQuery, its trees built for the substep
-    f,
-    dt,
+    config: qd.template(),
 ):
     """Build the pyramid contact rows of every valid particle within the soft range of a coupled geom, after
     `func_build_wall_rows` reset the rows.
@@ -318,7 +318,7 @@ def func_build_rigid_rows(
     """
     qd.loop_config(name="mpm_build_rigid_rows")
     for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
         x_p = particles.pos[f, i_p, i_b]
         # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
         # band: the two grown boxes together cover the band of the relative velocity
@@ -341,19 +341,19 @@ def func_build_rigid_rows(
             v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
             v_rel = particles.vel[f, i_p, i_b] - v_r
             # The relative speed bounds the normal approach speed, which needs the normal
-            is_candidate = phi < contact_band_width(params, v_rel.norm(), dt)
+            is_candidate = phi < contact_band_width(v_rel.norm(), dt, params)
         normal = qd.Vector.zero(gs.qd_float, 3)
         is_in_range = False
         if is_candidate:
             normal = geom_normal(
                 i_g_contact, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
             )
-            is_in_range = phi < contact_band_width(params, -normal.dot(v_rel), dt)
+            is_in_range = phi < contact_band_width(-normal.dot(v_rel), dt, params)
         if is_in_range:
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
             friction = qd.max(geoms_info.friction[i_g_contact] * geoms_state.friction_ratio[i_g_contact, i_b], 1e-2)
             friction_sq_reg = friction * friction / rigid_info.impratio[None]
-            invweight = contact_invweight(particles, particles_info, f, i_p, i_b, normal) + links_info.invweight[I_l][0]
+            invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info) + links_info.invweight[I_l][0]
             diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
             sol_params = geoms_info.sol_params[i_g_contact]
             sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
@@ -377,11 +377,11 @@ def func_build_rigid_rows(
 
 @qd.func(requires_top_level=True)
 def func_link_spatial_disp(
-    coupling: qd.template(),  # MpmRigidCoupling
-    src: qd.template(),  # qd.Ndarray (n_dofs, n_envs), a dof vector in units of x
-    links_info: array_class.LinksInfo,
+    src: qd.template(),
+    coupling: qd.template(),
     dofs_state: array_class.DofsState,
-    config: qd.template(),  # MpmStaticConfig
+    links_info: array_class.LinksInfo,
+    config: qd.template(),
 ):
     """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link.
 
@@ -408,12 +408,12 @@ def func_link_spatial_disp(
 
 @qd.func(requires_top_level=True)
 def func_link_force_to_dofs(
-    coupling: qd.template(),  # MpmRigidCoupling
-    out: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
-    scale,
-    links_info: array_class.LinksInfo,
+    scale: float,
+    out: qd.template(),
+    coupling: qd.template(),
     dofs_state: array_class.DofsState,
-    config: qd.template(),  # MpmStaticConfig
+    links_info: array_class.LinksInfo,
+    config: qd.template(),
 ):
     """Add the generalized force of the spatial forces accumulated on the links to a dof vector.
 
@@ -436,13 +436,13 @@ def func_link_force_to_dofs(
 
 @qd.func(requires_top_level=True)
 def func_contact_point_disp(
+    f: int,
     particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    coupling: qd.template(),  # MpmRigidCoupling
+    grid: qd.template(),
+    newton: qd.template(),
+    coupling: qd.template(),
     links_state: array_class.LinksState,
-    params: qd.template(),  # MpmParams
-    f,
+    params: qd.template(),
 ):
     """Set the displacement J_pt x of the contact point of every particle with Rigid rows.
 
@@ -452,9 +452,9 @@ def func_contact_point_disp(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
-            lin, ang = link_spatial(coupling, i_l, i_b)
-            dr = lin + ang.cross(particle_arm(particles, links_state, f, i_p, i_b, i_l))
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            lin, ang = link_spatial(i_l, i_b, coupling)
+            dr = lin + ang.cross(particle_arm(f, i_p, i_b, i_l, particles, links_state))
             for d in qd.static(range(3)):
                 newton.contact_dr[3 * s + d] = dr[d]
 
@@ -464,12 +464,12 @@ def func_contact_point_disp(
 
 @qd.func(requires_top_level=True)
 def func_rigid_begin(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dofs_state: array_class.DofsState,
     constraint_state: array_class.ConstraintState,
+    params: qd.template(),
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
+    config: qd.template(),
 ):
     """Start the Rigid unknown from Rigid's warm start and group Rigid's assembled rows by island.
 
@@ -495,14 +495,14 @@ def func_rigid_begin(
 
 @qd.func(requires_top_level=True)
 def func_rigid_evaluate(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
+    params: qd.template(),
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
+    config: qd.template(),
 ):
     """Evaluate Rigid's cost of qacc = x / dt^2 into `coupling.cost`, with its row activity, forces and qfrc_constraint.
 
@@ -540,10 +540,10 @@ def func_rigid_evaluate(
 
 @qd.func(requires_top_level=True)
 def func_rigid_energy(
-    coupling: qd.template(),  # MpmRigidCoupling
-    control: qd.template(),  # NewtonControl
-    params: qd.template(),  # MpmParams
-    is_trial,
+    coupling: qd.template(),
+    control: qd.template(),
+    params: qd.template(),
+    is_trial: bool,
 ):
     """Add Rigid's cost times dt^4, after func_rigid_evaluate, to the start or trial energy of the MPM energy pass."""
     n_envs = coupling.x.shape[1]
@@ -560,11 +560,11 @@ def func_rigid_energy(
 
 @qd.func(requires_top_level=True)
 def func_rigid_gradient(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
+    params: qd.template(),
+    config: qd.template(),
 ):
     """Compute the gradient of Rigid's share of the joint energy in x, after func_rigid_evaluate at the current x.
 
@@ -582,14 +582,14 @@ def func_rigid_gradient(
 
 @qd.func
 def rigid_solve(
-    i_b,
-    rhs: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
-    out: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
+    i_b: int,
+    rhs: qd.template(),
+    out: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Solve the Rigid block system of one environment by Rigid's own factors.
 
@@ -606,13 +606,13 @@ def rigid_solve(
 
 @qd.func(requires_top_level=True)
 def func_rigid_factor(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Factor the preconditioner (A + U K U^T)^-1 of the Rigid block, after func_rigid_contact_gradient summed the
     contact stiffness K_l of each link.
@@ -707,15 +707,15 @@ def func_rigid_factor(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_gradient(
+    f: int,
     particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    coupling: qd.template(),  # MpmRigidCoupling
+    grid: qd.template(),
+    newton: qd.template(),
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
-    f,
+    params: qd.template(),
+    config: qd.template(),
 ):
     """Add the share of the Rigid contact rows to the gradient in x, and sum the spatial contact stiffness of each link.
 
@@ -723,7 +723,7 @@ def func_rigid_contact_gradient(
     takes minus the generalized force of the rows of the particles on their links. The spatial stiffness K_l = sum_s
     P_s^T H_s P_s of each link feeds the preconditioner, with P_s = [I, -[r_s]x] mapping the spatial displacement of the
     link to that of the contact point at arm r_s."""
-    func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
+    func_link_spatial_disp(coupling.x, coupling, dyn_state.dofs, dyn_info.links, config)
     qd.loop_config(name="mpm_rigid_link_K_clear")
     for i_l, i_b, k in qd.ndrange(coupling.link_K.shape[0], coupling.link_K.shape[1], 36):
         coupling.link_K[i_l, i_b, k] = 0.0
@@ -731,13 +731,13 @@ def func_rigid_contact_gradient(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
             H = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
             if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
-                r = particle_arm(particles, dyn_state.links, f, i_p, i_b, i_l)
+                r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
                 torque = r.cross(g)
                 for d in qd.static(range(3)):
                     qd.atomic_add(coupling.link_F[i_l, i_b, d], g[d])
@@ -751,17 +751,17 @@ def func_rigid_contact_gradient(
                     qd.atomic_add(coupling.link_K[i_l, i_b, 6 * i + 3 + j], -HR[i, j])
                     qd.atomic_add(coupling.link_K[i_l, i_b, 6 * (3 + i) + j], RH[i, j])
                     qd.atomic_add(coupling.link_K[i_l, i_b, 6 * (3 + i) + 3 + j], -RHR[i, j])
-    func_link_force_to_dofs(coupling, coupling.grad, -1.0, dyn_info.links, dyn_state.dofs, config)
+    func_link_force_to_dofs(-1.0, coupling.grad, coupling, dyn_state.dofs, dyn_info.links, config)
 
 
 @qd.func(requires_top_level=True)
 def func_rigid_precondition(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Apply the preconditioner of the Rigid block with the factors of func_rigid_factor.
 
@@ -816,7 +816,7 @@ def func_rigid_precondition(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_init(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
 ):
     """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared."""
     n_dofs = coupling.x.shape[0]
@@ -830,8 +830,8 @@ def func_rigid_pcg_init(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_init_direction(
-    coupling: qd.template(),  # MpmRigidCoupling
-    ws: qd.template(),  # PCGWorkspace
+    coupling: qd.template(),
+    ws: qd.template(),
 ):
     """Set the first search direction over the Rigid dofs, after func_init_linear_pcg_direction over the MPM rows.
 
@@ -850,16 +850,16 @@ def func_rigid_pcg_init_direction(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_matvec(
+    f: int,
     particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    linear: qd.template(),  # MpmLinearSystem
-    coupling: qd.template(),  # MpmRigidCoupling
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
-    config: qd.template(),  # MpmStaticConfig
-    params: qd.template(),  # MpmParams
-    f,
+    params: qd.template(),
+    config: qd.template(),
 ):
     """Apply the Rigid contact rows' share of the joint operator beyond the MPM matrix, after func_linear_pcg_spmv.
 
@@ -869,17 +869,17 @@ def func_rigid_contact_matvec(
     p.Ap gains p_u . (-sum_a w_a H dr).
     """
     ws = linear.pcg
-    func_link_spatial_disp(coupling, coupling.p, dyn_info.links, dyn_state.dofs, config)
+    func_link_spatial_disp(coupling.p, coupling, dyn_state.dofs, dyn_info.links, config)
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0 and ws.converged[()] == 0:
-            i_p, i_b, slots, w = particle_stencil(particles, grid, params, f, s)
+            i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
             H = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
-            r = particle_arm(particles, dyn_state.links, f, i_p, i_b, i_l)
-            lin, ang = link_spatial(coupling, i_l, i_b)
+            r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
+            lin, ang = link_spatial(i_l, i_b, coupling)
             dr = lin + ang.cross(r)
             dxp = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
@@ -900,12 +900,12 @@ def func_rigid_contact_matvec(
 
 @qd.func(requires_top_level=True)
 def func_rigid_matvec(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Set Ap_r = (M + J^T D J) p_r over the active rows of Rigid."""
     n_envs = coupling.x.shape[1]
@@ -927,19 +927,19 @@ def func_rigid_matvec(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_matvec_post(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Add to Ap_r the generalized force of the spatial forces accumulated on the links by func_rigid_contact_matvec."""
-    func_link_force_to_dofs(coupling, coupling.ap, 1.0, dyn_info.links, dyn_state.dofs, config)
+    func_link_force_to_dofs(1.0, coupling.ap, coupling, dyn_state.dofs, dyn_info.links, config)
 
 
 @qd.func(requires_top_level=True)
 def func_rigid_matvec_dot(
-    coupling: qd.template(),  # MpmRigidCoupling
-    ws: qd.template(),  # PCGWorkspace
+    coupling: qd.template(),
+    ws: qd.template(),
 ):
     """Add p_r . Ap_r to p . Ap, once Ap_r holds the whole joint operator."""
     n_dofs = coupling.x.shape[0]
@@ -952,8 +952,8 @@ def func_rigid_matvec_dot(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_update_xr(
-    coupling: qd.template(),  # MpmRigidCoupling
-    ws: qd.template(),  # PCGWorkspace
+    coupling: qd.template(),
+    ws: qd.template(),
 ):
     """Update the solution and the residual over the Rigid dofs, with the step of func_linear_pcg_update_xr.
 
@@ -972,8 +972,8 @@ def func_rigid_pcg_update_xr(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_dot_rz(
-    coupling: qd.template(),  # MpmRigidCoupling
-    ws: qd.template(),  # PCGWorkspace
+    coupling: qd.template(),
+    ws: qd.template(),
 ):
     """Add r.z over the Rigid dofs to the rz_new slot, before func_linear_pcg_direction_update adds the MPM rows."""
     n_dofs = coupling.x.shape[0]
@@ -987,8 +987,8 @@ def func_rigid_pcg_dot_rz(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_direction(
-    coupling: qd.template(),  # MpmRigidCoupling
-    ws: qd.template(),  # PCGWorkspace
+    coupling: qd.template(),
+    ws: qd.template(),
 ):
     """Update the search direction over the Rigid dofs and clear Ap, after func_linear_pcg_direction_update.
 
@@ -1011,8 +1011,8 @@ def func_rigid_pcg_direction(
 
 @qd.func(requires_top_level=True)
 def func_rigid_start_line_search(
-    coupling: qd.template(),  # MpmRigidCoupling
-    control: qd.template(),  # NewtonControl
+    coupling: qd.template(),
+    control: qd.template(),
 ):
     """Set the line-search direction dx = -solution and its start point, and take |dx| into the largest displacement of
     the Newton step, after the MPM rows."""
@@ -1027,8 +1027,8 @@ def func_rigid_start_line_search(
 
 @qd.func(requires_top_level=True)
 def func_rigid_step_forward(
-    coupling: qd.template(),  # MpmRigidCoupling
-    control: qd.template(),  # NewtonControl
+    coupling: qd.template(),
+    control: qd.template(),
 ):
     n_dofs = coupling.x.shape[0]
     n_envs = coupling.x.shape[1]
@@ -1039,9 +1039,9 @@ def func_rigid_step_forward(
 
 @qd.func(requires_top_level=True)
 def func_rigid_write_back(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     constraint_state: array_class.ConstraintState,
-    config: qd.template(),  # MpmStaticConfig
+    config: qd.template(),
 ):
     """Hand the converged qacc to Rigid as the solution of its constraint solve.
 
@@ -1058,9 +1058,9 @@ def func_rigid_write_back(
 
 @qd.func(requires_top_level=True)
 def func_rigid_adjoint_rhs(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     constraint_state: array_class.ConstraintState,
-    params: qd.template(),  # MpmParams
+    params: qd.template(),
 ):
     """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts.
 
@@ -1076,9 +1076,9 @@ def func_rigid_adjoint_rhs(
 
 @qd.func(requires_top_level=True)
 def func_rigid_adjoint_finish(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     constraint_state: array_class.ConstraintState,
-    params: qd.template(),  # MpmParams
+    params: qd.template(),
 ):
     """Set the solution of Rigid's adjoint solve from that of the joint one.
 
@@ -1094,14 +1094,14 @@ def func_rigid_adjoint_finish(
 
 @qd.func(requires_top_level=True)
 def func_mpm_reaction(
+    f: int,
     particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    coupling: qd.template(),  # MpmRigidCoupling
+    grid: qd.template(),
+    newton: qd.template(),
+    coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    params: qd.template(),  # MpmParams
-    f,
+    params: qd.template(),
 ):
     """Apply the force of the MPM contact rows on Rigid at the converged solve, after func_rigid_write_back.
 
@@ -1123,13 +1123,13 @@ def func_mpm_reaction(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
-            slots = stencil_node_slots(grid, env, cell)
-            dx, w = particle_trial_disp(particles, newton, params, f, i_p, i_b, cell, slots)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            slots = stencil_node_slots(env, cell, grid)
+            dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
             dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            energy, g, hess = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
+            energy, g, hess = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
             if g.norm_sqr() > 0.0:
-                torque = particle_arm(particles, dyn_state.links, f, i_p, i_b, i_l).cross(g)
+                torque = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links).cross(g)
                 for d in qd.static(range(3)):
                     qd.atomic_add(coupling.link_F[i_l, i_b, d], g[d])
                     qd.atomic_add(coupling.link_F[i_l, i_b, 3 + d], torque[d])
@@ -1142,9 +1142,9 @@ def func_mpm_reaction(
 
 @qd.func(requires_top_level=True)
 def func_add_mpm_contact_force(
-    coupling: qd.template(),  # MpmRigidCoupling
+    coupling: qd.template(),
     links_state: array_class.LinksState,
-    params: qd.template(),  # MpmParams
+    params: qd.template(),
 ):
     """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
     contact forces were written by the post-solve stage of its substep."""

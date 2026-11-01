@@ -57,7 +57,7 @@ class MpmSphBoundary:
         """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep.
 
         The leaves sit at the MPM particles of frame f."""
-        kernel_fit_mpm_obstacle_leaves(self, f)
+        kernel_fit_mpm_obstacle_leaves(f, self)
         build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
 
     def gather(self):
@@ -69,7 +69,7 @@ class MpmSphBoundary:
         kernel_scatter_boundary(self)
 
     @qd.func
-    def b_grad_at(self, k):
+    def b_grad_at(self, k: int):
         return qd.Vector([self.b_grad[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
 
 
@@ -149,7 +149,10 @@ def kernel_scatter_boundary(boundary: qd.template()):
 
 
 @qd.kernel
-def kernel_apply_boundary_impulse(boundary: qd.template(), f: qd.i32):
+def kernel_apply_boundary_impulse(
+    f: int,
+    boundary: qd.template(),
+):
     """Add the impulses of the SPH particles to the velocity of every active MPM particle before the MPM
     particle-to-grid transfer, and clear them.
 

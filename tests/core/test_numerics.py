@@ -30,14 +30,14 @@ def kernel_radix_sort(
     perm_b: qd.types.ndarray(),
     n: qd.types.ndarray(),
 ):
-    func_dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n[()])
+    func_dynamic_radix_sort(keys_a, keys_b, perm_a, perm_b, sorter, n[()])
 
 
 @qd.kernel(graph=True)
 def kernel_exclusive_sum(
     scanner: qd.template(), values: qd.types.ndarray(), output: qd.types.ndarray(), n: qd.types.ndarray()
 ):
-    func_dynamic_exclusive_sum(scanner, values, output, n[()])
+    func_dynamic_exclusive_sum(values, output, scanner, n[()])
 
 
 @pytest.mark.required
@@ -105,7 +105,7 @@ def kernel_sort_reduce_and_multiply(matrix: qd.template(), x: qd.types.ndarray()
     func_sort_reduce_bcoo(matrix)
     for i in range(y.shape[0]):
         y[i] = 0.0
-    func_sym_bcoo_spmv(matrix, x, y)
+    func_sym_bcoo_spmv(x, y, matrix)
 
 
 def _random_symmetric_triplets(rng, n_rows, n_triplets):
@@ -220,12 +220,12 @@ def kernel_pcg_solve(
     x: qd.types.ndarray(),
 ):
     func_sort_reduce_bcoo(matrix)
-    func_init_linear_pcg_residual(ws, b, x)
-    func_apply_block_jacobi(ws, precond_inv_diag)
+    func_init_linear_pcg_residual(b, x, ws)
+    func_apply_block_jacobi(precond_inv_diag, ws)
     func_init_linear_pcg_direction(ws)
     while qd.graph.do_while(ws.cond):
-        func_linear_pcg_matvec_update(ws, matrix, x)
-        func_apply_block_jacobi(ws, precond_inv_diag)
+        func_linear_pcg_matvec_update(x, ws, matrix)
+        func_apply_block_jacobi(precond_inv_diag, ws)
         func_linear_pcg_direction_update(ws)
 
 
@@ -312,8 +312,8 @@ def kernel_sum(values: qd.types.ndarray(), partials: qd.types.ndarray(), out: qd
         value = 0.0
         if i < n:
             value = values[i]
-        write_block_partial(value, partials, i // REDUCE_BLOCK_DIM, qd.f64)
-    func_sum_block_partials(partials, (n + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM, out, qd.f64)
+        write_block_partial(i // REDUCE_BLOCK_DIM, value, partials, qd.f64)
+    func_sum_block_partials(partials, out, (n + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM, qd.f64)
 
 
 @pytest.mark.required
