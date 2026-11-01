@@ -3531,11 +3531,11 @@ def kernel_substep_inequality(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Assemble the inequality constraints of a substep, captured as one graph."""
     func_add_inequality_constraints(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
+        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
     )
 
 

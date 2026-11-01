@@ -34,7 +34,7 @@ def func_gjk_contact(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Detect multiple possible contact points between two geometries using GJK and EPA algorithms, and compute weights
@@ -128,7 +128,7 @@ def func_gjk_contact(
             rigid_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
 
         if gjk_flag == GJK.GJK_RETURN_CODE.INTERSECT:
@@ -160,7 +160,7 @@ def func_gjk_contact(
                         rigid_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
                     max_epa_iter -= num_iter
 
@@ -199,7 +199,7 @@ def func_gjk_contact(
                         dyn_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
 
                     if not found_default_epa:
@@ -242,7 +242,7 @@ def func_gjk_contact(
                     rigid_info,
                     collider_info,
                     rigid_config,
-                    collider_static_config,
+                    collider_config,
                 )
                 if i_f == -1:
                     continue
@@ -262,7 +262,7 @@ def func_gjk_contact(
                     dyn_info,
                     collider_info,
                     rigid_config,
-                    collider_static_config,
+                    collider_config,
                 )
 
         elif i == 0:
@@ -366,7 +366,7 @@ def func_extended_epa(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Extended version of safe EPA algorithm to find multiple possible contact points for differentiable contact detection.
@@ -424,7 +424,7 @@ def func_extended_epa(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
         w = gjk_state.polytope_verts.mink[i_b, wi]
 
@@ -574,7 +574,7 @@ def func_add_diff_contact_input(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Prepare the (non-differentiable) contact data that can be used for computing the differentiable contact data later.
@@ -647,7 +647,7 @@ def func_add_diff_contact_input(
         dyn_info,
         collider_info,
         rigid_config,
-        collider_static_config,
+        collider_config,
         shrink_sphere=False,
     )
 

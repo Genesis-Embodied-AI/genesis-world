@@ -130,7 +130,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for i_g in range(self.rigid_solver.n_geoms):
             if geoms_info.needs_coup[i_g]:
@@ -145,7 +145,7 @@ class LegacyCoupler(RBC):
                     links_state=links_state,
                     rigid_info=rigid_info,
                     sdf_info=sdf_info,
-                    collider_static_config=collider_static_config,
+                    collider_config=collider_config,
                 )
         return vel
 
@@ -162,7 +162,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
 
@@ -171,7 +171,7 @@ class LegacyCoupler(RBC):
 
         if influence > 0.1:
             normal_rigid = sdf.sdf_func_normal_world(
-                geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
+                geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
             )
             vel = self._func_collide_in_rigid_geom(
                 pos_world, vel, mass, normal_rigid, influence, geom_idx, batch_idx, geoms_info, links_state, rigid_info
@@ -195,14 +195,14 @@ class LegacyCoupler(RBC):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         """
         Similar to _func_collide_with_rigid_geom, but additionally handles potential side flip due to penetration.
         """
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
         normal_rigid = sdf.sdf_func_normal_world(
-            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
+            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
         )
 
         # bigger coup_softness implies that the coupling influence extends further away from the object.
@@ -312,7 +312,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for ii, jj, kk, i_b in qd.ndrange(*self.mpm_solver.grid_res, self.mpm_solver._B):
             I = (ii, jj, kk)
@@ -344,7 +344,7 @@ class LegacyCoupler(RBC):
                         links_state=links_state,
                         rigid_info=rigid_info,
                         sdf_info=sdf_info,
-                        collider_static_config=collider_static_config,
+                        collider_config=collider_config,
                     )
 
                 #################### MPM <-> SPH ####################
@@ -453,7 +453,7 @@ class LegacyCoupler(RBC):
         geoms_info: GeomsInfo,
         sdf_info: SDFInfo,
         rigid_info: RigidInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.mpm_solver.n_particles, self.mpm_solver._B):
             if self.mpm_solver.particles_ng[f, i_p, i_b].active:
@@ -467,7 +467,7 @@ class LegacyCoupler(RBC):
                             geoms_info,
                             rigid_info,
                             sdf_info,
-                            collider_static_config,
+                            collider_config,
                         )
                         # we only update the normal if the particle does not the object
                         if sdf_normal.dot(self.mpm_rigid_normal[i_p, i_g, i_b]) >= 0:
@@ -486,7 +486,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         # TODO: all collisions are on vertices instead of surface and edge
         for i_s, i_b in qd.ndrange(self.fem_solver.n_surfaces, self.fem_solver._B):
@@ -518,7 +518,7 @@ class LegacyCoupler(RBC):
                         links_state,
                         rigid_info,
                         sdf_info,
-                        collider_static_config,
+                        collider_config,
                     )
                     self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
 
@@ -653,7 +653,7 @@ class LegacyCoupler(RBC):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.sph_solver._n_particles, self.sph_solver._B):
             if self.sph_solver.particles_ng_reordered[i_p, i_b].active:
@@ -676,7 +676,7 @@ class LegacyCoupler(RBC):
                             links_info,
                             rigid_info,
                             sdf_info,
-                            collider_static_config,
+                            collider_config,
                         )
 
     @qd.kernel
@@ -687,7 +687,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         sdf_info: SDFInfo,
         rigid_info: RigidInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.pbd_solver._n_particles, self.sph_solver._B):
             if self.pbd_solver.particles_ng_reordered[i_p, i_b].active:
@@ -711,7 +711,7 @@ class LegacyCoupler(RBC):
                             links_state,
                             sdf_info,
                             rigid_info,
-                            collider_static_config,
+                            collider_config,
                         )
 
     @qd.kernel
@@ -807,7 +807,7 @@ class LegacyCoupler(RBC):
         links_state: LinksState,
         sdf_info: SDFInfo,
         rigid_info: RigidInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         """
         Resolves collision when a particle is already in collision with a rigid object.
@@ -815,7 +815,7 @@ class LegacyCoupler(RBC):
         """
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
         contact_normal = sdf.sdf_func_normal_world(
-            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
+            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
         )
         new_pos = pos_world
         new_vel = vel
@@ -875,7 +875,7 @@ class LegacyCoupler(RBC):
                 links_state=self.rigid_solver.dyn_state.links,
                 rigid_info=self.rigid_solver.rigid_info,
                 sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                collider_static_config=self.rigid_solver.collider.collider_config,
+                collider_config=self.rigid_solver.collider.collider_config,
             )
 
         # SPH <-> Rigid
@@ -899,7 +899,7 @@ class LegacyCoupler(RBC):
                 links_state=self.rigid_solver.dyn_state.links,
                 sdf_info=self.rigid_solver.collider.sdf.sdf_info,
                 rigid_info=self.rigid_solver.rigid_info,
-                collider_static_config=self.rigid_solver.collider.collider_config,
+                collider_config=self.rigid_solver.collider.collider_config,
             )
 
             # 1-way: animate particles by links, over the substep interval and no faster than the clamp allows.

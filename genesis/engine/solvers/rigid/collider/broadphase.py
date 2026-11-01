@@ -70,7 +70,7 @@ def func_collision_clear(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Clear the contacts and the candidate link pairs of every environment, and fit the bounding box of every link.
 
@@ -86,7 +86,7 @@ def func_collision_clear(
 
     # The pairs and links of an env are split over chunks so that the GPU cores are kept busy whatever the env count,
     # as in func_narrowphase_contact0, the first chunk clearing the contacts of the env
-    n_chunks = qd.max((collider_static_config.gpu_cores + _B - 1) // _B, 1)
+    n_chunks = qd.max((collider_config.gpu_cores + _B - 1) // _B, 1)
     qd.loop_config(name="collision_clear", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_b_chunk in range(_B * n_chunks):
         i_b = i_b_chunk // n_chunks
@@ -94,9 +94,7 @@ def func_collision_clear(
         if i_chunk == 0:
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             collider_state.n_broad_link_pairs[i_b] = 0
-        if qd.static(
-            collider_static_config.has_non_box_plane_convex_convex and not rigid_config.enable_mujoco_compatibility
-        ):
+        if qd.static(collider_config.has_non_box_plane_convex_convex and not rigid_config.enable_mujoco_compatibility):
             n_pairs = qd.min(collider_state.n_broad_pairs[i_b], max_broad_pairs)
             for i_pair_ in range(i_chunk * n_pairs // n_chunks, (i_chunk + 1) * n_pairs // n_chunks):
                 i_ga = collider_state.broad_collision_pairs[i_pair_, i_b][0]
@@ -335,19 +333,12 @@ def func_broad_phase(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     errno: qd.Tensor,
 ):
     """Run the broad phase, sweeping the links with the traversal the rigid config selects then testing their geoms."""
     func_collision_clear(
-        geoms_init_AABB,
-        dyn_state,
-        collider_state,
-        dyn_info,
-        rigid_info,
-        collider_info,
-        rigid_config,
-        collider_static_config,
+        geoms_init_AABB, dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, collider_config
     )
     if qd.static(rigid_config.broadphase_traversal == gs.broadphase_traversal.ALL_VS_ALL):
         _func_broad_phase_links_all_vs_all(

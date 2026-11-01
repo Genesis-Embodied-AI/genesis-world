@@ -346,24 +346,19 @@ def sdf_func_grad_world(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     g_pos = dyn_state.geoms.pos[geom_idx, batch_idx]
     g_quat = dyn_state.geoms.quat[geom_idx, batch_idx]
 
     return sdf_func_grad_world_local(
-        geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_static_config
+        geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
     )
 
 
 @qd.func
 def sdf_func_grad(
-    geom_idx,
-    pos_sdf,
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
-    collider_static_config: qd.template(),
+    geom_idx, pos_sdf, geoms_info: GeomsInfo, rigid_info: RigidInfo, sdf_info: SDFInfo, collider_config: qd.template()
 ):
     """
     sdf grad at sdf frame coordinate.
@@ -374,7 +369,7 @@ def sdf_func_grad(
     if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
         grad_sdf = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, sdf_info)
     else:
-        grad_sdf = sdf_func_true_grad(geom_idx, pos_sdf, geoms_info, sdf_info, collider_static_config)
+        grad_sdf = sdf_func_true_grad(geom_idx, pos_sdf, geoms_info, sdf_info, collider_config)
     return grad_sdf
 
 
@@ -398,15 +393,13 @@ def sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info: RigidInfo, sdf_info: SDFI
 
 
 @qd.func
-def sdf_func_true_grad(
-    geom_idx, pos_sdf, geoms_info: GeomsInfo, sdf_info: SDFInfo, collider_static_config: qd.template()
-):
+def sdf_func_true_grad(geom_idx, pos_sdf, geoms_info: GeomsInfo, sdf_info: SDFInfo, collider_config: qd.template()):
     """
     True sdf grad interpolated using stored sdf grad grid.
     """
     sdf_grad_sdf = qd.Vector.zero(gs.qd_float, 3)
     if geoms_info.type[geom_idx] == gs.GEOM_TYPE.TERRAIN:  # Terrain uses finite difference
-        if qd.static(collider_static_config.has_terrain):  # for speed up compilation
+        if qd.static(collider_config.has_terrain):  # for speed up compilation
             # since we are in sdf frame, delta can be a relatively big value
             delta = gs.qd_float(1e-2)
 
@@ -493,13 +486,13 @@ def sdf_func_normal_world(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     g_pos = geoms_state.pos[geom_idx, batch_idx]
     g_quat = geoms_state.quat[geom_idx, batch_idx]
 
     return sdf_func_normal_world_local(
-        geom_idx, pos_world, g_pos, g_quat, geoms_info, rigid_info, sdf_info, collider_static_config
+        geom_idx, pos_world, g_pos, g_quat, geoms_info, rigid_info, sdf_info, collider_config
     )
 
 
@@ -512,7 +505,7 @@ def sdf_func_normal_world_local(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Computes normalized SDF gradient (surface normal) in world coordinates,
@@ -520,7 +513,7 @@ def sdf_func_normal_world_local(
     """
     return gu.qd_normalize(
         sdf_func_grad_world_local(
-            geom_idx, pos_world, geom_pos, geom_quat, geoms_info, rigid_info, sdf_info, collider_static_config
+            geom_idx, pos_world, geom_pos, geom_quat, geoms_info, rigid_info, sdf_info, collider_config
         ),
         rigid_info.EPS[None],
     )
@@ -535,7 +528,7 @@ def sdf_func_grad_world_local(
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Computes SDF gradient in world coordinates, using provided geometry pose
@@ -556,7 +549,7 @@ def sdf_func_grad_world_local(
     else:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
-        grad_sdf = sdf_func_grad(geom_idx, pos_sdf, geoms_info, rigid_info, sdf_info, collider_static_config)
+        grad_sdf = sdf_func_grad(geom_idx, pos_sdf, geoms_info, rigid_info, sdf_info, collider_config)
 
         grad_mesh = grad_sdf  # no rotation between mesh and sdf frame
         grad_world = gu.qd_transform_by_quat(grad_mesh, geom_quat)

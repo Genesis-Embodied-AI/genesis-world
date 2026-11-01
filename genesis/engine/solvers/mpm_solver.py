@@ -381,7 +381,7 @@ class MPMSolver(ParticleSolver):
         links_state: LinksState,
         rigid_info: RigidInfo,
         sdf_info: SDFInfo,
-        collider_static_config: qd.template(),
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
@@ -457,14 +457,7 @@ class MPMSolver(ParticleSolver):
                             if geoms_info.needs_coup[i_g]:
                                 sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
                                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g,
-                                    i_b,
-                                    cell_pos,
-                                    geoms_state,
-                                    geoms_info,
-                                    rigid_info,
-                                    sdf_info,
-                                    collider_static_config,
+                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
                                 )
 
                                 if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g

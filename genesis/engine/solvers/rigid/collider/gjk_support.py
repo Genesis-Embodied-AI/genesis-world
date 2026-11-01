@@ -72,7 +72,7 @@ def support_driver(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     shrink_sphere: bool,
 ):
     """
@@ -94,7 +94,7 @@ def support_driver(
     elif geom_type == gs.GEOM_TYPE.BOX:
         v, v_, vid = support_field._func_support_box(i_g, direction, pos, quat, dyn_info)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
-        if qd.static(collider_static_config.has_terrain):
+        if qd.static(collider_config.has_terrain):
             v, vid = support_field._func_support_prism(i_b, direction, collider_state)
     elif qd.static(rigid_config.enable_mujoco_compatibility):
         # If mujoco-compatible, do exhaustive search for the vertex
@@ -126,7 +126,7 @@ def func_support(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     shrink_sphere: bool,
 ):
     """
@@ -162,7 +162,7 @@ def func_support(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
             shrink_sphere,
         )
 

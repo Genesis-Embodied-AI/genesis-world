@@ -195,7 +195,7 @@ def _func_query_contact_depth(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     eps: float,
 ):
     """
@@ -228,7 +228,7 @@ def _func_query_contact_depth(
             need_normal = (pen_gt > max_pen_gt and pen_gt > eps) or (pen_m > max_pen_m and pen_m > eps)
             if need_normal:
                 normal = sdf.sdf_func_normal_world_local(
-                    i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_static_config
+                    i_g, probe_pos, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
                 )
                 contact_link = dyn_info.geoms.link_idx[i_g]
                 if pen_gt > max_pen_gt and pen_gt > eps:
@@ -320,7 +320,7 @@ def _kernel_kinematic_taxel(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     eps: float,
     measured_equals_gt: int,
 ):
@@ -380,7 +380,7 @@ def _kernel_kinematic_taxel(
             dyn_info,
             rigid_info,
             collider_info,
-            collider_static_config,
+            collider_config,
             eps,
         )
 

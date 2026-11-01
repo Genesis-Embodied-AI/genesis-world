@@ -173,7 +173,7 @@ def support_driver(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     v = qd.Vector.zero(gs.qd_float, 3)
     geom_type = dyn_info.geoms.type[i_g]
@@ -188,7 +188,7 @@ def support_driver(
     elif geom_type == gs.GEOM_TYPE.BOX:
         v, v_, vid = support_field._func_support_box(i_g, direction, pos, quat, dyn_info)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
-        if qd.static(collider_static_config.has_terrain):
+        if qd.static(collider_config.has_terrain):
             # Terrain support doesn't depend on geometry pos/quat - uses collider_state.prism
             # Terrain is global and not perturbed, so we use the global state directly
             v, _ = support_field._func_support_prism(i_b, direction, collider_state)
@@ -222,7 +222,7 @@ def compute_support(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     v1 = qd.Vector.zero(gs.qd_float, 3)
     v2 = qd.Vector.zero(gs.qd_float, 3)
@@ -233,16 +233,7 @@ def compute_support(
         pos = pos_a if i_side == 0 else pos_b
         quat = quat_a if i_side == 0 else quat_b
         v = support_driver(
-            i_g,
-            i_b,
-            side_direction,
-            pos,
-            quat,
-            collider_state,
-            dyn_info,
-            collider_info,
-            rigid_config,
-            collider_static_config,
+            i_g, i_b, side_direction, pos, quat, collider_state, dyn_info, collider_info, rigid_config, collider_config
         )
         if i_side == 0:
             v1 = v
@@ -468,7 +459,7 @@ def func_mpr_contact_from_centers(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     ccd_tol = collider_info.mpr.CCD_TOLERANCE[None]
     if qd.static(not rigid_config.enable_mujoco_compatibility):
@@ -527,7 +518,7 @@ def func_mpr_contact_from_centers(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
 
         if stage == MPR_STAGE.AXIS_PROBE:
@@ -744,7 +735,7 @@ def func_mpr_contact(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     center_a, center_b = guess_geoms_center(
         i_ga,
@@ -776,7 +767,7 @@ def func_mpr_contact(
         dyn_info,
         collider_info,
         rigid_config,
-        collider_static_config,
+        collider_config,
     )
 
 

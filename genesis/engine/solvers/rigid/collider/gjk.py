@@ -171,8 +171,8 @@ def func_gjk_contact(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
-    gjk_static_config: qd.template(),
+    collider_config: qd.template(),
+    gjk_config: qd.template(),
 ):
     """
     Detect (possibly multiple) contact between two geometries using GJK and EPA algorithms.
@@ -216,7 +216,7 @@ def func_gjk_contact(
                 dyn_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 shrink_sphere,
             )
 
@@ -279,7 +279,7 @@ def func_gjk_contact(
                         rigid_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
                 elif nsimplex == 4:
                     polytope_flag = func_epa_init_polytope_4d(i_b, gjk_state, collider_info)
@@ -303,7 +303,7 @@ def func_gjk_contact(
                         dyn_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
 
                 # Assume touching. Zeroed only after the initialization above, whose 2-simplex path rejects a
@@ -325,11 +325,11 @@ def func_gjk_contact(
                         dyn_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
                     gjk_state.nearest_face[i_b] = i_f
 
-                    if qd.static(gjk_static_config.enable_contact_patch):
+                    if qd.static(gjk_config.enable_contact_patch):
                         # The patch needs a valid nearest polytope face and two discrete geometries to clip.
                         if i_f >= 0 and func_is_discrete_geoms(i_ga, i_gb, dyn_info):
                             func_multi_contact(
@@ -351,7 +351,7 @@ def func_gjk_contact(
             rigid_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
         if gjk_flag == GJK_RETURN_CODE.INTERSECT:
             # Initialize polytope
@@ -378,10 +378,10 @@ def func_gjk_contact(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
             )
 
-            if qd.static(gjk_static_config.enable_contact_patch):
+            if qd.static(gjk_config.enable_contact_patch):
                 # The patch needs a valid nearest polytope face and two discrete geometries to clip.
                 i_f = gjk_state.nearest_face[i_b]
                 if i_f >= 0 and func_is_discrete_geoms(i_ga, i_gb, dyn_info):
@@ -444,7 +444,7 @@ def func_gjk(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     shrink_sphere: bool,
 ):
     """
@@ -544,7 +544,7 @@ def func_gjk(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
             shrink_sphere,
         )
 
@@ -588,7 +588,7 @@ def func_gjk(
                 dyn_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
             )
             if intersect_code == GJK_RETURN_CODE.SEPARATED:
                 # No intersection, objects are separated
@@ -684,7 +684,7 @@ def func_gjk_intersect(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Check if the two objects intersect using the GJK algorithm.
@@ -779,7 +779,7 @@ def func_gjk_intersect(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
             shrink_sphere=False,
         )
 
@@ -1163,7 +1163,7 @@ def func_safe_gjk(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Safe GJK algorithm to compute the minimum distance between two convex objects.
@@ -1273,7 +1273,7 @@ def func_safe_gjk(
             rigid_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
 
         is_vertex_valid = func_is_new_simplex_vertex_valid(i_b, id1, id2, minkowski, gjk_state, collider_info)
@@ -1600,7 +1600,7 @@ def func_safe_gjk_support(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Find support points on the two objects using [dir] to use in the [safe_gjk] algorithm.
@@ -1663,7 +1663,7 @@ def func_safe_gjk_support(
                 dyn_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 shrink_sphere=False,
             )
             if j == 0:

@@ -1106,8 +1106,8 @@ def func_detection(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
-    gjk_static_config: qd.template(),
+    collider_config: qd.template(),
+    gjk_config: qd.template(),
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
@@ -1130,7 +1130,7 @@ def func_detection(
             rigid_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
             errno,
         )
         if qd.static(split_narrowphase):
@@ -1144,7 +1144,7 @@ def func_detection(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 errno,
             )
             func_narrowphase_multicontact(
@@ -1157,11 +1157,11 @@ def func_detection(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
-                gjk_static_config,
+                collider_config,
+                gjk_config,
                 errno,
             )
-        elif qd.static(collider_static_config.has_non_box_plane_convex_convex):
+        elif qd.static(collider_config.has_non_box_plane_convex_convex):
             func_narrow_phase_convex_vs_convex(
                 geoms_init_AABB=geoms_init_AABB,
                 dyn_state=dyn_state,
@@ -1173,11 +1173,11 @@ def func_detection(
                 rigid_info=rigid_info,
                 collider_info=collider_info,
                 rigid_config=rigid_config,
-                collider_static_config=collider_static_config,
-                gjk_static_config=gjk_static_config,
+                collider_config=collider_config,
+                gjk_config=gjk_config,
                 errno=errno,
             )
-        if qd.static(collider_static_config.has_convex_specialization):
+        if qd.static(collider_config.has_convex_specialization):
             func_narrow_phase_convex_specializations(
                 geoms_init_AABB,
                 dyn_state,
@@ -1186,10 +1186,10 @@ def func_detection(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 errno,
             )
-        if qd.static(collider_static_config.has_terrain):
+        if qd.static(collider_config.has_terrain):
             func_narrow_phase_any_vs_terrain(
                 geoms_init_AABB,
                 dyn_state,
@@ -1199,10 +1199,10 @@ def func_detection(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 errno,
             )
-        if qd.static(collider_static_config.has_nonconvex_nonterrain):
+        if qd.static(collider_config.has_nonconvex_nonterrain):
             func_narrow_phase_nonconvex_vs_nonterrain(
                 geoms_init_AABB,
                 dyn_state,
@@ -1211,14 +1211,14 @@ def func_detection(
                 rigid_info,
                 collider_info,
                 rigid_config,
-                collider_static_config,
+                collider_config,
                 errno,
             )
         if qd.static(coop_dedup):
             func_clamp_prune_contacts_coop(dyn_state, collider_state, dyn_info, rigid_info, collider_info, errno)
         else:
             func_clamp_prune_contacts(
-                dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_static_config, errno
+                dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_config, errno
             )
         # Plane-convex and sphere-sphere contacts come from analytic paths that leave diff_contact_input unfilled, so
         # it is filled here for the differentiable narrow-phase reverse (see func_fill_diff_contact_input_analytic)
@@ -1243,8 +1243,8 @@ def kernel_detection(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
-    gjk_static_config: qd.template(),
+    collider_config: qd.template(),
+    gjk_config: qd.template(),
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
@@ -1267,8 +1267,8 @@ def kernel_detection(
         rigid_info=rigid_info,
         collider_info=collider_info,
         rigid_config=rigid_config,
-        collider_static_config=collider_static_config,
-        gjk_static_config=gjk_static_config,
+        collider_config=collider_config,
+        gjk_config=gjk_config,
         has_possible_pairs=has_possible_pairs,
         split_narrowphase=split_narrowphase,
         coop_dedup=coop_dedup,
@@ -1293,8 +1293,8 @@ def kernel_detection_without_graph(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
-    gjk_static_config: qd.template(),
+    collider_config: qd.template(),
+    gjk_config: qd.template(),
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
@@ -1317,8 +1317,8 @@ def kernel_detection_without_graph(
         rigid_info=rigid_info,
         collider_info=collider_info,
         rigid_config=rigid_config,
-        collider_static_config=collider_static_config,
-        gjk_static_config=gjk_static_config,
+        collider_config=collider_config,
+        gjk_config=gjk_config,
         has_possible_pairs=has_possible_pairs,
         split_narrowphase=split_narrowphase,
         coop_dedup=coop_dedup,

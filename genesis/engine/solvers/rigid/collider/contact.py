@@ -170,7 +170,7 @@ def rotmatx(i0: int, i1: int, i2: int, matin: qd.types.matrix(3, 3), f0: int, f1
 
 @qd.func
 def func_collider_reset_env(
-    i_b: int, collider_state: ColliderState, collider_static_config: qd.template(), cache_only: qd.template()
+    i_b: int, collider_state: ColliderState, collider_config: qd.template(), cache_only: qd.template()
 ):
     """Drop what the collision detection of env i_b carries over from the previous steps.
 
@@ -181,7 +181,7 @@ def func_collider_reset_env(
         collider_state.first_time[i_b] = True
 
     # The contact cache is only held for the convex-convex pairs (see get_contact_cache in array_class.py)
-    if qd.static(collider_static_config.has_non_box_plane_convex_convex):
+    if qd.static(collider_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
             collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
@@ -192,13 +192,13 @@ def collider_kernel_reset(
     envs_idx: qd.types.ndarray(),
     collider_state: ColliderState,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     cache_only: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_static_config, cache_only=cache_only)
+        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=cache_only)
 
 
 @qd.func
@@ -352,12 +352,12 @@ def kernel_collider_clear(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_static_config, cache_only=False)
+        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
         func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
         # Only the contacts of the sleepers remain listed, so their links alone keep a contact force
         for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -373,12 +373,12 @@ def kernel_masked_collider_clear(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_collider_reset_env(i_b, collider_state, collider_static_config, cache_only=False)
+            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             # See 'kernel_collider_clear'
             for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -1277,7 +1277,7 @@ def func_clamp_prune_contacts(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     errno: qd.Tensor,
 ):
     """Clamp + (optional) link-pair pruning, in one per-env loop pass.
@@ -1286,7 +1286,7 @@ def func_clamp_prune_contacts(
     func runs, downstream consumers read contact i_col by indirecting through
     contact_data.X[contact_sort_idx[i_col, i_b], i_b]. The physical layout of contact_data is left intact.
 
-    Phases per env (gated at compile time by collider_static_config):
+    Phases per env (gated at compile time by collider_config):
     - Always: clamp n_contacts to max_candidate_contacts; initialise contact_sort_idx to the identity.
     - If has_prunable_contacts and not requires_grad: prune redundant contacts via 2D convex hull on the
       contact-patch plane (skipped at runtime when contact_pruning_tolerance is 0). Drops are realised by compacting
@@ -1341,7 +1341,7 @@ def func_clamp_prune_contacts(
         # === Pruning phase (link-pair support polygon). Gated by static config: only emitted when the
         # scene has multi-geom links / nonconvex / terrain, and not in autodiff mode. Skipped at runtime
         # when contact_pruning_tolerance is 0.
-        if qd.static(collider_static_config.has_prunable_contacts and not rigid_config.requires_grad):
+        if qd.static(collider_config.has_prunable_contacts and not rigid_config.requires_grad):
             if n_con - n_hib >= 3 and tol > gs.qd_float(0.0):
                 # Phase 1: sort contact_sort_idx by canonical (min_link, max_link) pair. The sort_idx already holds
                 # the identity from the unconditional init above.

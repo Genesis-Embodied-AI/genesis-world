@@ -38,7 +38,7 @@ def func_epa(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     EPA algorithm to find the exact penetration depth and contact normal using the simplex constructed by GJK.
@@ -103,7 +103,7 @@ def func_epa(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
         w = gjk_state.polytope_verts.mink[i_b, wi]
 
@@ -436,7 +436,7 @@ def func_epa_init_polytope_2d(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Create the polytope for EPA from a 1-simplex (line segment).
@@ -510,7 +510,7 @@ def func_epa_init_polytope_2d(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
 
     v3 = gjk_state.polytope_verts.mink[i_b, vi[2]]
@@ -581,7 +581,7 @@ def func_epa_init_polytope_3d(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Create the polytope for EPA from a 2-simplex (triangle).
@@ -640,7 +640,7 @@ def func_epa_init_polytope_3d(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
     v4 = gjk_state.polytope_verts.mink[i_b, vi[3]]
     v5 = gjk_state.polytope_verts.mink[i_b, vi[4]]
@@ -810,7 +810,7 @@ def func_epa_support(
     dyn_info: DynInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Find support points on the two objects using [dir] and insert them into the polytope.
@@ -846,7 +846,7 @@ def func_epa_support(
         dyn_info,
         collider_info,
         rigid_config,
-        collider_static_config,
+        collider_config,
         shrink_sphere=False,
     )
 
@@ -962,7 +962,7 @@ def func_safe_epa(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Safe EPA algorithm to find the exact penetration depth and contact normal using the simplex constructed by GJK.
@@ -1029,7 +1029,7 @@ def func_safe_epa(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
         w = gjk_state.polytope_verts.mink[i_b, wi]
 

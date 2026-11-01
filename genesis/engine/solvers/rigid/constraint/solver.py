@@ -1524,7 +1524,7 @@ def _sort_contacts_and_build_islands(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Build the island partition of every env and order its live contacts (see add_inequality_constraints) in one
     launch.
@@ -1567,7 +1567,7 @@ def _sort_contacts_and_build_islands(
                 func_build_islands_coop(
                     i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
                 )
-            if qd.static(collider_static_config.has_non_box_plane_convex_convex):
+            if qd.static(collider_config.has_non_box_plane_convex_convex):
                 qd.simt.block.sync()
                 func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
                 qd.simt.block.sync()
@@ -1594,7 +1594,7 @@ def _sort_contacts_and_build_islands(
                         )
             else:
                 func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
-            if qd.static(collider_static_config.has_non_box_plane_convex_convex):
+            if qd.static(collider_config.has_non_box_plane_convex_convex):
                 func_sort_contacts(
                     i_b,
                     collider_state.n_contacts_hibernated[i_b],
@@ -1648,7 +1648,7 @@ def func_add_inequality_constraints(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     # Order the contacts deterministically BEFORE assembling the contact constraints below: the contact-constraint
     # index i_c follows the logical contact order (contact_sort_idx), so fixing that order here makes both the solve
@@ -1658,7 +1658,7 @@ def func_add_inequality_constraints(
     # launch (see _sort_contacts_and_build_islands); the constraint grouping it feeds waits for the assembled
     # constraints, in func_solve_init.
     _sort_contacts_and_build_islands(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
+        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
     )
 
     add_frictionloss_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
@@ -1675,11 +1675,11 @@ def kernel_add_inequality_constraints(
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Run func_add_inequality_constraints on its own, outside the substep graph that captures it."""
     func_add_inequality_constraints(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
+        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
     )
 
 
