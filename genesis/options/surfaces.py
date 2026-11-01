@@ -1,10 +1,9 @@
 import math
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 import numpy as np
 
 from pydantic import Field, StrictBool, field_validator, model_validator
-from typing_extensions import Self
 
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
