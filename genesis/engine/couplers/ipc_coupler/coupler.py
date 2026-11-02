@@ -7,6 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -36,6 +37,7 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
     from uipc.constitution import (
         AffineBodyConstitution,
         AffineBodyPrismaticJoint,
+        AffineBodyPrismaticJointLimit,
         AffineBodyRevoluteJoint,
         DiscreteShellBending,
         ElasticModuli,
@@ -44,6 +46,7 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         SoftTransformConstraint,
         StableNeoHookean,
         StrainLimitingBaraffWitkinShell,
+        StrainPlasticDiscreteShellBending,
     )
     from uipc.core import Engine, World, Scene, AffineBodyStateAccessorFeature, ContactElement, SubsceneElement
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
@@ -87,6 +90,10 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     assert is_constrained_attr and aim_transform_attr
     uipc.view(is_constrained_attr)[0] = 1
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
+    strength = coupler._link_coupling_strength.get(link)
+    if strength is not None:
+        strength_view = uipc.view(geom.instances().find("strength_ratio"))
+        strength_view[0] = np.reshape(strength[0], strength_view[0].shape)
 
 
 class IPCCoupler(RBC):
@@ -148,6 +155,12 @@ class IPCCoupler(RBC):
         self._ipc_stc: SoftTransformConstraint | None = None
         self._ipc_nks: StrainLimitingBaraffWitkinShell | None = None
         self._ipc_dsb: DiscreteShellBending | None = None
+        self._ipc_pdsb: StrainPlasticDiscreteShellBending | None = None
+
+        # Per-link soft-constraint overrides (set_link_coupling_stiffness): link -> ((s_t, s_r) for IPC, (c_t, c_r)
+        # for the Genesis reaction), and the affine-body mass / mean inertia libuipc derives from the link meshes.
+        self._link_coupling_strength: dict = {}
+        self._abd_mass_props: dict = {}
         self._ipc_eac: ExternalArticulationConstraint | None = None
 
         # ==== IPC Contact Elements ====
@@ -316,6 +329,8 @@ class IPCCoupler(RBC):
         # Add rigid geoms and articulated entities to IPC based on per-entity coupling types
         if self.rigid_solver.is_active:
             self._add_rigid_geoms_to_ipc()
+            if self.options.native_prismatic_limits:
+                self._add_two_way_prismatic_limits()
             self._add_articulation_entities_to_ipc()
 
         # Register all per-entity contact pair models with per-material friction
@@ -373,11 +388,26 @@ class IPCCoupler(RBC):
 
                     # Apply bending stiffness if specified
                     if entity.material.bending_stiffness is not None:
-                        if self._ipc_dsb is None:
-                            self._ipc_dsb = DiscreteShellBending()
-                            self._ipc_constitution_tabular.insert(self._ipc_dsb)
+                        if entity.material.bending_model == "strain_plastic":
+                            if self._ipc_pdsb is None:
+                                self._ipc_pdsb = StrainPlasticDiscreteShellBending()
+                                self._ipc_constitution_tabular.insert(self._ipc_pdsb)
 
-                        self._ipc_dsb.apply_to(mesh, bending_stiffness=entity.material.bending_stiffness)
+                            self._ipc_pdsb.apply_to(
+                                mesh,
+                                bending_stiffness=entity.material.bending_stiffness,
+                                yield_threshold=entity.material.bending_yield_threshold,
+                                hardening_modulus=entity.material.bending_hardening_modulus,
+                            )
+                        else:
+                            if self._ipc_dsb is None:
+                                self._ipc_dsb = DiscreteShellBending()
+                                self._ipc_constitution_tabular.insert(self._ipc_dsb)
+
+                            self._ipc_dsb.apply_to(mesh, bending_stiffness=entity.material.bending_stiffness)
+                        self._apply_cloth_edge_bending(entity, mesh)
+                    elif entity._cloth_edge_bending:
+                        gs.raise_exception("Edge bending parameters require 'bending_stiffness' on the material.")
                 else:
                     if self._ipc_stk is None:
                         self._ipc_stk = StableNeoHookean()
@@ -395,6 +425,50 @@ class IPCCoupler(RBC):
 
                 # ---- Create IPC object and geometry slot ----
                 fem_obj.geometries().create(mesh)
+
+    def set_link_coupling_stiffness(self, links, translation, rotation):
+        """
+        Set the stiffness of the soft constraint pulling the IPC body of each link toward its Genesis pose.
+
+        Overrides 'constraint_strength_translation/rotation' for these links. Can be called between steps, e.g. to
+        mimic an impedance controller that softens on contact. Only for 'two_way_soft_constraint' links.
+
+        Parameters
+        ----------
+        links : RigidLink or list of RigidLink
+        translation : float
+            Translational stiffness (N/m) between the IPC body and the Genesis link.
+        rotation : float
+            Rotational stiffness (N*m/rad) about the body's center of mass.
+        """
+        dt2 = self.sim.substep_dt**2
+        links = links if isinstance(links, (list, tuple)) else [links]
+        # links joined by fixed joints share one IPC body, held by the first non-fixed ancestor
+        for link in dict.fromkeys(find_target_link_for_fixed_merge(l) for l in links):
+            if link not in self._abd_mass_props:
+                gs.raise_exception(f"Link '{link.name}' has no IPC body.")
+            m_abd, i_abd = self._abd_mass_props[link]
+            i_gs = np.linalg.eigvalsh(np.asarray(link.desc.inertia, dtype=np.float64)).mean()
+            self._link_coupling_strength[link] = (
+                (translation * dt2 / m_abd, rotation * dt2 / i_abd),
+                (translation / link.desc.mass, rotation / i_gs),
+            )
+
+    @staticmethod
+    def _apply_cloth_edge_bending(entity: "FEMEntity", mesh: "SimplicialComplex") -> None:
+        """Write the per-edge bending overrides of 'FEMEntity.set_cloth_edge_bending' into the uipc edge attributes."""
+        if not entity._cloth_edge_bending:
+            return
+        mesh_edges = np.sort(np.asarray(mesh.edges().topo().view()).reshape((-1, 2)), axis=1)
+        edge_index = {(int(a), int(b)): i for i, (a, b) in enumerate(mesh_edges)}
+        for name, overrides in entity._cloth_edge_bending.items():
+            values = uipc.view(mesh.edges().find(name))
+            for edges, edge_values in overrides:
+                try:
+                    rows = np.array([edge_index[(int(a), int(b))] for a, b in edges], dtype=np.int64)
+                except KeyError as e:
+                    gs.raise_exception(f"Edge {e.args[0]} is not an edge of the cloth mesh of entity {entity.uid}.")
+                values[rows] = edge_values.reshape(values[rows].shape)
 
     def _add_rigid_geoms_to_ipc(self) -> None:
         """Add rigid geoms to the IPC scene as ABD objects, merging geoms by link."""
@@ -441,6 +515,7 @@ class IPCCoupler(RBC):
 
                 # ---- Collect geom meshes ----
                 meshes = []
+                link_tms = []
                 for source_link in source_links:
                     for geom in source_link.geoms:
                         if geom.type == gs.GEOM_TYPE.PLANE:
@@ -475,15 +550,27 @@ class IPCCoupler(RBC):
                             if source_link is not target_link:
                                 geom_verts = gu.transform_by_trans_quat(geom_verts, *merge_transforms[source_link])
 
+                            geom_faces = geom.init_faces
+                            # Affine bodies take their mass from the enclosed volume, which an open mesh lacks
+                            # (e.g. a thin flange whose convexified collision mesh came out with holes).
+                            tm = trimesh.Trimesh(geom_verts, geom_faces, process=False)
+                            if not tm.is_watertight:
+                                gs.logger.warning(
+                                    f"Collision mesh of geom {geom.idx} (link '{source_link.name}') is not closed; "
+                                    "using its convex hull in IPC."
+                                )
+                                hull = tm.convex_hull
+                                geom_verts, geom_faces = np.asarray(hull.vertices), np.asarray(hull.faces)
                             try:
                                 mesh = uipc.geometry.trimesh(
                                     geom_verts.astype(np.float64, copy=False),
-                                    geom.init_faces.astype(np.int32, copy=False),
+                                    geom_faces.astype(np.int32, copy=False),
                                 )
                             except RuntimeError as e:
                                 gs.raise_exception_from(f"Failed to process geom {geom.idx} for IPC.", e)
 
                             meshes.append(mesh)
+                            link_tms.append(trimesh.Trimesh(geom_verts, geom_faces, process=False))
 
                 if not meshes:
                     continue
@@ -535,6 +622,10 @@ class IPCCoupler(RBC):
                     else:
                         rho = RHO_ROBOT if target_link.desc.is_robot else RHO_OBJECT
                 self._ipc_abd.apply_to(rigid_link_geom, kappa=ABD_KAPPA * uipc.unit.MPa, mass_density=rho)
+                if env_idx == 0:
+                    merged = trimesh.util.concatenate(link_tms)
+                    inertia = rho * np.linalg.eigvalsh(merged.moment_inertia).mean()
+                    self._abd_mass_props[target_link] = (rho * abs(merged.volume), inertia)
 
                 # Apply SoftTransformConstraint and animator for coupled links
                 if is_soft_constraint_target:
@@ -575,6 +666,79 @@ class IPCCoupler(RBC):
 
                 # ---- Store slot mappings ----
                 self._abd_slots_by_link.setdefault(target_link, []).append(abd_geom_slot)
+
+    def _add_two_way_prismatic_limits(self) -> None:
+        """Add native IPC limits for prismatic links in soft-coupled robots.
+
+        ``two_way_soft_constraint`` normally couples each ABD link to its
+        Genesis pose independently.  A Genesis prismatic limit therefore runs
+        after IPC has already advanced the ABD state and cannot prevent a
+        one-step excursion.  The finger links are ordinary prismatic joints;
+        represent the same joint in IPC and attach its native limit before the
+        world is initialized.  The joint constitution keeps the two ABD bodies
+        on the prismatic axis, while the limit constitution enforces the
+        finite Genesis range inside the same solve.
+
+        External-articulation entities build their own joint geometry below;
+        they must not receive a duplicate constraint here.
+        """
+        if COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT not in self._entities_by_coup_type:
+            return
+
+        joints_added = 0
+        joints_limit = AffineBodyPrismaticJointLimit()
+        joints_prismatic = AffineBodyPrismaticJoint()
+        self._ipc_constitution_tabular.insert(joints_prismatic)
+        self._ipc_constitution_tabular.insert(joints_limit)
+        joints_xaxis = qd_to_numpy(self.rigid_solver.dyn_state.joints.xaxis, transpose=True)
+        joints_xanchor = qd_to_numpy(self.rigid_solver.dyn_state.joints.xanchor, transpose=True)
+
+        for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):
+            if self._coup_type_by_entity.get(entity) != COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT:
+                continue
+            for joint in entity.joints:
+                if joint.type != gs.constants.JOINT_TYPE.PRISMATIC:
+                    continue
+                # A limit is meaningful only for finite Genesis ranges.  The
+                # Tianji finger joints are the only such prismatic links in the
+                # current robot, but this keeps the rule generic for other
+                # soft-coupled assets.
+                lim = np.asarray(joint.desc.dofs_limit, dtype=float)
+                if lim.ndim != 2 or lim.shape[0] != joint.desc.n_dofs or not np.isfinite(lim[0]).all():
+                    continue
+                child_link = joint.link
+                parent_link = entity.links[max(joint.link.parent_idx, 0) - entity.link_start]
+                parent_link = find_target_link_for_fixed_merge(parent_link)
+                child_link = find_target_link_for_fixed_merge(child_link)
+                if parent_link not in self._abd_slots_by_link or child_link not in self._abd_slots_by_link:
+                    continue
+
+                for env_idx in range(self.sim._B):
+                    joint_axis = joints_xaxis[env_idx, joint.idx]
+                    joint_pos = joints_xanchor[env_idx, joint.idx]
+                    v1 = joint_pos - 0.5 * joint_axis
+                    v2 = joint_pos + 0.5 * joint_axis
+                    joint_geom = uipc.geometry.linemesh(np.array([v1, v2], dtype=np.float64), np.array([[0, 1]], dtype=np.int32))
+                    if self.sim.n_envs > 0:
+                        self._ipc_subscenes[env_idx].apply_to(joint_geom)
+                    joints_prismatic.apply_to(
+                        joint_geom,
+                        [self._abd_slots_by_link[parent_link][env_idx]], [0],
+                        [self._abd_slots_by_link[child_link][env_idx]], [0],
+                        [JOINT_STRENGTH_RATIO],
+                    )
+                    joints_limit.apply_to(
+                        joint_geom,
+                        float(lim[0, 0]),
+                        float(lim[0, 1]),
+                        float(self.options.prismatic_limit_strength),
+                    )
+                    joint_obj = self._ipc_objects.create(f"two_way_prismatic_limit_{i_e}_{joint.idx}_{env_idx}")
+                    joint_obj.geometries().create(joint_geom)
+                    joints_added += 1
+
+        if joints_added:
+            gs.logger.info(f"IPC native prismatic limits: {joints_added} joint instances")
 
     def _add_articulation_entities_to_ipc(self) -> None:
         """
@@ -1143,13 +1307,19 @@ class IPCCoupler(RBC):
             return
 
         assert self._coupling_data is not None
+        links = self._coupling_data.links
+        strength_t = np.full(len(links), self._constraint_strength_translation_scaled, dtype=gs.np_float)
+        strength_r = np.full(len(links), self._constraint_strength_rotation_scaled, dtype=gs.np_float)
+        for i, link in enumerate(links):
+            if link in self._link_coupling_strength:
+                strength_t[i], strength_r[i] = self._link_coupling_strength[link][1]
         update_coupling_forces(
             self._coupling_data.ipc_transforms,
             self._coupling_data.aim_transforms,
             self._coupling_data.links_mass,
             self._coupling_data.links_inertia_i,
-            self._constraint_strength_translation_scaled,
-            self._constraint_strength_rotation_scaled,
+            strength_t,
+            strength_r,
             self._coupling_data.out_forces,
             self._coupling_data.out_torques,
         )
