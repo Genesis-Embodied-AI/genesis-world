@@ -12,7 +12,7 @@ import pytest
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH", gravity=-9.81):
@@ -314,7 +314,7 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
-    scene.add_entity(
+    liquid = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.25),
             size=(0.3, 0.3, 0.5),
@@ -347,3 +347,14 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     p_top = pressures[heights >= 0.3].mean()
     assert p_bottom > 1.5 * p_middle
     assert p_middle > 2.0 * p_top
+
+    # Stepping from a restored state must reproduce the continuous run bit-identically, whatever the order in which
+    # parallel threads sort the particles into the cells of the neighbour search.
+    state = scene.get_state()
+    for _ in range(5):
+        scene.step()
+    pos = liquid.get_particles_pos().clone()
+    scene.reset(state)
+    for _ in range(5):
+        scene.step()
+    assert_equal(liquid.get_particles_pos(), pos)

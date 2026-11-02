@@ -2515,18 +2515,22 @@ class SpatialHasher:
         else:
             self.n_slots = n_slots
 
-    def build(self, n_batch):
+    def build(self, n_elems, n_batch):
         self._B = n_batch
         # number of elements in each slot
         self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
         # element index offset in each slot
         self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
+        # index of the element each sorted index holds, before the elements of each slot are put in ascending order
+        self.elems_idx = qd.field(gs.qd_int, shape=(n_elems, self._B))
         self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
 
     @qd.func
     def compute_reordered_idx(self, n, pos, active, reordered_idx):
         """
         Reordered element idx based on the given positions and active flags.
+
+        The elements of a slot take their sorted indices in ascending order of element index.
 
         Parameters:
             n (int)       : The number of elements in the positions and active arrays.
@@ -2554,11 +2558,25 @@ class SpatialHasher:
         for i_n, i_b in qd.ndrange(n, self._B):
             if active[i_n, i_b]:
                 slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                reordered_idx[i_n, i_b] = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
+                i_r = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
+                self.elems_idx[i_r, i_b] = i_n
 
         # recover slot_start
         for i_s, i_b in qd.ndrange(self.n_slots, self._B):
             self.slot_start[i_s, i_b] -= self.slot_size[i_s, i_b]
+
+        # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
+        # Ranking the elements of a slot by index fixes the order in which the neighbour queries sum over them, so that
+        # the same state steps on bit-identically.
+        for i_n, i_b in qd.ndrange(n, self._B):
+            if active[i_n, i_b]:
+                slot_idx = self.pos_to_slot(pos[i_n, i_b])
+                slot_start = self.slot_start[slot_idx, i_b]
+                rank = 0
+                for i_r in range(slot_start, slot_start + self.slot_size[slot_idx, i_b]):
+                    if self.elems_idx[i_r, i_b] < i_n:
+                        rank += 1
+                reordered_idx[i_n, i_b] = slot_start + rank
 
     @qd.func
     def for_all_neighbors(self, i_p, pos, task_range, ret: qd.template(), task: qd.template(), i_b):

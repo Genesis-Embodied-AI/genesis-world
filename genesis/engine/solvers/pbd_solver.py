@@ -213,7 +213,7 @@ class PBDSolver(ParticleSolver):
         self._n_vfaces = self.n_vfaces
 
         if self.is_active:
-            self.sh.build(self._B)
+            self.sh.build(self._n_particles, self._B)
 
             self.init_particle_fields()
             self.init_edge_fields()

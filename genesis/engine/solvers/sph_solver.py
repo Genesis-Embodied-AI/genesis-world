@@ -131,7 +131,7 @@ class SPHSolver(ParticleSolver):
         self._coupler = self.sim._coupler
 
         if self.is_active:
-            self.sh.build(self._B)
+            self.sh.build(self._n_particles, self._B)
             self.init_particle_fields()
 
             for entity in self.entities:
