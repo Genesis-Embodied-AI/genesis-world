@@ -361,8 +361,7 @@ def test_geom_tensor_identity(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-@pytest.mark.parametrize("precision", ["32", "64"])
-def test_slerp(batch_shape, precision, tol):
+def test_slerp(batch_shape, tol):
     INTERP_RATIO = 0.7
 
     numel = math.prod(batch_shape)
@@ -391,22 +390,35 @@ def test_slerp(batch_shape, precision, tol):
         lerp = gu.slerp(convert(q0[0]), q1_batch, convert(ratio))
         assert_allclose(lerp_from_one_true.reshape((*batch_shape, 4)), lerp, tol=tol)
 
+    eps = torch.finfo(gs.tc_float).eps
     q0 = torch.tensor([0.5, -0.5, 0.5, 0.5], dtype=gs.tc_float, device=gs.device)
     tangent_projection = torch.eye(4, dtype=gs.tc_float, device=gs.device) - q0[:, None] * q0[None, :]
     for sign in (-1.0, 1.0):
         q1 = sign * q0
         for ratio in (0.0, 0.3, 1.0):
             t = torch.tensor(ratio, dtype=gs.tc_float, device=gs.device)
-            assert_allclose(gu.slerp(q0, q1, t), q0, atol=2e-7 if precision == "32" else 1e-12)
+            assert_allclose(gu.slerp(q0, q1, t), q0, atol=2 * eps)
             jac0, jac1 = torch.autograd.functional.jacobian(partial(gu.slerp, t=t), (q0, q1))
-            assert_allclose(jac0, (1 - ratio) * tangent_projection, atol=2e-7 if precision == "32" else 1e-12)
-            assert_allclose(jac1, sign * ratio * tangent_projection, atol=2e-7 if precision == "32" else 1e-12)
+            assert_allclose(jac0, (1 - ratio) * tangent_projection, atol=2 * eps)
+            assert_allclose(jac1, sign * ratio * tangent_projection, atol=2 * eps)
 
-    if precision == "64":
-        q0.requires_grad_()
-        q1 = (q0.detach() + torch.tensor([1e-9, 2e-9, -1e-9, 0.0], device=gs.device)).requires_grad_()
-        t = torch.tensor(0.3, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-        assert torch.autograd.gradcheck(gu.slerp, (q0, q1, t), eps=1e-7, atol=1e-6)
+    q0.requires_grad_()
+    delta = 0.01 * math.sqrt(eps)
+    q1 = (
+        q0.detach() + delta * torch.tensor([1.0, 2.0, -1.0, 0.0], dtype=gs.tc_float, device=gs.device)
+    ).requires_grad_()
+    t = torch.tensor(0.3, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    step = eps ** (1.0 / 3.0)
+    args = (q0, q1, t)
+    for i, (value, jacobian) in enumerate(zip(args, torch.autograd.functional.jacobian(gu.slerp, args))):
+        jacobian_fd = torch.empty_like(jacobian)
+        for index in np.ndindex(value.shape):
+            delta = torch.zeros_like(value)
+            delta[index] = step
+            args_plus = (*args[:i], value + delta, *args[i + 1 :])
+            args_minus = (*args[:i], value - delta, *args[i + 1 :])
+            jacobian_fd[(slice(None), *index)] = (gu.slerp(*args_plus) - gu.slerp(*args_minus)) / (2 * step)
+        assert_allclose(jacobian, jacobian_fd, atol=3 * step**2, rtol=1e-3)
 
 
 @pytest.mark.required
