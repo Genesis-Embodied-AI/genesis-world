@@ -2240,8 +2240,9 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         assert out.shape == (*v_a.shape[:-1], 4)
         out_ = out
 
-    # Inputs can share storage with output entries written before later vectors are read
-    v_a = v_a.copy()
+    # Output writes can overlap input vectors that have not been read yet
+    if out is not None:
+        v_a = v_a.copy()
 
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
@@ -2259,10 +2260,12 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
             quat[:] = 1.0, 0.0, 0.0, 0.0
             continue
 
-        v_x, v_y, v_z = v_x / scaled_norm, v_y / scaled_norm, v_z / scaled_norm
+        scaled_norm_inv = 1.0 / scaled_norm
+        v_x, v_y, v_z = v_x * scaled_norm_inv, v_y * scaled_norm_inv, v_z * scaled_norm_inv
         if v_z >= 0.0:
             s = np.sqrt(2.0 * (1.0 + v_z))
-            quat[:] = 0.5 * s, -v_y / s, v_x / s, 0.0
+            s_inv = 1.0 / s
+            quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
         else:
             # Near -z, 1 + v_z loses the small rotation component to cancellation. Recover cos(theta/2)
             # from the transverse direction instead, keeping both axis signs in every quadrant.
@@ -2276,6 +2279,9 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
             else:
                 # The exact antipodal direction has no unique rotation axis. Pick y
                 quat[:] = 0.0, 0.0, 1.0, 0.0
+
+            # First order quaternion normalization is accurate enough
+            quat *= 0.5 * (3.0 - (quat[0] ** 2 + quat[1] ** 2 + quat[2] ** 2))
 
     return out_
 

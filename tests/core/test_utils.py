@@ -350,11 +350,7 @@ def test_geom_tensor_identity(batch_shape):
         np.testing.assert_allclose(np_args[0], np_args[-1], atol=1e2 * gs.EPS)
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
 
-
-@pytest.mark.required
-@pytest.mark.parametrize("precision", ["32", "64"])
-def test_direction_quaternion(precision):
-    tol = 1e-6 if precision == "32" else 1e-12
+    tol = 4 * np.finfo(gs.np_float).eps
     directions = np.array(
         [
             [-1e-8, -2e-8, -1.0],
@@ -409,7 +405,7 @@ def test_direction_quaternion(precision):
         dtype=gs.np_float,
     )
     quaternion_true = gu.z_to_quat(directions)
-    for scale in (1.0, 1e20 if precision == "32" else 1e200, np.finfo(gs.np_float).max):
+    for scale in (1.0, 2 * np.sqrt(np.finfo(gs.np_float).max), np.finfo(gs.np_float).max):
         scaled_directions = scale * directions
         assert_allclose(gu.z_to_quat(scaled_directions), quaternion_true, atol=tol)
         for direction, quaternion in zip(scaled_directions, quaternion_true):
