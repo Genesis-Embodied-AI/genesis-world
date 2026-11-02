@@ -539,11 +539,16 @@ class LegacyCoupler(RBC):
                     mpm_fx = pos * self.mpm_solver.inv_dx - mpm_base.cast(gs.qd_float)
                     mpm_w = [0.5 * (1.5 - mpm_fx) ** 2, 0.75 - (mpm_fx - 1.0) ** 2, 0.5 * (mpm_fx - 0.5) ** 2]
                     new_vel_fem_sv = vel_fem_sv
+                    grid_res = qd.Vector(self.mpm_solver.grid_res, dt=gs.qd_int)
                     for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
                         mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
-                        mpm_grid_mass = (
-                            self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
-                        )
+                        # A vertex outside the domain of the grid exchanges nothing with the cells the grid lacks
+                        is_cell_in_grid = (mpm_grid_I >= 0).all() and (mpm_grid_I < grid_res).all()
+                        mpm_grid_mass = gs.qd_float(0.0)
+                        if is_cell_in_grid:
+                            mpm_grid_mass = (
+                                self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
+                            )
 
                         mpm_weight = gs.qd_float(1.0)
                         for d in qd.static(range(3)):
@@ -552,7 +557,8 @@ class LegacyCoupler(RBC):
                         # FEM -> MPM
                         mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
                         signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
-                        if signed_dist <= self.mpm_solver.dx:  # NOTE: use dx as minimal unit for collision
+                        # NOTE: use dx as minimal unit for collision
+                        if is_cell_in_grid and signed_dist <= self.mpm_solver.dx:
                             vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
                             mass_mpm_at_cell = mpm_weight * mpm_grid_mass
 
