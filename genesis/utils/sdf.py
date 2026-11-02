@@ -288,7 +288,8 @@ def sdf_func_sdf(geom_idx, pos_sdf, sdf_info: SDFInfo):
 @qd.func
 def sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info: SDFInfo):
     res = sdf_info.geoms_info.sdf_res[geom_idx]
-    return (pos_sdf >= res - 1).any() or (pos_sdf <= 0).any()
+    # A non-finite position fails every comparison of the inside test, so it counts as outside and indexes no cell
+    return not ((pos_sdf > 0).all() and (pos_sdf < res - 1).all())
 
 
 @qd.func
