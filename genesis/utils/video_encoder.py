@@ -26,8 +26,10 @@ H264_CODEC_CANDIDATES = (
 )
 
 # Tuned for latency rather than compression ratio, so that encoding never becomes the bottleneck of a simulation.
+# VideoToolbox gets 'prio_speed' rather than 'realtime': in real-time mode it drops frames when encoding falls behind,
+# and ffmpeg discards a dropped frame silently, leaving a video shorter than the recording.
 H264_CODEC_OPTIONS = {
-    "h264_videotoolbox": {"realtime": "1"},
+    "h264_videotoolbox": {"prio_speed": "1"},
     "h264_nvenc": {"preset": "p1", "tune": "ull"},
     "h264_vaapi": {},
     "h264_qsv": {"preset": "veryfast"},
