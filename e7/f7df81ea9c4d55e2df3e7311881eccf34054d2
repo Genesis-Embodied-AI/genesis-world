@@ -1,0 +1,19 @@
+genesis/ext/pyrender/overlay/plugin.py
+  s_a176ca5e4aa9f8::t_ae8d454be2b793 316-317,319-324,328
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e7f7df81ea9c4d55e2df3e7311881eccf34054d2",
+  "prompts": {},
+  "sessions": {
+    "s_a176ca5e4aa9f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9d0d8c2d-7032-4d57-b0a2-620fa678cfad",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

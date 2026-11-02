@@ -1,0 +1,49 @@
+genesis/options/indices.py
+  s_c960e3a1fa9c88::t_73bce4527beddd 44
+  s_c960e3a1fa9c88::t_dc4eb300768b4c 69-73,159-161,194-195,199
+  s_c960e3a1fa9c88::t_f64436ff16fd8a 36
+examples/rigid/link_and_geom_options.py
+  s_c960e3a1fa9c88::t_dc4eb300768b4c 55
+genesis/engine/solvers/rigid/collider/collider.py
+  s_c960e3a1fa9c88::t_226df9210c8f9c 462
+genesis/engine/entities/rigid_entity/description.py
+  s_c960e3a1fa9c88::t_dc4eb300768b4c 477-480,1231-1233,1700-1702
+  s_c960e3a1fa9c88::t_226df9210c8f9c 481,1234-1235,1409-1410,1703-1704
+tests/core/test_misc.py
+  s_c960e3a1fa9c88::t_92568e61ff2dd8 49-51,159-160,292-301,533-534,541
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c960e3a1fa9c88::t_226df9210c8f9c 231,540
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c960e3a1fa9c88::t_226df9210c8f9c 76,1532,1682
+  s_c960e3a1fa9c88::t_dc4eb300768b4c 78-80
+genesis/engine/solvers/kinematic_solver.py
+  s_c960e3a1fa9c88::t_226df9210c8f9c 830
+genesis/options/entities.py
+  s_c960e3a1fa9c88::t_dc4eb300768b4c 404-405,409,414,416,418
+tests/coupling/test_hybrid.py
+  s_0dda136e1dd12c::t_7ee2196adeb310 374
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dd76088b6976daee17e31674f06dfbd160fb2ab8",
+  "prompts": {},
+  "sessions": {
+    "s_0dda136e1dd12c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2259c48-c7ba-469c-a289-5a3d91b9bd88",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c960e3a1fa9c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f85a0b1c-a7f4-49ca-b375-b50c1b840b61",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

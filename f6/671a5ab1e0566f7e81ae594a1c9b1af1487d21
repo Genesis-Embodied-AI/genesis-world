@@ -1,0 +1,49 @@
+genesis/options/indices.py
+  s_c960e3a1fa9c88::t_a6b1fb8c96bb55 29-40,42,44-48,53-60,67-76,78-85,91,151,155-156,159-166,172-196
+genesis/engine/entities/rigid_entity/description.py
+  s_c960e3a1fa9c88::t_ae3748952ac115 379-383,472-473,478-485,586-589,591,665-667,1230-1232,1384,1406-1407,1434,1440-1441,1461-1462,1464,1696-1698
+  s_c960e3a1fa9c88::t_7128e6e5dd9c99 1246
+  s_c960e3a1fa9c88::t_e558a74f2ad8e3 27
+  s_c960e3a1fa9c88::t_0b1eef7d84fd61 474-476
+genesis/engine/solvers/rigid/collider/collider.py
+  s_c960e3a1fa9c88::t_0b1eef7d84fd61 459-463
+examples/rigid/grasp_bottle.py
+  s_c960e3a1fa9c88::t_91b91acd52812f 52
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c960e3a1fa9c88::t_0b1eef7d84fd61 10
+  s_c960e3a1fa9c88::t_5a01bb9d5d9060 76-81,1532,1682
+genesis/engine/solvers/kinematic_solver.py
+  s_c960e3a1fa9c88::t_5a01bb9d5d9060 830
+tests/core/test_misc.py
+  s_c960e3a1fa9c88::t_b60f70b3ff773d 271-273,307-311
+  s_c960e3a1fa9c88::t_cc5c1fb46dfe86 46-48,171-175,289,312
+  s_c960e3a1fa9c88::t_39ffa6f8e259bb 284,323,452-457,504,507,517-518,521-525,527,530
+  s_c960e3a1fa9c88::t_9edca5f9ddc7c4 329
+  s_c960e3a1fa9c88::t_23ee6fa2e0c46e 313
+examples/rigid/link_and_geom_options.py
+  s_c960e3a1fa9c88::t_95d6bfcb4e6d24 1-63
+  s_c960e3a1fa9c88::t_6a93df7d6a8635 64-65
+genesis/options/entities.py
+  s_c960e3a1fa9c88::t_b39d9532cb2aad 309-310,368-371
+  s_c960e3a1fa9c88::t_0b1eef7d84fd61 415-417
+  s_c960e3a1fa9c88::t_5dac9d657982ec 270-274,278,282,336,340-341,367,374,383-387,390-391,397,400-404,406,408-410,412,418-419,421-425
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c960e3a1fa9c88::t_0b1eef7d84fd61 230-232
+  s_c960e3a1fa9c88::t_5a01bb9d5d9060 540
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f6671a5ab1e0566f7e81ae594a1c9b1af1487d21",
+  "prompts": {},
+  "sessions": {
+    "s_c960e3a1fa9c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f85a0b1c-a7f4-49ca-b375-b50c1b840b61",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
