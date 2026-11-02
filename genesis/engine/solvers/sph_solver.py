@@ -718,7 +718,6 @@ class SPHSolver(ParticleSolver):
                 self._kernel_compute_rho(f)
                 self._kernel_compute_DFSPH_factor(f)
                 self._divergence_solve(f)
-                self._kernel_advect_velocity(f)
                 self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
                 self._kernel_predict_velocity(f)
                 self._density_solve(f)
