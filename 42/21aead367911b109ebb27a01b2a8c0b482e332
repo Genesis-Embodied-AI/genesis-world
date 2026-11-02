@@ -1,7 +1,61 @@
+genesis/engine/materials/FEM/base.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 1,52-59
+genesis/engine/solvers/pbd_solver.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 352,369,387,401,415
+genesis/engine/materials/FEM/elastic.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 55-57
+genesis/engine/solvers/fem_solver.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 382,413
+genesis/engine/entities/particle_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 79,81
+genesis/engine/solvers/sph_solver.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 168,180
+genesis/engine/entities/base_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 47,62,126-128,131-134
+genesis/options/morphs.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 300-303,617-620,1005-1008,1158-1161
+genesis/engine/entities/pbd_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 140,154,274,289,391,406,502-512,515-525,576-586,589-599
+genesis/engine/entities/sph_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 35-45,48-58
+tests/core/test_misc.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 24,26-37,76-168,176-184,194-196,204-209,220-221
+genesis/engine/entities/mpm_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 66,84
+genesis/engine/materials/base.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 1-3,24-26,28-34
+genesis/engine/entities/hybrid_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 56-57
+genesis/engine/materials/MPM/base.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 2,69
+genesis/engine/simulator.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 162-167
+genesis/engine/entities/fem_entity.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 170,172
+genesis/engine/materials/MPM/snow.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 44-47
+genesis/engine/scene.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 32,34,37,39-41,43,50,52-53,73-83,340-366,429-431,441,443
+genesis/engine/solvers/mpm_solver.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 266,283
+genesis/options/__init__.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 1-14,38,41,46,48-50,52,60,62-63
+genesis/options/entities.py
+  s_5f0a6aada3cc7c::t_70df5cfc3a80af 8,13,43-44,93-210
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.7.5",
   "base_commit_sha": "4221aead367911b109ebb27a01b2a8c0b482e332",
-  "prompts": {}
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
 }
