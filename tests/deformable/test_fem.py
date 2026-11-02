@@ -183,6 +183,51 @@ def test_offset_pos(box_obj_path, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+def test_halt_on_nan(show_viewer):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    sphere = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.0, 0.3),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    scene.build(n_envs=2)
+
+    # The explicit integration of a stiff sphere at the default time step diverges until its positions overflow, and
+    # every env is flagged at the very step its positions stop being finite
+    for _ in range(10):
+        scene.step()
+        is_finite = sphere.get_state().pos.isfinite().all(dim=(-2, -1))
+        assert_equal(scene.get_error_envs_mask(), ~is_finite)
+        if not is_finite.any():
+            break
+    assert not is_finite.any()
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(gs.GenesisException, match="NaN detected in FEM states"):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
+            scene.step()
+
+    # Writing some of the vertices leaves the error flagged, since the other vertices stay non-finite
+    sphere.set_verts_pos(sphere.init_positions[:1], verts_idx_local=[0])
+    assert scene.get_error_envs_mask().all()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert sphere.get_state().pos.isfinite().all()
+    assert not scene.get_error_envs_mask().any()
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
     "coupler_type, material_model",

@@ -2,50 +2,41 @@ import numpy as np
 import pytest
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array
 
 
-# This test cannot be flagged as required because it takes 500s + 250s to run on CPU.
-# @pytest.mark.required
-@pytest.mark.slow("cpu")  # cpu ~500s
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 @pytest.mark.parametrize("muscle_material", [gs.materials.MPM.Muscle, gs.materials.FEM.Muscle])
 def test_muscle(n_envs, muscle_material, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=5e-4,
             substeps=10,
-            gravity=(0, 0, -9.8),
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-1.0, -1.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
         ),
-        vis_options=gs.options.VisOptions(
-            show_world_frame=True,
-            visualize_mpm_boundary=True,
-        ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, 0, 0.8),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(1.0, -0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.05),
             camera_fov=40,
         ),
         show_viewer=show_viewer,
-        show_FPS=False,
     )
-
     scene.add_entity(
         morph=gs.morphs.Plane(),
         material=gs.materials.Rigid(
             coup_friction=5.0,
         ),
     )
-    worm = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/worm/worm.obj",
-            pos=(0.3, 0.3, 0.001),
-            scale=0.1,
-            euler=(90, 0, 0),
+    # The tetrahedralization is refined, surface included, so that every muscle group spans many tetrahedra. Its
+    # well-shaped tetrahedra keep the explicit FEM integration stable at the substep MPM needs.
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.05),
+            size=(0.1, 0.5, 0.1),
+            nobisect=False,
+            maxvolume=2e-5,
         ),
         material=muscle_material(
             E=5e5,
@@ -53,47 +44,30 @@ def test_muscle(n_envs, muscle_material, show_viewer):
             rho=10000.0,
             n_groups=4,
         ),
-        surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="meshes/worm/bdy_Base_Color.png",
-            ),
-        ),
     )
-    if n_envs > 0:
-        scene.build(n_envs=n_envs)
-    else:
-        scene.build()
+    scene.build(n_envs=n_envs)
 
-    if isinstance(worm.material, gs.materials.MPM.Muscle):
-        pos = worm.get_state().pos[0]
-        n_units = worm.n_particles
-    else:  # isinstance(worm.material, gs.materials.FEM.Muscle):
-        pos = worm.get_state().pos[0, worm.get_el2v()].mean(1)
-        n_units = worm.n_elements
+    if isinstance(box.material, gs.materials.MPM.Muscle):
+        pos = box.get_state().pos[0]
+    else:  # isinstance(box.material, gs.materials.FEM.Muscle):
+        pos = box.get_state().pos[0, box.get_el2v()].mean(1)
 
-    pos = tensor_to_array(pos)
-    pos_max, pos_min = pos.max(0), pos.min(0)
-    pos_range = pos_max - pos_min
-    lu_thresh, fh_thresh = 0.3, 0.6
-    muscle_group = np.zeros((n_units,), dtype=int)
-    mask_upper = pos[:, 2] > (pos_min[2] + pos_range[2] * lu_thresh)
-    mask_fore = pos[:, 1] < (pos_min[1] + pos_range[1] * fh_thresh)
-    muscle_group[mask_upper & mask_fore] = 0  # upper fore body
-    muscle_group[mask_upper & ~mask_fore] = 1  # upper hind body
-    muscle_group[~mask_upper & mask_fore] = 2  # lower fore body
-    muscle_group[~mask_upper & ~mask_fore] = 3  # lower hind body
+    # Four groups: upper or lower part of the body, fore or hind part
+    pos_min, pos_max = pos.amin(0), pos.amax(0)
+    is_lower = pos[:, 2] <= pos_min[2] + 0.3 * (pos_max[2] - pos_min[2])
+    is_hind = pos[:, 1] >= pos_min[1] + 0.6 * (pos_max[1] - pos_min[1])
+    box.set_muscle(muscle_group=2 * is_lower + is_hind, muscle_direction=(0.0, 1.0, 0.0))
 
-    muscle_direction = np.array([[0.0, 1.0, 0.0]] * n_units, dtype=gs.np_float)
-
-    worm.set_muscle(
-        muscle_group=muscle_group,
-        muscle_direction=muscle_direction,
-    )
-
-    scene.reset()
-    for i in range(200):
-        actuation = np.array([0.0, 0.0, 0.0, 1.0 * (0.5 + np.sin(0.005 * np.pi * i))])
-        if n_envs > 1:
-            actuation = np.tile(actuation, (n_envs, 1))
-        worm.set_actuation(actuation)
+    pos_init = box.get_state().pos.clone()
+    for i in range(50):
+        box.set_actuation([0.0, 0.0, 0.0, 0.5 + np.sin(0.005 * np.pi * i)])
         scene.step()
+    pos = box.get_state().pos
+
+    # Contracting the lower hind fibers along the body axis shortens the body, and bends its hind part upward off the
+    # plane, which raises its center of mass
+    length_init = pos_init[..., 1].amax(-1) - pos_init[..., 1].amin(-1)
+    length = pos[..., 1].amax(-1) - pos[..., 1].amin(-1)
+    assert (length < length_init - 5e-3).all()
+    assert (pos[..., 2].mean(-1) > pos_init[..., 2].mean(-1) + 5e-4).all()
+    assert (pos[..., 2] > -gs.EPS).all()

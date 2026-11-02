@@ -14,9 +14,9 @@ from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
-from genesis.utils.array_class import ArrayItem, DataKind, LinksState
+from genesis.utils.array_class import ArrayItem, DataKind, ErrorCode, LinksState
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor, qd_to_torch
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -71,6 +71,17 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.batch_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
         self.batch_pcg_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
         self.batch_linesearch_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
+
+        # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
+        self.errno = qd.field(gs.qd_int, shape=(self._B,))
+        self.register_errors(
+            self.errno,
+            {
+                ErrorCode.INVALID_VERTEX_NAN: (
+                    "NaN detected in FEM states. Try reducing the time step size or adjusting simulation parameters."
+                ),
+            },
+        )
 
         pcg_state = qd.types.struct(
             rTr=gs.qd_float,
@@ -466,10 +477,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def compute_pos(self, f: qd.i32):
+        # Every solver and coupler path ends a substep here, so the positions it integrates are checked once. The hard
+        # constraints overwrite some of them afterward, and check their targets (see 'apply_hard_constraints').
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
-            self.elements_v[f + 1, i_v, i_b].pos = (
-                self.substep_dt * self.elements_v[f + 1, i_v, i_b].vel + self.elements_v[f, i_v, i_b].pos
-            )
+            pos = self.substep_dt * self.elements_v[f + 1, i_v, i_b].vel + self.elements_v[f, i_v, i_b].pos
+            self.elements_v[f + 1, i_v, i_b].pos = pos
+            if not qd_isfinite(pos):
+                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VERTEX_NAN
         # With gradients, the substeps of a step run in successive frames, to which the actuation set in frame 0 carries
         # over
         if qd.static(self._requires_grad):
@@ -1008,6 +1022,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel)
+            self.clear_errno(envs_idx)
 
     def get_state(self, f):
         if self.is_active:
@@ -1531,6 +1546,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if vc.is_constrained and not vc.is_soft_constraint:
                 self.elements_v[f + 1, i_v, i_b].pos = vc.target_pos
                 self.elements_v[f + 1, i_v, i_b].vel.fill(0.0)
+                if not qd_isfinite(vc.target_pos):
+                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VERTEX_NAN
 
     @no_grad
     @qd.kernel
