@@ -154,7 +154,7 @@ class SPHSolver(ParticleSolver):
             self._density0 = self.particles_info[0].rho
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------

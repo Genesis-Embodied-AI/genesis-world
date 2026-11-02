@@ -20,7 +20,8 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
-from genesis.utils.array_class import ConfigItem, DataItem, DataKind, RigidData, RigidSimStaticConfig, iter_data
+from genesis.utils.array_class import RigidData, RigidSimStaticConfig
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -1441,7 +1442,8 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_state, ik_fk, targets = self.data_manager.ik_scratch
+        ik_scratch = self.data_manager.ik_scratch
+        ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

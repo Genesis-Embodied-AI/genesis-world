@@ -6,6 +6,7 @@ import torch
 
 import genesis as gs
 from genesis.ext.pyrender.camera import OrthographicCamera
+from genesis.utils.array_class import RaycastResult
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, with_lock
 from genesis.utils.raycast import Ray, RayHit
 
@@ -55,7 +56,6 @@ class Raycaster:
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
         # NOTE: delayed imports to avoid pulling in rigid_solver / array_class before gs is fully initialized.
         from genesis.engine.bvh import get_bvh_data
-        from genesis.utils.array_class import get_raycast_result
 
         self.scene = scene
         self._envs_offset = torch.as_tensor(scene.envs_offset, dtype=gs.tc_float, device=gs.device)
@@ -81,7 +81,7 @@ class Raycaster:
                 if n_slots == 0:
                     continue
             bvh = get_bvh_data(n_envs_max, n_slots)
-            result = get_raycast_result(n_envs_max)
+            result = RaycastResult(sizes=dict(envs=n_envs_max))
             self.targets.append(RaycastTarget(solver, bvh.state, bvh.config, result, vfaces_mask))
 
         if not self.targets:

@@ -14,7 +14,8 @@ from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
-from genesis.utils.array_class import ArrayItem, DataKind, ErrorCode, LinksState
+from genesis.utils.array_class import ErrorCode, LinksState
+from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
 
@@ -369,7 +370,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_constraints()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     @property
     def is_active(self):

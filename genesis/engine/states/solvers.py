@@ -5,7 +5,7 @@ import torch
 
 import genesis as gs
 from genesis.repr_base import RBC
-from genesis.utils.array_class import DataKind
+from genesis.utils.data import DataKind
 
 
 @dataclasses.dataclass
