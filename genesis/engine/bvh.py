@@ -25,7 +25,6 @@ from genesis.utils.array_class import (
     BVHTreeState,
     BVH_FIT_KIND,
     BVH_SORT_KIND,
-    get_bvh_state,
 )
 from genesis.utils.misc import get_gpu_core_count
 
@@ -55,8 +54,8 @@ class BVHData(NamedTuple):
 def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData:
     """Return a set of trees, one per batch, over the same number of leaves each.
 
-    A set switched off takes the empty shape on every tensor (see maybe_shape in array_class.py), for the tree a
-    kernel argument carries but a static configuration skips.
+    A set switched off holds placeholders alone (see 'unused' in Data), for the tree a kernel argument carries but a
+    static configuration skips.
     """
     if is_active and n_leaves < 1:
         gs.raise_exception(f"A BVH set needs at least one leaf per tree, got {n_leaves}.")
@@ -105,7 +104,24 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
     # The state: the scratch of the device-wide radix sort is sized by quadrants, the lanes of the extent are fixed
     n_sort_scratch = sort_scratch_slots(n_keys, log256_max_n) if sort_kind == BVH_SORT_KIND.DEVICE_RADIX else 0
     n_sort_chunks = max(1, min(SORT_MAX_CHUNKS, (os.cpu_count() or 1) // n_trees))
-    bvh_state = get_bvh_state(n_trees, n_leaves, n_sort_scratch, n_sort_chunks, EXTENT_LANES, bvh_config, is_active)
+    bvh_state = BVHState(
+        sizes=dict(
+            bvh_trees=n_trees,
+            bvh_leaves=n_leaves,
+            sort_slots=n_sort_scratch,
+            sort_chunks=n_sort_chunks,
+            extent_lanes=EXTENT_LANES,
+        ),
+        values=dict(n_keys=n_trees * n_leaves),
+        # A set switched off leaves every array unused, else the scratch of the sort and the fit it runs alone
+        unused=dict(
+            device_radix_sort=sort_kind != BVH_SORT_KIND.DEVICE_RADIX,
+            per_tree_radix_sort=sort_kind != BVH_SORT_KIND.PER_TREE_RADIX,
+            block_sweep_fit=fit_kind != BVH_FIT_KIND.BLOCK_SWEEP,
+        )
+        if is_active
+        else True,
+    )
 
     return BVHData(bvh_state, bvh_config)
 

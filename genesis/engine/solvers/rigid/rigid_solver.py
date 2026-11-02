@@ -18,18 +18,17 @@ from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
 from genesis.utils.array_class import (
+    cholesky_tile_size_for,
     ColliderState,
-    ConfigItem,
     ConstraintState,
-    DataItem,
-    RigidData,
     DynInfo,
     DynState,
     ErrorCode,
+    RigidData,
     RigidInfo,
     RigidSimStaticConfig,
-    cholesky_tile_size_for,
 )
+from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,

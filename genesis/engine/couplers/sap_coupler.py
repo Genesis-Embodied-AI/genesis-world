@@ -30,7 +30,6 @@ from genesis.utils.array_class import (
     SAPContactQueriesState,
     VertsInfo,
     VertsState,
-    get_bvh_query_results,
 )
 
 if TYPE_CHECKING:
@@ -476,7 +475,9 @@ class SAPCoupler(RBC):
         fem_self_query = BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.fem_surface_tet_bvh_state.tree,
-            results=get_bvh_query_results(max_results, is_active=self._enable_fem_self_tet_contact),
+            results=BVHQueryResults(
+                sizes=dict(query_results=max_results), unused=not self._enable_fem_self_tet_contact
+            ),
         )
 
         n_faces = self.rigid_solver.n_faces
@@ -492,7 +493,7 @@ class SAPCoupler(RBC):
         rigid_tri_query = BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.rigid_tri_bvh_state.tree,
-            results=get_bvh_query_results(max_results, is_active=self._enable_rigid_fem_contact),
+            results=BVHQueryResults(sizes=dict(query_results=max_results), unused=not self._enable_rigid_fem_contact),
         )
 
         has_rigid_tet_tree = self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
@@ -505,7 +506,7 @@ class SAPCoupler(RBC):
         rigid_tet_query = BVHQueryState(
             leaves=self.rigid_tet_bvh_state.leaves,
             tree=self.rigid_tet_bvh_state.tree,
-            results=get_bvh_query_results(max_results, is_active=has_rigid_tet_tree),
+            results=BVHQueryResults(sizes=dict(query_results=max_results), unused=not has_rigid_tet_tree),
         )
         self.contact_queries_state = SAPContactQueriesState(
             fem_self=fem_self_query, rigid_tri=rigid_tri_query, rigid_tet=rigid_tet_query

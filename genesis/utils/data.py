@@ -701,10 +701,8 @@ def _size_names(cls: type) -> frozenset[str]:
                     holders.append(data_field.type)
                 spec = data_field.metadata.get(_SPEC, _FieldSpec())
                 element_shape = spec.dtype[1] if isinstance(spec.dtype, tuple) else ()
-                dims += [
-                    *(spec.shape or ()),
-                    *(element_shape if isinstance(element_shape, tuple) else (element_shape,)),
-                ]
+                dims += spec.shape or ()
+                dims += element_shape if isinstance(element_shape, tuple) else (element_shape,)
         while dims:
             dim = dims.pop()
             if isinstance(dim, Size):
@@ -806,6 +804,8 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         elif len(element_dims) == 2:
             dtype = qd.types.matrix(*element_dims, dtype)
 
+    # FIXME: quadrants#856 - a kernel cannot take None for a struct argument, so an unused array is a 0-d placeholder
+    # rather than absent, each one costing a buffer and a kernel argument.
     if properties.get("unused"):
         return V(dtype=dtype, shape=())
     if leaf.is_constant:
