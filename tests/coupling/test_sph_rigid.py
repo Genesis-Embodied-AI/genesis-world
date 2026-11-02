@@ -77,8 +77,9 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
     )
     scene.build(n_envs=n_envs)
 
+    # The light ball first sinks with the settling fluid before buoyancy lifts it above the surface
     raft_rolls = []
-    for _ in range(50):
+    for _ in range(100):
         scene.step()
         raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
     raft_rolls = torch.stack(raft_rolls)

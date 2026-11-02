@@ -6,19 +6,22 @@
 # Irregular samplers (e.g. pbs, random) introduce local density fluctuations at initialization, which lead to large
 # spurious pressure forces and can cause the simulation to become unstable or diverge.
 
-import pytest
 import numpy as np
+import pytest
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
 
+from ..utils.assertions import assert_allclose
 
-def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH"):
+
+def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH", gravity=-9.81):
     """Create a basic SPH scene with regular sampler."""
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
             substeps=10,
+            gravity=(0.0, 0.0, gravity),
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=particle_size,
@@ -177,7 +180,9 @@ def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
 @pytest.mark.required
 @pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
 def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol):
-    scene, liquid = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
+    GRAVITY = -9.81
+
+    scene, liquid = create_sph_scene(show_viewer, pressure_solver=pressure_solver, gravity=GRAVITY)
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
 
@@ -215,6 +220,12 @@ def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol)
     assert displacement < 1.0, (
         f"Maximum displacement {displacement:.4f} is too large after {num_steps} steps. This may indicate instability."
     )
+
+    # The liquid is still far above the floor, so it is in free fall: the particle interactions are internal and
+    # cancel out in the momentum balance, leaving the mean velocity to gain gravity times the elapsed time. The
+    # tolerance absorbs the momentum drift of the viscosity, which weights each pair by the density of the neighbor
+    # alone, so the forces between two particles of different densities do not cancel.
+    assert_allclose(liquid.get_particles_vel()[..., 2].mean(), GRAVITY * num_steps * scene.dt, tol=1e-4)
 
 
 @pytest.mark.required
