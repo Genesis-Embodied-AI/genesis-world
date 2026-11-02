@@ -368,8 +368,6 @@ def kernel_set_links_mass(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     mass: qd.types.ndarray(),
-    jac_row: qd.Tensor,
-    solve_out: qd.Tensor,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -396,11 +394,12 @@ def kernel_set_links_mass(
         for i_l_ in range(links_idx.shape[0]):
             func_set_link_mass(links_idx[i_l_], 0, mass[0, i_l_], dyn_info, rigid_config, is_inertia_scaled)
 
+    # Each row and its solve are held as in kernel_refresh_invweight_and_meaninertia
     func_refresh_links_invweight_and_meaninertia(
         links_idx,
         envs_idx,
-        jac_row,
-        solve_out,
+        constraint_state.grad,
+        constraint_state.Mgrad,
         dyn_state,
         dyn_info,
         rigid_info,
@@ -416,8 +415,6 @@ def kernel_set_links_COM(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     com: qd.types.ndarray(),
-    jac_row: qd.Tensor,
-    solve_out: qd.Tensor,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -443,8 +440,8 @@ def kernel_set_links_COM(
     func_refresh_links_invweight_and_meaninertia(
         links_idx,
         envs_idx,
-        jac_row,
-        solve_out,
+        constraint_state.grad,
+        constraint_state.Mgrad,
         dyn_state,
         dyn_info,
         rigid_info,
@@ -460,8 +457,6 @@ def kernel_set_links_inertia(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     inertia: qd.types.ndarray(),
-    jac_row: qd.Tensor,
-    solve_out: qd.Tensor,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -486,8 +481,8 @@ def kernel_set_links_inertia(
     func_refresh_links_invweight_and_meaninertia(
         links_idx,
         envs_idx,
-        jac_row,
-        solve_out,
+        constraint_state.grad,
+        constraint_state.Mgrad,
         dyn_state,
         dyn_info,
         rigid_info,

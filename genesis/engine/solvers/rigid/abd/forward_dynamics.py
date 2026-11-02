@@ -1302,11 +1302,14 @@ def func_init_link_invweight(
 ):
     """Compute the two constraint inverse weights of one link, from the mass matrix at the neutral configuration.
 
-    Each weight is the mean diagonal entry of `J M^-1 J^T` over three rows of the Jacobian of the link's center of
-    mass: the translational rows for the first weight, the rotational rows for the second. Those rows are built from
-    the motion subspace of every DOF between the link and the root of its tree. One row is computed at a time, and
-    every operation is restricted to the mass blocks that chain spans, so the cost is that of one tree; forming M^-1
-    explicitly would cost n_dofs^2 per environment instead.
+    The weights scale the regularization of each constraint row to its inverse effective mass, so that the impedance has
+    the same relative effect on light and heavy bodies. Each is the mean diagonal entry of `J M^-1 J^T` over three rows
+    of the Jacobian of the link's center of mass (translational for the first weight, rotational for the second), taken
+    at the neutral configuration, the most reasonable constant baseline without further information.
+
+    Those rows are built from the motion subspace of every DOF between the link and the root of its tree. One row is
+    computed at a time, and every operation is restricted to the mass blocks that chain spans, so the cost is that of
+    one tree, where forming M^-1 explicitly would cost n_dofs^2 per environment.
     """
     EPS = rigid_info.EPS[None]
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -1373,6 +1376,7 @@ def func_init_dofs_invweight(
     The Jacobian row of a DOF is the unit row, so `J M^-1 J^T` reduces to one diagonal entry of the inverse mass
     matrix. The entries are averaged over each group of DOFs a joint moves together: the translation and the rotation
     of a free joint are two such groups, a spherical joint is one, and every other movable joint has one DOF per group.
+    The neutral configuration is the baseline of every weight (see 'func_init_link_invweight').
     """
     EPS = rigid_info.EPS[None]
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -1497,8 +1501,6 @@ def func_refresh_links_invweight_and_meaninertia(
 @qd.kernel(fastcache=True)
 def kernel_refresh_invweight_and_meaninertia(
     envs_idx: qd.types.ndarray(),
-    jac_row: qd.Tensor,
-    solve_out: qd.Tensor,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -1524,6 +1526,9 @@ def kernel_refresh_invweight_and_meaninertia(
     func_enter_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 
     # Weighed as in func_refresh_links_invweight_and_meaninertia, over every tree instead of the listed ones.
+    # A Jacobian row and its mass-matrix solve are held in the 'grad' and 'Mgrad' of the constraint state, since the row
+    # is the cost gradient of its one-row constraint and its weight is grad . Mgrad. Every constraint solve writes both
+    # before reading them, so they carry nothing from one step to the next.
     n_envs_pending = (
         envs_idx.shape[0] if qd.static(rigid_config.batch_links_info or rigid_config.batch_dofs_info) else 1
     )
@@ -1540,10 +1545,27 @@ def kernel_refresh_invweight_and_meaninertia(
                 continue
             if is_link_pending:
                 func_init_link_invweight(
-                    i_l, i_b, jac_row, solve_out, dyn_state, dyn_info, rigid_info, rigid_config, force_update
+                    i_l,
+                    i_b,
+                    constraint_state.grad,
+                    constraint_state.Mgrad,
+                    dyn_state,
+                    dyn_info,
+                    rigid_info,
+                    rigid_config,
+                    force_update,
                 )
             if is_dofs_pending:
-                func_init_dofs_invweight(i_l, i_b, jac_row, solve_out, dyn_info, rigid_info, rigid_config, force_update)
+                func_init_dofs_invweight(
+                    i_l,
+                    i_b,
+                    constraint_state.grad,
+                    constraint_state.Mgrad,
+                    dyn_info,
+                    rigid_info,
+                    rigid_config,
+                    force_update,
+                )
 
     func_init_meaninertia(envs_idx, rigid_info, rigid_config)
 

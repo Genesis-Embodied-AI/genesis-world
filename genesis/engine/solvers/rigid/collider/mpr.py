@@ -36,7 +36,7 @@ class MPR:
             )
         )
         # The states are the fields of one struct so that the collider opts each in by name (see MPRScratch)
-        scratch = MPRScratch(sizes=dict(envs=self._solver._B))
+        scratch = MPRScratch(sizes=dict(workers=self._solver._B))
         self.mpr_state = scratch.main
         self.contact0_mpr_state = scratch.contact0
         self.multicontact_mpr_state = scratch.multicontact

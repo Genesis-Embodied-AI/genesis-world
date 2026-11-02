@@ -372,7 +372,8 @@ class LaunchRecorder:
             arrays_used, arrays_written = set(), []
             for arg_meta, arg in zip(kernel.arg_metas, args):
                 if dataclasses.is_dataclass(arg):
-                    for path, array in iter_state_arrays(arg, (arg_meta.name,)):
+                    for path, array in iter_state_arrays(arg):
+                        path = (arg_meta.name, *path)
                         if flat_names_used is None or "__qd_" + "__qd_".join(path) in flat_names_used:
                             arrays_used.add(id(array))
                             if path in paths_written:

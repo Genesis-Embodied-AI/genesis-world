@@ -301,7 +301,7 @@ def test_deformable_parallel(show_viewer):
 
 
 @pytest.mark.required
-def test_fem_outside_mpm_grid(show_viewer, tol):
+def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     GRAVITY = -9.81
     DT = 2e-3
     N_STEPS = 10
@@ -329,12 +329,19 @@ def test_fem_outside_mpm_grid(show_viewer, tol):
         ),
         material=gs.materials.MPM.Elastic(),
     )
+    # FIXME: Building should raise when the scene cannot meet the accuracy of the simulation. The explicit time step
+    # must stay under about h / c, with h the smallest element size, c = sqrt((lambda + 2 * mu) / rho) the wave speed,
+    # lambda = E * nu / ((1 + nu) * (1 - 2 * nu)) and mu = E / (2 * (1 + nu)). The rest shape of a body accumulates
+    # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
+    # stay under the tolerance. Meanwhile, single precision takes a softer material.
     fem = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.4, 0.0, 0.5),
             size=(0.1, 0.1, 0.1),
         ),
-        material=gs.materials.FEM.Elastic(),
+        material=gs.materials.FEM.Elastic(
+            E=1e6 if precision == "64" else 1e5,
+        ),
     )
     scene.build(n_envs=2)
 

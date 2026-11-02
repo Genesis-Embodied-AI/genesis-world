@@ -380,7 +380,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 ),
             },
         )
-        self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+        self._refresh_invweight_and_meaninertia(force_update=False)
 
         # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
         # written to the armature field from the host once the parsed inverse weights stand, and a second refresh
@@ -424,7 +424,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
                 links_invweight[links_idx] = -1.0
                 self.dyn_info.links.invweight.from_numpy(links_invweight)
-                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+                self._refresh_invweight_and_meaninertia(force_update=False)
 
         # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
         # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
@@ -930,7 +930,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             mass_spread = max(mass_spread, mass_spread_entity.max())
         return mass_spread
 
-    def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True, in_place=False):
+    def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True):
         # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
         # writing them, which recomputes their own tree only.
         # Early return if no DoFs. This is essential to avoid segfault on CUDA.
@@ -945,18 +945,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
 
-        # The computation needs one vector of size n_dofs and one mass-matrix solve against it. Build time borrows
-        # both from the constraint solver, so that a scene never writing an inertial property allocates no scratch of
-        # its own.
-        if in_place:
-            constraint_state = self.constraint_solver.constraint_state
-            jac_row, solve_out = constraint_state.grad, constraint_state.Mgrad
-        else:
-            jac_row, solve_out = self.data_manager.weight_scratch.jac_row, self.data_manager.weight_scratch.solve_out
         kernel_refresh_invweight_and_meaninertia(
             envs_idx,
-            jac_row,
-            solve_out,
             self.dyn_state,
             self.constraint_solver.constraint_state,
             self.dyn_info,
@@ -2203,8 +2193,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -2219,8 +2207,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -2234,8 +2220,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
