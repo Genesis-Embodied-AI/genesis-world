@@ -529,6 +529,13 @@ class DiffContactInput(Data, kind=DataKind.SCRATCH):
     # Support core of the convex geom of a plane-convex contact (box vertex, sphere center, nearest capsule endpoint),
     # in its local frame
     core_local: qd.Tensor = field((float, 3))
+    # Points of the surfaces of geom A and geom B that a sphere-capsule or capsule-capsule contact joins, in the local
+    # frame of their geom (see func_differentiable_capsule_contact)
+    witness_local_a: qd.Tensor = field((float, 3))
+    witness_local_b: qd.Tensor = field((float, 3))
+    # The normal and the penetration the detection returned for the contact
+    normal: qd.Tensor = field((float, 3))
+    penetration: qd.Tensor = field(float)
     ref_id: qd.Tensor = field(int)
     # Whether the forward and backward passes compute the contact stably
     valid: qd.Tensor = field(int)

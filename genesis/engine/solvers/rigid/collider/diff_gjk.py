@@ -1,4 +1,5 @@
 import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.array_class import (
@@ -11,7 +12,8 @@ from genesis.utils.array_class import (
     GeomsInitAABB,
     RigidInfo,
 )
-from . import gjk as GJK, contact, epa
+
+from . import contact, epa, gjk, utils
 
 
 @qd.func
@@ -66,7 +68,7 @@ def func_gjk_contact(
     EPS = rigid_info.EPS[None]
 
     # Clear the cache to prepare for this GJK-EPA run.
-    GJK.clear_cache(i_b, gjk_state)
+    gjk.clear_cache(i_b, gjk_state)
 
     gjk_state.n_diff_contact_input[i_b] = 0
 
@@ -114,7 +116,7 @@ def func_gjk_contact(
                 gb_pos_local, gb_quat_local, default_contact_pos, gu.qd_inv_quat(qrot)
             )
 
-        gjk_flag = GJK.func_safe_gjk(
+        gjk_flag = gjk.func_safe_gjk(
             i_ga,
             i_gb,
             i_b,
@@ -131,7 +133,7 @@ def func_gjk_contact(
             collider_config,
         )
 
-        if gjk_flag == GJK.GJK_RETURN_CODE.INTERSECT:
+        if gjk_flag == gjk.GJK_RETURN_CODE.INTERSECT:
             # Initialize polytope
             gjk_state.polytope.nverts[i_b] = 0
             gjk_state.polytope.nfaces[i_b] = 0
@@ -379,7 +381,7 @@ def func_extended_epa(
     tolerance = collider_info.gjk.tolerance[None]
     i_f_nearest = gs.qd_int(-1)
 
-    discrete = GJK.func_is_discrete_geoms(i_ga, i_gb, dyn_info)
+    discrete = gjk.func_is_discrete_geoms(i_ga, i_gb, dyn_info)
     if discrete:
         # If the objects are discrete, we do not use tolerance.
         tolerance = rigid_info.EPS[None]
@@ -478,7 +480,7 @@ def func_extended_epa(
             break
 
         # Attach the new faces
-        attach_flag = GJK.RETURN_CODE.SUCCESS
+        attach_flag = gjk.RETURN_CODE.SUCCESS
         for i in range(nedges):
             # Face id of the current face to attach
             i_f0 = nfaces + i
@@ -511,7 +513,7 @@ def func_extended_epa(
                 gjk_state,
                 collider_info,
             )
-            if attach_flag != GJK.RETURN_CODE.SUCCESS:
+            if attach_flag != gjk.RETURN_CODE.SUCCESS:
                 # Unrecoverable numerical issue
                 break
 
@@ -521,7 +523,7 @@ def func_extended_epa(
             gjk_state.polytope_faces.map_idx[i_b, i_f0] = nfaces_map
             gjk_state.polytope.nfaces_map[i_b] += 1
 
-        if attach_flag != GJK.RETURN_CODE.SUCCESS:
+        if attach_flag != gjk.RETURN_CODE.SUCCESS:
             i_f_nearest = -1
             break
 
@@ -543,7 +545,7 @@ def func_extended_epa(
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
         flag = epa.func_safe_epa_witness(i_b, i_f_nearest, gjk_state, collider_info)
-        if flag == GJK.RETURN_CODE.SUCCESS:
+        if flag == gjk.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
         else:
@@ -633,7 +635,7 @@ def func_add_diff_contact_input(
         normal = -normal
 
     ### Compute the support point along the face normal.
-    obj1, obj2, localpos1, localpos2, id1, id2, mink = GJK.func_support(
+    obj1, obj2, localpos1, localpos2, id1, id2, mink = gjk.func_support(
         i_ga,
         i_gb,
         i_b,
@@ -915,6 +917,10 @@ def func_differentiable_plane_contact(
     func_fill_diff_contact_input_analytic; [radius] and the plane direction come from the geoms info. Gradients flow to
     both geom poses through the geoms state pos / quat. For a sphere, [core_local] is the local origin, so the
     orientation gradient is zero, matching the rotation-invariant forward contact.
+
+    A contact whose penetration the detection clamped to zero keeps it, with zero derivative: the detection clamps a
+    grazing contact, and slides a contact of the multi-contact search past the edge of the patch to where its depth
+    vanishes, so that its penetration stays zero as the poses move.
     """
     trans_plane = dyn_state.geoms.pos[i_ga, i_b]
     trans_convex = dyn_state.geoms.pos[i_gb, i_b]
@@ -928,8 +934,99 @@ def func_differentiable_plane_contact(
 
     penetration = normal.dot(v_world - trans_plane)
     contact_pos = v_world - 0.5 * penetration * normal
+    if diff_contact_input.penetration[i_b, i_c] <= 0.0:
+        penetration = gs.qd_float(0.0)
     weight = gs.qd_float(1.0)
     return contact_pos, normal, penetration, weight
+
+
+@qd.func
+def func_differentiable_capsule_contact(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_c: int,
+    is_ref: bool,
+    dyn_state: DynState,
+    diff_contact_input: DiffContactInput,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+):
+    """Differentiable sphere-capsule and capsule-capsule contact reconstruction.
+
+    [i_ga] is the sphere or capsule geom and [i_gb] the capsule geom. The core of a geom is its center for a sphere and
+    its segment for a capsule. The reference contact of the pair ([is_ref]) is the closed form of the poses of both
+    geoms that func_sphere_capsule_contact and func_capsule_capsule_contact in capsule_contact.py compute: the closest
+    points of both cores give its normal, penetration and position. The other contacts of the pair, which the
+    multi-contact search of the detection added, join the points of both surfaces that
+    func_fill_diff_contact_input_analytic stored, held fixed on their geoms, along the normal of the reference contact.
+    Both surfaces being smooth, the depth between points held fixed has the derivative of the depth between closest
+    points.
+
+    The derivative of the closed form is unbounded where the cores nearly cross, the normal turning as the inverse of
+    their distance, and where both segments are nearly parallel, the closest points sliding as the inverse of the
+    squared sine of their angle. There, every contact of the pair joins its points held fixed along the normal of the
+    detection, which bounds the derivative at the cost of the turn of the normal and the slide of the contact point.
+    A contact whose penetration the detection clamped to zero keeps it, with zero derivative (see
+    func_differentiable_plane_contact).
+    """
+    EPS = rigid_info.EPS[None]
+
+    pos_a = dyn_state.geoms.pos[i_ga, i_b]
+    quat_a = dyn_state.geoms.quat[i_ga, i_b]
+    pos_b = dyn_state.geoms.pos[i_gb, i_b]
+    quat_b = dyn_state.geoms.quat[i_gb, i_b]
+    radius_a = dyn_info.geoms.data[i_ga][0]
+    radius_b = dyn_info.geoms.data[i_gb][0]
+
+    local_z_unit = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+    axis_b = gu.qd_transform_by_quat_fast(local_z_unit, quat_b)
+    halflength_b = 0.5 * dyn_info.geoms.data[i_gb][1]
+    seg_b_p1 = pos_b - halflength_b * axis_b
+    seg_b_p2 = pos_b + halflength_b * axis_b
+
+    core_a = pos_a
+    core_b = pos_b
+    sin_sqr = gs.qd_float(1.0)
+    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE:
+        axis_a = gu.qd_transform_by_quat_fast(local_z_unit, quat_a)
+        halflength_a = 0.5 * dyn_info.geoms.data[i_ga][1]
+        core_a, core_b = utils.func_closest_points_on_segments(
+            pos_a - halflength_a * axis_a, pos_a + halflength_a * axis_a, seg_b_p1, seg_b_p2, EPS
+        )
+        sin_sqr = axis_a.cross(axis_b).norm_sqr()
+    else:
+        segment = seg_b_p2 - seg_b_p1
+        segment_length_sq = segment.dot(segment)
+        t = gs.qd_float(0.5)
+        if segment_length_sq > EPS:
+            t = qd.math.clamp((pos_a - seg_b_p1).dot(segment) / segment_length_sq, 0.0, 1.0)
+        core_b = seg_b_p1 + t * segment
+
+    # The bounds of the configurations whose closed form has an unbounded derivative: the distance between the cores
+    # relative to the sum of the radii, and the squared sine of the angle between both segments
+    delta = core_a - core_b
+    dist_sq = delta.dot(delta)
+    is_bounded = sin_sqr > 1e-3 and dist_sq > (1e-2 * (radius_a + radius_b)) ** 2
+
+    normal = diff_contact_input.normal[i_b, i_c]
+    witness_a = gu.qd_transform_by_trans_quat(diff_contact_input.witness_local_a[i_b, i_c], pos_a, quat_a)
+    witness_b = gu.qd_transform_by_trans_quat(diff_contact_input.witness_local_b[i_b, i_c], pos_b, quat_b)
+    contact_pos = 0.5 * (witness_a + witness_b)
+    penetration = gs.qd_float(0.0)
+    if is_bounded:
+        dist = qd.sqrt(dist_sq)
+        normal = delta / dist
+        if is_ref:
+            penetration = radius_a + radius_b - dist
+            contact_pos = core_a - (radius_a - 0.5 * penetration) * normal
+        else:
+            penetration = normal.dot(witness_b - witness_a)
+    else:
+        penetration = normal.dot(witness_b - witness_a)
+    if diff_contact_input.penetration[i_b, i_c] <= 0.0:
+        penetration = gs.qd_float(0.0)
+    return contact_pos, normal, penetration, gs.qd_float(1.0)
 
 
 @qd.func

@@ -23,10 +23,14 @@ from ..utils.assertions import assert_allclose
         pytest.param("sphere", gs.gpu, marks=pytest.mark.required),
         ("capsule", gs.cpu),
         pytest.param("capsule", gs.gpu, marks=pytest.mark.required),
+        pytest.param("sphere_on_capsule", gs.cpu, marks=pytest.mark.required),
+        ("sphere_on_capsule", gs.gpu),
+        pytest.param("capsule_on_capsule", gs.cpu, marks=pytest.mark.required),
+        ("capsule_on_capsule", gs.gpu),
     ],
 )
-def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, show_viewer):
-    def _build_contact_scene(shape, mjcf_capsule, *, requires_grad, show_viewer=False):
+def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsule_rail, precision, show_viewer):
+    def _build_contact_scene(shape, mjcf_capsule, mjcf_rail, *, requires_grad, show_viewer=False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 substeps=2,
@@ -59,7 +63,15 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
                 vis_mode="collision",
             )
         else:
-            ground = scene.add_entity(gs.morphs.Plane())
+            if shape in ("sphere_on_capsule", "capsule_on_capsule"):
+                ground = scene.add_entity(
+                    gs.morphs.MJCF(
+                        file=mjcf_rail,
+                    ),
+                    vis_mode="collision",
+                )
+            else:
+                ground = scene.add_entity(gs.morphs.Plane())
             if shape == "box":
                 obj = scene.add_entity(
                     gs.morphs.Box(
@@ -68,7 +80,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
                     ),
                     vis_mode="collision",
                 )
-            elif shape == "sphere":
+            elif shape in ("sphere", "sphere_on_capsule"):
                 obj = scene.add_entity(
                     gs.morphs.Sphere(
                         radius=0.2,
@@ -76,7 +88,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
                     ),
                     vis_mode="collision",
                 )
-            elif shape == "capsule":
+            elif shape in ("capsule", "capsule_on_capsule"):
                 obj = scene.add_entity(
                     gs.morphs.MJCF(
                         file=mjcf_capsule,
@@ -93,8 +105,15 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
         return len(entity.get_contacts()["geom_a"])
 
     # Rest z puts the body's lowest point on its support: box / sphere half extent 0.2, upright capsule
-    # radius 0.1 + half length 0.2 = 0.3, box-on-ground centered at 0.40.
-    rest_z = {"ground_box": 0.40, "box": 0.20, "sphere": 0.20, "capsule": 0.30}[shape]
+    # radius 0.1 + half length 0.2 = 0.3, box-on-ground centered at 0.40, the top of the capsule rail at 0.2.
+    rest_z = {
+        "ground_box": 0.40,
+        "box": 0.20,
+        "sphere": 0.20,
+        "capsule": 0.30,
+        "sphere_on_capsule": 0.40,
+        "capsule_on_capsule": 0.50,
+    }[shape]
     rest_dofs = [0.0, 0.0, rest_z, 0.0, 0.0, 0.0]
     n_settle = 12
     n_steps = 2
@@ -118,7 +137,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             scene.step()
 
     scene_ana, obj_ana, ground_ana = _build_contact_scene(
-        shape, grad_capsule, requires_grad=True, show_viewer=show_viewer
+        shape, grad_capsule, grad_capsule_rail, requires_grad=True, show_viewer=show_viewer
     )
     scene_ana.reset()
     settle(scene_ana, obj_ana)
@@ -143,7 +162,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would
     # measure that forward gap instead of the gradient.
-    scene_fd, obj_fd, ground_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
+    scene_fd, obj_fd, ground_fd = _build_contact_scene(shape, grad_capsule, grad_capsule_rail, requires_grad=True)
 
     # The finite differences need no autograd graph of the rollout, so it is left unrecorded
     @torch.no_grad()
