@@ -780,7 +780,7 @@ def test_split_vs_monolithic_narrowphase(
     )
     # The monolithic arm runs GJK on one state per environment, which the split arm leaves unused
     with namespace(scene._namespace):
-        opt_in(GJKScratch.main, envs=2)
+        opt_in(GJKScratch.main, workers=2)
     # Batched build: the split arm packs its work queue across environments through one global counter, a structure
     # a single environment cannot exercise.
     scene.build(n_envs=2)
@@ -1171,7 +1171,7 @@ def test_mesh_support_exactness(show_viewer, tol):
     ]
     # The support queries run on the GJK state of the monolithic narrowphase, which the split one leaves unused
     with namespace(scene._namespace):
-        opt_in(GJKScratch.main, envs=1)
+        opt_in(GJKScratch.main, workers=1)
     scene.build()
 
     @qd.kernel

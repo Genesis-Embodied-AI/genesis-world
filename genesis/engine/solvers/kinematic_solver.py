@@ -20,7 +20,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
-from genesis.utils.array_class import RigidData, RigidSimStaticConfig
+from genesis.utils.array_class import IKScratch, RigidData, RigidSimStaticConfig
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -183,6 +183,7 @@ class KinematicSolver(Solver):
         self.constraint_solver = None
 
         self.qpos = None
+        self._ik_scratch: IKScratch | None = None
 
         self._is_forward_pos_updated: bool = False
         self._is_forward_vel_updated: bool = False
@@ -1442,8 +1443,21 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_scratch = self.data_manager.ik_scratch
-        ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
+        # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so the scratch is
+        # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
+        if self._ik_scratch is None:
+            entities = self.entities
+            self._ik_scratch = IKScratch(
+                sizes=dict(
+                    envs=self._B,
+                    entity_qs=max([entity.n_qs for entity in entities], default=0),
+                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_links=max([entity.n_links for entity in entities], default=0),
+                    entity_joints=max([entity.n_joints for entity in entities], default=0),
+                    ik_targets=n_tgts,
+                )
+            )
+        ik_state, ik_fk, targets = self._ik_scratch.state, self._ik_scratch.fk, self._ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

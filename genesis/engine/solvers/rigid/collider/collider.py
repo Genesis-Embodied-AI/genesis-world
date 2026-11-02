@@ -108,15 +108,15 @@ class Collider:
         if self._use_split_narrowphase:
             gpu_cores = self.collider_config.gpu_cores
             n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
-            opt_in(MPRScratch.contact0, envs=n_contact0_threads)
-            opt_in(MPRScratch.multicontact, envs=max(gpu_cores, self._n_terrain_threads))
-            opt_in(GJKScratch.contact0, envs=n_contact0_threads)
-            opt_in(GJKScratch.multicontact, envs=gpu_cores)
+            opt_in(MPRScratch.contact0, workers=n_contact0_threads)
+            opt_in(MPRScratch.multicontact, workers=max(gpu_cores, self._n_terrain_threads))
+            opt_in(GJKScratch.contact0, workers=n_contact0_threads)
+            opt_in(GJKScratch.multicontact, workers=gpu_cores)
         else:
             if self.collider_config.has_terrain:
-                opt_in(MPRScratch.multicontact, envs=self._n_terrain_threads)
+                opt_in(MPRScratch.multicontact, workers=self._n_terrain_threads)
             if self.collider_config.has_non_box_plane_convex_convex:
-                opt_in(GJKScratch.main, envs=self._solver._B)
+                opt_in(GJKScratch.main, workers=self._solver._B)
 
         if self.collider_config.has_nonconvex_nonterrain:
             opt_in(ColliderInfo.sdf)

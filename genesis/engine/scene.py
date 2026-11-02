@@ -295,6 +295,9 @@ class Scene(RBC):
             if getattr(self, "_sim", None) is not None:
                 self._sim.destroy()
                 self._sim = None
+                # The opt-in requests of the namespace hold callables bound to the components of the simulator, which
+                # would keep its data alive with the scene (see 'opt_in').
+                self._namespace = None
 
                 # Reference cycles leave the Quadrants arrays of the simulator to a later garbage collection, which
                 # aborts the process if it runs on a thread without their CUDA context, e.g. the viewer render thread.
