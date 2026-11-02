@@ -1,0 +1,36 @@
+examples/fluid/smoke.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 97
+tests/core/test_misc.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 1484,1542,1596
+genesis/engine/solvers/sf_solver.py
+  s_5f0a6aada3cc7c::t_6a4aaeb905daf9 24
+tests/particles/test_sf.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 26
+genesis/options/solvers.py
+  s_5f0a6aada3cc7c::t_6a4aaeb905daf9 904-908,911,922-933
+tests/sensors/test_raycaster.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 97,108,355,369
+tests/sensors/test_api.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 620
+examples/sensors/depth_camera_custom_vverts.py
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 106,121
+genesis/options/sensors/raycaster.py
+  s_5f0a6aada3cc7c::t_6a4aaeb905daf9 105,109,113,212,230,237,239-242,245
+  s_5f0a6aada3cc7c::t_2d3ffb645c276c 129-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3c1047784117affc035f30fc4f8bba857a49a688",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
