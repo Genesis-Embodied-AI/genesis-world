@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from enum import IntEnum
 from typing import TYPE_CHECKING, NamedTuple, overload
 
 import numpy as np
@@ -15,7 +16,6 @@ from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
 from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -31,6 +31,20 @@ from genesis.utils.misc import (
     sanitize_indexed_tensor,
     tensor_to_array,
 )
+
+
+class ErrorCode(IntEnum):
+    SUCCESS = 0b000000000000000000000000000000000
+    OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
+    OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
+    OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
+    UNSUPPORTED_COLLISION_PAIR = 0b00000000000000000000000000001000
+    INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
+    INVALID_FORCE_NAN = 0b00000000000000000000000000100000
+    INVALID_ACC_NAN = 0b00000000000000000000000001000000
+    INVALID_GRAD_NAN = 0b00000000000000000000000010000000
+    INVALID_PARTICLE_NAN = 0b00000000000000000000000100000000
+    INVALID_VERTEX_NAN = 0b00000000000000000000001000000000
 
 
 if TYPE_CHECKING:

@@ -15,7 +15,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
 from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
@@ -207,7 +207,7 @@ def kernel_wake_up_entities_held_by_links(
     """Wake up the hibernated islands resting on or constrained to the specified links.
 
     A fixed link never sleeps, so moving it wakes nothing by itself, while the links it holds would stay asleep where
-    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in array_class.py) and the
+    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in rigid/data.py) and the
     equality constraints.
     """
     n_links = rigid_info.links_tree_idx.shape[0]

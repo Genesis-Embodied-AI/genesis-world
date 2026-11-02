@@ -11,11 +11,12 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import ArrayItem, DataKind, opt_in
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
 

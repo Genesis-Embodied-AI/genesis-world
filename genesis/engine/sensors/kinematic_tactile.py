@@ -7,11 +7,14 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.bvh import BVHTreeState
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
-from genesis.options.sensors import ContactDepthProbe as ContactDepthProbeOptions
-from genesis.options.sensors import ContactProbe as ContactProbeOptions
-from genesis.options.sensors import KinematicTaxel as KinematicTaxelOptions
-from genesis.utils.array_class import BVHTreeState, ColliderInfo, ColliderState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, DynInfo, DynState, RigidInfo
+from genesis.options.sensors import (
+    ContactDepthProbe as ContactDepthProbeOptions,
+    ContactProbe as ContactProbeOptions,
+    KinematicTaxel as KinematicTaxelOptions,
+)
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 

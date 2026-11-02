@@ -2039,7 +2039,7 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     #   - contact set    -> narrowphase / pruning
     #   - contact order  -> contact sort
     #   - dofs velocity  -> constraint solve
-    from genesis.utils.array_class import RigidSimStaticConfig
+    from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
 
     if prefer_decomposed_solver is not None:
         init_orig = RigidSimStaticConfig.__init__

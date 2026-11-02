@@ -5,10 +5,9 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
-
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import opt_in
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 

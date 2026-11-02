@@ -10,12 +10,12 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.utils.array_class import (
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     DynInfo,
     DynState,
-    ErrorCode,
     GJKState,
     GeomsInitAABB,
     RigidInfo,
@@ -180,7 +180,7 @@ def func_collider_reset_env(
     if qd.static(not cache_only):
         collider_state.first_time[i_b] = True
 
-    # The contact cache is only held for the convex-convex pairs (see ContactCache in array_class.py)
+    # The contact cache is only held for the convex-convex pairs (see ContactCache in rigid/data.py)
     if qd.static(collider_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
@@ -245,11 +245,11 @@ def func_collider_clear_env(
     if qd.static(rigid_config.use_hibernation):
         # Advect the contacts of the sleepers: a pair standing still (func_is_link_pair_hibernated) stays where it is,
         # so its contact is kept at the front of the buffer with the force of the last solve it took part in (see
-        # n_contacts_hibernated in array_class.py for what reads the kept range). The contacts are first flagged on
+        # n_contacts_hibernated in rigid/data.py for what reads the kept range). The contacts are first flagged on
         # their raw slot, in the sort key the narrowphase rewrites before reading it, then compacted in raw order: every
         # slot written to was already read, so no kept contact is overwritten. The kept range then lists them in their
         # last logical order (see func_sort_contacts), the raw order following the narrowphase's slot allocation, which
-        # the GPU leaves to atomics. An env with no sleeper keeps none (see n_awake_dofs in array_class.py).
+        # the GPU leaves to atomics. An env with no sleeper keeps none (see n_awake_dofs in rigid/data.py).
         n_hib = 0
         if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
             n_raw = 0
@@ -324,7 +324,7 @@ def func_promote_woken_contacts(
     A kept contact holds where its sleeper rests, and the narrowphase left the sleeper's pairs out while it slept, so
     the woken link would solve its wake step without its support otherwise. A contact is promoted once its pair no
     longer stands still (func_is_link_pair_hibernated). The promoted contact moves to the end of the kept range, which
-    shrinks past it onto the first live slot (see n_contacts_hibernated in array_class.py), and the kept contacts
+    shrinks past it onto the first live slot (see n_contacts_hibernated in rigid/data.py), and the kept contacts
     behind it close the gap in their order, so the getters keep listing the contacts of the links still asleep as they
     stood. The caller then sorts the live range.
     """
@@ -1330,7 +1330,7 @@ def func_clamp_prune_contacts(
         n_con = qd.min(collider_state.n_contacts[i_b], max_candidate_contacts)
         collider_state.n_contacts[i_b] = n_con
         # The kept contacts of the sleepers lead the buffer in the order func_collider_clear_env gave them, and the
-        # prune runs on the live contacts after them (see n_contacts_hibernated in array_class.py)
+        # prune runs on the live contacts after them (see n_contacts_hibernated in rigid/data.py)
         n_hib = collider_state.n_contacts_hibernated[i_b]
 
         # Identity permutation of the live contacts. Required so downstream consumers can always indirect through

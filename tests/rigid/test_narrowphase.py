@@ -45,7 +45,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider import gjk_support, support_field
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKScratch, GJKState
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, DynInfo, GJKScratch, GJKState
 from genesis.utils.data import namespace, opt_in
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 

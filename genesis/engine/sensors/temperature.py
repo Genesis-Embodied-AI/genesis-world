@@ -9,9 +9,8 @@ import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions
-from genesis.options.sensors import TemperatureProperties
-from genesis.utils.array_class import ColliderState, DynState
+from genesis.engine.solvers.rigid.data import ColliderState, DynState
+from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions, TemperatureProperties
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.ring_buffer import TensorRingBuffer
 

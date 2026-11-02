@@ -10,7 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderInfo, ColliderState, DynInfo, GJKState, RigidInfo
 
 from .constants import EPA_POLY_INIT_RETURN_CODE, RETURN_CODE
 from .gjk_support import func_support

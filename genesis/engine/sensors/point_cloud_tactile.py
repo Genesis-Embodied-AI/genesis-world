@@ -9,11 +9,12 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.bvh import BVHTreeState
+from genesis.engine.solvers.rigid.data import ColliderInfo, DynInfo, DynState
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
 )
-from genesis.utils.array_class import BVHTreeState, ColliderInfo, DynInfo, DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal

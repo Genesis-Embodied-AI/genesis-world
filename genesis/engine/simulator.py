@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import ErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
 from genesis.utils.data import ArrayItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer

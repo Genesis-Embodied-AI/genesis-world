@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ColliderState, DynInfo, DynState, RigidInfo
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver

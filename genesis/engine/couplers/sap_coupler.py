@@ -1,3 +1,4 @@
+import dataclasses
 import math
 from typing import TYPE_CHECKING
 
@@ -11,12 +12,15 @@ import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
-from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
-from genesis.options.solvers import SAPCouplerOptions
-from genesis.repr_base import RBC
-from genesis.utils.array_class import (
+from genesis.engine.bvh import (
     BVHQueryResults,
     BVHQueryState,
+    build_bvh,
+    func_bvh_query_leaves,
+    func_no_filter,
+    get_bvh_data,
+)
+from genesis.engine.solvers.rigid.data import (
     DofsState,
     EntitiesInfo,
     EqualitiesInfo,
@@ -27,10 +31,21 @@ from genesis.utils.array_class import (
     LinksInfo,
     LinksState,
     RigidInfo,
-    SAPContactQueriesState,
     VertsInfo,
     VertsState,
 )
+from genesis.options.solvers import SAPCouplerOptions
+from genesis.repr_base import RBC
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class SAPContactQueriesState:
+    """The box queries of the SAP coupler, one per contact handler traversing a tree (see SAPCoupler._init_bvh)."""
+
+    fem_self: BVHQueryState
+    rigid_tri: BVHQueryState
+    rigid_tet: BVHQueryState
+
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator

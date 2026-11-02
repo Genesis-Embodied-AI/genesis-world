@@ -11,8 +11,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
+from genesis.engine.solvers.rigid.data import GeomsInfo, LinksState
 from genesis.ext.urdfpy.urdf import URDF
-from genesis.utils.array_class import GeomsInfo, LinksState
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,

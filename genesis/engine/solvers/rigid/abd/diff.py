@@ -8,7 +8,8 @@ These functions handle:
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import DynInfo, DynState, ErrorCode, RigidInfo
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.misc import qd_isfinite
 
 from .forward_dynamics import func_clear_coupling_wrench

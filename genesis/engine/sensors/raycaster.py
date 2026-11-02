@@ -6,13 +6,11 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.engine.bvh import BVHData, get_bvh_data
+from genesis.engine.bvh import BVHData, BVHState, BVHStaticConfig, get_bvh_data
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.engine.state_change import StateChange, Subscriber
-from genesis.options.sensors import Raycaster as RaycasterOptions
-from genesis.options.sensors import RaycastPattern
-from genesis.utils.array_class import BVHState, BVHStaticConfig
+from genesis.options.sensors import RaycastPattern, Raycaster as RaycasterOptions
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
 from genesis.utils.raycast_qd import (

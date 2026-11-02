@@ -11,10 +11,11 @@ import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
-from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch

@@ -7,7 +7,7 @@ This module contains shared utility functions used by both GJK and EPA algorithm
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ColliderInfo
+from genesis.engine.solvers.rigid.data import ColliderInfo
 from .constants import RETURN_CODE
 from .utils import func_det3
 

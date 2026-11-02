@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
-from genesis.utils.array_class import DynInfo, DynState, IKScratchFK, IKState, IKTargets, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, IKScratchFK, IKState, IKTargets, RigidInfo
 from genesis.utils.misc import qd_isfinite
 
 

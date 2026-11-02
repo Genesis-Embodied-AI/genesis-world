@@ -3,7 +3,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynState, RigidInfo
 from genesis.utils.misc import qd_to_torch
 from . import linesearch
 from . import solver
@@ -177,7 +177,7 @@ def _func_update_gradient(
 ):
     """Step 5: update the gradient of every env still iterating, one env per thread.
 
-    Where the solve is seeded one env per thread (see has_per_env_solve_seed in array_class.py), the Hessian of the env
+    Where the solve is seeded one env per thread (see has_per_env_solve_seed in rigid/data.py), the Hessian of the env
     is assembled and factored first.
     """
     _B = constraint_state.grad.shape[1]
@@ -366,7 +366,7 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
 
     The per-iteration factor/solve runs per island over the (env, island) work-list, an unpartitioned env being a
     single island spanning every dof, except where the solve is seeded one env per thread (see has_per_env_solve_seed
-    in array_class.py): the seed and every factor then run one env per thread.
+    in rigid/data.py): the seed and every factor then run one env per thread.
     """
     # The graph maintains the assembled Hessian in nt_H, so the seed leaves it there (write_L=False).
     solver.func_solve_init(dyn_state, constraint_state, rigid_info, rigid_config, write_L=False)

@@ -2,7 +2,7 @@
 
 The island partition (see island.py) makes the mass matrix, the Jacobian and hence the cost block-diagonal, so each
 island owns a line search, a convergence test and a search direction of its own, measured against the trace of its own
-mass block (IslandState.inertia in array_class.py), and a converged island stands still while the others iterate. The
+mass block (IslandState.inertia in rigid/data.py), and a converged island stands still while the others iterate. The
 monolith arm (one thread per env) takes the islands one after the other, each search sweeping its own dofs and rows
 through the island-ordered dof_id / constraint_id lists with its state in registers. The decomposed arm runs all the
 islands of a group of _K in lockstep with the lanes of the env's block, sweeping the group's range of those lists in
@@ -24,7 +24,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd.misc import func_list_item, func_list_range_start
-from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import ConstraintState, DynState, RigidInfo
 
 from . import solver as constraint_solver
 
@@ -119,7 +119,7 @@ def func_row_alpha_terms(
     """The (const, linear, quad) coefficient triple of one constraint row at each pending candidate step.
 
     The triples are taken at the first n_alphas candidates of alphas, in the shifted convention cost(alpha) - cost(0)
-    (see ls_improvement in IslandState, array_class.py): an equality row contributes nothing (its terms sit in the
+    (see ls_improvement in IslandState, rigid/data.py): an equality row contributes nothing (its terms sit in the
     initialization sums), an elliptic cone contributes through its head row only. row_kind names the row's class when
     the caller knows it (2 friction loss, 3 elliptic cone head, 4 contact or limit), 0 when the row's class is tested
     at runtime.
@@ -433,7 +433,7 @@ def func_ls_state_advance(
 
     if phase == 0:
         p1_alpha, p1_cost, p1_deriv_0, p1_deriv_1, p1_kink = alphas[0], costs[0], grads[0], hess[0], kinks[0]
-        # Costs are shifted deltas from alpha = 0 (see ls_improvement in array_class.py): a positive one means no
+        # Costs are shifted deltas from alpha = 0 (see ls_improvement in rigid/data.py): a positive one means no
         # improvement over alpha = 0, which takes its place.
         if p1_cost > 0.0:
             p1_alpha = 0.0

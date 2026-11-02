@@ -1,7 +1,6 @@
 from .base_entity import Entity
 from .emitter import Emitter
 from .fem_entity import FEMEntity
-from .hybrid_entity import HybridEntity
 from .mpm_entity import MPMEntity
 from .pbd_entity import (
     PBD2DEntity,
@@ -12,3 +11,6 @@ from .pbd_entity import (
 from .rigid_entity import DroneEntity, KinematicEntity, RigidEntity, TerrainEntity
 from .sph_entity import SPHEntity
 from .sf_entity import SFParticleEntity
+
+# Last, since the rigid data it imports load the solvers package, which imports the other entities from this one
+from .hybrid_entity import HybridEntity

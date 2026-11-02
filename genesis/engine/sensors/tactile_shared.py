@@ -9,8 +9,8 @@ import torch.nn.functional as F
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.data import SDFInfo
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
-from genesis.utils.array_class import SDFInfo
 from genesis.utils.data import opt_in
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
 

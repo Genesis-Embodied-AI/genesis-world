@@ -3,7 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import GEOM_TYPE
-from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
 
 
 @qd.func

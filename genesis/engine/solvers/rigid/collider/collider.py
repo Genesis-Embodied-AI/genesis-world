@@ -20,7 +20,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
-from genesis.utils.array_class import (
+from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     ColliderStaticConfig,

@@ -1,15 +1,17 @@
 """Linear bounding volume hierarchies (LBVH) over sets of axis-aligned boxes: build and box queries.
 
 A set holds one tree per batch over the same number of leaves. The caller writes the box of each leaf into the state,
-builds the set, and traverses the trees it gets back (see BVHTreeState in array_class). The build follows
+builds the set, and traverses the trees it gets back (see BVHTreeState). The build follows
 Karras (2012, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees").
 
 A leaf carries two indices: i_a names it by its box, in the order the caller wrote them, and i_leaf by its slot in the
 sorted order the tree is laid out in, the one leaves_idx maps back to i_a.
 """
 
+import dataclasses
 import math
 import os
+from enum import IntEnum
 from typing import NamedTuple
 
 import quadrants as qd
@@ -17,15 +19,7 @@ from quadrants.algorithms import sort as radix_sort
 from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
-from genesis.utils.array_class import (
-    BVHQueryResults,
-    BVHQueryState,
-    BVHState,
-    BVHStaticConfig,
-    BVHTreeState,
-    BVH_FIT_KIND,
-    BVH_SORT_KIND,
-)
+from genesis.utils.data import Data, DataKind, Size, StaticConfig, field
 from genesis.utils.misc import get_gpu_core_count
 
 # Bits of a morton code: three interleaved 10-bit coordinates.
@@ -42,6 +36,124 @@ EXTENT_LANES = 64
 # chunks bring parallelism to a set of few trees; a set of many trees is parallel over its trees already, and every
 # chunk costs a histogram of 256 bins per pass.
 SORT_MAX_CHUNKS = 64
+
+
+class BVH_SORT_KIND(IntEnum):
+    """The sort ordering the leaf keys of a set of BVH trees."""
+
+    # The device-wide radix sort of quadrants over every key of the set (GPU, large trees)
+    DEVICE_RADIX = 0
+    # The rank of each leaf among the keys of its tree (small trees)
+    RANK = 1
+    # A radix sort per tree, its chunks in parallel (CPU, large trees)
+    PER_TREE_RADIX = 2
+
+
+class BVH_FIT_KIND(IntEnum):
+    """The bottom-up fit of the node boxes of a set of BVH trees."""
+
+    # One thread per leaf walking to the root, the arrival counters sequentially consistent (CPU)
+    LEAF_WALK = 0
+    # The leaf walk with a device fence on each side of the relaxed arrival atomic (GPU)
+    FENCED_LEAF_WALK = 1
+    # One block per tree sweeping the nodes level by level, every barrier uniform (Metal, see quadrants#925)
+    BLOCK_SWEEP = 2
+
+
+@qd.data_oriented
+class BVHStaticConfig(StaticConfig):
+    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
+
+    A leaf key packs the tree, the morton code and the leaf index in that order, so one flat sort orders every tree.
+    """
+
+    # The bits of a morton code, three interleaved coordinates of the same width
+    morton_bits: int
+    # The bits a sort must order, a multiple of 16 up to 64
+    end_bit: int
+    # Scan depth of the device-wide radix sort (see quadrants.algorithms.sort), 1 to 8
+    log256_max_n: int
+    # BVH_SORT_KIND
+    sort_kind: int
+    # BVH_FIT_KIND
+    fit_kind: int
+
+
+# Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree, the slots of its
+# device-wide radix sort and the chunks of its per-tree radix sort
+BVH_TREES = Size("bvh_trees")
+BVH_LEAVES = Size("bvh_leaves")
+SORT_SLOTS = Size("sort_slots")
+SORT_CHUNKS = Size("sort_chunks")
+# The (tree, leaf, query) triplets a box query of a BVH holds
+QUERY_RESULTS = Size("query_results")
+# The scratch of each sort and fit (see BVH_SORT_KIND and BVH_FIT_KIND)
+DEVICE_RADIX_SORT = "device_radix_sort"
+PER_TREE_RADIX_SORT = "per_tree_radix_sort"
+BLOCK_SWEEP_FIT = "block_sweep_fit"
+
+
+class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
+    """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
+
+    The n_leaves - 1 internal nodes come first, then the leaves, so node n_leaves - 1 + i holds the i-th sorted leaf,
+    whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
+    """
+
+    nodes_left: qd.Tensor = field(int)
+    nodes_right: qd.Tensor = field(int)
+    nodes_min: qd.Tensor = field((float, 3))
+    nodes_max: qd.Tensor = field((float, 3))
+    leaves_idx: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES))
+
+
+class BVHLeaves(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, BVH_LEAVES)):
+    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH), written before a build."""
+
+    aabbs_min: qd.Tensor = field((float, 3))
+    aabbs_max: qd.Tensor = field((float, 3))
+
+
+class BVHState(Data, kind=DataKind.SCRATCH):
+    """The linear bounding volume hierarchies (LBVH) of a set of trees, built by 'build_bvh'."""
+
+    tree: BVHTreeState
+    leaves: BVHLeaves
+    leaves_keys: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
+    keys_scratch: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
+    sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
+    sort_hist: qd.Tensor = field(int, shape=(BVH_TREES, SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
+    n_keys: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT)
+    nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
+    nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
+    fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)
+    lanes_min: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    lanes_max: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
+    trees_min: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+    trees_max: qd.Tensor = field((float, 3), shape=(BVH_TREES,))
+
+
+class BVHQueryResults(Data, kind=DataKind.SCRATCH):
+    """The (tree, leaf, query) triplets a box query of a BVH collects, and their count, above the capacity on overflow.
+
+    See 'func_bvh_query_aabb'.
+    """
+
+    triplets: qd.Tensor = field((int, 3), shape=(QUERY_RESULTS,))
+    count: qd.Tensor = field(int, shape=(1,))
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHQueryState:
+    """A box query of a set of trees: the leaves tested, the trees traversed and the pairs found.
+
+    Leaf i_q of tree i_t of 'leaves' is tested against tree i_t of 'tree' (see 'func_bvh_query_leaves'). It
+    holds arrays of other structs, apart from its results.
+    """
+
+    leaves: BVHLeaves
+    tree: BVHTreeState
+    results: BVHQueryResults
 
 
 class BVHData(NamedTuple):
@@ -110,7 +222,6 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
             bvh_leaves=n_leaves,
             sort_slots=n_sort_scratch,
             sort_chunks=n_sort_chunks,
-            extent_lanes=EXTENT_LANES,
         ),
         values=dict(n_keys=n_trees * n_leaves),
         # A set switched off leaves every array unused, else the scratch of the sort and the fit it runs alone

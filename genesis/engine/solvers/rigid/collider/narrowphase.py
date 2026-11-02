@@ -11,13 +11,13 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 import genesis.utils.simt as su
-from genesis.utils.array_class import (
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import (
     ColliderInfo,
     ColliderState,
     DiffContactInput,
     DynInfo,
     DynState,
-    ErrorCode,
     GJKState,
     GeomsInitAABB,
     MPRState,
@@ -3426,7 +3426,7 @@ def _func_multicontact_detect(
     past 0 requires contact 0 in slot 0.
 
     Without the contact patch, detection i stores its contact in slot i of the entry (see NarrowphaseWorkQueue in
-    array_class.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
+    rigid/data.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
     contact 0 when there is one, which skips perturbation, accepts each contact as it comes and writes those of the
     pair itself once its last detection ran.
     """
@@ -3900,7 +3900,7 @@ def _func_multicontact_gather(
 ):
     """Accept the candidate contacts of a queued pair in slot order and write those it keeps.
 
-    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in array_class.py) go through
+    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in rigid/data.py) go through
     _func_multicontact_accept in order, and the contacts kept are written by _func_multicontact_write.
     """
     i_b = collider_state.work_queue.i_b[i_work]

@@ -7,8 +7,8 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.data import DynState
 from genesis.options.sensors import SurfaceDistanceProbe as SurfaceDistanceProbeOptions
-from genesis.utils.array_class import DynState
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.raycast_qd import closest_point_on_triangle
 
