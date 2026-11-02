@@ -227,10 +227,6 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         for np_out, tc_out in zip(np_outs, tc_outs):
             assert_allclose(np_out, tc_out, tol=tol)
 
-
-@pytest.mark.required
-@pytest.mark.parametrize("batch_shape", [(), (2, 3)])
-def test_homogeneous_transforms(batch_shape):
     for convert in (lambda x: x, partial(torch.as_tensor, dtype=gs.tc_float, device=gs.device)):
         translation = convert(np.broadcast_to([1.0, 2.0, 3.0], (*batch_shape, 3)).copy())
         rotation = convert(np.broadcast_to(np.eye(3), (*batch_shape, 3, 3)).copy())
