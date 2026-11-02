@@ -337,11 +337,13 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
-            size=(0.05, 0.05, 0.05),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.1),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.MPM.Elastic(),
     )
     # FIXME: Building should raise when the scene cannot meet the accuracy of the simulation. The explicit time step
     # must stay under about h / c, with h the smallest element size, c = sqrt((lambda + 2 * mu) / rho) the wave speed,
@@ -349,12 +351,14 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
     # stay under the tolerance. Meanwhile, single precision takes a softer material.
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.5),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e6 if precision == "64" else 1e5,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e6 if precision == "64" else 1e5,
+            ),
         ),
     )
     scene.build(n_envs=2)

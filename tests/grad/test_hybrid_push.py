@@ -293,12 +293,14 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         ),
     )
     fem_block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.0, 0.0),
-            size=(0.1, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=5e4,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.0, 0.0),
+                size=(0.1, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=5e4,
+            ),
         ),
     )
     scene.build(n_envs=2)

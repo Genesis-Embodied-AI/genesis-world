@@ -205,11 +205,13 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.05,
-            pos=(0.0, 0.0, 0.3),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.0, 0.0, 0.3),
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build(n_envs=2)
 

@@ -205,12 +205,14 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.3),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=1e9,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.3),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e9,
+            ),
         ),
     )
     scene.build(n_envs=2)
