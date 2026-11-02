@@ -547,6 +547,22 @@ class Solver(RBC):
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
 
+    def save_replay_seed(self) -> torch.Tensor | None:
+        """
+        Return the solution of the iterative solve of the last substep, None for a solver running none.
+
+        The backward pass replays each substep of a step from its start (see 'Simulator._reverse'), which recomputes the
+        solution the step found. Seeded with it, the solve of the replay starts converged.
+        """
+        return None
+
+    def load_replay_seed(self, seed: torch.Tensor | None) -> None:
+        """
+        Seed the solve of the replay of a substep with what 'save_replay_seed' returned after that substep.
+
+        On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+        """
+
     @property
     def data(self) -> Iterator[DataItem | ConfigItem]:
         """Yield every array, scalar and static config the solver holds, under the dotted name a checkpoint and a
