@@ -9,7 +9,29 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: Genesis-Embodied-AI/actions/publish-to-jfrog-pypi@650087e22bb78ec3fc97938f5a57780b7fe25b0e # main
-        with:
-          repository: pypi-internal
-          version: 1.4.5+b39d50d
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      # Genesis-Embodied-AI/actions/jfrog-oidc-login, inlined because public repos cannot use internal actions.
+      - name: Exchange the GitHub OIDC token for a JFrog token
+        id: jfrog
+        run: |
+          id_token=$(curl -sfLS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -re .value)
+          echo "::add-mask::${id_token}"
+          access_token=$(jq -n --arg token "$id_token" '{
+              grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+              subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+              subject_token: $token,
+              provider_name: "github"
+            }' | curl -sfS -X POST -H "Content-Type: application/json" -d @- \
+              https://genesisai.jfrog.io/access/api/v1/oidc/token | jq -re .access_token)
+          echo "::add-mask::${access_token}"
+          echo "access-token=${access_token}" >> "$GITHUB_OUTPUT"
+      - run: uv build --wheel --out-dir dist .
+      - run: test -f dist/genesis_world-1.4.5+b39d50d-py3-none-any.whl
+      - run: |
+          uv publish \
+            --publish-url https://genesisai.jfrog.io/artifactory/api/pypi/pypi-internal \
+            --check-url https://genesisai.jfrog.io/artifactory/api/pypi/pypi-internal/simple \
+            --username "" \
+            --password "${{ steps.jfrog.outputs.access-token }}" \
+            dist/*.whl
