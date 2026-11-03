@@ -1702,8 +1702,8 @@ def func_torque_and_passive_force(
                         dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
                     )
                 elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION:
-                    # Each local is assigned once, since autodiff gets the gradient of a local reassigned in a nested
-                    # loop wrong. A local vector takes no runtime index, so the rotation vector component is selected.
+                    # A local vector takes no runtime index, so the component of the rotation vector is selected.
+                    # The position error is assigned once, since reassigning it in a branch breaks its gradient.
                     i_rot = i_d - dof_start - 3
                     rotvec_i = qd.select(i_rot == 0, rotvec[0], qd.select(i_rot == 1, rotvec[1], rotvec[2]))
                     pos_err = qd.select(
