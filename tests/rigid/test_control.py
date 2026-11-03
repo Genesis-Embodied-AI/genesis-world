@@ -155,10 +155,16 @@ def test_reset_control(robot_path, tol):
     for _ in range(5):
         scene.step()
 
-    # The integral of the position error restarts from zero on reset, so the first step reproduces the first step above
+    # The integral of the position error restarts from zero on reset, and on a pose jump that zeroes the velocity, so the
+    # first step after either reproduces the first step above
     scene.reset()
-    robot.set_dofs_position(qpos)
+    robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    scene.step()
+    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=tol)
+    for _ in range(5):
+        scene.step()
+    robot.set_dofs_position(qpos)
     scene.step()
     assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=tol)
 
