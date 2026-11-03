@@ -717,9 +717,10 @@ def kernel_set_dofs_zero_velocity(
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.vel))):
-        # Zeroing the velocity restarts the integral of the position error (see KinematicSolver.set_dofs_velocity)
+        # Zeroing the velocity restarts the integrals of the control errors (see KinematicSolver.set_dofs_velocity)
         dyn_state.dofs.vel[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
         dyn_state.dofs.ctrl_pos_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
+        dyn_state.dofs.ctrl_vel_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
 
 
 @qd.kernel(fastcache=True)

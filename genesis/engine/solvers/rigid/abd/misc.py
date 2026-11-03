@@ -279,6 +279,7 @@ def kernel_init_dof_fields(
         dyn_state.dofs.ctrl_mode[i_d, i_b] = gs.CTRL_MODE.FORCE
         dyn_state.dofs.ctrl_force[i_d, i_b] = gs.qd_float(0.0)
         dyn_state.dofs.ctrl_pos_err_int[i_d, i_b] = gs.qd_float(0.0)
+        dyn_state.dofs.ctrl_vel_err_int[i_d, i_b] = gs.qd_float(0.0)
 
     if qd.static(rigid_config.use_hibernation):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

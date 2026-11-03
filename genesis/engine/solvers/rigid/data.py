@@ -220,9 +220,11 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     ctrl_force: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_pos: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
-    # The time integral of the position error of the position controller (see func_torque_and_passive_force)
+    # The time integrals of the errors of the position and velocity controllers (see func_torque_and_passive_force)
     ctrl_pos_err_int: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_pos_err_int_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
+    ctrl_vel_err_int: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    ctrl_vel_err_int_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
     ctrl_mode: qd.Tensor = field(int, kind=DataKind.STATE)
     is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
 
