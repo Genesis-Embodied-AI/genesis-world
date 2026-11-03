@@ -48,6 +48,11 @@ def test_position_control(show_viewer):
         dtype=gs.tc_float,
         device=gs.device,
     )
+    MOTORS_KI = torch.tensor(
+        [1000.0, 1000.0, 800.0, 800.0, 500.0, 500.0, 500.0, 20.0, 20.0],
+        dtype=gs.tc_float,
+        device=gs.device,
+    )
 
     # FIXME: We do NOT raise exception anymore when setting control targets that would have no effect
     # robot.set_dofs_kp(torch.zeros_like(MOTORS_KP), envs_idx=0)
@@ -66,6 +71,8 @@ def test_position_control(show_viewer):
 
     robot.set_dofs_kp(MOTORS_KP, envs_idx=0)
     robot.set_dofs_kv(MOTORS_KD, envs_idx=0)
+    robot.set_dofs_ki(MOTORS_KI, envs_idx=0)
+    assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
     robot.control_dofs_position(MOTORS_POS_TARGET, envs_idx=0)
     robot.control_dofs_position_velocity(MOTORS_POS_TARGET, MOTORS_VEL_TARGET, envs_idx=0)
 
@@ -80,10 +87,14 @@ def test_position_control(show_viewer):
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)
+    pos_err_int = torch.zeros_like(MOTORS_POS_TARGET)
     for i in range(200):
         dofs_pos = robot.get_qpos(envs_idx=1)
         dofs_vel = robot.get_dofs_velocity(envs_idx=1)
-        dofs_torque = MOTORS_KP * (MOTORS_POS_TARGET - dofs_pos) + MOTORS_KD * (MOTORS_VEL_TARGET - dofs_vel)
+        pos_err = MOTORS_POS_TARGET - dofs_pos
+        pos_err_int = pos_err_int + pos_err * scene.sim._substep_dt
+        pos_err_int.clamp_(force_range[:, 1, 0] / MOTORS_KI, force_range[:, 1, 1] / MOTORS_KI)
+        dofs_torque = MOTORS_KP * pos_err + MOTORS_KD * (MOTORS_VEL_TARGET - dofs_vel) + MOTORS_KI * pos_err_int
         dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()
@@ -129,11 +140,23 @@ def test_reset_control(robot_path, tol):
         )
     )
     scene.build()
-    qpos = np.random.rand(robot.n_dofs)
+    robot.set_dofs_ki(1000.0)
+    # Offsets small enough that the actuators stay inside their force range, where the integral term shows
+    qpos = 0.01 * np.random.rand(robot.n_dofs)
     robot.set_dofs_position(qpos)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     scene.step()
     old_control_force = robot.get_dofs_control_force()
+    for _ in range(5):
+        scene.step()
+
+    # The integral of the position error restarts from zero on reset, so the first step reproduces the first step above
+    scene.reset()
+    robot.set_dofs_position(qpos)
+    robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    scene.step()
+    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=tol)
+
     scene.reset()
     scene.step()
     new_control_force = robot.get_dofs_control_force()
