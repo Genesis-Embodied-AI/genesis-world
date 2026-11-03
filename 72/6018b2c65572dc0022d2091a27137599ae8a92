@@ -1,0 +1,119 @@
+examples/coupling/fem_cube_linked_with_arm.py
+  s_2e342472cc8daf::t_f393b15069bad9 69
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_2e342472cc8daf::t_f965b951718c9f 107
+examples/drone/fly_route.py
+  s_2e342472cc8daf::t_75352fc5ca11ef 98
+examples/drone/hover_env.py
+  s_2e342472cc8daf::t_f744f2d9587b57 82
+examples/fluid/smoke.py
+  s_2e342472cc8daf::t_397e7ca3e8c944 97
+examples/manipulation/grasp_env.py
+  s_2e342472cc8daf::t_db8ef9b5667c57 65,103,121,130
+examples/rendering/demo.py
+  s_2e342472cc8daf::t_3b487e00c953ff 9,159
+examples/rendering/follow_entity.py
+  s_2e342472cc8daf::t_f1c8cea95d8bdf 33
+examples/rendering/moving_camera.py
+  s_2e342472cc8daf::t_94dde7874ad54a 30
+examples/rendering/speed_test.py
+  s_2e342472cc8daf::t_b87ddf006e1caa 35
+examples/rigid/franka_cube.py
+  s_2e342472cc8daf::t_f8c35e772f00d1 21
+examples/rigid/hibernation.py
+  s_2e342472cc8daf::t_555a416bfced2b 97
+examples/rigid/single_franka.py
+  s_2e342472cc8daf::t_967ef8f87d2338 34
+examples/rigid/single_franka_batch_render.py
+  s_2e342472cc8daf::t_b52707c4756c34 52,60,68,75
+examples/rigid/single_franka_envs.py
+  s_2e342472cc8daf::t_35572a433b0201 45
+examples/rigid/wrecking_ball.py
+  s_2e342472cc8daf::t_f01dca660e599f 220
+examples/sensors/camera_as_sensor.py
+  s_2e342472cc8daf::t_a4483d5b5d01fa 154
+examples/sensors/depth_camera_custom_vverts.py
+  s_2e342472cc8daf::t_7856071a6e2eb6 106,121
+examples/speed_benchmark/franka.py
+  s_2e342472cc8daf::t_b13f88f268c1f3 13
+examples/tutorials/mpm.py
+  s_2e342472cc8daf::t_0bb2037778ea7b 20
+examples/tutorials/pbd_cloth.py
+  s_2e342472cc8daf::t_19cf670e3329db 14
+examples/tutorials/selecting_rendered_envs.py
+  s_2e342472cc8daf::t_1df4cbe633e688 11
+examples/tutorials/visualization.py
+  s_2e342472cc8daf::t_f74408747fbb7b 17,34
+genesis/engine/scene.py
+  s_2e342472cc8daf::t_25927d6283cb10 757,771,791,837-839,843
+genesis/engine/sensors/camera.py
+  s_2e342472cc8daf::t_07fe6d0663aaad 83,94,246,453,640,669,758,792
+genesis/engine/solvers/sf_solver.py
+  s_2e342472cc8daf::t_c6789d456877f2 24
+genesis/options/sensors/camera.py
+  s_2e342472cc8daf::t_61b04b7e5c3f58 32,55,62-63,66-69
+genesis/options/sensors/raycaster.py
+  s_2e342472cc8daf::t_8617f7b059b17f 105,109,113,129-130,212,230,237,239-242,245
+genesis/options/solvers.py
+  s_2e342472cc8daf::t_b8188ef0a8e702 904-908,911,922-931
+genesis/options/vis.py
+  s_2e342472cc8daf::t_617829603409cb 32,70,84,86,98-101
+genesis/vis/batch_renderer.py
+  s_2e342472cc8daf::t_71575ea7eb30ad 310
+genesis/vis/camera.py
+  s_2e342472cc8daf::t_06c38ecc25ed73 32,77,96,114,513,547,564,907,909-915,932-933,935-936,939,1049,1053,1057
+genesis/vis/rasterizer.py
+  s_2e342472cc8daf::t_93a33b0169fe8f 53-55
+genesis/vis/raytracer.py
+  s_2e342472cc8daf::t_15d94c9901b546 243,617,626,810
+genesis/vis/viewer.py
+  s_2e342472cc8daf::t_fd4a1c7fe1e5fe 43,135,177,505-508,511-513
+genesis/vis/visualizer.py
+  s_2e342472cc8daf::t_d99d1116cb3df3 78,81,137-152,159
+tests/core/test_misc.py
+  s_2e342472cc8daf::t_a501a93c958bee 842,1484,1542,1596
+tests/core/test_recorders.py
+  s_2e342472cc8daf::t_1bfe15010a1a4a 420
+tests/particles/test_sf.py
+  s_2e342472cc8daf::t_ad510c6e526df8 26
+tests/rendering/test_batch_render.py
+  s_2e342472cc8daf::t_9649868970a016 44
+tests/rendering/test_debug_draw.py
+  s_2e342472cc8daf::t_7b1d7282386ee7 33,111,239,265
+tests/rendering/test_dynamic_meshes.py
+  s_2e342472cc8daf::t_eaf4a2c14e285a 51,248,299,456
+tests/rendering/test_imgui_overlay.py
+  s_2e342472cc8daf::t_f71da7002b5b87 99
+tests/rendering/test_interactive_viewer.py
+  s_2e342472cc8daf::t_580c49b7146ee2 79,108,340,460,811,831,876,889,916,930
+tests/rendering/test_offscreen.py
+  s_2e342472cc8daf::t_a95756a956ad91 184,297,303,456,535,546,556,566,878,999,1170,1236,1326,1334,1342,1424,1451,1492,1512,1570,1703,1730,1737,1890,1944,1953,2016,2142
+tests/rigid/test_api.py
+  s_2e342472cc8daf::t_38cfe4fc68e66a 1391
+tests/rigid/test_serialization.py
+  s_2e342472cc8daf::t_141d56fa3b9f94 497
+tests/sensors/test_api.py
+  s_2e342472cc8daf::t_ee64528f3c2f5e 620,717
+tests/sensors/test_camera.py
+  s_2e342472cc8daf::t_1b8a88854f2768 91,109,118,131,143,242,304,362-363,398,444-445,495,560,618-619,680,709,717
+tests/sensors/test_raycaster.py
+  s_2e342472cc8daf::t_0fdd47b729ae91 97,108,355,369
+tests/utils/simulators.py
+  s_2e342472cc8daf::t_13303811fd5d0f 145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "726018b2c65572dc0022d2091a27137599ae8a92",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
