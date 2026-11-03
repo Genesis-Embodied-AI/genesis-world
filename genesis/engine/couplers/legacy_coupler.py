@@ -489,10 +489,6 @@ class LegacyCoupler(RBC):
                         if sdf_normal.dot(self.mpm_rigid_normal[i_p, i_g, i_b]) >= 0:
                             self.mpm_rigid_normal[i_p, i_g, i_b] = sdf_normal
 
-    def fem_rigid_link_constraints(self):
-        if self.fem_solver._constraints_initialized and self.rigid_solver.is_active:
-            self.fem_solver._kernel_update_linked_vertex_constraints(self.rigid_solver.dyn_state.links)
-
     @qd.kernel
     def fem_surface_force(
         self,
@@ -939,7 +935,6 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.collider.collider_info.sdf,
                 self.rigid_solver.collider.collider_config,
             )
-            self.fem_rigid_link_constraints()
 
     @property
     def is_differentiable(self) -> bool:
