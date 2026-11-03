@@ -13,7 +13,6 @@ from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.grad.bridge import no_grad
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
@@ -500,13 +499,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._mats[mat_idx].pre_compute(J=J, F=F, i_e=i_e, i_b=i_b)
 
     @qd.kernel
-    def init_pos_and_inertia(self, f: qd.i32):
+    def init_pos_and_inertia(self, f: qd.i32, links_state: LinksState):
         dt2 = self.substep_dt**2
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             if qd.static(self._enable_vertex_constraints):
                 if self.vertex_constraints.is_constrained[i_v, i_b]:
-                    self.elements_v[f + 1, i_v, i_b].pos = self.vertex_constraints.target_pos[i_v, i_b]
-                    self.elements_v_energy[i_b, i_v].inertia = self.vertex_constraints.target_pos[i_v, i_b]
+                    target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
+                    self.elements_v[f + 1, i_v, i_b].pos = target_pos
+                    self.elements_v_energy[i_b, i_v].inertia = target_pos
                 else:
                     self.elements_v_energy[i_b, i_v].inertia = (
                         self.elements_v[f, i_v, i_b].pos
@@ -974,7 +974,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 pass  # IPC coupler handles FEM simulation
             elif self._use_implicit_solver:
                 self.precompute_material_data(f)
-                self.init_pos_and_inertia(f)
+                self.init_pos_and_inertia(f, self._sim.rigid_solver.dyn_state.links)
                 self.batch_solve(f)
                 self.setup_pos_vel(f)
             else:
@@ -982,13 +982,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.compute_vel(f)
                 self.apply_uniform_force(f)
                 if self._constraints_initialized:
-                    self.apply_soft_constraints(f)
+                    self.apply_soft_constraints(f, self._sim.rigid_solver.dyn_state.links)
 
     def substep_post_coupling(self, f):
         if self.is_active:
             self.compute_pos(f)
             if self._constraints_initialized and not self._use_implicit_solver:
-                self.apply_hard_constraints(f)
+                self.apply_hard_constraints(f, self._sim.rigid_solver.dyn_state.links)
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
@@ -1525,39 +1525,40 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # -------------------------------- vertex constraints --------------------------------
     # ------------------------------------------------------------------------------------
 
-    @qd.kernel
-    def _kernel_update_linked_vertex_constraints(self, links_state: LinksState):
-        for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
-            vc = self.vertex_constraints[i_v, i_b]
-            if vc.is_constrained and vc.link_idx >= 0:
-                i_l = vc.link_idx
-                pos = links_state.pos[i_l, i_b]
-                quat = links_state.quat[i_l, i_b]
+    @qd.func
+    def _func_get_constraint_target(self, i_v: int, i_b: int, links_state: LinksState) -> qd.types.vector(3):
+        target_pos = self.vertex_constraints[i_v, i_b].target_pos
+        i_l = self.vertex_constraints[i_v, i_b].link_idx
+        if i_l >= 0:
+            # The target of a vertex following a link is computed from the pose of the link where it is used, rather than
+            # stored, so that the gradient flows from the link to the vertex
+            offset_quat = qd_transform_quat_by_quat(
+                qd_inv_quat(self.vertex_constraints[i_v, i_b].link_init_quat), links_state.quat[i_l, i_b]
+            )
+            offset_pos = qd_transform_by_quat(self.vertex_constraints[i_v, i_b].link_offset_pos, offset_quat)
+            target_pos = links_state.pos[i_l, i_b] + offset_pos
+        return target_pos
 
-                offset_pos = vc.link_offset_pos
-                offset_quat = qd_transform_quat_by_quat(qd_inv_quat(vc.link_init_quat), quat)
-                self.vertex_constraints[i_v, i_b].target_pos = pos + qd_transform_by_quat(offset_pos, offset_quat)
-
-    @no_grad
     @qd.kernel
-    def apply_hard_constraints(self, f: qd.i32):
+    def apply_hard_constraints(self, f: qd.i32, links_state: LinksState):
         """Apply hard constraints by directly overriding positions and velocities."""
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             vc = self.vertex_constraints[i_v, i_b]
             if vc.is_constrained and not vc.is_soft_constraint:
-                self.elements_v[f + 1, i_v, i_b].pos = vc.target_pos
+                target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
+                self.elements_v[f + 1, i_v, i_b].pos = target_pos
                 self.elements_v[f + 1, i_v, i_b].vel.fill(0.0)
-                if not qd_isfinite(vc.target_pos):
+                if not qd_isfinite(target_pos):
                     self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VERTEX_NAN
 
-    @no_grad
     @qd.kernel
-    def apply_soft_constraints(self, f: qd.i32):
+    def apply_soft_constraints(self, f: qd.i32, links_state: LinksState):
         """Apply soft constraints as spring forces for explicit solver."""
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             vc = self.vertex_constraints[i_v, i_b]
             if vc.is_constrained and vc.is_soft_constraint:
-                pos_error = self.elements_v[f, i_v, i_b].pos - vc.target_pos
+                target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
+                pos_error = self.elements_v[f, i_v, i_b].pos - target_pos
                 vel_error = self.elements_v[f + 1, i_v, i_b].vel - self.elements_v[f, i_v, i_b].vel
                 spring_force = -vc.stiffness * pos_error
                 damping_force = -2.0 * qd.math.sqrt(vc.stiffness) * vel_error

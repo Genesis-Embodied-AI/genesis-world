@@ -249,6 +249,11 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=16,
         ),
+        # The collisions of the FEM solver carry no gradient (see 'LegacyCoupler.is_differentiable')
+        coupler_options=gs.options.LegacyCouplerOptions(
+            rigid_fem=False,
+            fem_mpm=False,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, -0.6, 0.4),
             camera_lookat=(0.0, 0.0, 0.0),
@@ -270,10 +275,25 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
     )
+    fem_block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.15, 0.0, 0.0),
+            size=(0.1, 0.05, 0.05),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=5e4,
+        ),
+    )
     scene.build(n_envs=2)
     # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
     block.set_particle_constraints(
         block.get_particles_in_bbox((-0.2, -0.05, -0.05), (-0.15, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
+    )
+    # The FEM block follows the box too, its near end held at the box and its far end pulled toward it by springs
+    fem_verts_x = tensor_to_array(fem_block.init_positions)[:, 0]
+    fem_block.set_vertex_constraints(np.nonzero(fem_verts_x < 0.1 + gs.EPS)[0], link=box.links[0])
+    fem_block.set_vertex_constraints(
+        np.nonzero(fem_verts_x > 0.2 - gs.EPS)[0], link=box.links[0], is_soft_constraint=True, stiffness=100.0
     )
 
     def rollout(vel):
@@ -282,27 +302,31 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         box.set_dofs_velocity(vel)
         for _ in range(20):
             scene.step()
-        return (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
+        box_loss = (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
+        return box_loss, (fem_block.get_state().pos ** 2).sum()
 
     tol = 2e-10 if precision == "64" else 1e-4
+    fem_tol = 2e-10 if precision == "64" else 5e-4
     vel = np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1))
     vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    loss = rollout(vel_ana)
+    box_loss, _ = rollout(vel_ana)
     # The block pushes the box, which would otherwise keep its velocity
     assert (box.get_dofs_velocity()[..., 0] > vel_ana[..., 0] + 5e-3).all()
-    loss.backward()
+    box_loss.backward()
+    (fem_grad,) = torch.autograd.grad(rollout(vel_ana)[1], vel_ana)
     # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
     # a reset starts free of the coupling wrench the previous one left.
     eps = 1e-6 if precision == "64" else 1e-2
-    fd_grad = np.zeros_like(vel)
+    fd_grad = np.zeros((2, *vel.shape))
     with torch.no_grad():
         for i, j in np.ndindex(vel.shape):
             losses = []
             for sign in (+1, -1):
                 perturbed = vel.copy()
                 perturbed[i, j] += sign * eps
-                losses.append(float(rollout(perturbed)))
-            fd_grad[i, j] = (losses[0] - losses[1]) / (2.0 * eps)
-    (grad_rerun,) = torch.autograd.grad(rollout(vel_ana), vel_ana)
+                losses.append([float(loss) for loss in rollout(perturbed)])
+            fd_grad[:, i, j] = (np.array(losses[0]) - np.array(losses[1])) / (2.0 * eps)
+    (grad_rerun,) = torch.autograd.grad(rollout(vel_ana)[0], vel_ana)
     assert_allclose(grad_rerun, vel_ana.grad, tol=tol)
-    assert_allclose(vel_ana.grad, fd_grad, rtol=tol, atol=tol)
+    assert_allclose(vel_ana.grad, fd_grad[0], rtol=tol, atol=tol)
+    assert_allclose(fem_grad, fd_grad[1], rtol=fem_tol, atol=fem_tol)
