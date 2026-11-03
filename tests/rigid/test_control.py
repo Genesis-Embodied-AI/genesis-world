@@ -126,9 +126,10 @@ def test_position_control(show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize("robot_path", ["xml/franka_emika_panda/panda.xml"])
-def test_reset_control(robot_path):
+def test_reset_control(n_envs, robot_path):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -144,7 +145,7 @@ def test_reset_control(robot_path):
             file=robot_path,
         )
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
     robot.set_dofs_ki(1000.0)
     # Offsets small enough that the actuators stay inside their force range, where the integral term shows
     qpos = 0.01 * np.random.rand(robot.n_dofs)
@@ -152,21 +153,31 @@ def test_reset_control(robot_path):
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     scene.step()
     old_control_force = robot.get_dofs_control_force()
-    for _ in range(5):
+    for _ in range(6):
         scene.step()
+    late_control_force = robot.get_dofs_control_force()
 
     # The integral of the position error restarts from zero on reset, and on a pose jump that zeroes the velocity, so the
-    # first step after either reproduces the first step above
+    # first step after either reproduces the first step above. An environment left alone keeps its integral.
+    envs_idx = [0] if n_envs > 0 else None
     scene.reset()
     robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    for _ in range(6):
+        scene.step()
+    scene.reset(envs_idx=envs_idx)
+    robot.set_dofs_position(qpos, envs_idx=envs_idx, zero_velocity=False)
+    robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     scene.step()
-    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=gs.EPS)
+    control_force = robot.get_dofs_control_force()
+    assert_allclose(control_force[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
+    if n_envs > 0:
+        assert_allclose(control_force[1], late_control_force[1], tol=gs.EPS)
     for _ in range(5):
         scene.step()
-    robot.set_dofs_position(qpos)
+    robot.set_dofs_position(qpos, envs_idx=envs_idx)
     scene.step()
-    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=gs.EPS)
+    assert_allclose(robot.get_dofs_control_force()[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
 
     scene.reset()
     scene.step()
