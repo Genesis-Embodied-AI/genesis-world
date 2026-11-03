@@ -1,0 +1,19 @@
+genesis/engine/solvers/kinematic_solver.py
+  s_2e342472cc8daf::t_91af73109a473a 827,835-836
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de7a9d5d6bf0ffb85b6c11a60b0d4c64f0cbecd8",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
