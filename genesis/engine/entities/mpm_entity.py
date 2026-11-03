@@ -126,6 +126,27 @@ class MPMEntity(ParticleEntity):
     # ---------------------------------- io & control ------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @gs.assert_built
+    def get_particles_stress(self, envs_idx=None):
+        """
+        Read the Cauchy stress of elastic particles in world coordinates.
+
+        Supports ``MPM.Elastic`` with either constitutive model. Stress is evaluated from the current deformation
+        gradient on demand, in pascals (force per current area). Inactive particles return zero. Active particles must
+        have positive volume. The returned snapshot has no gradient connection to the simulation.
+
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, shape (M,), optional
+            Environments to read. If None, all environments are selected.
+
+        Returns
+        -------
+        stress : torch.Tensor, shape ([M,] n_particles, 3, 3)
+            Cauchy stress tensors. The batch dimension is omitted for a non-parallelized scene.
+        """
+        return self._solver.get_particles_stress(self.material, slice(self.particle_start, self.particle_end), envs_idx)
+
     @assert_muscle
     def set_actuation(self, actus, envs_idx=None):
         """
