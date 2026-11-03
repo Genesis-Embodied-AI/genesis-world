@@ -92,9 +92,14 @@ def test_position_control(show_viewer):
         dofs_pos = robot.get_qpos(envs_idx=1)
         dofs_vel = robot.get_dofs_velocity(envs_idx=1)
         pos_err = MOTORS_POS_TARGET - dofs_pos
-        pos_err_int = pos_err_int + pos_err * scene.sim._substep_dt
-        pos_err_int.clamp_(force_range[:, 1, 0] / MOTORS_KI, force_range[:, 1, 1] / MOTORS_KI)
-        dofs_torque = MOTORS_KP * pos_err + MOTORS_KD * (MOTORS_VEL_TARGET - dofs_vel) + MOTORS_KI * pos_err_int
+        dofs_torque_pd = MOTORS_KP * pos_err + MOTORS_KD * (MOTORS_VEL_TARGET - dofs_vel)
+        pos_err_int_next = pos_err_int + pos_err * scene.sim._substep_dt
+        dofs_torque = dofs_torque_pd + MOTORS_KI * pos_err_int_next
+        is_winding_up = ((dofs_torque > force_range[:, 1, 1]) & (pos_err > 0.0)) | (
+            (dofs_torque < force_range[:, 1, 0]) & (pos_err < 0.0)
+        )
+        pos_err_int = torch.where(is_winding_up, pos_err_int, pos_err_int_next)
+        dofs_torque = dofs_torque_pd + MOTORS_KI * pos_err_int
         dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()

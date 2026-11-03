@@ -2459,9 +2459,9 @@ class RigidEntity(KinematicEntity):
 
         The integral term accumulates the position error over time, so a dof under a constant load such as gravity
         settles on its target instead of short of it by `load / kp`. The cost is overshoot and slower settling, which
-        grow with the gain. The accumulated term is bounded by the force range of the dof, so it stops growing while the
-        actuator saturates. It restarts from zero when the scene is reset, when the dof switches to another control mode
-        and while the gain is zero. The gain is zero by default.
+        grow with the gain. The accumulated error stops growing while the actuation force is held at the limit of the
+        force range of the dof, so a saturated actuator does not wind it up. It restarts from zero when the scene is
+        reset, when the dof switches to another control mode and while the gain is zero. The gain is zero by default.
 
         Parameters
         ----------
