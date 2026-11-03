@@ -2319,11 +2319,14 @@ class RigidEntity(KinematicEntity):
         The integral term accumulates the position error over time, so a dof under a constant load such as gravity
         settles on its target instead of short of it by `load / kp`. The cost is overshoot and slower settling, which
         grow with the gain. The accumulated error stops growing while the actuation force is held at the limit of the
-        force range of the dof, so a saturated actuator does not wind it up. It restarts from zero when the scene is
-        reset and when the velocity of the dof is zeroed (`zero_velocity=True` of `set_qpos` and `set_dofs_position`, as
-        in the reset of an episode). It is also cleared by every simulation step taken under another control mode or with
-        a zero gain, so changing the mode or the gain back and forth between two steps keeps it.
-        The gain is zero by default.
+        force range of the dof, so a saturated actuator does not wind it up.
+
+        The accumulated error restarts from zero when the scene is reset, and when the velocity of the dof is zeroed as
+        in the reset of an episode: by `zero_all_dofs_velocity`, by `set_dofs_velocity` without a velocity, and by
+        `set_pos`, `set_quat`, `set_qpos` and `set_dofs_position` with `zero_velocity=True` (their default), which zero
+        the velocity of every dof of the entity. Writing an explicit zero velocity keeps it. A simulation step taken
+        under another control mode or with a zero gain also clears it, so changing the mode or the gain back and forth
+        between two steps keeps it. The gain is zero by default.
 
         Parameters
         ----------
