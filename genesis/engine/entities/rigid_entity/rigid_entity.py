@@ -2461,9 +2461,10 @@ class RigidEntity(KinematicEntity):
         settles on its target instead of short of it by `load / kp`. The cost is overshoot and slower settling, which
         grow with the gain. The accumulated error stops growing while the actuation force is held at the limit of the
         force range of the dof, so a saturated actuator does not wind it up. It restarts from zero when the scene is
-        reset, when the velocity of the dof is zeroed (`zero_velocity=True` of `set_qpos` and `set_dofs_position`, as in
-        the reset of an episode), when the dof switches to another control mode and while the gain is zero. The gain is
-        zero by default.
+        reset and when the velocity of the dof is zeroed (`zero_velocity=True` of `set_qpos` and `set_dofs_position`, as
+        in the reset of an episode). It is also cleared by every simulation step taken under another control mode or with
+        a zero gain, so changing the mode or the gain back and forth between two steps keeps it.
+        The gain is zero by default.
 
         Parameters
         ----------
