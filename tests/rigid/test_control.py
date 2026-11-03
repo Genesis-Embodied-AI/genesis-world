@@ -75,6 +75,10 @@ def test_position_control(show_viewer):
     assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
     robot.control_dofs_position(MOTORS_POS_TARGET, envs_idx=0)
     robot.control_dofs_position_velocity(MOTORS_POS_TARGET, MOTORS_VEL_TARGET, envs_idx=0)
+    # The last arm joint and a finger track their target velocity alone, the arm joint saturating its force range
+    is_vel_ctrl = torch.zeros_like(MOTORS_POS_TARGET, dtype=torch.bool)
+    is_vel_ctrl[[6, 7]] = True
+    robot.control_dofs_velocity(MOTORS_VEL_TARGET[is_vel_ctrl], dofs_idx_local=[6, 7], envs_idx=0)
 
     # Must update DoF armature to emulate implicit damping for force control.
     # This is equivalent to the first-order correction term involved in implicit integration scheme,
@@ -87,19 +91,21 @@ def test_position_control(show_viewer):
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)
-    pos_err_int = torch.zeros_like(MOTORS_POS_TARGET)
+    err_int = torch.zeros_like(MOTORS_POS_TARGET)
     for i in range(200):
         dofs_pos = robot.get_qpos(envs_idx=1)
         dofs_vel = robot.get_dofs_velocity(envs_idx=1)
         pos_err = MOTORS_POS_TARGET - dofs_pos
-        dofs_torque_pd = MOTORS_KP * pos_err + MOTORS_KD * (MOTORS_VEL_TARGET - dofs_vel)
-        pos_err_int_next = pos_err_int + pos_err * scene.sim._substep_dt
-        dofs_torque = dofs_torque_pd + MOTORS_KI * pos_err_int_next
-        is_winding_up = ((dofs_torque > force_range[:, 1, 1]) & (pos_err > 0.0)) | (
-            (dofs_torque < force_range[:, 1, 0]) & (pos_err < 0.0)
+        vel_err = MOTORS_VEL_TARGET - dofs_vel
+        err = torch.where(is_vel_ctrl, vel_err, pos_err)
+        dofs_torque_base = torch.where(is_vel_ctrl, 0.0, MOTORS_KP * pos_err) + MOTORS_KD * vel_err
+        err_int_next = err_int + err * scene.sim._substep_dt
+        dofs_torque = dofs_torque_base + MOTORS_KI * err_int_next
+        is_winding_up = ((dofs_torque > force_range[:, 1, 1]) & (err > 0.0)) | (
+            (dofs_torque < force_range[:, 1, 0]) & (err < 0.0)
         )
-        pos_err_int = torch.where(is_winding_up, pos_err_int, pos_err_int_next)
-        dofs_torque = dofs_torque_pd + MOTORS_KI * pos_err_int
+        err_int = torch.where(is_winding_up, err_int, err_int_next)
+        dofs_torque = dofs_torque_base + MOTORS_KI * err_int
         dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()
@@ -147,10 +153,12 @@ def test_reset_control(n_envs, robot_path):
     )
     scene.build(n_envs=n_envs)
     robot.set_dofs_ki(1000.0)
-    # Offsets small enough that the actuators stay inside their force range, where the integral term shows
+    # Offsets and target velocity small enough that the actuators stay inside their force range, where the integral
+    # term shows
     qpos = 0.01 * np.random.rand(robot.n_dofs)
     robot.set_dofs_position(qpos)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
     scene.step()
     old_control_force = robot.get_dofs_control_force()
     for _ in range(6):
@@ -163,11 +171,13 @@ def test_reset_control(n_envs, robot_path):
     scene.reset()
     robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
     for _ in range(6):
         scene.step()
     scene.reset(envs_idx=envs_idx)
     robot.set_dofs_position(qpos, envs_idx=envs_idx, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
     scene.step()
     control_force = robot.get_dofs_control_force()
     assert_allclose(control_force[envs_idx], old_control_force[envs_idx], tol=gs.EPS)
