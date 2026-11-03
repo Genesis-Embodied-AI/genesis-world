@@ -1,5 +1,5 @@
-"""Implicit finite element method (FEM) as a secondary participant of the NewtonSolver, and the contact rows of the
-material point method (MPM) with FEM as a coupling.
+"""Implicit finite element method (FEM) as a participant of the NewtonSolver, and the contact rows of the material point
+method (MPM) with FEM as a coupling.
 
 The stage functions are those of `mpm_fem_func`, and this module binds them to the data of one scene.
 
@@ -9,6 +9,8 @@ velocities from them and runs the rest of its coupling after the solve.
 """
 
 import quadrants as qd
+
+from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
 
 from . import mpm_fem_func
 
@@ -21,11 +23,8 @@ class FemNewtonParticipant:
         self.fem = fem
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self, f: int):
+    def func_assemble(self, f: int):
         self.fem._func_compute_ele_hessian_gradient(f)
-
-    @qd.func(requires_top_level=True)
-    def func_gradient(self, f: int):
         self.fem._func_accumulate_vertex_force_preconditioner(f)
 
     @qd.func(requires_top_level=True)
@@ -41,28 +40,28 @@ class FemNewtonParticipant:
         mpm_fem_func.func_fem_precondition(self.fem.substep_dt, self.fem)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, ws: qd.template()):
-        mpm_fem_func.func_fem_pcg_init_direction(self.fem, ws)
+    def func_pcg_init_direction(self, pcg_scalars: qd.template()):
+        mpm_fem_func.func_fem_pcg_init_direction(self.fem, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_matvec(self):
+    def func_matvec(self, pcg_scalars: qd.template()):
         mpm_fem_func.func_fem_matvec(self.fem.substep_dt, self.fem)
 
     @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, ws: qd.template()):
-        mpm_fem_func.func_fem_matvec_dot(self.fem, ws)
+    def func_matvec_dot(self, pcg_scalars: qd.template()):
+        mpm_fem_func.func_fem_matvec_dot(self.fem, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, ws: qd.template()):
-        mpm_fem_func.func_fem_pcg_update_xr(self.fem, ws)
+    def func_pcg_update_xr(self, pcg_scalars: qd.template()):
+        mpm_fem_func.func_fem_pcg_update_xr(self.fem, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, ws: qd.template()):
-        mpm_fem_func.func_fem_pcg_dot_rz(self.fem, ws)
+    def func_pcg_dot_rz(self, pcg_scalars: qd.template()):
+        mpm_fem_func.func_fem_pcg_dot_rz(self.fem, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, ws: qd.template()):
-        mpm_fem_func.func_fem_pcg_direction(self.fem, ws)
+    def func_pcg_direction(self, pcg_scalars: qd.template()):
+        mpm_fem_func.func_fem_pcg_direction(self.fem, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
@@ -97,15 +96,12 @@ class MpmFemContact:
         mpm_fem_func.func_fem_contact_gradient(self.grid, self.newton, self.fem, self.params)
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f: int):
+    def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
         mpm_fem_func.func_fem_contact_matvec(
-            f, self.particles, self.grid, self.newton, self.linear, self.fem, self.params
+            f, self.particles, self.grid, self.newton, self.linear, self.fem, pcg_scalars, self.params
         )
-
-    @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self, f: int):
         mpm_fem_func.func_fem_contact_matvec_post(
-            f, self.particles, self.grid, self.newton, self.linear, self.fem, self.params
+            f, self.particles, self.grid, self.newton, self.linear, self.fem, pcg_scalars, self.params
         )
 
     @qd.func(requires_top_level=True)
@@ -122,10 +118,7 @@ def kernel_fem_begin(fem: qd.template()):
 
 
 @qd.kernel
-def kernel_fem_rows(
-    f: int,
-    contact: qd.template(),
-):
+def kernel_fem_rows(f: int, contact: qd.template()):
     mpm_fem_func.func_build_fem_rows(
         f,
         contact.params.substep_dt[()],
@@ -140,17 +133,16 @@ def kernel_fem_rows(
     contact.func_after_step(f)
 
 
-class FemNewtonHost:
+class FemNewtonHost(NewtonHost):
     """Host stages of FEM around the joint solve: the inertia and material data of its substep before, and its
     velocities from the solved positions after.
 
     Once FEM has its velocities, the host runs the part of the coupler's step on FEM that follows FEM's own solve in a
     substep FEM solves alone (see LegacyCoupler.couple_fem)."""
 
-    is_differentiable = False
-
-    def __init__(self, fem_solver, coupler):
+    def __init__(self, fem_solver, device: FemNewtonParticipant, coupler):
         self._fem_solver = fem_solver
+        self._device = device
         self._coupler = coupler
 
     def newton_prepare(self, f):
@@ -158,23 +150,21 @@ class FemNewtonHost:
         self._fem_solver.init_pos_and_inertia(f)
         kernel_fem_begin(self._fem_solver)
 
+    def newton_assemble(self, f, is_exact=False):
+        kernel_assemble_participant(f, self._device)
+
     def newton_finish(self, f):
         self._fem_solver.setup_pos_vel(f)
 
     def newton_after(self, f):
         self._coupler.couple_fem(f)
 
-    def newton_end(self, f):
-        pass
 
-
-class MpmFemContactHost:
+class MpmFemContactHost(NewtonHost):
     """Host stages of the MPM-FEM contact rows before the joint solve: the triangle trees, then the rows and their
     contact point displacement at the start point.
 
     The force of the rows on FEM acts in the joint solve itself."""
-
-    is_differentiable = False
 
     def __init__(self, device: MpmFemContact):
         self._device = device
@@ -182,12 +172,3 @@ class MpmFemContactHost:
     def newton_prepare(self, f):
         self._device.query.build(f)
         kernel_fem_rows(f, self._device)
-
-    def newton_finish(self, f):
-        pass
-
-    def newton_after(self, f):
-        pass
-
-    def newton_end(self, f):
-        pass

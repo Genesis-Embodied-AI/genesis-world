@@ -12,7 +12,7 @@ import genesis.utils.geom as gu
 
 
 @qd.func
-def soft_row(params, phi: float, vel: float, diag_coef: float, dt: float):
+def soft_row(params: qd.types.vector(7), phi: float, vel: float, diag_coef: float, dt: float):
     """Return the stiffness D and the target t of one row relative to the partner, at a negative signed distance.
 
     phi is the signed distance, vel the velocity J v of the row relative to the partner at the step start, and the

@@ -19,7 +19,6 @@ from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.geom import SpatialHasher
-from genesis.utils.misc import qd_to_numpy
 
 from .particle_solver import ParticleSolver
 
@@ -65,7 +64,7 @@ class PBDSolver(ParticleSolver):
         self._position_tolerance = options.position_tolerance
         # Device state of the constraint loop: its condition, its iteration count and the largest correction of the
         # iteration
-        self._loop_cond = qd.ndarray(qd.i32, shape=())
+        self._is_loop_running = qd.ndarray(qd.i32, shape=())
         self._loop_iter = qd.ndarray(qd.i32, shape=())
         self._max_correction = qd.ndarray(gs.qd_float, shape=())
         # Particles of another solver the PBD particles collide with as immovable obstacles, set by that solver before
@@ -1175,11 +1174,10 @@ class PBDSolver(ParticleSolver):
 
         Every iteration solves the topology constraints, every kind as its own group within its own iteration budget,
         then the density constraints and the contact group. The loop runs `solver_iterations` iterations, or stops once
-        the largest correction of an iteration falls below `position_tolerance`. `_loop_iter` holds the number of
-        iterations it ran."""
+        the largest correction of an iteration falls below `position_tolerance`."""
         self._loop_iter[()] = 0
-        self._loop_cond[()] = 1
-        while qd.graph.do_while(self._loop_cond):
+        self._is_loop_running[()] = 1
+        while qd.graph.do_while(self._is_loop_running):
             if qd.static(self._position_tolerance > 0.0):
                 self._max_correction[()] = 0.0
             if qd.static(self._n_edges > 0):
@@ -1208,12 +1206,7 @@ class PBDSolver(ParticleSolver):
             if qd.static(self._position_tolerance > 0.0):
                 if self._max_correction[()] < self._position_tolerance:
                     is_done = True
-            self._loop_cond[()] = 0 if is_done else 1
-
-    @property
-    def n_iterations(self):
-        """The number of iterations the constraint loop ran in the last substep, read back from the device."""
-        return int(qd_to_numpy(self._loop_iter))
+            self._is_loop_running[()] = 0 if is_done else 1
 
     def substep_post_coupling(self, f):
         if self.is_active:

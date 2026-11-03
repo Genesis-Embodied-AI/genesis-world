@@ -12,7 +12,7 @@ from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
 
 
-@pytest.mark.slow  # ~300s
+@pytest.mark.slow  # ~60s
 @pytest.mark.required
 def test_rigid_mpm_muscle(show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)
@@ -20,7 +20,7 @@ def test_rigid_mpm_muscle(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=3e-3,
-            substeps=10,
+            substeps=1,
         ),
         rigid_options=gs.options.RigidOptions(
             gravity=(0, 0, -9.8),
@@ -28,7 +28,6 @@ def test_rigid_mpm_muscle(show_viewer):
         ),
         mpm_options=gs.options.MPMOptions(
             gravity=(0.0, 0.0, 0.0),  # mimic gravity compensation
-            enable_CPIC=True,
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
         ),
@@ -61,6 +60,7 @@ def test_rigid_mpm_muscle(show_viewer):
                 nu=0.45,
                 rho=1000.0,
                 model="neohooken",
+                sampler="regular",
             ),
             damping=1000.0,
             thickness=0.05,
@@ -79,8 +79,8 @@ def test_rigid_mpm_muscle(show_viewer):
     scene.build()
 
     scene.reset()
-    for i in range(150):
-        robot.control_dofs_velocity(np.array([2.0 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
+    for i in range(200):
+        robot.control_dofs_velocity(np.array([4.5 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
         scene.step()
 
     ball_pos_delta = ball.get_pos() - torch.tensor(BALL_POS_INIT, dtype=gs.tc_float, device=gs.device)
@@ -314,7 +314,7 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     # The implicit MPM solve stops once its velocity update falls below the Newton tolerance, which bounds the velocity
     # of the cube at rest
-    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=scene.sim.mpm_solver._options.newton_velocity_tol)
+    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=scene.options.newton.velocity_tol)
     assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 

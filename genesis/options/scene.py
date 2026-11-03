@@ -13,6 +13,7 @@ from .solvers import (
     KinematicOptions,
     LegacyCouplerOptions,
     MPMOptions,
+    NewtonOptions,
     PBDOptions,
     RigidOptions,
     SFOptions,
@@ -42,6 +43,7 @@ class SceneOptions(Options):
     fem: FEMOptions = Field(default_factory=FEMOptions)
     sf: SFOptions = Field(default_factory=SFOptions)
     pbd: PBDOptions = Field(default_factory=PBDOptions)
+    newton: NewtonOptions = Field(default_factory=NewtonOptions)
     coupler: BaseCouplerOptions = Field(default_factory=LegacyCouplerOptions)
     vis: VisOptions = Field(default_factory=VisOptions)
     viewer: ViewerOptions = Field(default_factory=ViewerOptions)

@@ -2,6 +2,7 @@ import numpy as np
 
 import quadrants as qd
 
+import genesis as gs
 from genesis.utils.misc import qd_debug_asserts
 
 EMPTY_KEY = 0xFFFFFFFFFFFFFFFF
@@ -20,21 +21,21 @@ class OpenAddressingHash:
     def __init__(self, max_keys: int) -> None:
         self.capacity = 1 << max(int(np.ceil(np.log2(max(2 * max_keys, 2)))), 1)
         self.keys = qd.ndarray(qd.u64, shape=(self.capacity,))
-        self.vals = qd.ndarray(qd.i32, shape=(self.capacity,))
+        self.vals = qd.ndarray(gs.qd_int, shape=(self.capacity,))
         self.keys.from_numpy(np.full(self.capacity, EMPTY_KEY, dtype=np.uint64))
-        self.vals.from_numpy(np.full(self.capacity, -1, dtype=np.int32))
+        self.vals.from_numpy(np.full(self.capacity, -1, dtype=gs.np_int))
 
     @qd.func
-    def slot_of(self, key):
+    def slot_of(self, key: qd.u64):
         """Return the home slot of a key, a 64-bit avalanche mix masked to the capacity."""
         h = key
         h = h ^ (h >> qd.u64(33))
         h = h * qd.u64(0xFF51AFD7ED558CCD)
         h = h ^ (h >> qd.u64(33))
-        return qd.i32(h & qd.u64(self.keys.shape[0] - 1))
+        return gs.qd_int(h & qd.u64(self.keys.shape[0] - 1))
 
     @qd.func
-    def insert(self, key, value):
+    def insert(self, key: qd.u64, value: int):
         """Claim a slot for a key that this phase inserts once, publish its value, and return whether it found a slot.
 
         A full table, which the capacity rule excludes, fails the assertion in debug mode and inserts nothing otherwise,
@@ -57,11 +58,11 @@ class OpenAddressingHash:
         return is_inserted
 
     @qd.func
-    def lookup(self, key):
+    def lookup(self, key: qd.u64):
         """Return the value of a key, or -1 for an absent key, the probes stopping at an empty slot or a full turn."""
         capacity = self.keys.shape[0]
         i = self.slot_of(key)
-        result = qd.i32(-1)
+        result = gs.qd_int(-1)
         is_searching = True
         probes = 0
         while is_searching and probes < capacity:
@@ -78,9 +79,7 @@ class OpenAddressingHash:
 
 
 @qd.func(requires_top_level=True)
-def func_reset_hash(
-    table: qd.template(),
-):
+def func_reset_hash(table: qd.template()):
     qd.loop_config(name="hash_reset")
     for i in range(table.keys.shape[0]):
         table.keys[i] = qd.u64(EMPTY_KEY)

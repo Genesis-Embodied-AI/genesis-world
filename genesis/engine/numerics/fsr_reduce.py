@@ -4,36 +4,30 @@ import genesis as gs
 
 
 @qd.func
-def _segment_metadata(
-    gid: int,
-    n,
-    seg_ids: qd.template(),
-    sorted_keys: qd.template(),
-    sentinel: qd.template(),
-):
-    lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
+def _segment_metadata(gid: int, n: int, seg_ids: qd.template(), sorted_keys: qd.template(), sentinel: qd.template()):
+    lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
     is_valid = gid < n and sorted_keys[gid] != sentinel
-    segment = qd.i32(0)
-    previous_segment = qd.i32(-1)
-    next_segment = qd.i32(-2)
+    segment = gs.qd_int(0)
+    previous_segment = gs.qd_int(-1)
+    next_segment = gs.qd_int(-2)
     if is_valid:
-        segment = qd.i32(seg_ids[gid])
+        segment = gs.qd_int(seg_ids[gid])
         if lane > 0 and gid > 0:
-            previous_segment = qd.i32(seg_ids[gid - 1])
+            previous_segment = gs.qd_int(seg_ids[gid - 1])
         if lane < 31 and gid + 1 < n:
-            next_segment = qd.i32(seg_ids[gid + 1])
-    is_head = qd.i32(not is_valid or lane == 0 or previous_segment != segment)
+            next_segment = gs.qd_int(seg_ids[gid + 1])
+    is_head = gs.qd_int(not is_valid or lane == 0 or previous_segment != segment)
     is_tail = is_valid and (lane == 31 or gid == n - 1 or next_segment != segment)
-    return qd.Vector([qd.i32(is_valid), segment, is_head, qd.i32(is_tail)], dt=qd.i32)
+    return qd.Vector([gs.qd_int(is_valid), segment, is_head, gs.qd_int(is_tail)], dt=gs.qd_int)
 
 
 @qd.func
 def head_segmented_reduce_add(value, tail_flag):
-    lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
-    tail_mask = qd.u32(qd.simt.subgroup.ballot(qd.i32(tail_flag != 0))) | qd.u32(0x80000000)
+    lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+    tail_mask = qd.u32(qd.simt.subgroup.ballot(gs.qd_int(tail_flag != 0))) | qd.u32(0x80000000)
     tails_at_or_above = tail_mask & (qd.u32(0xFFFFFFFF) << qd.u32(lane))
     lowest_tail = tails_at_or_above & (qd.u32(0) - tails_at_or_above)
-    tail_lane = qd.i32(31) - qd.i32(qd.math.clz(lowest_tail))
+    tail_lane = gs.qd_int(31) - gs.qd_int(qd.math.clz(lowest_tail))
     distance = tail_lane - lane
     for level in qd.static(range(5)):
         offset = qd.static(1 << level)
@@ -68,31 +62,31 @@ def func_fsr_reduce(
         qd.loop_config(name="fsr_reduce_cpu")
         for gid in range(n[()]):
             if sorted_keys[gid] != qd.u64(0xFFFFFFFFFFFFFFFF):
-                segment = qd.i32(seg_ids[gid])
-                if gid == 0 or qd.i32(seg_ids[gid - 1]) != segment:
+                segment = gs.qd_int(seg_ids[gid])
+                if gid == 0 or gs.qd_int(seg_ids[gid - 1]) != segment:
                     total = qd.Vector.zero(value_type, block_scalar_count)
                     entry = gid
                     is_in_run = True
                     while is_in_run:
-                        source = qd.i32(sorted_perm[entry]) * block_scalar_count
+                        source = gs.qd_int(sorted_perm[entry]) * block_scalar_count
                         for component in qd.static(range(block_scalar_count)):
                             total[component] += values[source + component]
                         entry += 1
                         # Reading seg_ids only below n: a kernel 'and' does not short-circuit
                         is_in_run = False
                         if entry < n[()]:
-                            is_in_run = qd.i32(seg_ids[entry]) == segment
+                            is_in_run = gs.qd_int(seg_ids[entry]) == segment
                     for component in qd.static(range(block_scalar_count)):
                         output[segment * block_scalar_count + component] += total[component]
     else:
         qd.loop_config(name="fsr_reduce", block_dim=256)
         for gid in range(qd.min(((padded_n[()] + 31) // 32) * 32, capacity)):
-            lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
+            lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
             if gid - lane < padded_n[()]:
                 metadata = _segment_metadata(gid, n[()], seg_ids, sorted_keys, qd.u64(0xFFFFFFFFFFFFFFFF))
-                source = qd.i32(0)
+                source = gs.qd_int(0)
                 if metadata[0] != 0:
-                    source = qd.i32(sorted_perm[gid])
+                    source = gs.qd_int(sorted_perm[gid])
                 for component in qd.static(range(block_scalar_count)):
                     value = value_type(0.0)
                     if metadata[0] != 0:

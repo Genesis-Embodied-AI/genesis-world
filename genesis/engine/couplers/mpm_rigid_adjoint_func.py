@@ -61,11 +61,7 @@ def orthogonals_bw(n: qd.types.vector(3), g_d1: qd.types.vector(3), g_d2: qd.typ
 
 @qd.func
 def geom_sdf_grid_hessian(
-    i_g: int,
-    i_b: int,
-    x: qd.types.vector(3),
-    geoms_state: array_class.GeomsState,
-    sdf_info: array_class.SDFInfo,
+    i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: array_class.GeomsState, sdf_info: array_class.SDFInfo
 ):
     """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at a world point.
 
@@ -200,7 +196,7 @@ def func_rigid_contact_adjoint(
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
-    coupling: qd.template(),
+    rigid_data: qd.template(),
     geoms_state: array_class.GeomsState,
     links_state: array_class.LinksState,
     dofs_state: array_class.DofsState,
@@ -215,7 +211,7 @@ def func_rigid_contact_adjoint(
     """Pull the Rigid contact rows of every particle back into the adjoints of the particles and of Rigid's state.
 
     The adjoints add to frame f of the particles, from the joint solution (u*, x*) and the adjoint lambda =
-    (`linear.solution`, `coupling.sol`). With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k,
+    (`linear.solution`, `rigid_data.sol`). With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k,
     t_k_bar = D_k a_k, J_k_bar = -D_k (a_k Delta + c_k delta), Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k
     J_k. Delta and delta move with the weights, the arm r = x_p - root_COM of the particle and the cdofs of its chain.
     The rows move with the particle state, with the geom pose through its distance and normal, and with the link
@@ -239,8 +235,8 @@ def func_rigid_contact_adjoint(
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
             r = x_p - links_state.root_COM[i_l, i_b]
-            V_lin, V_ang = link_chain_spatial(i_l, i_b, coupling.x, dofs_state, links_info, config)
-            L_lin, L_ang = link_chain_spatial(i_l, i_b, coupling.sol, dofs_state, links_info, config)
+            V_lin, V_ang = link_chain_spatial(i_l, i_b, rigid_data.x, dofs_state, links_info, config)
+            L_lin, L_ang = link_chain_spatial(i_l, i_b, rigid_data.sol, dofs_state, links_info, config)
             Delta = dxp - (V_lin + V_ang.cross(r))
             delta = lam_p - (L_lin + L_ang.cross(r))
 
@@ -280,8 +276,8 @@ def func_rigid_contact_adjoint(
             while i_a >= 0:
                 I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
                 for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
-                    x_d = coupling.x[i_d, i_b]
-                    lam_d = coupling.sol[i_d, i_b]
+                    x_d = rigid_data.x[i_d, i_b]
+                    lam_d = rigid_data.sol[i_d, i_b]
                     dofs_state.cdof_vel.grad[i_d, i_b] += -(x_d * Delta_bar + lam_d * delta_bar)
                     dofs_state.cdof_ang.grad[i_d, i_b] += -(x_d * r_cross_Delta_bar + lam_d * r_cross_delta_bar)
                 i_a = links_info.parent_idx[I_a]
@@ -295,7 +291,7 @@ def func_rigid_contact_adjoint(
             normal = geom_normal(i_g, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, config)
             friction = qd.max(geoms_info.friction[i_g] * geoms_state.friction_ratio[i_g, i_b], 1e-2)
             friction_sq_reg = friction * friction / rigid_info.impratio[None]
-            U, S, V = qd.svd(particles.F[f, i_p, i_b], gs.qd_float)
+            U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()
             n_rest = R.transpose() @ normal
             W = particles_info.contact_invweight[i_p]

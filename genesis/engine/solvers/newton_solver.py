@@ -5,17 +5,17 @@ between them. The linear system of every Newton iteration is solved by one preco
 the rows of all participants, preconditioned block-diagonally by each participant over its own rows, and the line
 search runs on the total energy.
 
-A participant owns its unknowns, its energy, its share of the gradient and of the operator, and a preconditioner over
-its own rows. The primary participant also owns the block coordinate (BCOO) matrix and the PCG workspace whose device
-scalars (r.z, p.Ap, the threshold, the convergence flag) every participant reduces into. A secondary one keeps its
-vectors and adds its partial dot products at fixed points of the iteration. A coupling owns only the knowledge of both
-sides and adds its cross terms to their gradients and operators.
+Every participant runs the same stages. It owns its unknowns, its energy, its share of the gradient and of the operator,
+the PCG vectors over its own rows and a preconditioner over them, and adds its share of r . z and p . Ap into the
+scalars of the solve, which the Newton solver owns (see PCGScalars) and from which it takes the steps and the
+convergence decision between the stages of the participants. A coupling owns only the knowledge of both sides and adds
+its cross terms to their gradients and operators.
 
-The participant and coupling objects enter the kernels as templates, in a fixed number of slots: an absent one is a
-`NullParticipant`. Quadrants registers the arrays of a template only through @qd.data_oriented attributes and frozen
-dataclasses, so the slots are kernel arguments rather than a list.
+The participants enter the kernels as one template argument, `NewtonParticipants`, which holds the participants and the
+couplings in @qd.data_oriented NamedTuples that the composed stages iterate with qd.static.
 """
 
+import collections
 import functools
 from typing import TYPE_CHECKING
 
@@ -24,11 +24,16 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.linear_pcg import PCGScalars, func_pcg_arm, func_pcg_decide, func_pcg_reset, func_pcg_step
 from genesis.engine.numerics.newton_control import (
     NewtonControl,
     func_accept_or_backtrack,
     func_check_convergence,
+    func_clear_non_finite,
     func_init_line_search,
+    func_reset_energy,
+    func_reset_newton_control,
+    func_reset_newton_measures,
     func_update_convergence,
 )
 from genesis.grad.bridge import custom_backward
@@ -39,96 +44,69 @@ from .base_solver import Solver
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+    from genesis.options.solvers import NewtonOptions
 
-# Run the Newton iterations as one graph (`kernel_newton_loop`), or drive them from the host with only the
-# preconditioned conjugate gradient iterations as a graph. The graph runs faster, the host loop compiles faster.
-# FIXME: The compile time of a graph grows faster than its size, so the Newton graph compiles much slower than its
-# stages as separate kernels, and a change of any stage in it recompiles it whole.
-USE_NEWTON_GRAPH = False
-
-# Slots of the composed kernels
-N_SECONDARY_SLOTS = 3
-N_COUPLING_SLOTS = 3
-
-# Relative reduction of r . z at which the conjugate gradient of the adjoint solve stops, tighter than the forward
-# solve's, whose error the adjoint carries into every gradient
-ADJOINT_PCG_TOL_RATE = {64: 1e-24, 32: 1e-12}
+# Default of NewtonOptions.adjoint_pcg_tol by the bits of the floating-point precision
+DEFAULT_ADJOINT_PCG_TOL = {64: 1e-24, 32: 1e-12}
 
 
 @qd.data_oriented
-class NullParticipant:
-    """Stands in for an absent secondary participant or coupling of the composed kernels: every stage does nothing."""
+class NewtonParticipants:
+    """Participants of a Newton solve and the couplings between them, gathered into one kernel argument.
 
-    @qd.func(requires_top_level=True)
-    def func_evaluate(self, f: int):
+    `members` and `couplings` are @qd.data_oriented NamedTuples (see `participant_group`) of their device objects. They
+    stay members of this object: a tuple passed as the kernel argument itself cannot be weakly referenced, so the kernel
+    would re-derive its specialization on every launch.
+    """
+
+    def __init__(self, members, couplings):
+        self.members = members
+        self.couplings = couplings
+
+
+def participant_group(name: str, devices: list):
+    """Gather the device objects of several participants into a @qd.data_oriented NamedTuple, which qd.static iterates.
+
+    Quadrants declares the arrays a kernel reaches through a template argument by walking its @qd.data_oriented members.
+    """
+    fields = [f"member_{i}" for i in range(len(devices))]
+    # FIXME: quadrants#1040 - the walk of the arguments reads the members of a data-oriented object through vars(),
+    # which a NamedTuple has none of. A subclass without __slots__ carries a __dict__, which holds the members under
+    # their field names as well, so that the walk declares their arrays.
+    group_type = qd.data_oriented(type(name, (collections.namedtuple(name, fields),), {}))
+    group = group_type(*devices)
+    group.__dict__.update(zip(fields, devices))
+    return group
+
+
+class NewtonHost:
+    """Host stages of a participant or a coupling around the Newton solve of a substep, which do nothing by default.
+
+    A participant also assembles its share of the Newton system from the host (`newton_assemble`), reverses the part of
+    its substep that the solve takes over around the joint adjoint solve (`newton_backward`), and flags a solve stopped
+    on a non-finite measure for the environments its solver reports errors on (`newton_flag_non_finite`)."""
+
+    is_differentiable = False
+
+    def newton_prepare(self, f):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_gradient(self, f: int):
+    def newton_flag_non_finite(self, control):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_factor(self):
+    def newton_finish(self, f):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_pcg_init(self):
+    def newton_after(self, f):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_precondition(self):
+    def newton_end(self, f):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, ws: qd.template()):
+    def newton_adjoint_rhs(self, f):
         pass
 
-    @qd.func(requires_top_level=True)
-    def func_matvec(self):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, ws: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, ws: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, ws: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, ws: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f, is_trial):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_contact_gradient(self, f: int):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f: int):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self, f: int):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_after_step(self, f: int):
+    def newton_adjoint_finish(self, f):
         pass
 
 
@@ -136,297 +114,170 @@ class NullParticipant:
 
 
 @qd.func(requires_top_level=True)
-def func_assemble_secondary(
-    f: int,
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
-    """Assemble the gradients and factors of the secondary participants and couplings at the current iterate.
-
-    Runs after the assembly of the primary, which stages what the couplings read of it."""
-    s0.func_evaluate(f)
-    s0.func_gradient(f)
-    s1.func_evaluate(f)
-    s2.func_evaluate(f)
-    s1.func_gradient(f)
-    s2.func_gradient(f)
-    c0.func_contact_gradient(f)
-    c1.func_contact_gradient(f)
-    c2.func_contact_gradient(f)
-    s0.func_factor()
-    s1.func_factor()
-    s2.func_factor()
+def func_assemble(f: int, participants: qd.template()):
+    """Assemble the Newton system of every participant at the current iterate, then the share of the couplings."""
+    for member in qd.static(participants.members):
+        member.func_assemble(f)
+    func_contact_gradient(f, participants)
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_start(
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-):
+def func_contact_gradient(f: int, participants: qd.template()):
+    """Add the share of the couplings to the gradients and preconditioners of both sides, once they all assembled."""
+    for coupling in qd.static(participants.couplings):
+        coupling.func_contact_gradient(f)
+
+
+@qd.func(requires_top_level=True)
+def func_pcg_start(pcg_scalars: qd.template(), participants: qd.template()):
     """Build the preconditioner of every participant and start the preconditioned conjugate gradient from 0.
 
-    The start sets r = -grad, z = M^-1 r, p = z and r . z."""
-    p.func_pcg_prepare()
-    p.func_pcg_init_residual()
-    s0.func_pcg_init()
-    s1.func_pcg_init()
-    s2.func_pcg_init()
-    p.func_precondition()
-    s0.func_precondition()
-    s1.func_precondition()
-    s2.func_precondition()
-    p.func_pcg_init_direction()
-    s0.func_pcg_init_direction(p.ws)
-    s1.func_pcg_init_direction(p.ws)
-    s2.func_pcg_init_direction(p.ws)
+    The start sets r = -grad, z = M^-1 r and p = z over the rows of every participant, then the convergence threshold
+    from the r . z they all added."""
+    func_pcg_reset(pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_factor()
+        member.func_pcg_init()
+        member.func_precondition()
+        member.func_pcg_init_direction(pcg_scalars)
+    func_pcg_arm(pcg_scalars)
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_iteration(
-    f: int,
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
+def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.template()):
     """Run one preconditioned conjugate gradient iteration over the rows of every participant.
 
-    The operator includes the cross terms of the couplings."""
-    p.func_pcg_spmv()
-    c0.func_contact_matvec(f)
-    c1.func_contact_matvec(f)
-    c2.func_contact_matvec(f)
-    s0.func_matvec()
-    s1.func_matvec()
-    s2.func_matvec()
-    c0.func_contact_matvec_post(f)
-    c1.func_contact_matvec_post(f)
-    c2.func_contact_matvec_post(f)
-    s0.func_matvec_dot(p.ws)
-    s1.func_matvec_dot(p.ws)
-    s2.func_matvec_dot(p.ws)
-    s0.func_pcg_update_xr(p.ws)
-    s1.func_pcg_update_xr(p.ws)
-    s2.func_pcg_update_xr(p.ws)
-    p.func_pcg_update_xr()
-    p.func_precondition()
-    s0.func_precondition()
-    s1.func_precondition()
-    s2.func_precondition()
-    s0.func_pcg_dot_rz(p.ws)
-    s1.func_pcg_dot_rz(p.ws)
-    s2.func_pcg_dot_rz(p.ws)
-    p.func_pcg_direction_update()
-    s0.func_pcg_direction(p.ws)
-    s1.func_pcg_direction(p.ws)
-    s2.func_pcg_direction(p.ws)
+    The couplings add their cross terms once every participant set the product of its own operator. The step alpha and
+    the direction factor beta, with the convergence decision, are taken once every participant added its p . Ap and its
+    r . z (see PCGScalars)."""
+    for member in qd.static(participants.members):
+        member.func_matvec(pcg_scalars)
+    for coupling in qd.static(participants.couplings):
+        coupling.func_contact_matvec(f, pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_matvec_dot(pcg_scalars)
+    func_pcg_step(pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_pcg_update_xr(pcg_scalars)
+        member.func_precondition()
+        member.func_pcg_dot_rz(pcg_scalars)
+    func_pcg_decide(pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_pcg_direction(pcg_scalars)
 
 
 @qd.func(requires_top_level=True)
-def func_start_line_search(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-):
+def func_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
     """Set the Newton direction of every participant from the conjugate gradient solution, then start the line search.
 
     The participants report the measure of the direction, on which the convergence is checked first."""
-    s0.func_start_line_search(control, f)
-    s1.func_start_line_search(control, f)
-    s2.func_start_line_search(control, f)
-    p.func_start_line_search(control, f)
-    func_check_convergence(control)
-    func_init_line_search(control)
+    func_reset_newton_measures(newton_control)
+    for member in qd.static(participants.members):
+        member.func_start_line_search(newton_control, f)
+    func_check_convergence(newton_control)
+    func_init_line_search(newton_control)
 
 
 @qd.func(requires_top_level=True)
-def func_step_forward(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
+def func_step_forward(f: int, newton_control: qd.template(), participants: qd.template()):
     """Move every participant to the trial point of the line-search step and update what the couplings derive of it."""
-    p.func_step_forward(control)
-    s0.func_step_forward(control, f)
-    s1.func_step_forward(control, f)
-    s2.func_step_forward(control, f)
-    c0.func_after_step(f)
-    c1.func_after_step(f)
-    c2.func_after_step(f)
+    for member in qd.static(participants.members):
+        member.func_step_forward(newton_control, f)
+    for coupling in qd.static(participants.couplings):
+        coupling.func_after_step(f)
 
 
 @qd.func(requires_top_level=True)
-def func_energy(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    is_trial: bool,
-):
-    """Evaluate the total energy at the start or trial point.
-
-    The primary writes the energy and the secondary participants add theirs."""
-    p.func_energy(control, f, is_trial)
-    s0.func_energy(control, f, is_trial)
-    s1.func_energy(control, f, is_trial)
-    s2.func_energy(control, f, is_trial)
+def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: bool):
+    """Evaluate the total energy at the start or trial point, which every participant adds its own to."""
+    func_reset_energy(newton_control, is_trial)
+    for member in qd.static(participants.members):
+        member.func_energy(newton_control, f, is_trial)
 
 
 # ================================================== kernels ==================================================
 
 
 @qd.kernel
-def kernel_assemble_secondary(
-    f: int,
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
-    func_assemble_secondary(f, s0, s1, s2, c0, c1, c2)
+def kernel_assemble_participant(f: int, participant: qd.template()):
+    """Assemble the Newton system of one participant, for a participant needing no storage growth from the host."""
+    participant.func_assemble(f)
 
 
 @qd.kernel
-def kernel_pcg_start(
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-):
-    func_pcg_start(p, s0, s1, s2)
+def kernel_contact_gradient(f: int, participants: qd.template()):
+    func_contact_gradient(f, participants)
+
+
+@qd.kernel
+def kernel_pcg_start(pcg_scalars: qd.template(), participants: qd.template()):
+    func_pcg_start(pcg_scalars, participants)
 
 
 @qd.kernel(graph=True)
-def kernel_pcg_loop(
-    f: int,
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
+def kernel_pcg_loop(f: int, pcg_scalars: qd.template(), participants: qd.template()):
     """Run the conjugate gradient iterations after kernel_pcg_start as one graph, until convergence or the budget."""
-    while qd.graph.do_while(p.ws.cond):
-        func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
+    while qd.graph.do_while(pcg_scalars.is_running):
+        func_pcg_iteration(f, pcg_scalars, participants)
 
 
 @qd.kernel
-def kernel_pcg_iteration(
-    f: int,
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
-    func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
+def kernel_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.template()):
+    func_pcg_iteration(f, pcg_scalars, participants)
 
 
 @qd.kernel
-def kernel_start_line_search(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-):
-    func_start_line_search(f, control, p, s0, s1, s2)
+def kernel_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
+    func_start_line_search(f, newton_control, participants)
 
 
 @qd.kernel
-def kernel_step_forward(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
-    func_step_forward(f, control, p, s0, s1, s2, c0, c1, c2)
+def kernel_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: bool):
+    func_energy(f, newton_control, participants, is_trial)
 
 
 @qd.kernel
-def kernel_energy(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    is_trial: bool,
-):
-    func_energy(f, control, p, s0, s1, s2, is_trial)
+def kernel_line_search_trial(f: int, newton_control: qd.template(), participants: qd.template()):
+    """Step every participant to the trial point, evaluate its energy, and accept it or halve the step."""
+    func_step_forward(f, newton_control, participants)
+    func_energy(f, newton_control, participants, is_trial=True)
+    func_accept_or_backtrack(newton_control)
 
 
 @qd.kernel
-def kernel_accept_or_backtrack(control: qd.template()):
-    func_accept_or_backtrack(control)
+def kernel_update_convergence(newton_control: qd.template()):
+    func_update_convergence(newton_control)
 
 
 @qd.kernel
-def kernel_update_convergence(control: qd.template()):
-    func_update_convergence(control)
+def kernel_reset_newton_control(newton_control: qd.template()):
+    func_reset_newton_control(newton_control)
+
+
+@qd.kernel
+def kernel_clear_non_finite(newton_control: qd.template()):
+    func_clear_non_finite(newton_control)
 
 
 @qd.kernel(graph=True)
-def kernel_newton_loop(
-    f: int,
-    control: qd.template(),
-    p: qd.template(),
-    s0: qd.template(),
-    s1: qd.template(),
-    s2: qd.template(),
-    c0: qd.template(),
-    c1: qd.template(),
-    c2: qd.template(),
-):
+def kernel_newton_loop(f: int, newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template()):
     """Run the Newton iterations of a substep as one graph, after the evaluation of the start energy.
 
-    The assembly of the primary must need no storage growth inside the loop. The MPM triplet demand depends on the grid
-    topology alone, which is fixed over the substep, so the storage sized before the loop holds every assembly in it.
+    The assembly of every participant must need no storage growth inside the loop. The MPM triplet demand depends on the
+    grid topology alone, which is fixed over the substep, so the storage sized before the loop holds every assembly in
+    it.
     """
-    while qd.graph.do_while(control.newton_cond):
-        p.func_assemble(control, f)
-        func_assemble_secondary(f, s0, s1, s2, c0, c1, c2)
-        func_pcg_start(p, s0, s1, s2)
-        while qd.graph.do_while(p.ws.cond):
-            func_pcg_iteration(f, p, s0, s1, s2, c0, c1, c2)
-        func_start_line_search(f, control, p, s0, s1, s2)
-        while qd.graph.do_while(control.ls_cond):
-            func_step_forward(f, control, p, s0, s1, s2, c0, c1, c2)
-            func_energy(f, control, p, s0, s1, s2, 1)
-            func_accept_or_backtrack(control)
-        func_update_convergence(control)
+    while qd.graph.do_while(newton_control.is_newton_running):
+        func_assemble(f, participants)
+        func_pcg_start(pcg_scalars, participants)
+        while qd.graph.do_while(pcg_scalars.is_running):
+            func_pcg_iteration(f, pcg_scalars, participants)
+        func_start_line_search(f, newton_control, participants)
+        while qd.graph.do_while(newton_control.is_line_search_running):
+            func_step_forward(f, newton_control, participants)
+            func_energy(f, newton_control, participants, is_trial=True)
+            func_accept_or_backtrack(newton_control)
+        func_update_convergence(newton_control)
 
 
 # =================================================== solver ===================================================
@@ -439,42 +290,62 @@ class NewtonSolver(Solver):
     the post-coupling phase, after every solver's pre-coupling phase and the coupler, and before every solver's own
     post-coupling phase.
 
-    Each participant and coupling registers a host object, whose methods run the host-side stages around the solve
-    (`newton_prepare`, `newton_finish`, `newton_after`, `newton_end`, and `newton_assemble` for the primary), and a
-    device object for the composed kernels.
+    The coupler registers every participant and coupling of the scene (see LegacyCoupler), each as a host object (see
+    NewtonHost), whose methods run the host-side stages around the solve, and a device object for the composed kernels.
     """
 
-    def __init__(self, scene: "Scene", sim: "Simulator"):
-        super().__init__(scene, sim, None)
-        self.control = NewtonControl(gs.qd_float)
-        self._null = NullParticipant()
-        self._primary = None
-        self._secondaries = []
-        self._couplings = []
+    def __init__(self, scene: "Scene", sim: "Simulator", options: "NewtonOptions"):
+        super().__init__(scene, sim, options)
+        self.control = NewtonControl(
+            gs.qd_float, options.max_iterations, options.line_search_max_iterations, options.line_search_shrink
+        )
+        self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol)
+        bits = 64 if gs.qd_float == qd.f64 else 32
+        self._adjoint_pcg_tol = options.adjoint_pcg_tol or DEFAULT_ADJOINT_PCG_TOL[bits]
+        self._participant_hosts = []
+        self._coupling_hosts = []
+        self._participants = None
+        self._is_loop_graph = options.graph == "newton"
+        self._has_coupling_devices = False
+        self._has_warned_adjoint_projection = False
 
-    def register_primary(self, host, device):
-        self._primary = (host, device)
+    def register(self, participants, couplings):
+        """Register the participants of the Newton solve and the couplings between them, each as a pair of its host
+        object and its device object, which activates the solver.
 
-    def register_secondary(self, host, device):
-        if len(self._secondaries) == N_SECONDARY_SLOTS:
-            gs.raise_exception(f"The Newton solver holds {N_SECONDARY_SLOTS} secondary participants at most.")
-        self._secondaries.append((host, device))
-
-    def register_coupling(self, host, device):
-        if len(self._couplings) == N_COUPLING_SLOTS:
-            gs.raise_exception(f"The Newton solver holds {N_COUPLING_SLOTS} couplings at most.")
-        self._couplings.append((host, device))
+        A coupling acting on one participant alone, whose cross terms vanish, gives None as its device object and runs
+        its host stages only."""
+        coupling_devices = [device for _, device in couplings if device is not None]
+        # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, which those of the participants
+        # besides MPM do in a scene tracking gradients
+        if self._is_loop_graph and self._requires_grad and (len(participants) > 1 or coupling_devices):
+            gs.raise_exception(
+                "NewtonOptions(graph='newton') does not support a differentiable scene coupling MPM with another "
+                "solver."
+            )
+        self.control.disp_tol.from_numpy(
+            np.array(self._options.velocity_tol * self._sim._substep_dt, dtype=gs.np_float)
+        )
+        self._participant_hosts = [host for host, _ in participants]
+        self._coupling_hosts = [host for host, _ in couplings]
+        self._participants = NewtonParticipants(
+            participant_group("NewtonMembers", [device for _, device in participants]),
+            participant_group("NewtonCouplings", coupling_devices),
+        )
+        self._has_coupling_devices = bool(coupling_devices)
 
     @property
     def is_active(self):
-        return self._primary is not None
+        return self._participants is not None
 
-    def _slots(self):
-        secondary = [device for _, device in self._secondaries]
-        secondary += [self._null] * (N_SECONDARY_SLOTS - len(secondary))
-        coupling = [device for _, device in self._couplings]
-        coupling += [self._null] * (N_COUPLING_SLOTS - len(coupling))
-        return self._primary[1], secondary, coupling
+    @property
+    def _hosts(self):
+        return [*self._participant_hosts, *self._coupling_hosts]
+
+    @property
+    def _is_joint(self):
+        """Whether the device stages of the solve span several participants."""
+        return len(self._participant_hosts) > 1 or self._has_coupling_devices
 
     def step(self, f):
         """Run the Newton solve of a substep: the preparation of the participants, the start energy, the Newton
@@ -483,125 +354,158 @@ class NewtonSolver(Solver):
         The launches of the solve of substep `f` form one entry of the step recorded for a backward pass, which
         `backward` reverses: the solve is differentiated by the implicit function theorem rather than launch by launch.
         """
-        if not self.is_active or self._primary[0].runs_own_substep():
+        if not self.is_active:
             return
         with custom_backward(self.backward, f):
             self._step(f)
         # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
-        for host in [self._primary[0]] + [host for host, _ in self._secondaries + self._couplings]:
+        for host in self._hosts:
             host.newton_end(f)
+        self._check_failures()
+
+    def _check_failures(self):
+        """Report the solves that failed since the last check.
+
+        A solve stopped on a non-finite measure is handed to every participant once a step is over, which flags it for
+        the environments it reports errors on, an error being raised at the beginning of the next step. A solve that
+        reached `max_iterations` is warned of every `failure_check_interval` substeps, each check waiting for the
+        device."""
+        control = self.control
+        sim = self._sim
+        if (sim.cur_substep_global + 1) % sim._substeps == 0:
+            for host in self._participant_hosts:
+                host.newton_flag_non_finite(control)
+            kernel_clear_non_finite(control)
+        if sim.cur_substep_global % self._options.failure_check_interval == 0:
+            if int(qd_to_numpy(control.has_failed_iterations)):
+                control.has_failed_iterations.from_numpy(np.array(0, dtype=gs.np_int))
+                gs.logger.warning(
+                    "The implicit Newton solve stopped before converging: raise NewtonOptions(max_iterations) or "
+                    "loosen NewtonOptions(velocity_tol)."
+                )
 
     def backward(self, f):
         """Reverse the Newton solve of a substep, from the state left by the replay of its forward pass.
 
-        The primary reverses the solve of substep `f`. Each secondary participant wraps it in its own reverse of the
-        part of its substep that the joint solve takes over, sharing the joint adjoint solve (see 'stage_adjoint')."""
-        hosts = [host for host, _ in self._secondaries + self._couplings]
-        if not all(host.is_differentiable for host in hosts):
+        Each participant wraps the joint adjoint solve in its own reverse of the part of its substep that the solve
+        takes over: the reverse of what follows the solve into the right-hand side before, and the pullback of the
+        adjoint solution after."""
+        if not all(host.is_differentiable for host in self._hosts):
             gs.raise_exception(
                 "The backward pass of the joint Newton solve supports the participants of Rigid alone besides MPM."
             )
-        solve = functools.partial(self._primary[0].newton_backward, f)
-        for host, _ in self._secondaries:
+        solve = functools.partial(self._solve_adjoint, f)
+        for host in self._participant_hosts:
             solve = functools.partial(host.newton_backward, f, solve)
         solve()
 
-    def stage_adjoint(self, f):
-        """Assemble the rows of the secondary participants and couplings and their right-hand side of the adjoint solve.
+    def _solve_adjoint(self, f):
+        """Solve the adjoint system of substep `f` on the Hessian at its solution by the conjugate gradient of the
+        forward solve, and hand the solution to every participant and coupling.
 
-        The rows are taken at the solution of substep `f`, after the primary assembled its Hessian there and staged its
-        own right-hand side."""
-        if not (self._secondaries or self._couplings):
-            return
-        primary, secondary, coupling = self._slots()
-        kernel_assemble_secondary(f, *secondary, *coupling)
-        for host, _ in self._secondaries + self._couplings:
-            host.newton_adjoint_rhs(f)
-
-    def finish_adjoint(self, f):
-        """Hand the solution of the adjoint solve of a substep to the secondary participants and couplings."""
-        for host, _ in self._secondaries + self._couplings:
+        The Hessian is exact or projected to positive definite, as `adjoint_hessian` selects. With 'auto', a solve
+        meeting a direction of non-positive curvature on the exact Hessian runs again on the projected one."""
+        mode = self._options.adjoint_hessian
+        is_exact = mode in ("exact", "auto")
+        self._stage_adjoint(f, is_exact)
+        if not self._pcg_adjoint(f, check_curvature=is_exact):
+            # At a converged solution the Hessian of the incremental potential is positive definite
+            if mode == "exact":
+                gs.raise_exception(
+                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution, which the "
+                    "forward Newton solve most likely stopped short of: tighten NewtonOptions(velocity_tol), or use "
+                    "NewtonOptions(adjoint_hessian='auto') or 'projected'."
+                )
+            if not self._has_warned_adjoint_projection:
+                gs.logger.warning(
+                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution, which the "
+                    "forward Newton solve most likely stopped short of: its adjoint solves on the projected Hessian, "
+                    "whose gradients are approximate. Tighten NewtonOptions(velocity_tol) for exact ones."
+                )
+                self._has_warned_adjoint_projection = True
+            self._stage_adjoint(f, is_exact=False)
+            self._pcg_adjoint(f)
+        for host in self._hosts:
             host.newton_adjoint_finish(f)
 
-    @property
-    def has_secondaries(self):
-        return bool(self._secondaries or self._couplings)
+    def _stage_adjoint(self, f, is_exact):
+        """Assemble the Newton system of every participant at the solution of substep `f`, the Hessian exact with
+        `is_exact`, then stage the right-hand side of the adjoint solve in place of the gradient."""
+        self._assemble(f, is_exact)
+        for host in self._hosts:
+            host.newton_adjoint_rhs(f)
 
-    def solve_adjoint(self, f, check_curvature=False) -> bool:
-        """Solve the adjoint system H lambda = b on the rows of the primary, at the tighter tolerance of the adjoint.
+    def _pcg_adjoint(self, f, check_curvature=False) -> bool:
+        """Solve the staged adjoint system H lambda = b by the conjugate gradient of the forward solve, at the tighter
+        tolerance of the adjoint.
 
-        The preconditioned conjugate gradient of the forward solve of substep `f` runs from the right-hand side and the
-        matrix staged by the primary. With `check_curvature`, meant for a Hessian without positive definite projection,
-        returns whether the solve met no direction of non-positive curvature. Otherwise returns True."""
-        primary, secondary, coupling = self._slots()
-        ws = primary.ws
-        tol_rate = qd_to_numpy(ws.tol_rate, copy=True)
-        bits = 64 if gs.qd_float == qd.f64 else 32
-        ws.tol_rate.from_numpy(np.array(ADJOINT_PCG_TOL_RATE[bits], dtype=gs.np_float))
-        ws.check_curvature.from_numpy(np.array(int(check_curvature), dtype=np.int32))
+        With `check_curvature`, meant for a Hessian without positive definite projection, returns whether the solve met
+        no direction of non-positive curvature. Otherwise returns True."""
+        pcg_scalars = self.pcg_scalars
+        pcg_scalars.tol_rate.from_numpy(np.array(self._adjoint_pcg_tol, dtype=gs.np_float))
+        pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
         self._pcg(f)
-        ws.tol_rate.from_numpy(tol_rate)
+        pcg_scalars.tol_rate.from_numpy(np.array(self._options.pcg_tol, dtype=gs.np_float))
         if not check_curvature:
             return True
-        ws.check_curvature.from_numpy(np.array(0, dtype=np.int32))
-        return not int(qd_to_numpy(ws.breakdown))
+        pcg_scalars.is_curvature_checked.from_numpy(np.array(0, dtype=gs.np_int))
+        return not int(qd_to_numpy(pcg_scalars.has_breakdown))
 
     def _step(self, f):
         control = self.control
-        primary, secondary, coupling = self._slots()
-        hosts = [self._primary[0]] + [host for host, _ in self._secondaries]
-        coupling_hosts = [host for host, _ in self._couplings]
+        participants = self._participants
 
-        for host in hosts + coupling_hosts:
+        for host in self._hosts:
             host.newton_prepare(f)
-        kernel_energy(f, control, primary, *secondary, is_trial=False)
+        kernel_reset_newton_control(control)
+        kernel_energy(f, control, participants, is_trial=False)
 
-        if USE_NEWTON_GRAPH and not self._has_grad_participants():
-            kernel_newton_loop(f, control, primary, *secondary, *coupling)
+        # FIXME: The compile time of a graph grows faster than its size, so the Newton graph compiles much slower than
+        # its stages as separate kernels, and a change of any stage in it recompiles it whole
+        if self._is_loop_graph:
+            kernel_newton_loop(f, control, self.pcg_scalars, participants)
         else:
             self._newton_loop_launches(f)
 
-        for host in hosts + coupling_hosts:
+        for host in self._hosts:
             host.newton_finish(f)
-        for host in hosts + coupling_hosts:
+        for host in self._hosts:
             host.newton_after(f)
 
-    def _has_grad_participants(self):
-        """Whether a participant other than the primary takes part in a scene tracking gradients, its ndarrays then
-        owning a gradient."""
-        return self._requires_grad and bool(self._secondaries or self._couplings)
+    def _assemble(self, f, is_exact=False):
+        """Assemble the Newton system of every participant from the host, then the share of the couplings."""
+        for host in self._participant_hosts:
+            host.newton_assemble(f, is_exact)
+        if self._has_coupling_devices:
+            kernel_contact_gradient(f, self._participants)
 
     def _pcg(self, f):
         """Run the conjugate gradient iterations of a substep from its staged right-hand side, as one graph."""
-        primary, secondary, coupling = self._slots()
-        kernel_pcg_start(primary, *secondary)
+        participants = self._participants
+        pcg_scalars = self.pcg_scalars
+        kernel_pcg_start(pcg_scalars, participants)
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one,
         # with a device read each, when other participants take part in a scene tracking gradients
-        if not self._has_grad_participants():
-            kernel_pcg_loop(f, primary, *secondary, *coupling)
+        if not (self._requires_grad and self._is_joint):
+            kernel_pcg_loop(f, pcg_scalars, participants)
             return
         while True:
-            kernel_pcg_iteration(f, primary, *secondary, *coupling)
-            if not int(qd_to_numpy(primary.ws.cond)):
+            kernel_pcg_iteration(f, pcg_scalars, participants)
+            if not int(qd_to_numpy(pcg_scalars.is_running)):
                 break
 
     def _newton_loop_launches(self, f):
         """Drive the Newton iterations from the host, the conjugate gradient iterations of each running as one graph."""
         control = self.control
-        primary, secondary, coupling = self._slots()
-        has_secondary = bool(self._secondaries or self._couplings)
+        participants = self._participants
         while True:
-            self._primary[0].newton_assemble(f)
-            if has_secondary:
-                kernel_assemble_secondary(f, *secondary, *coupling)
+            self._assemble(f)
             self._pcg(f)
-            kernel_start_line_search(f, control, primary, *secondary)
+            kernel_start_line_search(f, control, participants)
             while True:
-                kernel_step_forward(f, control, primary, *secondary, *coupling)
-                kernel_energy(f, control, primary, *secondary, is_trial=True)
-                kernel_accept_or_backtrack(control)
-                if not int(qd_to_numpy(control.ls_cond)):
+                kernel_line_search_trial(f, control, participants)
+                if not int(qd_to_numpy(control.is_line_search_running)):
                     break
             kernel_update_convergence(control)
-            if not int(qd_to_numpy(control.newton_cond)):
+            if not int(qd_to_numpy(control.is_newton_running)):
                 break

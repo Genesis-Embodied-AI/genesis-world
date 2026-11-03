@@ -109,10 +109,7 @@ def test_mpm_rigid_push_grad(show_viewer):
 
 
 @pytest.mark.required
-# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
-# tolerance, which fp32 cannot resolve. The adjoint solves on the exact Hessian by a direct factorization, which the
-# finite differences match, whereas the default symmetric positive definite (SPD) projection of the Hessian clamps the
-# modes of the compressed muscle.
+# fp32 cannot resolve the Newton tolerance the finite differences need
 @pytest.mark.precision("64")
 def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
@@ -129,9 +126,14 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
                 lower_bound=(-0.5, -0.5, -0.1),
                 upper_bound=(0.5, 0.5, 0.5),
                 grid_density=32,
-                newton_velocity_tol=1e-10,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+                # Newton solve stops approach only once it has converged far below its default tolerance
+                velocity_tol=1e-10,
+                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+                # clamps a mode of the material, so the finite differences match the exact Hessian alone
                 adjoint_hessian="exact",
-                adjoint_linear_solver="direct",
             ),
             # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
             coupler_options=gs.options.LegacyCouplerOptions(
@@ -245,8 +247,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
-# tolerance, which fp32 cannot resolve, and its adjoint on the exact Hessian by a direct factorization, which they match
+# fp32 cannot resolve the Newton tolerance the finite differences need
 @pytest.mark.precision("64")
 def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
     # The force fields act on the grid velocity before the Newton solve, so the gradient of the initial velocity goes
@@ -265,9 +266,14 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
                 grid_density=32,
                 lower_bound=(-0.5, -0.5, -0.5),
                 upper_bound=(0.5, 0.5, 0.5),
-                newton_velocity_tol=1e-10,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+                # Newton solve stops approach only once it has converged far below its default tolerance
+                velocity_tol=1e-10,
+                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+                # clamps a mode of the material, so the finite differences match the exact Hessian alone
                 adjoint_hessian="exact",
-                adjoint_linear_solver="direct",
             ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(0.4, -0.4, 0.3),
@@ -323,6 +329,7 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
+# fp32 cannot resolve the Newton tolerance the finite differences need
 @pytest.mark.precision("64")
 @pytest.mark.parametrize(
     "material",
@@ -370,9 +377,14 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
                 grid_density=32,
                 lower_bound=(-0.5, -0.5, -0.5),
                 upper_bound=(0.5, 0.5, 0.5),
-                newton_velocity_tol=1e-10,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+                # Newton solve stops approach only once it has converged far below its default tolerance
+                velocity_tol=1e-10,
+                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+                # clamps a mode of the material, so the finite differences match the exact Hessian alone
                 adjoint_hessian="exact",
-                adjoint_linear_solver="direct",
             ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(0.4, -0.4, 0.3),
@@ -427,8 +439,7 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
 
 
 @pytest.mark.required
-# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
-# tolerance, which fp32 cannot resolve, and its adjoint on the exact Hessian by a direct factorization, which they match
+# fp32 cannot resolve the Newton tolerance the finite differences need
 @pytest.mark.precision("64")
 def test_hybrid_grad_matches_fd(precision, show_viewer):
     # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
@@ -445,9 +456,14 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
                 gravity=(0.0, 0.0, 0.0),
                 lower_bound=(0.0, 0.0, -0.2),
                 upper_bound=(1.0, 1.0, 1.0),
-                newton_velocity_tol=1e-10,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+                # Newton solve stops approach only once it has converged far below its default tolerance
+                velocity_tol=1e-10,
+                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+                # clamps a mode of the material, so the finite differences match the exact Hessian alone
                 adjoint_hessian="exact",
-                adjoint_linear_solver="direct",
             ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(0.65, -0.35, 0.6),
@@ -507,9 +523,7 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-# The finite differences need the joint Newton solve of MPM and Rigid converged far below its default tolerance, which
-# fp32 cannot resolve, and its adjoint solved by the joint preconditioned conjugate gradient (PCG) on the exact MPM
-# Hessian, which they match.
+# fp32 cannot resolve the Newton tolerance the finite differences need
 @pytest.mark.precision("64")
 def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     scene = gs.Scene(
@@ -523,7 +537,14 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=16,
-            newton_velocity_tol=1e-10,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+            # joint Newton solve of MPM and Rigid stops approach only once it has converged far below its default
+            # tolerance
+            velocity_tol=1e-10,
+            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+            # clamps a mode of the material, so the finite differences match the exact Hessian alone
             adjoint_hessian="exact",
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -569,7 +590,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     loss.backward()
     # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
     # a reset starts free of the coupling wrench the previous one left.
-    eps = 1e-6
+    eps = 1e-5
     fd_grad = np.zeros_like(vel)
     with torch.no_grad():
         for i, j in np.ndindex(vel.shape):
@@ -581,5 +602,4 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             fd_grad[i, j] = (losses[0] - losses[1]) / (2.0 * eps)
     (grad_rerun,) = torch.autograd.grad(rollout(vel_ana), vel_ana)
     assert_allclose(grad_rerun, vel_ana.grad, tol=1e-10)
-    # The finite differences keep the error of the Newton tolerance, which differs between the environments
-    assert_allclose(vel_ana.grad, fd_grad, rtol=1e-4, atol=1e-7)
+    assert_allclose(vel_ana.grad, fd_grad, tol=1e-8)

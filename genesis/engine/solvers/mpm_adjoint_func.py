@@ -91,7 +91,7 @@ def return_map_vjp(
             J_bar = (F_new_bar[0, 0] + F_new_bar[1, 1] + F_new_bar[2, 2]) / (3.0 * qd.pow(det, 2.0 / 3.0))
             F_bar = (J_bar * det) * F.inverse().transpose()
     elif kind != PLASTIC_NONE:
-        U, S, V = qd.svd(F, gs.qd_float)
+        U, S, V = gu.qd_svd(F)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         h = sigma
         dh = qd.Matrix.identity(gs.qd_float, 3)
@@ -186,34 +186,35 @@ def return_map_vjp(
 
 
 @qd.func
-def band_row_bw(sol_params, phi: float, vel: float, diag_coef: float, dt: float, D_bar: float, t_bar: float):
+def band_row_bw(
+    sol_params: qd.types.vector(7), phi: float, vel: float, diag_coef: float, dt: float, D_bar: float, t_bar: float
+):
     """Reverse of `band_row` (see soft_row), from the adjoints of the coefficients of a row to those of its inputs.
 
     Returns the adjoints of phi, vel and diag_coef, given D_bar and t_bar, the adjoints of the coefficients D and t.
     """
     phi_bar = gs.qd_float(0.0)
     vel_bar = gs.qd_float(0.0)
-    diag_coef_bar = gs.qd_float(0.0)
     width = sol_params[4]
+    # The impedance of the row, at the edge of the range phi = 0 short of it, chosen at runtime so that
+    # `imp_aref_grad` is inlined once
+    phi_row = gs.qd_float(0.0)
     if phi <= 0.0:
-        imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, phi)
-        diag_raw = diag_coef * (1.0 - imp) / imp
-        D = 1.0 / qd.max(diag_raw, gs.EPS)
-        # Zero where diag_raw is clamped at the floor gs.EPS
-        diag_raw_bar = gs.qd_float(0.0)
-        if diag_raw > gs.EPS:
-            diag_raw_bar = -D * D * D_bar
-        diag_coef_bar = diag_raw_bar * (1.0 - imp) / imp
+        phi_row = phi
+    imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, phi_row)
+    diag_raw = diag_coef * (1.0 - imp) / imp
+    # Zero where diag_raw is clamped at the floor gs.EPS
+    diag_raw_bar = gs.qd_float(0.0)
+    if diag_raw > gs.EPS:
+        D = 1.0 / diag_raw
+        diag_raw_bar = -D * D * D_bar
+    diag_coef_bar = diag_raw_bar * (1.0 - imp) / imp
+    if phi <= 0.0:
         # t = dt vel + dt^2 (-b vel - k imp phi), imp of |phi| / width
         imp_bar = diag_raw_bar * (-diag_coef / (imp * imp)) - dt * dt * k * phi * t_bar
         vel_bar = (dt - dt * dt * b) * t_bar
         phi_bar = -dt * dt * k * imp * t_bar - imp_bar * d_imp_d_x / width
     else:
-        imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, 0.0)
-        diag_raw = diag_coef * (1.0 - imp) / imp
-        if diag_raw > gs.EPS:
-            D = 1.0 / diag_raw
-            diag_coef_bar = -D * D * D_bar * (1.0 - imp) / imp
         phi_bar = -t_bar
     return phi_bar, vel_bar, diag_coef_bar
 
@@ -269,7 +270,7 @@ def func_wall_contact_adjoint(
                 Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
                 row = 3 * (linear.row_offset + slots[a])
                 delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
-            U, S, V = qd.svd(particles.F[f, i_p, i_b], gs.qd_float)
+            U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()
             W = particles_info.contact_invweight[i_p]
             sol_params = qd.Vector([params.wall_sol_params[i] for i in qd.static(range(7))], dt=gs.qd_float)
@@ -367,10 +368,7 @@ def func_constraint_adjoint(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_reset_u_bar(
-    grid: qd.template(),
-    newton: qd.template(),
-):
+def func_adjoint_reset_u_bar(grid: qd.template(), newton: qd.template()):
     """Clear the adjoint of u*, which the reverse of the grid-to-particle transfer (G2P) accumulates into `newton.du`
     (free once the forward solve is over)."""
     qd.loop_config(name="mpm_adjoint_reset_u_bar")
@@ -439,11 +437,7 @@ def func_adjoint_g2p(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_rhs(
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-):
+def func_adjoint_rhs(grid: qd.template(), newton: qd.template(), linear: qd.template()):
     """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed components, whose rows of
     the Newton matrix are the identity."""
     qd.loop_config(name="mpm_adjoint_rhs")
@@ -524,7 +518,7 @@ def func_adjoint_particles(
         x_p = particles.pos[f, i_p, i_b]
         fx = x_p * params.inv_dx[()] - cell.cast(gs.qd_float)
         w, grad_w = q1_stencil(fx, params.inv_dx[()])
-        F_tr, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, grid, newton, params)
+        F_tr, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
 
         Lam = qd.Matrix.zero(gs.qd_float, 3, 3)
         grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -536,7 +530,7 @@ def func_adjoint_particles(
             grad_u += u_a.outer_product(grad_w_a)
         A_def = qd.Matrix.identity(gs.qd_float, 3) + grad_u
 
-        U, S, V = qd.svd(F_tr, gs.qd_float)
+        U, S, V = gu.qd_svd(F_tr)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         slot = particles_info.material_idx[i_p]
         mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
@@ -595,12 +589,7 @@ def func_adjoint_particles(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_consume(
-    f: int,
-    particles: MpmParticles,
-    particles_ng: MpmParticlesNG,
-    params: qd.template(),
-):
+def func_adjoint_consume(f: int, particles: MpmParticles, particles_ng: MpmParticlesNG, params: qd.template()):
     """Clear the adjoint of the next frame, which the substep consumed.
 
     The substep carries an inactive particle over unchanged, so its adjoint of frame f + 1 first adds to that of frame

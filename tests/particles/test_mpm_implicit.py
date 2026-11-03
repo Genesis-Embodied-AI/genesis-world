@@ -45,23 +45,23 @@ def kernel_corotated(
     F_in: qd.types.ndarray(),
     r_a: qd.types.ndarray(),
     r_b: qd.types.ndarray(),
-    mu: qd.f64,
-    lam: qd.f64,
+    mu: float,
+    lam: float,
     out_psi: qd.types.ndarray(),
     out_P: qd.types.ndarray(),
     out_block: qd.types.ndarray(),
 ):
     for _ in range(1):
-        F = qd.Matrix.zero(qd.f64, 3, 3)
+        F = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i, j in qd.static(qd.ndrange(3, 3)):
             F[i, j] = F_in[i, j]
-        U, S, V = qd.svd(F, qd.f64)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=qd.f64)
+        U, S, V = qd.svd(F, gs.qd_float)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         psi, g, A = fixed_corotated_principal(sigma, mu, lam)
         S_block, alpha, beta = isotropic_projected_modes(sigma, g, A)
-        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=qd.f64) @ V.transpose()
-        ra = qd.Vector([r_a[0], r_a[1], r_a[2]], dt=qd.f64)
-        rb = qd.Vector([r_b[0], r_b[1], r_b[2]], dt=qd.f64)
+        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
+        ra = qd.Vector([r_a[0], r_a[1], r_a[2]], dt=gs.qd_float)
+        rb = qd.Vector([r_b[0], r_b[1], r_b[2]], dt=gs.qd_float)
         Z = isotropic_pair_block(V.transpose() @ ra, V.transpose() @ rb, S_block, alpha, beta)
         block = U @ Z @ U.transpose()
         out_psi[()] = psi
@@ -71,10 +71,10 @@ def kernel_corotated(
 
 
 def _evaluate(F, r_a, r_b, mu, lam):
-    F_nd = qd.ndarray(qd.f64, shape=(3, 3))
-    ra_nd, rb_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(3,))
-    psi_nd = qd.ndarray(qd.f64, shape=())
-    P_nd, block_nd = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3, 3))
+    F_nd = qd.ndarray(gs.qd_float, shape=(3, 3))
+    ra_nd, rb_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3,))
+    psi_nd = qd.ndarray(gs.qd_float, shape=())
+    P_nd, block_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
     F_nd.from_numpy(F)
     ra_nd.from_numpy(r_a)
     rb_nd.from_numpy(r_b)
@@ -180,14 +180,10 @@ def test_fixed_corotated_is_finite_and_psd_when_inverted():
 
 @qd.kernel
 def kernel_energy_from_singular_values(
-    F_in: qd.types.ndarray(),
-    mu: qd.f64,
-    lam: qd.f64,
-    out_sigma: qd.types.ndarray(),
-    out_psi: qd.types.ndarray(),
+    F_in: qd.types.ndarray(), mu: float, lam: float, out_sigma: qd.types.ndarray(), out_psi: qd.types.ndarray()
 ):
     for _ in range(1):
-        F = qd.Matrix.zero(qd.f64, 3, 3)
+        F = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i, j in qd.static(qd.ndrange(3, 3)):
             F[i, j] = F_in[i, j]
         sigma = signed_singular_values(F)
@@ -202,8 +198,8 @@ def kernel_energy_from_singular_values(
 def test_energy_from_signed_singular_values():
     rng = np.random.default_rng(4)
     mu, lam = 3.0, 5.0
-    F_nd, sigma_nd = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3,))
-    psi_nd = qd.ndarray(qd.f64, shape=())
+    F_nd, sigma_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3,))
+    psi_nd = qd.ndarray(gs.qd_float, shape=())
     samples = [np.eye(3), np.diag([1.2, 0.7, 0.9]), np.diag([0.5, -1.1, 0.8])]
     samples += [np.eye(3) + 0.3 * rng.standard_normal((3, 3)) for _ in range(6)]
     samples += [rng.standard_normal((3, 3)) for _ in range(6)]
@@ -238,16 +234,17 @@ _FAMILIES = (
 
 @qd.kernel
 def kernel_principal(
-    family: qd.template(),  # int, the index of the energy in _FAMILIES
+    # The index of the energy in _FAMILIES
+    family: qd.template(),
     sigma_in: qd.types.ndarray(),
-    mu: qd.f64,
-    lam: qd.f64,
+    mu: float,
+    lam: float,
     out_psi: qd.types.ndarray(),
     out_g: qd.types.ndarray(),
     out_A: qd.types.ndarray(),
 ):
     for _ in range(1):
-        sigma = qd.Vector([sigma_in[0], sigma_in[1], sigma_in[2]], dt=qd.f64)
+        sigma = qd.Vector([sigma_in[0], sigma_in[1], sigma_in[2]], dt=gs.qd_float)
         psi, g, A = qd.static(_FAMILIES[family])(sigma, mu, lam)
         out_psi[()] = psi
         for i in qd.static(range(3)):
@@ -288,8 +285,8 @@ def _reference_liquid(sigma, mu, lam):
 def test_principal_derivatives(family, reference, sigmas):
     rng = np.random.default_rng(5)
     mu, lam, h = 3.0, 5.0, 1e-7
-    sigma_nd, psi_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=())
-    g_nd, A_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(3, 3))
+    sigma_nd, psi_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=())
+    g_nd, A_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3, 3))
 
     def evaluate(sigma):
         sigma_nd.from_numpy(sigma)
@@ -315,8 +312,8 @@ def test_principal_derivatives(family, reference, sigmas):
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_stable_neohookean_rest_state():
     mu, lam = 3.0, 5.0
-    sigma_nd, psi_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=())
-    g_nd, A_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(3, 3))
+    sigma_nd, psi_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=())
+    g_nd, A_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3, 3))
     sigma_nd.from_numpy(np.ones(3))
     kernel_principal(1, sigma_nd, mu, lam, psi_nd, g_nd, A_nd)
     assert_allclose(qd_to_numpy(psi_nd), 0.0, atol=1e-12)
@@ -331,8 +328,8 @@ def test_stable_neohookean_rest_state():
 @pytest.mark.parametrize("family, unextended", [(1, 4), (3, 5)], ids=["stable_neohookean", "fixed_corotated"])
 def test_crushed_states_restore(family, unextended):
     mu, lam = 3.0, 5.0
-    sigma_nd, psi_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=())
-    g_nd, A_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(3, 3))
+    sigma_nd, psi_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=())
+    g_nd, A_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3, 3))
 
     def gradient(index, sigma):
         sigma_nd.from_numpy(sigma)
@@ -352,7 +349,7 @@ def test_crushed_states_restore(family, unextended):
 @qd.kernel
 def kernel_q1(fx_in: qd.types.ndarray(), w_out: qd.types.ndarray(), grad_out: qd.types.ndarray()):
     for _ in range(1):
-        fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=qd.f64)
+        fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=gs.qd_float)
         w, grad_w = q1_stencil(fx, inv_dx=2.0)
         for a in qd.static(range(8)):
             w_out[a] = w[a]
@@ -365,8 +362,8 @@ def kernel_q1(fx_in: qd.types.ndarray(), w_out: qd.types.ndarray(), grad_out: qd
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_q1_stencil_partition_of_unity():
     rng = np.random.default_rng(3)
-    fx_nd, w_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(8,))
-    grad_nd = qd.ndarray(qd.f64, shape=(8, 3))
+    fx_nd, w_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(8,))
+    grad_nd = qd.ndarray(gs.qd_float, shape=(8, 3))
     for _ in range(5):
         fx = rng.random(3)
         fx_nd.from_numpy(fx)
@@ -383,7 +380,7 @@ def test_q1_stencil_partition_of_unity():
 @qd.kernel
 def kernel_q1_hessian(fx_in: qd.types.ndarray(), H_out: qd.types.ndarray()):
     for _ in range(1):
-        fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=qd.f64)
+        fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=gs.qd_float)
         for a in qd.static(range(8)):
             H = q1_weight_hessian(fx, inv_dx=2.0, a=a)
             for i, j in qd.static(qd.ndrange(3, 3)):
@@ -396,8 +393,8 @@ def kernel_q1_hessian(fx_in: qd.types.ndarray(), H_out: qd.types.ndarray()):
 def test_q1_weight_hessian():
     rng = np.random.default_rng(4)
     inv_dx, h = 2.0, 1e-6
-    fx_nd, w_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(8,))
-    grad_nd, H_nd = qd.ndarray(qd.f64, shape=(8, 3)), qd.ndarray(qd.f64, shape=(8, 3, 3))
+    fx_nd, w_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(8,))
+    grad_nd, H_nd = qd.ndarray(gs.qd_float, shape=(8, 3)), qd.ndarray(gs.qd_float, shape=(8, 3, 3))
 
     def gradient(fx):
         fx_nd.from_numpy(fx)
@@ -421,21 +418,22 @@ _STRESS_FAMILIES = (fixed_corotated_principal, stable_neohookean_principal, exte
 
 @qd.kernel
 def kernel_first_piola(
-    family: qd.template(),  # int, the index of the energy in _STRESS_FAMILIES
+    # The index of the energy in _STRESS_FAMILIES
+    family: qd.template(),
     F_in: qd.types.ndarray(),
     dF_in: qd.types.ndarray(),
-    mu: qd.f64,
-    lam: qd.f64,
+    mu: float,
+    lam: float,
     P_out: qd.types.ndarray(),
     dP_out: qd.types.ndarray(),
 ):
     for _ in range(1):
-        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
-        dF = qd.Matrix([[dF_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
-        U, S, V = qd.svd(F, qd.f64)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=qd.f64)
+        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
+        dF = qd.Matrix([[dF_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
+        U, S, V = qd.svd(F, gs.qd_float)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         psi, g, A = qd.static(_STRESS_FAMILIES[family])(sigma, mu, lam)
-        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=qd.f64) @ V.transpose()
+        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
         dP = isotropic_first_piola_differential(U, V, sigma, g, A, dF)
         for i, j in qd.static(qd.ndrange(3, 3)):
             P_out[i, j] = P[i, j]
@@ -449,8 +447,8 @@ def kernel_first_piola(
 def test_first_piola_differential(family):
     rng = np.random.default_rng(6)
     mu, lam, h = 3.0, 5.0, 1e-6
-    F_nd, dF_nd = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3, 3))
-    P_nd, dP_nd = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3, 3))
+    F_nd, dF_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
+    P_nd, dP_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
 
     def evaluate(F, dF):
         F_nd.from_numpy(F)
@@ -472,18 +470,18 @@ def test_first_piola_differential(family):
 def kernel_return_map(
     materials: MpmMaterialTable,
     params: qd.template(),
-    kind: qd.i32,
+    kind: int,
     F_in: qd.types.ndarray(),
-    Jp: qd.f64,
+    Jp: float,
     F_bar_in: qd.types.ndarray(),
-    Jp_bar: qd.f64,
+    Jp_bar: float,
     F_out: qd.types.ndarray(),
     F_bar_out: qd.types.ndarray(),
     Jp_out: qd.types.ndarray(),
 ):
     for _ in range(1):
-        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
-        F_bar = qd.Matrix([[F_bar_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
+        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
+        F_bar = qd.Matrix([[F_bar_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
         F_new, Jp_new = return_map(slot=0, kind=kind, F=F, Jp=Jp, materials=materials, params=params)
         F_bar_old, Jp_bar_old = return_map_vjp(
             slot=0, kind=kind, F=F, Jp=Jp, F_new_bar=F_bar, Jp_new_bar=Jp_bar, materials=materials, params=params
@@ -510,16 +508,7 @@ def kernel_return_map(
         (PLASTIC_SAND, (0.9, 0.88, 0.86), 0.0),
         (PLASTIC_LIQUID, (0.95, 0.9, 0.8), 1.0),
     ],
-    ids=[
-        "von_mises_yield",
-        "von_mises_elastic",
-        "clamp",
-        "snow",
-        "sand_expand",
-        "sand_flow",
-        "sand_stick",
-        "liquid",
-    ],
+    ids=["von_mises_yield", "von_mises_elastic", "clamp", "snow", "sand_expand", "sand_flow", "sand_stick", "liquid"],
 )
 def test_return_map_vjp(kind, sigma, Jp):
     rng = np.random.default_rng(7)
@@ -539,9 +528,9 @@ def test_return_map_vjp(kind, sigma, Jp):
         wall_lower=np.zeros(3),
         wall_upper=np.ones(3),
     )
-    F_nd, F_bar_nd = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3, 3))
-    F_out, F_bar_out = qd.ndarray(qd.f64, shape=(3, 3)), qd.ndarray(qd.f64, shape=(3, 3))
-    Jp_out = qd.ndarray(qd.f64, shape=(2,))
+    F_nd, F_bar_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
+    F_out, F_bar_out = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
+    Jp_out = qd.ndarray(gs.qd_float, shape=(2,))
 
     U, _ = np.linalg.qr(rng.standard_normal((3, 3)))
     V, _ = np.linalg.qr(rng.standard_normal((3, 3)))

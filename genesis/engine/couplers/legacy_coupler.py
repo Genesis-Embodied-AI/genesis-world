@@ -74,7 +74,119 @@ class LegacyCoupler(RBC):
         self._dx = 1 / 1024
         self._stencil_size = int(np.floor(self._dx / self.sph_solver.hash_grid_cell_size) + 2)
 
+        self._resolve_mpm_couplings()
+        self._build_mpm_couplings()
         self.reset(envs_idx=self.sim.scene._envs_idx)
+
+    def _resolve_mpm_couplings(self) -> None:
+        """Decide which solvers the implicit MPM solver couples with, each pair behind its own option, and check that
+        each coupled solver supports it."""
+        mpm, rigid, fem = self.mpm_solver, self.rigid_solver, self.fem_solver
+        options = self.options
+        if mpm.is_active and rigid.is_active and options.rigid_mpm:
+            rigid_options = rigid._options
+            if rigid_options.friction_cone == gs.friction_cone.elliptic:
+                gs.raise_exception(
+                    "Coupling the implicit MPM solver with an elliptic Rigid friction cone is not supported."
+                )
+            # The joint solve uses Rigid's Newton Hessian factor as its preconditioner and integrates every Rigid dof
+            if rigid_options.constraint_solver != gs.constraint_solver.Newton:
+                gs.raise_exception("Coupling the implicit MPM solver with Rigid requires Rigid's Newton solver.")
+            if rigid._use_hibernation or rigid_options.noslip_iterations > 0:
+                gs.raise_exception(
+                    "Coupling the implicit MPM solver with Rigid does not support hibernation or noslip iterations."
+                )
+        # The particles get contact rows on the coupled Rigid geoms, and Rigid's dofs join the Newton solve with them if
+        # it has any: rows on static geoms (a plane, a terrain) act on the particle displacement alone, as wall rows do
+        self._mpm_rigid = (
+            mpm.is_active and rigid.is_active and options.rigid_mpm and any(geom.needs_coup for geom in rigid.geoms)
+        )
+        self._mpm_rigid_dofs = self._mpm_rigid and rigid.n_dofs > 0
+        if self._mpm_rigid and self.sim.options.requires_grad and rigid.collider.collider_config.has_terrain:
+            gs.raise_exception(
+                "Differentiable simulation with the implicit MPM solver does not support the contact with a Rigid "
+                "terrain yet."
+            )
+        self._mpm_fem = mpm.is_active and fem.is_active and options.fem_mpm
+        if self._mpm_fem and not fem._use_implicit_solver:
+            gs.raise_exception(
+                "Coupling the implicit MPM solver with FEM requires FEM's implicit solver "
+                "(FEMOptions(use_implicit_solver=True)), or LegacyCouplerOptions(fem_mpm=False)."
+            )
+        self._mpm_pbd = mpm.is_active and self.pbd_solver.is_active and options.mpm_pbd
+        self._mpm_sph = mpm.is_active and self.sph_solver.is_active and options.mpm_sph
+
+    def _build_mpm_couplings(self) -> None:
+        """Build the couplings of the implicit MPM solver, and register into the Newton solver the participants of the
+        implicit solve of every substep and the couplings between them, which activates it whenever MPM is in the scene.
+
+        MPM joins first, then the solvers it couples with implicitly, each owning the data of its own unknowns. The
+        substep of such a solver stops before its own solve, which the joint solve takes over. The MPM particles are
+        also boundary particles of the SPH fluid (see mpm_sph_func) and obstacles of the PBD particles, both staggered
+        with the solve."""
+        # Imported here to avoid a circular dependency: the couplings with MPM import the solvers, whose entities import
+        # the couplers
+        from .mpm_fem_func import FemContactParams, FemTriangleQuery
+        from .mpm_fem_newton import FemNewtonHost, FemNewtonParticipant, MpmFemContact, MpmFemContactHost
+        from .mpm_pbd_func import (
+            MpmParticleObstacles,
+            MpmPbdContact,
+            MpmPbdContactHost,
+            PbdContactParams,
+            PbdNewtonHost,
+            PbdNewtonParticipant,
+            PbdParticleQuery,
+        )
+        from .mpm_rigid_newton import (
+            MpmRigidContact,
+            MpmRigidContactHost,
+            RigidNewtonData,
+            RigidNewtonHost,
+            RigidNewtonParticipant,
+        )
+        from .mpm_sph_func import MpmSphBoundary
+
+        mpm = self.mpm_solver
+        if not mpm.is_active:
+            return
+        rigid, fem, pbd = self.rigid_solver, self.fem_solver, self.pbd_solver
+        n_envs = self.sim._B
+        mpm_participant = mpm.newton_participant
+        participants = [(mpm, mpm_participant)]
+        couplings = []
+        if self._mpm_rigid:
+            if self._mpm_rigid_dofs:
+                rigid_participant = RigidNewtonParticipant(rigid, n_envs)
+                rigid_data = rigid_participant.rigid_data
+                participants.append((RigidNewtonHost(rigid, rigid_participant), rigid_participant))
+                rigid.defer_constraint_solve()
+            else:
+                rigid_data = RigidNewtonData(rigid.n_dofs_, rigid.n_links, n_envs)
+            contact = MpmRigidContact(mpm_participant, rigid, rigid_data, n_envs)
+            # Without Rigid dofs the cross terms of the rows vanish, and the coupling runs its host stages alone
+            device = contact if self._mpm_rigid_dofs else None
+            couplings.append((MpmRigidContactHost(contact, self._mpm_rigid_dofs), device))
+        if self._mpm_fem:
+            fem_participant = FemNewtonParticipant(fem)
+            participants.append((FemNewtonHost(fem, fem_participant, self), fem_participant))
+            fem.defer_solve()
+            query = FemTriangleQuery(
+                fem, mpm_participant.newton, mpm_participant.params, FemContactParams(mpm.dx), n_envs
+            )
+            contact = MpmFemContact(mpm_participant, fem_participant, query)
+            couplings.append((MpmFemContactHost(contact), contact))
+        if self._mpm_pbd:
+            pbd_contact = PbdContactParams(mpm.dx)
+            pbd_participant = PbdNewtonParticipant(pbd, n_envs)
+            participants.append((PbdNewtonHost(pbd_participant), pbd_participant))
+            query = PbdParticleQuery(pbd, mpm_participant.newton, mpm_participant.params, pbd_contact, n_envs)
+            contact = MpmPbdContact(mpm_participant, pbd_participant, query)
+            couplings.append((MpmPbdContactHost(contact), contact))
+            pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
+        if self._mpm_sph:
+            self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.params, n_envs)
+            self.sph_solver.set_boundary(self._sph_boundary)
+        self.sim.newton_solver.register(participants, couplings)
 
     def reset(self, envs_idx=None) -> None:
         if self._rigid_sph:
@@ -633,8 +745,13 @@ class LegacyCoupler(RBC):
             clamped_inv_dt = min(substep_inv_dt, CLAMPED_INV_DT)
             self.kernel_pbd_rigid_solve_animate_particles_by_link(clamped_inv_dt, self.rigid_solver.dyn_state.links)
 
-        if self.fem_solver.is_active and not self.fem_solver._defer_solve:
+        if self.fem_solver.is_active and not self._mpm_fem:
             self.couple_fem(f)
+
+        # The impulses of the SPH particles on the MPM particles enter the next MPM particle-to-grid transfer, which the
+        # Newton solve of the substep runs
+        if self._mpm_sph:
+            self._sph_boundary.apply_impulse(f)
 
     def couple_fem(self, f):
         """The coupling of FEM's end-of-substep velocities with the floor, Rigid and SPH, and of its vertices linked to

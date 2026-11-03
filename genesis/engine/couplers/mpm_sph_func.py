@@ -41,11 +41,11 @@ class MpmSphBoundary:
         self.n = max(sph.n_particles, 1)
         self.n_mpm = max(mpm_solver.n_particles, 1)
         self.n_envs = n_envs
-        self.frame = qd.ndarray(qd.i32, shape=())
+        self.frame = qd.ndarray(gs.qd_int, shape=())
         self.b_rho = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
         self.b_grad = qd.ndarray(gs.qd_float, shape=(3 * self.n * n_envs,))
         self.b_vel_grad = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.b_count = qd.ndarray(qd.i32, shape=(self.n * n_envs,))
+        self.b_count = qd.ndarray(gs.qd_int, shape=(self.n * n_envs,))
         self.s = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
         self.impulse = qd.ndarray(gs.qd_float, shape=(3 * self.n_mpm * n_envs,))
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, self.n_mpm)
@@ -67,6 +67,11 @@ class MpmSphBoundary:
     def scatter(self):
         """The impulses of the SPH particles on the MPM particles over an integration step."""
         kernel_scatter_boundary(self)
+
+    def apply_impulse(self, f):
+        """Hand the MPM particles of frame f the impulses SPH's substep accumulated, before the MPM particle-to-grid
+        transfer."""
+        kernel_apply_boundary_impulse(f, self)
 
     @qd.func
     def b_grad_at(self, k: int):
@@ -149,10 +154,7 @@ def kernel_scatter_boundary(boundary: qd.template()):
 
 
 @qd.kernel
-def kernel_apply_boundary_impulse(
-    f: int,
-    boundary: qd.template(),
-):
+def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
     """Add the impulses of the SPH particles to the velocity of every active MPM particle before the MPM
     particle-to-grid transfer, and clear them.
 

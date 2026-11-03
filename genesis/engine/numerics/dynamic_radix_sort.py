@@ -12,16 +12,12 @@ CPU_CHUNKS = 256
 
 
 @qd.func
-def _rank_warp_striped_items(
-    digits: qd.template(),
-    ranks: qd.template(),
-    block_prefixes: qd.template(),
-):
+def _rank_warp_striped_items(digits: qd.template(), ranks: qd.template(), block_prefixes: qd.template()):
     tid = qd.simt.block.thread_idx()
-    lane = qd.i32(qd.simt.subgroup.invocation_id())
+    lane = gs.qd_int(qd.simt.subgroup.invocation_id())
     subgroup = tid // 32
-    sh_warp_offsets = qd.simt.block.SharedArray((8 * 256,), qd.i32)
-    sh_match_masks = qd.simt.block.SharedArray((8 * 256,), qd.i32)
+    sh_warp_offsets = qd.simt.block.SharedArray((8 * 256,), gs.qd_int)
+    sh_match_masks = qd.simt.block.SharedArray((8 * 256,), gs.qd_int)
 
     for item in qd.static(range(8)):
         index = subgroup * 256 + lane + item * 32
@@ -34,20 +30,20 @@ def _rank_warp_striped_items(
         qd.atomic_add(sh_warp_offsets[subgroup * 256 + digits[item]], 1)
     qd.simt.block.sync()
 
-    block_count = qd.i32(0)
+    block_count = gs.qd_int(0)
     if tid < 256:
         for warp in qd.static(range(8)):
             index = warp * 256 + tid
             warp_count = sh_warp_offsets[index]
             sh_warp_offsets[index] = block_count
             block_count = block_count + warp_count
-    block_prefix = qd.simt.block.exclusive_add(block_count, 256, qd.i32)
+    block_prefix = qd.simt.block.exclusive_add(block_count, 256, gs.qd_int)
     if tid < 256:
         block_prefixes[tid] = block_prefix
     qd.simt.block.sync()
 
     lane_mask_le = qd.simt.subgroup.lanemask_le(qd.u32(lane))
-    lane_mask = qd.i32(qd.u32(1) << qd.u32(lane))
+    lane_mask = gs.qd_int(qd.u32(1) << qd.u32(lane))
     for item in qd.static(range(24)):
         digit = digits[item]
         index = subgroup * 256 + digit
@@ -56,9 +52,9 @@ def _rank_warp_striped_items(
         qd.simt.subgroup.mem_fence()
 
         match = qd.u32(sh_match_masks[index])
-        leader = qd.i32(31) - qd.i32(qd.math.clz(match))
-        count = qd.i32(qd.math.popcnt(match & lane_mask_le))
-        offset = qd.i32(0)
+        leader = gs.qd_int(31) - gs.qd_int(qd.math.clz(match))
+        count = gs.qd_int(qd.math.popcnt(match & lane_mask_le))
+        offset = gs.qd_int(0)
         if lane == leader:
             offset = qd.atomic_add(sh_warp_offsets[index], count)
         offset = qd.simt.subgroup.shuffle(offset, qd.u32(leader))
@@ -67,7 +63,7 @@ def _rank_warp_striped_items(
         qd.simt.subgroup.sync()
         qd.simt.subgroup.mem_fence()
         ranks[item] = offset + count - 1
-    return qd.Vector([block_count, block_prefix], dt=qd.i32)
+    return qd.Vector([block_count, block_prefix], dt=gs.qd_int)
 
 
 @qd.data_oriented
@@ -92,24 +88,24 @@ class DynamicRadixSort:
         self.n_passes = n_passes
         n_blocks = max((capacity + _BLOCK_THREADS * _ITEMS_PER_THREAD - 1) // (_BLOCK_THREADS * _ITEMS_PER_THREAD), 1)
 
-        self.bins = qd.ndarray(qd.i32, shape=(n_passes, _RADIX_DIGITS))
-        self.lookback_status = qd.ndarray(qd.i32, shape=(n_blocks, _RADIX_DIGITS))
-        self.lookback_partial = qd.ndarray(qd.i32, shape=(n_blocks, _RADIX_DIGITS))
-        self.lookback_complete = qd.ndarray(qd.i32, shape=(n_blocks, _RADIX_DIGITS))
-        self.tile_counters = qd.ndarray(qd.i32, shape=(n_passes,))
+        self.bins = qd.ndarray(gs.qd_int, shape=(n_passes, _RADIX_DIGITS))
+        self.lookback_status = qd.ndarray(gs.qd_int, shape=(n_blocks, _RADIX_DIGITS))
+        self.lookback_partial = qd.ndarray(gs.qd_int, shape=(n_blocks, _RADIX_DIGITS))
+        self.lookback_complete = qd.ndarray(gs.qd_int, shape=(n_blocks, _RADIX_DIGITS))
+        self.tile_counters = qd.ndarray(gs.qd_int, shape=(n_passes,))
         # Pass loop of kernel_radix_sort on the device: the first of the two passes of an iteration, and the condition
-        self.pass_idx = qd.ndarray(qd.i32, shape=())
-        self.pass_cond = qd.ndarray(qd.i32, shape=())
+        self.pass_idx = qd.ndarray(gs.qd_int, shape=())
+        self.is_pass_running = qd.ndarray(gs.qd_int, shape=())
 
         # Digit offsets of every chunk in the CPU passes
-        self.chunk_offsets = qd.ndarray(qd.i32, shape=(CPU_CHUNKS if gs.backend == gs.cpu else 1, _RADIX_DIGITS))
+        self.chunk_offsets = qd.ndarray(gs.qd_int, shape=(CPU_CHUNKS if gs.backend == gs.cpu else 1, _RADIX_DIGITS))
 
-        self.bins.from_numpy(np.zeros((n_passes, _RADIX_DIGITS), dtype=np.int32))
+        self.bins.from_numpy(np.zeros((n_passes, _RADIX_DIGITS), dtype=gs.np_int))
         lookback_shape = (n_blocks, _RADIX_DIGITS)
-        self.lookback_status.from_numpy(np.zeros(lookback_shape, dtype=np.int32))
-        self.lookback_partial.from_numpy(np.zeros(lookback_shape, dtype=np.int32))
-        self.lookback_complete.from_numpy(np.zeros(lookback_shape, dtype=np.int32))
-        self.tile_counters.from_numpy(np.zeros(n_passes, dtype=np.int32))
+        self.lookback_status.from_numpy(np.zeros(lookback_shape, dtype=gs.np_int))
+        self.lookback_partial.from_numpy(np.zeros(lookback_shape, dtype=gs.np_int))
+        self.lookback_complete.from_numpy(np.zeros(lookback_shape, dtype=gs.np_int))
+        self.tile_counters.from_numpy(np.zeros(n_passes, dtype=gs.np_int))
 
     @qd.func(requires_top_level=True)
     def clear_bins(self):
@@ -120,16 +116,12 @@ class DynamicRadixSort:
             self.bins[radix_pass, digit] = 0
 
     @qd.func(requires_top_level=True)
-    def histogram(
-        self,
-        keys: qd.template(),
-        n: qd.template(),
-    ):
+    def histogram(self, keys: qd.template(), n: qd.template()):
         qd.loop_config(name="drs_histogram", block_dim=128)
         for thread in range(128 * 128):
             tid = qd.simt.block.thread_idx()
             block = thread // 128
-            sh_histogram = qd.simt.block.SharedArray((self.n_passes * 256,), qd.i32)
+            sh_histogram = qd.simt.block.SharedArray((self.n_passes * 256,), gs.qd_int)
             for radix_pass in qd.static(range(self.n_passes)):
                 for item in qd.static(range(2)):
                     sh_histogram[radix_pass * 256 + item * 128 + tid] = 0
@@ -149,13 +141,13 @@ class DynamicRadixSort:
                             else:
                                 key64 = keys[index]
                         for radix_pass in qd.static(range(self.n_passes)):
-                            digit = qd.i32(0)
+                            digit = gs.qd_int(0)
                             if is_valid:
                                 shift = qd.static(radix_pass * 8)
                                 if qd.static(self.key_dtype == qd.u32):
-                                    digit = qd.i32((key32 >> shift) & qd.u32(255))
+                                    digit = gs.qd_int((key32 >> shift) & qd.u32(255))
                                 else:
-                                    digit = qd.i32((key64 >> shift) & qd.u64(255))
+                                    digit = gs.qd_int((key64 >> shift) & qd.u64(255))
                                 qd.atomic_add(sh_histogram[radix_pass * 256 + digit], 1)
             qd.simt.block.sync()
             for radix_pass in qd.static(range(self.n_passes)):
@@ -171,15 +163,11 @@ class DynamicRadixSort:
             radix_pass = index // 256
             digit = index - radix_pass * 256
             value = self.bins[radix_pass, digit]
-            prefix = qd.simt.block.exclusive_add(value, 256, qd.i32)
+            prefix = qd.simt.block.exclusive_add(value, 256, gs.qd_int)
             self.bins[radix_pass, digit] = prefix
 
     @qd.func(requires_top_level=True)
-    def clear_pass(
-        self,
-        radix_pass,
-        n: qd.template(),
-    ):
+    def clear_pass(self, radix_pass: int, n: qd.template()):
         qd.loop_config(name="drs_memset_lookback", block_dim=256)
         needed_blocks = qd.max((n + 6143) // 6144, 1)
         for index in range(needed_blocks * 256):
@@ -197,7 +185,7 @@ class DynamicRadixSort:
         perm_in: qd.template(),
         perm_out: qd.template(),
         n: qd.template(),
-        radix_pass,
+        radix_pass: int,
     ):
         qd.loop_config(name="drs_onesweep", block_dim=256)
         needed_blocks = qd.max((n + 6143) // 6144, 1)
@@ -207,7 +195,7 @@ class DynamicRadixSort:
             tid = qd.simt.block.thread_idx()
             count = n
             launch_block = thread // 256
-            sh_tile_slot = qd.simt.block.SharedArray((1,), qd.i32)
+            sh_tile_slot = qd.simt.block.SharedArray((1,), gs.qd_int)
             if tid == 0:
                 if launch_block < needed_blocks:
                     sh_tile_slot[0] = qd.atomic_add(self.tile_counters[radix_pass], 1)
@@ -217,15 +205,15 @@ class DynamicRadixSort:
 
             tile = sh_tile_slot[0]
             if tile < needed_blocks:
-                sh_block_prefixes = qd.simt.block.SharedArray((256,), qd.i32)
-                sh_tile_prefixes = qd.simt.block.SharedArray((256,), qd.i32)
+                sh_block_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
+                sh_tile_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
                 sh_sorted_keys = qd.simt.block.SharedArray((6144,), qd.u64)
-                sh_sorted_perm = qd.simt.block.SharedArray((6144,), qd.i32)
+                sh_sorted_perm = qd.simt.block.SharedArray((6144,), gs.qd_int)
 
                 keys32 = qd.Vector.zero(qd.u32, 24)
                 keys64 = qd.Vector.zero(qd.u64, 24)
-                digits = qd.Vector.zero(qd.i32, 24)
-                local_ranks = qd.Vector.zero(qd.i32, 24)
+                digits = qd.Vector.zero(gs.qd_int, 24)
+                local_ranks = qd.Vector.zero(gs.qd_int, 24)
 
                 for item in qd.static(range(24)):
                     input_index = tile * 6144 + (tid // 32) * 24 * 32 + item * 32 + tid % 32
@@ -243,7 +231,7 @@ class DynamicRadixSort:
                         digit_key = (key32 >> shift) & qd.u32(0xFF)
                     else:
                         digit_key = qd.u32((key64 >> qd.u64(shift)) & qd.u64(0xFF))
-                    digit = qd.i32(digit_key)
+                    digit = gs.qd_int(digit_key)
                     keys32[item] = key32
                     keys64[item] = key64
                     digits[item] = digit
@@ -264,7 +252,7 @@ class DynamicRadixSort:
                             sh_sorted_keys[sorted_index] = keys64[item]
                         sh_sorted_perm[sorted_index] = perm_in[input_index]
 
-                tile_prefix = qd.i32(0)
+                tile_prefix = gs.qd_int(0)
                 if tid < 256:
                     predecessor = tile - 1
                     is_prefix_complete = tile == 0
@@ -302,7 +290,7 @@ class DynamicRadixSort:
                     sorted_index = item * 256 + tid
                     if sorted_index < valid_count:
                         key = sh_sorted_keys[sorted_index]
-                        digit = qd.i32((key >> qd.u64(shift)) & qd.u64(0xFF))
+                        digit = gs.qd_int((key >> qd.u64(shift)) & qd.u64(0xFF))
                         output_index = (
                             self.bins[radix_pass, digit]
                             + sh_tile_prefixes[digit]
@@ -320,22 +308,22 @@ class DynamicRadixSort:
     def start_passes(self):
         for _ in range(1):
             self.pass_idx[()] = 0
-            self.pass_cond[()] = 1
+            self.is_pass_running[()] = 1
 
     @qd.func(requires_top_level=True)
     def advance_passes(self):
         for _ in range(1):
             self.pass_idx[()] = self.pass_idx[()] + 2
-            self.pass_cond[()] = qd.i32(self.pass_idx[()] < self.n_passes)
+            self.is_pass_running[()] = gs.qd_int(self.pass_idx[()] < self.n_passes)
 
     @qd.func
     def digit(self, key, radix_pass: qd.template()):
         shift = qd.static(radix_pass * 8)
-        value = qd.i32(0)
+        value = gs.qd_int(0)
         if qd.static(self.key_dtype == qd.u32):
-            value = qd.i32((key >> qd.u32(shift)) & qd.u32(255))
+            value = gs.qd_int((key >> qd.u32(shift)) & qd.u32(255))
         else:
-            value = qd.i32((key >> qd.u64(shift)) & qd.u64(255))
+            value = gs.qd_int((key >> qd.u64(shift)) & qd.u64(255))
         return value
 
     @qd.func(requires_top_level=True)
@@ -360,7 +348,7 @@ class DynamicRadixSort:
             for i in range(chunk * size, qd.min(chunk * size + size, n)):
                 self.chunk_offsets[chunk, self.digit(keys_in[i], radix_pass)] += 1
         for _ in range(1):
-            running = qd.i32(0)
+            running = gs.qd_int(0)
             for digit in range(_RADIX_DIGITS):
                 for chunk in range(CPU_CHUNKS):
                     count = self.chunk_offsets[chunk, digit]
@@ -420,7 +408,7 @@ def func_dynamic_radix_sort(
         sorter.histogram(keys_a, n)
         sorter.scan_bins()
         sorter.start_passes()
-        while qd.graph.do_while(sorter.pass_cond):
+        while qd.graph.do_while(sorter.is_pass_running):
             sorter.clear_pass(sorter.pass_idx[()], n)
             sorter.onesweep_pass(keys_a, keys_b, perm_a, perm_b, n, sorter.pass_idx[()])
             sorter.clear_pass(sorter.pass_idx[()] + 1, n)

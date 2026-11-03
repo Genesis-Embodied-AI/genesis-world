@@ -391,6 +391,72 @@ class KinematicOptions(Options):
     IK_max_targets: PositiveInt = 6
 
 
+class NewtonOptions(Options):
+    """
+    Options configuring the NewtonSolver, which runs the implicit solve of every substep over the implicit MPM solver
+    and the solvers coupled with it in that solve.
+
+    Parameters
+    ----------
+    velocity_tol : float, optional
+        Convergence tolerance of the solve, in m/s: the solve stops once an iteration changes the velocity of every MPM
+        particle and of every coupled body by less than this value. A smaller value gives a more accurate motion and
+        more accurate gradients, at the cost of more iterations per substep, and a larger one is faster but less
+        accurate. Comparing the gradients against finite differences needs a much smaller value than the default, since
+        the gradients describe the motion where the solve stopped. Defaults to 5e-2.
+    graph : str, optional
+        How much of the solve runs as one GPU graph, which trades the compile time of the first steps for fewer launches
+        in the next ones, with the same motion. 'split' drives the Newton iterations from the host, each solve of their
+        linear systems running as one graph: it compiles fastest. 'newton' runs all the Newton iterations as one graph,
+        which compiles slower, and needs a scene without gradients when MPM is coupled with another solver. Defaults to
+        'split'.
+    adjoint_hessian : str, optional
+        How exactly the gradients of a differentiable scene follow the response of the MPM materials through the solve.
+        'projected' always succeeds, but its gradients are approximate wherever the solve has to stabilize the response
+        of a strongly deformed material. 'exact' gives the exact gradients, but raises an error on a substep whose solve
+        stopped before converging (see 'velocity_tol'). 'auto' gives the exact gradients, and the approximate ones with
+        a warning on the substeps where 'exact' would raise. Defaults to 'projected'.
+    max_iterations : int, optional
+        Newton iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning.
+        Defaults to 1024.
+    line_search_max_iterations : int, optional
+        Trial steps of the backtracking line search of a Newton iteration at most, the last one being kept. Defaults to
+        12.
+    line_search_shrink : float, optional
+        Factor of the step of the line search between two trials, strictly between 0 and 1. Defaults to 0.5.
+    pcg_max_iterations : int, optional
+        Iterations of the preconditioned conjugate gradient (PCG) solving the linear system of a Newton iteration at
+        most. Defaults to 1024.
+    pcg_tol : float, optional
+        Reduction of r . z, the preconditioned squared residual, relative to its start value, at which the PCG of a
+        Newton iteration stops. The Newton iterations correct an inexact direction, so a loose value suffices. Defaults
+        to 1e-4.
+    adjoint_pcg_tol : float, optional
+        Reduction of r . z at which the PCG of the adjoint solve of a substep stops, tighter than 'pcg_tol' since the
+        error of the adjoint solve enters every gradient. Defaults to 1e-24 in 64-bit precision and 1e-12 in 32-bit.
+    failure_check_interval : int, optional
+        Substeps between two reads of whether a Newton solve reached 'max_iterations', each read waiting for the device.
+        Defaults to 32.
+    """
+
+    velocity_tol: PositiveFloat = 5e-2
+    # FIXME: A whole substep as one graph, the final target, is a mode of the Newton solver that composes the
+    # preparation, the Newton iterations and the end of the substep of every participant alike
+    graph: Literal["split", "newton"] = "split"
+    adjoint_hessian: Literal["projected", "exact", "auto"] = "projected"
+    max_iterations: PositiveInt = 1024
+    line_search_max_iterations: PositiveInt = 12
+    line_search_shrink: PositiveFloat = 0.5
+    pcg_max_iterations: PositiveInt = 1024
+    pcg_tol: PositiveFloat = 1e-4
+    adjoint_pcg_tol: PositiveFloat | None = None
+    failure_check_interval: PositiveInt = 32
+
+    def model_post_init(self, context: Any) -> None:
+        if self.line_search_shrink >= 1.0:
+            gs.raise_exception(f"'line_search_shrink' must be below 1, got {self.line_search_shrink}.")
+
+
 class RigidOptions(GravityMixin, TimeBasedMixin):
     """
     Options configuring the RigidSolver.
@@ -645,30 +711,13 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Particle diameter in meters. If not given, we will compute `particle_size` based on `grid_density`, where `particle_size` will be linearly proportional to the grid cell size. A reference value is `particle_size = 0.01` for `grid_density = 64`. Defaults to None.
     grid_density : float, optional
         Number of grid cells per meter. Defaults to 64.
-    enable_CPIC : bool, optional
-        Whether to enable CPIC (Compatible Particle-in-Cell) to support coupling with thin objects. Defaults to False.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
-    newton_velocity_tol : float, optional
-        Convergence tolerance of the implicit solve of every substep, in m/s: the solve stops once an iteration changes
-        the velocity of every particle by less than this value. A smaller value gives a more accurate motion and more
-        accurate gradients, at the cost of more iterations per substep, and a larger one is faster but less accurate.
-        Comparing the gradients against finite differences needs a much smaller value than the default, since the
-        gradients describe the motion where the solve stopped. Defaults to 5e-2.
-    adjoint_hessian : str, optional
-        How exactly the gradients of a differentiable scene follow the response of the materials. 'projected' always
-        succeeds, but its gradients are approximate wherever the solve has to stabilize the response of a strongly
-        deformed material. 'exact' gives the exact gradients, but raises an error on a substep whose solve stopped
-        before converging (see 'newton_velocity_tol'). 'auto' gives the exact gradients, and the approximate ones with a
-        warning on the substeps where 'exact' would raise. Defaults to 'projected'.
-    adjoint_linear_solver : str, optional
-        How the gradients of a differentiable scene are solved for at every substep. 'pcg' is an iterative solve,
-        accurate up to a tolerance, whose cost scales to large scenes. 'direct' is exact up to rounding, but its memory
-        grows with the square of the number of active grid nodes, so it is limited to 20000 unknowns (three per active
-        grid node and environment). It serves to check the gradients against finite differences on small scenes.
-        Defaults to 'pcg'.
+    wall_timeconst : float, optional
+        Time constant of the soft contact rows that keep the particles within the domain walls, in seconds, floored at
+        twice the substep. A smaller value gives stiffer walls. Defaults to 0.01.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -677,15 +726,11 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
     particle_size: PositiveFloat | None = None  # in meters. Will be computed automatically if it's None.
     grid_density: PositiveFloat = 64
-    enable_CPIC: StrictBool = False
 
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
-
-    newton_velocity_tol: PositiveFloat = 5e-2
-    adjoint_hessian: Literal["projected", "exact", "auto"] = "projected"
-    adjoint_linear_solver: Literal["pcg", "direct"] = "pcg"
+    wall_timeconst: PositiveFloat = 1e-2
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)

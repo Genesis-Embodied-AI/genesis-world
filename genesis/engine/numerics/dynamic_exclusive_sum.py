@@ -25,20 +25,17 @@ class DynamicExclusiveSum:
         assert capacity >= 1
         n_blocks = max((capacity + _BLOCK_THREADS * _ITEMS_PER_THREAD - 1) // (_BLOCK_THREADS * _ITEMS_PER_THREAD), 1)
 
-        self.status = qd.ndarray(qd.i32, shape=(n_blocks,))
-        self.partial = qd.ndarray(qd.i32, shape=(max(n_blocks, CPU_CHUNKS),))
-        self.complete = qd.ndarray(qd.i32, shape=(n_blocks,))
-        self.tile_counter = qd.ndarray(qd.i32, shape=())
-        self.status.from_numpy(np.zeros(n_blocks, dtype=np.int32))
-        self.partial.from_numpy(np.zeros(self.partial.shape[0], dtype=np.int32))
-        self.complete.from_numpy(np.zeros(n_blocks, dtype=np.int32))
-        self.tile_counter.from_numpy(np.array(0, dtype=np.int32))
+        self.status = qd.ndarray(gs.qd_int, shape=(n_blocks,))
+        self.partial = qd.ndarray(gs.qd_int, shape=(max(n_blocks, CPU_CHUNKS),))
+        self.complete = qd.ndarray(gs.qd_int, shape=(n_blocks,))
+        self.tile_counter = qd.ndarray(gs.qd_int, shape=())
+        self.status.from_numpy(np.zeros(n_blocks, dtype=gs.np_int))
+        self.partial.from_numpy(np.zeros(self.partial.shape[0], dtype=gs.np_int))
+        self.complete.from_numpy(np.zeros(n_blocks, dtype=gs.np_int))
+        self.tile_counter.from_numpy(np.array(0, dtype=gs.np_int))
 
     @qd.func(requires_top_level=True)
-    def clear(
-        self,
-        n: qd.template(),
-    ):
+    def clear(self, n: qd.template()):
         qd.loop_config(name="des_init_tile_state", block_dim=128)
         needed_blocks = qd.max((n + 3071) // 3072, 1)
         for block in range(needed_blocks):
@@ -47,33 +44,23 @@ class DynamicExclusiveSum:
                 self.tile_counter[()] = 0
 
     @qd.func(requires_top_level=True)
-    def scan(
-        self,
-        values: qd.template(),
-        output: qd.template(),
-        n: qd.template(),
-    ):
+    def scan(self, values: qd.template(), output: qd.template(), n: qd.template()):
         if qd.static(gs.backend == gs.cpu):
             self.scan_cpu(values, output, n)
         else:
             self.scan_gpu(values, output, n)
 
     @qd.func(requires_top_level=True)
-    def scan_cpu(
-        self,
-        values: qd.template(),
-        output: qd.template(),
-        n: qd.template(),
-    ):
+    def scan_cpu(self, values: qd.template(), output: qd.template(), n: qd.template()):
         qd.loop_config(name="des_chunk_sums")
         for chunk in range(CPU_CHUNKS):
             size = (n + CPU_CHUNKS - 1) // CPU_CHUNKS
-            total = qd.i32(0)
+            total = gs.qd_int(0)
             for i in range(chunk * size, qd.min(chunk * size + size, n)):
                 total += values[i]
             self.partial[chunk] = total
         for _ in range(1):
-            running = qd.i32(0)
+            running = gs.qd_int(0)
             for chunk in range(CPU_CHUNKS):
                 total = self.partial[chunk]
                 self.partial[chunk] = running
@@ -88,12 +75,7 @@ class DynamicExclusiveSum:
                 running += value
 
     @qd.func(requires_top_level=True)
-    def scan_gpu(
-        self,
-        values: qd.template(),
-        output: qd.template(),
-        n: qd.template(),
-    ):
+    def scan_gpu(self, values: qd.template(), output: qd.template(), n: qd.template()):
         self.clear(n)
         qd.loop_config(name="des_scan", block_dim=128)
         needed_blocks = qd.max((n + 3071) // 3072, 1)
@@ -103,37 +85,37 @@ class DynamicExclusiveSum:
             count = n
             launch_block = thread // 128
             if launch_block < needed_blocks:
-                sh_tile_slot = qd.simt.block.SharedArray((1,), qd.i32)
+                sh_tile_slot = qd.simt.block.SharedArray((1,), gs.qd_int)
                 if tid == 0:
                     sh_tile_slot[0] = qd.atomic_add(self.tile_counter[()], 1)
                 qd.simt.block.sync()
                 tile = sh_tile_slot[0]
-                local_prefixes = qd.Vector.zero(qd.i32, 24)
-                sh_tile_values = qd.simt.block.SharedArray((3072,), qd.i32)
-                sh_tile_total = qd.simt.block.SharedArray((1,), qd.i32)
+                local_prefixes = qd.Vector.zero(gs.qd_int, 24)
+                sh_tile_values = qd.simt.block.SharedArray((3072,), gs.qd_int)
+                sh_tile_total = qd.simt.block.SharedArray((1,), gs.qd_int)
 
                 for item in qd.static(range(24)):
                     index = tile * 3072 + item * 128 + tid
-                    value = qd.i32(0)
+                    value = gs.qd_int(0)
                     if index < count:
                         value = values[index]
                     sh_tile_values[item * 128 + tid] = value
                 qd.simt.block.sync()
 
-                thread_total = qd.i32(0)
+                thread_total = gs.qd_int(0)
                 for item in qd.static(range(24)):
                     logical_index = tid * 24 + item
                     local_prefixes[item] = thread_total
                     thread_total = thread_total + sh_tile_values[logical_index]
-                thread_prefix = qd.simt.block.exclusive_add(thread_total, 128, qd.i32)
+                thread_prefix = qd.simt.block.exclusive_add(thread_total, 128, gs.qd_int)
                 if tid == 127:
                     sh_tile_total[0] = thread_prefix + thread_total
                 qd.simt.block.sync()
 
-                sh_tile_prefix = qd.simt.block.SharedArray((1,), qd.i32)
+                sh_tile_prefix = qd.simt.block.SharedArray((1,), gs.qd_int)
                 if tid == 0:
                     tile_sum = sh_tile_total[0]
-                    tile_prefix = qd.i32(0)
+                    tile_prefix = gs.qd_int(0)
                     predecessor = tile - 1
                     is_prefix_complete = tile == 0
                     if tile > 0:
@@ -172,12 +154,7 @@ class DynamicExclusiveSum:
 
 
 @qd.func(requires_top_level=True)
-def func_dynamic_exclusive_sum(
-    values: qd.template(),
-    output: qd.template(),
-    scanner: qd.template(),
-    n: qd.template(),
-):
+def func_dynamic_exclusive_sum(values: qd.template(), output: qd.template(), scanner: qd.template(), n: qd.template()):
     """Write the exclusive prefix sum of the leading entries of an array into another array.
 
     The sum covers the first n entries of values and lands in output.
@@ -187,10 +164,7 @@ def func_dynamic_exclusive_sum(
 
 @qd.kernel
 def kernel_dynamic_exclusive_sum(
-    values: qd.types.ndarray(),
-    output: qd.types.ndarray(),
-    n: qd.types.ndarray(),
-    scanner: qd.template(),
+    values: qd.types.ndarray(), output: qd.types.ndarray(), n: qd.types.ndarray(), scanner: qd.template()
 ):
     """Run func_dynamic_exclusive_sum as a launch of its own, reading the count from a device scalar."""
     scanner.scan(values, output, n[()])

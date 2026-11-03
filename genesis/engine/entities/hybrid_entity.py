@@ -442,7 +442,7 @@ class HybridEntity(Entity):
                 dt_for_rigid_acc = (
                     self._solver_rigid.dt
                 )  # NOTE: use rigid dt here as we are sorta doing integration within soft solver substep
-                mass_real = self._solver_soft.particles_info.mass[i_global] / self._solver_soft._particle_volume_scale
+                mass_real = self._solver_soft.particles_info.mass[i_global] / self._solver_soft.particle_volume_scale
                 acc = vel_d / dt_for_rigid_acc
                 frc_vel = mass_real * acc
                 frc_ang = (x_pos - links_state.root_COM[link_idx, i_b]).cross(frc_vel)

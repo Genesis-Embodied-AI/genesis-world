@@ -68,6 +68,66 @@ def qd_vec_to_skew(vec):
 
 
 @qd.func
+def qd_svd(F):
+    """Singular value decomposition F = U S V^T of a 3x3 matrix, with the conventions of qd.svd.
+
+    The singular values come in descending order on the diagonal of S, the last one carrying the sign of det(F), and
+    det(U) = det(V) = 1.
+    """
+    # FIXME: quadrants#1051 - the fp64 Sifakis SVD skips the rotations of entries under 1e-6, which leaves an error of
+    # up to 1e-6 in the decomposition of a matrix near the identity. Two one-sided Jacobi sweeps on U^T F V, which is
+    # nearly diagonal, bring it to the precision of fp64: the stress built from it is then a smooth function of F to
+    # that precision, which the finite differences of the gradients need. Its thresholds are absolute, so the
+    # decomposition runs on F scaled to a largest entry of one.
+    F_unit = F
+    scale = gs.qd_float(1.0)
+    if qd.static(gs.qd_float == qd.f64):
+        scale = qd.abs(F).max()
+        if scale > 0.0:
+            F_unit = F / scale
+    U, S, V = qd.svd(F_unit, gs.qd_float)
+    if qd.static(gs.qd_float == qd.f64):
+        B = U.transpose() @ F_unit @ V
+        W = qd.Matrix.identity(gs.qd_float, 3)
+        for _ in qd.static(range(2)):
+            for p, q in qd.static(((0, 1), (0, 2), (1, 2))):
+                alpha, beta, gamma = gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)
+                for r in qd.static(range(3)):
+                    alpha += B[r, p] * B[r, p]
+                    beta += B[r, q] * B[r, q]
+                    gamma += B[r, p] * B[r, q]
+                if qd.abs(gamma) > 0.0:
+                    zeta = (beta - alpha) / (2.0 * gamma)
+                    t = 1.0 / (qd.abs(zeta) + qd.sqrt(1.0 + zeta * zeta))
+                    if zeta < 0.0:
+                        t = -t
+                    c = 1.0 / qd.sqrt(1.0 + t * t)
+                    s = c * t
+                    for r in qd.static(range(3)):
+                        B_p, B_q = B[r, p], B[r, q]
+                        B[r, p] = c * B_p - s * B_q
+                        B[r, q] = s * B_p + c * B_q
+                        W_p, W_q = W[r, p], W[r, q]
+                        W[r, p] = c * W_p - s * W_q
+                        W[r, q] = s * W_p + c * W_q
+        # The columns of B are now orthogonal, of norms the singular values. The third column of U completes the first
+        # two into a rotation, which leaves the sign of det(F) to the last singular value.
+        B_0 = qd.Vector([B[r, 0] for r in qd.static(range(3))], dt=gs.qd_float)
+        B_1 = qd.Vector([B[r, 1] for r in qd.static(range(3))], dt=gs.qd_float)
+        B_2 = qd.Vector([B[r, 2] for r in qd.static(range(3))], dt=gs.qd_float)
+        sigma_0, sigma_1 = B_0.norm(), B_1.norm()
+        # A matrix of rank 1 at most keeps the decomposition of qd.svd, whose second column of U would be undefined
+        if sigma_1 > 0.0:
+            U_0, U_1 = B_0 / sigma_0, B_1 / sigma_1
+            U_2 = U_0.cross(U_1)
+            U = U @ qd.Matrix.cols([U_0, U_1, U_2])
+            S = qd.Matrix([[sigma_0, 0.0, 0.0], [0.0, sigma_1, 0.0], [0.0, 0.0, U_2.dot(B_2)]], dt=gs.qd_float)
+            V = V @ W
+        S = scale * S
+    return U, S, V
+
+
+@qd.func
 def qd_transform_by_quat_fast(v, quat):
     """
     Rotate a vector by a quaternion that is already normalized.

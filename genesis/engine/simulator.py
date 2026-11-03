@@ -113,7 +113,7 @@ class Simulator(RBC):
         self.sf_solver = SFSolver(self.scene, self, options.sf)
         # The Newton solve of the solvers that couple strongly, into which they register at build. It owns no physical
         # state, so it stays out of the solvers whose state the simulator gathers.
-        self.newton_solver = NewtonSolver(self.scene, self)
+        self.newton_solver = NewtonSolver(self.scene, self, options.newton)
 
         self._solvers: list["Solver"] = gs.List(
             [

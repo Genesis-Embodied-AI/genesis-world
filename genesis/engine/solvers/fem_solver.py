@@ -37,8 +37,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._floor_height = options.floor_height
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
-        # Whether the NewtonSolver runs the implicit substep (see FemNewtonHost), set by the solver coupled with FEM
-        self._defer_solve = False
+        # Whether the NewtonSolver runs the implicit substep (see defer_solve)
+        self._is_solve_deferred = False
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
         self._n_pcg_iterations = options.n_pcg_iterations
@@ -967,6 +967,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
+    def defer_solve(self):
+        """Leave the implicit solve of every substep to the NewtonSolver, which solves it jointly with the solvers
+        coupled with FEM (see FemNewtonHost)."""
+        self._is_solve_deferred = True
+
     def substep_pre_coupling(self, f):
         if self.is_active:
             # Skip FEM solver step if using IPCCoupler (IPC handles FEM simulation)
@@ -974,7 +979,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             if isinstance(self.sim._coupler, IPCCoupler):
                 pass  # IPC coupler handles FEM simulation
-            elif self._defer_solve:
+            elif self._is_solve_deferred:
                 # The NewtonSolver solves the implicit substep jointly with the implicit MPM solver
                 pass
             elif self._use_implicit_solver:

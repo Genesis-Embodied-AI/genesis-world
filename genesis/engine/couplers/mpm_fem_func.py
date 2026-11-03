@@ -1,5 +1,5 @@
-"""Stages of the implicit finite element method (FEM) as a secondary participant of the NewtonSolver, and of the contact
-rows of the material point method (MPM) with FEM as a coupling.
+"""Stages of the implicit finite element method (FEM) as a participant of the NewtonSolver, and of the contact rows of
+the material point method (MPM) with FEM as a coupling.
 
 The FEM unknown is the end-of-substep vertex position x, starting at the substep start. Its share of the joint energy is
 FEM's own incremental potential (inertia, elasticity and the linearized damping of its implicit solver) times dt^2, in
@@ -13,16 +13,16 @@ particle displacement relative to the displacement of its closest point, the bar
 vertex displacements over the whole substep.
 """
 
+import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
-from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted
+from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted, particle_stencil
 from genesis.utils import array_class
-
-from .mpm_rigid_func import particle_stencil
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
@@ -83,13 +83,7 @@ def closest_point_barycentric(
 
 
 @qd.func
-def is_in_element(
-    i_e: int,
-    i_b: int,
-    f: int,
-    x: qd.types.vector(3),
-    fem: qd.template(),
-):
+def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.template()):
     """Whether a point lies in a tetrahedral element, by its barycentric coordinates.
 
     The point is x and the element i_e of environment i_b, at frame f. A degenerate element holds no point."""
@@ -104,13 +98,7 @@ def is_in_element(
 
 
 @qd.func
-def triangle_point_disp(
-    i_s: int,
-    i_b: int,
-    f: int,
-    bary: qd.types.vector(3),
-    fem: qd.template(),
-):
+def triangle_point_disp(i_s: int, i_b: int, f: int, bary: qd.types.vector(3), fem: qd.template()):
     """Displacement over the substep of a point of a FEM surface triangle.
 
     The point is that of surface triangle i_s of environment i_b at barycentric coordinates bary, displaced from frame f
@@ -126,17 +114,34 @@ def triangle_point_disp(
 
 
 @qd.data_oriented
+class FemContactParams:
+    """Scene values of the MPM-FEM contact rows, as device scalars.
+
+    The FEM surface takes the thickness `thickness`, in metres, half a grid cell of MPM: a triangle has no volume of its
+    own. A row takes the penalty stiffness `stiffness` in units of its effective mass, the inverse of its inverse
+    weight: the row energy is 1/2 stiffness m_eff c^2 in the joint dt^2-scaled units."""
+
+    def __init__(self, dx: float) -> None:
+        self.thickness = qd.ndarray(gs.qd_float, shape=())
+        self.thickness.from_numpy(np.array(0.5 * dx, dtype=gs.np_float))
+        self.stiffness = qd.ndarray(gs.qd_float, shape=())
+        self.stiffness.from_numpy(np.array(10.0, dtype=gs.np_float))
+
+
+@qd.data_oriented
 class FemTriangleQuery:
     """The linear bounding volume hierarchy (LBVH) over the FEM surface triangles of every environment (see
     genesis.engine.bvh).
 
-    It also holds the data the filter of its queries reads: the FEM solver, the contact thickness, and the query point,
-    frame and nearest triangle of each sorted particle in `newton`."""
+    It also holds the data the filter of its queries reads: the FEM solver, the values of the MPM kernels `params`, the
+    values of the contact rows `contact`, and the query point, frame and nearest triangle of each sorted particle in
+    `newton`."""
 
-    def __init__(self, fem, newton, params, n_envs):
+    def __init__(self, fem, newton, params, contact: FemContactParams, n_envs):
         self.fem = fem
         self.newton = newton
         self.params = params
+        self.contact = contact
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, fem.n_surfaces)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -150,17 +155,14 @@ class FemTriangleQuery:
 
 
 @qd.kernel
-def kernel_fit_triangle_leaves(
-    f: int,
-    query: qd.template(),
-):
+def kernel_fit_triangle_leaves(f: int, query: qd.template()):
     """The box of every surface triangle over the element behind it, so that a particle that penetrated the surface
     element still finds the triangle.
 
     The box grows by the contact thickness and by twice the distance the fastest vertex of the element travels over the
     substep."""
     dt = query.params.substep_dt[()]
-    thickness = query.params.fem_contact_thickness[()]
+    thickness = query.contact.thickness[()]
     for i_b, i_s in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         lo = gu.qd_vec3(qd.math.inf)
         hi = gu.qd_vec3(-qd.math.inf)
@@ -218,7 +220,7 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
             normal = d / dist
         query.newton.query_dist[i_q] = dist
         query.newton.query_align[i_q] = align
-        query.newton.query_phi[i_q] = side * dist - query.params.fem_contact_thickness[()]
+        query.newton.query_phi[i_q] = side * dist - query.contact.thickness[()]
         query.newton.query_idx[i_q] = i_a
         for k in qd.static(range(3)):
             query.newton.query_bary[3 * i_q + k] = bary[k]
@@ -248,9 +250,9 @@ def func_build_fem_rows(
     particle's box spans its band at its own speed, and the grown triangle boxes span the thickness and the vertex
     motion, so together they cover the band of the relative velocity.
 
-    The gap phi is the signed distance to the triangle, outward along its normal, minus `params.fem_contact_thickness`.
+    The gap phi is the signed distance to the triangle, outward along its normal, minus `query.contact.thickness`.
     Every row of the friction pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the
-    relative displacement r. Its target is -phi and its stiffness `params.fem_contact_stiffness` times the row's
+    relative displacement r. Its target is -phi and its stiffness `query.contact.stiffness` times the row's
     effective mass, the inverse of the particle's inverse weight (see func_contact_invweight) plus that of the triangle
     point, sum_k b_k^2 / m_k. The row energy depends on the end positions alone, so the rows add no energy, as a
     reference acceleration from the start gap would. The next substep builds its rows anew and drops the tangential part
@@ -290,7 +292,7 @@ def func_build_fem_rows(
                     i_e = fem.surface[best_tri].tri2el
                     friction = qd.max(fem.elements_i[i_e].friction_mu, MIN_FRICTION)
                     invweight = contact_invweight(f, i_p, i_b, best_normal, particles, particles_info) + inv_mass
-                    D = params.fem_contact_stiffness[()] / invweight
+                    D = query.contact.stiffness[()] / invweight
                     d1, d2 = gu.qd_orthogonals(best_normal)
                     for i in qd.static(range(PYRAMID_ROWS)):
                         d = d1
@@ -308,13 +310,7 @@ def func_build_fem_rows(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_point_disp(
-    f: int,
-    grid: qd.template(),
-    newton: qd.template(),
-    fem: qd.template(),
-    params: qd.template(),
-):
+def func_fem_point_disp(f: int, grid: qd.template(), newton: qd.template(), fem: qd.template(), params: qd.template()):
     """Displacement of the contact point of every particle with FEM rows at the current FEM iterate."""
     qd.loop_config(name="mpm_fem_point_disp")
     for s in range(grid.n_valid[()]):
@@ -328,12 +324,7 @@ def func_fem_point_disp(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_contact_gradient(
-    grid: qd.template(),
-    newton: qd.template(),
-    fem: qd.template(),
-    params: qd.template(),
-):
+def func_fem_contact_gradient(grid: qd.template(), newton: qd.template(), fem: qd.template(), params: qd.template()):
     """Add the share of the FEM rows to the FEM gradient and to its preconditioner.
 
     It runs after FEM's own force and diagonal blocks, and after the MPM assembly that staged the row gradients g and
@@ -385,7 +376,7 @@ def fem_contact_terms(
     For sorted particle s, the func returns its environment i_b, its stencil slots and weights w, its row Hessian H, its
     trial displacement dxp = sum_a w_a p_u,a along the direction and the displacement dq = sum_k b_k p_v,k of its
     closest point."""
-    ws = linear.pcg
+    pcg_workspace = linear.pcg
     i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
     H = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i, j in qd.static(qd.ndrange(3, 3)):
@@ -393,7 +384,7 @@ def fem_contact_terms(
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
         row = 3 * (linear.row_offset + slots[a])
-        dxp += w[a] * qd.Vector([ws.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
     i_s = newton.contact_tri[s]
     dq = qd.Vector.zero(gs.qd_float, 3)
     for k in qd.static(range(3)):
@@ -410,21 +401,22 @@ def func_fem_contact_matvec(
     newton: qd.template(),
     linear: qd.template(),
     fem: qd.template(),
+    pcg_scalars: qd.template(),
     params: qd.template(),
 ):
     """The FEM rows' cross term on the MPM rows, after func_linear_pcg_spmv: Ap_u,a -= w_a H dq, and p.Ap takes
     p_u.(-sum w_a H dq)."""
-    ws = linear.pcg
+    pcg_workspace = linear.pcg
     qd.loop_config(name="mpm_fem_matvec_particles")
     for s in range(grid.n_valid[()]):
-        if newton.contact_tri[s] >= 0 and ws.converged[()] == 0:
+        if newton.contact_tri[s] >= 0 and pcg_scalars.is_converged[()] == 0:
             i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
             H_dq = H @ dq
             for a in qd.static(range(8)):
                 row = 3 * (linear.row_offset + slots[a])
                 for d in qd.static(range(3)):
-                    qd.atomic_add(ws.ap[row + d], -w[a] * H_dq[d])
-            qd.atomic_add(ws.p_dot_ap[()], -dxp.dot(H_dq))
+                    qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dq[d])
+            qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
 
 
 @qd.func(requires_top_level=True)
@@ -435,13 +427,13 @@ def func_fem_contact_matvec_post(
     newton: qd.template(),
     linear: qd.template(),
     fem: qd.template(),
+    pcg_scalars: qd.template(),
     params: qd.template(),
 ):
     """The FEM rows' term on the FEM rows, after FEM's own operator overwrote its Ap: Ap_v,k += b_k H (dq - dxp)."""
-    ws = linear.pcg
     qd.loop_config(name="mpm_fem_matvec_vertices")
     for s in range(grid.n_valid[()]):
-        if newton.contact_tri[s] >= 0 and ws.converged[()] == 0:
+        if newton.contact_tri[s] >= 0 and pcg_scalars.is_converged[()] == 0:
             i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
             h = H @ (dq - dxp)
             i_s = newton.contact_tri[s]
@@ -454,10 +446,7 @@ def func_fem_contact_matvec_post(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_init(
-    dt: float,
-    fem: qd.template(),
-):
+def func_fem_pcg_init(dt: float, fem: qd.template()):
     """The FEM part of the preconditioned conjugate gradient (PCG) start from 0: r = grad = -dt^2 force, solution and Ap
     cleared."""
     qd.loop_config(name="mpm_fem_pcg_init")
@@ -468,10 +457,7 @@ def func_fem_pcg_init(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_precondition(
-    dt: float,
-    fem: qd.template(),
-):
+def func_fem_precondition(dt: float, fem: qd.template()):
     """z = M^-1 r by FEM's inverse 3x3 diagonal blocks, scaled to the joint energy.
 
     A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contact rows leave it in
@@ -486,22 +472,16 @@ def func_fem_precondition(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_init_direction(fem: qd.template(), ws: qd.template()):
-    """p = z over the FEM vertices, and r.z added to rz before the threshold is re-derived, after the primary's
-    func_init_linear_pcg_direction."""
+def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
+    """Set the first search direction p = z over the FEM vertices, and add r . z to rz."""
     qd.loop_config(name="mpm_fem_pcg_init_direction")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z
-        qd.atomic_add(ws.rz_slots[ws.parity[()]], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
-    for _ in range(1):
-        ws.tol_sq[()] = ws.tol_rate[()] * qd.abs(ws.rz_slots[ws.parity[()]])
+        qd.atomic_add(pcg_scalars.rz[()], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
 
 @qd.func(requires_top_level=True)
-def func_fem_matvec(
-    dt: float,
-    fem: qd.template(),
-):
+def func_fem_matvec(dt: float, fem: qd.template()):
     """Ap = dt^2 H p over the FEM vertices with FEM's own operator, before the FEM rows add their term."""
     fem.compute_Ap()
     qd.loop_config(name="mpm_fem_matvec_scale")
@@ -510,52 +490,47 @@ def func_fem_matvec(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_matvec_dot(fem: qd.template(), ws: qd.template()):
+def func_fem_matvec_dot(fem: qd.template(), pcg_scalars: qd.template()):
+    """Add p . Ap over the FEM vertices to p . Ap, once Ap holds the whole joint operator."""
     qd.loop_config(name="mpm_fem_matvec_dot")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if ws.converged[()] == 0:
-            qd.atomic_add(ws.p_dot_ap[()], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
+        if pcg_scalars.is_converged[()] == 0:
+            qd.atomic_add(pcg_scalars.p_dot_ap[()], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_update_xr(fem: qd.template(), ws: qd.template()):
-    """x += alpha p and r -= alpha Ap over the FEM vertices, with the alpha of func_linear_pcg_update_xr."""
+def func_fem_pcg_update_xr(fem: qd.template(), pcg_scalars: qd.template()):
+    """Update the solution and the residual over the FEM vertices, x += alpha p and r -= alpha Ap."""
     qd.loop_config(name="mpm_fem_pcg_update_xr")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if ws.converged[()] == 0:
-            p_dot_ap = ws.p_dot_ap[()]
-            alpha = ws.rz_slots[ws.parity[()]] / p_dot_ap if p_dot_ap != 0.0 else gs.qd_float(0.0)
+        if pcg_scalars.is_converged[()] == 0:
+            alpha = pcg_scalars.alpha[()]
             fem.pcg_state_v[i_b, i_v].x = fem.pcg_state_v[i_b, i_v].x + alpha * fem.pcg_state_v[i_b, i_v].p
             fem.pcg_state_v[i_b, i_v].r = fem.pcg_state_v[i_b, i_v].r - alpha * fem.pcg_state_v[i_b, i_v].Ap
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_dot_rz(fem: qd.template(), ws: qd.template()):
-    """r.z over the FEM vertices into the rz_new slot, before the primary's func_linear_pcg_direction_update."""
+def func_fem_pcg_dot_rz(fem: qd.template(), pcg_scalars: qd.template()):
+    """Add r . z over the FEM vertices to rz_new."""
     qd.loop_config(name="mpm_fem_pcg_dot_rz")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if ws.converged[()] == 0:
-            qd.atomic_add(ws.rz_slots[1 - ws.parity[()]], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
+        if pcg_scalars.is_converged[()] == 0:
+            qd.atomic_add(pcg_scalars.rz_new[()], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_direction(fem: qd.template(), ws: qd.template()):
-    """p = z + beta p and Ap cleared over the FEM vertices, after func_linear_pcg_direction_update flips the parity."""
+def func_fem_pcg_direction(fem: qd.template(), pcg_scalars: qd.template()):
+    """Update the search direction p = z + beta p over the FEM vertices, and clear Ap."""
     qd.loop_config(name="mpm_fem_pcg_direction")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
-        if ws.converged[()] == 0:
-            rz = ws.rz_slots[1 - ws.parity[()]]
-            beta = ws.rz_slots[ws.parity[()]] / rz if rz != 0.0 else gs.qd_float(0.0)
+        if pcg_scalars.is_converged[()] == 0:
+            beta = pcg_scalars.beta[()]
             fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z + beta * fem.pcg_state_v[i_b, i_v].p
 
 
 @qd.func(requires_top_level=True)
-def func_fem_start_line_search(
-    f: int,
-    fem: qd.template(),
-    control: qd.template(),
-):
+def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template()):
     """The line-search start point, and the largest component of the step -x into the Newton measure."""
     qd.loop_config(name="mpm_fem_start_line_search")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
@@ -565,11 +540,7 @@ def func_fem_start_line_search(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_step_forward(
-    f: int,
-    fem: qd.template(),
-    control: qd.template(),
-):
+def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_fem_step_forward")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.elements_v[f + 1, i_v, i_b].pos = (
@@ -578,13 +549,7 @@ def func_fem_step_forward(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_energy(
-    f: int,
-    dt: float,
-    fem: qd.template(),
-    control: qd.template(),
-    is_trial: bool,
-):
+def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(), is_trial: bool):
     """Add FEM's incremental potential at the end-of-substep positions, times dt^2, to the start or trial energy.
 
     The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of

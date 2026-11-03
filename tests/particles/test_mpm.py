@@ -168,3 +168,54 @@ def test_perf_dispatch(variant, show_viewer):
     dx = 1.0 / 64
     assert final_elastic_pos[..., 2].min() > -0.5 * dx
     assert final_liquid_pos[..., 2].min() > -0.5 * dx
+
+
+@pytest.mark.slow  # ~300s from a cold cache, the Newton graph compiling in ~200s
+@pytest.mark.required
+@pytest.mark.precision("64")
+def test_newton_graph_matches_split(show_viewer):
+    # The Newton graph runs the stages of Rigid's dofs with those of MPM
+    positions = []
+    for newton_graph in ("split", "newton"):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=4e-3,
+                substeps=2,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.5, -0.5, -0.1),
+                upper_bound=(0.5, 0.5, 0.6),
+                grid_density=32,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # Converged far below its default tolerance, the solve stops at the same iteration on every path
+                velocity_tol=1e-10,
+                graph=newton_graph,
+            ),
+            show_viewer=show_viewer,
+        )
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+        block = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.08),
+                size=(0.12, 0.12, 0.12),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                sampler="regular",
+            ),
+        )
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.06, 0.06, 0.06),
+            ),
+        )
+        scene.build(n_envs=2)
+        for _ in range(10):
+            scene.step()
+        positions.append(block.get_particles_pos())
+    assert_allclose(*positions, tol=1e-13)
