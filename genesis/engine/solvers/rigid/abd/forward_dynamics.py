@@ -1640,43 +1640,10 @@ def func_torque_and_passive_force(
             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
             joint_type = dyn_info.joints.type[I_j]
 
-            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                force = gs.qd_float(0.0)
-                pos_err_int = gs.qd_float(0.0)
-                if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
-                    force = dyn_state.dofs.ctrl_force[i_d, i_b]
-                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
-                    force = -dyn_info.dofs.act_bias[I_d][2] * (
-                        dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
-                    )
-                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION and not (
-                    joint_type == gs.JOINT_TYPE.FREE and i_d >= dyn_info.links.dof_start[I_l] + 3
-                ):
-                    # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
-                    # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
-                    pos_err = dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b]
-                    force_pd = (
-                        dyn_info.dofs.act_gain[I_d] * pos_err
-                        + dyn_info.dofs.act_bias[I_d][0]
-                        + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
-                        + dyn_info.dofs.act_bias[I_d][2]
-                        * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-                    )
-                    pos_err_int = func_ctrl_pos_err_int_next(
-                        i_d, i_b, pos_err, force_pd, dyn_state, dyn_info, rigid_info, rigid_config
-                    )
-                    force = force_pd + dyn_info.dofs.act_ki[I_d] * pos_err_int
-
-                dyn_state.dofs.ctrl_pos_err_int_next[i_d, i_b] = pos_err_int
-                dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
-                    force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
-                )
-
-                if qd.abs(force) > EPS:
-                    wakeup = True
-
+            # The position error of the rotation of a free joint is the rotation vector from its orientation to its
+            # target, since a difference of Euler angles does not measure a rotation
             dof_start = dyn_info.links.dof_start[I_l]
+            rotvec = qd.Vector.zero(gs.qd_float, 3)
             if joint_type == gs.JOINT_TYPE.FREE and (
                 dyn_state.dofs.ctrl_mode[dof_start + 3, i_b] == gs.CTRL_MODE.POSITION
                 or dyn_state.dofs.ctrl_mode[dof_start + 4, i_b] == gs.CTRL_MODE.POSITION
@@ -1706,29 +1673,48 @@ def func_torque_and_passive_force(
                 q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
                 rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
 
-                for j in qd.static(range(3)):
-                    i_d = dof_start + 3 + j
-                    I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            for i_d in range(dof_start, dyn_info.links.dof_end[I_l]):
+                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                force = gs.qd_float(0.0)
+                pos_err_int = gs.qd_float(0.0)
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
+                    force = dyn_state.dofs.ctrl_force[i_d, i_b]
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
+                    force = -dyn_info.dofs.act_bias[I_d][2] * (
+                        dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
+                    )
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION:
+                    # Each local is assigned once, since autodiff gets the gradient of a local reassigned in a nested
+                    # loop wrong. A local vector takes no runtime index, so the rotation vector component is selected.
+                    i_rot = i_d - dof_start - 3
+                    rotvec_i = qd.select(i_rot == 0, rotvec[0], qd.select(i_rot == 1, rotvec[1], rotvec[2]))
+                    pos_err = qd.select(
+                        joint_type == gs.JOINT_TYPE.FREE and i_rot >= 0,
+                        rotvec_i,
+                        dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b],
+                    )
+
+                    # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
+                    # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
                     force_pd = (
-                        dyn_info.dofs.act_gain[I_d] * rotvec[j]
+                        dyn_info.dofs.act_gain[I_d] * pos_err
                         + dyn_info.dofs.act_bias[I_d][0]
                         + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
                         + dyn_info.dofs.act_bias[I_d][2]
                         * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
                     )
                     pos_err_int = func_ctrl_pos_err_int_next(
-                        i_d, i_b, rotvec[j], force_pd, dyn_state, dyn_info, rigid_info, rigid_config
+                        i_d, i_b, pos_err, force_pd, dyn_state, dyn_info, rigid_info, rigid_config
                     )
                     force = force_pd + dyn_info.dofs.act_ki[I_d] * pos_err_int
 
-                    dyn_state.dofs.ctrl_pos_err_int_next[i_d, i_b] = pos_err_int
+                dyn_state.dofs.ctrl_pos_err_int_next[i_d, i_b] = pos_err_int
+                dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
+                    force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
+                )
 
-                    dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
-                        force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
-                    )
-
-                    if qd.abs(force) > EPS:
-                        wakeup = True
+                if qd.abs(force) > EPS:
+                    wakeup = True
 
             if qd.static(rigid_config.use_hibernation):
                 # Actuation on a sleeping link wakes its island, the unit that sleeps and wakes together (see
