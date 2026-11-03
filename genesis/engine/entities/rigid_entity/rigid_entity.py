@@ -2312,6 +2312,29 @@ class RigidEntity(KinematicEntity):
         self._solver.set_dofs_kv(kv, dofs_idx, envs_idx)
 
     @gs.assert_built
+    def set_dofs_ki(self, ki, dofs_idx_local=None, envs_idx=None):
+        """
+        Set the entity's dofs' integral gains, which turn the PD position controller into a PID controller.
+
+        The integral term accumulates the position error over time, so a dof under a constant load such as gravity
+        settles on its target instead of short of it by `load / kp`. The cost is overshoot and slower settling, which
+        grow with the gain. The accumulated term is bounded by the force range of the dof, so it stops growing while the
+        actuator saturates. It restarts from zero when the scene is reset, when the dof switches to another control mode
+        and while the gain is zero. The gain is zero by default.
+
+        Parameters
+        ----------
+        ki : array_like
+            The integral gains to set.
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        self._solver.set_dofs_ki(ki, dofs_idx, envs_idx)
+
+    @gs.assert_built
     def set_dofs_act_gain(self, act_gain, dofs_idx_local=None, envs_idx=None):
         """
         Set the actuator gain for the entity's dofs. Invalidates PD-reducibility.
@@ -2659,6 +2682,26 @@ class RigidEntity(KinematicEntity):
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_kv(dofs_idx, envs_idx)
+
+    @gs.assert_built
+    def get_dofs_ki(self, dofs_idx_local=None, envs_idx=None):
+        """
+        Get the integral gain (ki) for the entity's dofs used by the PID position controller.
+
+        Parameters
+        ----------
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        ki : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+            The integral gain (ki) for the entity's dofs.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        return self._solver.get_dofs_ki(dofs_idx, envs_idx)
 
     @gs.assert_built
     def get_dofs_act_gain(self, dofs_idx_local=None, envs_idx=None):
