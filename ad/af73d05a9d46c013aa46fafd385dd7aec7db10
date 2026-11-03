@@ -1,0 +1,27 @@
+genesis/engine/solvers/rigid/abd/forward_dynamics.py
+  s_89519fefaf9334::t_5a4d6272e89af7 1591,1600-1602,1608-1612,1614-1615
+  s_89519fefaf9334::t_5445671de48805 1659,1666-1669
+  s_89519fefaf9334::t_255a0d216d647f 1712,1719-1722
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_89519fefaf9334::t_4f8bfdb7a06647 2321-2323
+genesis/engine/solvers/rigid/abd/diff.py
+  s_89519fefaf9334::t_8631a14414ee30 28-30
+tests/rigid/test_control.py
+  s_89519fefaf9334::t_1a604a01e1e39e 95-102
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "adaf73d05a9d46c013aa46fafd385dd7aec7db10",
+  "prompts": {},
+  "sessions": {
+    "s_89519fefaf9334": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2a1f18c-7a3c-4261-abbd-cb0686eb33c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
