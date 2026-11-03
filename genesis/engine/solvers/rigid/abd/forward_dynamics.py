@@ -1584,36 +1584,38 @@ def kernel_refresh_invweight_and_meaninertia(
 
 
 @qd.func
-def func_ctrl_pos_err_int_next(
+def func_ctrl_err_int_next(
     i_d: int,
     i_b: int,
-    pos_err: float,
-    force_pd: float,
-    dyn_state: DynState,
+    err: float,
+    err_int: float,
+    force: float,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Integrate the position error of a dof over one substep, for the integral term of its position controller.
+    """Integrate the control error of a dof over one substep, for the integral term of its controller.
 
-    The integral stays zero while the integral gain is zero, so that setting a gain later starts from a clean integral.
-    It keeps its value instead of integrating whenever the actuation force, `force_pd` plus the integral term, falls
-    outside the force range of the dof on the side the error pushes it to. This conditional integration keeps the
-    integral from winding up while the actuator saturates.
+    `err` is the position error under position control and the velocity error under velocity control, `err_int` its
+    integral so far, and `force` the actuation force of the other terms of the controller. The integral stays zero
+    while the integral gain is zero, so that setting a gain later starts from a clean integral. It keeps its value
+    instead of integrating whenever the actuation force, `force` plus the integral term, falls outside the force range
+    of the dof on the side the error pushes it to. This conditional integration keeps the integral from winding up
+    while the actuator saturates.
     """
     I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
     ki = dyn_info.dofs.act_ki[I_d]
-    pos_err_int = gs.qd_float(0.0)
+    err_int_next = gs.qd_float(0.0)
     if ki > rigid_info.EPS[None]:
-        pos_err_int = dyn_state.dofs.ctrl_pos_err_int[i_d, i_b]
-        pos_err_int_next = pos_err_int + pos_err * rigid_info.substep_dt[None]
-        force = force_pd + ki * pos_err_int_next
-        is_winding_up = (force > dyn_info.dofs.force_range[I_d][1] and pos_err > 0.0) or (
-            force < dyn_info.dofs.force_range[I_d][0] and pos_err < 0.0
+        err_int_next = err_int
+        err_int_candidate = err_int + err * rigid_info.substep_dt[None]
+        force_pid = force + ki * err_int_candidate
+        is_winding_up = (force_pid > dyn_info.dofs.force_range[I_d][1] and err > 0.0) or (
+            force_pid < dyn_info.dofs.force_range[I_d][0] and err < 0.0
         )
         if not is_winding_up:
-            pos_err_int = pos_err_int_next
-    return pos_err_int
+            err_int_next = err_int_candidate
+    return err_int_next
 
 
 @qd.func
@@ -1675,20 +1677,22 @@ def func_torque_and_passive_force(
 
             for i_d in range(dof_start, dyn_info.links.dof_end[I_l]):
                 I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                force = gs.qd_float(0.0)
-                pos_err_int = gs.qd_float(0.0)
-                if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
-                    force = dyn_state.dofs.ctrl_force[i_d, i_b]
-                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
-                    force = -dyn_info.dofs.act_bias[I_d][2] * (
-                        dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
-                    )
-                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION:
+                ctrl_mode = dyn_state.dofs.ctrl_mode[i_d, i_b]
+                force_base = gs.qd_float(0.0)
+                err = gs.qd_float(0.0)
+                err_int = gs.qd_float(0.0)
+                if ctrl_mode == gs.CTRL_MODE.FORCE:
+                    force_base = dyn_state.dofs.ctrl_force[i_d, i_b]
+                elif ctrl_mode == gs.CTRL_MODE.VELOCITY:
+                    err = dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
+                    force_base = -dyn_info.dofs.act_bias[I_d][2] * err
+                    err_int = dyn_state.dofs.ctrl_vel_err_int[i_d, i_b]
+                elif ctrl_mode == gs.CTRL_MODE.POSITION:
                     # A local vector takes no runtime index, so the component of the rotation vector is selected.
                     # The position error is assigned once, since reassigning it in a branch breaks its gradient.
                     i_rot = i_d - dof_start - 3
                     rotvec_i = qd.select(i_rot == 0, rotvec[0], qd.select(i_rot == 1, rotvec[1], rotvec[2]))
-                    pos_err = qd.select(
+                    err = qd.select(
                         joint_type == gs.JOINT_TYPE.FREE and i_rot >= 0,
                         rotvec_i,
                         dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b],
@@ -1696,19 +1700,28 @@ def func_torque_and_passive_force(
 
                     # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
                     # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
-                    force_pd = (
-                        dyn_info.dofs.act_gain[I_d] * pos_err
+                    force_base = (
+                        dyn_info.dofs.act_gain[I_d] * err
                         + dyn_info.dofs.act_bias[I_d][0]
                         + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
                         + dyn_info.dofs.act_bias[I_d][2]
                         * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
                     )
-                    pos_err_int = func_ctrl_pos_err_int_next(
-                        i_d, i_b, pos_err, force_pd, dyn_state, dyn_info, rigid_info, rigid_config
-                    )
-                    force = force_pd + dyn_info.dofs.act_ki[I_d] * pos_err_int
+                    err_int = dyn_state.dofs.ctrl_pos_err_int[i_d, i_b]
 
-                dyn_state.dofs.ctrl_pos_err_int_next[i_d, i_b] = pos_err_int
+                # Each integral is zero outside its control mode, so that switching modes restarts it
+                err_int_next = gs.qd_float(0.0)
+                if ctrl_mode == gs.CTRL_MODE.VELOCITY or ctrl_mode == gs.CTRL_MODE.POSITION:
+                    err_int_next = func_ctrl_err_int_next(
+                        i_d, i_b, err, err_int, force_base, dyn_info, rigid_info, rigid_config
+                    )
+                force = force_base + dyn_info.dofs.act_ki[I_d] * err_int_next
+                dyn_state.dofs.ctrl_pos_err_int_next[i_d, i_b] = qd.select(
+                    ctrl_mode == gs.CTRL_MODE.POSITION, err_int_next, 0.0
+                )
+                dyn_state.dofs.ctrl_vel_err_int_next[i_d, i_b] = qd.select(
+                    ctrl_mode == gs.CTRL_MODE.VELOCITY, err_int_next, 0.0
+                )
                 dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
                     force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
                 )

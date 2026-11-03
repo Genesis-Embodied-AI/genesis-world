@@ -2314,12 +2314,16 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_dofs_ki(self, ki, dofs_idx_local=None, envs_idx=None):
         """
-        Set the entity's dofs' integral gains, which turn the PD position controller into a PID controller.
+        Set the entity's dofs' integral gains, which add an integral term to the position and velocity controllers.
 
-        The integral term accumulates the position error over time, so a dof under a constant load such as gravity
-        settles on its target instead of short of it by `load / kp`. The cost is overshoot and slower settling, which
-        grow with the gain. The accumulated error stops growing while the actuation force is held at the limit of the
-        force range of the dof, so a saturated actuator does not wind it up.
+        The integral term accumulates the control error over time, which removes the steady-state error that a constant
+        load such as gravity leaves: a dof under position control settles on its target instead of short of it by
+        `load / kp`, and a dof under velocity control reaches its target velocity instead of falling short of it by
+        `load / kv`. Under velocity control, the integral of the velocity error is the distance between the dof and
+        where its target velocity would have taken it, so a blocked dof pushes harder over time. The cost is overshoot
+        and slower settling, which grow with the gain. The accumulated error stops growing while the actuation force is
+        held at the limit of the force range of the dof, so a saturated actuator does not wind it up. Force control
+        ignores the gain.
 
         The accumulated error restarts from zero when the scene is reset, and when the velocity of the dof is zeroed as
         in the reset of an episode: by `zero_all_dofs_velocity`, by `set_dofs_velocity` without a velocity, and by
@@ -2692,7 +2696,7 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_ki(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the integral gain (ki) for the entity's dofs used by the PID position controller.
+        Get the integral gain (ki) for the entity's dofs used by the position and velocity controllers.
 
         Parameters
         ----------

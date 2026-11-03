@@ -1684,6 +1684,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             acc_dst = qd_to_torch(self.dyn_state.dofs.acc, transpose=True, copy=False)
             ctrl_force_dst = qd_to_torch(self.dyn_state.dofs.ctrl_force, transpose=True, copy=False)
             ctrl_pos_err_int_dst = qd_to_torch(self.dyn_state.dofs.ctrl_pos_err_int, transpose=True, copy=False)
+            ctrl_vel_err_int_dst = qd_to_torch(self.dyn_state.dofs.ctrl_vel_err_int, transpose=True, copy=False)
             ctrl_mode_dst = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             pos_dst = qd_to_torch(self.dyn_state.links.pos, transpose=True, copy=False)
             quat_dst = qd_to_torch(self.dyn_state.links.quat, transpose=True, copy=False)
@@ -1723,6 +1724,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     torch.where(envs_mask[:, None], state.dofs_acc, acc_dst, out=acc_dst)
                     ctrl_force_dst.masked_fill_(envs_mask[:, None], 0.0)
                     ctrl_pos_err_int_dst.masked_fill_(envs_mask[:, None], 0.0)
+                    ctrl_vel_err_int_dst.masked_fill_(envs_mask[:, None], 0.0)
                     ctrl_mode_dst.masked_fill_(envs_mask[:, None], gs.CTRL_MODE.FORCE)
                 torch.where(envs_mask[:, None, None], state.links_pos, pos_dst, out=pos_dst)
                 torch.where(envs_mask[:, None, None], state.links_quat, quat_dst, out=quat_dst)
@@ -1748,6 +1750,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     acc_dst[envs_idx] = state.dofs_acc[envs_idx]
                     ctrl_force_dst[envs_idx] = 0.0
                     ctrl_pos_err_int_dst[envs_idx] = 0.0
+                    ctrl_vel_err_int_dst[envs_idx] = 0.0
                     ctrl_mode_dst[envs_idx] = gs.CTRL_MODE.FORCE
                 pos_dst[envs_idx] = state.links_pos[envs_idx]
                 quat_dst[envs_idx] = state.links_quat[envs_idx]

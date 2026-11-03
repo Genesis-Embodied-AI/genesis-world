@@ -121,6 +121,7 @@ def kernel_set_state(
         dyn_state.dofs.acc[i_d, envs_idx[i_b_]] = dofs_acc[envs_idx[i_b_], i_d]
         dyn_state.dofs.ctrl_force[i_d, envs_idx[i_b_]] = gs.qd_float(0.0)
         dyn_state.dofs.ctrl_pos_err_int[i_d, envs_idx[i_b_]] = gs.qd_float(0.0)
+        dyn_state.dofs.ctrl_vel_err_int[i_d, envs_idx[i_b_]] = gs.qd_float(0.0)
         dyn_state.dofs.ctrl_mode[i_d, envs_idx[i_b_]] = gs.CTRL_MODE.FORCE
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
@@ -798,9 +799,10 @@ def kernel_set_dofs_zero_velocity(
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-        # Zeroing the velocity restarts the integral of the position error (see KinematicSolver.set_dofs_velocity)
+        # Zeroing the velocity restarts the integrals of the control errors (see KinematicSolver.set_dofs_velocity)
         dyn_state.dofs.vel[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
         dyn_state.dofs.ctrl_pos_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
+        dyn_state.dofs.ctrl_vel_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
 
 
 @qd.kernel(fastcache=True)
