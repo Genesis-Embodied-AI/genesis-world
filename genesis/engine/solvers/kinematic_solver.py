@@ -1039,6 +1039,9 @@ class KinematicSolver(Solver):
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
         if gs.use_zerocopy:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
+            # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral
+            # of the position error of the position controller (see func_ctrl_pos_err_int_next)
+            pos_err_int = qd_to_torch(self.dyn_state.dofs.ctrl_pos_err_int, transpose=True, copy=False)
             dofs_mask = indices_to_mask(dofs_idx)
             if (
                 (not dofs_mask or isinstance(dofs_mask[0], slice))
@@ -1050,10 +1053,11 @@ class KinematicSolver(Solver):
             ):
                 dofs_vel = vel[(slice(None), *dofs_mask)]
                 if velocity is None:
-                    if envs_idx.dtype == torch.bool:
-                        dofs_vel.masked_fill_(envs_idx[:, None], 0.0)
-                    else:
-                        dofs_vel.scatter_(0, envs_idx[:, None].expand((-1, dofs_vel.shape[1])), 0.0)
+                    for dofs_values in (dofs_vel, pos_err_int[(slice(None), *dofs_mask)]):
+                        if envs_idx.dtype == torch.bool:
+                            dofs_values.masked_fill_(envs_idx[:, None], 0.0)
+                        else:
+                            dofs_values.scatter_(0, envs_idx[:, None].expand((-1, dofs_values.shape[1])), 0.0)
                 else:
                     if velocity.ndim == 2 and len(dofs_vel) != len(velocity):
                         # Note that it is necessary to create a new temporary view because it will be reshaped in-place
@@ -1067,6 +1071,7 @@ class KinematicSolver(Solver):
                 )
                 if velocity is None:
                     vel[mask] = 0.0
+                    pos_err_int[mask] = 0.0
                 else:
                     assign_indexed_tensor(vel, mask, velocity)
                 if mask and isinstance(mask[0], torch.Tensor):

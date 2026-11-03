@@ -40,7 +40,6 @@ from ..base_solver import GravityMixin, TimeBasedMixin
 from ..kinematic_solver import KinematicSolver, _fill_base_link_geom_offsets, _offset_world_shift, _select_links_offset
 from .abd.accessor import (
     ConstraintType,
-    kernel_clear_dofs_ctrl_pos_err_int,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -2460,21 +2459,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
             self._wake_dofs(wake_dofs_idx, wake_envs_idx)
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
-
-        # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral of
-        # the position error (see func_ctrl_pos_err_int_next)
-        if velocity is None:
-            if gs.use_zerocopy:
-                mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
-                pos_err_int = qd_to_torch(self.dyn_state.dofs.ctrl_pos_err_int, transpose=True, copy=False)
-                pos_err_int[mask] = 0.0
-                if gs.backend == gs.metal:
-                    torch.mps.synchronize()
-            else:
-                _, dofs_idx, envs_idx = self._sanitize_io_variables(
-                    None, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
-                )
-                kernel_clear_dofs_ctrl_pos_err_int(dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
 
     @mutates()
     def control_dofs_force(self, force, dofs_idx=None, envs_idx=None):
