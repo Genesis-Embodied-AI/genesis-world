@@ -1,0 +1,15 @@
+name: Publish 1.4.5+b39d50d to pypi-internal
+on:
+  push:
+    branches: [trinity/pypi-internal-1.4.5-b39d50d]
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: Genesis-Embodied-AI/actions/publish-to-jfrog-pypi@650087e22bb78ec3fc97938f5a57780b7fe25b0e # main
+        with:
+          repository: pypi-internal
+          version: 1.4.5+b39d50d
