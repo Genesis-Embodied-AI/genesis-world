@@ -904,6 +904,11 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
     rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
     assert len({id(array) for array in rgba_arrays}) == 1
+    rigid_nodes = scene.visualizer.context.rigid_nodes
+    base_color_textures = [
+        rigid_nodes[vgeom.uid].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
+    ]
+    assert len({id(texture) for texture in base_color_textures}) == 1
     with pytest.raises(ValueError, match="read-only"):
         vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array[0, 0] = 0
 
