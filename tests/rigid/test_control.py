@@ -128,7 +128,7 @@ def test_position_control(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize("robot_path", ["xml/franka_emika_panda/panda.xml"])
-def test_reset_control(robot_path, tol):
+def test_reset_control(robot_path):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -161,12 +161,12 @@ def test_reset_control(robot_path, tol):
     robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     scene.step()
-    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=tol)
+    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=gs.EPS)
     for _ in range(5):
         scene.step()
     robot.set_dofs_position(qpos)
     scene.step()
-    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=tol)
+    assert_allclose(robot.get_dofs_control_force(), old_control_force, tol=gs.EPS)
 
     scene.reset()
     scene.step()
