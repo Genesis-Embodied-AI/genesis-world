@@ -529,7 +529,12 @@ class DiffContactInput(Data, kind=DataKind.SCRATCH):
     # Support core of the convex geom of a plane-convex contact (box vertex, sphere center, nearest capsule endpoint),
     # in its local frame
     core_local: qd.Tensor = field((float, 3))
+    # Plane-convex contacts only: whether the detection returned a zero penetration (see
+    # func_differentiable_plane_contact)
+    has_zero_penetration: qd.Tensor = field(bool)
     ref_id: qd.Tensor = field(int)
+    # Analytic contacts only: the multi-contact detection that found the contact, 0 for the unperturbed one
+    detection_idx: qd.Tensor = field(int)
     # Whether the forward and backward passes compute the contact stably
     valid: qd.Tensor = field(int)
     # Penetration depth weighting the contact, the input the gradients flow to
