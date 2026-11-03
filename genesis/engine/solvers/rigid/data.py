@@ -185,6 +185,7 @@ class DofsInfo(Data, kind=DataKind.INFO, shape=(DOFS, DOFS_INFO_ENVS)):
     limit: qd.Tensor = field((float, 2))
     act_gain: qd.Tensor = field(float)
     act_bias: qd.Tensor = field((float, 3))
+    act_ki: qd.Tensor = field(float)
     force_range: qd.Tensor = field((float, 2))
     dof_length: qd.Tensor = field(float)
 
@@ -219,6 +220,9 @@ class DofsState(Data, kind=DataKind.DERIVED, shape=(DOFS, ENVS)):
     ctrl_force: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_pos: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
     ctrl_vel: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    # The time integral of the position error of the position controller (see func_torque_and_passive_force)
+    ctrl_pos_err_int: qd.Tensor = field(float, kind=DataKind.STATE, grad=True)
+    ctrl_pos_err_int_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
     ctrl_mode: qd.Tensor = field(int, kind=DataKind.STATE)
     is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
 

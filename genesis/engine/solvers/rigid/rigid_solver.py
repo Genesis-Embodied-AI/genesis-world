@@ -48,6 +48,7 @@ from .abd.accessor import (
     kernel_get_links_vel,
     kernel_set_dofs_act_bias,
     kernel_set_dofs_act_gain,
+    kernel_set_dofs_act_ki,
     kernel_set_dofs_armature,
     kernel_set_dofs_damping,
     kernel_set_dofs_force_range,
@@ -2304,6 +2305,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             "kv",
             "act_gain",
             "act_bias",
+            "act_ki",
             "force_range",
             "stiffness",
             "damping",
@@ -2368,6 +2370,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_act_gain(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "act_bias":
             kernel_set_dofs_act_bias(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
+        elif name == "act_ki":
+            kernel_set_dofs_act_ki(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         else:
             gs.raise_exception(f"Invalid `name` {name}.")
 
@@ -2376,6 +2380,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def set_dofs_kv(self, kv, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([kv], dofs_idx, "kv", envs_idx)
+
+    def set_dofs_ki(self, ki, dofs_idx=None, envs_idx=None):
+        self._set_dofs_info([ki], dofs_idx, "act_ki", envs_idx)
 
     def set_dofs_act_gain(self, act_gain, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([act_gain], dofs_idx, "act_gain", envs_idx)
@@ -2831,6 +2838,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 "Use get_dofs_act_gain() and get_dofs_act_bias() instead."
             )
         return -bias[..., 2]
+
+    def get_dofs_ki(self, dofs_idx=None, envs_idx=None):
+        if not self._options.batch_dofs_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
+        tensor = qd_to_torch(self.dyn_info.dofs.act_ki, envs_idx, dofs_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
     def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None):
         if not self._options.batch_dofs_info and envs_idx is not None:
