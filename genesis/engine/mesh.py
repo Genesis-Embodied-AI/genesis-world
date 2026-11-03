@@ -543,6 +543,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             # use white color as default
             color_factor = (1.0, 1.0, 1.0, 1.0)
 
+        color_textures_key = None
         if must_update_surface:
             metadata["is_visual_overwritten"] = isinstance(surface.texture, gs.textures.ColorTexture)
 
@@ -550,15 +551,16 @@ class Mesh(RBC, serialization.SerializationMixin):
             # them lives, rather than holding one full-resolution copy each
             color_textures = None
             if color_image is not None:
-                color_textures_key = (
-                    "color_textures",
-                    get_hashkey(color_image, color_image.shape, color_image.dtype.str),
-                    color_factor,
-                )
+                color_textures_key = (get_hashkey(color_image, color_image.shape, color_image.dtype.str), color_factor)
                 color_textures = _COLOR_TEXTURES_CACHE.find(color_textures_key)
             if color_textures is None:
                 color_texture = mu.create_texture(color_image, color_factor, "srgb")
                 color_textures = (color_texture, None if color_texture is None else color_texture.check_dim(3))
+                # Every mesh created from the image shares the arrays of its textures, so writing into them raises
+                # rather than changing all those meshes
+                for texture in color_textures:
+                    if isinstance(texture, gs.textures.ImageTexture):
+                        texture.image_array.flags.writeable = False
             color_texture, opacity_texture = color_textures
             roughness_texture = mu.create_texture(None, roughness_factor, "linear")
 
@@ -583,7 +585,15 @@ class Mesh(RBC, serialization.SerializationMixin):
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
         )
-        if must_update_surface and color_image is not None:
+        # The mesh owns the shared textures only while its surface holds one of them, an authored texture or the visual
+        # cleared by a simplification leaving them unused
+        if color_textures_key is not None and (
+            gs_mesh.surface.texture is color_texture
+            or (
+                isinstance(gs_mesh.surface, (gs.surfaces.Metal, gs.surfaces.Plastic, gs.surfaces.BSDF))
+                and gs_mesh.surface.opacity_texture is opacity_texture
+            )
+        ):
             _COLOR_TEXTURES_CACHE.own(gs_mesh, color_textures_key, color_textures)
         return gs_mesh
 

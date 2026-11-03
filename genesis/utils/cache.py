@@ -370,7 +370,11 @@ def get_hashkey(*args):
             arg = arg.encode()
         elif not isinstance(arg, bytes):
             try:
-                arg = bytes(memoryview(arg))
+                # A contiguous buffer is hashed in place, sparing a copy of a large array. Its digest is the one of its
+                # bytes, so the keys stay those of the caches already on disk.
+                arg = memoryview(arg)
+                if not arg.c_contiguous:
+                    arg = arg.tobytes()
             except TypeError:
                 arg = marshal.dumps(arg)
         hasher.update(arg)

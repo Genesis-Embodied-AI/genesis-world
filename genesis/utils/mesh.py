@@ -1,6 +1,7 @@
 import inspect
 import math
 import os
+import weakref
 from functools import lru_cache, wraps
 from pathlib import Path
 
@@ -271,7 +272,9 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
-# Trimesh materials drawing the image textures, kept as long as the texture lives
+# Trimesh materials drawing the image textures, kept as long as the texture lives. An entry is keyed on a weak reference
+# to its texture, which never matches a later texture reusing the id of a collected one, even while the release of the
+# owned entries is disabled (see 'disable_owned_cache_release').
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
@@ -320,7 +323,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                 # the texture once (see 'RasterizerContext.on_rigid')
                 material = _TEXTURE_MATERIALS_CACHE.get(
                     texture,
-                    id(texture),
+                    weakref.ref(texture),
                     lambda: trimesh.visual.material.SimpleMaterial(
                         image=Image.fromarray(texture.image_array), diffuse=(1.0, 1.0, 1.0, 1.0)
                     ),

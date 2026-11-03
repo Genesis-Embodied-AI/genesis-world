@@ -904,6 +904,8 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
     rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
     assert len({id(array) for array in rgba_arrays}) == 1
+    with pytest.raises(ValueError, match="read-only"):
+        vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array[0, 0] = 0
 
 
 # ==================== Surface Reconstruction Tests ====================

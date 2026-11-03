@@ -576,10 +576,11 @@ class RasterizerContext:
             yield self.sim.kinematic_solver
 
     def on_rigid(self):
-        # Reuse a single pyrender material per genesis surface and per textured trimesh material, from which the
-        # pyrender material is built, so that geoms sharing either one (e.g. the many textured submeshes of a GLB, kept
-        # separate to preserve baked convex decompositions, or the geoms of an MJCF drawn with one texture) expose the
-        # same Texture instances. The renderer then keeps a single host copy and GPU upload instead of one per geom.
+        # Reuse a single pyrender material per genesis surface, and per trimesh material among the textured geoms (see
+        # 'surface_uvs_to_trimesh_visual'), so that geoms sharing either one (e.g. the many textured submeshes of a GLB,
+        # kept separate to preserve baked convex decompositions) expose the same Texture instances. The renderer then
+        # keeps a single host copy and GPU upload instead of one per geom. A surface keys its textured geoms and its
+        # untextured ones (without uvs) apart, since each kind is drawn with a material of its own.
         vis_materials = {}
         for solver in self._rigid_solvers():
             # One conversion of the geom poses per visual mode in use
@@ -592,9 +593,10 @@ class RasterizerContext:
                 geoms_T = geoms_T_by_mode[is_visual]
 
                 for geom in geoms:
-                    material_keys = [id(geom.surface)]
-                    if is_visual and isinstance(geom.trimesh.visual, trimesh.visual.TextureVisuals):
-                        material_keys.append(id(geom.trimesh.visual.material))
+                    is_textured = is_visual and isinstance(geom.trimesh.visual, trimesh.visual.TextureVisuals)
+                    material_keys = [("surface", is_textured, id(geom.surface))]
+                    if is_textured:
+                        material_keys.append(("material", id(geom.trimesh.visual.material)))
                     material = next((vis_materials[key] for key in material_keys if key in vis_materials), None)
                     mesh_node = self.add_geom_node(geom, geoms_T, material=material)
                     if mesh_node is not None:
