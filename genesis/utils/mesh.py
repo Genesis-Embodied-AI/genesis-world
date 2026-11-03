@@ -271,6 +271,10 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
+# Trimesh materials drawing the image textures, kept as long as the texture lives
+_TEXTURE_MATERIALS_CACHE = OwnedCache()
+
+
 def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
@@ -305,13 +309,22 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     if isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
-            image = Image.fromarray(texture.image_array)
             if emissive_kwargs:
                 material = trimesh.visual.material.PBRMaterial(
-                    baseColorTexture=image, baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
+                    baseColorTexture=Image.fromarray(texture.image_array),
+                    baseColorFactor=(255, 255, 255, 255),
+                    **emissive_kwargs,
                 )
             else:
-                material = trimesh.visual.material.SimpleMaterial(image=image, diffuse=(1.0, 1.0, 1.0, 1.0))
+                # The meshes drawing one texture share one material, which the rasterizer draws them all with, uploading
+                # the texture once (see 'RasterizerContext.on_rigid')
+                material = _TEXTURE_MATERIALS_CACHE.get(
+                    texture,
+                    id(texture),
+                    lambda: trimesh.visual.material.SimpleMaterial(
+                        image=Image.fromarray(texture.image_array), diffuse=(1.0, 1.0, 1.0, 1.0)
+                    ),
+                )
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
             # fall back to color texture

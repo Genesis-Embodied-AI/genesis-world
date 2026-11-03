@@ -254,10 +254,17 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
     # Resolve a surface's color and opacity textures into a single RGBA texture. The result is memoized on the input
-    # texture instances: surfaces sharing the same textures (e.g. all textured submeshes of a GLB) then reuse a single
-    # merged array instead of allocating one full-resolution copy each. A texture update swaps in a new instance, which
-    # is a natural cache miss, so no explicit invalidation is needed.
-    cache_key = (color_texture, opacity_texture, batch)
+    # texture instances, flat colors aside, which are memoized on their color: surfaces sharing the same textures (e.g.
+    # all textured submeshes of a GLB, or meshes sharing an image texture but each given its own default opacity) then
+    # reuse a single merged array instead of allocating one full-resolution copy each. A texture update swaps in a new
+    # instance, which is a natural cache miss, so no explicit invalidation is needed.
+    cache_key = (
+        *(
+            texture.color if isinstance(texture, ColorTexture) else texture
+            for texture in (color_texture, opacity_texture)
+        ),
+        batch,
+    )
     cached = _RGBA_CACHE.get(cache_key)
     if cached is not None:
         return cached

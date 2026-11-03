@@ -72,6 +72,10 @@ CHARTS_ROT = np.stack((np.eye(3), gu.euler_to_R(np.array((90.0, 0.0, 0.0)))))
 # Data derived from the trimesh of a mesh alone, shared by the meshes of one trimesh (see 'Mesh.tmesh_hash')
 _TMESH_CACHE = OwnedCache()
 
+# Color and opacity textures created from the image of a trimesh material, by its content and color factor, shared by
+# the meshes created from that image (see 'Mesh.from_trimesh')
+_COLOR_TEXTURES_CACHE = OwnedCache()
+
 
 def cached_by_tmesh(method):
     """Wrap a method of 'Mesh' computing data from its trimesh alone, so that the meshes of one trimesh share it.
@@ -542,10 +546,20 @@ class Mesh(RBC, serialization.SerializationMixin):
         if must_update_surface:
             metadata["is_visual_overwritten"] = isinstance(surface.texture, gs.textures.ColorTexture)
 
-            color_texture = mu.create_texture(color_image, color_factor, "srgb")
-            opacity_texture = None
-            if color_texture is not None:
-                opacity_texture = color_texture.check_dim(3)
+            # The meshes of every material holding one image share the textures created from it, as long as any of
+            # them lives, rather than holding one full-resolution copy each
+            color_textures = None
+            if color_image is not None:
+                color_textures_key = (
+                    "color_textures",
+                    get_hashkey(color_image, color_image.shape, color_image.dtype.str),
+                    color_factor,
+                )
+                color_textures = _COLOR_TEXTURES_CACHE.find(color_textures_key)
+            if color_textures is None:
+                color_texture = mu.create_texture(color_image, color_factor, "srgb")
+                color_textures = (color_texture, None if color_texture is None else color_texture.check_dim(3))
+            color_texture, opacity_texture = color_textures
             roughness_texture = mu.create_texture(None, roughness_factor, "linear")
 
             surface.update_texture(
@@ -557,7 +571,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         elif share_arrays:
             tmesh.visual = mesh.visual.copy()
 
-        return cls(
+        gs_mesh = cls(
             mesh=tmesh,
             surface=surface,
             uvs=uvs,
@@ -569,6 +583,9 @@ class Mesh(RBC, serialization.SerializationMixin):
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
         )
+        if must_update_surface and color_image is not None:
+            _COLOR_TEXTURES_CACHE.own(gs_mesh, color_textures_key, color_textures)
+        return gs_mesh
 
     @classmethod
     def from_attrs(

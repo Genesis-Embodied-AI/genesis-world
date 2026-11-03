@@ -901,6 +901,10 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     explicit_uvs = [np.unique(vgeoms["mesh_explicit_a"].uvs, axis=0), np.unique(vgeoms["mesh_explicit_b"].uvs, axis=0)]
     assert_allclose(explicit_uvs, EXPECTED_EXPLICIT_UVS, tol=gs.EPS)
 
+    # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
+    rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
+    assert len({id(array) for array in rgba_arrays}) == 1
+
 
 # ==================== Surface Reconstruction Tests ====================
 
