@@ -25,7 +25,9 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
     for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
         is_valid = True
         if i_dq < dyn_state.dofs.vel.shape[0]:
-            is_valid = qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b])
+            is_valid = qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b]) and qd_isfinite(
+                dyn_state.dofs.ctrl_pos_err_int_next[i_dq, i_b]
+            )
         if i_dq < rigid_info.qpos.shape[0]:
             is_valid = is_valid and qd_isfinite(rigid_info.qpos_next[i_dq, i_b])
         if not is_valid:
