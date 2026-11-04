@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
@@ -21,6 +20,8 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.utils.array_class import IKScratch, RigidData, RigidSimStaticConfig
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -182,6 +183,7 @@ class KinematicSolver(Solver):
         self.constraint_solver = None
 
         self.qpos = None
+        self._ik_scratch: IKScratch | None = None
 
         self._is_forward_pos_updated: bool = False
         self._is_forward_vel_updated: bool = False
@@ -399,7 +401,7 @@ class KinematicSolver(Solver):
 
     def _build_static_config(self):
         # Static config with all physics disabled
-        self.rigid_config = array_class.RigidSimStaticConfig(
+        self.rigid_config = RigidSimStaticConfig(
             backend=gs.backend,
             para_level=self.sim._para_level,
             requires_grad=False,
@@ -420,21 +422,21 @@ class KinematicSolver(Solver):
         )
 
     def _create_data_manager(self):
-        self.data_manager = array_class.DataManager(self, kinematic_only=True)
+        self.data_manager = RigidData(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
-        yield from array_class.iter_data(self, "rigid_config")
-        yield from array_class.iter_data(self.data_manager, "errno", array_class.DataKind.STATE)
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        yield from iter_data(self, "rigid_config")
+        yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         for name in ("rigid_info", "dyn_info", "dyn_state"):
-            yield from array_class.iter_data(self.data_manager, name)
+            yield from iter_data(self.data_manager, name)
         # The flags describe the derived poses and velocities, so they travel with them
-        yield from array_class.iter_data(self, "_is_forward_pos_updated", array_class.DataKind.DERIVED)
-        yield from array_class.iter_data(self, "_is_forward_vel_updated", array_class.DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_pos_updated", DataKind.DERIVED)
+        yield from iter_data(self, "_is_forward_vel_updated", DataKind.DERIVED)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -442,10 +444,6 @@ class KinematicSolver(Solver):
 
     def _sanitize_joint_sol_params(self, sol_params):
         """Hook: sanitize joint constraint solver params. No-op in base (no constraints)."""
-        return sol_params
-
-    def _sanitize_geom_sol_params(self, sol_params):
-        """Hook: sanitize geom constraint solver params. No-op in base (no constraints)."""
         return sol_params
 
     # ------------------------------------------------------------------------------------
@@ -457,10 +455,6 @@ class KinematicSolver(Solver):
         has_dofs = sum(joint.n_dofs for joint in joints) > 0
         if has_dofs:
             kernel_init_dof_fields(
-                np.concatenate(
-                    [(joint.link._entity_idx_in_solver,) * joint.n_dofs for joint in joints if joint.n_dofs],
-                    dtype=gs.np_int,
-                ),
                 np.concatenate([joint.desc.dofs_motion_ang for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_motion_vel for joint in joints], dtype=gs.np_float),
                 np.concatenate([joint.desc.dofs_limit for joint in joints], dtype=gs.np_float),
@@ -628,7 +622,6 @@ class KinematicSolver(Solver):
                 np.array([link.desc.quat for link in links], dtype=gs.np_float),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -640,7 +633,6 @@ class KinematicSolver(Solver):
             kernel_init_joint_fields(
                 np.array([joint.q_start for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_start for joint in joints], dtype=gs.np_int),
-                np.array([joint.q_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.dof_end for joint in joints], dtype=gs.np_int),
                 np.array([joint.type for joint in joints], dtype=gs.np_int),
                 joints_sol_params,
@@ -679,8 +671,6 @@ class KinematicSolver(Solver):
             if is_init_qpos_out_of_bounds:
                 gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
             self.qpos.from_numpy(init_qpos)
-
-        self.links_T = self.rigid_info.links_T
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
@@ -848,10 +838,8 @@ class KinematicSolver(Solver):
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0 for entity in entities], dtype=gs.np_int),
                 np.array([0.0 for entity in entities], dtype=gs.np_float),
-                np.array([False for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -918,7 +906,7 @@ class KinematicSolver(Solver):
 
     def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
         super().load_checkpoint(checkpoint, boundary_only=boundary_only)
-        if array_class.DataKind.DERIVED not in checkpoint.kinds:
+        if DataKind.DERIVED not in checkpoint.kinds:
             # Without the derived arrays, the next step recomputes them from the state. A restored record runs forward
             # kinematics at once, since the scene may be drawn from it, while the replay of a step restoring a boundary
             # checkpoint recomputes them with the same kernels as its forward pass.
@@ -1274,17 +1262,6 @@ class KinematicSolver(Solver):
         tensor = self._read_data(self.dyn_state.links.cd_ang, envs_idx, links_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def _build_dof_to_q_map(self, dofs_idx_t):
-        """Build a mapping from DOF indices to qpos indices for revolute/prismatic joints."""
-        dof_to_q = torch.zeros(self.n_dofs, dtype=torch.long, device=gs.device)
-        for entity in self._entities:
-            for joint in entity.joints:
-                if joint.n_dofs == 0:
-                    continue
-                for i in range(joint.n_dofs):
-                    dof_to_q[joint.dof_start - entity.dof_start + i] = joint.q_start - entity.q_start + i
-        return dof_to_q[dofs_idx_t]
-
     def get_qpos(self, qs_idx=None, envs_idx=None):
         tensor = self._read_data(self.qpos, envs_idx, qs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -1466,7 +1443,21 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_state, ik_fk, targets = self.data_manager.ik_scratch
+        # The damped normal matrix of inverse kinematics is quadratic in RigidOptions.IK_max_targets, so the scratch is
+        # allocated by the first solve and a scene that never solves inverse kinematics allocates none of it
+        if self._ik_scratch is None:
+            entities = self.entities
+            self._ik_scratch = IKScratch(
+                sizes=dict(
+                    envs=self._B,
+                    entity_qs=max([entity.n_qs for entity in entities], default=0),
+                    entity_dofs=max([entity.n_dofs for entity in entities], default=0),
+                    entity_links=max([entity.n_links for entity in entities], default=0),
+                    entity_joints=max([entity.n_joints for entity in entities], default=0),
+                    ik_targets=n_tgts,
+                )
+            )
+        ik_state, ik_fk, targets = self._ik_scratch.state, self._ik_scratch.fk, self._ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

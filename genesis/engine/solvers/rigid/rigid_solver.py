@@ -7,7 +7,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
@@ -18,6 +17,18 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
+from genesis.utils.array_class import (
+    cholesky_tile_size_for,
+    ColliderState,
+    ConstraintState,
+    DynInfo,
+    DynState,
+    ErrorCode,
+    RigidData,
+    RigidInfo,
+    RigidSimStaticConfig,
+)
+from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -81,11 +92,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_held_by_links,
 )
-from .abd.diff import (
-    func_copy_next_to_curr,
-    func_integrate_dq_entity,
-    kernel_copy_next_to_curr_clear_coupling,
-)
+from .abd.diff import func_copy_next_to_curr, kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
     func_clear_coupling_wrench,
     func_forward_dynamics,
@@ -93,7 +100,6 @@ from .abd.forward_dynamics import (
     func_update_acc,
     func_vel_at_point,
     kernel_compute_smooth_qacc,
-    kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
     kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
@@ -343,38 +349,38 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.register_errors(
             self._errno,
             {
-                array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                ErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
                     f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
                     "option 'multiplier_collision_broad_phase'."
                 ),
-                array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                ErrorCode.OVERFLOW_COLLISION_PAIRS: (
                     f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
                     "Please increase the value of RigidSolver's option 'max_collision_pairs'."
                 ),
-                array_class.ErrorCode.OVERFLOW_CONTACTS: (
+                ErrorCode.OVERFLOW_CONTACTS: (
                     f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
                     "supported by the constraint solver. Please increase the value of RigidSolver's option "
                     "'max_contacts'."
                 ),
-                array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                ErrorCode.UNSUPPORTED_COLLISION_PAIR: (
                     "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
                     "filter this pair out via 'contype'/'conaffinity'."
                 ),
-                array_class.ErrorCode.INVALID_CONTACT_NAN: (
+                ErrorCode.INVALID_CONTACT_NAN: (
                     "Collision detection reported a contact whose position, normal or penetration is not finite. This "
                     "is a solver-internal error, please report it."
                 ),
-                array_class.ErrorCode.INVALID_FORCE_NAN: (
+                ErrorCode.INVALID_FORCE_NAN: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
                 ),
-                array_class.ErrorCode.INVALID_ACC_NAN: (
+                ErrorCode.INVALID_ACC_NAN: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
                     "the controls given to the dofs."
                 ),
             },
         )
-        self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+        self._refresh_invweight_and_meaninertia(force_update=False)
 
         # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
         # written to the armature field from the host once the parsed inverse weights stand, and a second refresh
@@ -418,7 +424,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
                 links_invweight[links_idx] = -1.0
                 self.dyn_info.links.invweight.from_numpy(links_invweight)
-                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+                self._refresh_invweight_and_meaninertia(force_update=False)
 
         # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
         # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
@@ -555,7 +561,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # instructions to a busy GPU, whether the links are grouped by tree or by root.
         enable_level_sweep = gs.backend != gs.cpu
         if enable_level_sweep and not is_generic:
-            n_lanes_per_env = array_class.RigidSimStaticConfig.level_sweep_n_lanes_per_env
+            n_lanes_per_env = RigidSimStaticConfig.level_sweep_n_lanes_per_env
             for links_group_idx, links_level in (
                 (self._links_tree_root_idx, self._links_tree_level),
                 (self._links_root_idx, self._links_root_level),
@@ -645,7 +651,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
                 # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
                 # cholesky_tile_size_for in array_class.py.
-                cholesky_tile_size = 32 if is_generic else array_class.cholesky_tile_size_for(self.n_dofs)
+                cholesky_tile_size = 32 if is_generic else cholesky_tile_size_for(self.n_dofs)
 
                 # A shared tile holds the dofs it factors rounded up to the next size of get_gpu_shared_tile_sizes,
                 # which bounds the sizes compiled while keeping the occupancy of the tightest fit. A mass block above
@@ -751,7 +757,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             and rigid_config["solver_type"] == gs.constraint_solver.Newton
             and self._jacobi_mass_spread_bound() > mass_spread_threshold
         )
-        self.rigid_config = array_class.RigidSimStaticConfig(**rigid_config)
+        self.rigid_config = RigidSimStaticConfig(**rigid_config)
 
         if self.rigid_config.requires_grad:
             if self.rigid_config.use_hibernation:
@@ -775,7 +781,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = array_class.DataManager(self, kinematic_only=False)
+        self.data_manager = RigidData(self, kinematic_only=False)
         self._errno = self.data_manager.errno
 
         self.rigid_info = self.data_manager.rigid_info
@@ -924,7 +930,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             mass_spread = max(mass_spread, mass_spread_entity.max())
         return mass_spread
 
-    def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True, in_place=False):
+    def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True):
         # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
         # writing them, which recomputes their own tree only.
         # Early return if no DoFs. This is essential to avoid segfault on CUDA.
@@ -939,18 +945,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
 
-        # The computation needs one vector of size n_dofs and one mass-matrix solve against it. Build time borrows
-        # both from the constraint solver, so that a scene never writing an inertial property allocates no scratch of
-        # its own.
-        if in_place:
-            constraint_state = self.constraint_solver.constraint_state
-            jac_row, solve_out = constraint_state.grad, constraint_state.Mgrad
-        else:
-            jac_row, solve_out = self.data_manager.weight_scratch.jac_row, self.data_manager.weight_scratch.solve_out
         kernel_refresh_invweight_and_meaninertia(
             envs_idx,
-            jac_row,
-            solve_out,
             self.dyn_state,
             self.constraint_solver.constraint_state,
             self.dyn_info,
@@ -1116,7 +1112,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.concatenate([geom.init_faces + geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.concatenate([geom.init_edges + geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.concatenate([geom.init_normals for geom in geoms], dtype=gs.np_float),
-                np.concatenate([geom.init_center_pos for geom in geoms], dtype=gs.np_float),
                 np.concatenate(
                     [np.full(geom.n_verts, geom.is_fixed and not geom.entity._batch_fixed_verts) for geom in geoms],
                     dtype=gs.np_bool,
@@ -1203,7 +1198,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([geom.vert_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.face_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.edge_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.verts_state_end for geom in geoms], dtype=gs.np_int),
                 np.array([geom.init_pos for geom in geoms], dtype=gs.np_float),
                 np.array(geoms_center, dtype=gs.np_float),
                 np.array([geom.init_quat for geom in geoms], dtype=gs.np_float),
@@ -1221,7 +1215,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([geom.coup_friction for geom in geoms], dtype=gs.np_float),
                 np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
-                np.array([geom.metadata.get("decomposed", False) for geom in geoms], dtype=gs.np_bool),
                 np.array(geoms_is_hollow, dtype=gs.np_bool),
                 self.geoms_init_AABB,
                 self.dyn_state,
@@ -1240,10 +1233,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([entity.geom_start for entity in entities], dtype=gs.np_int),
                 np.array([entity.geom_end for entity in entities], dtype=gs.np_int),
                 np.array([entity.gravity_compensation for entity in entities], dtype=gs.np_float),
-                np.array([entity.is_local_collision_mask for entity in entities], dtype=gs.np_bool),
                 self.dyn_state,
                 self.dyn_info,
-                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -1255,7 +1246,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             _sanitize_sol_params(equalities_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
 
             kernel_init_equality_fields(
-                np.array([equality.type for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_obj1id for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_obj2id for equality in equalities], dtype=gs.np_int),
                 np.array([equality.eq_data for equality in equalities], dtype=gs.np_float),
@@ -1357,14 +1347,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
             else:
                 self._func_constraint_force()
-                kernel_step_2(
-                    self.dyn_state,
-                    self.constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    self._errno,
-                )
+                kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
         else:
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
@@ -1525,21 +1508,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 enable_collision=self._enable_collision,
             )
 
-    def _func_forward_dynamics(self):
-        kernel_forward_dynamics(
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-        )
-
-    def _func_update_acc(self):
-        kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-
-    def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
-        func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
-
     @mutates()
     def apply_links_external_wrench(
         self,
@@ -1658,14 +1626,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-            kernel_step_2(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._errno,
-            )
+            kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
@@ -1837,7 +1798,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._restart()
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
+    def data(self) -> Iterator[DataItem | ConfigItem]:
         yield from super().data
         yield from self.collider.data
         yield from self.constraint_solver.data
@@ -2232,8 +2193,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -2248,8 +2207,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -2263,8 +2220,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx,
                 envs_idx,
                 values,
-                self.data_manager.weight_scratch.jac_row,
-                self.data_manager.weight_scratch.solve_out,
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
@@ -3369,7 +3324,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
             return
 
-        kernel_clear_external_force(self.dyn_state, self.rigid_info, self.rigid_config)
+        kernel_clear_external_force(self.dyn_state, self.rigid_config)
 
     def update_drone_propeller_vgeoms(self, propellers_vgeom_idxs, propellers_revs, propellers_spin):
         kernel_update_drone_propeller_vgeoms(
@@ -3448,10 +3403,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
 @qd.func
 def func_step_1(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
@@ -3470,10 +3425,10 @@ def func_step_1(
 
 @qd.kernel(fastcache=True)
 def kernel_step_1(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
@@ -3493,12 +3448,7 @@ def kernel_step_1(
 
 @qd.func
 def func_step_2(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    errno: qd.Tensor,
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
     # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
     # would not corresponds to anyting physical. There is no other way than doing this right before integration,
@@ -3520,24 +3470,19 @@ def func_step_2(
 
 @qd.kernel(fastcache=True)
 def kernel_step_2(
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    errno: qd.Tensor,
+    dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
     """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)
 
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_substep_dynamics(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
@@ -3558,32 +3503,32 @@ def kernel_substep_dynamics(
         is_backward=False,
     )
     if qd.static(enable_constraint):
-        func_add_equality_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+        func_add_equality_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_substep_inequality(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Assemble the inequality constraints of a substep, captured as one graph."""
     func_add_inequality_constraints(
-        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
+        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_config
     )
 
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_substep_post(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     enable_constraint: qd.template(),
     noslip: qd.template(),
@@ -3598,4 +3543,4 @@ def kernel_substep_post(
         func_resolve_post(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
         )
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)
+    func_step_2(dyn_state, dyn_info, rigid_info, rigid_config, errno)

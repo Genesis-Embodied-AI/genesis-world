@@ -1,10 +1,9 @@
 import math
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 import numpy as np
 
-from pydantic import Field, StrictBool, model_validator
-from typing_extensions import Self
+from pydantic import Field, StrictBool, field_validator, model_validator
 
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
@@ -13,7 +12,7 @@ from genesis.utils.cache import SizeCappedCache
 
 from .misc import FoamOptions
 from .options import Options
-from .textures import Texture, ColorTexture, ImageTexture, BatchTexture
+from .textures import BatchTexture, ColorTexture, ImageTexture, Texture
 
 MetalType = Literal["aluminium", "gold", "copper", "brass", "iron", "titanium", "vanadium", "lithium"]
 
@@ -70,7 +69,10 @@ class Surface(Options):
     normal_diff_clamp : float, optional
         Controls the threshold for computing surface normals by interpolating vertex normals.
     recon_backend : str, optional
-        Backend for surface reconstruction. Possible values are ['splashsurf', 'openvdb']. Defaults to 'splashsurf'.
+        Backend for surface reconstruction. 'splashsurf' extracts a smooth surface from the density of the particles,
+        but requires all of them to share the same radius. 'levelset' wraps the union of the spheres of the particles,
+        which supports a radius per particle at the cost of a bumpier surface. 'openvdb' is a deprecated alias of
+        'levelset'. Defaults to 'splashsurf'.
     generate_foam : bool, optional
         Whether to generate foam particles for visual effects for particle-based entities.
     foam_options : gs.options.FoamOptions, optional
@@ -93,9 +95,17 @@ class Surface(Options):
     double_sided: StrictBool | None = None
     cutoff: float = 180.0
     normal_diff_clamp: float = 180.0
-    recon_backend: Literal["splashsurf", "openvdb"] = "splashsurf"
+    recon_backend: Literal["splashsurf", "levelset"] = "splashsurf"
     generate_foam: StrictBool = False
     foam_options: FoamOptions = Field(default_factory=FoamOptions)
+
+    @field_validator("recon_backend", mode="before")
+    @classmethod
+    def _rename_openvdb_backend(cls, value: Any) -> Any:
+        if value == "openvdb":
+            gs.logger.warning("Surface reconstruction backend 'openvdb' is deprecated. Use 'levelset' instead.")
+            return "levelset"
+        return value
 
     @model_validator(mode="before")
     @classmethod

@@ -6,7 +6,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
@@ -16,6 +15,8 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
+from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
+from genesis.utils.data import ArrayItem, DataKind, opt_in
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .particle_solver import ParticleSolver
@@ -43,6 +44,8 @@ class MPMSolver(ParticleSolver):
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
+        # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
+        opt_in(SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         self._constraints_initialized = False
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
@@ -142,8 +145,9 @@ class MPMSolver(ParticleSolver):
         self.register_errors(
             self.errno,
             {
-                array_class.ErrorCode.INVALID_PARTICLE_NAN: (
-                    "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
+                ErrorCode.INVALID_VELOCITY_NAN: (
+                    "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
+                    "adjust the material parameters."
                 ),
             },
         )
@@ -249,7 +253,7 @@ class MPMSolver(ParticleSolver):
                 )
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -367,12 +371,12 @@ class MPMSolver(ParticleSolver):
     def p2g(
         self,
         f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
-        collider_static_config: qd.template(),
+        geoms_state: GeomsState,
+        geoms_info: GeomsInfo,
+        links_state: LinksState,
+        rigid_info: RigidInfo,
+        sdf_info: SDFInfo,
+        collider_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
@@ -448,14 +452,7 @@ class MPMSolver(ParticleSolver):
                             if geoms_info.needs_coup[i_g]:
                                 sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
                                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g,
-                                    i_b,
-                                    cell_pos,
-                                    geoms_state,
-                                    geoms_info,
-                                    rigid_info,
-                                    sdf_info,
-                                    collider_static_config,
+                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
                                 )
 
                                 if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g
@@ -488,13 +485,7 @@ class MPMSolver(ParticleSolver):
                         self.grid[f, base - self._grid_offset + offset, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
-    def g2p(
-        self,
-        f: qd.i32,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-    ):
+    def g2p(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState, rigid_info: RigidInfo):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
                 base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
@@ -528,6 +519,10 @@ class MPMSolver(ParticleSolver):
                     new_vel += weight * grid_vel
                     new_C += 4 * self._inv_dx * weight * grid_vel.outer_product(dpos)
 
+                # A velocity that is not finite flags its env, whose state 'freeze_invalid_envs' then leaves as it was
+                if not qd_isfinite(new_vel):
+                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
+
                 # compute actual new_pos with new_vel
                 new_pos = self.particles[f, i_p, i_b].pos + self.substep_dt * new_vel
 
@@ -547,14 +542,19 @@ class MPMSolver(ParticleSolver):
 
             self.particles_ng[f + 1, i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
 
+    # The state of an env whose velocities are not finite stays as it was before the substep, so that it remains finite.
+    # The flag holds until the error raises at the beginning of the next step, which freezes the env for the rest of its
+    # step, as in the rigid solver.
     @no_grad
     @qd.kernel
-    def _kernel_flag_non_finite_pos(self, f: int):
-        """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
+    def _kernel_freeze_invalid_envs(self, f: int):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            pos = self.particles[f, i_p, i_b].pos
-            if not qd_isfinite(pos):
-                self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
+            if (self.errno[i_b] & ErrorCode.INVALID_VELOCITY_NAN) != 0:
+                self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
+                self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
+                self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
+                self.particles[f + 1, i_p, i_b].C = self.particles[f, i_p, i_b].C
+                self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -580,7 +580,7 @@ class MPMSolver(ParticleSolver):
             self.sim.coupler.rigid_solver.dyn_info.geoms,
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.sdf.sdf_info,
+            self.sim.coupler.rigid_solver.collider.collider_info.sdf,
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
@@ -610,9 +610,7 @@ class MPMSolver(ParticleSolver):
             else:
                 self.grid_dirty_count[0] = 0
 
-        # The positions a step ends with are checked once, an error being raised at the beginning of the next step
-        if (self._sim._cur_substep_global + 1) % self._substeps == 0:
-            self._kernel_flag_non_finite_pos(f + 1)
+        self._kernel_freeze_invalid_envs(f)
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
@@ -678,7 +676,7 @@ class MPMSolver(ParticleSolver):
             ("particles.actu", self.particles.actu),
             ("particles_ng.active", self.particles_ng.active),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -1119,7 +1117,7 @@ class MPMSolver(ParticleSolver):
                 self.particle_constraints[i_p, i_b].link_idx = -1
 
     @qd.kernel
-    def apply_particle_constraints(self, f: qd.i32, links_state: array_class.LinksState):
+    def apply_particle_constraints(self, f: qd.i32, links_state: LinksState):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particle_constraints[i_p, i_b].is_constrained:
                 # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
@@ -1132,19 +1130,21 @@ class MPMSolver(ParticleSolver):
                     local_pos = self.particle_constraints[i_p, i_b].link_local_pos
                     target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
 
-                # Apply spring force to velocity
+                # The critically damped spring is integrated by backward Euler, the position moving with the velocity it
+                # gives, which keeps it stable whatever its stiffness: m (v' - v) = dt (-k (x + dt v' - x_t) - c v').
                 stiffness = self.particle_constraints[i_p, i_b].stiffness
                 mass = self.particles_info[i_p].mass / self._particle_volume_scale
+                damping = 2.0 * qd.math.sqrt(stiffness * mass)
+                dt = self.substep_dt
+                dt_damping_stiffness = dt * damping + dt**2 * stiffness
 
                 pos = self.particles[f + 1, i_p, i_b].pos
                 vel = self.particles[f + 1, i_p, i_b].vel
-
                 pos_error = pos - target_pos
-                spring_force = -stiffness * pos_error
-                damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
 
+                vel_delta = -(dt_damping_stiffness * vel + dt * stiffness * pos_error) / (mass + dt_damping_stiffness)
                 # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
-                self.particles[f + 1, i_p, i_b].vel += self.substep_dt * (spring_force + damping_force) / mass
+                self.particles[f + 1, i_p, i_b].vel += vel_delta
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

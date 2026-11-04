@@ -861,8 +861,9 @@ def _get_sdf_grid(
             )
             query_points = np.stack([X, Y, Z], axis=-1).reshape((-1, 3))
 
+            # See compute_sdf_data in genesis/utils/mesh.py for the sign computation
             signed_distance, sdf_closest_faces, closest_points, _ = igl.signed_distance(
-                query_points, sdf_verts, sdf_faces
+                query_points, sdf_verts, sdf_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
             )
             sdf_value = signed_distance.astype(gs.np_float, copy=False).reshape(n_nodes)
 
@@ -870,7 +871,10 @@ def _get_sdf_grid(
             # it is measured against that mesh
             closest_faces = sdf_closest_faces
             if not (np.array_equal(sdf_verts, verts) and np.array_equal(sdf_faces, faces)):
-                _, closest_faces, *_ = igl.signed_distance(query_points, verts, faces)
+                # Unsigned, since the closest faces alone are read
+                _, closest_faces, *_ = igl.signed_distance(
+                    query_points, verts, faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
+                )
             verts_idx = faces[closest_faces]
             verts_dist = np.linalg.norm(verts[verts_idx] - query_points[:, None, :], axis=-1)
             sdf_closest_verts_idx = verts_idx[np.arange(len(query_points)), np.argmin(verts_dist, axis=-1)]

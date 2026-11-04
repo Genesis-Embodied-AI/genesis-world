@@ -213,7 +213,7 @@ class PBDSolver(ParticleSolver):
         self._n_vfaces = self.n_vfaces
 
         if self.is_active:
-            self.sh.build(self._B)
+            self.sh.build(self._n_particles, self._B)
 
             self.init_particle_fields()
             self.init_edge_fields()
@@ -224,7 +224,7 @@ class PBDSolver(ParticleSolver):
                 entity._add_to_solver()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     @qd.kernel
     def add_uvs_and_faces(

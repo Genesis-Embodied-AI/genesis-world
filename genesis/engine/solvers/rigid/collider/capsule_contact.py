@@ -2,8 +2,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.array_class import DynInfo, RigidInfo
 from . import utils
-import genesis.utils.array_class as array_class
 
 
 @qd.func
@@ -14,8 +14,8 @@ def func_capsule_capsule_contact(
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical capsule-capsule collision detection.
@@ -70,7 +70,11 @@ def func_capsule_capsule_contact(
     penetration = gs.qd_float(0.0)
     if dist_sq < combined_radius_sq:
         is_col = True
-        dist = qd.sqrt(dist_sq)
+        # The differentiable narrowphase replays this detection, and the derivative of the square root is infinite at
+        # zero. The distance of coincident segments stays a constant zero, which keeps the gradient finite.
+        dist = gs.qd_float(0.0)
+        if dist_sq > 0.0:
+            dist = qd.sqrt(dist_sq)
 
         # Compute contact normal (from B to A, pointing into geom A)
         if dist > EPS:
@@ -102,8 +106,8 @@ def func_sphere_sphere_contact(
     i_gb: int,
     ga_pos: qd.types.vector(3),
     gb_pos: qd.types.vector(3),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-sphere collision detection.
@@ -136,7 +140,10 @@ def func_sphere_sphere_contact(
     penetration = gs.qd_float(0.0)
     if dist_sq < combined_radius_sq:
         is_col = True
-        dist = qd.sqrt(dist_sq)
+        # See the distance of func_capsule_capsule_contact
+        dist = gs.qd_float(0.0)
+        if dist_sq > 0.0:
+            dist = qd.sqrt(dist_sq)
 
         # Coincident centers keep the arbitrary default direction.
         if dist > EPS:
@@ -154,11 +161,10 @@ def func_sphere_capsule_contact(
     i_ga: int,
     i_gb: int,
     ga_pos: qd.types.vector(3),
-    ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-capsule collision detection.
@@ -216,7 +222,10 @@ def func_sphere_capsule_contact(
     penetration = gs.qd_float(0.0)
     if dist_sq < combined_radius_sq:
         is_col = True
-        dist = qd.sqrt(dist_sq)
+        # See the distance of func_capsule_capsule_contact
+        dist = gs.qd_float(0.0)
+        if dist_sq > 0.0:
+            dist = qd.sqrt(dist_sq)
 
         # Compute contact normal (from capsule to sphere, i.e., B to A)
         if dist > EPS:

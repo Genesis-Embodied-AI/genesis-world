@@ -5,7 +5,7 @@ import trimesh
 
 import genesis as gs
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -98,8 +98,12 @@ def test_particle_constraints(show_viewer, tol):
     for _ in range(30):
         scene.step()
 
+    # The attached particles follow the link, the springs keeping every particle finite whatever their stiffness
+    assert mpm_cube.get_state().vel.isfinite().all()
     mpm_diff = mpm_cube.get_particles_pos()[:, mask[0], 0].mean() - initial_mpm_x
-    assert mpm_diff > pos_diff[0] * 0.3, f"MPM should follow rigid link. Got {mpm_diff:.3f}"
+    # The springs deflect under the pull of the rest of the block, so the attached particles lag the link by a physical
+    # offset that precision does not bound
+    assert_allclose(mpm_diff, pos_diff[0], tol=1e-4)
 
 
 @pytest.mark.required
@@ -170,3 +174,50 @@ def test_perf_dispatch(variant, show_viewer):
     # is normal for the MPM coupling, so allow up to 2mm.
     assert final_elastic_pos[..., 2].min() > -1e-3
     assert final_liquid_pos[..., 2].min() > -2e-3
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+def test_halt_on_nan(show_viewer):
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=1e9,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The explicit integration of a stiff block diverges, the block of the second env first since it hits the floor
+    # faster. The diverging env is flagged and frozen before its state stops being finite, while the other proceeds.
+    block.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -5.0)))
+    for _ in range(10):
+        scene.step()
+        assert block.get_state().pos.isfinite().all()
+        if scene.get_error_envs_mask().any():
+            break
+    assert_equal(scene.get_error_envs_mask(), (False, True))
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(gs.GenesisException, match="Invalid MPM particle velocities"):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
+            scene.step()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert block.get_state().pos.isfinite().all()
+    assert not scene.get_error_envs_mask().any()

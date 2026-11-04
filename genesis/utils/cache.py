@@ -28,7 +28,7 @@ WT_CACHE_VERSION = 7
 WTH_CACHE_VERSION = 2
 # Bumped when the particles sampled for a fixed key change or when the layout of an entry does: forces a cache miss on
 # stale entries.
-PTC_CACHE_VERSION = 2
+PTC_CACHE_VERSION = 3
 
 
 def get_cache_dir():
@@ -288,9 +288,9 @@ def _release_collected_owner(cache_ref: weakref.ReferenceType[OwnedCache], owner
 
 
 def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
-    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the layout of a
-    # file changes, which forces a cache miss on stale entries.
-    schema = "v4-sdf-grid"
+    # The mesh, the resolution and the cell size determine the grid. The schema tag is bumped whenever the layout or the
+    # values of a file change, which forces a cache miss on stale entries.
+    schema = "v5-fast-winding"
     hashkey = get_hashkey(verts, faces, sdf_res, sdf_cell_size, schema)
     return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
 

@@ -131,7 +131,7 @@ class SPHSolver(ParticleSolver):
         self._coupler = self.sim._coupler
 
         if self.is_active:
-            self.sh.build(self._B)
+            self.sh.build(self._n_particles, self._B)
             self.init_particle_fields()
 
             for entity in self.entities:
@@ -154,7 +154,7 @@ class SPHSolver(ParticleSolver):
             self._density0 = self.particles_info[0].rho
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        self._build_gravity()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -718,7 +718,6 @@ class SPHSolver(ParticleSolver):
                 self._kernel_compute_rho(f)
                 self._kernel_compute_DFSPH_factor(f)
                 self._divergence_solve(f)
-                self._kernel_advect_velocity(f)
                 self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
                 self._kernel_predict_velocity(f)
                 self._density_solve(f)

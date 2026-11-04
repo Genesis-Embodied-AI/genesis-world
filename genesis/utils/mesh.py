@@ -253,7 +253,11 @@ def compute_sdf_data(mesh, res):
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
     query_points = np.stack([X, Y, Z], axis=-1).reshape((-1, 3))
 
-    voxels, *_ = igl.signed_distance(query_points, mesh.vertices, mesh.faces)
+    # The fast winding number sign makes the distances bitwise identical for identical inputs, which the default sign
+    # computation of libigl breaks in the last bits from one call to the next.
+    voxels, *_ = igl.signed_distance(
+        query_points, mesh.vertices, mesh.faces, sign_type=igl.SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER
+    )
     voxels = voxels.reshape((res, res, res)).astype(gs.np_float, copy=False)
 
     T_mesh_to_sdf = np.eye(4, dtype=gs.np_float)

@@ -1,10 +1,9 @@
 import argparse
 import csv
 import os
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, override
 
 import numpy as np
-from typing_extensions import override
 
 import genesis as gs
 import genesis.utils.geom as gu

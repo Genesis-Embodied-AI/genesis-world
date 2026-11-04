@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils import array_class
+from genesis.utils.array_class import ColliderState, DynInfo, DynState, RigidInfo
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
@@ -217,7 +217,7 @@ class PathPlanner(ABC):
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
         out: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         is_plan_with_obj: qd.i32,
     ):
         for i_b_ in range(envs_idx.shape[0]):
@@ -235,7 +235,7 @@ class PathPlanner(ABC):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         is_plan_with_obj: qd.i32,
     ) -> qd.i32:
         is_collision_detected = qd.cast(False, gs.qd_int)
@@ -380,9 +380,9 @@ class RRT(PathPlanner):
         envs_idx: qd.types.ndarray(),
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        dyn_state: array_class.DynState,
-        dyn_info: array_class.DynInfo,
-        rigid_info: array_class.RigidInfo,
+        dyn_state: DynState,
+        dyn_info: DynInfo,
+        rigid_info: RigidInfo,
     ):
         """
         Step 1 includes:
@@ -468,7 +468,7 @@ class RRT(PathPlanner):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
+        collider_state: ColliderState,
         ignore_collision: qd.i32,
         is_plan_with_obj: qd.i32,
     ):
@@ -728,9 +728,9 @@ class RRTConnect(PathPlanner):
         qpos: qd.Tensor,
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        dyn_state: array_class.DynState,
-        dyn_info: array_class.DynInfo,
-        rigid_info: array_class.RigidInfo,
+        dyn_state: DynState,
+        dyn_info: DynInfo,
+        rigid_info: RigidInfo,
         forward_pass: qd.i32,
     ):
         """
@@ -833,8 +833,8 @@ class RRTConnect(PathPlanner):
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
         ignore_geom_pairs: qd.types.ndarray(),
-        collider_state: array_class.ColliderState,
-        rigid_info: array_class.RigidInfo,
+        collider_state: ColliderState,
+        rigid_info: RigidInfo,
         forward_pass: qd.i32,
         ignore_collision: qd.i32,
         is_plan_with_obj: qd.i32,
