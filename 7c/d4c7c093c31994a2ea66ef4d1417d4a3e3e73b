@@ -1,0 +1,19 @@
+tests/parsers/test_mesh.py
+  s_471e150e8c9aa1::t_b78d2247ed8295 907-911
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7cd4c7c093c31994a2ea66ef4d1417d4a3e3e73b",
+  "prompts": {},
+  "sessions": {
+    "s_471e150e8c9aa1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a62f512-26b6-47f4-a085-3b7218792d2a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
