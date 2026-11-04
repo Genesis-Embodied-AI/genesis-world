@@ -1,0 +1,22 @@
+genesis/options/vis.py
+  s_2e342472cc8daf::t_8fc7a53acfaf02 99
+genesis/engine/scene.py
+  s_2e342472cc8daf::t_75df9876deb4fe 782
+  s_2e342472cc8daf::t_8fc7a53acfaf02 747,828
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd802b2e678af0ee5e49dce7ffddecdd8e6e149a",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

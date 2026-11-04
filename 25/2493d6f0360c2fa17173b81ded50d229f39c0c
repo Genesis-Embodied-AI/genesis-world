@@ -1,0 +1,19 @@
+genesis/vis/rasterizer_context.py
+  s_5f0a6aada3cc7c::t_e91a49541994c4 2,16-17,44-45,62,662,1419,1424
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "252493d6f0360c2fa17173b81ded50d229f39c0c",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

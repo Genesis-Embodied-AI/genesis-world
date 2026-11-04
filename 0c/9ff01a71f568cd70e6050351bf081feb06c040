@@ -1,0 +1,29 @@
+genesis/engine/dynamic_texture.py
+  s_5f0a6aada3cc7c::t_dca53452f5daba 112,142
+genesis/options/textures.py
+  s_5f0a6aada3cc7c::t_80d80009fb0342 373-376
+  s_5f0a6aada3cc7c::t_dca53452f5daba 326-328,332,335,368,372,390,436,441
+tests/rendering/test_offscreen.py
+  s_5f0a6aada3cc7c::t_80d80009fb0342 236,259,277
+  s_5f0a6aada3cc7c::t_dca53452f5daba 368,373,377,383
+examples/rendering/dynamic_texture_duck.py
+  s_5f0a6aada3cc7c::t_80d80009fb0342 20,44,70
+tests/rigid/test_serialization.py
+  s_5f0a6aada3cc7c::t_80d80009fb0342 171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0c9ff01a71f568cd70e6050351bf081feb06c040",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
