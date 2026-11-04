@@ -22,8 +22,8 @@ return_map_vjp), and the snow hardening reverses through the Lame parameters rea
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import LinksState
 import genesis.utils.geom as gu
-from genesis.utils import array_class
 
 from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
 from .mpm_func import (
@@ -238,7 +238,7 @@ def func_constraint_adjoint(
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
-    links_state: array_class.LinksState,
+    links_state: LinksState,
     params: qd.template(),
     constraints: qd.template(),
 ):

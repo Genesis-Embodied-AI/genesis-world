@@ -18,8 +18,8 @@ goes to the MPM material.
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import BVHQueryResults
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.utils import array_class
 
 from .mpm_pbd_func import kernel_fit_mpm_obstacle_leaves
 
@@ -50,7 +50,7 @@ class MpmSphBoundary:
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, n_mpm)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
-        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+        self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep.

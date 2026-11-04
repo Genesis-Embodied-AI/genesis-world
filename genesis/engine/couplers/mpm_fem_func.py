@@ -18,6 +18,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import BVHQueryResults
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
@@ -28,7 +29,6 @@ from genesis.engine.solvers.mpm_func import (
     particle_of_sorted,
     pyramid_dirs,
 )
-from genesis.utils import array_class
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
@@ -152,7 +152,7 @@ class FemTriangleQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest triangle in `newton` and records no pair
-        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+        self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaf boxes to the triangles at the substep start and build the trees."""

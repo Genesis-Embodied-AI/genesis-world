@@ -23,6 +23,19 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import (
+    BVHQueryResults,
+    ConstraintState,
+    DofsState,
+    DynInfo,
+    DynState,
+    GeomsInfo,
+    GeomsState,
+    LinksInfo,
+    LinksState,
+    RigidInfo,
+    SDFInfo,
+)
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
@@ -48,14 +61,13 @@ from genesis.engine.solvers.rigid.constraint.solver import (
     initialize_Jaref,
     initialize_Ma,
 )
-from genesis.utils import array_class
 
 
 # ============================================ Layer 0: spatial algebra =============================================
 
 
 @qd.func
-def particle_arm(f: int, i_p: int, i_b: int, i_l: int, particles: MpmParticles, links_state: array_class.LinksState):
+def particle_arm(f: int, i_p: int, i_b: int, i_l: int, particles: MpmParticles, links_state: LinksState):
     """Arm of a particle from the root center of mass (COM) of its contact link, the reference point of the link's
     spatial vectors."""
     return particles.pos[f, i_p, i_b] - links_state.root_COM[i_l, i_b]
@@ -65,9 +77,7 @@ def particle_arm(f: int, i_p: int, i_b: int, i_l: int, particles: MpmParticles, 
 
 
 @qd.func
-def geom_sdf_grid(
-    i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: array_class.GeomsState, sdf_info: array_class.SDFInfo
-):
+def geom_sdf_grid(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, sdf_info: SDFInfo):
     """Continuous signed distance and its gradient in the mesh frame of a geom with a signed distance field (SDF) grid.
 
     Inside the grid, it returns the trilinear interpolant of the node distances and its analytic gradient, consistent
@@ -106,9 +116,9 @@ def geom_sdf(
     i_g: int,
     i_b: int,
     x: qd.types.vector(3),
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    sdf_info: SDFInfo,
 ):
     """Signed distance of a world point to a geom, by `geom_sdf_grid` for the geoms with a distance grid."""
     signed_distance = gs.qd_float(0.0)
@@ -125,10 +135,10 @@ def geom_normal(
     i_g: int,
     i_b: int,
     x: qd.types.vector(3),
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     """Outward unit normal of a geom at a world point: the gradient of the distance measured by `geom_sdf`."""
@@ -163,7 +173,7 @@ class RigidGeomQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest geom in `newton` and records no pair
-        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+        self.results = BVHQueryResults(sizes=dict(query_results=1))
         self.geoms_state = rigid.dyn_state.geoms
         self.geoms_info = rigid.dyn_info.geoms
         self.geoms_init_AABB = rigid.geoms_init_AABB
@@ -248,14 +258,14 @@ def func_build_rigid_rows(
     particles: MpmParticles,
     grid: qd.template(),
     newton: qd.template(),
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
     query: qd.template(),
     particles_info: MpmParticlesInfo,
-    geoms_info: array_class.GeomsInfo,
-    links_info: array_class.LinksInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    links_info: LinksInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     params: qd.template(),
     config: qd.template(),
 ):
@@ -327,8 +337,8 @@ def func_build_rigid_rows(
 def func_link_spatial_disp(
     src: qd.template(),
     rigid_data: qd.template(),
-    dofs_state: array_class.DofsState,
-    links_info: array_class.LinksInfo,
+    dofs_state: DofsState,
+    links_info: LinksInfo,
     config: qd.template(),
 ):
     """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link.
@@ -358,8 +368,8 @@ def func_link_force_to_dofs(
     scale: float,
     out: qd.template(),
     rigid_data: qd.template(),
-    dofs_state: array_class.DofsState,
-    links_info: array_class.LinksInfo,
+    dofs_state: DofsState,
+    links_info: LinksInfo,
     config: qd.template(),
 ):
     """Add the generalized force of the spatial forces accumulated on the links to a dof vector.
@@ -388,7 +398,7 @@ def func_contact_point_disp(
     grid: qd.template(),
     newton: qd.template(),
     rigid_data: qd.template(),
-    links_state: array_class.LinksState,
+    links_state: LinksState,
     params: qd.template(),
 ):
     """Set the displacement J_pt x of the contact point of every particle with Rigid rows.
@@ -410,8 +420,8 @@ def func_contact_point_disp(
 @qd.func(requires_top_level=True)
 def func_rigid_begin(
     rigid_data: qd.template(),
-    dofs_state: array_class.DofsState,
-    constraint_state: array_class.ConstraintState,
+    dofs_state: DofsState,
+    constraint_state: ConstraintState,
     params: qd.template(),
     rigid_config: qd.template(),
     config: qd.template(),
@@ -441,10 +451,10 @@ def func_rigid_begin(
 @qd.func(requires_top_level=True)
 def func_rigid_evaluate(
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     params: qd.template(),
     rigid_config: qd.template(),
     config: qd.template(),
@@ -502,8 +512,8 @@ def func_rigid_energy(rigid_data: qd.template(), control: qd.template(), params:
 @qd.func(requires_top_level=True)
 def func_rigid_gradient(
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
     params: qd.template(),
     config: qd.template(),
 ):
@@ -526,9 +536,9 @@ def rigid_solve(
     i_b: int,
     rhs: qd.template(),
     out: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -548,10 +558,10 @@ def rigid_solve(
 @qd.func(requires_top_level=True)
 def func_rigid_factor(
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -650,8 +660,8 @@ def func_rigid_contact_gradient(
     grid: qd.template(),
     newton: qd.template(),
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     params: qd.template(),
     config: qd.template(),
 ):
@@ -689,9 +699,9 @@ def func_rigid_contact_gradient(
 @qd.func(requires_top_level=True)
 def func_rigid_precondition(
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -776,8 +786,8 @@ def func_rigid_contact_matvec(
     linear: qd.template(),
     rigid_data: qd.template(),
     pcg_scalars: qd.template(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
     params: qd.template(),
     config: qd.template(),
 ):
@@ -802,9 +812,9 @@ def func_rigid_contact_matvec(
 @qd.func(requires_top_level=True)
 def func_rigid_matvec(
     rigid_data: qd.template(),
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -828,7 +838,7 @@ def func_rigid_matvec(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_matvec_post(
-    rigid_data: qd.template(), dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, config: qd.template()
+    rigid_data: qd.template(), dyn_state: DynState, dyn_info: DynInfo, config: qd.template()
 ):
     """Add to Ap_r the generalized force of the spatial forces accumulated on the links by func_rigid_contact_matvec."""
     func_link_force_to_dofs(1.0, rigid_data.ap, rigid_data, dyn_state.dofs, dyn_info.links, config)
@@ -907,9 +917,7 @@ def func_rigid_step_forward(rigid_data: qd.template(), control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_write_back(
-    rigid_data: qd.template(), constraint_state: array_class.ConstraintState, config: qd.template()
-):
+def func_rigid_write_back(rigid_data: qd.template(), constraint_state: ConstraintState, config: qd.template()):
     """Hand the converged qacc to Rigid as the solution of its constraint solve.
 
     Runs after func_rigid_evaluate at the converged x, which left the row activity, forces and qfrc_constraint of Rigid
@@ -924,9 +932,7 @@ def func_rigid_write_back(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_adjoint_rhs(
-    rigid_data: qd.template(), constraint_state: array_class.ConstraintState, params: qd.template()
-):
+def func_rigid_adjoint_rhs(rigid_data: qd.template(), constraint_state: ConstraintState, params: qd.template()):
     """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts.
 
     The right-hand side is the adjoint of x = dt^2 qacc, dL/dqacc / dt^2, with dL/dqacc as taken by Rigid's own adjoint
@@ -940,9 +946,7 @@ def func_rigid_adjoint_rhs(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_adjoint_finish(
-    rigid_data: qd.template(), constraint_state: array_class.ConstraintState, params: qd.template()
-):
+def func_rigid_adjoint_finish(rigid_data: qd.template(), constraint_state: ConstraintState, params: qd.template()):
     """Set the solution of Rigid's adjoint solve from that of the joint one.
 
     Rigid's share of the joint energy is dt^4 times its cost of x / dt^2, whose gradient in the parameters of Rigid's
@@ -962,8 +966,8 @@ def func_mpm_reaction(
     grid: qd.template(),
     newton: qd.template(),
     rigid_data: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
     params: qd.template(),
 ):
     """Apply the force of the MPM contact rows on Rigid at the converged solve, after func_rigid_write_back.
@@ -1003,7 +1007,7 @@ def func_mpm_reaction(
 
 
 @qd.func(requires_top_level=True)
-def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: array_class.LinksState, params: qd.template()):
+def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: LinksState, params: qd.template()):
     """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
     contact forces were written by the post-solve stage of its substep."""
     n_links = rigid_data.link_force_vel.shape[0]

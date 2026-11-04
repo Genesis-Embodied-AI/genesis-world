@@ -6,7 +6,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import ErrorCode, LinksState
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
@@ -266,18 +266,18 @@ class MPMSolver(ParticleSolver):
         self.register_errors(
             self.errno,
             {
-                array_class.ErrorCode.INVALID_VELOCITY_NAN: (
+                ErrorCode.INVALID_VELOCITY_NAN: (
                     "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
                     "adjust the material parameters."
                 ),
-                array_class.ErrorCode.INVALID_MPM_SOLVE_NAN: (
+                ErrorCode.INVALID_MPM_SOLVE_NAN: (
                     "The implicit MPM Newton solve produced non-finite values. Try reducing the time step size or "
                     "adjusting simulation parameters."
                 ),
-                array_class.ErrorCode.OVERFLOW_MPM_GRID_RANGE: (
+                ErrorCode.OVERFLOW_MPM_GRID_RANGE: (
                     "MPM particles have non-finite positions or left the range the sparse grid can index."
                 ),
-                array_class.ErrorCode.INVALID_MPM_GRID: (
+                ErrorCode.INVALID_MPM_GRID: (
                     "Internal error of the implicit MPM solver: its sparse grid or matrix storage is inconsistent. "
                     "Rerun with `gs.init(debug=True)` to stop at the faulty kernel."
                 ),
@@ -543,7 +543,7 @@ class MPMSolver(ParticleSolver):
         """Flag INVALID_VELOCITY_NAN for every env with a particle whose position in the given frame is not finite."""
         for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
-                self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_VELOCITY_NAN
+                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
 
     @no_grad
     @qd.kernel
@@ -553,7 +553,7 @@ class MPMSolver(ParticleSolver):
         for _ in range(1):
             if control.has_failed_non_finite[()] != 0:
                 for i_b in range(self.errno.shape[0]):
-                    self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_MPM_SOLVE_NAN
+                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -1384,7 +1384,7 @@ def kernel_wall_rows(
 def kernel_constraint_rows(
     grid: qd.template(),
     newton: qd.template(),
-    links_state: array_class.LinksState,
+    links_state: LinksState,
     particles_info: MpmParticlesInfo,
     params: qd.template(),
     constraints: qd.template(),
@@ -1399,7 +1399,7 @@ def kernel_constraint_adjoint(
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
-    links_state: array_class.LinksState,
+    links_state: LinksState,
     params: qd.template(),
     constraints: qd.template(),
 ):

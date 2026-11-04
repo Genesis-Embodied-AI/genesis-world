@@ -18,6 +18,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import BVHQueryResults
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
@@ -30,7 +31,6 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_dirs,
 )
 from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
-from genesis.utils import array_class
 
 # Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
 # OBSTACLE_REACH contact distances of its start or predicted position
@@ -266,7 +266,7 @@ class PbdParticleQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest PBD particle in `newton` and records no pair
-        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+        self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self):
         """Fit the leaf boxes to the PBD particles' sweeps over the substep and build the trees."""
@@ -450,7 +450,7 @@ class MpmParticleObstacles:
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
-        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
+        self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaves to the MPM particles, build the trees, and gather the obstacle candidates of every PBD

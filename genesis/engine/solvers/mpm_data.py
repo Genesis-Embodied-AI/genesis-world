@@ -14,14 +14,13 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 from genesis.engine.numerics.bcoo_matrix import BCOOMatrix
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
 from genesis.engine.numerics.linear_pcg import PCGWorkspace
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
-from genesis.utils.data import V
+from genesis.utils.data import DataKind, V
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -98,7 +97,7 @@ class MpmParams:
 class MpmParticles:
     """Particle state of every frame of the substep window, shape (frames, n_particles, n_envs)."""
 
-    kind: ClassVar[array_class.DataKind] = array_class.DataKind.STATE
+    kind: ClassVar[DataKind] = DataKind.STATE
 
     pos: qd.Tensor
     vel: qd.Tensor
@@ -124,7 +123,7 @@ def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int, requires_gra
 class MpmParticlesNG:
     """Particle state without gradient, shape (frames, n_particles, n_envs)."""
 
-    kind: ClassVar[array_class.DataKind] = array_class.DataKind.STATE
+    kind: ClassVar[DataKind] = DataKind.STATE
 
     active: qd.Tensor
 
@@ -137,7 +136,7 @@ def get_mpm_particles_ng(n_frames: int, n_particles: int, n_envs: int) -> MpmPar
 class MpmParticlesInfo:
     """Static per-particle data, shape (n_particles,)."""
 
-    kind: ClassVar[array_class.DataKind] = array_class.DataKind.INFO
+    kind: ClassVar[DataKind] = DataKind.INFO
 
     material_idx: qd.Tensor
     mass: qd.Tensor
@@ -167,7 +166,7 @@ class MpmMaterialTable:
     """Parameter-major material table, `material_table[param * n_materials + slot]`, and the energy family and the
     return map of each slot."""
 
-    kind: ClassVar[array_class.DataKind] = array_class.DataKind.CONSTANT
+    kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     material_table: qd.Tensor
     mat_family: qd.Tensor

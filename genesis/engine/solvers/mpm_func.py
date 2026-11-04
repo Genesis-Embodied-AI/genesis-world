@@ -22,7 +22,7 @@ neither lanes nor atomics. The stages that map each particle or node on its own 
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import ErrorCode, LinksState
 import genesis.utils.geom as gu
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM, write_block_partial
 from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add
@@ -1022,7 +1022,7 @@ def stencil_node_slots(env: int, cell, grid: qd.template()):
                 env,
             )
         if block_slot < 0:
-            flag_env_error(env, grid, array_class.ErrorCode.INVALID_MPM_GRID)
+            flag_env_error(env, grid, ErrorCode.INVALID_MPM_GRID)
             block_slot = 0
         slots[a] = block_slot * BLOCK_CELLS + cell_local(node)
     return slots
@@ -1148,7 +1148,7 @@ def func_compose_particle_keys(
             if is_in_range:
                 key = particle_key(i_b, qd.floor(x).cast(gs.qd_int))
             else:
-                flag_env_error(i_b, grid, array_class.ErrorCode.OVERFLOW_MPM_GRID_RANGE)
+                flag_env_error(i_b, grid, ErrorCode.OVERFLOW_MPM_GRID_RANGE)
         grid.sort_keys[gid] = key
         grid.sort_ids[gid] = gid
         if gid == 0:
@@ -1218,7 +1218,7 @@ def func_publish_blocks(grid: qd.template()):
                 grid.block_coords[slot] = grid.neighbor_keys[i]
                 if not grid.hash.insert(grid.neighbor_keys[i], slot):
                     env, block = unpack_block(grid.neighbor_keys[i])
-                    flag_env_error(env, grid, array_class.ErrorCode.INVALID_MPM_GRID)
+                    flag_env_error(env, grid, ErrorCode.INVALID_MPM_GRID)
         if i == grid.n_neighbor_keys[()] - 1:
             grid.grid_demand[()] = grid.block_ranks[i] + grid.block_flags[i]
 
@@ -1289,7 +1289,7 @@ def func_fill_cell_segs(grid: qd.template()):
             assert not is_missing, "MPM grid: no block holds the cell of sorted particle %d" % start
         if is_missing:
             env, block = unpack_block(key >> qd.u64(6))
-            flag_env_error(env, grid, array_class.ErrorCode.INVALID_MPM_GRID)
+            flag_env_error(env, grid, ErrorCode.INVALID_MPM_GRID)
         if block_slot >= 0:
             slot = block_slot * BLOCK_CELLS + gs.qd_int(key & qd.u64(63))
             grid.cell_seg_start[slot] = start
@@ -1745,7 +1745,7 @@ def constraint_row_terms(s: int, x: qd.types.vector(3), dx: qd.types.vector(3), 
 def func_build_constraint_rows(
     grid: qd.template(),
     newton: qd.template(),
-    links_state: array_class.LinksState,
+    links_state: LinksState,
     particles_info: MpmParticlesInfo,
     params: qd.template(),
     constraints: qd.template(),
@@ -1826,7 +1826,7 @@ def func_check_loop_capacity(grid: qd.template(), linear: qd.template(), params:
                 linear.matrix.max_triplets[()],
             )
         if is_overflow:
-            flag_all_envs_error(grid, params, array_class.ErrorCode.INVALID_MPM_GRID)
+            flag_all_envs_error(grid, params, ErrorCode.INVALID_MPM_GRID)
 
 
 @qd.func(requires_top_level=True)

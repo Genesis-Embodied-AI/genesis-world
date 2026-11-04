@@ -18,13 +18,13 @@ func_contact_invweight).
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.mpm_adjoint_func import band_row_bw, polar_rotation_bw
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
 from genesis.engine.solvers.mpm_func import particle_of_sorted, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.utils import array_class
 
 from .mpm_rigid_func import geom_normal
 
@@ -32,9 +32,7 @@ from .mpm_rigid_func import geom_normal
 
 
 @qd.func
-def geom_sdf_grid_hessian(
-    i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: array_class.GeomsState, sdf_info: array_class.SDFInfo
-):
+def geom_sdf_grid_hessian(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, sdf_info: SDFInfo):
     """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at a world point.
 
     Inside the grid, they are those of the trilinear interpolant, whose pure second derivatives vanish. Outside, a
@@ -88,10 +86,10 @@ def geom_contact_bw(
     x: qd.types.vector(3),
     phi_bar: float,
     n_bar: qd.types.vector(3),
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
 ):
     """Reverse of the signed distance `geom_sdf` and of the normal `geom_normal` of a geom at a world point.
 
@@ -141,8 +139,8 @@ def link_chain_spatial(
     i_l: int,
     i_b: int,
     src: qd.template(),
-    dofs_state: array_class.DofsState,
-    links_info: array_class.LinksInfo,
+    dofs_state: DofsState,
+    links_info: LinksInfo,
     config: qd.template(),
 ):
     """Spatial displacement of a link from a dof vector (see func_link_spatial_disp).
@@ -171,14 +169,14 @@ def func_rigid_contact_adjoint(
     newton: qd.template(),
     linear: qd.template(),
     rigid_data: qd.template(),
-    geoms_state: array_class.GeomsState,
-    links_state: array_class.LinksState,
-    dofs_state: array_class.DofsState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    dofs_state: DofsState,
     particles_info: MpmParticlesInfo,
-    geoms_info: array_class.GeomsInfo,
-    links_info: array_class.LinksInfo,
-    rigid_info: array_class.RigidInfo,
-    sdf_info: array_class.SDFInfo,
+    geoms_info: GeomsInfo,
+    links_info: LinksInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
     params: qd.template(),
     config: qd.template(),
 ):
