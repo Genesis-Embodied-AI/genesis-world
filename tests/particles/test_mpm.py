@@ -98,8 +98,12 @@ def test_particle_constraints(show_viewer, tol):
     for _ in range(30):
         scene.step()
 
+    # The attached particles follow the link, the springs keeping every particle finite whatever their stiffness
+    assert mpm_cube.get_state().vel.isfinite().all()
     mpm_diff = mpm_cube.get_particles_pos()[:, mask[0], 0].mean() - initial_mpm_x
-    assert mpm_diff > pos_diff[0] * 0.3, f"MPM should follow rigid link. Got {mpm_diff:.3f}"
+    # The springs deflect under the pull of the rest of the block, so the attached particles lag the link by a physical
+    # offset that precision does not bound
+    assert_allclose(mpm_diff, pos_diff[0], tol=1e-4)
 
 
 @pytest.mark.required
