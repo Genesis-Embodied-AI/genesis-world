@@ -19,7 +19,7 @@ Genesis/
 │   │   │   └── sf_solver.py   # Stable Fluid
 │   │   └── couplers/          # Inter-solver coupling
 │   ├── options/               # Configuration classes (Pydantic models)
-│   │   ├── materials.py       # Physical laws, independent of the solver
+│   │   ├── materials.py       # Physical description of the entity (independent of solver)
 │   │   ├── morphs.py          # Shape definitions (Box, Mesh, URDF, MJCF)
 │   │   ├── solvers.py         # Solver configuration options
 │   │   └── surfaces.py        # Surface properties
