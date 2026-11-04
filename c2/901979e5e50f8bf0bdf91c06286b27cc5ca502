@@ -1,0 +1,21 @@
+tests/grad/test_hybrid_push.py
+  s_91e0422623a7c7::t_e6cf2b3a02f3d2 296-303
+tests/particles/test_mpm.py
+  s_91e0422623a7c7::t_d2014cfa6c303d 208-215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c2901979e5e50f8bf0bdf91c06286b27cc5ca502",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
