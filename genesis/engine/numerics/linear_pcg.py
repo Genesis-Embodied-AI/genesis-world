@@ -28,6 +28,8 @@ class PCGScalars:
 
     def __init__(self, value_type, max_iter: int, tol_rate: float) -> None:
         self.value_type = value_type
+        # FIXME: The environments of a batch share these scalars, as those of NewtonControl, so one PCG solve spans them
+        # all and stops on their joint residual.
         self.is_running = qd.ndarray(gs.qd_int, shape=())
         self.is_running.fill(0)
         self.max_iter = qd.ndarray(gs.qd_int, shape=())

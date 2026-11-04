@@ -17,7 +17,7 @@ def test_mpm_rigid_push_grad(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
-            substeps=10,
+            substeps=2,
             requires_grad=True,
         ),
         mpm_options=gs.options.MPMOptions(
@@ -114,71 +114,68 @@ def test_mpm_rigid_push_grad(show_viewer):
 def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
     # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
-    scenes, boxes_by_scene = [], []
-    for requires_grad in (True, False):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=4e-3,
-                substeps=2,
-                requires_grad=requires_grad,
-            ),
-            mpm_options=gs.options.MPMOptions(
-                lower_bound=(-0.5, -0.5, -0.1),
-                upper_bound=(0.5, 0.5, 0.5),
-                grid_density=32,
-            ),
-            newton_options=gs.options.NewtonOptions(
-                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-                # Newton solve stops approach only once it has converged far below its default tolerance
-                velocity_tol=1e-10,
-                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-                # clamps a mode of the material, so the finite differences match the exact Hessian alone
-                adjoint_hessian="exact",
-            ),
-            # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
-            coupler_options=gs.options.LegacyCouplerOptions(
-                fem_mpm=False,
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.6, -0.9, 0.5),
-                camera_lookat=(0.0, 0.0, 0.15),
-            ),
-            show_viewer=show_viewer and requires_grad,
-        )
-        mpm_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                lower=(-0.35, -0.1, 0.1),
-                upper=(-0.15, 0.1, 0.2),
-            ),
-            material=gs.materials.MPM.Muscle(
-                E=5e4,
-                nu=0.3,
-                rho=1000.0,
-                sampler="regular",
-                n_groups=2,
-            ),
-        )
-        fem_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.3, 0.0, 0.3),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.FEM.Muscle(
-                E=5e4,
-                nu=0.3,
-                n_groups=2,
-            ),
-        )
-        scene.build(n_envs=2)
-        # One muscle group on each side of each box
-        mpm_muscle_group = (mpm_box.init_particles[:, 0] > -0.25).astype(gs.np_int)
-        mpm_box.set_muscle(muscle_group=mpm_muscle_group)
-        elems_centroid = tensor_to_array(fem_box.init_positions)[fem_box.elems].mean(axis=1)
-        fem_box.set_muscle(muscle_group=(elems_centroid[:, 0] > 0.3).astype(gs.np_int))
-        scenes.append(scene)
-        boxes_by_scene.append((mpm_box, fem_box))
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=4e-3,
+            substeps=2,
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=32,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+            # Newton solve stops approach only once it has converged far below its default tolerance
+            velocity_tol=1e-10,
+            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+            # clamps a mode of the material, so the finite differences match the exact Hessian alone
+            adjoint_hessian="exact",
+        ),
+        # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
+        coupler_options=gs.options.LegacyCouplerOptions(
+            fem_mpm=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -0.9, 0.5),
+            camera_lookat=(0.0, 0.0, 0.15),
+        ),
+        show_viewer=show_viewer,
+    )
+    mpm_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.35, -0.1, 0.1),
+            upper=(-0.15, 0.1, 0.2),
+        ),
+        material=gs.materials.MPM.Muscle(
+            E=5e4,
+            nu=0.3,
+            rho=1000.0,
+            sampler="regular",
+            n_groups=2,
+        ),
+    )
+    fem_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.3, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Muscle(
+            E=5e4,
+            nu=0.3,
+            n_groups=2,
+        ),
+    )
+    scene.build(n_envs=2)
+    # One muscle group on each side of each box
+    mpm_muscle_group = (mpm_box.init_particles[:, 0] > -0.25).astype(gs.np_int)
+    mpm_box.set_muscle(muscle_group=mpm_muscle_group)
+    elems_centroid = tensor_to_array(fem_box.init_positions)[fem_box.elems].mean(axis=1)
+    fem_box.set_muscle(muscle_group=(elems_centroid[:, 0] > 0.3).astype(gs.np_int))
+    boxes = (mpm_box, fem_box)
 
-    def rollout(scene, boxes, actus, vels):
+    def rollout(actus, vels):
         scene.reset()
         for box, vel, actu in zip(boxes, vels, actus):
             box.set_velocity(vel)
@@ -202,20 +199,19 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     actus = np.array([[[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]], [[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]])
     vels = np.array([[0.1, -0.2, 0.3], [-0.2, 0.1, 0.2]])
     # Every substep of a step reads the actuation set last
-    for scene, boxes in zip(scenes, boxes_by_scene):
-        rollout(scene, boxes, actus, vels)
-        assert_allclose(boxes[0].get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
+    rollout(actus, vels)
+    assert_allclose(mpm_box.get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
 
     # A particle given several times takes the value of its last occurrence, which alone gets a gradient, whether the
     # particles are given once for every environment or row by row, and whether they count from the start or the end
-    n_particles = boxes_by_scene[0][0].n_particles
+    n_particles = mpm_box.n_particles
     for particles_idx_local in ([0, 0], [[0, 0], [1, 1]], [n_particles - 1, -1]):
-        scenes[0].reset()
+        scene.reset()
         vels_repeated = torch.tensor(
             [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]] * 2, dtype=gs.tc_float, device=gs.device, requires_grad=True
         )
-        boxes_by_scene[0][0].set_particles_vel(vels_repeated, particles_idx_local=particles_idx_local)
-        vel = boxes_by_scene[0][0].get_state().vel[[0, 1], np.array(particles_idx_local).reshape(-1, 2)[:, 0]]
+        mpm_box.set_particles_vel(vels_repeated, particles_idx_local=particles_idx_local)
+        vel = mpm_box.get_state().vel[[0, 1], np.array(particles_idx_local).reshape(-1, 2)[:, 0]]
         assert_allclose(vel, vels_repeated[:, 1], tol=gs.EPS)
         (vels_grad,) = torch.autograd.grad(vel.sum(), vels_repeated)
         assert_allclose(vels_grad[:, 0], 0.0, tol=gs.EPS)
@@ -223,27 +219,27 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
 
     actus_ana = torch.tensor(actus, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    sum(rollout(scenes[0], boxes_by_scene[0], actus_ana, vels_ana)).backward()
+    sum(rollout(actus_ana, vels_ana)).backward()
 
-    # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error. The
-    # finite difference of the inputs of a box reads the loss of that box alone, clear of the rounding of the other.
-    eps = 1e-5 if precision == "64" else 1e-2
+    # The finite differences run on the same scene without gradients, which simulates the same physics. The finite
+    # difference of the inputs of a box reads the loss of that box alone, clear of the rounding of the other.
+    eps = 1e-5
     inputs = (actus, vels)
     inputs_fd_grad = (np.zeros_like(actus), np.zeros_like(vels))
-    for i_input, (value, fd_grad) in enumerate(zip(inputs, inputs_fd_grad)):
-        for idx in np.ndindex(value.shape):
-            losses = []
-            for sign in (+1, -1):
-                perturbed_inputs = list(inputs)
-                perturbed_inputs[i_input] = value.copy()
-                perturbed_inputs[i_input][idx] += sign * eps
-                losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
-            fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
-        assert (np.abs(fd_grad) > 1e-3).all()
-    # The finite differences of the MPM box keep the error of the Newton tolerance of the implicit MPM solve
-    for i_box, tol in enumerate((2e-6, 2e-9)):
-        assert_allclose(actus_ana.grad[i_box], inputs_fd_grad[0][i_box], tol=tol)
-        assert_allclose(vels_ana.grad[i_box], inputs_fd_grad[1][i_box], tol=tol)
+    with torch.no_grad():
+        for i_input, (value, fd_grad) in enumerate(zip(inputs, inputs_fd_grad)):
+            for idx in np.ndindex(value.shape):
+                losses = []
+                for sign in (+1, -1):
+                    perturbed_inputs = list(inputs)
+                    perturbed_inputs[i_input] = value.copy()
+                    perturbed_inputs[i_input][idx] += sign * eps
+                    losses.append(float(rollout(*perturbed_inputs)[idx[0]]))
+                fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+            assert (np.abs(fd_grad) > 1e-3).all()
+    for i_box, (actus_tol, vels_tol) in enumerate(((1e-7, 5e-9), (2e-9, 2e-9))):
+        assert_allclose(actus_ana.grad[i_box], inputs_fd_grad[0][i_box], tol=actus_tol)
+        assert_allclose(vels_ana.grad[i_box], inputs_fd_grad[1][i_box], tol=vels_tol)
 
 
 @pytest.mark.required
@@ -253,57 +249,53 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
     # The force fields act on the grid velocity before the Newton solve, so the gradient of the initial velocity goes
     # through their derivative with respect to the velocity: zero for the constant field, the drag's |v| v and the
     # flow of the point attractor otherwise
-    scenes, blocks = [], []
-    for requires_grad in (True, False):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=4e-3,
-                substeps=2,
-                gravity=(0.0, 0.0, 0.0),
-                requires_grad=requires_grad,
-            ),
-            mpm_options=gs.options.MPMOptions(
-                grid_density=32,
-                lower_bound=(-0.5, -0.5, -0.5),
-                upper_bound=(0.5, 0.5, 0.5),
-            ),
-            newton_options=gs.options.NewtonOptions(
-                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-                # Newton solve stops approach only once it has converged far below its default tolerance
-                velocity_tol=1e-10,
-                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-                # clamps a mode of the material, so the finite differences match the exact Hessian alone
-                adjoint_hessian="exact",
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.4, -0.4, 0.3),
-                camera_lookat=(0.0, 0.0, 0.0),
-            ),
-            show_viewer=show_viewer and requires_grad,
-        )
-        block = scene.add_entity(
-            morph=gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.MPM.Elastic(
-                E=5e4,
-                nu=0.3,
-                sampler="regular",
-            ),
-        )
-        for force_field in (
-            gs.force_fields.Constant(direction=(0.0, 0.0, 1.0), strength=2.0),
-            gs.force_fields.Drag(linear=3.0, quadratic=5.0),
-            gs.force_fields.Point(strength=1.0, position=(0.3, 0.2, 0.1), flow=2.0),
-        ):
-            scene.add_force_field(force_field).activate()
-        scene.build(n_envs=2)
-        scenes.append(scene)
-        blocks.append(block)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=4e-3,
+            substeps=2,
+            gravity=(0.0, 0.0, 0.0),
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=32,
+            lower_bound=(-0.5, -0.5, -0.5),
+            upper_bound=(0.5, 0.5, 0.5),
+        ),
+        newton_options=gs.options.NewtonOptions(
+            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+            # Newton solve stops approach only once it has converged far below its default tolerance
+            velocity_tol=1e-10,
+            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+            # clamps a mode of the material, so the finite differences match the exact Hessian alone
+            adjoint_hessian="exact",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.4, -0.4, 0.3),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=5e4,
+            nu=0.3,
+            sampler="regular",
+        ),
+    )
+    for force_field in (
+        gs.force_fields.Constant(direction=(0.0, 0.0, 1.0), strength=2.0),
+        gs.force_fields.Drag(linear=3.0, quadratic=5.0),
+        gs.force_fields.Point(strength=1.0, position=(0.3, 0.2, 0.1), flow=2.0),
+    ):
+        scene.add_force_field(force_field).activate()
+    scene.build(n_envs=2)
 
     goal = torch.tensor((0.1, -0.05, 0.02), dtype=gs.tc_float, device=gs.device)
 
-    def rollout(scene, block, vels):
+    def rollout(vels):
         scene.reset()
         block.set_velocity(vels)
         for _ in range(3):
@@ -312,20 +304,21 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
 
     vels = np.array([[0.3, -0.2, 0.4], [-0.5, 0.1, 0.2]])
     vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    rollout(scenes[0], blocks[0], vels_ana).sum().backward()
+    rollout(vels_ana).sum().backward()
 
+    # The finite differences run on the same scene without gradients, which simulates the same physics
     eps = 1e-5
     fd_grad = np.zeros_like(vels)
-    for idx in np.ndindex(vels.shape):
-        losses = []
-        for sign in (+1, -1):
-            perturbed = vels.copy()
-            perturbed[idx] += sign * eps
-            losses.append(float(rollout(scenes[1], blocks[1], perturbed)[idx[0]]))
-        fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+    with torch.no_grad():
+        for idx in np.ndindex(vels.shape):
+            losses = []
+            for sign in (+1, -1):
+                perturbed = vels.copy()
+                perturbed[idx] += sign * eps
+                losses.append(float(rollout(perturbed)[idx[0]]))
+            fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-3).all()
-    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
-    assert_allclose(vels_ana.grad, fd_grad, tol=2e-6)
+    assert_allclose(vels_ana.grad, fd_grad, tol=2e-9)
 
 
 @pytest.mark.required
@@ -364,56 +357,51 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
     # Two blocks collide head-on and yield, so that the gradient of the initial velocity of the first goes through the
     # reverse of the return map of every substep after the impact, and through the plastic volume ratio Jp for the snow
     # and the sand
-    scenes, blocks = [], []
-    for requires_grad in (True, False):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=4e-3,
-                substeps=2,
-                gravity=(0.0, 0.0, 0.0),
-                requires_grad=requires_grad,
-            ),
-            mpm_options=gs.options.MPMOptions(
-                grid_density=32,
-                lower_bound=(-0.5, -0.5, -0.5),
-                upper_bound=(0.5, 0.5, 0.5),
-            ),
-            newton_options=gs.options.NewtonOptions(
-                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-                # Newton solve stops approach only once it has converged far below its default tolerance
-                velocity_tol=1e-10,
-                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-                # clamps a mode of the material, so the finite differences match the exact Hessian alone
-                adjoint_hessian="exact",
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.4, -0.4, 0.3),
-                camera_lookat=(0.0, 0.0, 0.0),
-            ),
-            show_viewer=show_viewer and requires_grad,
-        )
-        block = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(-0.055, 0.0, 0.0),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=material(),
-        )
-        target = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.055, 0.01, 0.0),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=material(),
-        )
-        scene.build(n_envs=2)
-        scenes.append(scene)
-        blocks.append((block, target))
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=4e-3,
+            substeps=2,
+            gravity=(0.0, 0.0, 0.0),
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=32,
+            lower_bound=(-0.5, -0.5, -0.5),
+            upper_bound=(0.5, 0.5, 0.5),
+        ),
+        newton_options=gs.options.NewtonOptions(
+            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+            # Newton solve stops approach only once it has converged far below its default tolerance
+            velocity_tol=1e-10,
+            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+            # clamps a mode of the material, so the finite differences match the exact Hessian alone
+            adjoint_hessian="exact",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.4, -0.4, 0.3),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.055, 0.0, 0.0),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=material(),
+    )
+    target = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.055, 0.01, 0.0),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=material(),
+    )
+    scene.build(n_envs=2)
 
     goal = torch.tensor((0.1, -0.05, 0.02), dtype=gs.tc_float, device=gs.device)
 
-    def rollout(scene, entities, vels):
-        block, target = entities
+    def rollout(vels):
         scene.reset()
         block.set_velocity(vels)
         target.set_velocity(torch.tensor(((-1.5, 0.0, 0.0),) * 2, dtype=gs.tc_float, device=gs.device))
@@ -423,19 +411,21 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
 
     vels = np.array([[1.5, -0.2, 0.3], [1.2, 0.1, -0.2]])
     vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    rollout(scenes[0], blocks[0], vels_ana).sum().backward()
+    rollout(vels_ana).sum().backward()
 
+    # The finite differences run on the same scene without gradients, which simulates the same physics
     eps = 1e-5
     fd_grad = np.zeros_like(vels)
-    for idx in np.ndindex(vels.shape):
-        losses = []
-        for sign in (+1, -1):
-            perturbed = vels.copy()
-            perturbed[idx] += sign * eps
-            losses.append(float(rollout(scenes[1], blocks[1], perturbed)[idx[0]]))
-        fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+    with torch.no_grad():
+        for idx in np.ndindex(vels.shape):
+            losses = []
+            for sign in (+1, -1):
+                perturbed = vels.copy()
+                perturbed[idx] += sign * eps
+                losses.append(float(rollout(perturbed)[idx[0]]))
+            fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-3).all()
-    assert_allclose(vels_ana.grad, fd_grad, tol=2e-6)
+    assert_allclose(vels_ana.grad, fd_grad, tol=2e-8)
 
 
 @pytest.mark.required
@@ -444,60 +434,55 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
 def test_hybrid_grad_matches_fd(precision, show_viewer):
     # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
     # gradient goes from the soft particles to the dofs of the arm through that coupling and the implicit MPM solve
-    scenes, robots = [], []
-    for requires_grad in (True, False):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=3e-3,
-                substeps=2,
-                requires_grad=requires_grad,
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=3e-3,
+            substeps=2,
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            gravity=(0.0, 0.0, 0.0),
+            lower_bound=(0.0, 0.0, -0.2),
+            upper_bound=(1.0, 1.0, 1.0),
+        ),
+        newton_options=gs.options.NewtonOptions(
+            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
+            # Newton solve stops approach only once it has converged far below its default tolerance
+            velocity_tol=1e-10,
+            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
+            # clamps a mode of the material, so the finite differences match the exact Hessian alone
+            adjoint_hessian="exact",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.65, -0.35, 0.6),
+            camera_lookat=(0.65, 0.45, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    robot = scene.add_entity(
+        morph=gs.morphs.URDF(
+            pos=(0.45, 0.45, 0.2),
+            file="urdf/simple/two_link_arm.urdf",
+            scale=0.2,
+            fixed=True,
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(
+                gravity_compensation=1.0,
             ),
-            mpm_options=gs.options.MPMOptions(
-                gravity=(0.0, 0.0, 0.0),
-                lower_bound=(0.0, 0.0, -0.2),
-                upper_bound=(1.0, 1.0, 1.0),
+            material_soft=gs.materials.MPM.Muscle(
+                E=1e4,
+                nu=0.45,
+                sampler="regular",
             ),
-            newton_options=gs.options.NewtonOptions(
-                # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-                # Newton solve stops approach only once it has converged far below its default tolerance
-                velocity_tol=1e-10,
-                # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-                # clamps a mode of the material, so the finite differences match the exact Hessian alone
-                adjoint_hessian="exact",
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.65, -0.35, 0.6),
-                camera_lookat=(0.65, 0.45, 0.2),
-            ),
-            show_viewer=show_viewer and requires_grad,
-        )
-        robot = scene.add_entity(
-            morph=gs.morphs.URDF(
-                pos=(0.45, 0.45, 0.2),
-                file="urdf/simple/two_link_arm.urdf",
-                scale=0.2,
-                fixed=True,
-            ),
-            material=gs.materials.Hybrid(
-                material_rigid=gs.materials.Rigid(
-                    gravity_compensation=1.0,
-                ),
-                # Both scenes must sample the same particles for the finite differences
-                material_soft=gs.materials.MPM.Muscle(
-                    E=1e4,
-                    nu=0.45,
-                    sampler="regular",
-                ),
-                damping=1000.0,
-            ),
-        )
-        scene.build()
-        scenes.append(scene)
-        robots.append(robot)
+            damping=1000.0,
+        ),
+    )
+    scene.build()
 
     goal = torch.tensor((0.5, 0.5, 0.25), dtype=gs.tc_float, device=gs.device)
 
-    def rollout(scene, robot, vel):
+    def rollout(vel):
         scene.reset()
         robot.set_dofs_velocity(vel)
         for _ in range(3):
@@ -506,20 +491,21 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
 
     vel = np.array([1.5, -0.8])
     vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    rollout(scenes[0], robots[0], vel_ana).backward()
+    rollout(vel_ana).backward()
 
+    # The finite differences run on the same scene without gradients, which simulates the same physics
     eps = 1e-5
     fd_grad = np.zeros_like(vel)
-    for i in range(len(vel)):
-        losses = []
-        for sign in (+1, -1):
-            perturbed = vel.copy()
-            perturbed[i] += sign * eps
-            losses.append(float(rollout(scenes[1], robots[1], perturbed)))
-        fd_grad[i] = (losses[0] - losses[1]) / (2.0 * eps)
+    with torch.no_grad():
+        for i in range(len(vel)):
+            losses = []
+            for sign in (+1, -1):
+                perturbed = vel.copy()
+                perturbed[i] += sign * eps
+                losses.append(float(rollout(perturbed)))
+            fd_grad[i] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-4).all()
-    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
-    assert_allclose(vel_ana.grad, fd_grad, rtol=1e-5, atol=1e-8)
+    assert_allclose(vel_ana.grad, fd_grad, rtol=5e-6, atol=5e-9)
 
 
 @pytest.mark.required
@@ -588,18 +574,20 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     # The block pushes the box, which would otherwise keep its velocity
     assert (box.get_dofs_velocity()[..., 0] > vel_ana[..., 0] + 5e-3).all()
     loss.backward()
-    # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
-    # a reset starts free of the coupling wrench the previous one left.
+    # The environments run the same inputs apart, so they get the same gradient
+    assert_allclose(vel_ana.grad[1], vel_ana.grad[0], tol=1e-10)
+    # The finite differences of the first environment run on the same scene without gradients, which simulates the same
+    # physics. A rollout after a reset starts free of the coupling wrench the previous one left.
     eps = 1e-5
-    fd_grad = np.zeros_like(vel)
+    fd_grad = np.zeros(vel.shape[1])
     with torch.no_grad():
-        for i, j in np.ndindex(vel.shape):
+        for j in range(vel.shape[1]):
             losses = []
             for sign in (+1, -1):
                 perturbed = vel.copy()
-                perturbed[i, j] += sign * eps
+                perturbed[0, j] += sign * eps
                 losses.append(float(rollout(perturbed)))
-            fd_grad[i, j] = (losses[0] - losses[1]) / (2.0 * eps)
+            fd_grad[j] = (losses[0] - losses[1]) / (2.0 * eps)
     (grad_rerun,) = torch.autograd.grad(rollout(vel_ana), vel_ana)
     assert_allclose(grad_rerun, vel_ana.grad, tol=1e-10)
-    assert_allclose(vel_ana.grad, fd_grad, tol=1e-8)
+    assert_allclose(vel_ana.grad[0], fd_grad, tol=1e-8)

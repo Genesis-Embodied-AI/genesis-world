@@ -69,6 +69,7 @@ class MpmParams:
         wall_sol_params,
         wall_lower,
         wall_upper,
+        liquid_band: float,
     ) -> None:
         self.n_envs = _scalar(gs.qd_int, n_envs)
         self.n_particles = _scalar(gs.qd_int, n_particles)
@@ -78,6 +79,9 @@ class MpmParams:
         self.particle_volume = _scalar(gs.qd_float, particle_volume)
         self.mass_scale = _scalar(gs.qd_float, mass_scale)
         self.n_materials = _scalar(gs.qd_int, n_materials)
+        # Width in volume ratio of the band below J = 1 over which the stiffness of the liquid rises (see
+        # liquid_volume_terms)
+        self.liquid_band = _scalar(gs.qd_float, liquid_band)
         # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
         # will violate are then active at the first assembly, so that the first direction already sees them. A barrier
         # against penetration needs the start u = 0, free of penetration, for its continuous collision detection, so

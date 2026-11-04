@@ -170,6 +170,9 @@ class MpmNewtonParticipant:
         mpm_func.func_negate_du(self.grid, self.newton, self.linear)
         mpm_func.func_record_start_point(self.grid, self.newton)
         mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.params)
+        mpm_func.func_cap_inversion_step(
+            f, self.particles, self.grid, self.newton, control, self.particles_info, self.materials, self.params
+        )
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
@@ -312,6 +315,7 @@ class MPMSolver(ParticleSolver):
             wall_sol_params=self._wall_sol_params(),
             wall_lower=self.boundary.lower,
             wall_upper=self.boundary.upper,
+            liquid_band=self._liquid_band(),
         )
         self._mpm_materials = get_mpm_material_table(table.reshape(-1), family, plastic)
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks, self.errno)
@@ -335,6 +339,22 @@ class MPMSolver(ParticleSolver):
     def params(self) -> MpmParams:
         """The scene values of the implicit MPM kernels, which the couplings with MPM read."""
         return self._mpm_params
+
+    def _liquid_band(self):
+        """Return the width in volume ratio over which the stiffness of a liquid rises below J = 1: the volume change of
+        a cell under the displacement of `MPMOptions.liquid_smoothing_velocity` over a substep, by default the velocity
+        tolerance of the Newton solve, under which the solve does not resolve the motion anyway."""
+        velocity = self._options.liquid_smoothing_velocity
+        if velocity is None:
+            velocity = self._scene.options.newton.velocity_tol
+        band = velocity * self.substep_dt / self._dx
+        if band >= 0.5:
+            gs.raise_exception(
+                f"The smoothing band of the liquid energy, {band:.3g} in volume ratio, would soften the liquid down to "
+                "half its volume: lower MPMOptions(liquid_smoothing_velocity), NewtonOptions(velocity_tol) or the "
+                "substep."
+            )
+        return band
 
     def _wall_sol_params(self):
         """Return the solref / solimp parameters of the wall rows: Rigid's defaults, with `MPMOptions.wall_timeconst`

@@ -91,6 +91,9 @@ VON_MISES_SIGMA_MIN = 0.05
 SAND_SIGMA_MIN = 1e-4
 # Range of the volume ratio the liquid return map keeps
 LIQUID_J_MIN = 0.2
+# Fraction of the step to the first zero volume of a liquid particle along the Newton direction, beyond which the line
+# search does not start, so that every trial state keeps the volume ratio of the liquid positive
+INVERSION_STEP_SLACK = 0.9
 # Hardening exponent of snow, mu and lam scaled by exp(SNOW_HARDENING (1 - Jp))
 SNOW_HARDENING = 10.0
 
@@ -292,41 +295,6 @@ def warp_max(value):
 
 
 @qd.func
-def signed_singular_values(F: qd.types.matrix(3, 3)):
-    """Singular values of a deformation gradient by descending magnitude, the last one signed by its determinant.
-
-    They are the square roots of the eigenvalues of F^T F in closed form (the trigonometric solution of the
-    characteristic cubic), which skips the rotations of a full singular value decomposition since the energy needs the
-    singular values alone.
-    """
-    A = F.transpose() @ F
-    p1 = A[0, 1] * A[0, 1] + A[0, 2] * A[0, 2] + A[1, 2] * A[1, 2]
-    eigenvalues = qd.Vector([A[0, 0], A[1, 1], A[2, 2]], dt=gs.qd_float)
-    if p1 > 0.0:
-        q = (A[0, 0] + A[1, 1] + A[2, 2]) / 3.0
-        p2 = (A[0, 0] - q) ** 2 + (A[1, 1] - q) ** 2 + (A[2, 2] - q) ** 2 + 2.0 * p1
-        p = qd.sqrt(p2 / 6.0)
-        B = (A - q * qd.Matrix.identity(gs.qd_float, 3)) / p
-        r = qd.min(qd.max(B.determinant() / 2.0, -1.0), 1.0)
-        phi = qd.acos(r) / 3.0
-        e1 = q + 2.0 * p * qd.cos(phi)
-        e3 = q + 2.0 * p * qd.cos(phi + 2.0943951023931953)
-        eigenvalues = qd.Vector([e1, 3.0 * q - e1 - e3, e3], dt=gs.qd_float)
-    else:
-        # Already diagonal: sort the eigenvalues in descending order
-        for i in qd.static(range(2)):
-            for j in qd.static(range(2 - i)):
-                if eigenvalues[j] < eigenvalues[j + 1]:
-                    eigenvalue_next = eigenvalues[j + 1]
-                    eigenvalues[j + 1] = eigenvalues[j]
-                    eigenvalues[j] = eigenvalue_next
-    sigma = qd.Vector([qd.sqrt(qd.max(eigenvalues[i], 0.0)) for i in qd.static(range(3))], dt=gs.qd_float)
-    if F.determinant() < 0.0:
-        sigma[2] = -sigma[2]
-    return sigma
-
-
-@qd.func
 def compression_penalty(sigma: qd.types.vector(3), mu: float, lam: float):
     """Compression penalty of the fixed corotated and Stable Neo-Hookean energies, with its gradient and Hessian.
 
@@ -453,16 +421,126 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
 
 
 @qd.func
-def liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float):
-    """Energy density, gradient and Hessian of the liquid in the signed singular values, without compression penalty.
+def liquid_volume_terms(J: float, lam: float, band: float):
+    """Volume term of the liquid energy density and its first and second derivatives in J.
 
-    The volume term lam / 2 (J - 1)^2 is one-sided: it acts under compression (J < 1) and vanishes under expansion, C1
-    at J = 1. The fixed corotated shear term mu |sigma - 1|^2 models viscosity, with mu zero for an inviscid liquid.
+    The term lam / 4 (J^2 - 1 - 2 ln J), of bulk modulus lam, acts under compression alone. Within `band` below J = 1,
+    the quintic in x = 1 - J with zero value, slope and curvature at x = 0 that meets the log form with its value, slope
+    and curvature at x = band takes its place, so that the term is C2 at J = 1: its stiffness rises from zero over the
+    band instead of jumping to lam, which every particle of a liquid near rest crosses back and forth, and which would
+    otherwise take the Newton model away from the energy at every iteration."""
+    psi = gs.qd_float(0.0)
+    dpsi = gs.qd_float(0.0)
+    d2psi = gs.qd_float(0.0)
+    x = 1.0 - J
+    if x >= band and x > 0.0:
+        psi = 0.25 * lam * (J * J - 1.0 - 2.0 * qd.log(J))
+        dpsi = 0.5 * lam * (J - 1.0 / J)
+        d2psi = 0.5 * lam * (1.0 + 1.0 / (J * J))
+    elif x > 0.0:
+        J_band = 1.0 - band
+        value = 0.25 * lam * (J_band * J_band - 1.0 - 2.0 * qd.log(J_band))
+        # Slope and curvature in x at x = band, scaled by band and band^2
+        slope = -0.5 * lam * (J_band - 1.0 / J_band) * band
+        curvature = 0.5 * lam * (1.0 + 1.0 / (J_band * J_band)) * band * band
+        c3 = 10.0 * value - 4.0 * slope + 0.5 * curvature
+        c4 = 7.0 * slope - 15.0 * value - curvature
+        c5 = 0.5 * curvature - 3.0 * slope + 6.0 * value
+        t = x / band
+        psi = t * t * t * (c3 + t * (c4 + t * c5))
+        dpsi = -t * t * (3.0 * c3 + t * (4.0 * c4 + t * 5.0 * c5)) / band
+        d2psi = t * (6.0 * c3 + t * (12.0 * c4 + t * 20.0 * c5)) / (band * band)
+    return psi, dpsi, d2psi
+
+
+@qd.func
+def liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band: float):
+    """Energy density, gradient and Hessian of the liquid in the signed singular values.
+
+    The volume term is one-sided (see liquid_volume_terms): it acts under compression (J < 1) and vanishes under
+    expansion. Under expansion, the curvature of a two-sided term along the shear of a particle is negative, which the
+    positive definite projection drops, so that a free surface spreading on few particles leaves the Newton system
+    almost flat along directions on which that energy rises steeply. Its log term walls off J = 0, so it is defined for
+    J > 0 alone, which the line search keeps for every trial state (see func_cap_inversion_step). The fixed corotated
+    shear term mu |sigma - 1|^2 models viscosity, with mu zero for an inviscid liquid.
     """
-    lam_compressed = gs.qd_float(0.0)
-    if sigma[0] * sigma[1] * sigma[2] < 1.0:
-        lam_compressed = lam
-    return fixed_corotated_principal(sigma, mu, lam_compressed, is_penalized=False)
+    J = sigma[0] * sigma[1] * sigma[2]
+    cofactor = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
+    psi_volume, dpsi, d2psi = liquid_volume_terms(J, lam, band)
+    psi = mu * (sigma - 1.0).dot(sigma - 1.0) + psi_volume
+    g = 2.0 * mu * (sigma - 1.0) + dpsi * cofactor
+    A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3) + d2psi * cofactor.outer_product(cofactor)
+    for k in qd.static(range(3)):
+        i, j = qd.static(_PAIRS[k])
+        axis_other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
+        A[i, j] += dpsi * sigma[axis_other]
+        A[j, i] += dpsi * sigma[axis_other]
+    return psi, g, A
+
+
+@qd.func
+def det_cubic(F0: qd.types.matrix(3, 3), dF: qd.types.matrix(3, 3)):
+    """Coefficients c0, c1, c2, c3 of det(F0 + t dF) in powers of t, by the multilinear expansion over the columns."""
+    a = [qd.Vector([F0[r, c] for r in qd.static(range(3))], dt=gs.qd_float) for c in qd.static(range(3))]
+    b = [qd.Vector([dF[r, c] for r in qd.static(range(3))], dt=gs.qd_float) for c in qd.static(range(3))]
+    c0 = a[0].dot(a[1].cross(a[2]))
+    c1 = b[0].dot(a[1].cross(a[2])) + a[0].dot(b[1].cross(a[2])) + a[0].dot(a[1].cross(b[2]))
+    c2 = a[0].dot(b[1].cross(b[2])) + b[0].dot(a[1].cross(b[2])) + b[0].dot(b[1].cross(a[2]))
+    c3 = b[0].dot(b[1].cross(b[2]))
+    return c0, c1, c2, c3
+
+
+@qd.func
+def cubic_first_root(c0: float, c1: float, c2: float, c3: float, t_max: float):
+    """Smallest root in (0, t_max] of c0 + c1 t + c2 t^2 + c3 t^3 given c0 > 0, or 2 t_max where it stays positive.
+
+    The extrema of the cubic split (0, t_max] into monotone pieces, and the first piece whose end is not positive
+    brackets the root, which bisection refines."""
+    # Extrema in (0, t_max), the absent ones at t_max, in ascending order
+    t_low = t_max
+    t_high = t_max
+    a = 3.0 * c3
+    b = 2.0 * c2
+    c = c1
+    if qd.abs(a) > 0.0:
+        discriminant = b * b - 4.0 * a * c
+        if discriminant > 0.0:
+            root_sqrt = qd.sqrt(discriminant)
+            r1 = (-b - root_sqrt) / (2.0 * a)
+            r2 = (-b + root_sqrt) / (2.0 * a)
+            if r1 > 0.0 and r1 < t_max:
+                t_low = r1
+            if r2 > 0.0 and r2 < t_max:
+                t_high = r2
+    elif qd.abs(b) > 0.0:
+        r = -c / b
+        if r > 0.0 and r < t_max:
+            t_low = r
+    if t_high < t_low:
+        t_swap = t_low
+        t_low = t_high
+        t_high = t_swap
+    breakpoints = qd.Vector([t_low, t_high, t_max], dt=gs.qd_float)
+    root = 2.0 * t_max
+    is_found = False
+    lo = gs.qd_float(0.0)
+    for k in qd.static(range(3)):
+        hi = breakpoints[k]
+        g_lo = c0 + lo * (c1 + lo * (c2 + lo * c3))
+        g_hi = c0 + hi * (c1 + hi * (c2 + hi * c3))
+        if not is_found and g_lo > 0.0 and g_hi <= 0.0:
+            is_found = True
+            left = lo
+            right = hi
+            for _ in range(64):
+                mid = 0.5 * (left + right)
+                if c0 + mid * (c1 + mid * (c2 + mid * c3)) > 0.0:
+                    left = mid
+                else:
+                    right = mid
+            root = 0.5 * (left + right)
+        lo = hi
+    return root
 
 
 @qd.func
@@ -715,7 +793,14 @@ def material_params(slot: int, Jp: float, materials: MpmMaterialTable, params: q
 
 
 @qd.func
-def elastic_principal(slot: int, sigma: qd.types.vector(3), mu: float, lam: float, materials: MpmMaterialTable):
+def elastic_principal(
+    slot: int,
+    sigma: qd.types.vector(3),
+    mu: float,
+    lam: float,
+    materials: MpmMaterialTable,
+    params: qd.template(),
+):
     """Energy density, principal gradient and Hessian of the energy family of a material slot."""
     psi = gs.qd_float(0.0)
     g = qd.Vector.zero(gs.qd_float, 3)
@@ -726,21 +811,28 @@ def elastic_principal(slot: int, sigma: qd.types.vector(3), mu: float, lam: floa
     elif family == FAMILY_EXTENDED_HENCKY:
         psi, g, A = extended_hencky_principal(sigma, mu, lam)
     elif family == FAMILY_LIQUID:
-        psi, g, A = liquid_principal(sigma, mu, lam)
+        psi, g, A = liquid_principal(sigma, mu, lam, params.liquid_band[()])
     else:
         psi, g, A = fixed_corotated_principal(sigma, mu, lam)
     return psi, g, A
 
 
 @qd.func
-def elastic_energy(slot: int, sigma: qd.types.vector(3), mu: float, lam: float, materials: MpmMaterialTable):
+def elastic_energy(
+    slot: int,
+    sigma: qd.types.vector(3),
+    mu: float,
+    lam: float,
+    materials: MpmMaterialTable,
+    params: qd.template(),
+):
     """Energy density of the energy family of a material slot, from the signed singular values."""
     psi = gs.qd_float(0.0)
     family = materials.mat_family[slot]
     if family == FAMILY_FIXED_COROTATED:
         psi = fixed_corotated_energy(sigma, mu, lam)
     else:
-        psi, g, A = elastic_principal(slot, sigma, mu, lam, materials)
+        psi, g, A = elastic_principal(slot, sigma, mu, lam, materials, params)
     return psi
 
 
@@ -1714,7 +1806,7 @@ def particle_stencil_terms(
     sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-    psi, g, A = elastic_principal(slot, sigma, mu, lam, materials)
+    psi, g, A = elastic_principal(slot, sigma, mu, lam, materials, params)
     scale = params.particle_volume[()] * dt * dt
     P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
     m = particles_info.muscle_direction[i_p]
@@ -2517,6 +2609,43 @@ def func_contribute_newton_max_disp(
                 qd.atomic_max(control.max_disp[()], block_max)
 
 
+@qd.func(requires_top_level=True)
+def func_cap_inversion_step(
+    f: int,
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    control: qd.template(),
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    params: qd.template(),
+):
+    """Cap the start step of the line search below the first zero volume of a liquid particle along the Newton direction.
+
+    Along the step u + alpha du, the trial deformation (I + grad u + alpha grad du) F of a particle is affine in alpha,
+    so its determinant is a cubic in alpha, whose first root takes INVERSION_STEP_SLACK times its value as the bound of
+    the step. The liquid energy is defined for a positive volume ratio alone, which its log term only walls off along
+    the continuous path, so that a discrete trial step could otherwise jump across a zero volume. Runs after the start
+    point is recorded, with u at the start point."""
+    t_max = 1.0 / INVERSION_STEP_SLACK
+    qd.loop_config(name="mpm_cap_inversion_step")
+    for s in range(grid.n_valid[()]):
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        slot = particles_info.material_idx[i_p]
+        if materials.mat_family[slot] == FAMILY_LIQUID:
+            slots = stencil_node_slots(env, cell, grid)
+            F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+            grad_du = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for a in qd.static(range(8)):
+                du_a = qd.Vector([newton.du[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+                grad_du += du_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+            c0, c1, c2, c3 = det_cubic(F_trial, grad_du @ F)
+            if c0 > 0.0:
+                root = cubic_first_root(c0, c1, c2, c3, t_max)
+                if root <= t_max:
+                    qd.atomic_min(control.alpha[()], INVERSION_STEP_SLACK * root)
+
+
 @qd.func
 def particle_max_disp(
     f: int, s: int, particles: MpmParticles, grid: qd.template(), newton: qd.template(), params: qd.template()
@@ -2588,12 +2717,13 @@ def particle_energy(
     """V dt^2 psi(F_trial), the contact-row energy and the constraint spring energy of the sorted particle s."""
     i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
     slots = stencil_node_slots(env, cell, grid)
-    F_tr, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+    F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-    psi = elastic_energy(slot, signed_singular_values(F_tr), mu, lam, materials)
+    _, S, _ = gu.qd_svd(F_trial)
+    psi = elastic_energy(slot, qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float), mu, lam, materials, params)
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(
-        slot, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_tr, materials, params
+        slot, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_trial, materials, params
     )
     psi += psi_fibre
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)

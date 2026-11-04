@@ -22,8 +22,9 @@ from genesis.engine.solvers.mpm_func import (
     PLASTIC_SAND,
     PLASTIC_SNOW,
     PLASTIC_VON_MISES,
+    cubic_first_root,
+    det_cubic,
     extended_hencky_principal,
-    fixed_corotated_energy,
     fixed_corotated_principal,
     invert_node_block,
     isotropic_first_piola_differential,
@@ -33,7 +34,6 @@ from genesis.engine.solvers.mpm_func import (
     q1_stencil,
     q1_weight_hessian,
     return_map,
-    signed_singular_values,
     stable_neohookean_principal,
 )
 from genesis.utils.misc import qd_to_numpy
@@ -179,40 +179,6 @@ def test_fixed_corotated_is_finite_and_psd_when_inverted():
             assert np.linalg.eigvalsh(0.5 * (block + block.T)).min() > -1e-9
 
 
-@qd.kernel
-def kernel_energy_from_singular_values(
-    F_in: qd.types.ndarray(), mu: float, lam: float, out_sigma: qd.types.ndarray(), out_psi: qd.types.ndarray()
-):
-    for _ in range(1):
-        F = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            F[i, j] = F_in[i, j]
-        sigma = signed_singular_values(F)
-        for i in qd.static(range(3)):
-            out_sigma[i] = sigma[i]
-        out_psi[()] = fixed_corotated_energy(sigma, mu, lam)
-
-
-@pytest.mark.required
-@pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_energy_from_signed_singular_values():
-    rng = np.random.default_rng(4)
-    mu, lam = 3.0, 5.0
-    F_nd, sigma_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3,))
-    psi_nd = qd.ndarray(gs.qd_float, shape=())
-    samples = [np.eye(3), np.diag([1.2, 0.7, 0.9]), np.diag([0.5, -1.1, 0.8])]
-    samples += [np.eye(3) + 0.3 * rng.standard_normal((3, 3)) for _ in range(6)]
-    samples += [rng.standard_normal((3, 3)) for _ in range(6)]
-    for F in samples:
-        F_nd.from_numpy(F)
-        kernel_energy_from_singular_values(F_nd, mu, lam, sigma_nd, psi_nd)
-        sigma = qd_to_numpy(sigma_nd)
-        reference = _signed_singular_values(F)
-        assert_allclose(sigma, reference, tol=1e-7)
-        assert_allclose(qd_to_numpy(psi_nd), _reference_extended_corotated(reference, mu, lam), rtol=1e-8, atol=1e-10)
-
-
 @qd.func
 def _stable_neohookean_unpenalized(sigma, mu, lam):
     return stable_neohookean_principal(sigma, mu, lam, is_penalized=False)
@@ -223,10 +189,19 @@ def _fixed_corotated_unpenalized(sigma, mu, lam):
     return fixed_corotated_principal(sigma, mu, lam, is_penalized=False)
 
 
+# Smoothing band of the liquid energy in the tests of the energy families
+LIQUID_BAND = 0.05
+
+
+@qd.func
+def _liquid_banded(sigma, mu, lam):
+    return liquid_principal(sigma, mu, lam, LIQUID_BAND)
+
+
 _FAMILIES = (
     extended_hencky_principal,
     stable_neohookean_principal,
-    liquid_principal,
+    _liquid_banded,
     fixed_corotated_principal,
     _stable_neohookean_unpenalized,
     _fixed_corotated_unpenalized,
@@ -261,8 +236,11 @@ def _reference_extended_hencky(sigma, mu, lam):
 
 
 def _reference_liquid(sigma, mu, lam):
+    """The one-sided log volume term, below the smoothing band, where the quintic does not take its place."""
     J = np.prod(sigma)
-    return mu * np.sum((sigma - 1.0) ** 2) + 0.5 * lam * min(J - 1.0, 0.0) ** 2
+    assert J <= 1.0 - LIQUID_BAND or J >= 1.0
+    volume = 0.25 * lam * (J * J - 1.0 - 2.0 * np.log(J)) if J < 1.0 else 0.0
+    return mu * np.sum((sigma - 1.0) ** 2) + volume
 
 
 @pytest.mark.required
@@ -275,8 +253,8 @@ def _reference_liquid(sigma, mu, lam):
         (0, _reference_extended_hencky, ((0.5, 1.5), (0.01, 0.04), (-0.5, 0.04))),
         # Above the penalty threshold, below it along every axis, and inverted
         (1, _reference_stable_neohookean, ((0.5, 1.5), (0.05, 0.35), (-1.2, -0.2))),
-        # Compressed and expanded
-        (2, _reference_liquid, ((0.6, 0.95), (1.05, 1.4))),
+        # Compressed below the smoothing band and expanded
+        (2, _reference_liquid, ((0.6, 0.98), (1.05, 1.4))),
         # Above the penalty threshold, below it along every axis, across it with inversion, and below it under a large
         # stretch of another axis
         (3, _reference_extended_corotated, ((0.5, 1.5), (0.05, 0.35), (-0.5, 0.8), (0.1, 20.0))),
@@ -306,6 +284,46 @@ def test_principal_derivatives(family, reference, sigmas):
                 A_fd = (evaluate(sigma + d)[1] - evaluate(sigma - d)[1]) / (2 * h)
                 assert_allclose(g[i], g_fd, tol=1e-6)
                 assert_allclose(A[:, i], A_fd, tol=1e-5)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_liquid_smoothing_band():
+    rng = np.random.default_rng(8)
+    lam, h = 5.0, 1e-7
+    sigma_nd, psi_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=())
+    g_nd, A_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3, 3))
+
+    def evaluate(sigma):
+        sigma_nd.from_numpy(np.asarray(sigma, dtype=np.float64))
+        kernel_principal(2, sigma_nd, 0.0, lam, psi_nd, g_nd, A_nd)
+        return float(qd_to_numpy(psi_nd)), qd_to_numpy(g_nd, copy=True), qd_to_numpy(A_nd, copy=True)
+
+    # Inside the band, the gradient and the Hessian are the derivatives of the energy
+    for _ in range(6):
+        sigma = rng.uniform(0.984, 0.999, 3)
+        assert 1.0 - LIQUID_BAND < np.prod(sigma) < 1.0
+        psi, g, A = evaluate(sigma)
+        for i in range(3):
+            d = np.zeros(3)
+            d[i] = h
+            assert_allclose(g[i], (evaluate(sigma + d)[0] - evaluate(sigma - d)[0]) / (2 * h), tol=1e-6)
+            assert_allclose(A[:, i], (evaluate(sigma + d)[1] - evaluate(sigma - d)[1]) / (2 * h), tol=1e-5)
+    # The energy, the gradient and the Hessian are continuous where the band meets the log form and at J = 1, where the
+    # compression stiffness vanishes instead of jumping to lam
+    for J in (1.0 - LIQUID_BAND, 1.0):
+        below = evaluate(np.full(3, (J * (1.0 - 1e-9)) ** (1.0 / 3.0)))
+        above = evaluate(np.full(3, (J * (1.0 + 1e-9)) ** (1.0 / 3.0)))
+        for value_below, value_above in zip(below, above):
+            assert_allclose(value_below, value_above, tol=1e-6 * lam)
+        if J == 1.0:
+            for value in below:
+                assert_allclose(value, 0.0, tol=1e-6 * lam)
+    # The curvature 1^T A 1 of the energy along a uniform compression sigma = s 1 stays positive across the band
+    for J in np.linspace(1.0 - LIQUID_BAND, 1.0, 12)[:-1]:
+        A = evaluate(np.full(3, J ** (1.0 / 3.0)))[2]
+        assert A.sum() > 0.0
 
 
 @pytest.mark.required
@@ -378,6 +396,47 @@ def test_invert_node_block():
     a = rng.standard_normal((3, 3))
     D = a @ a.T + np.diag([1e-3, 1.0, 1e3])
     assert_allclose(invert(D), np.linalg.inv(D), rtol=1e-4)
+
+
+@qd.kernel
+def kernel_inversion_root(F0_in: qd.types.ndarray(), dF_in: qd.types.ndarray(), t_max: float, out: qd.types.ndarray()):
+    for _ in range(1):
+        F0 = qd.Matrix.zero(gs.qd_float, 3, 3)
+        dF = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            F0[i, j] = F0_in[i, j]
+            dF[i, j] = dF_in[i, j]
+        c0, c1, c2, c3 = det_cubic(F0, dF)
+        out[()] = cubic_first_root(c0, c1, c2, c3, t_max)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_inversion_step_root():
+    F0_nd, dF_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
+    root_nd = qd.ndarray(gs.qd_float, shape=())
+    rng = np.random.default_rng(7)
+    t_max = 1.0 / 0.9
+    n_roots = 0
+    for _ in range(40):
+        F0 = np.eye(3) + 0.2 * rng.standard_normal((3, 3))
+        dF = 2.0 * rng.standard_normal((3, 3))
+        F0_nd.from_numpy(F0)
+        dF_nd.from_numpy(dF)
+        kernel_inversion_root(F0_nd, dF_nd, t_max, root_nd)
+        root = float(qd_to_numpy(root_nd))
+        # The first real root in (0, t_max] of the cubic det(F0 + t dF), interpolated from four of its values
+        coeffs = [np.linalg.det(F0 + t * dF) for t in (0.0, 1.0, -1.0, 2.0)]
+        c = np.linalg.solve(np.vander([0.0, 1.0, -1.0, 2.0], 4, increasing=True), coeffs)
+        candidates = [r.real for r in np.roots(c[::-1]) if abs(r.imag) < 1e-12 and 0.0 < r.real <= t_max]
+        if candidates:
+            n_roots += 1
+            assert_allclose(root, min(candidates), tol=1e-9)
+        else:
+            assert root > t_max
+    # Both outcomes are exercised
+    assert 0 < n_roots < 40
 
 
 @qd.kernel
@@ -561,6 +620,7 @@ def test_return_map_vjp(kind, sigma, Jp):
         wall_sol_params=np.zeros(7),
         wall_lower=np.zeros(3),
         wall_upper=np.ones(3),
+        liquid_band=0.0,
     )
     F_nd, F_bar_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
     F_out, F_bar_out = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))

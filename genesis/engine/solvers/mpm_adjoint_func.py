@@ -534,7 +534,7 @@ def func_adjoint_particles(
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         slot = particles_info.material_idx[i_p]
         mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-        psi, g, A_sigma = elastic_principal(slot, sigma, mu, lam, materials)
+        psi, g, A_sigma = elastic_principal(slot, sigma, mu, lam, materials, params)
         P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
         LamF = Lam @ F
         Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, LamF)

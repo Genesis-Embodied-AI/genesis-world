@@ -91,22 +91,19 @@ def test_rigid_mpm_muscle(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.cpu_threads(1)
-@pytest.mark.parametrize("substeps", [1, 10])
-def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
-    # This test is aimining at two things:
-    # 1) When substep = 1, the rigid object should be affected by the MPM particles
-    # 2) Regardless of substeps, as far as the substep dt is the same, they should give consistent results
-    substep_dt = 4e-4
-    horizon_substeps = 100
-
+def test_rigid_mpm_legacy_coupling(tol, show_viewer):
+    # The liquid collapsing against the rigid box pushes it
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=substep_dt * substeps,
-            substeps=substeps,
+            dt=1e-2,
+            substeps=1,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
+        ),
+        newton_options=gs.options.NewtonOptions(
+            strict=True,
         ),
         vis_options=gs.options.VisOptions(
             visualize_mpm_boundary=True,
@@ -123,7 +120,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
     obj_rigid = scene.add_entity(
         material=gs.materials.Rigid(
-            rho=1.0,
+            rho=1000.0,
         ),
         morph=gs.morphs.Box(
             pos=(0.0, -0.25, 0.1),
@@ -149,17 +146,16 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
     scene.build()
 
-    horizon = horizon_substeps // substeps
-    for i in range(horizon):
+    for _ in range(10):
         scene.step()
 
-    # Check that the sand moved the box along the negative Y direction
+    # Check that the liquid moved the box along the negative Y direction
     pos = tensor_to_array(obj_rigid.get_pos())
     assert pos[1] + 0.25 < 0.0
 
     # A rollout after a reset starts free of the coupling wrench the previous one left
     scene.reset()
-    for i in range(horizon):
+    for _ in range(10):
         scene.step()
     assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
 

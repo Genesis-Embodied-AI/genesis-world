@@ -26,6 +26,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.numerics.linear_pcg import PCGScalars, func_pcg_arm, func_pcg_decide, func_pcg_reset, func_pcg_step
 from genesis.engine.numerics.newton_control import (
+    NEWTON_FAILED_LINE_SEARCH,
     NewtonControl,
     func_accept_or_backtrack,
     func_check_convergence,
@@ -168,14 +169,15 @@ def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.temp
 
 @qd.func(requires_top_level=True)
 def func_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
-    """Set the Newton direction of every participant from the conjugate gradient solution, then start the line search.
+    """Start the line search and set the Newton direction of every participant from the conjugate gradient solution.
 
-    The participants report the measure of the direction, on which the convergence is checked first."""
+    The participants report the measure of the direction, on which the convergence is checked, and may lower the start
+    step of the line search below its full value."""
     func_reset_newton_measures(newton_control)
+    func_init_line_search(newton_control)
     for member in qd.static(participants.members):
         member.func_start_line_search(newton_control, f)
     func_check_convergence(newton_control)
-    func_init_line_search(newton_control)
 
 
 @qd.func(requires_top_level=True)
@@ -297,7 +299,11 @@ class NewtonSolver(Solver):
     def __init__(self, scene: "Scene", sim: "Simulator", options: "NewtonOptions"):
         super().__init__(scene, sim, options)
         self.control = NewtonControl(
-            gs.qd_float, options.max_iterations, options.line_search_max_iterations, options.line_search_shrink
+            gs.qd_float,
+            options.max_iterations,
+            options.line_search_max_iterations,
+            options.line_search_shrink,
+            options.strict,
         )
         self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol)
         bits = 64 if gs.qd_float == qd.f64 else 32
@@ -364,12 +370,28 @@ class NewtonSolver(Solver):
         if not self._is_step_failed:
             with custom_backward(self.backward, f):
                 self._step(f)
+            if self._options.strict:
+                self._check_line_search(f)
             # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred
             # substep
             for host in self._hosts:
                 host.newton_end(f)
+            # FIXME: This read waits for the device at every substep. A conditional graph node (graph `if`) on the latch,
+            # or stages that idle once it is set, would skip the solve on the device instead.
             self._is_step_failed = bool(int(qd_to_numpy(self.control.has_failed_non_finite)))
         self._check_failures()
+
+    def _check_line_search(self, f):
+        """Raise at once on a solve whose line search found no lower energy, in strict mode."""
+        control = self.control
+        if int(qd_to_numpy(control.failed)) == NEWTON_FAILED_LINE_SEARCH:
+            gs.raise_exception(
+                f"Strict Newton solve: the line search of Newton iteration {int(qd_to_numpy(control.newton_iter))} of "
+                f"substep {self._sim.cur_substep_global} found no energy below {float(qd_to_numpy(control.energy_start))} "
+                f"within {self._options.line_search_max_iterations} trials, the last one giving "
+                f"{float(qd_to_numpy(control.energy_trial))}. The energy disagrees with its gradient or with the "
+                "curvature of its Newton system."
+            )
 
     def _check_failures(self):
         """Report the solves that failed since the last check.

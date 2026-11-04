@@ -420,8 +420,15 @@ class NewtonOptions(Options):
         Newton iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning.
         Defaults to 1024.
     line_search_max_iterations : int, optional
-        Trial steps of the backtracking line search of a Newton iteration at most, the last one being kept. Defaults to
-        12.
+        Trial steps of the backtracking line search of a Newton iteration at most, the last one being kept unless
+        'strict' is set. Defaults to 12.
+    strict : bool, optional
+        Raise an error at the substep of a Newton iteration whose line search finds no lower energy within
+        'line_search_max_iterations' trials, instead of keeping its last trial. The energy of the solve has no barrier,
+        so it decreases along every Newton direction of a consistent implementation within a few halvings of the step:
+        such a line search reveals an energy that disagrees with its gradient or with the curvature of the Newton
+        system. Every solve then waits for the device.
+        Defaults to False.
     line_search_shrink : float, optional
         Factor of the step of the line search between two trials, strictly between 0 and 1. Defaults to 0.5.
     pcg_max_iterations : int, optional
@@ -446,6 +453,7 @@ class NewtonOptions(Options):
     adjoint_hessian: Literal["projected", "exact", "auto"] = "projected"
     max_iterations: PositiveInt = 1024
     line_search_max_iterations: PositiveInt = 12
+    strict: StrictBool = False
     line_search_shrink: PositiveFloat = 0.5
     pcg_max_iterations: PositiveInt = 1024
     pcg_tol: PositiveFloat = 1e-4
@@ -718,6 +726,12 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     wall_timeconst : float, optional
         Time constant of the soft contact rows that keep the particles within the domain walls, in seconds, floored at
         twice the substep. A smaller value gives stiffer walls. Defaults to 0.01.
+    liquid_smoothing_velocity : float, optional
+        Velocity in m/s under which the resistance of a liquid to compression fades in: the stiffness of a liquid rises
+        from zero to its bulk modulus over the volume change that a cell undergoes at that velocity over a substep, so
+        that the Newton solve meets no jump of stiffness where the liquid starts being compressed. A larger value eases
+        the solve of a liquid near rest but softens it more. Defaults to None, the velocity tolerance of the Newton
+        solve ('NewtonOptions.velocity_tol'), under which the solve does not resolve the motion anyway.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -731,6 +745,7 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
     wall_timeconst: PositiveFloat = 1e-2
+    liquid_smoothing_velocity: NonNegativeFloat | None = None
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)
