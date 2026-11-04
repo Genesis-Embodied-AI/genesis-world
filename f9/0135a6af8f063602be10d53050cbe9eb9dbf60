@@ -1,0 +1,27 @@
+genesis/options/entities.py
+  s_91e0422623a7c7::t_5f6129ded9d31b 161-164,330,350,354,356,360-361,368-372,424,653,656,658-661,911-912,976-977
+  s_91e0422623a7c7::t_f0ad5a814a0686 71-97,102-103,105,107-124,128-130,167,229,251,268,282,550,576,591,678,766,841,915,993,1034,1065
+  s_91e0422623a7c7::t_2e61d38652a870 99-101,106,125-127,149-150
+  s_91e0422623a7c7::t_f12ea0235b45d8 45-46
+  s_91e0422623a7c7::t_4568396c6d648b 980-990,1015,1046
+  s_91e0422623a7c7::t_1ebc3418d735db 165
+  s_91e0422623a7c7::t_ef61b099f6a8b9 978-979
+genesis/engine/scene.py
+  s_91e0422623a7c7::t_e14173984dc79a 450
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f90135a6af8f063602be10d53050cbe9eb9dbf60",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
