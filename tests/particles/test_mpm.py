@@ -14,8 +14,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 def test_particle_constraints(show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=2e-3,
-            substeps=20,
+            dt=1e-2,
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -43,6 +42,7 @@ def test_particle_constraints(show_viewer, tol):
             E=5e4,
             nu=0.3,
             rho=1000,
+            sampler="regular",
         ),
         morph=gs.morphs.Box(
             pos=(0, 0, 0.35),
@@ -120,8 +120,7 @@ def test_perf_dispatch(variant, show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=2e-3,
-            substeps=10,
+            dt=1e-2,
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -143,6 +142,7 @@ def test_perf_dispatch(variant, show_viewer):
             nu=0.2,
             rho=200.0,
             model=elastic_model,
+            sampler="regular",
         ),
     )
     liquid = scene.add_entity(
@@ -152,6 +152,7 @@ def test_perf_dispatch(variant, show_viewer):
         ),
         material=gs.materials.MPM.Liquid(
             viscous=liquid_viscous,
+            sampler="regular",
         ),
     )
     scene.build(n_envs=2)
@@ -159,7 +160,7 @@ def test_perf_dispatch(variant, show_viewer):
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
 
-    for _ in range(100):
+    for _ in range(20):
         scene.step()
 
     final_elastic_pos = elastic.get_particles_pos()
@@ -347,8 +348,7 @@ def test_newton_graph_matches_split(show_viewer):
     for newton_graph in ("split", "newton"):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
-                dt=4e-3,
-                substeps=2,
+                dt=1e-2,
             ),
             mpm_options=gs.options.MPMOptions(
                 lower_bound=(-0.5, -0.5, -0.1),

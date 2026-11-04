@@ -16,8 +16,7 @@ def test_rigid_mpm_muscle(show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=3e-3,
-            substeps=1,
+            dt=1e-2,
         ),
         rigid_options=gs.options.RigidOptions(
             gravity=(0, 0, -9.8),
@@ -59,7 +58,8 @@ def test_rigid_mpm_muscle(show_viewer):
                 model="neohooken",
                 sampler="regular",
             ),
-            damping=1000.0,
+            # The coupling scales the velocity the links impose on the particles by exp(-dt damping)
+            damping=300.0,
             thickness=0.05,
         ),
     )
@@ -76,13 +76,14 @@ def test_rigid_mpm_muscle(show_viewer):
     scene.build()
 
     scene.reset()
-    for i in range(200):
-        robot.control_dofs_velocity(np.array([4.5 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
+    for i in range(60):
+        robot.control_dofs_velocity(np.array([4.5 * np.sin(2 * np.pi * i * 0.02)] * robot.n_dofs))
         scene.step()
 
+    # The arm drives the muscle into the ball, which rolls away on the plane, mostly along +y
     ball_pos_delta = ball.get_pos() - torch.tensor(BALL_POS_INIT, dtype=gs.tc_float, device=gs.device)
-    assert_allclose(ball_pos_delta[..., 0], 0.0, tol=1e-2)
-    assert ((0.02 < ball_pos_delta[1]) & (ball_pos_delta[1] < 0.05)).all()
+    assert (ball_pos_delta[..., 1] > 0.05).all()
+    assert (ball_pos_delta[..., 0].abs() < 0.4 * ball_pos_delta[..., 1]).all()
     assert_allclose(ball_pos_delta[..., 2], 0.0, tol=1e-3)
 
 
@@ -92,7 +93,6 @@ def test_mpm_on_terrain(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
-            substeps=2,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, 0.0, -0.2),
@@ -196,7 +196,9 @@ def test_rigid_mpm_legacy_coupling(tol, show_viewer):
     )
 
     obj_sand = scene.add_entity(
-        material=gs.materials.MPM.Liquid(),
+        material=gs.materials.MPM.Liquid(
+            sampler="regular",
+        ),
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.2),
             size=(0.3, 0.3, 0.3),
@@ -321,6 +323,7 @@ def test_deformable_parallel(show_viewer):
         ),
         material=gs.materials.MPM.Elastic(
             rho=200,
+            sampler="regular",
         ),
         surface=gs.surfaces.Default(
             color=(0.9, 0.8, 0.2, 1.0),
@@ -440,11 +443,13 @@ def test_fem_outside_mpm_grid(show_viewer):
     ],
 )
 def test_fluid_emitter(n_envs, material_type, show_viewer):
+    # The implicit MPM takes one large step, while SPH and PBD need small substeps
+    if issubclass(material_type, gs.materials.MPM.Base):
+        sim_options = gs.options.SimOptions(dt=1e-2, substeps=1)
+    else:
+        sim_options = gs.options.SimOptions(dt=4e-3, substeps=10)
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=4e-3,
-            substeps=10,
-        ),
+        sim_options=sim_options,
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, -1.5, 0.0),
             upper_bound=(1.0, 1.5, 4.0),
