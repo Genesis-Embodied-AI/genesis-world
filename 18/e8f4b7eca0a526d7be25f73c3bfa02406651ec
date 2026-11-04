@@ -1,0 +1,19 @@
+.github/workflows/publish_pypi_internal_b39d50d.yml
+  s_cb21154aac869e::t_eb8c8e6f1e7f72 12-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "18e8f4b7eca0a526d7be25f73c3bfa02406651ec",
+  "prompts": {},
+  "sessions": {
+    "s_cb21154aac869e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8043a0d-0b8d-40b0-8b08-14cf250786e5",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
