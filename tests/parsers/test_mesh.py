@@ -546,9 +546,8 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
     for entity in entities:
         assert len(entity.vgeoms) == n_submeshes
         assert len({id(geom.surface) for geom in entity.vgeoms}) == 1
-    # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
     rgba_arrays = [geom.surface.get_rgba().image_array for entity in entities for geom in entity.vgeoms]
-    assert len({id(array) for array in rgba_arrays}) == 1
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
 
     scene.build()
     retriever = GenesisGeomRetriever(scene.sim.rigid_solver, seg_level="entity")
@@ -905,14 +904,14 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     explicit_uvs = [np.unique(vgeoms["mesh_explicit_a"].uvs, axis=0), np.unique(vgeoms["mesh_explicit_b"].uvs, axis=0)]
     assert_allclose(explicit_uvs, EXPECTED_EXPLICIT_UVS, tol=gs.EPS)
 
-    # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
     rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
-    assert len({id(array) for array in rgba_arrays}) == 1
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
     rigid_nodes = scene.visualizer.context.rigid_nodes
     base_color_textures = [
         rigid_nodes[vgeom.uid].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
     ]
-    assert len({id(texture) for texture in base_color_textures}) == 1
+    assert base_color_textures[0] is not None
+    assert all([texture is base_color_textures[0] for texture in base_color_textures])
     with pytest.raises(ValueError, match="read-only"):
         vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array[0, 0] = 0
 

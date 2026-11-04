@@ -218,8 +218,10 @@ class Surface(Options):
         return opacity
 
 
-# RGBA textures merged from the color and opacity textures of the surfaces, by the content of those textures (see
-# '_make_rgba').
+# RGBA textures merged by '_make_rgba' from the color and opacity textures of the surfaces, keyed on the content of
+# those textures and owned by them. Surfaces drawing the same colors (the textured submeshes of a GLB, every entity
+# loaded from one asset) share a single merged array, and a texture update swaps in a new instance, which releases the
+# entry along with the last instance holding the former content.
 _RGBA_CACHE = OwnedCache()
 
 
@@ -251,11 +253,6 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
 
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
-    # Resolve a surface's color and opacity textures into a single RGBA texture. The result is memoized on the content
-    # of the input textures and lives as long as any of them: surfaces drawing the same colors (e.g. all textured
-    # submeshes of a GLB, or every entity loaded from one asset) then reuse a single merged array instead of allocating
-    # one full-resolution copy each. A texture update swaps in a new instance, which releases the entry along with the
-    # last instance holding the former content.
     input_textures = [texture for texture in (color_texture, opacity_texture) if texture is not None]
     cache_key = (*[None if texture is None else texture.hashkey for texture in (color_texture, opacity_texture)], batch)
     result = _RGBA_CACHE.find(cache_key)
@@ -316,8 +313,7 @@ def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, b
             rgba_textures.append(rgba_texture)
 
         result = BatchTexture(textures=rgba_textures) if batch else rgba_textures[0]
-        # Every surface drawing the same colors shares the merged arrays, so writing into them raises rather than
-        # changing all those surfaces.
+        # Read-only like the textures they are merged from (see '_COLOR_TEXTURES_CACHE')
         for rgba_texture in result.textures if isinstance(result, BatchTexture) else (result,):
             if isinstance(rgba_texture, ImageTexture):
                 rgba_texture.image_array.flags.writeable = False

@@ -128,7 +128,7 @@ class ImageTexture(Texture, SerializationMixin):
     image_color: UnitIntervalArrayType
     encoding: Annotated[Literal["srgb", "linear"], BeforeValidator(lambda e: str(e).lower())] = "srgb"
 
-    # Digest of the image array it was computed from, computed again once another array replaces it.
+    # Digest of the image array it was computed from, computed again once another array replaces it
     _image_digest: tuple[np.ndarray, str] | None = PrivateAttr(default=None)
 
     def __init__(
@@ -248,7 +248,7 @@ class ImageTexture(Texture, SerializationMixin):
 
     @property
     def hashkey(self) -> Hashable:
-        # An HDR image is never loaded, so its file stands in for its pixels.
+        # An HDR image is never loaded, so its file stands in for its pixels
         if self.image_array is None:
             return (self.image_path, self.image_color, self.encoding)
         if self._image_digest is None or self._image_digest[0] is not self.image_array:

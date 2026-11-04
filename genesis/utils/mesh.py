@@ -272,9 +272,9 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
-# Trimesh materials drawing the image textures, by the content of their emission, kept as long as the texture lives. An
-# entry is keyed on a weak reference to its texture, which never matches a later texture reusing the id of a collected
-# one, even while the release of the owned entries is disabled (see 'disable_owned_cache_release').
+# Trimesh materials drawing the image textures, by texture and content of their emission, which the rasterizer shares
+# (see 'RasterizerContext.on_rigid'). A weak reference keys the texture, which never matches a later texture reusing
+# the id of a collected one, even while the release of the owned entries is disabled.
 _TEXTURE_MATERIALS_CACHE = OwnedCache()
 
 
@@ -312,8 +312,6 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     if isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
-            # The meshes drawing one texture with the same emission share one material, which the rasterizer draws them
-            # all with, uploading the textures once (see 'RasterizerContext.on_rigid').
             material = _TEXTURE_MATERIALS_CACHE.get(
                 texture,
                 (weakref.ref(texture), emission.hashkey if emissive_kwargs else None),
