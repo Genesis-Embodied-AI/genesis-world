@@ -338,8 +338,8 @@ class MPMSolver(ParticleSolver):
     def svd(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = qd.svd(
-                    self.particles[f, i_p, i_b].F_tmp, gs.qd_float
+                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = gu.qd_svd(
+                    self.particles[f, i_p, i_b].F_tmp
                 )
 
     @qd.kernel
@@ -353,8 +353,8 @@ class MPMSolver(ParticleSolver):
                     qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
                 ) @ self.particles[f, i_p, i_b].F
                 self.particles[f, i_p, i_b].F_tmp = F_tmp
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = qd.svd(
-                    F_tmp, gs.qd_float
+                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = gu.qd_svd(
+                    F_tmp
                 )
 
     @qd.kernel
@@ -382,7 +382,7 @@ class MPMSolver(ParticleSolver):
             if self.particles_ng[f, i_p, i_b].active:
                 # A. update F (deformation gradient), S (Sigma from SVD(F), essentially represents volume) and Jp
                 # (volume compression ratio) based on material type.
-                # det(F_tmp) == det(U S V^T) == det(S) for qd.svd (U, V are proper rotations), so when no material
+                # det(F_tmp) == det(U S V^T) == det(S) for gu.qd_svd (U, V are proper rotations), so when no material
                 # needs U/V/S we can read J directly from F_tmp and skip the SVD kernel. Predeclared outside the
                 # qd.static branch because quadrants scopes qd.static branches locally.
                 J = gs.qd_float(0.0)
