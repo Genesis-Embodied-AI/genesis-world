@@ -1,0 +1,21 @@
+tests/rigid/conftest.py
+  s_217d06e686a648::t_ea2076cbdedc58 1504-1519
+tests/rigid/test_collision.py
+  s_217d06e686a648::t_ea2076cbdedc58 1944,2011
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aaf104e0363c7b49d93496afd12a6bc7f1fa4cb9",
+  "prompts": {},
+  "sessions": {
+    "s_217d06e686a648": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d18df910-2357-4ead-9879-a41fb46ea1b0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

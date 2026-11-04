@@ -1,0 +1,25 @@
+tests/rigid/test_collision.py
+  s_217d06e686a648::t_2261104502a593 2034-2035,2040,2045,2049,2061
+genesis/utils/mjcf.py
+  s_217d06e686a648::t_a32ce09e06bffe 803
+genesis/utils/collision.py
+  s_217d06e686a648::t_a32ce09e06bffe 5-6,19,29,36,57,88
+genesis/utils/usd/usd_collision.py
+  s_217d06e686a648::t_a32ce09e06bffe 123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a46efa6248478413054da9013252c00bb06f38f",
+  "prompts": {},
+  "sessions": {
+    "s_217d06e686a648": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d18df910-2357-4ead-9879-a41fb46ea1b0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
