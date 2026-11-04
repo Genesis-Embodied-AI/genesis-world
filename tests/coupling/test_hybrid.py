@@ -199,8 +199,10 @@ def test_rigid_mpm_legacy_coupling(tol, show_viewer):
         material=gs.materials.MPM.Liquid(
             sampler="regular",
         ),
+        # Off the faces of the grid cells, where the rounding of a position would pick the cell, so that the rollout
+        # after the reset repeats the first (see MPM_FD_EPS in test_hybrid_push)
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
+            pos=(0.003, 0.002, 0.201),
             size=(0.3, 0.3, 0.3),
         ),
         surface=gs.surfaces.Default(

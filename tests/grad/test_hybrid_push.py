@@ -317,7 +317,9 @@ def test_mpm_force_fields_grad_matches_fd(precision, show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
+        # Off the faces of the grid cells, where the rounding of a position would pick the cell (see MPM_FD_EPS)
         morph=gs.morphs.Box(
+            pos=(0.003, 0.002, 0.001),
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.MPM.Elastic(
@@ -429,15 +431,17 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
+        # Both blocks off the faces of the grid cells, where the rounding of a position would pick the cell (see
+        # MPM_FD_EPS)
         morph=gs.morphs.Box(
-            pos=(-0.055, 0.0, 0.0),
+            pos=(-0.052, 0.002, 0.001),
             size=(0.1, 0.1, 0.1),
         ),
         material=material(),
     )
     target = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.055, 0.01, 0.0),
+            pos=(0.058, 0.012, 0.001),
             size=(0.1, 0.1, 0.1),
         ),
         material=material(),
@@ -474,7 +478,7 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
                 _assert_same_cells(cells, cells_ref)
             fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * MPM_FD_EPS)
     assert (np.abs(fd_grad) > 1e-3).all()
-    assert_allclose(vels_ana.grad, fd_grad, tol=5e-8)
+    assert_allclose(vels_ana.grad, fd_grad, tol=2e-8)
 
 
 @pytest.mark.required

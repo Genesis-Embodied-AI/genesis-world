@@ -197,9 +197,11 @@ def _falling_block(n_envs, show_viewer):
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
+    # Off the faces of the grid cells: the regular lattice of a block centered on a node puts particles on faces, whose
+    # cell the rounding of their position then picks, and the motion jumps with it (see MPM_FD_EPS in test_hybrid_push)
     block = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
+            pos=(0.003, 0.002, 0.1),
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.MPM.Elastic(
@@ -214,10 +216,9 @@ def _falling_block(n_envs, show_viewer):
 # fp32 cannot resolve the Newton tolerance the comparison of two batches needs
 @pytest.mark.precision("64")
 def test_envs_solve_apart(precision, show_viewer):
-    # The environments of a batch run their own Newton solves: the block resting in the first and the one thrown aside
-    # in the last move as they do alone, while the solves of the second, whose block hits the plane, run up to four times
-    # as many iterations. That impact lands, run to run, on one of two converged states that the order of the sums of
-    # the GPU reductions picks, alone as in a batch, so its environment takes no part in the comparison.
+    # The environments of a batch run their own Newton solves: thrown at different speeds, the block of each one moves
+    # as it does alone, the solves of the block hitting the plane running up to four times as many iterations as those
+    # of the block at rest
     velocities = ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, -0.5))
     scene, block = _falling_block(len(velocities), show_viewer)
     block.set_velocity(velocities)
@@ -225,9 +226,9 @@ def test_envs_solve_apart(precision, show_viewer):
         scene.step()
     pos = block.get_particles_pos()
     scene.destroy()
-    for i_b in (0, 2):
+    for i_b, velocity in enumerate(velocities):
         scene, block = _falling_block(0, show_viewer)
-        block.set_velocity(velocities[i_b])
+        block.set_velocity(velocity)
         for _ in range(10):
             scene.step()
         assert_allclose(pos[i_b], block.get_particles_pos(), tol=1e-11)
