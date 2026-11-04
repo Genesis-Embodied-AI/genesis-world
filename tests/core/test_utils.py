@@ -1,4 +1,5 @@
 import math
+import os
 import re
 import subprocess
 import sys
@@ -1154,6 +1155,20 @@ def test_logger_prints_once_with_root_logging(backend):
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8")
     assert proc.returncode == 0, proc.stderr
     assert (proc.stdout + proc.stderr).count("Genesis warning") == 1
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_spawn_subprocess_after_init(backend):
+    script = (
+        "import subprocess, sys; import genesis as gs; gs.init(backend=gs.cpu, logging_level='warning'); "
+        "print(subprocess.check_output([sys.executable, '-c', 'print(42)'], text=True), end='')"
+    )
+    # The script runs as a user script does, without the environment variables set by pytest
+    env = {name: value for name, value in os.environ.items() if not name.startswith("PYTEST_")}
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "42" in proc.stdout.splitlines()
 
 
 @pytest.mark.required

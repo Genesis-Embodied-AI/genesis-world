@@ -57,7 +57,7 @@ class redirect_libc_stderr:
     Context-manager that temporarily redirects C / C++ std::cerr (i.e. the C `stderr` file descriptor 2) to a given
     Python file-like object's fd.
 
-    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT ≥ VS2015).
+    Works on macOS and Linux (glibc / musl), and does nothing on Windows.
     """
 
     def __init__(self, fd):
@@ -66,6 +66,11 @@ class redirect_libc_stderr:
         self.original_stderr_fileno = None
 
     def __enter__(self):
+        # On Windows, redirecting descriptor 2 closes the OS handle that it owns, which native code caches when it
+        # first writes (the logger of Quadrants does). Its later writes then go to whichever file reuses the handle.
+        if os.name == "nt":
+            return self
+
         try:
             self.stderr_fileno = sys.stderr.fileno()
         except (io.UnsupportedOperation, AttributeError):
@@ -79,19 +84,6 @@ class redirect_libc_stderr:
             libc = ctypes.CDLL(None)
             libc.fflush(None)
             libc.dup2(self.fd.fileno(), self.stderr_fileno)
-        elif os.name == "nt":  # Windows
-            # FIXME: Do not redirect stderr on Windows OS when running pytest, otherwise it will raise this exception:
-            # "OSError: [WinError 6] The handle is invalid"
-            if "PYTEST_VERSION" not in os.environ:
-                msvcrt = ctypes.CDLL("msvcrt")
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-                msvcrt.fflush(None)
-                msvcrt._dup2(self.fd.fileno(), self.stderr_fileno)
-
-                STDERR_HANDLE = -12
-                new_os_handle = msvcrt._get_osfhandle(self.fd.fileno())
-                kernel32.SetStdHandle(STDERR_HANDLE, new_os_handle)
         else:
             gs.logger.warning(f"Unsupported platform for redirecting libc stderr: {sys.platform}")
 
@@ -106,18 +98,6 @@ class redirect_libc_stderr:
             sys.stderr.flush()
             libc.fflush(None)
             libc.dup2(self.original_stderr_fileno, self.stderr_fileno)
-        elif os.name == "nt":
-            if "PYTEST_VERSION" not in os.environ:
-                msvcrt = ctypes.CDLL("msvcrt")
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-                sys.stderr.flush()
-                msvcrt.fflush(None)
-                msvcrt._dup2(self.original_stderr_fileno, self.stderr_fileno)
-
-                STDERR_HANDLE = -12
-                orig_os_handle = msvcrt._get_osfhandle(self.original_stderr_fileno)
-                kernel32.SetStdHandle(STDERR_HANDLE, orig_os_handle)
 
         os.close(self.original_stderr_fileno)
         self.stderr_fileno = None
