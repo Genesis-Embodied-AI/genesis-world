@@ -1122,19 +1122,21 @@ class MPMSolver(ParticleSolver):
                     local_pos = self.particle_constraints[i_p, i_b].link_local_pos
                     target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
 
-                # Apply spring force to velocity
+                # The critically damped spring is integrated by backward Euler, the position moving with the velocity it
+                # gives, which keeps it stable whatever its stiffness: m (v' - v) = dt (-k (x + dt v' - x_t) - c v').
                 stiffness = self.particle_constraints[i_p, i_b].stiffness
                 mass = self.particles_info[i_p].mass / self._particle_volume_scale
+                damping = 2.0 * qd.math.sqrt(stiffness * mass)
+                dt = self.substep_dt
+                dt_damping_stiffness = dt * damping + dt**2 * stiffness
 
                 pos = self.particles[f + 1, i_p, i_b].pos
                 vel = self.particles[f + 1, i_p, i_b].vel
-
                 pos_error = pos - target_pos
-                spring_force = -stiffness * pos_error
-                damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
 
+                vel_delta = -(dt_damping_stiffness * vel + dt * stiffness * pos_error) / (mass + dt_damping_stiffness)
                 # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
-                self.particles[f + 1, i_p, i_b].vel += self.substep_dt * (spring_force + damping_force) / mass
+                self.particles[f + 1, i_p, i_b].vel += vel_delta
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
