@@ -1,0 +1,20 @@
+tests/rigid/test_collision.py
+  s_217d06e686a648::t_676b198dc5bca9 1947-1958,1963-1966,2021-2026,2037-2076
+  s_217d06e686a648::t_0c270cf0a857a7 2077
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0f684efd4519c924609e3b7a2e17f5bb8753dbb5",
+  "prompts": {},
+  "sessions": {
+    "s_217d06e686a648": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d18df910-2357-4ead-9879-a41fb46ea1b0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
