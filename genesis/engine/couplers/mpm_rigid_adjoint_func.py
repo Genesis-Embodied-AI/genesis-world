@@ -32,34 +32,6 @@ from .mpm_rigid_func import geom_normal
 
 
 @qd.func
-def orthogonals_bw(n: qd.types.vector(3), g_d1: qd.types.vector(3), g_d2: qd.types.vector(3)):
-    """Reverse of `gu.qd_orthogonals`, from the adjoints of the two tangents to that of the normal.
-
-    The tangents are d1 = b x n and d2 = b, with b the normalized branch vector of n. Returns the adjoint of n from g_d1
-    and g_d2, the adjoints of d1 and d2."""
-    is_branch_a = qd.abs(n[1]) < 0.5
-    b_raw = qd.Vector.zero(gs.qd_float, 3)
-    if is_branch_a:
-        b_raw = qd.Vector([-n[0] * n[1], 1.0 - n[1] * n[1], -n[2] * n[1]], dt=gs.qd_float)
-    else:
-        b_raw = qd.Vector([-n[0] * n[2], -n[1] * n[2], 1.0 - n[2] * n[2]], dt=gs.qd_float)
-    b_raw_norm = b_raw.norm()
-    b = b_raw / b_raw_norm
-    g_b = g_d2 + n.cross(g_d1)
-    g_n = g_d1.cross(b)
-    g_b_raw = (g_b - g_b.dot(b) * b) / b_raw_norm
-    if is_branch_a:
-        g_n[0] += g_b_raw[0] * (-n[1])
-        g_n[1] += g_b_raw[0] * (-n[0]) + g_b_raw[1] * (-2.0 * n[1]) + g_b_raw[2] * (-n[2])
-        g_n[2] += g_b_raw[2] * (-n[1])
-    else:
-        g_n[0] += g_b_raw[0] * (-n[2])
-        g_n[1] += g_b_raw[1] * (-n[2])
-        g_n[2] += g_b_raw[0] * (-n[0]) + g_b_raw[1] * (-n[1]) + g_b_raw[2] * (-2.0 * n[2])
-    return g_n
-
-
-@qd.func
 def geom_sdf_grid_hessian(
     i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: array_class.GeomsState, sdf_info: array_class.SDFInfo
 ):
@@ -333,7 +305,7 @@ def func_rigid_contact_adjoint(
                     g_d2 += (sign * friction) * J_bar_i
                 else:
                     g_d1 += (sign * friction) * J_bar_i
-            n_bar += orthogonals_bw(normal, g_d1, g_d2)
+            n_bar += gu.qd_orthogonals_bw(normal, g_d1, g_d2)
 
             # The inverse weight n^T R W R^T n
             invweight_bar = diag_coef_bar * diag_coef_scale

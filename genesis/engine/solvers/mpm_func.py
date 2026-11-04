@@ -879,6 +879,31 @@ def trial_deformation(
 
 
 @qd.func
+def particle_elastic_stress(
+    f: int,
+    i_p: int,
+    i_b: int,
+    F_trial: qd.types.matrix(3, 3),
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    params: qd.template(),
+):
+    """Principal decomposition and first Piola-Kirchhoff stress of the elastic energy of a particle.
+
+    Returns the material slot of particle `i_p` of environment `i_b`, the singular value decomposition F_trial = U
+    diag(sigma) V^T, the principal gradient g = dpsi/dsigma and Hessian A of its elastic energy at the plastic state of
+    frame `f`, and its stress P = U diag(g) V^T. The fibre term of a muscle is the caller's."""
+    U, S, V = gu.qd_svd(F_trial)
+    sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+    slot = particles_info.material_idx[i_p]
+    mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
+    psi, g, A = elastic_principal(slot, sigma, mu, lam, materials)
+    P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
+    return slot, U, sigma, V, g, A, P
+
+
+@qd.func
 def pyramid_dirs(normal: qd.types.vector(3), friction: float):
     """Directions of the four rows of the friction pyramid around a contact normal, as the rows of a 4 x 3 matrix.
 
@@ -1705,13 +1730,10 @@ def particle_stencil_terms(
     for a in qd.static(range(8)):
         movable[a] = gs.qd_float(grid.node_fixed[slots[a]] == 0)
     F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
-    U, S, V = gu.qd_svd(F_trial)
-    sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-    slot = particles_info.material_idx[i_p]
-    mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-    psi, g, A = elastic_principal(slot, sigma, mu, lam, materials)
+    slot, U, sigma, V, g, A, P = particle_elastic_stress(
+        f, i_p, i_b, F_trial, particles, particles_info, materials, params
+    )
     scale = params.particle_volume[()] * dt * dt
-    P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
     m = particles_info.muscle_direction[i_p]
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(slot, particles.actu[f, i_p, i_b], m, F_trial, materials, params)
     P += P_fibre

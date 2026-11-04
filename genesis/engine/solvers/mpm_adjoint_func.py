@@ -43,12 +43,11 @@ from .mpm_func import (
     SAND_SIGMA_MIN,
     SNOW_HARDENING,
     VON_MISES_SIGMA_MIN,
-    elastic_principal,
     isotropic_first_piola_differential,
     local_offset,
     material_param,
-    material_params,
     node_offset,
+    particle_elastic_stress,
     particle_of_sorted,
     q1_stencil,
     q1_weight_hessian,
@@ -528,12 +527,9 @@ def func_adjoint_particles(
             grad_u += u_a.outer_product(grad_w_a)
         F_increment = qd.Matrix.identity(gs.qd_float, 3) + grad_u
 
-        U, S, V = gu.qd_svd(F_trial)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-        slot = particles_info.material_idx[i_p]
-        mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-        psi, g, A_sigma = elastic_principal(slot, sigma, mu, lam, materials)
-        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
+        slot, U, sigma, V, g, A_sigma, P = particle_elastic_stress(
+            f, i_p, i_b, F_trial, particles, particles_info, materials, params
+        )
         Lambda_F = Lambda @ F
         Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, Lambda_F)
         # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
