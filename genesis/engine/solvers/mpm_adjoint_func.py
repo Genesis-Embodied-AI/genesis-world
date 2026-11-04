@@ -29,20 +29,10 @@ from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles,
 from .mpm_func import (
     LIQUID_J_MIN,
     PARAM_FIBRE,
-    PARAM_LAM,
-    PARAM_MU,
-    PARAM_SAND_ALPHA,
-    PARAM_YIELD_HIGHER,
-    PARAM_YIELD_LOWER,
-    PARAM_YIELD_STRESS,
     PLASTIC_LIQUID,
     PLASTIC_NONE,
-    PLASTIC_SAND,
     PLASTIC_SNOW,
-    PLASTIC_VON_MISES,
-    SAND_SIGMA_MIN,
     SNOW_HARDENING,
-    VON_MISES_SIGMA_MIN,
     isotropic_first_piola_differential,
     local_offset,
     material_param,
@@ -51,6 +41,7 @@ from .mpm_func import (
     particle_of_sorted,
     q1_stencil,
     q1_weight_hessian,
+    return_map_principal,
     stencil_node_slots,
     trial_deformation,
     unpack_block,
@@ -92,83 +83,9 @@ def return_map_vjp(
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-        h = sigma
-        dh = qd.Matrix.identity(gs.qd_float, 3)
-        dh_dJp = qd.Vector.zero(gs.qd_float, 3)
-        dJp_new_dsigma = qd.Vector.zero(gs.qd_float, 3)
-        dJp_new_dJp = gs.qd_float(1.0)
-        is_changed = True
-        mu = material_param(slot, materials, params, PARAM_MU)
-        eye = qd.Matrix.identity(gs.qd_float, 3)
-        if kind == PLASTIC_VON_MISES:
-            # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
-            eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
-            eps_hat = eps - eps.sum() / 3.0
-            n = eps_hat.norm(gs.EPS)
-            r = material_param(slot, materials, params, PARAM_YIELD_STRESS) / (2.0 * mu)
-            is_changed = n - r > 0.0
-            if is_changed:
-                h = qd.exp(eps - ((n - r) / n) * eps_hat)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    deps = 1.0 / sigma[j] if sigma[j] > qd.static(VON_MISES_SIGMA_MIN) else 0.0
-                    projector = eye[i, j] - 1.0 / 3.0
-                    dlog = 1.0 / 3.0 + r * (projector / n - eps_hat[i] * eps_hat[j] / (n * n * n))
-                    dh[i, j] = h[i] * dlog * deps
-        elif kind == PLASTIC_SAND:
-            lam = material_param(slot, materials, params, PARAM_LAM)
-            deps = qd.Vector.zero(gs.qd_float, 3)
-            for j in qd.static(range(3)):
-                if qd.abs(sigma[j]) > qd.static(SAND_SIGMA_MIN):
-                    deps[j] = 1.0 / sigma[j]
-            eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
-            trace = eps.sum() + Jp
-            eps_hat = eps - trace / 3.0
-            n = eps_hat.norm(gs.EPS)
-            h = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
-            dh = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if trace >= 0.0:
-                # Jp_new = trace and h = 1
-                dJp_new_dsigma = deps
-            else:
-                dJp_new_dJp = 0.0
-                c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * material_param(slot, materials, params, PARAM_SAND_ALPHA)
-                delta_gamma = n + c * trace
-                h = qd.exp(eps - qd.max(delta_gamma, 0.0) / n * eps_hat)
-                if delta_gamma <= 0.0:
-                    for j in qd.static(range(3)):
-                        dh[j, j] = h[j] * deps[j]
-                else:
-                    # log h = trace / 3 1 - c trace u with u = eps_hat / n, the differential of u being du = (I - u u^T)
-                    # / n d_eps_hat with d_eps_hat = (I - 1 1^T / 3) d_eps - 1 / 3 d_Jp
-                    u = eps_hat / n
-                    for i in qd.static(range(3)):
-                        for j in qd.static(range(3)):
-                            tangent = gs.qd_float(0.0)
-                            for k in qd.static(range(3)):
-                                tangent += (eye[i, k] - u[i] * u[k]) * (eye[k, j] - 1.0 / 3.0)
-                            dlog = 1.0 / 3.0 - c * u[i] - c * trace / n * tangent
-                            dh[i, j] = h[i] * dlog * deps[j]
-                        tangent_Jp = gs.qd_float(0.0)
-                        for k in qd.static(range(3)):
-                            tangent_Jp += (eye[i, k] - u[i] * u[k]) * (-1.0 / 3.0)
-                        dh_dJp[i] = h[i] * (1.0 / 3.0 - c * u[i] - c * trace / n * tangent_Jp)
-        else:
-            lower = 1.0 - material_param(slot, materials, params, PARAM_YIELD_LOWER)
-            higher = 1.0 + material_param(slot, materials, params, PARAM_YIELD_HIGHER)
-            h = qd.min(qd.max(sigma, lower), higher)
-            for j in qd.static(range(3)):
-                dh[j, j] = 1.0 if sigma[j] > lower and sigma[j] < higher else 0.0
-            if kind == PLASTIC_SNOW:
-                # Jp_new = Jp prod(sigma) / prod(h)
-                h_product = h[0] * h[1] * h[2]
-                dJp_new_dJp = (sigma[0] * sigma[1] * sigma[2]) / h_product
-                Jp_new = Jp * dJp_new_dJp
-                for j in qd.static(range(3)):
-                    others = gs.qd_float(1.0)
-                    for k in qd.static(range(3)):
-                        if qd.static(k != j):
-                            others *= sigma[k]
-                    dJp_new_dsigma[j] = Jp * others / h_product - Jp_new * dh[j, j] / h[j]
+        h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
+            slot, kind, sigma, Jp, materials, params
+        )
         if is_changed:
             F_bar = isotropic_first_piola_differential(U, V, sigma, h, dh.transpose(), F_new_bar)
             F_bar += Jp_new_bar * (

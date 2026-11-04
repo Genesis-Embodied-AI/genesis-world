@@ -765,6 +765,101 @@ def fibre_terms(
 
 
 @qd.func
+def return_map_principal(
+    slot: int, kind: int, sigma: qd.types.vector(3), Jp: float, materials: MpmMaterialTable, params: qd.template()
+):
+    """Principal values of a plastic return map that acts on the singular values, with the derivatives of its reverse.
+
+    The map `kind` (see return_map) takes the singular values `sigma` of the deformation gradient and the plastic state
+    `Jp` to the principal values h of the returned deformation gradient U diag(h) V^T and the returned state Jp_new.
+    Returns h, Jp_new, whether the map changes the deformation gradient, and dh/dsigma, dh/dJp, dJp_new/dsigma and
+    dJp_new/dJp, which return_map leaves unused and return_map_vjp takes."""
+    h = sigma
+    Jp_new = Jp
+    is_changed = True
+    dh = qd.Matrix.identity(gs.qd_float, 3)
+    dh_dJp = qd.Vector.zero(gs.qd_float, 3)
+    dJp_new_dsigma = qd.Vector.zero(gs.qd_float, 3)
+    dJp_new_dJp = gs.qd_float(1.0)
+    mu = material_param(slot, materials, params, PARAM_MU)
+    eye = qd.Matrix.identity(gs.qd_float, 3)
+    if kind == PLASTIC_VON_MISES:
+        # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
+        eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
+        eps_hat = eps - eps.sum() / 3.0
+        eps_hat_norm = eps_hat.norm(gs.EPS)
+        r = material_param(slot, materials, params, PARAM_YIELD_STRESS) / (2.0 * mu)
+        delta_gamma = eps_hat_norm - r
+        is_changed = delta_gamma > 0.0
+        if is_changed:
+            h = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                deps = 1.0 / sigma[j] if sigma[j] > qd.static(VON_MISES_SIGMA_MIN) else 0.0
+                projector = eye[i, j] - 1.0 / 3.0
+                dlog = 1.0 / 3.0 + r * (
+                    projector / eps_hat_norm - eps_hat[i] * eps_hat[j] / (eps_hat_norm * eps_hat_norm * eps_hat_norm)
+                )
+                dh[i, j] = h[i] * dlog * deps
+    elif kind == PLASTIC_SAND:
+        lam = material_param(slot, materials, params, PARAM_LAM)
+        deps = qd.Vector.zero(gs.qd_float, 3)
+        for j in qd.static(range(3)):
+            if qd.abs(sigma[j]) > qd.static(SAND_SIGMA_MIN):
+                deps[j] = 1.0 / sigma[j]
+        eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
+        trace = eps.sum() + Jp
+        eps_hat = eps - trace / 3.0
+        eps_hat_norm = eps_hat.norm(gs.EPS)
+        h = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+        dh = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if trace >= 0.0:
+            Jp_new = trace
+            dJp_new_dsigma = deps
+        else:
+            Jp_new = 0.0
+            dJp_new_dJp = 0.0
+            c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * material_param(slot, materials, params, PARAM_SAND_ALPHA)
+            delta_gamma = eps_hat_norm + c * trace
+            h = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
+            if delta_gamma <= 0.0:
+                for j in qd.static(range(3)):
+                    dh[j, j] = h[j] * deps[j]
+            else:
+                # log h = trace / 3 1 - c trace u with u = eps_hat / |eps_hat|, the differential of u being
+                # du = (I - u u^T) / |eps_hat| d_eps_hat with d_eps_hat = (I - 1 1^T / 3) d_eps - 1 / 3 d_Jp
+                u = eps_hat / eps_hat_norm
+                for i in qd.static(range(3)):
+                    for j in qd.static(range(3)):
+                        tangent = gs.qd_float(0.0)
+                        for k in qd.static(range(3)):
+                            tangent += (eye[i, k] - u[i] * u[k]) * (eye[k, j] - 1.0 / 3.0)
+                        dlog = 1.0 / 3.0 - c * u[i] - c * trace / eps_hat_norm * tangent
+                        dh[i, j] = h[i] * dlog * deps[j]
+                    tangent_Jp = gs.qd_float(0.0)
+                    for k in qd.static(range(3)):
+                        tangent_Jp += (eye[i, k] - u[i] * u[k]) * (-1.0 / 3.0)
+                    dh_dJp[i] = h[i] * (1.0 / 3.0 - c * u[i] - c * trace / eps_hat_norm * tangent_Jp)
+    else:
+        lower = 1.0 - material_param(slot, materials, params, PARAM_YIELD_LOWER)
+        higher = 1.0 + material_param(slot, materials, params, PARAM_YIELD_HIGHER)
+        h = qd.min(qd.max(sigma, lower), higher)
+        for j in qd.static(range(3)):
+            dh[j, j] = 1.0 if sigma[j] > lower and sigma[j] < higher else 0.0
+        if kind == PLASTIC_SNOW:
+            # Jp_new = Jp prod(sigma) / prod(h)
+            h_product = h[0] * h[1] * h[2]
+            dJp_new_dJp = (sigma[0] * sigma[1] * sigma[2]) / h_product
+            Jp_new = Jp * dJp_new_dJp
+            for j in qd.static(range(3)):
+                others = gs.qd_float(1.0)
+                for k in qd.static(range(3)):
+                    if qd.static(k != j):
+                        others *= sigma[k]
+                dJp_new_dsigma[j] = Jp * others / h_product - Jp_new * dh[j, j] / h[j]
+    return h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp
+
+
+@qd.func
 def return_map(
     slot: int, kind: int, F: qd.types.matrix(3, 3), Jp: float, materials: MpmMaterialTable, params: qd.template()
 ):
@@ -773,7 +868,8 @@ def return_map(
 
     The map `kind` is von Mises in log strain or the singular-value clamp (ElastoPlastic), the clamp with the volume
     ratio it removes accumulated in Jp (Snow), Drucker-Prager with the log volume correction in Jp (Sand), or the
-    dilation projection to a volume ratio in [LIQUID_J_MIN, 1] (Liquid). The formulas match the explicit materials.
+    dilation projection to a volume ratio in [LIQUID_J_MIN, 1] (Liquid). Every map but the liquid's acts on the singular
+    values (see return_map_principal).
     """
     F_new = F
     Jp_new = Jp
@@ -783,44 +879,12 @@ def return_map(
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-        sigma_new = sigma
-        is_changed = True
-        mu = material_param(slot, materials, params, PARAM_MU)
-        if kind == PLASTIC_VON_MISES:
-            eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
-            eps_hat = eps - eps.sum() / 3.0
-            eps_hat_norm = eps_hat.norm(gs.EPS)
-            delta_gamma = eps_hat_norm - material_param(slot, materials, params, PARAM_YIELD_STRESS) / (2.0 * mu)
-            is_changed = delta_gamma > 0.0
-            if is_changed:
-                sigma_new = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
-        elif kind == PLASTIC_SAND:
-            lam = material_param(slot, materials, params, PARAM_LAM)
-            eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
-            trace = eps.sum() + Jp
-            eps_hat = eps - trace / 3.0
-            eps_hat_norm = eps_hat.norm(gs.EPS)
-            sigma_new = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
-            if trace >= 0.0:
-                Jp_new = trace
-            else:
-                Jp_new = 0.0
-                alpha = material_param(slot, materials, params, PARAM_SAND_ALPHA)
-                delta_gamma = eps_hat_norm + (3.0 * lam + 2.0 * mu) / (2.0 * mu) * trace * alpha
-                sigma_new = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
-        else:
-            lower = 1.0 - material_param(slot, materials, params, PARAM_YIELD_LOWER)
-            higher = 1.0 + material_param(slot, materials, params, PARAM_YIELD_HIGHER)
-            sigma_new = qd.min(qd.max(sigma, lower), higher)
-            if kind == PLASTIC_SNOW:
-                Jp_new = Jp * (sigma[0] * sigma[1] * sigma[2]) / (sigma_new[0] * sigma_new[1] * sigma_new[2])
+        h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
+            slot, kind, sigma, Jp, materials, params
+        )
         if is_changed:
             F_new = (
-                U
-                @ qd.Matrix(
-                    [[sigma_new[0], 0.0, 0.0], [0.0, sigma_new[1], 0.0], [0.0, 0.0, sigma_new[2]]], dt=gs.qd_float
-                )
-                @ V.transpose()
+                U @ qd.Matrix([[h[0], 0.0, 0.0], [0.0, h[1], 0.0], [0.0, 0.0, h[2]]], dt=gs.qd_float) @ V.transpose()
             )
     return F_new, Jp_new
 
