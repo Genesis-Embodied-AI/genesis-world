@@ -11,6 +11,7 @@ from genesis.engine.solvers.mpm_func import (
     EXTENSION_STIFFNESS,
     HENCKY_SIGMA_MIN,
     N_MATERIAL_PARAMS,
+    PARAM_FIBRE,
     PARAM_LAM,
     PARAM_MU,
     PARAM_SAND_ALPHA,
@@ -22,9 +23,11 @@ from genesis.engine.solvers.mpm_func import (
     PLASTIC_SAND,
     PLASTIC_SNOW,
     PLASTIC_VON_MISES,
+    active_fibre_stiffness,
     cubic_first_root,
     det_cubic,
     extended_hencky_principal,
+    fibre_terms,
     fixed_corotated_principal,
     invert_node_block,
     isotropic_first_piola_differential,
@@ -363,6 +366,82 @@ def test_crushed_states_restore(family, unextended):
     for delta in (0.1, 0.2):
         sigma = np.full(3, delta)
         assert (sigma * gradient(family, sigma) < 5.0 * sigma * gradient(unextended, sigma)).all()
+
+
+@qd.kernel
+def kernel_fibre(
+    materials: MpmMaterialTable,
+    params: qd.template(),
+    actu: float,
+    m_in: qd.types.ndarray(),
+    F_in: qd.types.ndarray(),
+    out_psi: qd.types.ndarray(),
+    out_P: qd.types.ndarray(),
+    out_stiffness: qd.types.ndarray(),
+):
+    for _ in range(1):
+        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
+        m = qd.Vector([m_in[0], m_in[1], m_in[2]], dt=gs.qd_float)
+        psi, P, curvature = fibre_terms(0, actu, m, F, materials, params)
+        ka, dka = active_fibre_stiffness(0, actu, materials, params)
+        out_psi[()] = psi
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            out_P[i, j] = P[i, j]
+        out_stiffness[0] = curvature
+        out_stiffness[1] = dka
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_fibre_terms():
+    rng = np.random.default_rng(9)
+    stiffness, h = 2.0, 1e-7
+    columns = np.zeros(N_MATERIAL_PARAMS)
+    columns[[PARAM_MU, PARAM_LAM, PARAM_FIBRE]] = 3.0, 5.0, stiffness
+    materials = get_mpm_material_table(columns, family=np.array([0]), plastic=np.array([0]))
+    params = MpmParams(
+        n_envs=1,
+        n_particles=1,
+        substep_dt=1e-3,
+        dx=0.1,
+        particle_volume=1e-3,
+        mass_scale=1.0,
+        n_materials=1,
+        wall_sol_params=np.zeros(7),
+        wall_lower=np.zeros(3),
+        wall_upper=np.ones(3),
+        liquid_band=0.0,
+    )
+    m = np.array([0.0, 0.6, 0.8])
+    F = np.eye(3) + 0.2 * rng.standard_normal((3, 3))
+    m_nd, F_nd = qd.ndarray(gs.qd_float, shape=(3,)), qd.ndarray(gs.qd_float, shape=(3, 3))
+    psi_nd, P_nd = qd.ndarray(gs.qd_float, shape=()), qd.ndarray(gs.qd_float, shape=(3, 3))
+    stiffness_nd = qd.ndarray(gs.qd_float, shape=(2,))
+    m_nd.from_numpy(m)
+
+    def evaluate(F, actu):
+        F_nd.from_numpy(F)
+        kernel_fibre(materials, params, actu, m_nd, F_nd, psi_nd, P_nd, stiffness_nd)
+        return float(qd_to_numpy(psi_nd)), qd_to_numpy(P_nd, copy=True), qd_to_numpy(stiffness_nd, copy=True)
+
+    # An active fibre pulls along its direction, with the stress of its energy and the actuation derivative the adjoint
+    # takes
+    actu = 0.7
+    psi, P, (curvature, dka) = evaluate(F, actu)
+    assert_allclose(psi, 0.5 * stiffness * actu * np.sum((F @ m) ** 2), tol=1e-12)
+    assert_allclose(curvature, stiffness * actu, tol=1e-12)
+    for i, j in np.ndindex(3, 3):
+        dF = np.zeros((3, 3))
+        dF[i, j] = h
+        assert_allclose(P[i, j], (evaluate(F + dF, actu)[0] - evaluate(F - dF, actu)[0]) / (2 * h), tol=1e-6)
+    assert_allclose(
+        dka * 0.5 * np.sum((F @ m) ** 2), (evaluate(F, actu + h)[0] - evaluate(F, actu - h)[0]) / (2 * h), tol=1e-6
+    )
+
+    # A muscle only contracts: a negative actuation activates nothing, so the term stays convex and bounded below
+    psi, P, stiffnesses = evaluate(F, -0.4)
+    assert psi == 0.0 and not P.any() and not stiffnesses.any()
 
 
 @qd.kernel

@@ -28,11 +28,11 @@ from genesis.utils import array_class
 from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
 from .mpm_func import (
     LIQUID_J_MIN,
-    PARAM_FIBRE,
     PLASTIC_LIQUID,
     PLASTIC_NONE,
     PLASTIC_SNOW,
     SNOW_HARDENING,
+    active_fibre_stiffness,
     isotropic_first_piola_differential,
     local_offset,
     material_param,
@@ -457,9 +457,10 @@ def func_adjoint_particles(
             for i, j in qd.static(qd.ndrange(3, 3)):
                 phi += P[i, j] * Lambda_F[i, j]
             Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
-        stiffness = material_param(slot, materials, params, PARAM_FIBRE)
         muscle_direction = particles_info.muscle_direction[i_p]
-        active_stiffness = stiffness * particles.actu[f, i_p, i_b]
+        active_stiffness, dactive_stiffness = active_fibre_stiffness(
+            slot, particles.actu[f, i_p, i_b], materials, params
+        )
         F_trial_m = F_trial @ muscle_direction
         Lambda_F_m = Lambda_F @ muscle_direction
         P += active_stiffness * F_trial_m.outer_product(muscle_direction)
@@ -467,7 +468,7 @@ def func_adjoint_particles(
 
         scale = params.particle_volume[()] * dt * dt
         F_bar = -scale * (F_increment.transpose() @ Q + Lambda.transpose() @ P)
-        actu_bar = -scale * stiffness * F_trial_m.dot(Lambda_F_m)
+        actu_bar = -scale * dactive_stiffness * F_trial_m.dot(Lambda_F_m)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
             lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])

@@ -837,6 +837,16 @@ def elastic_energy(
 
 
 @qd.func
+def active_fibre_stiffness(slot: int, actu: float, materials: MpmMaterialTable, params: qd.template()):
+    """Active stiffness k a of the muscle fibre term of a particle, and its derivative in the actuation `actu`.
+
+    A muscle only contracts: the actuation is a level of activation a = max(actu, 0), so that a negative actuation
+    activates nothing instead of pushing the fibres apart, which would make the energy unbounded below."""
+    k = material_param(slot, materials, params, PARAM_FIBRE)
+    return k * qd.max(actu, 0.0), qd.select(actu > 0.0, k, 0.0)
+
+
+@qd.func
 def fibre_terms(
     slot: int,
     actu: float,
@@ -847,13 +857,13 @@ def fibre_terms(
 ):
     """Energy density, first Piola-Kirchhoff stress and Hessian curvature of the muscle fibre term of a particle.
 
-    The term is 1/2 k a |F_trial m|^2, with k the fibre stiffness of the material, a the actuation `actu` and m the
-    fibre direction. Its stress is k a (F_trial m) m^T and its Hessian k a (m m^T) (x) I, whose curvature is clamped to
-    max(k a, 0) since an extension (k a < 0) makes it concave. All three vanish for a material without fibre stiffness.
+    The term is 1/2 k a |F_trial m|^2, with k a the active stiffness (see active_fibre_stiffness) and m the fibre
+    direction. Its stress is k a (F_trial m) m^T and its Hessian k a (m m^T) (x) I, of curvature k a >= 0, so that the
+    term is convex. All three vanish for a material without fibre stiffness.
     """
-    ka = material_param(slot, materials, params, PARAM_FIBRE) * actu
+    ka, _ = active_fibre_stiffness(slot, actu, materials, params)
     Fm = F_trial @ m
-    return 0.5 * ka * Fm.dot(Fm), ka * Fm.outer_product(m), qd.max(ka, 0.0)
+    return 0.5 * ka * Fm.dot(Fm), ka * Fm.outer_product(m), ka
 
 
 @qd.func
@@ -1893,8 +1903,6 @@ def particle_stencil_terms(
     m = particles_info.muscle_direction[i_p]
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(slot, particles.actu[f, i_p, i_b], m, F_trial, materials, params)
     P += P_fibre
-    if qd.static(is_exact):
-        fibre_curvature = material_param(slot, materials, params, PARAM_FIBRE) * particles.actu[f, i_p, i_b]
     # Fibre direction in the V frame
     fibre_frame = V.transpose() @ m
     newton.g_p[s] = scale * P @ F.transpose()
