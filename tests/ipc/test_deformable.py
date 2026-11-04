@@ -78,7 +78,7 @@ def test_robot_grasp_fem(coup_type, show_viewer):
     )
 
     box = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=BOX_POS,
                 size=(0.05, 0.05, 0.05),
@@ -203,7 +203,7 @@ def test_cloth_corner_drag(n_envs, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/IPC/grid20x20.obj",
                 scale=2 * CLOTH_HALF,
@@ -309,7 +309,7 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/IPC/grid20x20.obj",
                 scale=2 * CLOTH_HALF,

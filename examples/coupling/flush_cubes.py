@@ -37,7 +37,7 @@ def main():
         morph=gs.morphs.Plane(),
     )
     cube0 = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.25, 0.4),
                 size=(0.12, 0.12, 0.12),
@@ -54,7 +54,7 @@ def main():
     )
 
     cube0 = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Sphere(
                 pos=(0.15, 0.45, 0.5),
                 radius=0.06,
@@ -71,7 +71,7 @@ def main():
     )
 
     cube0 = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Cylinder(
                 pos=(-0.15, 0.45, 0.6),
                 radius=0.05,
@@ -88,7 +88,7 @@ def main():
         ),
     )
     emitter1 = scene.add_emitter(
-        gs.options.MPMEntityOptions(
+        gs.entities.MPM(
             morph=gs.morphs.Nowhere(
                 n_particles=800000,
             ),
@@ -102,7 +102,7 @@ def main():
         ),
     )
     emitter2 = scene.add_emitter(
-        gs.options.MPMEntityOptions(
+        gs.entities.MPM(
             morph=gs.morphs.Nowhere(
                 n_particles=800000,
             ),

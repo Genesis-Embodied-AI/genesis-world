@@ -356,11 +356,11 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, precisio
 @pytest.mark.precision("64")
 def test_reject_non_differentiable_solvers():
     box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))
-    fem_options = gs.options.FEMEntityOptions(morph=box, material=gs.materials.Elastic())
-    rigid_options = gs.options.RigidEntityOptions(morph=box)
+    fem_options = gs.entities.FEM(morph=box, material=gs.materials.Elastic())
+    rigid_options = gs.entities.Rigid(morph=box)
     for entities_options, scene_options, component_name in (
-        ((gs.options.PBDLiquidEntityOptions(morph=box),), {}, "PBDSolver"),
-        ((gs.options.SPHEntityOptions(morph=box),), {}, "SPHSolver"),
+        ((gs.entities.PBDLiquid(morph=box),), {}, "PBDSolver"),
+        ((gs.entities.SPH(morph=box),), {}, "SPHSolver"),
         ((fem_options,), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
         ((fem_options, rigid_options), {}, "LegacyCoupler"),
         ((rigid_options,), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),

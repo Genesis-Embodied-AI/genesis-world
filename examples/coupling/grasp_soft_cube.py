@@ -37,7 +37,7 @@ def main():
         gs.morphs.Plane(),
     )
     cube = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 size=(0.04, 0.04, 0.04),
                 pos=(0.65, 0.0, 0.025),

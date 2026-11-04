@@ -12,7 +12,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
-from genesis.options.entities import MPMEntityOptions, RigidEntityOptions
 from genesis.utils.array_class import GeomsInfo, LinksState
 from genesis.utils.hybrid import (
     check_graph,
@@ -58,7 +57,7 @@ class HybridEntity(Entity):
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
 
-        rigid_options = RigidEntityOptions(
+        rigid_options = gs.entities.Rigid(
             morph=morph,
             material=options.material_rigid,
             solver_options=options.rigid_solver_options,
@@ -81,7 +80,7 @@ class HybridEntity(Entity):
 
         elif isinstance(morph, gs.morphs.Mesh):
             part_soft = scene.add_entity(
-                options=MPMEntityOptions(
+                options=gs.entities.MPM(
                     morph=morph,
                     material=options.material_soft,
                     solver_options=options.solver_options.soft,
@@ -561,7 +560,7 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, options, surface
             meshes[i] = trimesh.boolean.difference([mesh] + meshes[i + 1 :])
 
     part_soft = scene.add_entity(
-        options=MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.MeshSet(
                 files=meshes,
                 poss=trans_local_to_global,

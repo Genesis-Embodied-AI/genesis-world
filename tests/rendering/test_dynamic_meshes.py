@@ -83,7 +83,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 scale=1.0,
@@ -96,7 +96,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Mesh(
                 file="meshes/worm/worm.obj",
                 pos=(0.3, 0.3, 0.001),
@@ -115,7 +115,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     liquid = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.65),
                 size=(0.4, 0.4, 0.4),
@@ -206,7 +206,7 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
     # Add PBD cloth with checker texture
     asset_path = get_hf_dataset(pattern="uv_plane.obj")
     scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/uv_plane.obj",
                 scale=0.4,
@@ -223,7 +223,7 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
 
     # Add FEM elastic object with checker texture
     scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 scale=0.1,

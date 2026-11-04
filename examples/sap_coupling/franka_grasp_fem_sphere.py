@@ -52,7 +52,7 @@ def main():
         ),
     )
     sphere = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 radius=0.02,
                 pos=(0.65, 0.0, 0.02),

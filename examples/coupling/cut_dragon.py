@@ -51,7 +51,7 @@ def main():
         surface=gs.surfaces.Iron(),
     )
     dragon = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Mesh(
                 file="meshes/dragon/dragon.obj",
                 scale=0.007,

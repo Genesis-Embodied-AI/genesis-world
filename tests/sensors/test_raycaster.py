@@ -335,7 +335,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
         ),
     )
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
+        options=gs.entities.Rigid(
             morph=gs.morphs.URDF(
                 file=str(urdf_path),
                 pos=(0.0, 0.0, 1.5),
@@ -343,7 +343,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
                 merge_fixed_links=False,
             ),
             links={
-                "child": gs.options.LinkOptions(
+                "child": gs.options.Link(
                     use_visual_raycasting=True,
                 ),
             },

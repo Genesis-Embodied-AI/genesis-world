@@ -55,9 +55,9 @@ def main():
     )
 
     if args.solver == "sph":
-        options_cls, solver_options_cls = gs.options.SPHEntityOptions, gs.options.SPHEntitySolverOptions
+        options_cls, solver_options_cls = gs.entities.SPH, gs.options.SPHEntitySolverOptions
     else:
-        options_cls, solver_options_cls = gs.options.MPMEntityOptions, gs.options.MPMEntitySolverOptions
+        options_cls, solver_options_cls = gs.entities.MPM, gs.options.MPMEntitySolverOptions
     emitter = scene.add_emitter(
         options_cls(
             morph=gs.morphs.Nowhere(

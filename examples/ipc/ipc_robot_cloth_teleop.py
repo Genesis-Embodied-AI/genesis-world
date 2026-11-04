@@ -72,7 +72,7 @@ def main():
 
     # Add Franka robot
     franka = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
+        options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda_non_overlap.xml",
                 pos=(0.0, 0.0, 0.005),
@@ -83,7 +83,7 @@ def main():
             ),
             # The two-way coupling couples the fingers alone
             links={
-                gs.LinkIndex.named("left_finger", "right_finger"): gs.options.LinkOptions(
+                gs.LinkIndex.named("left_finger", "right_finger"): gs.options.Link(
                     solver_options=gs.options.RigidLinkSolverOptions(
                         needs_coup=True,
                     ),
@@ -101,7 +101,7 @@ def main():
         max_workers=1,
     )
     scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{cloth_asset_path}/IPC/grid20x20.obj",
                 scale=0.5,
@@ -122,7 +122,7 @@ def main():
         ),
     )
     scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{cloth_asset_path}/IPC/grid20x20.obj",
                 scale=0.3,

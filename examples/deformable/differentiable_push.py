@@ -54,7 +54,7 @@ def main():
         ),
     )
     obj1 = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 lower=(0.2, 0.1, 0.05),
                 upper=(0.4, 0.3, 0.15),
@@ -70,7 +70,7 @@ def main():
         ),
     )
     obj2 = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 pos=(0.4, 0.55, 0.056),

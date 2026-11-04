@@ -1,16 +1,13 @@
 """Constitutive models of the finite element method (FEM) solver, bound from the material and the solver options."""
 
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.materials import Cloth, Elastic, Muscle
-
-if TYPE_CHECKING:
-    from genesis.options.entities import FEMEntityOptions
 
 
 @qd.data_oriented
@@ -273,7 +270,7 @@ class FEMMuscleModelKey(FEMModelKey):
     stiffness: float
 
 
-def get_fem_model_key(options: "FEMEntityOptions") -> FEMModelKey:
+def get_fem_model_key(options: "gs.entities.FEM") -> FEMModelKey:
     """Return what decides the model of an entity, so that the entities sharing it share one compiled model."""
     material, model = options.material, options.solver_options.model
     if isinstance(material, Cloth):

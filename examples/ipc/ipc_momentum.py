@@ -36,7 +36,7 @@ def main():
     # FEM bodies use StableNeoHookean constitution, Rigid bodies use ABD constitution
     # FEM entities (added to IPC as deformable bodies)
     blob = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 pos=(0.3, 0.0, 0.4),
                 radius=0.1,

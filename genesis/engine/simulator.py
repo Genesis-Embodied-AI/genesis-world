@@ -34,7 +34,6 @@ from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
-    from genesis.options.entities import EntityOptions
     from genesis.options.scene import SceneOptions
 
 
@@ -151,13 +150,13 @@ class Simulator(RBC):
         surface=None,
         visualize_contact=False,
         name: str | None = None,
-        options: "EntityOptions | None" = None,
+        options: "gs.entities.BaseEntity | None" = None,
         desc: "EntityDescription | None" = None,
     ):
         if desc is not None:
             material = desc.material
             options = desc.options
-        if isinstance(options, gs.options.HybridEntityOptions):
+        if isinstance(options, gs.entities.Hybrid):
             # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
             # adds its parts to the scene itself.
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, options=options)

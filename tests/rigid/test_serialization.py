@@ -614,7 +614,7 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
     # other physics. No description carries a particle entity either.
     checkpoint_scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.Elastic()
         )
     )

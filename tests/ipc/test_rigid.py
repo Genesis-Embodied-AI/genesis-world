@@ -67,7 +67,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/IPC/grid20x20.obj",
                 scale=1.5,
@@ -102,7 +102,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     )
 
     sphere = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 radius=0.08,
                 pos=(0.5, 0.0, 0.1),
@@ -389,7 +389,7 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
         ),
     )
     fem = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=(0.4, 0.0, 0.12),
                 size=(0.05, 0.05, 0.05),
@@ -473,7 +473,7 @@ def test_objects_colliding(n_envs, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/IPC/grid20x20.obj",
                 scale=1.5,
@@ -509,7 +509,7 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     sphere = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 radius=0.08,
                 pos=(0.25, 0.0, 0.1),
@@ -599,7 +599,7 @@ def test_momentum_conservation(n_envs, show_viewer):
     )
 
     blob = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 pos=(0.3, 0.0, 0.4),
                 radius=0.1,

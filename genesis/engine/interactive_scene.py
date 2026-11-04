@@ -10,7 +10,6 @@ from genesis.vis.viewer_plugins.plugins import DefaultControlsPlugin
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import KinematicEntity
     from genesis.engine.scene import Scene
-    from genesis.options.entities import EntityOptions
     from genesis.options.sensors.options import SensorOptions
 
 
@@ -48,7 +47,7 @@ class InteractiveScene:
         self._rebuild_pending: bool = False
         self._reset_pending: bool = False
         self._has_new_scene_kwargs: bool = False
-        self._entities_options: dict[str, "EntityOptions"] = {}
+        self._entities_options: dict[str, "gs.entities.BaseEntity"] = {}
         self._sensors_kwargs: list["SensorOptions"] = []
         scene.register_pre_step_callback(self._pre_step)
         # Capture the wrapped scene's construction so rebuild() can reconstruct it identically. The stored options
@@ -196,7 +195,7 @@ class InteractiveScene:
         self,
         *,
         scene_kwargs: dict[str, Any] | None = None,
-        entities_options: dict[str, "EntityOptions"] | None = None,
+        entities_options: dict[str, "gs.entities.BaseEntity"] | None = None,
         sensors_kwargs: Iterable["SensorOptions"] | None = None,
     ):
         """
@@ -214,8 +213,8 @@ class InteractiveScene:
 
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
-            entities_options: Mapping from entity name to the ``EntityOptions`` forwarded to ``scene.add_entity``.
-                The dict key becomes the entity's name, overriding the name the options hold.
+            entities_options: Mapping from entity name to the entity options (``gs.entities.BaseEntity``) forwarded to
+                ``scene.add_entity``. The dict key becomes the entity's name, overriding the name the options hold.
             sensors_kwargs: Iterable of ``SensorOptions`` instances forwarded to ``scene.add_sensor``.
         """
         if InteractiveFeature.REBUILD not in self.supported_features:

@@ -16,7 +16,6 @@ import genesis.utils.geom as gu
 from genesis.engine.interactive_scene import InteractiveFeature, InteractiveScene
 from genesis.ext.pyrender.overlay.style import apply_dark_theme
 from genesis.ext.pyrender.overlay.types import build_entity_joint_data, EntityCacheEntry, EntityJointData
-from genesis.options.entities import EntityOptions, RigidEntityOptions
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, MouseInteractionPlugin, ViewerPlugin
 
@@ -123,7 +122,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         # The Scene editor panel mutates this local mirror of the live entities; on "Rebuild Scene" it is submitted to
         # the InteractiveScene, which applies it on the stepping thread.
         self._pending_dirty = False
-        self._pending_entities_options: dict[str, EntityOptions] = {}
+        self._pending_entities_options: dict[str, gs.entities.BaseEntity] = {}
         self._add_entity_morph_type = 0  # index into _ADD_ENTITY_TYPES
         self._add_entity_file = ""
         self._add_entity_pos = [0.0, 0.0, 0.0]
@@ -998,7 +997,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 while name in self._pending_entities_options:
                     suffix += 1
                     name = f"{base_name}_{suffix}"
-                self._pending_entities_options[name] = RigidEntityOptions(morph=new_morph)
+                self._pending_entities_options[name] = gs.entities.Rigid(morph=new_morph)
                 self._pending_dirty = True
             imgui.unindent()
 

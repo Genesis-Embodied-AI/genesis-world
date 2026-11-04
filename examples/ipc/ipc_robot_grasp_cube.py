@@ -53,14 +53,14 @@ def main():
             coup_type=args.coup_type,
         )
         franka_links_options = {
-            gs.LinkIndex.named("left_finger", "right_finger"): gs.options.LinkOptions(
+            gs.LinkIndex.named("left_finger", "right_finger"): gs.options.Link(
                 solver_options=gs.options.RigidLinkSolverOptions(
                     needs_coup=True,
                 ),
             ),
         }
     franka = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
+        options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/franka_emika_panda/panda_non_overlap.xml",
             ),
@@ -77,7 +77,7 @@ def main():
         color=(0.2, 0.8, 0.2, 0.5),
     )
     if not args.no_ipc:
-        cube_options = gs.options.FEMEntityOptions(
+        cube_options = gs.entities.FEM(
             morph=cube_morph,
             surface=cube_surface,
             material=gs.materials.Elastic(
@@ -91,7 +91,7 @@ def main():
             ),
         )
     else:
-        cube_options = gs.options.RigidEntityOptions(
+        cube_options = gs.entities.Rigid(
             morph=cube_morph,
             surface=cube_surface,
         )

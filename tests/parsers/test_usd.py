@@ -575,7 +575,7 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
         ),
     )
     ghosts = scene.add_stage(
-        options=gs.options.KinematicEntityOptions(
+        options=gs.entities.Kinematic(
             morph=gs.morphs.USD(
                 file=collision_filtering_usd,
                 pos=(0.0, 0.0, 0.5),
@@ -584,8 +584,8 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
     )
     with pytest.raises(gs.GenesisException, match="no link options"):
         scene.add_stage(
-            options=gs.options.RigidEntityOptions(
-                morph=gs.morphs.USD(file=collision_filtering_usd), links={"base": gs.options.LinkOptions()}
+            options=gs.entities.Rigid(
+                morph=gs.morphs.USD(file=collision_filtering_usd), links={"base": gs.options.Link()}
             )
         )
     scene.build()

@@ -51,7 +51,7 @@ def test_mpm_rigid_push_grad(show_viewer):
         ),
     )
     obj = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 lower=(0.2, 0.1, 0.05),
                 upper=(0.4, 0.3, 0.15),
@@ -139,7 +139,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             show_viewer=show_viewer and requires_grad,
         )
         mpm_box = scene.add_entity(
-            options=gs.options.MPMEntityOptions(
+            options=gs.entities.MPM(
                 morph=gs.morphs.Box(
                     lower=(-0.35, -0.1, 0.1),
                     upper=(-0.15, 0.1, 0.2),
@@ -156,7 +156,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             ),
         )
         fem_box = scene.add_entity(
-            options=gs.options.FEMEntityOptions(
+            options=gs.entities.FEM(
                 morph=gs.morphs.Box(
                     pos=(0.3, 0.0, 0.3),
                     size=(0.1, 0.1, 0.1),
@@ -272,7 +272,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 lower=(-0.2, -0.05, -0.05),
                 upper=(-0.05, 0.05, 0.05),
@@ -289,7 +289,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         ),
     )
     fem_block = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=(0.15, 0.0, 0.0),
                 size=(0.1, 0.05, 0.05),

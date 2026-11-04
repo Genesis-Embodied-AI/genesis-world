@@ -37,7 +37,7 @@ scene.add_entity(
 )
 
 worm = scene.add_entity(
-    options=gs.options.MPMEntityOptions(
+    options=gs.entities.MPM(
         morph=gs.morphs.Mesh(
             file="meshes/worm/worm.obj",
             pos=(0.3, 0.3, 0.001),
@@ -63,10 +63,10 @@ worm = scene.add_entity(
 scene.build(n_envs=3)
 
 
-if isinstance(worm.options, gs.options.MPMEntityOptions):
+if isinstance(worm.options, gs.entities.MPM):
     pos = worm.get_state().pos[0]
     n_units = worm.n_particles
-elif isinstance(worm.options, gs.options.FEMEntityOptions):
+elif isinstance(worm.options, gs.entities.FEM):
     pos = worm.get_state().pos[0, worm.get_el2v()].mean(dim=1)
     n_units = worm.n_elements
 else:

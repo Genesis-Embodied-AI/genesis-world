@@ -23,7 +23,7 @@ import trimesh
 import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.mesh import InertialProperties
-from genesis.options.entities import EntityOptions, KinematicEntityOptions, RigidEntityOptions, RigidEntitySolverOptions
+from genesis.options.entities import RigidEntitySolverOptions
 from genesis.options.indices import get_links_path
 from genesis.options.materials import Material
 from genesis.options.morphs import Morph
@@ -416,7 +416,7 @@ class KinematicEntityDescription(EntityDescription):
         visualize_contact: bool = False,
         name: str | None = None,
         *,
-        options: EntityOptions,
+        options: gs.entities.BaseEntity,
     ) -> Self:
         """Resolve what an entity is created with into the description it is built from.
 
@@ -445,7 +445,7 @@ class KinematicEntityDescription(EntityDescription):
             if isinstance(morph, gs.morphs.FileMorph):
                 # Rigid entities will convexify geom by default
                 if morph.convexify is None:
-                    morph.convexify = not isinstance(options, KinematicEntityOptions)
+                    morph.convexify = not isinstance(options, gs.entities.Kinematic)
                 # Decimation simplifies away the very surface detail that a non-convex collision mesh is kept for, so
                 # it defaults off when convexify is off and on otherwise. Only applies to meshes that skip
                 # watertightening (already-watertight inputs); watertighten does its own feature-preserving QEM.
@@ -476,7 +476,7 @@ class KinematicEntityDescription(EntityDescription):
         )
         for link_index in options.links:
             link_index.resolve(links_path)
-        if isinstance(options, RigidEntityOptions):
+        if isinstance(options, gs.entities.Rigid):
             geoms_index = [
                 *options.geoms,
                 *(i_g for link_options in options.links.values() for i_g in link_options.geoms),
@@ -1403,7 +1403,7 @@ class KinematicEntityDescription(EntityDescription):
             # A density the link or geom options give may move the center of mass off the anchor, which stays where a
             # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the solver reads the body as
             # unaligned, as it does once an attach extends it
-            if isinstance(self.options, RigidEntityOptions) and any(
+            if isinstance(self.options, gs.entities.Rigid) and any(
                 self.options.has_link_density(links_path[i_l]) for i_l in subtree
             ):
                 root.is_aligned = False
@@ -1484,7 +1484,7 @@ class KinematicEntityDescription(EntityDescription):
         # where a kinematic entity of the same asset anchors it (see '_resolve_inertial').
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
-        if isinstance(self.options, RigidEntityOptions):
+        if isinstance(self.options, gs.entities.Rigid):
             for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_path, geoms_name)):
                 if material is not None:
                     g_info["material"] = material

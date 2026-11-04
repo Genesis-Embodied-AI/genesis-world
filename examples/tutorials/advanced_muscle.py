@@ -42,7 +42,7 @@ E, nu = 3.0e4, 0.45
 rho = 1000.0
 
 robot_mpm = scene.add_entity(
-    options=gs.options.MPMEntityOptions(
+    options=gs.entities.MPM(
         morph=gs.morphs.Sphere(
             pos=(0.5, 0.2, 0.3),
             radius=0.1,
@@ -56,7 +56,7 @@ robot_mpm = scene.add_entity(
 )
 
 robot_fem = scene.add_entity(
-    options=gs.options.FEMEntityOptions(
+    options=gs.entities.FEM(
         morph=gs.morphs.Sphere(
             pos=(0.5, -0.2, 0.3),
             radius=0.1,

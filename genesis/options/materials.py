@@ -43,7 +43,7 @@ class Material(BaseMaterial):
         otherwise 1000 kg/m^3 under MuJoCo compatibility (see ``RigidOptions.enable_mujoco_compatibility``), 1500
         kg/m^3 for an articulated robot and 600 kg/m^3 for a basic object such as a mug or a table. Default is None.
     friction : float | None, optional
-        The sliding friction coefficient, which a rigid entity bounds (see ``RigidEntityOptions``). If None, the asset
+        The sliding friction coefficient, which a rigid entity bounds (see ``gs.entities.Rigid``). If None, the asset
         decides where it states one, and otherwise 1.0 for a rigid entity. Default is None.
     friction_torsional : float | None, optional
         The torsional friction coefficient, resisting the relative spin about the contact normal. Expressed in meters,
@@ -271,9 +271,9 @@ class Muscle(BaseMaterial):
 
 
 class Kinematic(Options):
-    """Deprecated material of a kinematic entity, replaced by ``gs.options.KinematicEntityOptions``.
+    """Deprecated material of a kinematic entity, replaced by ``gs.entities.Kinematic``.
 
-    ``Scene.add_entity`` turns it into the options of the entity, with a warning. See ``KinematicEntityOptions`` for
+    ``Scene.add_entity`` turns it into the options of the entity, with a warning. See ``gs.entities.Kinematic`` for
     'use_visual_raycasting'.
     """
 
@@ -281,10 +281,10 @@ class Kinematic(Options):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        options_name = "RigidEntityOptions" if isinstance(self, Rigid) else "KinematicEntityOptions"
+        options_name = "gs.entities.Rigid" if isinstance(self, Rigid) else "gs.entities.Kinematic"
         gs.logger.warning(
             f"'gs.materials.{type(self).__name__}' is deprecated and will be removed. Pass "
-            f"'options=gs.options.{options_name}(...)' to 'add_entity' instead."
+            f"'options={options_name}(...)' to 'add_entity' instead."
         )
 
     def get_entity_options_fields(self) -> dict[str, Any]:
@@ -293,11 +293,11 @@ class Kinematic(Options):
 
 
 class Rigid(Kinematic):
-    """Deprecated material of a rigid entity, replaced by ``gs.options.RigidEntityOptions``.
+    """Deprecated material of a rigid entity, replaced by ``gs.entities.Rigid``.
 
     ``Scene.add_entity`` turns it into the options of the entity, with a warning. 'rho' is the density of
     ``gs.materials.Material``, which takes the friction coefficients as well. 'gravity_compensation' and
-    'use_visual_raycasting' are fields of ``RigidEntityOptions``, and the coupling and signed distance field options
+    'use_visual_raycasting' are fields of ``gs.entities.Rigid``, and the coupling and signed distance field options
     are fields of ``RigidEntitySolverOptions``. 'coup_links' and 'coup_collision_links' enable the coupling and the
     collision of the links of these names alone, through the solver options of these links.
     """

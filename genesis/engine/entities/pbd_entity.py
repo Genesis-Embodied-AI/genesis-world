@@ -167,7 +167,7 @@ class PBDTetEntity(PBDBaseEntity):
             mu_s=self._options.material_params.friction,
             mu_k=self._options.material_params.kinetic_friction,
             air_resistance=self._options.solver_options.air_resistance
-            if isinstance(self._options, gs.options.PBDClothEntityOptions)
+            if isinstance(self._options, gs.entities.PBDCloth)
             else 0.0,
             density_relaxation=0.0,
             viscosity_relaxation=0.0,

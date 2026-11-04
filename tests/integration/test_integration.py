@@ -265,7 +265,7 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
             geom.desc.conaffinity = 0
     if primitive_type == "sphere":
         obj = scene.add_entity(
-            options=gs.options.FEMEntityOptions(
+            options=gs.entities.FEM(
                 morph=gs.morphs.Sphere(
                     pos=(0.65, 0.0, 0.02),
                     radius=0.02,
@@ -283,7 +283,7 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
     else:  # primitive_type == "box":
         asset_path = get_hf_dataset(pattern="meshes/cube8.obj")
         obj = scene.add_entity(
-            options=gs.options.FEMEntityOptions(
+            options=gs.entities.FEM(
                 morph=gs.morphs.Mesh(
                     file=f"{asset_path}/meshes/cube8.obj",
                     pos=(0.65, 0.0, 0.02),

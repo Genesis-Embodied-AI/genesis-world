@@ -38,7 +38,7 @@ def main():
     )
 
     water = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.4, 0.5, 0.25),
                 size=(0.7, 0.9, 0.5),
@@ -50,7 +50,7 @@ def main():
         ),
     )
     duck = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 pos=(0.5, 0.5, 0.7),

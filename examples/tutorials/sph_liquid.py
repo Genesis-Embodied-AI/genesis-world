@@ -27,7 +27,7 @@ plane = scene.add_entity(
 )
 
 liquid = scene.add_entity(
-    options=gs.options.SPHEntityOptions(
+    options=gs.entities.SPH(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.65),
             size=(0.4, 0.4, 0.4),

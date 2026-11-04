@@ -8,8 +8,8 @@ import genesis as gs
 @pytest.mark.parametrize(
     "options_cls, solver_options_cls",
     [
-        (gs.options.MPMEntityOptions, gs.options.MPMEntitySolverOptions),
-        (gs.options.FEMEntityOptions, gs.options.FEMEntitySolverOptions),
+        (gs.entities.MPM, gs.options.MPMEntitySolverOptions),
+        (gs.entities.FEM, gs.options.FEMEntitySolverOptions),
     ],
 )
 def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
@@ -57,7 +57,7 @@ def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
     )
     scene.build(n_envs=n_envs)
 
-    if isinstance(box.options, gs.options.MPMEntityOptions):
+    if isinstance(box.options, gs.entities.MPM):
         pos = box.get_state().pos[0]
     else:
         pos = box.get_state().pos[0, box.get_el2v()].mean(1)

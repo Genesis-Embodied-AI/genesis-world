@@ -27,7 +27,7 @@ def main():
     )
 
     bunny = scene.add_entity(
-        options=gs.options.PBDElasticEntityOptions(
+        options=gs.entities.PBDElastic(
             morph=gs.morphs.Mesh(
                 file="meshes/dragon/dragon.obj",
                 scale=0.003,

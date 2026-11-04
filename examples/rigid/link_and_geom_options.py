@@ -26,20 +26,20 @@ def main():
     )
 
     humanoid = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
+        options=gs.entities.Rigid(
             morph=gs.morphs.MJCF(
                 file="xml/humanoid.xml",
                 recompute_inertia=True,
             ),
             links={
-                gs.LinkIndex.subtree("thigh_right"): gs.options.LinkOptions(
+                gs.LinkIndex.subtree("thigh_right"): gs.options.Link(
                     material=gs.materials.Material(
                         density=3000.0,
                     ),
                 ),
             },
             geoms={
-                gs.GeomIndex.named("foot*"): gs.options.GeomOptions(
+                gs.GeomIndex.named("foot*"): gs.options.Geom(
                     material=gs.materials.Material(
                         friction=2.0,
                     ),

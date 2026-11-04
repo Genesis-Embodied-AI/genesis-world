@@ -41,7 +41,7 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     cube = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=(0.5, 0.0, 0.05),
                 size=(0.2, 0.2, 0.2),

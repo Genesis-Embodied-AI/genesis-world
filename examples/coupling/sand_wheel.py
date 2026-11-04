@@ -98,7 +98,7 @@ def main():
     )
 
     emitter = scene.add_emitter(
-        gs.options.MPMEntityOptions(
+        gs.entities.MPM(
             morph=gs.morphs.Nowhere(
                 n_particles=200000,
             ),

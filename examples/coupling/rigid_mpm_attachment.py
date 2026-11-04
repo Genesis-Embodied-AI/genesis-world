@@ -44,7 +44,7 @@ def main():
     )
 
     mpm_cube = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.35),
                 size=(0.15, 0.15, 0.15),

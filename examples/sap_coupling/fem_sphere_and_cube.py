@@ -35,7 +35,7 @@ def main():
         show_viewer=args.vis,
     )
     sphere = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 pos=(0.0, 0.0, 0.1),
                 radius=0.1,
@@ -57,7 +57,7 @@ def main():
         max_workers=1,
     )
     cube = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/cube8.obj",
                 pos=(0.0, 0.0, 0.4),

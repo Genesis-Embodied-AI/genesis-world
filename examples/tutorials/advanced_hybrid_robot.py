@@ -43,7 +43,7 @@ scene.add_entity(
 )
 
 robot = scene.add_entity(
-    options=gs.options.HybridEntityOptions(
+    options=gs.entities.Hybrid(
         morph=gs.morphs.URDF(
             file="urdf/simple/two_link_arm.urdf",
             pos=(0.5, 0.5, 0.3),

@@ -49,7 +49,7 @@ def main():
         max_workers=1,
     )
     cloth = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/IPC/grid20x20.obj",
                 scale=1.5,
@@ -87,7 +87,7 @@ def main():
 
     # Optional: Add another FEM volume object
     soft_ball = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 radius=0.08,
                 pos=(0.25, 0.0, 0.1),

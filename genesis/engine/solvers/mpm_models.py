@@ -2,16 +2,13 @@
 
 import math
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.options.materials import Elastic, ElastoPlastic, Liquid, Muscle, Sand, Snow
 from genesis.utils.element import lame_parameters
-
-if TYPE_CHECKING:
-    from genesis.options.entities import MPMEntityOptions
 
 
 @qd.data_oriented
@@ -317,11 +314,11 @@ class MPMSnowModelKey(MPMModelKey):
     critical_stretch: float
 
 
-def get_mpm_model_key(options: "MPMEntityOptions") -> MPMModelKey:
+def get_mpm_model_key(options: "gs.entities.MPM") -> MPMModelKey:
     """Return what decides the model of an entity, so that the entities sharing it share one compiled model.
 
     The key holds the parameters of the model of the material, the defaults of the solver filled in (see
-    'MPMEntityOptions.material_params').
+    'gs.entities.MPM.material_params').
     """
     material, params = options.material, options.material_params
     youngs_modulus, poisson_ratio = params.youngs_modulus, params.poisson_ratio

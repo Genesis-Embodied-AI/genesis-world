@@ -31,7 +31,7 @@ def main():
     )
 
     liquid = scene.add_entity(
-        options=gs.options.PBDLiquidEntityOptions(
+        options=gs.entities.PBDLiquid(
             morph=gs.morphs.Box(
                 lower=(0.2, 0.1, 0.1),
                 upper=(0.4, 0.3, 0.5),

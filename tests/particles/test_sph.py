@@ -37,7 +37,7 @@ def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH", g
     )
 
     liquid = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.65),
                 size=(0.4, 0.4, 0.4),
@@ -314,7 +314,7 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
         morph=gs.morphs.Plane(),
     )
     liquid = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.25),
                 size=(0.3, 0.3, 0.5),

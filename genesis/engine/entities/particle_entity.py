@@ -12,7 +12,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
-from genesis.options.entities import MPMEntityOptions
 from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
@@ -123,7 +122,7 @@ class ParticleEntity(Entity):
         GenesisException
             If the specified sampler is not supported or incorrectly formatted.
         """
-        if isinstance(self._options, MPMEntityOptions):
+        if isinstance(self._options, gs.entities.MPM):
             self.sampler = self._options.material_params.sampler
         else:
             self.sampler = self._options.solver_options.sampler

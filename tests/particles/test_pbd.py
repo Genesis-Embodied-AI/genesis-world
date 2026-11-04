@@ -18,7 +18,7 @@ def test_maxvolume(show_viewer, box_obj_path):
 
     # Mesh without any maximum-element-volume constraint
     pbd1 = scene.add_entity(
-        options=gs.options.PBDElasticEntityOptions(
+        options=gs.entities.PBDElastic(
             morph=gs.morphs.Mesh(
                 file=box_obj_path,
                 nobisect=False,
@@ -29,7 +29,7 @@ def test_maxvolume(show_viewer, box_obj_path):
 
     # Mesh with maximum element volume limited to 0.001
     pbd2 = scene.add_entity(
-        options=gs.options.PBDElasticEntityOptions(
+        options=gs.entities.PBDElastic(
             morph=gs.morphs.Mesh(
                 file=box_obj_path,
                 nobisect=False,
@@ -57,7 +57,7 @@ def test_get_mass(n_envs, show_viewer, tol):
     )
     scene.add_entity(gs.morphs.Plane())
     cloth = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 pos=(0, 0, 0.5),
@@ -89,7 +89,7 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         morph=gs.morphs.Plane(),
     )
     cloth_1 = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 pos=(0, 2.0, 0.5),
@@ -103,7 +103,7 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
         ),
     )
     cloth_2 = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 pos=(0, 0, 0.1),
@@ -216,7 +216,7 @@ def test_cloth_attach_rigid_link(show_viewer):
         ),
     )
     cloth = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 pos=(0.25, 0.25, box_height + 0.125 + particle_size),

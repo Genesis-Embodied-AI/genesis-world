@@ -37,7 +37,7 @@ def main():
         morph=gs.morphs.Plane(),
     )
     water = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.5, 0.0, 0.6),
                 size=(0.9, 1.6, 1.2),

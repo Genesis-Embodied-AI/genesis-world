@@ -42,7 +42,7 @@ def test_rigid_mpm_muscle(show_viewer):
         morph=gs.morphs.Plane(),
     )
     robot = scene.add_entity(
-        options=gs.options.HybridEntityOptions(
+        options=gs.entities.Hybrid(
             morph=gs.morphs.URDF(
                 file="urdf/simple/two_link_arm.urdf",
                 pos=(0.45, 0.45, 0.2),
@@ -129,7 +129,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_sand = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.2),
                 size=(0.3, 0.3, 0.3),
@@ -170,7 +170,7 @@ def test_mesh_mpm_build(show_viewer):
         show_FPS=False,
     )
     hybrid = scene.add_entity(
-        options=gs.options.HybridEntityOptions(
+        options=gs.entities.Hybrid(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 scale=0.15,
@@ -229,7 +229,7 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     cloth = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
+        options=gs.entities.PBDCloth(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 scale=0.6,
@@ -242,7 +242,7 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     water = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
+        options=gs.entities.SPH(
             morph=gs.morphs.Box(
                 pos=(0.15, 0.15, 0.22),
                 size=(0.25, 0.25, 0.4),
@@ -253,7 +253,7 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     mpm_cube = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.6, 0, 0.1),
                 size=(0.1, 0.1, 0.1),
@@ -268,7 +268,7 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     entity_fem = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=(0.8, 0.8, 0.1),
                 size=(0.1, 0.1, 0.1),
@@ -336,7 +336,7 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.1),
                 size=(0.05, 0.05, 0.05),
@@ -350,7 +350,7 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
     # stay under the tolerance. Meanwhile, single precision takes a softer material.
     fem = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 pos=(0.4, 0.0, 0.5),
                 size=(0.1, 0.1, 0.1),
@@ -372,15 +372,15 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
 @pytest.mark.parametrize(
     "n_envs, options_cls, material_type",
     [
-        pytest.param(0, gs.options.SPHEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
-        (1, gs.options.SPHEntityOptions, gs.materials.Liquid),
-        (2, gs.options.SPHEntityOptions, gs.materials.Liquid),
-        pytest.param(2, gs.options.PBDLiquidEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
-        pytest.param(2, gs.options.MPMEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
-        (2, gs.options.MPMEntityOptions, gs.materials.Sand),
-        (2, gs.options.MPMEntityOptions, gs.materials.Snow),
+        pytest.param(0, gs.entities.SPH, gs.materials.Liquid, marks=pytest.mark.required),
+        (1, gs.entities.SPH, gs.materials.Liquid),
+        (2, gs.entities.SPH, gs.materials.Liquid),
+        pytest.param(2, gs.entities.PBDLiquid, gs.materials.Liquid, marks=pytest.mark.required),
+        pytest.param(2, gs.entities.MPM, gs.materials.Liquid, marks=pytest.mark.required),
+        (2, gs.entities.MPM, gs.materials.Sand),
+        (2, gs.entities.MPM, gs.materials.Snow),
         # This makes little sense but nothing prevents doing this
-        (2, gs.options.MPMEntityOptions, gs.materials.Elastic),
+        (2, gs.entities.MPM, gs.materials.Elastic),
     ],
 )
 def test_fluid_emitter(n_envs, options_cls, material_type, show_viewer):
@@ -538,7 +538,7 @@ def test_sap_fem_vs_robot(show_viewer):
         ),
     )
     sphere = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Sphere(
                 pos=(0.0, 0.0, SPHERE_RADIUS),
                 radius=SPHERE_RADIUS,

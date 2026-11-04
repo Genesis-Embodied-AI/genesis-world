@@ -37,7 +37,7 @@ def test_particle_constraints(show_viewer, tol):
         ),
     )
     mpm_cube = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0, 0, 0.35),
                 size=(0.15, 0.15, 0.15),
@@ -54,7 +54,7 @@ def test_particle_constraints(show_viewer, tol):
         extents=(0.04, 0.12, 0.04), transform=trimesh.transformations.translation_matrix((0.0, 0.1, 0.0))
     )
     mpm_mesh_set = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.MeshSet(
                 files=(box, box),
                 poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
@@ -140,7 +140,7 @@ def test_perf_dispatch(variant, show_viewer):
         morph=gs.morphs.Plane(),
     )
     elastic = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(-0.1, 0.0, 0.2),
                 size=(0.08, 0.08, 0.08),
@@ -156,7 +156,7 @@ def test_perf_dispatch(variant, show_viewer):
         ),
     )
     liquid = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.15, 0.0, 0.2),
                 size=(0.08, 0.08, 0.08),
@@ -205,7 +205,7 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
+        options=gs.entities.MPM(
             morph=gs.morphs.Box(
                 pos=(0.0, 0.0, 0.3),
                 size=(0.1, 0.1, 0.1),

@@ -28,7 +28,7 @@ plane = scene.add_entity(
 )
 
 obj_elastic = scene.add_entity(
-    options=gs.options.MPMEntityOptions(
+    options=gs.entities.MPM(
         morph=gs.morphs.Box(
             pos=(0.0, -0.5, 0.25),
             size=(0.2, 0.2, 0.2),
@@ -44,7 +44,7 @@ obj_elastic = scene.add_entity(
 )
 
 obj_sand = scene.add_entity(
-    options=gs.options.MPMEntityOptions(
+    options=gs.entities.MPM(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.25),
             size=(0.3, 0.3, 0.3),
@@ -58,7 +58,7 @@ obj_sand = scene.add_entity(
 )
 
 obj_plastic = scene.add_entity(
-    options=gs.options.MPMEntityOptions(
+    options=gs.entities.MPM(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.5, 0.35),
             radius=0.1,

@@ -5,7 +5,6 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.options.entities import EntityOptions, HybridEntityOptions, KinematicEntityOptions
 from genesis.options.materials import BaseMaterial
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
@@ -21,10 +20,10 @@ class EntityDescription:
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
     options the entity was constructed from stand here as authored, before any default was resolved, and decide the
-    solver simulating it (see 'EntityOptions._solver_options_cls').
+    solver simulating it (see 'gs.entities.BaseEntity._solver_options_cls').
     """
 
-    options: EntityOptions = field(kw_only=True)
+    options: gs.entities.BaseEntity = field(kw_only=True)
 
     @property
     def material(self) -> BaseMaterial | None:
@@ -32,7 +31,7 @@ class EntityDescription:
 
         A kinematic entity takes no part in physics, and each part of a hybrid entity holds a material of its own.
         """
-        if isinstance(self.options, (KinematicEntityOptions, HybridEntityOptions)):
+        if isinstance(self.options, (gs.entities.Kinematic, gs.entities.Hybrid)):
             return None
         return self.options.material
 
@@ -52,7 +51,7 @@ class Entity(RBC):
         surface,
         name: str | None = None,
         *,
-        options: EntityOptions,
+        options: gs.entities.BaseEntity,
     ):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
@@ -128,7 +127,7 @@ class Entity(RBC):
         return None
 
     @property
-    def options(self) -> EntityOptions:
+    def options(self) -> gs.entities.BaseEntity:
         """The options this entity was constructed from, as authored.
 
         Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it

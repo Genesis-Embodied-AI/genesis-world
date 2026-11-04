@@ -166,7 +166,7 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
         ),
     )
     fem_quad = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Box(
                 size=(2.0, 2.0, 0.5),
                 pos=(4.5, 0.0, 0.0),
@@ -843,19 +843,19 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     )
 
     # We don't test "recon" for vis_mode because it is hard to install.
-    entities_config = ((gs.options.RigidEntityOptions, gs.materials.Material(), "visual"),)
+    entities_config = ((gs.entities.Rigid, gs.materials.Material(), "visual"),)
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         entities_config = (
             *entities_config,
-            (gs.options.FEMEntityOptions, gs.materials.Elastic(), "visual"),
-            (gs.options.MPMEntityOptions, gs.materials.Elastic(youngs_modulus=3e5), particle_mode),
-            (gs.options.PBDClothEntityOptions, gs.materials.Cloth(), particle_mode),
+            (gs.entities.FEM, gs.materials.Elastic(), "visual"),
+            (gs.entities.MPM, gs.materials.Elastic(youngs_modulus=3e5), particle_mode),
+            (gs.entities.PBDCloth, gs.materials.Cloth(), particle_mode),
             (
-                gs.options.SPHEntityOptions,
+                gs.entities.SPH,
                 gs.materials.Liquid(),
                 "particle" if particle_mode == "visual" else particle_mode,
             ),
-            (gs.options.KinematicEntityOptions, None, "visual"),
+            (gs.entities.Kinematic, None, "visual"),
         )
 
     ducks = []
@@ -899,11 +899,10 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     # 2 visual links. FEM entities use per-visual-geom tuple keys (entity.idx, i_g) only at "geom" level; at "link"
     # and "entity" levels they fall back to a plain int entity.idx.
     n_rigid_like = sum(
-        options_cls in (gs.options.RigidEntityOptions, gs.options.KinematicEntityOptions)
-        for options_cls, _, _ in entities_config
+        options_cls in (gs.entities.Rigid, gs.entities.Kinematic) for options_cls, _, _ in entities_config
     )
     n_fem_geom = (
-        sum(options_cls is gs.options.FEMEntityOptions for options_cls, _, _ in entities_config)
+        sum(options_cls is gs.entities.FEM for options_cls, _, _ in entities_config)
         if segmentation_level == "geom"
         else 0
     )
@@ -943,7 +942,7 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
     # Every vertex of the scene must stay inside the camera frustum: the Apple Software Renderer misrasterizes
     # out-of-frustum geometry.
     fem = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
+        options=gs.entities.FEM(
             morph=gs.morphs.Mesh(
                 file="meshes/trashbag_rope.glb",
                 group_by_material=True,

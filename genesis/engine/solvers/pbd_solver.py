@@ -16,12 +16,6 @@ from genesis.engine.entities import (
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
-from genesis.options.entities import (
-    PBDClothEntityOptions,
-    PBDElasticEntityOptions,
-    PBDLiquidEntityOptions,
-    PBDParticleEntityOptions,
-)
 from genesis.utils.geom import SpatialHasher
 
 from .particle_solver import ParticleSolver
@@ -355,7 +349,7 @@ class PBDSolver(ParticleSolver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(options, PBDClothEntityOptions):
+        if isinstance(options, gs.entities.PBDCloth):
             entity = PBD2DEntity(
                 scene=self.scene,
                 solver=self,
@@ -373,7 +367,7 @@ class PBDSolver(ParticleSolver):
                 options=options,
             )
 
-        elif isinstance(options, PBDElasticEntityOptions):
+        elif isinstance(options, gs.entities.PBDElastic):
             entity = PBD3DEntity(
                 scene=self.scene,
                 solver=self,
@@ -391,7 +385,7 @@ class PBDSolver(ParticleSolver):
                 options=options,
             )
 
-        elif isinstance(options, PBDLiquidEntityOptions):
+        elif isinstance(options, gs.entities.PBDLiquid):
             entity = PBDParticleEntity(
                 scene=self.scene,
                 solver=self,
@@ -405,7 +399,7 @@ class PBDSolver(ParticleSolver):
                 options=options,
             )
 
-        elif isinstance(options, PBDParticleEntityOptions):
+        elif isinstance(options, gs.entities.PBDParticle):
             entity = PBDFreeParticleEntity(
                 scene=self.scene,
                 solver=self,

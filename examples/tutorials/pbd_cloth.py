@@ -22,7 +22,7 @@ plane = scene.add_entity(
 )
 
 cloth_1 = scene.add_entity(
-    options=gs.options.PBDClothEntityOptions(
+    options=gs.entities.PBDCloth(
         morph=gs.morphs.Mesh(
             file="meshes/cloth.obj",
             scale=2.0,
@@ -37,7 +37,7 @@ cloth_1 = scene.add_entity(
 )
 
 cloth_2 = scene.add_entity(
-    options=gs.options.PBDClothEntityOptions(
+    options=gs.entities.PBDCloth(
         morph=gs.morphs.Mesh(
             file="meshes/cloth.obj",
             scale=2.0,
