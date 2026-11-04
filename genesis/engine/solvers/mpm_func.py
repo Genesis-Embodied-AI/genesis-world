@@ -879,12 +879,48 @@ def trial_deformation(
 
 
 @qd.func
-def particle_stencil(f: int, s: int, particles: MpmParticles, grid: qd.template(), params: qd.template()):
-    """Particle index, environment, stencil node slots and weights of a sorted particle."""
+def pyramid_dirs(normal: qd.types.vector(3), friction: float):
+    """Directions of the four rows of the friction pyramid around a contact normal, as the rows of a 4 x 3 matrix.
+
+    They are n - mu d1, n + mu d1, n - mu d2 and n + mu d2, with (d1, d2) the tangent basis of `gu.qd_orthogonals`."""
+    d1, d2 = gu.qd_orthogonals(normal)
+    return qd.Matrix.rows(
+        [normal - friction * d1, normal + friction * d1, normal - friction * d2, normal + friction * d2]
+    )
+
+
+@qd.func
+def contact_cross_matvec(
+    f: int,
+    s: int,
+    dq: qd.types.vector(3),
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    pcg_scalars: qd.template(),
+    params: qd.template(),
+):
+    """Add the cross term of the pyramid rows of a sorted particle on the MPM rows, and return their term on the other
+    side of the contact.
+
+    The rows of Hessian H act on the relative displacement dxp - dq, with dxp = sum_a w_a p_u,a and dq the displacement
+    of the contact point along the direction. Their term w_a w_b H is in the MPM matrix, so they add -w_a H dq to Ap_u,a
+    and -dxp . H dq to p.Ap. Returns h = H (dq - dxp), which the coupling adds to the unknowns of the contact point."""
+    pcg_workspace = linear.pcg
     i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
     slots = stencil_node_slots(env, cell, grid)
     w, grad_w = q1_stencil(particles.pos[f, i_p, i_b] * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
-    return i_p, i_b, slots, w
+    H = newton.h_rigid[s]
+    dxp = qd.Vector.zero(gs.qd_float, 3)
+    for a in qd.static(range(8)):
+        dxp += w[a] * qd.Vector([pcg_workspace.p[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    H_dq = H @ dq
+    for a in qd.static(range(8)):
+        for d in qd.static(range(3)):
+            qd.atomic_add(pcg_workspace.ap[3 * slots[a] + d], -w[a] * H_dq[d])
+    qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
+    return H @ (dq - dxp)
 
 
 # ============================================== Layer 1: grid rebuild ================================================

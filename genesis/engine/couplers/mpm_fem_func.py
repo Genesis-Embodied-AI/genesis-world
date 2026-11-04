@@ -21,7 +21,13 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
-from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted, particle_stencil
+from genesis.engine.solvers.mpm_func import (
+    contact_band_width,
+    contact_cross_matvec,
+    contact_invweight,
+    particle_of_sorted,
+    pyramid_dirs,
+)
 from genesis.utils import array_class
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
@@ -291,14 +297,10 @@ def func_build_fem_rows(
                     friction = qd.max(fem.elements_i[i_e].friction_mu, MIN_FRICTION)
                     invweight = contact_invweight(f, i_p, i_b, best_normal, particles, particles_info) + inv_mass
                     D = query.contact.stiffness[()] / invweight
-                    d1, d2 = gu.qd_orthogonals(best_normal)
+                    dirs = pyramid_dirs(best_normal, friction)
                     for i in qd.static(range(PYRAMID_ROWS)):
-                        d = d1
-                        if qd.static(i >= 2):
-                            d = d2
-                        J = best_normal + (qd.static(2 * (i % 2) - 1) * friction) * d
                         k = CONTACT_ROWS * s + WALL_ROWS + i
-                        newton.contact_dir[k] = J
+                        newton.contact_dir[k] = dirs[i, :]
                         newton.contact_D[k] = D
                         newton.contact_t[k] = -best_phi
                     newton.contact_tri[s] = best_tri
@@ -351,39 +353,6 @@ def func_fem_factor(fem: qd.template()):
         fem.pcg_state_v[i_b, i_v].prec = fem.pcg_state_v[i_b, i_v].diag3x3.inverse()
 
 
-@qd.func
-def fem_contact_terms(
-    f: int,
-    s: int,
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    fem: qd.template(),
-    params: qd.template(),
-):
-    """The operator terms of the FEM rows of a sorted particle: its stencil, row Hessian and trial displacement, and the
-    displacement of its closest point.
-
-    For sorted particle s, the func returns its environment i_b, its stencil slots and weights w, its row Hessian H, its
-    trial displacement dxp = sum_a w_a p_u,a along the direction and the displacement dq = sum_k b_k p_v,k of its
-    closest point."""
-    pcg_workspace = linear.pcg
-    i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-    H = newton.h_rigid[s]
-    dxp = qd.Vector.zero(gs.qd_float, 3)
-    for a in qd.static(range(8)):
-        row = 3 * slots[a]
-        dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    i_s = newton.contact_tri[s]
-    bary = newton.contact_bary[s]
-    dq = qd.Vector.zero(gs.qd_float, 3)
-    for k in qd.static(range(3)):
-        i_v = fem.surface[i_s].tri2v[k]
-        dq += bary[k] * fem.pcg_state_v[i_b, i_v].p
-    return i_b, slots, w, H, dxp, dq
-
-
 @qd.func(requires_top_level=True)
 def func_fem_contact_matvec(
     f: int,
@@ -395,42 +364,24 @@ def func_fem_contact_matvec(
     pcg_scalars: qd.template(),
     params: qd.template(),
 ):
-    """The FEM rows' cross term on the MPM rows, after func_linear_pcg_spmv: Ap_u,a -= w_a H dq, and p.Ap takes
-    p_u.(-sum w_a H dq)."""
-    pcg_workspace = linear.pcg
-    qd.loop_config(name="mpm_fem_matvec_particles")
-    for s in range(grid.n_valid[()]):
-        if newton.contact_tri[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
-            H_dq = H @ dq
-            for a in qd.static(range(8)):
-                row = 3 * slots[a]
-                for d in qd.static(range(3)):
-                    qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dq[d])
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
+    """The FEM rows' share of the joint operator, after the own operators of MPM and FEM set their Ap.
 
-
-@qd.func(requires_top_level=True)
-def func_fem_contact_matvec_post(
-    f: int,
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    fem: qd.template(),
-    pcg_scalars: qd.template(),
-    params: qd.template(),
-):
-    """The FEM rows' term on the FEM rows, after FEM's own operator overwrote its Ap: Ap_v,k += b_k H (dq - dxp)."""
-    qd.loop_config(name="mpm_fem_matvec_vertices")
+    The closest point of a particle moves by dq = sum_k b_k p_v,k along the direction. The rows add their cross term on
+    the MPM rows (see contact_cross_matvec), and b_k h to Ap_v,k of the vertices of the triangle."""
+    qd.loop_config(name="mpm_fem_contact_matvec")
     for s in range(grid.n_valid[()]):
-        if newton.contact_tri[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
-            h = H @ (dq - dxp)
-            i_s = newton.contact_tri[s]
+        i_s = newton.contact_tri[s]
+        if i_s >= 0 and pcg_scalars.is_converged[()] == 0:
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             bary = newton.contact_bary[s]
+            tri2v = fem.surface[i_s].tri2v
+            dq = qd.Vector.zero(gs.qd_float, 3)
             for k in qd.static(range(3)):
-                i_v = fem.surface[i_s].tri2v[k]
+                i_v = tri2v[k]
+                dq += bary[k] * fem.pcg_state_v[i_b, i_v].p
+            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, params)
+            for k in qd.static(range(3)):
+                i_v = tri2v[k]
                 qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, bary[k] * h)
 
 

@@ -31,11 +31,12 @@ from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     band_row,
     contact_band_width,
+    contact_cross_matvec,
     contact_invweight,
     contact_row_terms,
     particle_of_sorted,
-    particle_stencil,
     particle_trial_disp,
+    pyramid_dirs,
     stencil_node_slots,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch, func_vel_at_point
@@ -310,12 +311,9 @@ def func_build_rigid_rows(
             diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
             sol_params = geoms_info.sol_params[i_g_contact]
             sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
-            d1, d2 = gu.qd_orthogonals(normal)
+            dirs = pyramid_dirs(normal, friction)
             for i in qd.static(range(PYRAMID_ROWS)):
-                d = d1
-                if qd.static(i >= 2):
-                    d = d2
-                J = normal + (qd.static(2 * (i % 2) - 1) * friction) * d
+                J = dirs[i, :]
                 D, t = band_row(sol_params, phi, J.dot(v_rel), diag_coef, dt)
                 k = CONTACT_ROWS * s + WALL_ROWS + i
                 newton.contact_dir[k] = J
@@ -787,37 +785,22 @@ def func_rigid_contact_matvec(
     params: qd.template(),
     config: qd.template(),
 ):
-    """Apply the Rigid contact rows' share of the joint operator beyond the MPM matrix, after func_linear_pcg_spmv.
+    """Apply the Rigid contact rows' share of the joint operator, after the own operators of MPM and Rigid set their Ap.
 
-    It acts on p = (p_u, p_r), after func_rigid_matvec set Ap_r. A particle with Rigid rows of Hessian H, trial
-    displacement dxp = sum_a w_a p_u,a and contact point displacement dr of p_r adds -w_a H dr to Ap_u,a and the spatial
-    force (h, r x h), h = H (dr - dxp), to its link in `link_force_vel` / `link_force_ang`, which
-    func_rigid_contact_matvec_post hands to Ap_r.
-    p.Ap gains p_u . (-sum_a w_a H dr).
-    """
-    pcg_workspace = linear.pcg
+    The contact point of a particle moves by dr of p_r along the direction. The rows add their cross term on the MPM
+    rows (see contact_cross_matvec), and the spatial force (h, r x h) to the link in `link_force_vel` /
+    `link_force_ang`, which func_rigid_contact_matvec_post hands to Ap_r."""
     func_link_spatial_disp(rigid_data.p, rigid_data, dyn_state.dofs, dyn_info.links, config)
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-            H = newton.h_rigid[s]
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
             dr = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
-            dxp = qd.Vector.zero(gs.qd_float, 3)
-            for a in qd.static(range(8)):
-                row = 3 * slots[a]
-                dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H_dr = H @ dr
-            for a in qd.static(range(8)):
-                row = 3 * slots[a]
-                for d in qd.static(range(3)):
-                    qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dr[d])
-            h = H @ (dr - dxp)
+            h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, params)
             qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], h)
             qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(h))
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dr))
 
 
 @qd.func(requires_top_level=True)

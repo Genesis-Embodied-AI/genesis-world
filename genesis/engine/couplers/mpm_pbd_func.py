@@ -24,9 +24,10 @@ from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROW
 from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     contact_band_width,
+    contact_cross_matvec,
     contact_invweight,
     particle_of_sorted,
-    particle_stencil,
+    pyramid_dirs,
 )
 from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
 from genesis.utils import array_class
@@ -356,14 +357,10 @@ def func_build_pbd_rows(
                     if is_moving(i_q, i_b, pbd):
                         invweight += 1.0 / pbd.particles_info_reordered[i_q, i_b].mass
                     D = query.contact.stiffness[()] / invweight
-                    d1, d2 = gu.qd_orthogonals(normal)
+                    dirs = pyramid_dirs(normal, friction)
                     for i in qd.static(range(PYRAMID_ROWS)):
-                        d = d1
-                        if qd.static(i >= 2):
-                            d = d2
-                        J = normal + (qd.static(2 * (i % 2) - 1) * friction) * d
                         k = CONTACT_ROWS * s + WALL_ROWS + i
-                        newton.contact_dir[k] = J
+                        newton.contact_dir[k] = dirs[i, :]
                         newton.contact_D[k] = D
                         newton.contact_t[k] = -phi
                     newton.contact_pbd[s] = i_q
@@ -397,34 +394,6 @@ def func_pbd_contact_gradient(
             qd.atomic_add(pbd_data.diag_inv[i_q, i_b], newton.h_rigid[s])
 
 
-@qd.func
-def pbd_contact_terms(
-    f: int,
-    s: int,
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    pbd_data: qd.template(),
-    params: qd.template(),
-):
-    """The operator terms of the PBD rows of a sorted particle: its stencil, row Hessian and trial displacement, and the
-    direction of its PBD particle.
-
-    For sorted particle s, the func returns its stencil slots and weights w, its row Hessian H, its trial displacement
-    dxp = sum_a w_a p_u,a along the direction, its environment i_b and PBD particle i_q, and the direction dq of the
-    PBD particle."""
-    pcg_workspace = linear.pcg
-    i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-    H = newton.h_rigid[s]
-    dxp = qd.Vector.zero(gs.qd_float, 3)
-    for a in qd.static(range(8)):
-        row = 3 * slots[a]
-        dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    i_q = newton.contact_pbd[s]
-    return slots, w, H, dxp, i_b, i_q, pbd_data.p[i_q, i_b]
-
-
 @qd.func(requires_top_level=True)
 def func_pbd_contact_matvec(
     f: int,
@@ -436,38 +405,18 @@ def func_pbd_contact_matvec(
     pcg_scalars: qd.template(),
     params: qd.template(),
 ):
-    """The PBD rows' cross term on the MPM rows, after func_linear_pcg_spmv: Ap_u,a -= w_a H dq, and p.Ap takes
-    p_u.(-sum w_a H dq)."""
-    pcg_workspace = linear.pcg
-    qd.loop_config(name="mpm_pbd_matvec_particles")
-    for s in range(grid.n_valid[()]):
-        if newton.contact_pbd[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            slots, w, H, dxp, i_b, i_q, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
-            H_dq = H @ dq
-            for a in qd.static(range(8)):
-                row = 3 * slots[a]
-                for d in qd.static(range(3)):
-                    qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dq[d])
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
+    """The PBD rows' share of the joint operator, after the own operators of MPM and PBD set their Ap.
 
-
-@qd.func(requires_top_level=True)
-def func_pbd_contact_matvec_post(
-    f: int,
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    pbd_data: qd.template(),
-    pcg_scalars: qd.template(),
-    params: qd.template(),
-):
-    """The PBD rows' term on the PBD rows, after the inertia overwrote their Ap: Ap_q += H (dq - dxp)."""
-    qd.loop_config(name="mpm_pbd_matvec_pbd")
+    The PBD particle of a particle moves by its direction dq = p_q. The rows add their cross term on the MPM rows (see
+    contact_cross_matvec), and h to Ap_q."""
+    qd.loop_config(name="mpm_pbd_contact_matvec")
     for s in range(grid.n_valid[()]):
-        if newton.contact_pbd[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            slots, w, H, dxp, i_b, i_q, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
-            qd.atomic_add(pbd_data.ap[i_q, i_b], H @ (dq - dxp))
+        i_q = newton.contact_pbd[s]
+        if i_q >= 0 and pcg_scalars.is_converged[()] == 0:
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            dq = pbd_data.p[i_q, i_b]
+            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, params)
+            qd.atomic_add(pbd_data.ap[i_q, i_b], h)
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -736,9 +685,6 @@ class MpmPbdContact:
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
         func_pbd_contact_matvec(
-            f, self.particles, self.grid, self.newton, self.linear, self.pbd_data, pcg_scalars, self.params
-        )
-        func_pbd_contact_matvec_post(
             f, self.particles, self.grid, self.newton, self.linear, self.pbd_data, pcg_scalars, self.params
         )
 
