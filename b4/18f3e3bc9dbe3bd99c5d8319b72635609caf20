@@ -1,0 +1,27 @@
+genesis/ext/urdfpy/utils.py
+  s_be364e7a0e7b79::t_1d6635add994f5 229,236-238,243,245
+genesis/utils/urdf.py
+  s_be364e7a0e7b79::t_66d281dce016ac 206-207,211-213
+genesis/ext/urdfpy/urdf.py
+  s_be364e7a0e7b79::t_66d281dce016ac 645-646,653
+tests/core/test_misc.py
+  s_be364e7a0e7b79::t_531a0be6976dc2 36-60,82-84,376-412,704-709
+genesis/utils/mesh.py
+  s_be364e7a0e7b79::t_add1f3798d29b5 797-804,807-808,825-826,832-834,836-837,842
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b418f3e3bc9dbe3bd99c5d8319b72635609caf20",
+  "prompts": {},
+  "sessions": {
+    "s_be364e7a0e7b79": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d4207219-42a8-4f9b-98c0-dd78a134c7f4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
