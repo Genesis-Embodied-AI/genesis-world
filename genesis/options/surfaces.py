@@ -8,7 +8,7 @@ from pydantic import Field, StrictBool, field_validator, model_validator
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
 from genesis.utils import mesh as mu
-from genesis.utils.cache import SizeCappedCache
+from genesis.utils.cache import OwnedCache
 
 from .misc import FoamOptions
 from .options import Options
@@ -218,11 +218,9 @@ class Surface(Options):
         return opacity
 
 
-# 512 MiB of merged RGBA textures, bounded by the byte size of the image arrays they hold (full-resolution textures
-# dominate the footprint; a count-based bound would not reflect it). The entry count is also capped so that flat-color
-# surfaces (no image array, e.g. per-geom randomized collision colors) cannot accumulate unbounded. Dropped on genesis
-# teardown like the other caches.
-_RGBA_CACHE = SizeCappedCache(max_bytes=512 * 1024 * 1024, max_entries=8192)
+# RGBA textures merged from the color and opacity textures of the surfaces, by the content of those textures (see
+# '_make_rgba').
+_RGBA_CACHE = OwnedCache()
 
 
 def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | None) -> Texture | None:
@@ -253,82 +251,78 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
 
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
-    # Resolve a surface's color and opacity textures into a single RGBA texture. The result is memoized on the input
-    # texture instances, flat colors aside, which are memoized on their color: surfaces sharing the same textures (e.g.
-    # all textured submeshes of a GLB, or meshes sharing an image texture but each given its own default opacity) then
-    # reuse a single merged array instead of allocating one full-resolution copy each. A texture update swaps in a new
-    # instance, which is a natural cache miss, so no explicit invalidation is needed.
-    cache_key = (
-        *[
-            texture.color if isinstance(texture, ColorTexture) else texture
-            for texture in (color_texture, opacity_texture)
-        ],
-        batch,
-    )
-    cached = _RGBA_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    # Resolve a surface's color and opacity textures into a single RGBA texture. The result is memoized on the content
+    # of the input textures and lives as long as any of them: surfaces drawing the same colors (e.g. all textured
+    # submeshes of a GLB, or every entity loaded from one asset) then reuse a single merged array instead of allocating
+    # one full-resolution copy each. A texture update swaps in a new instance, which releases the entry along with the
+    # last instance holding the former content.
+    input_textures = [texture for texture in (color_texture, opacity_texture) if texture is not None]
+    cache_key = (*[None if texture is None else texture.hashkey for texture in (color_texture, opacity_texture)], batch)
+    result = _RGBA_CACHE.find(cache_key)
+    if result is None:
+        all_textures = []
+        for texture in (color_texture, opacity_texture):
+            textures = texture.textures if isinstance(texture, BatchTexture) else [texture]
+            all_textures.append(textures if batch else textures[:1])
+        color_textures, opacity_textures = all_textures
 
-    all_textures = []
-    for texture in (color_texture, opacity_texture):
-        textures = texture.textures if isinstance(texture, BatchTexture) else [texture]
-        all_textures.append(textures if batch else textures[:1])
-    color_textures, opacity_textures = all_textures
+        rgba_textures = []
+        num_colors = len(color_textures)
+        num_opacities = len(opacity_textures)
+        num_rgba = num_colors * num_opacities // math.gcd(num_colors, num_opacities)
 
-    rgba_textures = []
-    num_colors = len(color_textures)
-    num_opacities = len(opacity_textures)
-    num_rgba = num_colors * num_opacities // math.gcd(num_colors, num_opacities)
+        for i in range(num_rgba):
+            color_texture = color_textures[i % num_colors]
+            opacity_texture = opacity_textures[i % num_opacities]
 
-    for i in range(num_rgba):
-        color_texture = color_textures[i % num_colors]
-        opacity_texture = opacity_textures[i % num_opacities]
+            if isinstance(color_texture, ColorTexture):
+                if isinstance(opacity_texture, ColorTexture):
+                    rgba_texture = ColorTexture(color=(*color_texture.color, *opacity_texture.color))
+                elif isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
+                    rgb_color = mu.color_f32_to_u8(color_texture.color)
+                    rgb_array = np.full((*opacity_texture.image_array.shape[:2], 3), rgb_color, dtype=np.uint8)
+                    rgba_array = np.dstack((rgb_array, opacity_texture.image_array))
+                    rgba_scale = (1.0, 1.0, 1.0, *opacity_texture.image_color)
+                    rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
+                else:
+                    rgba_texture = ColorTexture(color=(*color_texture.color, 1.0))
 
-        if isinstance(color_texture, ColorTexture):
-            if isinstance(opacity_texture, ColorTexture):
-                rgba_texture = ColorTexture(color=(*color_texture.color, *opacity_texture.color))
-            elif isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
-                rgb_color = mu.color_f32_to_u8(color_texture.color)
-                rgb_array = np.full((*opacity_texture.image_array.shape[:2], 3), rgb_color, dtype=np.uint8)
-                rgba_array = np.dstack((rgb_array, opacity_texture.image_array))
-                rgba_scale = (1.0, 1.0, 1.0, *opacity_texture.image_color)
+            elif isinstance(color_texture, ImageTexture) and color_texture.image_array is not None:
+                if isinstance(opacity_texture, ColorTexture):
+                    a_color = mu.color_f32_to_u8(opacity_texture.color)
+                    a_array = np.full((*color_texture.image_array.shape[:2],), a_color, dtype=np.uint8)
+                    rgba_array = np.dstack((color_texture.image_array, a_array))
+                    rgba_scale = (*color_texture.image_color, 1.0)
+                elif (
+                    isinstance(opacity_texture, ImageTexture)
+                    and opacity_texture.image_array is not None
+                    and opacity_texture.image_array.shape[:2] == color_texture.image_array.shape[:2]
+                ):
+                    rgba_array = np.dstack((color_texture.image_array, opacity_texture.image_array))
+                    rgba_scale = (*color_texture.image_color, *opacity_texture.image_color)
+                else:
+                    if isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
+                        gs.logger.warning(
+                            "Color and opacity image shapes do not match. Fall back to fully opaque texture."
+                        )
+                    a_array = np.full(color_texture.image_array.shape[:2], 255, dtype=np.uint8)
+                    rgba_array = np.dstack((color_texture.image_array, a_array))
+                    rgba_scale = (*color_texture.image_color, 1.0)
                 rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
+
             else:
-                rgba_texture = ColorTexture(color=(*color_texture.color, 1.0))
+                rgba_texture = ColorTexture(color=(1.0, 1.0, 1.0, 1.0))
 
-        elif isinstance(color_texture, ImageTexture) and color_texture.image_array is not None:
-            if isinstance(opacity_texture, ColorTexture):
-                a_color = mu.color_f32_to_u8(opacity_texture.color)
-                a_array = np.full((*color_texture.image_array.shape[:2],), a_color, dtype=np.uint8)
-                rgba_array = np.dstack((color_texture.image_array, a_array))
-                rgba_scale = (*color_texture.image_color, 1.0)
-            elif (
-                isinstance(opacity_texture, ImageTexture)
-                and opacity_texture.image_array is not None
-                and opacity_texture.image_array.shape[:2] == color_texture.image_array.shape[:2]
-            ):
-                rgba_array = np.dstack((color_texture.image_array, opacity_texture.image_array))
-                rgba_scale = (*color_texture.image_color, *opacity_texture.image_color)
-            else:
-                if isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
-                    gs.logger.warning("Color and opacity image shapes do not match. Fall back to fully opaque texture.")
-                a_array = np.full(color_texture.image_array.shape[:2], 255, dtype=np.uint8)
-                rgba_array = np.dstack((color_texture.image_array, a_array))
-                rgba_scale = (*color_texture.image_color, 1.0)
-            rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
+            rgba_textures.append(rgba_texture)
 
-        else:
-            rgba_texture = ColorTexture(color=(1.0, 1.0, 1.0, 1.0))
-
-        rgba_textures.append(rgba_texture)
-
-    result = BatchTexture(textures=rgba_textures) if batch else rgba_textures[0]
-    n_bytes = sum(
-        t.image_array.nbytes
-        for t in (result.textures if isinstance(result, BatchTexture) else [result])
-        if isinstance(t, ImageTexture) and t.image_array is not None
-    )
-    _RGBA_CACHE.put(cache_key, result, n_bytes)
+        result = BatchTexture(textures=rgba_textures) if batch else rgba_textures[0]
+        # Every surface drawing the same colors shares the merged arrays, so writing into them raises rather than
+        # changing all those surfaces.
+        for rgba_texture in result.textures if isinstance(result, BatchTexture) else (result,):
+            if isinstance(rgba_texture, ImageTexture):
+                rgba_texture.image_array.flags.writeable = False
+    for texture in input_textures:
+        _RGBA_CACHE.own(texture, cache_key, result)
     return result
 
 

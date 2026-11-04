@@ -1,15 +1,16 @@
 import os
 from functools import cached_property
-from typing import Annotated, Sequence, Literal, Iterable, cast
+from typing import Annotated, Hashable, Iterable, Literal, Sequence, cast
 
 import numpy as np
+
 from PIL import Image
-from pydantic import model_validator, computed_field, BeforeValidator, Field
+from pydantic import BeforeValidator, Field, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
-from genesis.typing import LaxUnitIntervalArrayType, LaxFArrayType, UnitIntervalArrayType, NDArrayType
-
+from genesis.typing import LaxFArrayType, LaxUnitIntervalArrayType, NDArrayType, UnitIntervalArrayType
+from genesis.utils.cache import get_hashkey
 from genesis.utils.serialization import Exporting, Loading, SerializationMixin
 
 from .options import Options
@@ -31,7 +32,7 @@ class Texture(Options):
     # Pydantic disables hashing for models with a field-based __eq__; its only opt-in (model_config frozen=True) also
     # forbids the in-place edits done during setup (apply_cutoff, check_dim reassign image_array/color). Restore
     # identity hashing instead: textures are shared by reference and stable once a surface is built, so their identity
-    # is a valid key for caches such as the get_rgba cache.
+    # is a valid key for caches such as the trimesh materials cache (see 'surface_uvs_to_trimesh_visual').
     __hash__ = object.__hash__
 
     def __init__(self, **data):
@@ -52,6 +53,11 @@ class Texture(Options):
 
     @cached_property
     def requires_uv(self) -> bool:
+        raise NotImplementedError
+
+    @property
+    def hashkey(self) -> Hashable:
+        """Key of the content of the texture, shared by the textures holding the same colors."""
         raise NotImplementedError
 
 
@@ -92,6 +98,10 @@ class ColorTexture(Texture):
     @cached_property
     def requires_uv(self) -> bool:
         return False
+
+    @property
+    def hashkey(self) -> Hashable:
+        return self.color
 
 
 class ImageTexture(Texture, SerializationMixin):
@@ -233,6 +243,15 @@ class ImageTexture(Texture, SerializationMixin):
             return np.ones(3, dtype=np.float16)
         return cast(np.ndarray, (np.mean(self.image_array, axis=(0, 1), dtype=np.float32) / 255).astype(np.float16))
 
+    @property
+    def hashkey(self) -> Hashable:
+        # An HDR image is never loaded, so its file stands in for its pixels.
+        if self.image_array is None:
+            image_key = self.image_path
+        else:
+            image_key = get_hashkey(self.image_array, self.image_array.shape, self.image_array.dtype.str)
+        return (image_key, self.image_color, self.encoding)
+
     def check_dim(self, dim: int) -> Texture | None:
         if self.image_array is not None:
             if self.channel > dim:
@@ -255,7 +274,7 @@ class ImageTexture(Texture, SerializationMixin):
             return
         # The cutoff applies to the texel alpha scaled by the material's alpha factor, which image_color holds
         self.image_array = np.where(self.image_array * self.image_color >= 255.0 * cutoff, 255, 0).astype(np.uint8)
-        self.image_color = np.ones_like(self.image_color)
+        self.image_color = (1.0,) * len(self.image_color)
 
     def export(self, exporting: Exporting) -> dict | None:
         """Return the pixels of the image and how they are read, or None where a file can hold none of it.
@@ -391,6 +410,10 @@ class BatchTexture(Texture):
     @cached_property
     def requires_uv(self) -> bool:
         return any(texture is not None and texture.requires_uv for texture in self.textures)
+
+    @property
+    def hashkey(self) -> Hashable:
+        return tuple([None if texture is None else texture.hashkey for texture in self.textures])
 
     def check_dim(self, dim: int) -> "BatchTexture":
         return BatchTexture(
