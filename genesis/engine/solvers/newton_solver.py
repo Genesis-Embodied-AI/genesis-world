@@ -307,6 +307,8 @@ class NewtonSolver(Solver):
         self._participants = None
         self._is_loop_graph = options.graph == "newton"
         self._has_coupling_devices = False
+        # Whether a solve of the current step stopped on a non-finite measure
+        self._is_step_failed = False
         self._has_warned_adjoint_projection = False
 
     def register(self, participants, couplings):
@@ -353,14 +355,20 @@ class NewtonSolver(Solver):
 
         The launches of the solve of substep `f` form one entry of the step recorded for a backward pass, which
         `backward` reverses: the solve is differentiated by the implicit function theorem rather than launch by launch.
+
+        Once a solve of the step stopped on a non-finite measure, the remaining substeps of the step skip the solve,
+        which would only carry the non-finite values on, and the step raises at its end (see `_check_failures`).
         """
         if not self.is_active:
             return
-        with custom_backward(self.backward, f):
-            self._step(f)
-        # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
-        for host in self._hosts:
-            host.newton_end(f)
+        if not self._is_step_failed:
+            with custom_backward(self.backward, f):
+                self._step(f)
+            # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred
+            # substep
+            for host in self._hosts:
+                host.newton_end(f)
+            self._is_step_failed = bool(int(qd_to_numpy(self.control.has_failed_non_finite)))
         self._check_failures()
 
     def _check_failures(self):
@@ -376,6 +384,7 @@ class NewtonSolver(Solver):
             for host in self._participant_hosts:
                 host.newton_flag_non_finite(control)
             kernel_clear_non_finite(control)
+            self._is_step_failed = False
         if sim.cur_substep_global % self._options.failure_check_interval == 0:
             if int(qd_to_numpy(control.has_failed_iterations)):
                 control.has_failed_iterations.from_numpy(np.array(0, dtype=gs.np_int))

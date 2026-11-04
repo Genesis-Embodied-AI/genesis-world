@@ -170,6 +170,46 @@ def test_perf_dispatch(variant, show_viewer):
     assert final_liquid_pos[..., 2].min() > -0.5 * dx
 
 
+@pytest.mark.required
+def test_non_finite_state_raises(show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=4e-3,
+            substeps=4,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=32,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.1),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.build()
+
+    vel = block.get_particles_vel()
+    vel[0, 0] = float("nan")
+    block.set_particles_vel(vel)
+    scene.step()
+    assert scene.get_error_envs_mask().all()
+    # The error raises at the beginning of a later step, one step later where the check of the flags does not wait for
+    # the device
+    with pytest.raises(gs.GenesisException, match="NaN detected in MPM states"):
+        for _ in range(2):
+            scene.step()
+
+
 @pytest.mark.slow  # ~300s from a cold cache, the Newton graph compiling in ~200s
 @pytest.mark.required
 @pytest.mark.precision("64")

@@ -25,6 +25,7 @@ from genesis.engine.solvers.mpm_func import (
     extended_hencky_principal,
     fixed_corotated_energy,
     fixed_corotated_principal,
+    invert_node_block,
     isotropic_first_piola_differential,
     isotropic_pair_block,
     isotropic_projected_modes,
@@ -344,6 +345,39 @@ def test_crushed_states_restore(family, unextended):
     for delta in (0.1, 0.2):
         sigma = np.full(3, delta)
         assert (sigma * gradient(family, sigma) < 5.0 * sigma * gradient(unextended, sigma)).all()
+
+
+@qd.kernel
+def kernel_invert_node_block(D_in: qd.types.ndarray(), D_inv_out: qd.types.ndarray()):
+    for _ in range(1):
+        D = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            D[i, j] = D_in[i, j]
+        D_inv = invert_node_block(D)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            D_inv_out[i, j] = D_inv[i, j]
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_invert_node_block():
+    D_nd, D_inv_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
+
+    def invert(D):
+        D_nd.from_numpy(np.asarray(D, dtype=gs.np_float))
+        kernel_invert_node_block(D_nd, D_inv_nd)
+        return qd_to_numpy(D_inv_nd)
+
+    # The block m I of a node of vanishing mass, whose determinant m^3 underflows in single precision
+    mass = 2.2e-14
+    assert_allclose(invert(mass * np.eye(3)), np.eye(3) / mass, rtol=1e-5)
+    # The block of no particle
+    assert_allclose(invert(np.zeros((3, 3))), np.eye(3), tol=gs.EPS)
+    rng = np.random.default_rng(5)
+    a = rng.standard_normal((3, 3))
+    D = a @ a.T + np.diag([1e-3, 1.0, 1e3])
+    assert_allclose(invert(D), np.linalg.inv(D), rtol=1e-4)
 
 
 @qd.kernel

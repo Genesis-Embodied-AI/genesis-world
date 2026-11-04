@@ -2091,6 +2091,34 @@ def func_gather_brick(linear: qd.template()):
                     linear.brick[base + 3 * i + j] = block[i, j]
 
 
+@qd.func
+def invert_node_block(D):
+    """Invert the 3 x 3 block of a node coupled to no other node of its brick, equilibrated to a unit diagonal as the
+    coupled nodes are.
+
+    `qd.Matrix.inverse` divides the adjugate by the determinant, which overflows to inf, and then to nan in the products
+    of the preconditioner, as soon as the determinant underflows to zero. A node reached by a sliver of a particle
+    stencil has a block of about m I with a vanishing mass m: in single precision with fast math, its determinant m^3
+    flushes to zero from m below about 2e-13, while its inverse 1 / m is representable down to m of about 3e-39. The
+    equilibration to a unit diagonal keeps the determinant near one. A diagonal entry that is not positive is left
+    unscaled, and a block whose equilibrated determinant is not positive, such as the block of no particle, takes the
+    identity, which leaves its rows unpreconditioned."""
+    scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    for i in qd.static(range(3)):
+        if D[i, i] > 0.0:
+            scale[i] = 1.0 / qd.sqrt(D[i, i])
+    S = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        S[i, j] = D[i, j] * scale[i] * scale[j]
+    S_inv = qd.Matrix.identity(gs.qd_float, 3)
+    if S.determinant() > 0.0:
+        S_inv = S.inverse()
+    D_inv = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        D_inv[i, j] = S_inv[i, j] * scale[i] * scale[j]
+    return D_inv
+
+
 @qd.func(requires_top_level=True)
 def func_invert_brick(grid: qd.template(), linear: qd.template()):
     """Invert every brick's 48 x 48 matrix in place and record which of its nodes are coupled inside the brick.
@@ -2130,7 +2158,7 @@ def func_invert_brick_cpu(grid: qd.template(), linear: qd.template()):
             for r in range(BRICK_DIM):
                 if (bits & (1 << (r // 3))) != 0:
                     diagonal = linear.brick[brick_entry_index(base, r, r)]
-                    linear.brick_scratch[scale_start + r] = 1.0 / qd.sqrt(1.0 if diagonal == 0.0 else diagonal)
+                    linear.brick_scratch[scale_start + r] = 1.0 / qd.sqrt(diagonal if diagonal > 0.0 else 1.0)
             for r in range(BRICK_DIM):
                 if (bits & (1 << (r // 3))) != 0:
                     for c in range(r, BRICK_DIM):
@@ -2188,13 +2216,9 @@ def func_invert_brick_cpu(grid: qd.template(), linear: qd.template()):
             if (bits & (1 << a)) == 0:
                 block_base = base + brick_sym_index(a, a) * 9
                 D = qd.Matrix.zero(gs.qd_float, 3, 3)
-                entry_max = gs.qd_float(0.0)
                 for i, j in qd.static(qd.ndrange(3, 3)):
                     D[i, j] = linear.brick[block_base + 3 * i + j]
-                    entry_max = qd.max(entry_max, qd.abs(D[i, j]))
-                if entry_max == 0.0:
-                    D = qd.Matrix.identity(gs.qd_float, 3)
-                D_inv = D.inverse()
+                D_inv = invert_node_block(D)
                 for i, j in qd.static(qd.ndrange(3, 3)):
                     linear.brick[block_base + 3 * i + j] = D_inv[i, j]
 
@@ -2268,7 +2292,7 @@ def func_invert_brick_gpu(grid: qd.template(), linear: qd.template()):
                 r = lane + half * _WARP
                 if r < BRICK_DIM:
                     diagonal = sh_scale[i_warp * BRICK_DIM + r]
-                    sh_scale[i_warp * BRICK_DIM + r] = 1.0 / qd.sqrt(1.0 if diagonal == 0.0 else diagonal)
+                    sh_scale[i_warp * BRICK_DIM + r] = 1.0 / qd.sqrt(diagonal if diagonal > 0.0 else 1.0)
             qd.simt.subgroup.sync()
             qd.simt.subgroup.mem_fence()
 
@@ -2356,13 +2380,9 @@ def func_invert_brick_gpu(grid: qd.template(), linear: qd.template()):
         if lane < BRICK_NODES and (bits & (1 << lane)) == 0:
             block_base = base + brick_sym_index(lane, lane) * 9
             D = qd.Matrix.zero(gs.qd_float, 3, 3)
-            entry_max = gs.qd_float(0.0)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 D[i, j] = linear.brick[block_base + 3 * i + j]
-                entry_max = qd.max(entry_max, qd.abs(D[i, j]))
-            if entry_max == 0.0:
-                D = qd.Matrix.identity(gs.qd_float, 3)
-            D_inv = D.inverse()
+            D_inv = invert_node_block(D)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 linear.brick[block_base + 3 * i + j] = D_inv[i, j]
         qd.simt.subgroup.sync()
