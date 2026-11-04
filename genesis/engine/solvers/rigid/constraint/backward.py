@@ -506,20 +506,7 @@ def kernel_manual_add_collision_constraints_bw(
                 link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
                 invweight = invweight + dyn_info.links.invweight[link_b_maybe_batch][0]
 
-            # --- forward intermediates of qd_orthogonals(normal) ---
-            #   b_raw branches on |normal[1]| < 0.5; b = normalize(b_raw)
-            #   d1 = b x normal, d2 = b
-            n0, n1, n2 = normal[0], normal[1], normal[2]
-            is_branch_a = qd.abs(n1) < 0.5
-            b_raw = gs.qd_vec3(0.0, 0.0, 0.0)
-            if is_branch_a:
-                b_raw = gs.qd_vec3(-n0 * n1, 1.0 - n1 * n1, -n2 * n1)
-            else:
-                b_raw = gs.qd_vec3(-n0 * n2, -n1 * n2, 1.0 - n2 * n2)
-            b_raw_norm = b_raw.norm()
-            b = b_raw / b_raw_norm
-            d1 = b.cross(normal)
-            d2 = b
+            d1, d2 = gu.qd_orthogonals(normal)
 
             neg_pen = -penetration
             imp, b_coef, k_coef, d_imp_d_imp_x = gu.imp_aref_grad(sol_params, neg_pen)
@@ -622,22 +609,7 @@ def kernel_manual_add_collision_constraints_bw(
                 else:
                     g_d2 += s_i * g_d
 
-            # Reverse qd_orthogonals: d1 = b x normal, d2 = b, b = normalize(b_raw(normal)).
-            dL_db = g_d2 + normal.cross(g_d1)
-            g_normal += g_d1.cross(b)
-            # b = b_raw / |b_raw|
-            dL_db_raw = (dL_db - dL_db.dot(b) * b) / b_raw_norm
-            # b_raw(normal) branch Jacobian
-            if is_branch_a:
-                # b_raw = (-n0 n1, 1 - n1^2, -n2 n1)
-                g_normal[0] += dL_db_raw[0] * (-n1)
-                g_normal[1] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-2.0 * n1) + dL_db_raw[2] * (-n2)
-                g_normal[2] += dL_db_raw[2] * (-n1)
-            else:
-                # b_raw = (-n0 n2, -n1 n2, 1 - n2^2)
-                g_normal[0] += dL_db_raw[0] * (-n2)
-                g_normal[1] += dL_db_raw[1] * (-n2)
-                g_normal[2] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-n1) + dL_db_raw[2] * (-2.0 * n2)
+            g_normal += gu.qd_orthogonals_bw(normal, g_d1, g_d2)
 
             for j in qd.static(range(3)):
                 collider_state.contact_data.pos.grad[i_col, i_b][j] = g_pos[j]

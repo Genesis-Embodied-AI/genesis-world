@@ -29,29 +29,19 @@ from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles,
 from .mpm_func import (
     LIQUID_J_MIN,
     PARAM_FIBRE,
-    PARAM_LAM,
-    PARAM_MU,
-    PARAM_SAND_ALPHA,
-    PARAM_YIELD_HIGHER,
-    PARAM_YIELD_LOWER,
-    PARAM_YIELD_STRESS,
     PLASTIC_LIQUID,
     PLASTIC_NONE,
-    PLASTIC_SAND,
     PLASTIC_SNOW,
-    PLASTIC_VON_MISES,
-    SAND_SIGMA_MIN,
     SNOW_HARDENING,
-    VON_MISES_SIGMA_MIN,
-    elastic_principal,
     isotropic_first_piola_differential,
     local_offset,
     material_param,
-    material_params,
     node_offset,
+    particle_elastic_stress,
     particle_of_sorted,
     q1_stencil,
     q1_weight_hessian,
+    return_map_principal,
     stencil_node_slots,
     trial_deformation,
     unpack_block,
@@ -93,83 +83,9 @@ def return_map_vjp(
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-        h = sigma
-        dh = qd.Matrix.identity(gs.qd_float, 3)
-        dh_dJp = qd.Vector.zero(gs.qd_float, 3)
-        dJp_new_dsigma = qd.Vector.zero(gs.qd_float, 3)
-        dJp_new_dJp = gs.qd_float(1.0)
-        is_changed = True
-        mu = material_param(slot, materials, params, PARAM_MU)
-        eye = qd.Matrix.identity(gs.qd_float, 3)
-        if kind == PLASTIC_VON_MISES:
-            # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
-            eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
-            eps_hat = eps - eps.sum() / 3.0
-            n = eps_hat.norm(gs.EPS)
-            r = material_param(slot, materials, params, PARAM_YIELD_STRESS) / (2.0 * mu)
-            is_changed = n - r > 0.0
-            if is_changed:
-                h = qd.exp(eps - ((n - r) / n) * eps_hat)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    deps = 1.0 / sigma[j] if sigma[j] > qd.static(VON_MISES_SIGMA_MIN) else 0.0
-                    projector = eye[i, j] - 1.0 / 3.0
-                    dlog = 1.0 / 3.0 + r * (projector / n - eps_hat[i] * eps_hat[j] / (n * n * n))
-                    dh[i, j] = h[i] * dlog * deps
-        elif kind == PLASTIC_SAND:
-            lam = material_param(slot, materials, params, PARAM_LAM)
-            deps = qd.Vector.zero(gs.qd_float, 3)
-            for j in qd.static(range(3)):
-                if qd.abs(sigma[j]) > qd.static(SAND_SIGMA_MIN):
-                    deps[j] = 1.0 / sigma[j]
-            eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
-            trace = eps.sum() + Jp
-            eps_hat = eps - trace / 3.0
-            n = eps_hat.norm(gs.EPS)
-            h = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
-            dh = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if trace >= 0.0:
-                # Jp_new = trace and h = 1
-                dJp_new_dsigma = deps
-            else:
-                dJp_new_dJp = 0.0
-                c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * material_param(slot, materials, params, PARAM_SAND_ALPHA)
-                delta_gamma = n + c * trace
-                h = qd.exp(eps - qd.max(delta_gamma, 0.0) / n * eps_hat)
-                if delta_gamma <= 0.0:
-                    for j in qd.static(range(3)):
-                        dh[j, j] = h[j] * deps[j]
-                else:
-                    # log h = trace / 3 1 - c trace u with u = eps_hat / n, the differential of u being du = (I - u u^T)
-                    # / n d_eps_hat with d_eps_hat = (I - 1 1^T / 3) d_eps - 1 / 3 d_Jp
-                    u = eps_hat / n
-                    for i in qd.static(range(3)):
-                        for j in qd.static(range(3)):
-                            tangent = gs.qd_float(0.0)
-                            for k in qd.static(range(3)):
-                                tangent += (eye[i, k] - u[i] * u[k]) * (eye[k, j] - 1.0 / 3.0)
-                            dlog = 1.0 / 3.0 - c * u[i] - c * trace / n * tangent
-                            dh[i, j] = h[i] * dlog * deps[j]
-                        tangent_Jp = gs.qd_float(0.0)
-                        for k in qd.static(range(3)):
-                            tangent_Jp += (eye[i, k] - u[i] * u[k]) * (-1.0 / 3.0)
-                        dh_dJp[i] = h[i] * (1.0 / 3.0 - c * u[i] - c * trace / n * tangent_Jp)
-        else:
-            lower = 1.0 - material_param(slot, materials, params, PARAM_YIELD_LOWER)
-            higher = 1.0 + material_param(slot, materials, params, PARAM_YIELD_HIGHER)
-            h = qd.min(qd.max(sigma, lower), higher)
-            for j in qd.static(range(3)):
-                dh[j, j] = 1.0 if sigma[j] > lower and sigma[j] < higher else 0.0
-            if kind == PLASTIC_SNOW:
-                # Jp_new = Jp prod(sigma) / prod(h)
-                h_product = h[0] * h[1] * h[2]
-                dJp_new_dJp = (sigma[0] * sigma[1] * sigma[2]) / h_product
-                Jp_new = Jp * dJp_new_dJp
-                for j in qd.static(range(3)):
-                    others = gs.qd_float(1.0)
-                    for k in qd.static(range(3)):
-                        if qd.static(k != j):
-                            others *= sigma[k]
-                    dJp_new_dsigma[j] = Jp * others / h_product - Jp_new * dh[j, j] / h[j]
+        h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
+            slot, kind, sigma, Jp, materials, params
+        )
         if is_changed:
             F_bar = isotropic_first_piola_differential(U, V, sigma, h, dh.transpose(), F_new_bar)
             F_bar += Jp_new_bar * (
@@ -268,7 +184,7 @@ def func_wall_contact_adjoint(
             delta = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
                 Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()
@@ -282,7 +198,7 @@ def func_wall_contact_adjoint(
             for d in qd.static(range(3)):
                 k = CONTACT_ROWS * s + d
                 D = newton.contact_D[k]
-                J = qd.Vector([newton.contact_dir[3 * k + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                J = newton.contact_dir[k]
                 c = J.dot(Delta) - newton.contact_t[k]
                 if D > 0.0 and c < 0.0:
                     a_k = J.dot(delta)
@@ -306,7 +222,7 @@ def func_wall_contact_adjoint(
                     R_bar += (2.0 * invweight_bar) * n.outer_product(W @ n_rest)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
                 grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
@@ -345,15 +261,14 @@ def func_constraint_adjoint(
             delta = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
                 Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
             damping = newton.constraint_damping[s]
-            target = qd.Vector([newton.constraint_target[3 * s + e] for e in qd.static(range(3))], dt=gs.qd_float)
-            g = spring * (x_p + Delta - target) + damping * Delta
+            g = spring * (x_p + Delta - newton.constraint_target[s]) + damping * Delta
             x_bar = -spring * delta
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
                 grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
                 x_bar -= (lam_a.dot(g) + (spring + damping) * u_a.dot(delta)) * grad_w_a
@@ -438,14 +353,14 @@ def func_adjoint_g2p(
 
 @qd.func(requires_top_level=True)
 def func_adjoint_rhs(grid: qd.template(), newton: qd.template(), linear: qd.template()):
-    """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed components, whose rows of
+    """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed nodes, whose rows of
     the Newton matrix are the identity."""
     qd.loop_config(name="mpm_adjoint_rhs")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
         value = newton.du[i]
-        if grid.dof_fixed[i] != 0:
+        if grid.node_fixed[i // 3] != 0:
             value = 0.0
-        linear.b_rhs[3 * linear.row_offset + i] = value
+        linear.b_rhs[i] = value
 
 
 @qd.func(requires_top_level=True)
@@ -472,10 +387,10 @@ def func_adjoint_nodes(
         mass_bar = gs.qd_float(0.0)
         mom_bar = qd.Vector.zero(gs.qd_float, 3)
         if mass > 0.0 and grid.node_fixed[node] == 0:
-            lam = qd.Vector([linear.solution[3 * (linear.row_offset + node) + d] for d in qd.static(range(3))])
+            lam = qd.Vector([linear.solution[3 * node + d] for d in qd.static(range(3))])
             u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            v = qd.Vector([grid.node_v[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            v_free = qd.Vector([grid.node_v_free[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            v = grid.node_v[node]
+            v_free = grid.node_v_free[node]
             v_free_bar = (mass * dt) * lam
             v_bar = v_free_bar
             if qd.static(len(force_fields.force_fields) > 0):
@@ -485,8 +400,7 @@ def func_adjoint_nodes(
                     v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
             mom_bar = v_bar / mass
             mass_bar = -lam.dot(u - dt * v_free) - v.dot(v_bar) / mass
-        for d in qd.static(range(3)):
-            newton.adj_mom[3 * node + d] = mom_bar[d]
+        newton.adj_mom[node] = mom_bar
         newton.adj_mass[node] = mass_bar
 
 
@@ -518,48 +432,45 @@ def func_adjoint_particles(
         x_p = particles.pos[f, i_p, i_b]
         fx = x_p * params.inv_dx[()] - cell.cast(gs.qd_float)
         w, grad_w = q1_stencil(fx, params.inv_dx[()])
-        F_tr, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+        F_trial, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
 
-        Lam = qd.Matrix.zero(gs.qd_float, 3, 3)
+        Lambda = qd.Matrix.zero(gs.qd_float, 3, 3)
         grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
             grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
-            lam_a = qd.Vector([linear.solution[3 * (linear.row_offset + slots[a]) + d] for d in qd.static(range(3))])
+            lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])
             u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            Lam += lam_a.outer_product(grad_w_a)
+            Lambda += lam_a.outer_product(grad_w_a)
             grad_u += u_a.outer_product(grad_w_a)
-        A_def = qd.Matrix.identity(gs.qd_float, 3) + grad_u
+        F_increment = qd.Matrix.identity(gs.qd_float, 3) + grad_u
 
-        U, S, V = gu.qd_svd(F_tr)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-        slot = particles_info.material_idx[i_p]
-        mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
-        psi, g, A_sigma = elastic_principal(slot, sigma, mu, lam, materials, params)
-        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
-        LamF = Lam @ F
-        Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, LamF)
+        slot, U, sigma, V, g, A_sigma, P = particle_elastic_stress(
+            f, i_p, i_b, F_trial, particles, particles_info, materials, params
+        )
+        Lambda_F = Lambda @ F
+        Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, Lambda_F)
         # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
         # are proportional, so phi = V dt^2 P : (Lambda F) moves by -SNOW_HARDENING phi with Jp
         Jp_bar = gs.qd_float(0.0)
         if materials.mat_plastic[slot] == PLASTIC_SNOW:
             phi = gs.qd_float(0.0)
             for i, j in qd.static(qd.ndrange(3, 3)):
-                phi += P[i, j] * LamF[i, j]
+                phi += P[i, j] * Lambda_F[i, j]
             Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
         stiffness = material_param(slot, materials, params, PARAM_FIBRE)
         muscle_direction = particles_info.muscle_direction[i_p]
         active_stiffness = stiffness * particles.actu[f, i_p, i_b]
-        F_tr_m = F_tr @ muscle_direction
-        LamF_m = LamF @ muscle_direction
-        P += active_stiffness * F_tr_m.outer_product(muscle_direction)
-        Q += active_stiffness * LamF_m.outer_product(muscle_direction)
+        F_trial_m = F_trial @ muscle_direction
+        Lambda_F_m = Lambda_F @ muscle_direction
+        P += active_stiffness * F_trial_m.outer_product(muscle_direction)
+        Q += active_stiffness * Lambda_F_m.outer_product(muscle_direction)
 
         scale = params.particle_volume[()] * dt * dt
-        F_bar = -scale * (A_def.transpose() @ Q + Lam.transpose() @ P)
-        actu_bar = -scale * stiffness * F_tr_m.dot(LamF_m)
+        F_bar = -scale * (F_increment.transpose() @ Q + Lambda.transpose() @ P)
+        actu_bar = -scale * stiffness * F_trial_m.dot(Lambda_F_m)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
-            lam_a = qd.Vector([linear.solution[3 * (linear.row_offset + slots[a]) + d] for d in qd.static(range(3))])
+            lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])
             u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
             H_a = q1_weight_hessian(fx, params.inv_dx[()], a)
             x_bar -= scale * (H_a @ (F @ (Q.transpose() @ u_a + P.transpose() @ lam_a)))
@@ -573,7 +484,7 @@ def func_adjoint_particles(
         for a in qd.static(range(8)):
             grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
             x_a = (cell + node_offset(a)).cast(gs.qd_float) * params.dx[()]
-            mom_bar = qd.Vector([newton.adj_mom[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            mom_bar = newton.adj_mom[slots[a]]
             mass_bar = newton.adj_mass[slots[a]]
             v_tilde = v_p + C_p @ (x_a - x_p)
             v_bar += (w[a] * m_p) * mom_bar

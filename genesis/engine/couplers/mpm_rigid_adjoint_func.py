@@ -32,34 +32,6 @@ from .mpm_rigid_func import geom_normal
 
 
 @qd.func
-def orthogonals_bw(n: qd.types.vector(3), g_d1: qd.types.vector(3), g_d2: qd.types.vector(3)):
-    """Reverse of `gu.qd_orthogonals`, from the adjoints of the two tangents to that of the normal.
-
-    The tangents are d1 = b x n and d2 = b, with b the normalized branch vector of n. Returns the adjoint of n from g_d1
-    and g_d2, the adjoints of d1 and d2."""
-    is_branch_a = qd.abs(n[1]) < 0.5
-    b_raw = qd.Vector.zero(gs.qd_float, 3)
-    if is_branch_a:
-        b_raw = qd.Vector([-n[0] * n[1], 1.0 - n[1] * n[1], -n[2] * n[1]], dt=gs.qd_float)
-    else:
-        b_raw = qd.Vector([-n[0] * n[2], -n[1] * n[2], 1.0 - n[2] * n[2]], dt=gs.qd_float)
-    b_raw_norm = b_raw.norm()
-    b = b_raw / b_raw_norm
-    g_b = g_d2 + n.cross(g_d1)
-    g_n = g_d1.cross(b)
-    g_b_raw = (g_b - g_b.dot(b) * b) / b_raw_norm
-    if is_branch_a:
-        g_n[0] += g_b_raw[0] * (-n[1])
-        g_n[1] += g_b_raw[0] * (-n[0]) + g_b_raw[1] * (-2.0 * n[1]) + g_b_raw[2] * (-n[2])
-        g_n[2] += g_b_raw[2] * (-n[1])
-    else:
-        g_n[0] += g_b_raw[0] * (-n[2])
-        g_n[1] += g_b_raw[1] * (-n[2])
-        g_n[2] += g_b_raw[0] * (-n[0]) + g_b_raw[1] * (-n[1]) + g_b_raw[2] * (-2.0 * n[2])
-    return g_n
-
-
-@qd.func
 def geom_sdf_grid_hessian(
     i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: array_class.GeomsState, sdf_info: array_class.SDFInfo
 ):
@@ -95,14 +67,16 @@ def geom_sdf_grid_hessian(
     if distance > 0.0:
         o = outside / distance
         eye = qd.Matrix.identity(gs.qd_float, 3)
+        is_outside = qd.Vector.zero(gs.qd_int, 3)
         for d in qd.static(range(3)):
-            if outside[d] != 0.0:
+            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
+                is_outside[d] = 1
                 grad[d] = o[d]
                 for e in qd.static(range(3)):
                     hess[d, e] = 0.0
                     hess[e, d] = 0.0
         for d, e in qd.static(qd.ndrange(3, 3)):
-            if outside[d] != 0.0 and outside[e] != 0.0:
+            if is_outside[d] != 0 and is_outside[e] != 0:
                 hess[d, e] = (eye[d, e] - o[d] * o[e]) / distance
     return grad, hess
 
@@ -230,7 +204,7 @@ def func_rigid_contact_adjoint(
             lam_p = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
@@ -249,7 +223,7 @@ def func_rigid_contact_adjoint(
             for i in qd.static(range(PYRAMID_ROWS)):
                 k = CONTACT_ROWS * s + WALL_ROWS + i
                 D = newton.contact_D[k]
-                J = qd.Vector([newton.contact_dir[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
+                J = newton.contact_dir[k]
                 c = J.dot(Delta) - newton.contact_t[k]
                 if D > 0.0 and c < 0.0:
                     a_k = J.dot(delta)
@@ -265,7 +239,7 @@ def func_rigid_contact_adjoint(
             x_bar = -Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
@@ -331,7 +305,7 @@ def func_rigid_contact_adjoint(
                     g_d2 += (sign * friction) * J_bar_i
                 else:
                     g_d1 += (sign * friction) * J_bar_i
-            n_bar += orthogonals_bw(normal, g_d1, g_d2)
+            n_bar += gu.qd_orthogonals_bw(normal, g_d1, g_d2)
 
             # The inverse weight n^T R W R^T n
             invweight_bar = diag_coef_bar * diag_coef_scale

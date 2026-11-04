@@ -59,8 +59,8 @@ class RigidNewtonData:
     The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the displacement
     units of the MPM energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`, `p`, `ap` and `sol` are the
     Rigid rows of the conjugate gradient residual, preconditioned residual, direction, operator image and solution. Per
-    link, `link_V` holds the spatial displacement of a dof vector and `link_F` accumulates a spatial force, linear then
-    angular about the root center of mass, for the couplings acting on the links.
+    link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof vector and `link_force_vel` /
+    `link_force_ang` accumulate a spatial force, about the root center of mass, for the couplings acting on the links.
     """
 
     def __init__(self, n_dofs: int, n_links: int, n_envs: int) -> None:
@@ -78,23 +78,25 @@ class RigidNewtonData:
         self.sol = qd.ndarray(gs.qd_float, shape=shape)
         self.cost = qd.ndarray(gs.qd_float, shape=(n_envs,))
         link_shape = (max(n_links, 1), n_envs)
-        self.link_F = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
-        self.link_V = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
+        self.link_motion_vel = qd.ndarray(gs.qd_vec3, shape=link_shape)
+        self.link_motion_ang = qd.ndarray(gs.qd_vec3, shape=link_shape)
+        self.link_force_vel = qd.ndarray(gs.qd_vec3, shape=link_shape)
+        self.link_force_ang = qd.ndarray(gs.qd_vec3, shape=link_shape)
         # The contact stiffness the couplings put on the links, which the preconditioner takes in by the Woodbury
-        # identity on Rigid's factor A. Per link, its 6 x 6 spatial stiffness K_l, row-major. Per environment, the links
-        # in contact (at most `n_contact_links`, the second dimension of `contact_links` that the kernels read), the
-        # cdof map U of their chains with one column per spatial component, W = A^-1 U, and the lower-upper (LU) factor
-        # of S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
+        # identity on Rigid's factor A. Per link, its 6 x 6 spatial stiffness K_l. Per environment, the links in contact
+        # (at most `n_contact_links`, the second dimension of `contact_links` that the kernels read), the cdof map U of
+        # their chains with one column per spatial component, W = A^-1 U, and the lower-upper (LU) factor of
+        # S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
         n_contact_links = min(max(n_links, 1), MAX_PRECONDITIONED_LINKS)
         n_cols = 6 * n_contact_links
-        self.link_K = qd.ndarray(gs.qd_float, shape=(*link_shape, 36))
+        self.link_K = qd.ndarray(qd.types.matrix(6, 6, gs.qd_float), shape=link_shape)
         self.contact_links = qd.ndarray(gs.qd_int, shape=(n_envs, n_contact_links))
         self.n_links_in_contact = qd.ndarray(gs.qd_int, shape=(n_envs,))
-        self.wb_U = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
-        self.wb_W = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
-        self.wb_S = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols, n_cols))
-        self.wb_pivot = qd.ndarray(gs.qd_int, shape=(n_envs, n_cols))
-        self.wb_y = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols))
+        self.woodbury_U = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
+        self.woodbury_W = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
+        self.capacitance_LU = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols, n_cols))
+        self.capacitance_pivots = qd.ndarray(gs.qd_int, shape=(n_envs, n_cols))
+        self.woodbury_y = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols))
         self.solve_rhs = qd.ndarray(gs.qd_float, shape=shape)
         self.solve_out = qd.ndarray(gs.qd_float, shape=shape)
 

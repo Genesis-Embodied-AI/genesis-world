@@ -5,7 +5,7 @@ from genesis.utils.misc import qd_to_numpy
 
 from .dynamic_exclusive_sum import DynamicExclusiveSum, func_dynamic_exclusive_sum, kernel_dynamic_exclusive_sum
 from .dynamic_radix_sort import DynamicRadixSort, dynamic_radix_sort, func_dynamic_radix_sort
-from .fsr_reduce import func_fsr_reduce, head_segmented_reduce_add
+from .fsr_reduce import func_fsr_reduce
 
 
 @qd.data_oriented
@@ -177,15 +177,6 @@ class BCOOMatrix:
                             self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] += block[j, i]
 
     @qd.func
-    def read_triplet(self, slot: int):
-        """Return one stored input triplet as (row, column, block)."""
-        block = qd.Matrix.zero(self.value_type, self.block_rows, self.block_cols)
-        for i in qd.static(range(self.block_rows)):
-            for j in qd.static(range(self.block_cols)):
-                block[i, j] = self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j]
-        return self.triplet_row[slot], self.triplet_col[slot], block
-
-    @qd.func
     def read_bcoo(self, entry: int):
         """Return one reduced block coordinate (BCOO) entry as (row, column, block)."""
         block = qd.Matrix.zero(self.value_type, self.block_rows, self.block_cols)
@@ -315,44 +306,3 @@ def sort_reduce_bcoo(matrix: BCOOMatrix) -> None:
     kernel_mark_bcoo_segment_flags(matrix)
     kernel_dynamic_exclusive_sum(matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets, matrix.segment_scanner)
     kernel_reduce_bcoo(matrix)
-
-
-@qd.func(requires_top_level=True)
-def func_sym_bcoo_spmv(x: qd.template(), y: qd.template(), matrix: qd.template()):
-    """Add the product of a symmetric block coordinate (BCOO) matrix and a vector to an output vector.
-
-    The kernel computes y += A x, with A the matrix whose upper triangle is stored, mirrored on the fly. Each thread
-    handles one reduced entry. The entries are row-sorted, so consecutive lanes of a warp holding the same row form a
-    segment: a head-segmented warp reduction sums their row products and the segment head adds the sum with one atomic.
-    The mirrored product of an off-diagonal entry is added atomically per entry. The caller clears y, so that several
-    operators can accumulate into it.
-    """
-    qd.loop_config(name="bcoo_sym_spmv")
-    for t in range(((matrix.bcoo_nnz[()] + 31) // 32) * 32):
-        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
-        nnz = matrix.bcoo_nnz[()]
-        is_valid = t < nnz
-        row = gs.qd_int(-1)
-        product = qd.Vector.zero(matrix.value_type, matrix.block_rows)
-        if is_valid:
-            row_, col, block = matrix.read_bcoo(t)
-            row = row_
-            for block_row in qd.static(range(matrix.block_rows)):
-                for block_col in qd.static(range(matrix.block_cols)):
-                    product[block_row] += block[block_row, block_col] * x[col * matrix.block_cols + block_col]
-            if row != col:
-                for block_col in qd.static(range(matrix.block_cols)):
-                    product_mirrored = matrix.value_type(0.0)
-                    for block_row in qd.static(range(matrix.block_rows)):
-                        product_mirrored += block[block_row, block_col] * x[row * matrix.block_rows + block_row]
-                    qd.atomic_add(y[col * matrix.block_cols + block_col], product_mirrored)
-        previous_row = qd.simt.subgroup.shuffle(row, qd.u32(qd.max(lane - 1, 0)))
-        next_row = qd.simt.subgroup.shuffle(row, qd.u32(qd.min(lane + 1, 31)))
-        is_head = lane == 0 or row != previous_row
-        is_tail = lane == 31 or row != next_row
-        row_sum = qd.Vector.zero(matrix.value_type, matrix.block_rows)
-        for block_row in qd.static(range(matrix.block_rows)):
-            row_sum[block_row] = head_segmented_reduce_add(product[block_row], is_tail)
-        if is_valid and is_head:
-            for block_row in qd.static(range(matrix.block_rows)):
-                qd.atomic_add(y[row * matrix.block_rows + block_row], row_sum[block_row])

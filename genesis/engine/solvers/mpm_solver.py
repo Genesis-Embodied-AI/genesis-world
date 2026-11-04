@@ -261,7 +261,7 @@ class MPMSolver(ParticleSolver):
         self.particles_info = get_mpm_particles_info(self._n_particles)
 
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
-        self.errno = qd.field(gs.qd_int, shape=(self._B,))
+        self.errno = array_class.V(dtype=gs.qd_int, shape=(self._B,))
         self.register_errors(
             self.errno,
             {
@@ -539,7 +539,7 @@ class MPMSolver(ParticleSolver):
     @qd.kernel
     def _kernel_flag_non_finite_pos(self, f: int):
         """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
                 self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
 
@@ -550,7 +550,7 @@ class MPMSolver(ParticleSolver):
         non-finite measure since the Newton solver last cleared the latch (see NewtonControl)."""
         for _ in range(1):
             if control.has_failed_non_finite[()] != 0:
-                for i_b in range(self._B):
+                for i_b in range(self.errno.shape[0]):
                     self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_MPM_SOLVE_NAN
 
     # ------------------------------------------------------------------------------------
@@ -725,7 +725,7 @@ class MPMSolver(ParticleSolver):
 
     @qd.kernel
     def copy_frame(self, source: int, target: int):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             self.particles.pos[target, i_p, i_b] = self.particles.pos[source, i_p, i_b]
             self.particles.vel[target, i_p, i_b] = self.particles.vel[source, i_p, i_b]
             self.particles.F[target, i_p, i_b] = self.particles.F[source, i_p, i_b]
@@ -771,7 +771,7 @@ class MPMSolver(ParticleSolver):
         actu: qd.types.ndarray(),  # shape [B, n_particles]
         active: qd.types.ndarray(),  # shape [B, n_particles]
     ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             for j in qd.static(range(3)):
                 self.particles.pos[f, i_p, i_b][j] = pos[i_b, i_p, j]
                 self.particles.vel[f, i_p, i_b][j] = vel[i_b, i_p, j]
@@ -848,7 +848,7 @@ class MPMSolver(ParticleSolver):
                 self._particle_volume_real * mat_rho
             )
 
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
+        for i_p_, i_b in qd.ndrange(n_particles, self.particles.pos.shape[2]):
             i_p = i_p_ + particle_start
 
             self.particles_ng.active[f, i_p, i_b] = qd.cast(active, gs.qd_bool)
@@ -1320,7 +1320,12 @@ def build_grid(particles, particles_ng, grid, params, f):
     )
     kernel_grid_blocks(grid, params)
     dynamic_radix_sort(
-        grid.block_sort, grid.nbr_keys, grid.nbr_keys_tmp, grid.nbr_perm, grid.nbr_perm_tmp, grid.n_neighbor_keys
+        grid.block_sort,
+        grid.neighbor_keys,
+        grid.neighbor_keys_tmp,
+        grid.neighbor_perm,
+        grid.neighbor_perm_tmp,
+        grid.n_neighbor_keys,
     )
     kernel_grid_block_flags(grid)
     kernel_dynamic_exclusive_sum(grid.block_flags, grid.block_ranks, grid.n_neighbor_keys, grid.block_scan)
@@ -1346,7 +1351,6 @@ def kernel_predict(
     dt = params.substep_dt[()]
     mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, params)
     mpm_func.func_apply_force_fields(t, dt, grid, force_fields, params)
-    mpm_func.func_fix_nodes(grid)
     mpm_func.func_reset_contact_rows(grid, newton)
     mpm_func.func_newton_reset(grid, newton)
 
@@ -1360,10 +1364,9 @@ def kernel_wall_rows(
     particles_info: MpmParticlesInfo,
     params: qd.template(),
 ):
-    """Build the wall rows of the substep and set the start point of the Newton solve."""
+    """Build the wall rows of the substep."""
     dt = params.substep_dt[()]
     mpm_func.func_build_wall_rows(f, dt, particles, grid, newton, particles_info, params)
-    mpm_func.func_newton_start(dt, grid, newton, params)
 
 
 @qd.kernel
@@ -1433,8 +1436,7 @@ def kernel_finalize(
     params: qd.template(),
 ):
     dt = params.substep_dt[()]
-    mpm_func.func_grid_velocity(dt, grid, newton)
-    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, particles_info, materials, params)
+    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, params)
 
 
 @qd.kernel

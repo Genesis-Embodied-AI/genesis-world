@@ -31,11 +31,12 @@ from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     band_row,
     contact_band_width,
+    contact_cross_matvec,
     contact_invweight,
     contact_row_terms,
     particle_of_sorted,
-    particle_stencil,
     particle_trial_disp,
+    pyramid_dirs,
     stencil_node_slots,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_batch, func_vel_at_point
@@ -51,14 +52,6 @@ from genesis.utils import array_class
 
 
 # ============================================ Layer 0: spatial algebra =============================================
-
-
-@qd.func
-def link_spatial(i_l: int, i_b: int, rigid_data: qd.template()):
-    """Linear and angular parts of the spatial displacement of a link, held in `rigid_data.link_V`."""
-    lin = qd.Vector([rigid_data.link_V[i_l, i_b, d] for d in qd.static(range(3))], dt=gs.qd_float)
-    ang = qd.Vector([rigid_data.link_V[i_l, i_b, 3 + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    return lin, ang
 
 
 @qd.func
@@ -103,7 +96,7 @@ def geom_sdf_grid(
     distance = outside.norm()
     if distance > 0.0:
         for d in qd.static(range(3)):
-            if outside[d] != 0.0:
+            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
                 grad[d] = outside[d] / distance
     return value + distance, grad
 
@@ -237,7 +230,7 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
     The nearest geom of sorted particle i_q in environment i_t goes to `newton.query_phi` and `newton.query_idx`, and
     the query records no pair."""
     i_g = query.coupled_geoms[i_a]
-    x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    x = query.newton.query_pos[i_q]
     phi = (
         geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
     )
@@ -286,8 +279,7 @@ def func_build_rigid_rows(
         x_p = particles.pos[f, i_p, i_b]
         # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
         # band: the two grown boxes together cover the band of the relative velocity
-        for d in qd.static(range(3)):
-            newton.query_pos[3 * s + d] = x_p[d]
+        newton.query_pos[s] = x_p
         newton.query_phi[s] = float("inf")
         newton.query_idx[s] = -1
         reach = params.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
@@ -319,16 +311,12 @@ def func_build_rigid_rows(
             diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
             sol_params = geoms_info.sol_params[i_g_contact]
             sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
-            d1, d2 = gu.qd_orthogonals(normal)
+            dirs = pyramid_dirs(normal, friction)
             for i in qd.static(range(PYRAMID_ROWS)):
-                d = d1
-                if qd.static(i >= 2):
-                    d = d2
-                J = normal + (qd.static(2 * (i % 2) - 1) * friction) * d
+                J = dirs[i, :]
                 D, t = band_row(sol_params, phi, J.dot(v_rel), diag_coef, dt)
                 k = CONTACT_ROWS * s + WALL_ROWS + i
-                for e in qd.static(range(3)):
-                    newton.contact_dir[3 * k + e] = J[e]
+                newton.contact_dir[k] = J
                 newton.contact_D[k] = D
                 newton.contact_t[k] = t + dt * J.dot(v_r)
             newton.contact_link[s] = i_l
@@ -347,25 +335,24 @@ def func_link_spatial_disp(
 ):
     """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link.
 
-    link_V = sum over the dofs of the chain of the link of cdof src_d, and link_F is cleared alongside."""
-    n_links = rigid_data.link_V.shape[0]
-    n_envs = rigid_data.link_V.shape[1]
+    The displacement is the sum over the dofs of the chain of the link of cdof src_d."""
+    n_links = rigid_data.link_motion_vel.shape[0]
+    n_envs = rigid_data.link_motion_vel.shape[1]
     qd.loop_config(name="mpm_link_spatial_disp")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        lin = qd.Vector.zero(gs.qd_float, 3)
-        ang = qd.Vector.zero(gs.qd_float, 3)
+        motion_vel = qd.Vector.zero(gs.qd_float, 3)
+        motion_ang = qd.Vector.zero(gs.qd_float, 3)
         i_a = i_l
         while i_a >= 0:
             I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
             for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
-                lin += dofs_state.cdof_vel[i_d, i_b] * src[i_d, i_b]
-                ang += dofs_state.cdof_ang[i_d, i_b] * src[i_d, i_b]
+                motion_vel += dofs_state.cdof_vel[i_d, i_b] * src[i_d, i_b]
+                motion_ang += dofs_state.cdof_ang[i_d, i_b] * src[i_d, i_b]
             i_a = links_info.parent_idx[I_a]
-        for d in qd.static(range(3)):
-            rigid_data.link_V[i_l, i_b, d] = lin[d]
-            rigid_data.link_V[i_l, i_b, 3 + d] = ang[d]
-            rigid_data.link_F[i_l, i_b, d] = 0.0
-            rigid_data.link_F[i_l, i_b, 3 + d] = 0.0
+        rigid_data.link_motion_vel[i_l, i_b] = motion_vel
+        rigid_data.link_motion_ang[i_l, i_b] = motion_ang
+        rigid_data.link_force_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        rigid_data.link_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -379,19 +366,19 @@ def func_link_force_to_dofs(
 ):
     """Add the generalized force of the spatial forces accumulated on the links to a dof vector.
 
-    out_d += scale cdof_d . link_F over the links whose chain holds dof d."""
-    n_links = rigid_data.link_V.shape[0]
-    n_envs = rigid_data.link_V.shape[1]
+    out_d += scale cdof_d . f over the links whose chain holds dof d, with f the spatial force of the link."""
+    n_links = rigid_data.link_force_vel.shape[0]
+    n_envs = rigid_data.link_force_vel.shape[1]
     qd.loop_config(name="mpm_link_force_to_dofs")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        F_lin = qd.Vector([rigid_data.link_F[i_l, i_b, d] for d in qd.static(range(3))], dt=gs.qd_float)
-        F_ang = qd.Vector([rigid_data.link_F[i_l, i_b, 3 + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        if F_lin.norm_sqr() + F_ang.norm_sqr() > 0.0:
+        force_vel = rigid_data.link_force_vel[i_l, i_b]
+        force_ang = rigid_data.link_force_ang[i_l, i_b]
+        if force_vel.norm_sqr() + force_ang.norm_sqr() > 0.0:
             i_a = i_l
             while i_a >= 0:
                 I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
                 for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
-                    value = dofs_state.cdof_vel[i_d, i_b].dot(F_lin) + dofs_state.cdof_ang[i_d, i_b].dot(F_ang)
+                    value = dofs_state.cdof_vel[i_d, i_b].dot(force_vel) + dofs_state.cdof_ang[i_d, i_b].dot(force_ang)
                     qd.atomic_add(out[i_d, i_b], scale * value)
                 i_a = links_info.parent_idx[I_a]
 
@@ -408,17 +395,15 @@ def func_contact_point_disp(
 ):
     """Set the displacement J_pt x of the contact point of every particle with Rigid rows.
 
-    x is the dof vector whose link displacements are held in `link_V`. The other particles keep theirs, from
-    `func_reset_contact_rows` or from the coupling that gave them rows."""
+    x is the dof vector whose link displacements are held in `link_motion_vel` / `link_motion_ang`. The other particles
+    keep theirs, from `func_reset_contact_rows` or from the coupling that gave them rows."""
     qd.loop_config(name="mpm_contact_point_disp")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            lin, ang = link_spatial(i_l, i_b, rigid_data)
-            dr = lin + ang.cross(particle_arm(f, i_p, i_b, i_l, particles, links_state))
-            for d in qd.static(range(3)):
-                newton.contact_dr[3 * s + d] = dr[d]
+            r = particle_arm(f, i_p, i_b, i_l, particles, links_state)
+            newton.contact_dr[s] = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
 
 
 # ============================================== Layer 1: Rigid block ===============================================
@@ -591,10 +576,7 @@ def func_rigid_factor(
     for i_b in range(n_envs):
         n_links = 0
         for i_l in range(rigid_data.link_K.shape[0]):
-            k_sum = gs.qd_float(0.0)
-            for k in range(36):
-                k_sum += qd.abs(rigid_data.link_K[i_l, i_b, k])
-            if k_sum > 0.0 and n_links < rigid_data.contact_links.shape[1]:
+            if rigid_data.link_K[i_l, i_b].norm_sqr() > 0.0 and n_links < rigid_data.contact_links.shape[1]:
                 rigid_data.contact_links[i_b, n_links] = i_l
                 n_links += 1
         rigid_data.n_links_in_contact[i_b] = n_links
@@ -627,8 +609,8 @@ def func_rigid_factor(
                 config,
             )
             for i_d in range(n_dofs):
-                rigid_data.wb_U[i_d, i_b, i_col] = rigid_data.solve_rhs[i_d, i_b]
-                rigid_data.wb_W[i_d, i_b, i_col] = rigid_data.solve_out[i_d, i_b]
+                rigid_data.woodbury_U[i_d, i_b, i_col] = rigid_data.solve_rhs[i_d, i_b]
+                rigid_data.woodbury_W[i_d, i_b, i_col] = rigid_data.solve_out[i_d, i_b]
         # S = I + K U^T W, the rows of a link's block from its K_l and the rows of U^T W of its columns
         for b in range(n_cols):
             for j in range(n_links):
@@ -636,31 +618,33 @@ def func_rigid_factor(
                 for k in qd.static(range(6)):
                     value = gs.qd_float(0.0)
                     for i_d in range(n_dofs):
-                        value += rigid_data.wb_U[i_d, i_b, 6 * j + k] * rigid_data.wb_W[i_d, i_b, b]
+                        value += rigid_data.woodbury_U[i_d, i_b, 6 * j + k] * rigid_data.woodbury_W[i_d, i_b, b]
                     g[k] = value
                 i_l = rigid_data.contact_links[i_b, j]
+                K_g = rigid_data.link_K[i_l, i_b] @ g
                 for i in qd.static(range(6)):
-                    value = gs.qd_float(1.0) if 6 * j + i == b else gs.qd_float(0.0)
-                    for k in qd.static(range(6)):
-                        value += rigid_data.link_K[i_l, i_b, 6 * i + k] * g[k]
-                    rigid_data.wb_S[i_b, 6 * j + i, b] = value
+                    value = K_g[i]
+                    if 6 * j + i == b:
+                        value += 1.0
+                    rigid_data.capacitance_LU[i_b, 6 * j + i, b] = value
         # In-place lower-upper (LU) factorization with partial pivoting. S is non-singular, K and U^T W being positive
         # semi-definite
         for k in range(n_cols):
             i_max = k
             for i in range(k + 1, n_cols):
-                if qd.abs(rigid_data.wb_S[i_b, i, k]) > qd.abs(rigid_data.wb_S[i_b, i_max, k]):
+                if qd.abs(rigid_data.capacitance_LU[i_b, i, k]) > qd.abs(rigid_data.capacitance_LU[i_b, i_max, k]):
                     i_max = i
-            rigid_data.wb_pivot[i_b, k] = i_max
+            rigid_data.capacitance_pivots[i_b, k] = i_max
             if i_max != k:
                 for j in range(n_cols):
-                    entry = rigid_data.wb_S[i_b, k, j]
-                    rigid_data.wb_S[i_b, k, j] = rigid_data.wb_S[i_b, i_max, j]
-                    rigid_data.wb_S[i_b, i_max, j] = entry
+                    entry = rigid_data.capacitance_LU[i_b, k, j]
+                    rigid_data.capacitance_LU[i_b, k, j] = rigid_data.capacitance_LU[i_b, i_max, j]
+                    rigid_data.capacitance_LU[i_b, i_max, j] = entry
             for i in range(k + 1, n_cols):
-                rigid_data.wb_S[i_b, i, k] = rigid_data.wb_S[i_b, i, k] / rigid_data.wb_S[i_b, k, k]
+                rigid_data.capacitance_LU[i_b, i, k] /= rigid_data.capacitance_LU[i_b, k, k]
+                factor = rigid_data.capacitance_LU[i_b, i, k]
                 for j in range(k + 1, n_cols):
-                    rigid_data.wb_S[i_b, i, j] -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_S[i_b, k, j]
+                    rigid_data.capacitance_LU[i_b, i, j] -= factor * rigid_data.capacitance_LU[i_b, k, j]
 
 
 @qd.func(requires_top_level=True)
@@ -683,32 +667,26 @@ def func_rigid_contact_gradient(
     link to that of the contact point at arm r_s."""
     func_link_spatial_disp(rigid_data.x, rigid_data, dyn_state.dofs, dyn_info.links, config)
     qd.loop_config(name="mpm_rigid_link_K_clear")
-    for i_l, i_b, k in qd.ndrange(rigid_data.link_K.shape[0], rigid_data.link_K.shape[1], 36):
-        rigid_data.link_K[i_l, i_b, k] = 0.0
+    for i_l, i_b in qd.ndrange(rigid_data.link_K.shape[0], rigid_data.link_K.shape[1]):
+        rigid_data.link_K[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
     qd.loop_config(name="mpm_rigid_row_forces")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            g = newton.g_rigid[s]
+            H = newton.h_rigid[s]
             if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
                 r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
-                torque = r.cross(g)
-                for d in qd.static(range(3)):
-                    qd.atomic_add(rigid_data.link_F[i_l, i_b, d], g[d])
-                    qd.atomic_add(rigid_data.link_F[i_l, i_b, 3 + d], torque[d])
-                R = qd.Matrix([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]], dt=gs.qd_float)
-                HR = H @ R
-                RH = R @ H
-                RHR = RH @ R
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * i + j], H[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * i + 3 + j], -HR[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * (3 + i) + j], RH[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * (3 + i) + 3 + j], -RHR[i, j])
+                qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
+                qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(g))
+                R = gu.qd_vec_to_skew(r)
+                P = qd.Matrix.zero(gs.qd_float, 3, 6)
+                for i in qd.static(range(3)):
+                    P[i, i] = 1.0
+                    for j in qd.static(range(3)):
+                        P[i, 3 + j] = -R[i, j]
+                qd.atomic_add(rigid_data.link_K[i_l, i_b], P.transpose() @ H @ P)
     func_link_force_to_dofs(-1.0, rigid_data.grad, rigid_data, dyn_state.dofs, dyn_info.links, config)
 
 
@@ -734,38 +712,36 @@ def func_rigid_precondition(
         for a in range(n_cols):
             value = gs.qd_float(0.0)
             for i_d in range(n_dofs):
-                value += rigid_data.wb_U[i_d, i_b, a] * rigid_data.z[i_d, i_b]
-            rigid_data.wb_y[i_b, a] = value
+                value += rigid_data.woodbury_U[i_d, i_b, a] * rigid_data.z[i_d, i_b]
+            rigid_data.woodbury_y[i_b, a] = value
         for j in range(n_links):
             i_l = rigid_data.contact_links[i_b, j]
-            y = qd.Vector([rigid_data.wb_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
+            y = qd.Vector([rigid_data.woodbury_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
+            K_y = rigid_data.link_K[i_l, i_b] @ y
             for i in qd.static(range(6)):
-                value = gs.qd_float(0.0)
-                for k in qd.static(range(6)):
-                    value += rigid_data.link_K[i_l, i_b, 6 * i + k] * y[k]
-                rigid_data.wb_y[i_b, 6 * j + i] = value
+                rigid_data.woodbury_y[i_b, 6 * j + i] = K_y[i]
         # S q = K U^T z0 by the lower-upper (LU) factor: the row pivots, then the unit lower and upper triangular solves
         for k in range(n_cols):
-            i_p = rigid_data.wb_pivot[i_b, k]
+            i_p = rigid_data.capacitance_pivots[i_b, k]
             if i_p != k:
-                entry = rigid_data.wb_y[i_b, k]
-                rigid_data.wb_y[i_b, k] = rigid_data.wb_y[i_b, i_p]
-                rigid_data.wb_y[i_b, i_p] = entry
+                entry = rigid_data.woodbury_y[i_b, k]
+                rigid_data.woodbury_y[i_b, k] = rigid_data.woodbury_y[i_b, i_p]
+                rigid_data.woodbury_y[i_b, i_p] = entry
         for i in range(n_cols):
-            value = rigid_data.wb_y[i_b, i]
+            value = rigid_data.woodbury_y[i_b, i]
             for k in range(i):
-                value -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_y[i_b, k]
-            rigid_data.wb_y[i_b, i] = value
+                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
+            rigid_data.woodbury_y[i_b, i] = value
         for i_rev in range(n_cols):
             i = n_cols - 1 - i_rev
-            value = rigid_data.wb_y[i_b, i]
+            value = rigid_data.woodbury_y[i_b, i]
             for k in range(i + 1, n_cols):
-                value -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_y[i_b, k]
-            rigid_data.wb_y[i_b, i] = value / rigid_data.wb_S[i_b, i, i]
+                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
+            rigid_data.woodbury_y[i_b, i] = value / rigid_data.capacitance_LU[i_b, i, i]
         for i_d in range(n_dofs):
             value = gs.qd_float(0.0)
             for b in range(n_cols):
-                value += rigid_data.wb_W[i_d, i_b, b] * rigid_data.wb_y[i_b, b]
+                value += rigid_data.woodbury_W[i_d, i_b, b] * rigid_data.woodbury_y[i_b, b]
             rigid_data.z[i_d, i_b] -= value
 
 
@@ -809,41 +785,22 @@ def func_rigid_contact_matvec(
     params: qd.template(),
     config: qd.template(),
 ):
-    """Apply the Rigid contact rows' share of the joint operator beyond the MPM matrix, after func_linear_pcg_spmv.
+    """Apply the Rigid contact rows' share of the joint operator, after the own operators of MPM and Rigid set their Ap.
 
-    It acts on p = (p_u, p_r), after func_rigid_matvec set Ap_r. A particle with Rigid rows of Hessian H, trial
-    displacement dxp = sum_a w_a p_u,a and contact point displacement dr of p_r adds -w_a H dr to Ap_u,a and the spatial
-    force (h, r x h), h = H (dr - dxp), to its link in `link_F`, which func_rigid_contact_matvec_post hands to Ap_r.
-    p.Ap gains p_u . (-sum_a w_a H dr).
-    """
-    pcg_workspace = linear.pcg
+    The contact point of a particle moves by dr of p_r along the direction. The rows add their cross term on the MPM
+    rows (see contact_cross_matvec), and the spatial force (h, r x h) to the link in `link_force_vel` /
+    `link_force_ang`, which func_rigid_contact_matvec_post hands to Ap_r."""
     func_link_spatial_disp(rigid_data.p, rigid_data, dyn_state.dofs, dyn_info.links, config)
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
-            lin, ang = link_spatial(i_l, i_b, rigid_data)
-            dr = lin + ang.cross(r)
-            dxp = qd.Vector.zero(gs.qd_float, 3)
-            for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
-                dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H_dr = H @ dr
-            for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
-                for d in qd.static(range(3)):
-                    qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dr[d])
-            h = H @ (dr - dxp)
-            torque = r.cross(h)
-            for d in qd.static(range(3)):
-                qd.atomic_add(rigid_data.link_F[i_l, i_b, d], h[d])
-                qd.atomic_add(rigid_data.link_F[i_l, i_b, 3 + d], torque[d])
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dr))
+            dr = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
+            h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, params)
+            qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], h)
+            qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(h))
 
 
 @qd.func(requires_top_level=True)
@@ -1017,18 +974,18 @@ def func_mpm_reaction(
 
     qfrc_constraint becomes M qacc - qf_smooth, Rigid's own and the MPM rows' generalized force together, so that
     Rigid's dofs.force is M qacc of the converged qacc as after its own solve. The rows' spatial force on each link
-    stays in `link_F` (in units of dt^2 force) for func_add_mpm_contact_force: the contact force of a link is not
-    recoverable from the generalized force of a chain.
+    stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force) for func_add_mpm_contact_force: the contact
+    force of a link is not recoverable from the generalized force of a chain.
 
     A link pushed by the rows is marked constrained, as Rigid's assembly marks the links of its own contacts, since the
     midpoint integration of a free link (see func_midpoint_eligible) replaces qacc by the solution of the unconstrained
     equation of motion."""
-    n_links = rigid_data.link_V.shape[0]
-    n_envs = rigid_data.link_V.shape[1]
+    n_links = rigid_data.link_force_vel.shape[0]
+    n_envs = rigid_data.link_force_vel.shape[1]
     qd.loop_config(name="mpm_reaction_clear")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        for d in qd.static(range(6)):
-            rigid_data.link_F[i_l, i_b, d] = 0.0
+        rigid_data.link_force_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        rigid_data.link_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
     qd.loop_config(name="mpm_reaction_rows")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
@@ -1036,13 +993,12 @@ def func_mpm_reaction(
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             slots = stencil_node_slots(env, cell, grid)
             dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
-            dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            dr = newton.contact_dr[s]
             energy, g, hess = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
             if g.norm_sqr() > 0.0:
-                torque = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links).cross(g)
-                for d in qd.static(range(3)):
-                    qd.atomic_add(rigid_data.link_F[i_l, i_b, d], g[d])
-                    qd.atomic_add(rigid_data.link_F[i_l, i_b, 3 + d], torque[d])
+                r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
+                qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
+                qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(g))
                 dyn_state.links.is_constrained[i_l, i_b] = True
     n_dofs = rigid_data.x.shape[0]
     qd.loop_config(name="mpm_reaction_qfrc")
@@ -1054,10 +1010,10 @@ def func_mpm_reaction(
 def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: array_class.LinksState, params: qd.template()):
     """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
     contact forces were written by the post-solve stage of its substep."""
-    n_links = rigid_data.link_V.shape[0]
-    n_envs = rigid_data.link_V.shape[1]
+    n_links = rigid_data.link_force_vel.shape[0]
+    n_envs = rigid_data.link_force_vel.shape[1]
     dt = params.substep_dt[()]
     qd.loop_config(name="mpm_add_contact_force")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        force = qd.Vector([rigid_data.link_F[i_l, i_b, d] for d in qd.static(range(3))], dt=gs.qd_float)
+        force = rigid_data.link_force_vel[i_l, i_b]
         links_state.contact_force[i_l, i_b] = links_state.contact_force[i_l, i_b] + force / (dt * dt)

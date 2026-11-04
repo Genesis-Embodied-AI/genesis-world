@@ -100,9 +100,6 @@ class MpmFemContact:
         mpm_fem_func.func_fem_contact_matvec(
             f, self.particles, self.grid, self.newton, self.linear, self.fem, pcg_scalars, self.params
         )
-        mpm_fem_func.func_fem_contact_matvec_post(
-            f, self.particles, self.grid, self.newton, self.linear, self.fem, pcg_scalars, self.params
-        )
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):

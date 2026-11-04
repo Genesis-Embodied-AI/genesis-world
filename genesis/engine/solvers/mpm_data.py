@@ -82,11 +82,6 @@ class MpmParams:
         # Width in volume ratio of the band below J = 1 over which the stiffness of the liquid rises (see
         # liquid_volume_terms)
         self.liquid_band = _scalar(gs.qd_float, liquid_band)
-        # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
-        # will violate are then active at the first assembly, so that the first direction already sees them. A barrier
-        # against penetration needs the start u = 0, free of penetration, for its continuous collision detection, so
-        # this stays a switch.
-        self.newton_start_inertial = _scalar(gs.qd_int, 0)
         # The solref / solimp parameters of the wall rows, in Rigid's form: timeconst, dampratio, dmin, dmax, width, mid,
         # power
         self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
@@ -236,10 +231,10 @@ class MpmGrid:
         self.particle_sort = DynamicRadixSort(qd.u64, n_sort_padded)
 
         self.pblock_keys = qd.ndarray(qd.u64, shape=(max_particle_blocks,))
-        self.nbr_keys = qd.ndarray(qd.u64, shape=(n_neighbors,))
-        self.nbr_keys_tmp = qd.ndarray(qd.u64, shape=(n_neighbors,))
-        self.nbr_perm = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
-        self.nbr_perm_tmp = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
+        self.neighbor_keys = qd.ndarray(qd.u64, shape=(n_neighbors,))
+        self.neighbor_keys_tmp = qd.ndarray(qd.u64, shape=(n_neighbors,))
+        self.neighbor_perm = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
+        self.neighbor_perm_tmp = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
         self.block_sort = DynamicRadixSort(qd.u64, n_neighbors)
         self.block_flags = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
         self.block_ranks = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
@@ -258,15 +253,13 @@ class MpmGrid:
         self.cell_seg_end = qd.ndarray(gs.qd_int, shape=(max_nodes,))
 
         self.node_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
+        # Node touched by a non-free particle, whose displacement the Newton solve holds at zero
         self.node_fixed = qd.ndarray(gs.qd_int, shape=(max_nodes,))
-        # Per displacement component: held at zero by the Newton solve
-        self.dof_fixed = qd.ndarray(gs.qd_int, shape=(3 * max_nodes,))
         # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights
         # of the particles in their contact rows are computed once (see func_contact_invweight)
-        self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
-        self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        self.node_diag = qd.ndarray(gs.qd_mat3, shape=(max_nodes,))
+        self.node_v = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
+        self.node_v_free = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
 
     @property
     def max_nodes(self) -> int:
@@ -291,37 +284,37 @@ class MpmNewton:
         self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
         # gathers to the particles
-        self.adj_mom = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        self.adj_mom = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
         self.adj_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
         # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
-        self.g_p = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
+        self.g_p = qd.ndarray(gs.qd_mat3, shape=(n_padded,))
         # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
-        self.g_contact = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.g_contact = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs
         # of its link, and the displacement of its contact point on the link over the substep
-        self.g_rigid = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        self.h_rigid = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
-        self.contact_dr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.g_rigid = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
+        self.h_rigid = qd.ndarray(gs.qd_mat3, shape=(n_padded,))
+        self.contact_dr = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
         # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
         # build them only once a constraint exists.
         self.constraint_spring = qd.ndarray(gs.qd_float, shape=(n_padded,))
         self.constraint_damping = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.constraint_target = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.constraint_target = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         for array in (self.constraint_spring, self.constraint_damping, self.constraint_target):
-            array.from_numpy(np.zeros(array.shape, dtype=gs.np_float))
+            array.fill(0.0)
         self.energy_partials = qd.ndarray(gs.qd_float, shape=(n_partials,))
-        # Soft contact rows, CONTACT_ROWS per sorted particle on its trial displacement dx = sum_a w_a u_a: direction J,
-        # stiffness D (zero where there is no row) and target t of the row term 1/2 D min(0, J.dx - t)^2, and the
-        # Rigid link of the particle's pyramid rows (-1 if none)
-        self.contact_dir = qd.ndarray(gs.qd_float, shape=(3 * CONTACT_ROWS * n_padded,))
+        # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
+        # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
+        # 1/2 D min(0, J.dx - t)^2, and the Rigid link of the particle's pyramid rows (-1 if none)
+        self.contact_dir = qd.ndarray(gs.qd_vec3, shape=(CONTACT_ROWS * n_padded,))
         self.contact_D = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
         self.contact_t = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
         self.contact_link = qd.ndarray(gs.qd_int, shape=(n_padded,))
         # The FEM surface triangle of the particle's pyramid rows (-1 if none), and the barycentric coordinates of its
         # closest point on it
         self.contact_tri = qd.ndarray(gs.qd_int, shape=(n_padded,))
-        self.contact_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.contact_bary = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
         self.contact_pbd = qd.ndarray(gs.qd_int, shape=(n_padded,))
         # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and,
@@ -332,9 +325,9 @@ class MpmNewton:
         self.query_idx = qd.ndarray(gs.qd_int, shape=(n_padded,))
         self.query_dist = qd.ndarray(gs.qd_float, shape=(n_padded,))
         self.query_align = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.query_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        self.query_normal = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        self.query_pos = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.query_bary = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
+        self.query_normal = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
+        self.query_pos = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         self.query_frame = qd.ndarray(gs.qd_int, shape=())
 
 
@@ -344,7 +337,6 @@ class MpmLinearSystem:
     gradient state."""
 
     def __init__(self, max_nodes: int, max_triplets: int) -> None:
-        self.row_offset = 0
         self.matrix = BCOOMatrix(
             shape=(max_nodes, max_nodes),
             block_shape=(3, 3),
