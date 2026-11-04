@@ -657,6 +657,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia)
                 + (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos) * damping_alpha_dt
             )
+            # A constrained vertex sits at its target, which the damping of its jump to it would otherwise pull away
+            if qd.static(self._enable_vertex_constraints):
+                if self.vertex_constraints.is_constrained[i_v, i_b]:
+                    self.elements_v_energy[i_b, i_v].force = qd.Vector.zero(gs.qd_float, 3)
             self.pcg_state_v[i_b, i_v].diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i in qd.static(range(3)):
                 self.pcg_state_v[i_b, i_v].diag3x3[i, i] = (
