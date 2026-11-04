@@ -73,6 +73,9 @@ def test_position_control(show_viewer):
     robot.set_dofs_kv(MOTORS_KD, envs_idx=0)
     robot.set_dofs_ki(MOTORS_KI, envs_idx=0)
     assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
+    with pytest.raises(gs.GenesisException, match="must be non-negative"):
+        robot.set_dofs_ki(-MOTORS_KI, envs_idx=0)
+    assert_allclose(robot.get_dofs_ki(envs_idx=0), MOTORS_KI, tol=gs.EPS)
     robot.control_dofs_position(MOTORS_POS_TARGET, envs_idx=0)
     robot.control_dofs_position_velocity(MOTORS_POS_TARGET, MOTORS_VEL_TARGET, envs_idx=0)
     # The last arm joint and a finger track their target velocity alone, the arm joint saturating its force range
