@@ -1,6 +1,7 @@
 import inspect
 import math
 import os
+import weakref
 from functools import lru_cache, wraps
 from pathlib import Path
 
@@ -271,6 +272,12 @@ def compute_sdf_data(mesh, res):
     return sdf_data
 
 
+# Trimesh materials drawing the image textures, by texture and content of their emission, which the rasterizer shares
+# (see 'RasterizerContext.on_rigid'). A weak reference keys the texture, which never matches a later texture reusing
+# the id of a collected one, even while the release of the owned entries is disabled.
+_TEXTURE_MATERIALS_CACHE = OwnedCache()
+
+
 def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
@@ -305,13 +312,21 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     if isinstance(texture, gs.textures.ImageTexture):
         if flipped_uvs is not None:
             assert texture.image_array.dtype == np.uint8
-            image = Image.fromarray(texture.image_array)
-            if emissive_kwargs:
-                material = trimesh.visual.material.PBRMaterial(
-                    baseColorTexture=image, baseColorFactor=(255, 255, 255, 255), **emissive_kwargs
-                )
-            else:
-                material = trimesh.visual.material.SimpleMaterial(image=image, diffuse=(1.0, 1.0, 1.0, 1.0))
+            material = _TEXTURE_MATERIALS_CACHE.get(
+                texture,
+                (weakref.ref(texture), get_hashkey(emission) if emissive_kwargs else None),
+                lambda: (
+                    trimesh.visual.material.PBRMaterial(
+                        baseColorTexture=Image.fromarray(texture.image_array),
+                        baseColorFactor=(255, 255, 255, 255),
+                        **emissive_kwargs,
+                    )
+                    if emissive_kwargs
+                    else trimesh.visual.material.SimpleMaterial(
+                        image=Image.fromarray(texture.image_array), diffuse=(1.0, 1.0, 1.0, 1.0)
+                    )
+                ),
+            )
             visual = trimesh.visual.TextureVisuals(uv=flipped_uvs, material=material)
         else:
             # fall back to color texture

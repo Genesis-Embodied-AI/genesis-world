@@ -576,9 +576,11 @@ class RasterizerContext:
             yield self.sim.kinematic_solver
 
     def on_rigid(self):
-        # Reuse a single pyrender material per genesis surface so that geoms sharing one surface (e.g. the many
-        # textured submeshes of a GLB, which are kept separate to preserve baked convex decompositions) expose the
-        # same Texture instances. The renderer then keeps a single host copy and GPU upload instead of one per geom.
+        # Reuse a single pyrender material per genesis surface, and per trimesh material among the textured geoms (see
+        # 'surface_uvs_to_trimesh_visual'), so that geoms sharing either one (e.g. the many textured submeshes of a GLB,
+        # kept separate to preserve baked convex decompositions) expose the same Texture instances. The renderer then
+        # keeps a single host copy and GPU upload instead of one per geom. A surface keys its textured geoms and its
+        # untextured ones (without uvs) apart, since each kind is drawn with a material of its own.
         vis_materials = {}
         for solver in self._rigid_solvers():
             # One conversion of the geom poses per visual mode in use
@@ -591,10 +593,16 @@ class RasterizerContext:
                 geoms_T = geoms_T_by_mode[is_visual]
 
                 for geom in geoms:
-                    surface_key = id(geom.surface)
-                    mesh_node = self.add_geom_node(geom, geoms_T, material=vis_materials.get(surface_key))
+                    is_textured = is_visual and isinstance(geom.trimesh.visual, trimesh.visual.TextureVisuals)
+                    material_keys = [("surface", is_textured, id(geom.surface))]
+                    if is_textured:
+                        material_keys.append(("material", id(geom.trimesh.visual.material)))
+                    materials = [vis_materials[key] for key in material_keys if key in vis_materials]
+                    material = materials[0] if materials else None
+                    mesh_node = self.add_geom_node(geom, geoms_T, material=material)
                     if mesh_node is not None:
-                        vis_materials.setdefault(surface_key, mesh_node.primitives[0].material)
+                        for key in material_keys:
+                            vis_materials.setdefault(key, mesh_node.primitives[0].material)
 
         if self.sim.rigid_solver.is_active and any(link.visualize_contact for link in self.sim.rigid_solver.links):
             # Scale contact arrows by the parent link's overall size rather than the individual contacting geom, so
