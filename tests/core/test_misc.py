@@ -142,8 +142,12 @@ def test_entity_options(
     )
     options_classes = [
         cls
-        for cls in vars(gs.options).values()
-        if isinstance(cls, type) and issubclass(cls, gs.entities.BaseEntity) and cls is not gs.entities.BaseEntity
+        for name, cls in vars(gs.entities).items()
+        if isinstance(cls, type)
+        and issubclass(cls, gs.entities.BaseEntity)
+        and cls is not gs.entities.BaseEntity
+        and name.isidentifier()
+        and not name.startswith("_")
     ]
     entities = []
     for i, options_cls in enumerate(options_classes):
@@ -210,6 +214,8 @@ def test_entity_options(
         gs.entities.PBDElastic(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(youngs_modulus=1e6))
     with pytest.raises(gs.GenesisException, match="gs.entities.FEM or gs.entities.MPM"):
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Elastic())
+    with pytest.raises(gs.GenesisException, match="SPH or gs.entities.PBDLiquid or gs.entities.PBDParticle"):
+        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Liquid())
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
 

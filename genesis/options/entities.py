@@ -104,7 +104,7 @@ def _get_pbd_material_params(
 
 
 def get_entity_options_cls(material: BaseMaterial) -> tuple[type["BaseEntity"], ...]:
-    """Return the classes of the entity options admitting a material, in declaration order.
+    """Return the public classes of the entity options admitting a material, in declaration order.
 
     Each class admits the materials of its declared 'material' field. A kinematic or hybrid entity has no such field.
     """
@@ -113,10 +113,13 @@ def get_entity_options_cls(material: BaseMaterial) -> tuple[type["BaseEntity"], 
         options_cls = pending.pop()
         classes.append(options_cls)
         pending.extend(reversed(options_cls.__subclasses__()))
+    # Private bases and their parametrizations by the entity class declare a material field too
     return tuple(
         options_cls
         for options_cls in classes
-        if "material" in options_cls.model_fields
+        if not options_cls.__name__.startswith("_")
+        and options_cls.__pydantic_generic_metadata__["origin"] is None
+        and "material" in options_cls.model_fields
         and isinstance(material, options_cls.model_fields["material"].annotation)
     )
 
