@@ -30,11 +30,9 @@ def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=5.0,
-            ),
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=5.0,
         ),
     )
     # The tetrahedralization is refined, surface included, so that every muscle group spans many tetrahedra. Its

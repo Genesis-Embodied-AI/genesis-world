@@ -68,8 +68,8 @@ ball = scene.add_entity(
         pos=(0.8, 0.6, 0.1),
         radius=0.1,
     ),
-    material=gs.materials.Material(
-        density=1000,
+    material=gs.materials.Rigid(
+        rho=1000,
         friction=0.5,
     ),
 )

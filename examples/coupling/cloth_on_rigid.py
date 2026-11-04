@@ -31,26 +31,23 @@ def main():
         show_viewer=args.vis,
     )
 
-    frictionless_solver_options = gs.options.RigidEntitySolverOptions(
+    frictionless_rigid = gs.materials.Rigid(
+        needs_coup=True,
         coup_friction=0.0,
     )
 
     plane = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=frictionless_solver_options,
-        ),
+        morph=gs.morphs.Plane(),
+        material=frictionless_rigid,
     )
 
     obj = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Sphere(
-                radius=0.2,
-                pos=(0.0, 0.0, 0.0),
-                fixed=True,
-            ),
-            solver_options=frictionless_solver_options,
+        morph=gs.morphs.Sphere(
+            radius=0.2,
+            pos=(0.0, 0.0, 0.0),
+            fixed=True,
         ),
+        material=frictionless_rigid,
     )
 
     cloth = scene.add_entity(

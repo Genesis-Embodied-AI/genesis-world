@@ -49,7 +49,7 @@ def test_noslip_resting_stability(show_viewer):
         x = 0.4 + 0.12 * (i % 4)
         y = -0.25 + 0.12 * (i // 4)
         box = scene.add_entity(
-            material=gs.materials.Material(
+            material=gs.materials.Rigid(
                 friction=0.5,
             ),
             # Drop from just above the resting height: a high drop makes the landing chaotic across precisions,

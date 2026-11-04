@@ -32,6 +32,7 @@ def main():
         show_viewer=args.vis,
     )
 
+    frictionless_rigid = gs.materials.Rigid(needs_coup=True, coup_friction=0.0)
     plane = scene.add_entity(
         morph=gs.morphs.Plane(),
     )
@@ -51,16 +52,12 @@ def main():
     )
 
     cube = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.5, 0.0, 2.4),
-                size=(0.2, 0.2, 0.2),
-                euler=(30, 40, 0),
-                fixed=False,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.0,
-            ),
+        material=frictionless_rigid,
+        morph=gs.morphs.Box(
+            pos=(0.5, 0.0, 2.4),
+            size=(0.2, 0.2, 0.2),
+            euler=(30, 40, 0),
+            fixed=False,
         ),
     )
 

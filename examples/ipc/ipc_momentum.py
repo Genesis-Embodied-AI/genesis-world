@@ -55,22 +55,18 @@ def main():
     # Rigid bodies (added to both Genesis rigid solver AND IPC as ABD objects)
     # This enables contact between rigid bodies and FEM bodies through IPC
     rigid_cube = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.4),
-                size=(0.1, 0.1, 0.1),
-                euler=(0, 0, 0),
-            ),
-            surface=gs.surfaces.Plastic(
-                color=(0.8, 0.2, 0.2, 0.8),
-            ),
-            material=gs.materials.Material(
-                density=1000,
-                friction=0.3,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="two_way_soft_constraint",
-            ),
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.4),
+            size=(0.1, 0.1, 0.1),
+            euler=(0, 0, 0),
+        ),
+        material=gs.materials.Rigid(
+            rho=1000,
+            friction=0.3,
+            coup_type="two_way_soft_constraint",
+        ),
+        surface=gs.surfaces.Plastic(
+            color=(0.8, 0.2, 0.2, 0.8),
         ),
     )
     scene.build()

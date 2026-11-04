@@ -88,20 +88,16 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     )
 
     box = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                size=(0.2, 0.2, 0.2),
-                pos=(0.0, 0.0, 0.6),
-            ),
-            surface=gs.surfaces.Plastic(
-                color=(0.8, 0.3, 0.2, 0.8),
-            ),
-            material=gs.materials.Material(
-                density=500.0,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="ipc_only",
-            ),
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.6),
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+            coup_type="ipc_only",
+        ),
+        surface=gs.surfaces.Plastic(
+            color=(0.8, 0.3, 0.2, 0.8),
         ),
     )
 
@@ -228,33 +224,25 @@ def test_ground_clearance(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            material=gs.materials.Material(
-                density=200.0,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            rho=200.0,
+            coup_type="ipc_only",
         ),
     )
 
     cubes = []
     for y, resistance in ((-0.4, 1e2), (-0.2, 1e3), (0.0, 1e4), (0.2, 1e5), (0.4, 1e6)):
         cube = scene.add_entity(
-            options=gs.options.RigidEntityOptions(
-                morph=gs.morphs.Box(
-                    pos=(0.0, y, 0.05),
-                    size=(0.08, 0.08, 0.08),
-                ),
-                material=gs.materials.Material(
-                    density=200.0,
-                ),
-                solver_options=gs.options.RigidEntitySolverOptions(
-                    coup_friction=0.0,
-                    coup_type="ipc_only",
-                    contact_resistance=resistance,
-                ),
+            gs.morphs.Box(
+                pos=(0.0, y, 0.05),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.Rigid(
+                rho=200.0,
+                coup_friction=0.0,
+                coup_type="ipc_only",
+                contact_resistance=resistance,
             ),
         )
         cubes.append(cube)
@@ -304,27 +292,23 @@ def test_ground_sliding(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.25,
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=0.25,
+            coup_type="ipc_only",
         ),
     )
 
     cubes = []
     for y, mu in ((-0.4, 0.0), (-0.2, 0.01), (0.0, 0.04), (0.2, 0.09), (0.4, 0.16)):
         cube = scene.add_entity(
-            options=gs.options.RigidEntityOptions(
-                morph=gs.morphs.Box(
-                    pos=(0.0, y, 0.12),
-                    size=(0.08, 0.08, 0.08),
-                ),
-                solver_options=gs.options.RigidEntitySolverOptions(
-                    coup_friction=mu,
-                    coup_type="ipc_only",
-                ),
+            gs.morphs.Box(
+                pos=(0.0, y, 0.12),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.Rigid(
+                coup_friction=mu,
+                coup_type="ipc_only",
             ),
         )
         cubes.append(cube)
@@ -366,50 +350,42 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     )
 
     plane = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_type="ipc_only",
         ),
     )
     rigid_a = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.12),
-                size=(0.05, 0.05, 0.05),
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.25,
-                coup_type="ipc_only",
-                contact_resistance=9.0,
-            ),
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 0.12),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.25,
+            coup_type="ipc_only",
+            contact_resistance=9.0,
         ),
     )
     rigid_b = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.2, 0.0, 0.12),
-                size=(0.05, 0.05, 0.05),
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.64,
-                coup_type="ipc_only",
-                contact_resistance=16.0,
-            ),
+        gs.morphs.Box(
+            pos=(0.2, 0.0, 0.12),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.64,
+            coup_type="ipc_only",
+            contact_resistance=16.0,
         ),
     )
     rigid_c = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(-0.2, 0.0, 0.12),
-                size=(0.05, 0.05, 0.05),
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.16,
-                coup_type="ipc_only",
-                contact_resistance=None,
-            ),
+        gs.morphs.Box(
+            pos=(-0.2, 0.0, 0.12),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.16,
+            coup_type="ipc_only",
+            contact_resistance=None,
         ),
     )
     fem = scene.add_entity(
@@ -488,12 +464,10 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.5,
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=0.5,
+            coup_type="ipc_only",
         ),
     )
 
@@ -520,21 +494,17 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     box = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(-0.25, 0.0, 0.1),
-            ),
-            surface=gs.surfaces.Plastic(
-                color=(0.8, 0.3, 0.2, 0.8),
-            ),
-            material=gs.materials.Material(
-                density=500.0,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.3,
-                coup_type="ipc_only",
-            ),
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(-0.25, 0.0, 0.1),
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+            coup_friction=0.3,
+            coup_type="ipc_only",
+        ),
+        surface=gs.surfaces.Plastic(
+            color=(0.8, 0.3, 0.2, 0.8),
         ),
     )
 
@@ -647,21 +617,17 @@ def test_momentum_conservation(n_envs, show_viewer):
     )
 
     rigid_cube = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.4),
-                size=(0.1, 0.1, 0.1),
-                euler=(0, 0, 0),
-            ),
-            surface=gs.surfaces.Plastic(
-                color=(0.8, 0.2, 0.2, 0.8),
-            ),
-            material=gs.materials.Material(
-                density=1000,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="two_way_soft_constraint",
-            ),
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.4),
+            size=(0.1, 0.1, 0.1),
+            euler=(0, 0, 0),
+        ),
+        material=gs.materials.Rigid(
+            rho=1000,
+            coup_type="two_way_soft_constraint",
+        ),
+        surface=gs.surfaces.Plastic(
+            color=(0.8, 0.2, 0.2, 0.8),
         ),
     )
 
@@ -789,25 +755,21 @@ def test_single_joint(n_envs, coup_type, joint_type, fixed, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.5,
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=0.5,
+            coup_type="ipc_only",
         ),
     )
 
     robot = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.URDF(
-                file=f"urdf/simple/two_cube_{joint_type}.urdf",
-                pos=POS,
-                fixed=fixed,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type=coup_type,
-            ),
+        morph=gs.morphs.URDF(
+            file=f"urdf/simple/two_cube_{joint_type}.urdf",
+            pos=POS,
+            fixed=fixed,
+        ),
+        material=gs.materials.Rigid(
+            coup_type=coup_type,
         ),
     )
 
@@ -923,14 +885,12 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
     )
 
     box = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                size=(0.05, 0.05, 0.05),
-                pos=POS,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="two_way_soft_constraint",
-            ),
+        gs.morphs.Box(
+            size=(0.05, 0.05, 0.05),
+            pos=POS,
+        ),
+        material=gs.materials.Rigid(
+            coup_type="two_way_soft_constraint",
         ),
     )
 

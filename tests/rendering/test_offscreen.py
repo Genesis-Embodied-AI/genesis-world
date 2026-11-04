@@ -246,8 +246,8 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
             file="urdf/go2/urdf/go2.urdf",
             merge_fixed_links=False,
         ),
-        material=gs.materials.Material(
-            density=200.0,
+        material=gs.materials.Rigid(
+            rho=200.0,
         ),
     )
     cam_debug = scene.add_camera(
@@ -1340,7 +1340,7 @@ def test_camera_follow_entity(n_envs, renderer, show_viewer):
         obj.set_quat(quat, envs_idx=([1] if n_envs else None))
         _, _, seg, _ = cam.render(segmentation=True, force_render=True)
         assert (np.unique(seg) == (0, entity_idx)).all()
-        assert not seg[tuple([*range(res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
+        assert not seg[tuple([*range(0, res // 3), *range(2 * res // 3, res)] for res in CAM_RES)].any()
 
 
 @pytest.mark.required

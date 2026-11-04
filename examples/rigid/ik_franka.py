@@ -23,22 +23,20 @@ def main():
     )
 
     robot = scene.add_entity(
-        options=gs.options.KinematicEntityOptions(
-            morph=gs.morphs.MJCF(
-                file="xml/franka_emika_panda/panda.xml",
-            ),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
         ),
+        material=gs.materials.Kinematic(),
     )
 
     target_entity = scene.add_entity(
-        options=gs.options.KinematicEntityOptions(
-            morph=gs.morphs.Mesh(
-                file="meshes/axis.obj",
-                scale=0.15,
-            ),
-            surface=gs.surfaces.Default(
-                color=(1, 0.5, 0.5, 1),
-            ),
+        gs.morphs.Mesh(
+            file="meshes/axis.obj",
+            scale=0.15,
+        ),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(
+            color=(1, 0.5, 0.5, 1),
         ),
     )
 

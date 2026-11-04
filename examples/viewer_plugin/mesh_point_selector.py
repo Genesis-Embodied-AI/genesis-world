@@ -257,37 +257,32 @@ if __name__ == "__main__":
     )
 
     # Only entities opting into visual raycasting can be selected with --use-visual-geom.
+    raycastable = gs.materials.Rigid(
+        use_visual_raycasting=True,
+    )
     vis_mode = "visual" if args.use_visual_geom else "collision"
 
     hand = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.URDF(
-                file="urdf/shadow_hand/shadow_hand.urdf",
-                collision=True,
-                pos=(0.0, 0.0, 0.0),
-                euler=(0.0, 0.0, 180.0),
-                fixed=True,
-                merge_fixed_links=False,
-            ),
-            surface=gs.surfaces.Default(
-                vis_mode=vis_mode,
-            ),
-            use_visual_raycasting=True,
+        morph=gs.morphs.URDF(
+            file="urdf/shadow_hand/shadow_hand.urdf",
+            collision=True,
+            pos=(0.0, 0.0, 0.0),
+            euler=(0.0, 0.0, 180.0),
+            fixed=True,
+            merge_fixed_links=False,
         ),
+        material=raycastable,
+        vis_mode=vis_mode,
     )
     duck = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Mesh(
-                file="meshes/duck/duck.obj",
-                pos=(0.0, 0.3, 0.0),
-                scale=0.001,
-                fixed=True,
-            ),
-            surface=gs.surfaces.Default(
-                vis_mode=vis_mode,
-            ),
-            use_visual_raycasting=True,
+        morph=gs.morphs.Mesh(
+            file="meshes/duck/duck.obj",
+            pos=(0.0, 0.3, 0.0),
+            scale=0.001,
+            fixed=True,
         ),
+        material=raycastable,
+        vis_mode=vis_mode,
     )
 
     scene.viewer.add_plugin(

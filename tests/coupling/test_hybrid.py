@@ -65,8 +65,8 @@ def test_rigid_mpm_muscle(show_viewer):
             pos=BALL_POS_INIT,
             radius=0.12,
         ),
-        material=gs.materials.Material(
-            density=1000,
+        material=gs.materials.Rigid(
+            rho=1000,
             friction=0.5,
         ),
     )
@@ -115,8 +115,8 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_rigid = scene.add_entity(
-        material=gs.materials.Material(
-            density=1.0,
+        material=gs.materials.Rigid(
+            rho=1.0,
         ),
         morph=gs.morphs.Box(
             pos=(0.0, -0.25, 0.1),
@@ -222,11 +222,10 @@ def test_deformable_parallel(show_viewer):
     )
 
     plane = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.0,
-            ),
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            needs_coup=True,
+            coup_friction=0.0,
         ),
     )
     cloth = scene.add_entity(
@@ -470,6 +469,7 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
             size=(0.5, 0.5, 2 * BOX_HALFHEIGHT),
             pos=(0.0, 0.0, BOX_HALFHEIGHT),
         ),
+        material=gs.materials.Rigid(),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
     robot_1 = scene.add_entity(

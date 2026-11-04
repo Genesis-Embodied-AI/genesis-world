@@ -1732,7 +1732,7 @@ def test_heterogeneous_object(show_viewer, tol):
                 radius=SPHERE_RADIUS,
             ),
         ],
-        material=gs.materials.Material(
+        material=gs.materials.Rigid(
             friction=0.5,
         ),
     )

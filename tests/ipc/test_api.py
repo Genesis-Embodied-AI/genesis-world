@@ -28,22 +28,18 @@ def test_needs_coup():
         show_viewer=False,
     )
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                needs_coup=False,
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            needs_coup=False,
         ),
     )
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(0, 0, 0.5),
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                needs_coup=False,
-            ),
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0, 0, 0.5),
+        ),
+        material=gs.materials.Rigid(
+            needs_coup=False,
         ),
     )
     scene.build()
@@ -168,26 +164,22 @@ def test_find_target_links(coup_type, merge_fixed_links, show_viewer):
     )
 
     scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_friction=0.5,
-                coup_type="ipc_only",
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=0.5,
+            coup_type="ipc_only",
         ),
     )
 
     robot = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.URDF(
-                file="urdf/panda_bullet/panda_nohand.urdf",
-                pos=(0, 0, 1),
-                fixed=True,
-                merge_fixed_links=merge_fixed_links,
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type=coup_type,
-            ),
+        morph=gs.morphs.URDF(
+            file="urdf/panda_bullet/panda_nohand.urdf",
+            pos=(0, 0, 1),
+            fixed=True,
+            merge_fixed_links=merge_fixed_links,
+        ),
+        material=gs.materials.Rigid(
+            coup_type=coup_type,
         ),
     )
 
@@ -232,24 +224,20 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
     )
 
     plane = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Plane(),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                needs_coup=False,
-            ),
+        gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            needs_coup=False,
         ),
     )
 
     # Non-IPC box — always handled by rigid solver
     box = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.Box(
-                size=(0.05, 0.05, 0.05),
-                pos=(1.0, 0.0, 0.2),
-            ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                needs_coup=False,
-            ),
+        gs.morphs.Box(
+            size=(0.05, 0.05, 0.05),
+            pos=(1.0, 0.0, 0.2),
+        ),
+        material=gs.materials.Rigid(
+            needs_coup=False,
         ),
     )
 
@@ -279,26 +267,22 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
     else:
         with pytest.raises(gs.GenesisException):
             entity = scene.add_entity(
-                options=gs.options.RigidEntityOptions(
-                    morph=gs.morphs.URDF(
-                        file="urdf/go2/urdf/go2.urdf",
-                        pos=(0.0, 0.0, 1.0),
-                    ),
-                    solver_options=gs.options.RigidEntitySolverOptions(
-                        coup_type="ipc_only",
-                    ),
+                gs.morphs.URDF(
+                    file="urdf/go2/urdf/go2.urdf",
+                    pos=(0.0, 0.0, 1.0),
+                ),
+                material=gs.materials.Rigid(
+                    coup_type="ipc_only",
                 ),
             )
 
         entity = scene.add_entity(
-            options=gs.options.RigidEntityOptions(
-                morph=gs.morphs.Box(
-                    size=(0.2, 0.2, 0.2),
-                    pos=(0.0, 0.0, 0.6),
-                ),
-                solver_options=gs.options.RigidEntitySolverOptions(
-                    coup_type="ipc_only",
-                ),
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=(0.0, 0.0, 0.6),
+            ),
+            material=gs.materials.Rigid(
+                coup_type="ipc_only",
             ),
         )
 

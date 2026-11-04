@@ -68,15 +68,13 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     )
     # A kinematic entity, whose solver holds state of its own. The runtime crashes when it builds one with gradients
     # after another scene in the same process, so a gradient scene holds a rigid box there.
-    options_cls = gs.options.RigidEntityOptions if requires_grad else gs.options.KinematicEntityOptions
     scene.add_entity(
-        options=options_cls(
-            morph=gs.morphs.Box(
-                pos=(0.0, -0.6, 0.5),
-                quat=(1.0, 0.0, 0.0, 1.0),
-                size=(0.1, 0.1, 0.1),
-            ),
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.6, 0.5),
+            quat=(1.0, 0.0, 0.0, 1.0),
+            size=(0.1, 0.1, 0.1),
         ),
+        material=gs.materials.Rigid() if requires_grad else gs.materials.Kinematic(),
     )
     return scene
 
@@ -104,7 +102,7 @@ def test_export_and_load_rigid(
             pos=(0.0, 0.0, 0.5),
             size=(0.2, 0.2, 0.2),
         ),
-        material=gs.materials.Material(
+        material=gs.materials.Rigid(
             friction=0.7,
         ),
         surface=gs.surfaces.Default(
@@ -197,12 +195,11 @@ def test_export_and_load_rigid(
         ),
     )
     kinematic_arm = scene.add_entity(
-        options=gs.options.KinematicEntityOptions(
-            morph=gs.morphs.MJCF(
-                file=ET.tostring(mimic_hinges, encoding="unicode"),
-                pos=(40.0, 40.0, 1.0),
-            ),
+        morph=gs.morphs.MJCF(
+            file=ET.tostring(mimic_hinges, encoding="unicode"),
+            pos=(40.0, 40.0, 1.0),
         ),
+        material=gs.materials.Kinematic(),
     )
     # A second entity from the same asset as 'anchored', so both share its geometry in the written file
     twin = scene.add_entity(

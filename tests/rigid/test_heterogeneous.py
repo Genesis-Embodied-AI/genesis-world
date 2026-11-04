@@ -486,9 +486,8 @@ def test_morph_property_raises():
         gs.morphs.Sphere(radius=0.1),
     )
     kinematic_obj = scene.add_entity(
-        options=gs.options.KinematicEntityOptions(
-            morph=kinematic_morphs_heterogeneous,
-        ),
+        morph=kinematic_morphs_heterogeneous,
+        material=gs.materials.Kinematic(),
     )
     tool = scene.add_entity(
         morph=gs.morphs.Box(

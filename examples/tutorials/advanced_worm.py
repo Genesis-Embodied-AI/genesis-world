@@ -30,11 +30,9 @@ scene = gs.Scene(
 )
 
 scene.add_entity(
-    options=gs.options.RigidEntityOptions(
-        morph=gs.morphs.Plane(),
-        solver_options=gs.options.RigidEntitySolverOptions(
-            coup_friction=5.0,
-        ),
+    morph=gs.morphs.Plane(),
+    material=gs.materials.Rigid(
+        coup_friction=5.0,
     ),
 )
 

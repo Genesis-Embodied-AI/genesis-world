@@ -292,12 +292,11 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
     ghost = None
     if with_kinematic:
         ghost = scene.add_entity(
-            options=gs.options.KinematicEntityOptions(
-                morph=gs.morphs.URDF(
-                    file="urdf/anymal_c/urdf/anymal_c.urdf",
-                    pos=(0, -0.5, 0.8),
-                ),
+            gs.morphs.URDF(
+                file="urdf/anymal_c/urdf/anymal_c.urdf",
+                pos=(0, -0.5, 0.8),
             ),
+            material=gs.materials.Kinematic(),
         )
     time_start = time.time()
     scene.build(n_envs=n_envs)
@@ -538,7 +537,7 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=None, **s
         x = -0.10 + 0.05 * (i % 5)
         y = -0.05 + 0.05 * (i // 5)
         scene.add_entity(
-            material=gs.materials.Material(
+            material=gs.materials.Rigid(
                 friction=0.8,
             ),
             morph=gs.morphs.Box(
