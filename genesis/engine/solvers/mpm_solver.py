@@ -145,8 +145,9 @@ class MPMSolver(ParticleSolver):
         self.register_errors(
             self.errno,
             {
-                ErrorCode.INVALID_PARTICLE_NAN: (
-                    "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
+                ErrorCode.INVALID_VELOCITY_NAN: (
+                    "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
+                    "adjust the material parameters."
                 ),
             },
         )
@@ -518,6 +519,10 @@ class MPMSolver(ParticleSolver):
                     new_vel += weight * grid_vel
                     new_C += 4 * self._inv_dx * weight * grid_vel.outer_product(dpos)
 
+                # A velocity that is not finite flags its env, whose state 'freeze_invalid_envs' then leaves as it was
+                if not qd_isfinite(new_vel):
+                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
+
                 # compute actual new_pos with new_vel
                 new_pos = self.particles[f, i_p, i_b].pos + self.substep_dt * new_vel
 
@@ -537,14 +542,19 @@ class MPMSolver(ParticleSolver):
 
             self.particles_ng[f + 1, i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
 
+    # The state of an env whose velocities are not finite stays as it was before the substep, so that it remains finite.
+    # The flag holds until the error raises at the beginning of the next step, which freezes the env for the rest of its
+    # step, as in the rigid solver.
     @no_grad
     @qd.kernel
-    def _kernel_flag_non_finite_pos(self, f: int):
-        """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
+    def _kernel_freeze_invalid_envs(self, f: int):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            pos = self.particles[f, i_p, i_b].pos
-            if not qd_isfinite(pos):
-                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_PARTICLE_NAN
+            if (self.errno[i_b] & ErrorCode.INVALID_VELOCITY_NAN) != 0:
+                self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
+                self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
+                self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
+                self.particles[f + 1, i_p, i_b].C = self.particles[f, i_p, i_b].C
+                self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -600,9 +610,7 @@ class MPMSolver(ParticleSolver):
             else:
                 self.grid_dirty_count[0] = 0
 
-        # The positions a step ends with are checked once, an error being raised at the beginning of the next step
-        if (self._sim._cur_substep_global + 1) % self._substeps == 0:
-            self._kernel_flag_non_finite_pos(f + 1)
+        self._kernel_freeze_invalid_envs(f)
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
