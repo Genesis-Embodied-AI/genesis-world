@@ -254,6 +254,8 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
     input_textures = [texture for texture in (color_texture, opacity_texture) if texture is not None]
+    # TODO: Identical pixels loaded from distinct files are not shared, since 'image_path' is part of the key. Sharing
+    # them requires texture-specific hashing, which 'get_hashkey' leaves out to stay generic.
     cache_key = get_hashkey(color_texture, opacity_texture, batch)
     result = _RGBA_CACHE.find(cache_key)
     if result is None:
