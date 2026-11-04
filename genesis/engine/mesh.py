@@ -586,15 +586,7 @@ class Mesh(RBC, serialization.SerializationMixin):
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
         )
-        # The mesh owns the shared textures if its surface holds one of them, which an authored texture or a
-        # simplification clearing the visual prevents. Only these surfaces carry an opacity texture.
-        if color_textures_key is not None and (
-            gs_mesh.surface.texture is color_texture
-            or (
-                isinstance(gs_mesh.surface, (gs.surfaces.Metal, gs.surfaces.Plastic, gs.surfaces.BSDF))
-                and gs_mesh.surface.opacity_texture is opacity_texture
-            )
-        ):
+        if color_textures_key is not None:
             _COLOR_TEXTURES_CACHE.own(gs_mesh, color_textures_key, color_textures)
         return gs_mesh
 
