@@ -1,0 +1,44 @@
+examples/rendering/dynamic_texture_duck.py
+  s_5f0a6aada3cc7c::t_cafbd0d6e09fac 72,120
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_5f0a6aada3cc7c::t_fcf65a295ad945 619-621
+  s_5f0a6aada3cc7c::t_5c6b4dbf89fffd 731-732,734-735,737,740-753
+  s_5f0a6aada3cc7c::t_034ecd9bfd0582 12
+tests/rendering/test_offscreen.py
+  s_5f0a6aada3cc7c::t_cafbd0d6e09fac 245,261,278,326-328,330,347,350-352,357,359-360,362-372
+genesis/engine/dynamic_texture.py
+  s_5f0a6aada3cc7c::t_f0f3e5302736f1 131-133
+  s_5f0a6aada3cc7c::t_122cb31b15d6a6 36-38
+  s_5f0a6aada3cc7c::t_f3deb1339bfb89 34-35,39-41,50-56,75-86,89,99-100,102-103,106-125,127-130,134-135,139-141,146,153-168
+genesis/engine/entities/rigid_entity/description.py
+  s_5f0a6aada3cc7c::t_0535f858ee4477 524-526
+  s_5f0a6aada3cc7c::t_f8bce4d5be8c47 512
+genesis/engine/scene.py
+  s_5f0a6aada3cc7c::t_e63d34575a5fe7 976-981,983,985
+  s_5f0a6aada3cc7c::t_5a2667f457a089 982,984
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_5f0a6aada3cc7c::t_034ecd9bfd0582 9,76-77
+  s_5f0a6aada3cc7c::t_68c8299ddfb3a0 1098-1099,1101-1102,1104,1107-1108,1110,1112-1120
+genesis/vis/rasterizer_context.py
+  s_5f0a6aada3cc7c::t_7b48f69ca4e3a6 49,59-60,634-635,654-655,1369,1371-1381,1411,1416
+  s_5f0a6aada3cc7c::t_f0f3e5302736f1 1366-1367
+genesis/options/textures.py
+  s_5f0a6aada3cc7c::t_0e02b6f70c6d02 357-363,370,372-380,382,385-387,391-396,398,405-414,417,432-433,436,438
+  s_5f0a6aada3cc7c::t_abdd7cd8b5021c 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6aeb9aa323057916f705cb3b91f9d33fe577c25a",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

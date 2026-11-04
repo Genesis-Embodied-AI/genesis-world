@@ -1,0 +1,33 @@
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_2e342472cc8daf::t_53aae857a2303a 14,16,733,742-744
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_2e342472cc8daf::t_9701be59be6b5c 10
+  s_2e342472cc8daf::t_53aae857a2303a 12,1111-1118
+genesis/engine/texture.py
+  s_2e342472cc8daf::t_53aae857a2303a 12,20-23,90,96,161
+  s_2e342472cc8daf::t_9701be59be6b5c 3
+genesis/ext/pyrender/texture.py
+  s_2e342472cc8daf::t_9918401c6d4e70 173,185,190
+genesis/engine/mesh.py
+  s_2e342472cc8daf::t_9918401c6d4e70 318
+genesis/typing.py
+  s_2e342472cc8daf::t_53aae857a2303a 237-240
+genesis/ext/pyrender/jit_render.py
+  s_2e342472cc8daf::t_9918401c6d4e70 3,6,17-19,1502
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5086f129058193f3f1f85ac748e685d4fd9ab625",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

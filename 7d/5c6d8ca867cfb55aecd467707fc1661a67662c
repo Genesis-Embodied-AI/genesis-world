@@ -1,0 +1,19 @@
+examples/rendering/dynamic_texture.py
+  s_2d51769caa06e9::t_b1daab999d07b9 223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7d5c6d8ca867cfb55aecd467707fc1661a67662c",
+  "prompts": {},
+  "sessions": {
+    "s_2d51769caa06e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a362-c466-7452-8e4a-dc0a34d8f256",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+genesis/__init__.py
+  s_2e342472cc8daf::t_a78b8400f83357 506
+genesis/engine/texture.py
+  s_2e342472cc8daf::t_a78b8400f83357 10,86,95,160
+  s_2e342472cc8daf::t_2494217673bea9 29
+  s_2e342472cc8daf::t_aa5e09fcbec8dd 34-35
+examples/rendering/dynamic_texture.py
+  s_2e342472cc8daf::t_a78b8400f83357 174
+genesis/vis/rasterizer_context.py
+  s_2e342472cc8daf::t_a78b8400f83357 16,1412
+tests/rendering/test_offscreen.py
+  s_2e342472cc8daf::t_a78b8400f83357 337,410
+genesis/constants.py
+  s_2e342472cc8daf::t_a78b8400f83357 200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a90b1ff904928679075700036d6cefdaaa0d8920",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

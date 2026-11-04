@@ -1,0 +1,35 @@
+tests/sensors/test_camera.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 91,109,118,131,143,242,304,362-363,398,444-445,495,569,578,619-620,681,710,718
+tests/core/test_misc.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 842
+tests/rendering/test_interactive_viewer.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 889
+examples/sensors/camera_as_sensor.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 154
+genesis/options/sensors/camera.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 32,55
+tests/rendering/test_offscreen.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 298,1855
+tests/sensors/test_api.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 717
+genesis/engine/sensors/camera.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 83,246,453,640,669,758,792
+examples/manipulation/grasp_env.py
+  s_5f0a6aada3cc7c::t_b6613497c0b890 121,130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "862728d9eae687ecbfabe8b0e0177cb0834ccd34",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
