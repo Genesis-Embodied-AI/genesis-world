@@ -454,7 +454,7 @@ def pbd_contact_terms(
         H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
-        row = 3 * (linear.row_offset + slots[a])
+        row = 3 * slots[a]
         dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
     k = i_b * pd.n + newton.contact_pbd[s]
     return slots, w, H, dxp, k, vec_at(k, pd.p)
@@ -480,7 +480,7 @@ def func_pbd_contact_matvec(
             slots, w, H, dxp, k, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pd, params)
             H_dq = H @ dq
             for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 for d in qd.static(range(3)):
                     qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dq[d])
             qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))

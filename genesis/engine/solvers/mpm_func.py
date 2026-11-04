@@ -1267,15 +1267,6 @@ def func_apply_force_fields(
 
 
 @qd.func(requires_top_level=True)
-def func_fix_nodes(grid: qd.template()):
-    """Hold every displacement component of a node touched by a non-free particle."""
-    qd.loop_config(name="mpm_fix_nodes")
-    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-        for d in qd.static(range(3)):
-            grid.dof_fixed[3 * node + d] = grid.node_fixed[node]
-
-
-@qd.func(requires_top_level=True)
 def func_reset_contact_rows(grid: qd.template(), newton: qd.template()):
     """Clear the contact rows of every valid particle, so that an assembly before the rows are built is physical."""
     qd.loop_config(name="mpm_reset_contact_rows")
@@ -1296,9 +1287,8 @@ def func_gather_node_diag(grid: qd.template(), linear: qd.template()):
     for entry in range(linear.matrix.bcoo_nnz[()]):
         row, col, block = linear.matrix.read_bcoo(entry)
         if row == col:
-            node = row - linear.row_offset
             for i, j in qd.static(qd.ndrange(3, 3)):
-                grid.node_diag[9 * node + 3 * i + j] = block[i, j]
+                grid.node_diag[9 * row + 3 * i + j] = block[i, j]
 
 
 @qd.func(requires_top_level=True)
@@ -1433,19 +1423,13 @@ def func_build_wall_rows(
 
 
 @qd.func(requires_top_level=True)
-def func_grid_velocity(dt: float, grid: qd.template(), newton: qd.template()):
-    qd.loop_config(name="mpm_grid_velocity")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        grid.node_v_solved[i] = newton.u[i] / dt
-
-
-@qd.func(requires_top_level=True)
 def func_g2p_advect(
     f: int,
     dt: float,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
     grid: qd.template(),
+    newton: qd.template(),
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     params: qd.template(),
@@ -1466,7 +1450,7 @@ def func_g2p_advect(
         vel = qd.Vector.zero(gs.qd_float, 3)
         C = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
-            v_a = qd.Vector([grid.node_v_solved[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
             vel += w[a] * v_a
             C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
         particles.pos[f + 1, i_p, i_b] = pos + dt * vel
@@ -1592,8 +1576,7 @@ def particle_trial_disp(
 
 @qd.func(requires_top_level=True)
 def func_newton_reset(grid: qd.template(), newton: qd.template()):
-    """Reset the Newton state to u = 0, the configuration at the start of the substep, which is free of penetration (see
-    newton_start_inertial in mpm_data.py)."""
+    """Reset the Newton state to u = 0, the configuration at the start of the substep, which is free of penetration."""
     qd.loop_config(name="mpm_newton_reset")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
         newton.u[i] = 0.0
@@ -1602,24 +1585,11 @@ def func_newton_reset(grid: qd.template(), newton: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_newton_start(dt: float, grid: qd.template(), newton: qd.template(), params: qd.template()):
-    """Start the Newton solve at the inertial prediction u = dt v_free instead of u = 0 (func_newton_reset).
-
-    `params.newton_start_inertial` enables it, and the fixed components stay at zero. Runs after the contact rows are
-    built and before the start energy."""
-    qd.loop_config(name="mpm_newton_start")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        if params.newton_start_inertial[()] != 0 and grid.dof_fixed[i] == 0:
-            newton.u[i] = dt * grid.node_v_free[i]
-            newton.u_temp[i] = newton.u[i]
-
-
-@qd.func(requires_top_level=True)
 def func_report_extent(grid: qd.template(), linear: qd.template()):
     """Report the live rows and triplet demand: one kinetic diagonal per node and STENCIL_BLOCKS per elastic task."""
     for _ in range(1):
         n_nodes = grid.n_blocks[()] * BLOCK_CELLS
-        linear.pcg.n_rows[()] = linear.row_offset + n_nodes
+        linear.pcg.n_rows[()] = n_nodes
         linear.matrix.report_triplet_demand(n_nodes + STENCIL_BLOCKS * grid.n_tasks[()])
 
 
@@ -1653,8 +1623,7 @@ def func_kinetic_assemble(grid: qd.template(), linear: qd.template()):
         diagonal = qd.Matrix.identity(gs.qd_float, 3)
         if mass > 0.0 and grid.node_fixed[node] == 0:
             diagonal = mass * qd.Matrix.identity(gs.qd_float, 3)
-        row = linear.row_offset + node
-        linear.matrix.write_triplet(node, row, row, diagonal)
+        linear.matrix.write_triplet(node, node, node, diagonal)
 
 
 @qd.func(requires_top_level=True)
@@ -1675,7 +1644,7 @@ def func_elastic_assemble(
     The particles of a task share the 8-node stencil of their cell, and the task writes each of the 36 upper-triangular
     stencil blocks once, summed over its particles. Every particle also stages V dt^2 P(F_trial) F^T and the gradient of
     its active contact rows for the gradient gather. The rows act on the trial displacement sum_a w_a u_a, so their
-    Hessian enters block (a, b) as w_a w_b H. Rows and columns of fixed components are dropped from the blocks. The
+    Hessian enters block (a, b) as w_a w_b H. The blocks of fixed nodes are dropped from the stencil. The
     elastic blocks are projected to symmetric positive definite (SPD), or exact with `is_exact`, which only an adjoint
     solve at the converged displacement takes.
 
@@ -1705,10 +1674,9 @@ def particle_stencil_terms(
     contact-row gradients for the gradient gather."""
     i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
     slots = stencil_node_slots(env, cell, grid)
-    movable = qd.Matrix.zero(gs.qd_float, 8, 3)
+    movable = qd.Vector.zero(gs.qd_float, 8)
     for a in qd.static(range(8)):
-        for d in qd.static(range(3)):
-            movable[a, d] = gs.qd_float(grid.dof_fixed[3 * slots[a] + d] == 0)
+        movable[a] = gs.qd_float(grid.node_fixed[slots[a]] == 0)
     F_tr, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
     U, S, V = gu.qd_svd(F_tr)
     sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
@@ -1751,9 +1719,9 @@ def particle_stencil_terms(
 
 @qd.func
 def stencil_pair_block(
-    a,
-    b,
-    movable,
+    a: int,
+    b: int,
+    movable: qd.types.vector(8),
     r_frame: qd.types.matrix(8, 3),
     U: qd.types.matrix(3, 3),
     S_block: qd.types.matrix(3, 3),
@@ -1774,9 +1742,7 @@ def stencil_pair_block(
         gs.qd_float, 3
     )
     block += (w[a] * w[b]) * hess_contact
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        block[i, j] *= movable[a, i] * movable[b, j]
-    return block
+    return (movable[a] * movable[b]) * block
 
 
 @qd.func(requires_top_level=True)
@@ -1828,12 +1794,10 @@ def func_elastic_assemble_cpu(
                         w,
                         hess_contact,
                     )
-                    row = linear.row_offset + slots[a]
-                    col = linear.row_offset + slots[b]
                     if t == s:
-                        linear.matrix.write_triplet(base + pair, row, col, block)
+                        linear.matrix.write_triplet(base + pair, slots[a], slots[b], block)
                     else:
-                        linear.matrix.add_triplet(base + pair, row, col, block)
+                        linear.matrix.add_triplet(base + pair, slots[a], slots[b], block)
 
 
 @qd.func(requires_top_level=True)
@@ -1858,7 +1822,7 @@ def func_elastic_assemble_gpu(
         is_valid = s < n_valid
 
         slots = qd.Vector.zero(gs.qd_int, 8)
-        movable = qd.Matrix.zero(gs.qd_float, 8, 3)
+        movable = qd.Vector.zero(gs.qd_float, 8)
         r_frame = qd.Matrix.zero(gs.qd_float, 8, 3)
         U = qd.Matrix.identity(gs.qd_float, 3)
         S_block = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1910,12 +1874,7 @@ def func_elastic_assemble_gpu(
             for i, j in qd.static(qd.ndrange(3, 3)):
                 task_block[i, j] = head_segmented_reduce_add(block[i, j], is_tail)
             if is_valid and is_head != 0:
-                linear.matrix.write_triplet(
-                    n_nodes + STENCIL_BLOCKS * task + pair,
-                    linear.row_offset + slots[a],
-                    linear.row_offset + slots[b],
-                    task_block,
-                )
+                linear.matrix.write_triplet(n_nodes + STENCIL_BLOCKS * task + pair, slots[a], slots[b], task_block)
 
 
 @qd.func(requires_top_level=True)
@@ -1930,7 +1889,7 @@ def func_gradient_gather(
 ):
     """Gather the gradient b_rhs = m (u - dt v_free) + sum_p (G_p grad w + w g_contact_p) of every node.
 
-    The gradient is zero on fixed components. The particles of a node are summed in a fixed order, by the lanes of a
+    The gradient is zero on fixed nodes. The particles of a node are summed in a fixed order, by the lanes of a
     warp on a GPU and by one thread on a CPU (see func_p2g)."""
     if qd.static(gs.backend == gs.cpu):
         func_gradient_gather_cpu(f, dt, particles, grid, newton, linear, params)
@@ -1973,9 +1932,9 @@ def publish_node_gradient(
     mass = grid.node_mass[node]
     for d in qd.static(range(3)):
         value = gs.qd_float(0.0)
-        if grid.dof_fixed[3 * node + d] == 0:
+        if grid.node_fixed[node] == 0:
             value = grad[d] + mass * (newton.u[3 * node + d] - dt * grid.node_v_free[3 * node + d])
-        linear.b_rhs[3 * (linear.row_offset + node) + d] = value
+        linear.b_rhs[3 * node + d] = value
 
 
 @qd.func(requires_top_level=True)
@@ -2081,14 +2040,11 @@ def func_gather_brick(linear: qd.template()):
     qd.loop_config(name="mpm_brick_visit")
     for entry in range(linear.matrix.bcoo_nnz[()]):
         row, col, block = linear.matrix.read_bcoo(entry)
-        local_row = row - linear.row_offset
-        local_col = col - linear.row_offset
-        if local_row >= 0:
-            brick = brick_of(local_row)
-            if brick_of(local_col) == brick:
-                base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(local_row), brick_node(local_col))) * 9
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    linear.brick[base + 3 * i + j] = block[i, j]
+        brick = brick_of(row)
+        if brick_of(col) == brick:
+            base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(row), brick_node(col))) * 9
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                linear.brick[base + 3 * i + j] = block[i, j]
 
 
 @qd.func
@@ -2150,7 +2106,7 @@ def func_invert_brick_cpu(grid: qd.template(), linear: qd.template()):
             for b in range(a + 1, BRICK_NODES):
                 block_base = base + brick_sym_index(a, b) * 9
                 for k in qd.static(range(9)):
-                    if linear.brick[block_base + k] != 0.0:
+                    if qd.abs(linear.brick[block_base + k]) > 0.0:
                         bits |= (1 << a) | (1 << b)
         linear.brick_mask[brick] = bits
 
@@ -2165,7 +2121,7 @@ def func_invert_brick_cpu(grid: qd.template(), linear: qd.template()):
                         if (bits & (1 << (c // 3))) != 0:
                             index = brick_entry_index(base, r, c)
                             x = linear.brick[index]
-                            if r == c and x == 0.0:
+                            if r == c and qd.abs(x) <= 0.0:
                                 x = 1.0
                             x *= linear.brick_scratch[scale_start + r] * linear.brick_scratch[scale_start + c]
                             if r == c:
@@ -2269,7 +2225,7 @@ def func_invert_brick_gpu(grid: qd.template(), linear: qd.template()):
             is_valid, r, c = brick_slot_entry(is_diag_lane, P0, Q0, s)
             if is_valid:
                 x[s] = linear.brick[base + brick_sym_index(r // 3, c // 3) * 9 + (r % 3) * 3 + c % 3]
-                if r // 3 != c // 3 and x[s] != 0.0:
+                if r // 3 != c // 3 and qd.abs(x[s]) > 0.0:
                     bits |= (1 << (r // 3)) | (1 << (c // 3))
                 if r == c:
                     sh_scale[i_warp * BRICK_DIM + r] = x[s]
@@ -2299,7 +2255,7 @@ def func_invert_brick_gpu(grid: qd.template(), linear: qd.template()):
             for s in qd.static(range(_BRICK_SLOTS)):
                 is_valid, r, c = brick_slot_entry(is_diag_lane, P0, Q0, s)
                 if is_valid:
-                    if r == c and x[s] == 0.0:
+                    if r == c and qd.abs(x[s]) <= 0.0:
                         x[s] = 1.0
                     x[s] *= sh_scale[i_warp * BRICK_DIM + r] * sh_scale[i_warp * BRICK_DIM + c]
                     if r == c:
@@ -2416,7 +2372,7 @@ def func_apply_brick_cpu(grid: qd.template(), linear: qd.template()):
             for b in range(BRICK_NODES):
                 if (bits & (1 << b)) != 0:
                     block_base = base + brick_sym_index(qd.min(a, b), qd.max(a, b)) * 9
-                    row_b = 3 * (linear.row_offset + brick_slot(brick, b))
+                    row_b = 3 * brick_slot(brick, b)
                     for q in qd.static(range(3)):
                         m = gs.qd_float(0.0)
                         if a <= b:
@@ -2426,10 +2382,10 @@ def func_apply_brick_cpu(grid: qd.template(), linear: qd.template()):
                         z_entry += m * linear.pcg.r[row_b + q]
         else:
             block_base = base + brick_sym_index(a, a) * 9
-            row_a = 3 * (linear.row_offset + brick_slot(brick, a))
+            row_a = 3 * brick_slot(brick, a)
             for q in qd.static(range(3)):
                 z_entry += linear.brick[block_base + p * 3 + q] * linear.pcg.r[row_a + q]
-        linear.pcg.z[3 * (linear.row_offset + brick_slot(brick, a)) + p] = z_entry
+        linear.pcg.z[3 * brick_slot(brick, a) + p] = z_entry
 
 
 @qd.func(requires_top_level=True)
@@ -2449,7 +2405,7 @@ def func_apply_brick_gpu(grid: qd.template(), linear: qd.template()):
         p = i % 3
         sh_r = qd.simt.block.SharedArray((2 * BRICK_DIM,), gs.qd_float)
         s = brick_slot(brick, a)
-        sh_r[thread] = linear.pcg.r[3 * (linear.row_offset + s) + p]
+        sh_r[thread] = linear.pcg.r[3 * s + p]
         qd.simt.block.sync()
 
         base = brick * BRICK_SCALARS
@@ -2470,14 +2426,14 @@ def func_apply_brick_gpu(grid: qd.template(), linear: qd.template()):
             block_base = base + brick_sym_index(a, a) * 9
             for q in qd.static(range(3)):
                 z_entry += linear.brick[block_base + p * 3 + q] * sh_r[local * BRICK_DIM + a * 3 + q]
-        linear.pcg.z[3 * (linear.row_offset + s) + p] = z_entry
+        linear.pcg.z[3 * s + p] = z_entry
 
 
 @qd.func(requires_top_level=True)
 def func_negate_du(grid: qd.template(), newton: qd.template(), linear: qd.template()):
     qd.loop_config(name="mpm_negate_du")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.du[i] = -linear.solution[3 * linear.row_offset + i]
+        newton.du[i] = -linear.solution[i]
 
 
 @qd.func(requires_top_level=True)
@@ -2606,7 +2562,7 @@ def particle_energy(
 
 @qd.func(requires_top_level=True)
 def func_kinetic_energy_partial(dt: float, grid: qd.template(), newton: qd.template()):
-    """Write the per-block partial sums of 1/2 m |u - dt v_free|^2 over the free components, after the particle partials
+    """Write the per-block partial sums of 1/2 m |u - dt v_free|^2 over the free nodes, after the particle partials
     (see func_elastic_energy_partial)."""
     if qd.static(gs.backend == gs.cpu):
         qd.loop_config(name="mpm_kinetic_energy_partial_cpu")
@@ -2630,10 +2586,10 @@ def func_kinetic_energy_partial(dt: float, grid: qd.template(), newton: qd.templ
 
 @qd.func
 def node_kinetic_energy(node: int, dt: float, grid: qd.template(), newton: qd.template()):
-    """1/2 m |u - dt v_free|^2 of a node over its free components."""
+    """1/2 m |u - dt v_free|^2 of a node, zero for a fixed node."""
     energy = gs.qd_float(0.0)
-    for d in qd.static(range(3)):
-        if grid.dof_fixed[3 * node + d] == 0:
+    if grid.node_fixed[node] == 0:
+        for d in qd.static(range(3)):
             r = newton.u[3 * node + d] - dt * grid.node_v_free[3 * node + d]
             energy += 0.5 * grid.node_mass[node] * r * r
     return energy

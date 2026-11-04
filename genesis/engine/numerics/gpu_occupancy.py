@@ -1,6 +1,8 @@
 import torch
 
-# Blocks of a resident-grid launch where no CUDA device is present (the CPU backends run the loops serially)
+import genesis as gs
+
+# Blocks of a resident-grid launch on the CPU backend, and on a GPU whose properties torch cannot query
 _FALLBACK_BLOCKS = 64
 
 
@@ -9,9 +11,9 @@ def cuda_resident_blocks(block_size: int, shared_bytes: int, registers_per_threa
 
     Each block holds block_size threads, which use shared_bytes of shared memory per block and registers_per_thread
     registers each. The count is bounded by the threads, the shared memory and the registers of a multiprocessor. It is
-    _FALLBACK_BLOCKS without a CUDA device.
+    _FALLBACK_BLOCKS on the CPU backend and on a GPU without a torch.cuda device.
     """
-    if not torch.cuda.is_available():
+    if gs.backend == gs.cpu or not torch.cuda.is_available():
         return _FALLBACK_BLOCKS
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     blocks_from_threads = max(properties.max_threads_per_multi_processor // block_size, 1)

@@ -3,14 +3,12 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.bcoo_matrix import BCOOMatrix, func_sort_reduce_bcoo, func_sym_bcoo_spmv
-from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM, func_sum_block_partials, write_block_partial
+from genesis.engine.numerics.bcoo_matrix import BCOOMatrix, func_sort_reduce_bcoo, sort_reduce_bcoo
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum, func_dynamic_exclusive_sum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort, func_dynamic_radix_sort
 from genesis.engine.numerics.linear_pcg import (
     PCGScalars,
     PCGWorkspace,
-    func_apply_block_jacobi,
     func_init_linear_pcg_direction,
     func_init_linear_pcg_residual,
     func_linear_pcg_direction,
@@ -108,11 +106,9 @@ def kernel_write_triplets(
 
 
 @qd.kernel(graph=True)
-def kernel_sort_reduce_and_multiply(matrix: qd.template(), x: qd.types.ndarray(), y: qd.types.ndarray()):
+def kernel_sort_reduce_and_multiply(pcg_workspace: qd.template(), pcg_scalars: qd.template(), matrix: qd.template()):
     func_sort_reduce_bcoo(matrix)
-    for i in range(y.shape[0]):
-        y[i] = 0.0
-    func_sym_bcoo_spmv(x, y, matrix)
+    func_linear_pcg_spmv(pcg_workspace, pcg_scalars, matrix)
 
 
 def _random_symmetric_triplets(rng, n_rows, n_triplets):
@@ -149,11 +145,13 @@ def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
     cols_nd.from_numpy(cols)
     values_nd.from_numpy(values)
     x = rng.standard_normal(3 * n_rows)
-    x_nd, y_nd = qd.ndarray(gs.qd_float, shape=(3 * n_rows,)), qd.ndarray(gs.qd_float, shape=(3 * n_rows,))
-    x_nd.from_numpy(x)
+    pcg_workspace = PCGWorkspace(n_rows, gs.qd_float)
+    pcg_workspace.n_rows.from_numpy(np.array(n_rows, dtype=gs.np_int))
+    pcg_workspace.p.from_numpy(x)
+    pcg_scalars = PCGScalars(gs.qd_float, max_iter=1, tol_rate=0.0)
 
     kernel_write_triplets(matrix, rows_nd, cols_nd, values_nd)
-    kernel_sort_reduce_and_multiply(matrix, x_nd, y_nd)
+    kernel_sort_reduce_and_multiply(pcg_workspace, pcg_scalars, matrix)
     qd.sync()
 
     nnz = int(qd_to_numpy(matrix.bcoo_nnz))
@@ -164,7 +162,8 @@ def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
     assert np.all(np.diff(keys) > 0)
     expected_keys = np.unique(np.minimum(rows, cols) * n_rows + np.maximum(rows, cols))
     assert_equal(keys, expected_keys)
-    assert_allclose(qd_to_numpy(y_nd), dense @ x, tol=1e-10)
+    assert_allclose(qd_to_numpy(pcg_workspace.ap), dense @ x, tol=1e-10)
+    assert_allclose(qd_to_numpy(pcg_scalars.p_dot_ap), x @ dense @ x, tol=1e-10)
 
 
 @qd.kernel
@@ -218,6 +217,16 @@ def kernel_invert_block_diagonal(matrix: qd.template(), precond_inv_diag: qd.typ
                 precond_inv_diag[row * 9 + i * 3 + j] = inverse[i, j]
 
 
+@qd.func(requires_top_level=True)
+def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: qd.template()):
+    for row in range(pcg_workspace.n_rows[()]):
+        for i in qd.static(range(3)):
+            value = pcg_workspace.value_type(0.0)
+            for j in qd.static(range(3)):
+                value += precond_inv_diag[row * 9 + i * 3 + j] * pcg_workspace.r[row * 3 + j]
+            pcg_workspace.z[row * 3 + i] = value
+
+
 @qd.kernel(graph=True)
 def kernel_pcg_solve(
     pcg_workspace: qd.template(),
@@ -227,7 +236,6 @@ def kernel_pcg_solve(
     b: qd.types.ndarray(),
     x: qd.types.ndarray(),
 ):
-    func_sort_reduce_bcoo(matrix)
     func_pcg_reset(pcg_scalars)
     func_init_linear_pcg_residual(b, x, pcg_workspace)
     func_apply_block_jacobi(precond_inv_diag, pcg_workspace)
@@ -288,8 +296,7 @@ def _pcg_block_system(off_diagonal_scale, check_curvature):
     b_nd, x_nd = qd.ndarray(gs.qd_float, shape=(3 * n_rows,)), qd.ndarray(gs.qd_float, shape=(3 * n_rows,))
     b_nd.from_numpy(b)
 
-    kernel_sort_reduce_and_multiply(matrix, x_nd, b_nd)
-    b_nd.from_numpy(b)
+    sort_reduce_bcoo(matrix)
     kernel_invert_block_diagonal(matrix, precond_inv_diag)
     kernel_pcg_solve(pcg_workspace, pcg_scalars, matrix, precond_inv_diag, b_nd, x_nd)
     qd.sync()
@@ -317,35 +324,3 @@ def test_linear_pcg_flags_non_positive_curvature():
     dense, b, x, pcg_scalars = _pcg_block_system(off_diagonal_scale=10.0, check_curvature=True)
     assert np.linalg.eigvalsh(dense)[0] < 0
     assert int(qd_to_numpy(pcg_scalars.has_breakdown)) == 1
-
-
-@qd.kernel(graph=True)
-def kernel_sum(values: qd.types.ndarray(), partials: qd.types.ndarray(), out: qd.types.ndarray(), n: int):
-    qd.loop_config(block_dim=REDUCE_BLOCK_DIM)
-    for i in range(partials.shape[0] * REDUCE_BLOCK_DIM):
-        value = 0.0
-        if i < n:
-            value = values[i]
-        write_block_partial(i // REDUCE_BLOCK_DIM, value, partials, gs.qd_float)
-    func_sum_block_partials(partials, out, (n + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM, gs.qd_float)
-
-
-@pytest.mark.required
-@pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.gpu])
-def test_block_partial_sum_is_reproducible():
-    rng = np.random.default_rng(23)
-    n = 123_457
-    values = rng.standard_normal(n)
-    values_nd = qd.ndarray(gs.qd_float, shape=(n,))
-    values_nd.from_numpy(values)
-    partials = qd.ndarray(gs.qd_float, shape=((n + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM,))
-    out = qd.ndarray(gs.qd_float, shape=())
-
-    results = []
-    for _ in range(3):
-        kernel_sum(values_nd, partials, out, n)
-        qd.sync()
-        results.append(float(qd_to_numpy(out)))
-    assert_equal(results[1:], results[0])
-    assert_allclose(results[0], values.sum(), rtol=1e-12)

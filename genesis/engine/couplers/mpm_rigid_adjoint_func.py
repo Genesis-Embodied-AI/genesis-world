@@ -95,14 +95,16 @@ def geom_sdf_grid_hessian(
     if distance > 0.0:
         o = outside / distance
         eye = qd.Matrix.identity(gs.qd_float, 3)
+        is_outside = qd.Vector.zero(gs.qd_int, 3)
         for d in qd.static(range(3)):
-            if outside[d] != 0.0:
+            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
+                is_outside[d] = 1
                 grad[d] = o[d]
                 for e in qd.static(range(3)):
                     hess[d, e] = 0.0
                     hess[e, d] = 0.0
         for d, e in qd.static(qd.ndrange(3, 3)):
-            if outside[d] != 0.0 and outside[e] != 0.0:
+            if is_outside[d] != 0 and is_outside[e] != 0:
                 hess[d, e] = (eye[d, e] - o[d] * o[e]) / distance
     return grad, hess
 
@@ -230,7 +232,7 @@ def func_rigid_contact_adjoint(
             lam_p = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
@@ -265,7 +267,7 @@ def func_rigid_contact_adjoint(
             x_bar = -Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a

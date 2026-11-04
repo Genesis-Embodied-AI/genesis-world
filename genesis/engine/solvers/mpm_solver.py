@@ -1326,7 +1326,6 @@ def kernel_predict(
     dt = params.substep_dt[()]
     mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, params)
     mpm_func.func_apply_force_fields(t, dt, grid, force_fields, params)
-    mpm_func.func_fix_nodes(grid)
     mpm_func.func_reset_contact_rows(grid, newton)
     mpm_func.func_newton_reset(grid, newton)
 
@@ -1340,10 +1339,9 @@ def kernel_wall_rows(
     particles_info: MpmParticlesInfo,
     params: qd.template(),
 ):
-    """Build the wall rows of the substep and set the start point of the Newton solve."""
+    """Build the wall rows of the substep."""
     dt = params.substep_dt[()]
     mpm_func.func_build_wall_rows(f, dt, particles, grid, newton, particles_info, params)
-    mpm_func.func_newton_start(dt, grid, newton, params)
 
 
 @qd.kernel
@@ -1413,8 +1411,7 @@ def kernel_finalize(
     params: qd.template(),
 ):
     dt = params.substep_dt[()]
-    mpm_func.func_grid_velocity(dt, grid, newton)
-    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, particles_info, materials, params)
+    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, params)
 
 
 @qd.kernel

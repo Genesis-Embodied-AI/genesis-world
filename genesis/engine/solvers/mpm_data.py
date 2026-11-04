@@ -78,11 +78,6 @@ class MpmParams:
         self.particle_volume = _scalar(gs.qd_float, particle_volume)
         self.mass_scale = _scalar(gs.qd_float, mass_scale)
         self.n_materials = _scalar(gs.qd_int, n_materials)
-        # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
-        # will violate are then active at the first assembly, so that the first direction already sees them. A barrier
-        # against penetration needs the start u = 0, free of penetration, for its continuous collision detection, so
-        # this stays a switch.
-        self.newton_start_inertial = _scalar(gs.qd_int, 0)
         # The solref / solimp parameters of the wall rows, in Rigid's form: timeconst, dampratio, dmin, dmax, width, mid,
         # power
         self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
@@ -254,15 +249,13 @@ class MpmGrid:
         self.cell_seg_end = qd.ndarray(gs.qd_int, shape=(max_nodes,))
 
         self.node_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
+        # Node touched by a non-free particle, whose displacement the Newton solve holds at zero
         self.node_fixed = qd.ndarray(gs.qd_int, shape=(max_nodes,))
-        # Per displacement component: held at zero by the Newton solve
-        self.dof_fixed = qd.ndarray(gs.qd_int, shape=(3 * max_nodes,))
         # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights
         # of the particles in their contact rows are computed once (see func_contact_invweight)
         self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
 
     @property
     def max_nodes(self) -> int:
@@ -340,7 +333,6 @@ class MpmLinearSystem:
     gradient state."""
 
     def __init__(self, max_nodes: int, max_triplets: int) -> None:
-        self.row_offset = 0
         self.matrix = BCOOMatrix(
             shape=(max_nodes, max_nodes),
             block_shape=(3, 3),

@@ -123,7 +123,6 @@ def _func_dot_into_cpu(
             for v in range(chunk * size, qd.min(chunk * size + size, n_rows)):
                 for d in qd.static(range(3)):
                     value += a[3 * v + d] * b[3 * v + d]
-        if value != 0.0:
             if qd.static(is_new):
                 qd.atomic_add(pcg_scalars.rz_new[()], value)
             else:
@@ -148,7 +147,8 @@ def _func_dot_into_gpu(
                 for d in qd.static(range(3)):
                     value += a[3 * v + d] * b[3 * v + d]
         value = _warp_sum(value)
-        if lane == 0 and value != 0.0:
+        # Lane 0 holds the first row of its warp, below n_rows for a warp holding rows
+        if lane == 0 and t < n_rows and pcg_scalars.is_converged[()] == 0:
             if qd.static(is_new):
                 qd.atomic_add(pcg_scalars.rz_new[()], value)
             else:
@@ -249,8 +249,7 @@ def _func_linear_pcg_spmv_cpu(pcg_workspace: qd.template(), pcg_scalars: qd.temp
             if current_row >= 0:
                 for d in qd.static(range(3)):
                     qd.atomic_add(pcg_workspace.ap[3 * current_row + d], row_sum[d])
-            if energy_sum != 0.0:
-                qd.atomic_add(pcg_scalars.p_dot_ap[()], energy_sum)
+            qd.atomic_add(pcg_scalars.p_dot_ap[()], energy_sum)
 
 
 @qd.func(requires_top_level=True)
@@ -294,10 +293,10 @@ def _func_linear_pcg_spmv_gpu(pcg_workspace: qd.template(), pcg_scalars: qd.temp
                     row_sum[d] = head_segmented_reduce_add(product[d], is_tail)
                 if row >= 0 and is_head:
                     for d in qd.static(range(3)):
-                        if row_sum[d] != 0.0:
-                            qd.atomic_add(pcg_workspace.ap[3 * row + d], row_sum[d])
+                        qd.atomic_add(pcg_workspace.ap[3 * row + d], row_sum[d])
         energy_sum = _warp_sum(energy_sum)
-        if lane == 0 and energy_sum != 0.0:
+        # Lane 0 holds the first entry of its warp, below nnz for a warp holding entries
+        if lane == 0 and t < nnz and pcg_scalars.is_converged[()] == 0:
             qd.atomic_add(pcg_scalars.p_dot_ap[()], energy_sum)
 
 
@@ -342,21 +341,6 @@ def func_linear_pcg_direction(pcg_workspace: qd.template(), pcg_scalars: qd.temp
                     pcg_workspace.p[i] = pcg_workspace.z[i] + beta * pcg_workspace.p[i]
 
 
-@qd.func(requires_top_level=True)
-def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: qd.template()):
-    """Apply the block Jacobi preconditioner to the residual.
-
-    The result is z = M^-1 r, with M the 3x3 block diagonal whose inverse blocks the caller fills in precond_inv_diag.
-    """
-    qd.loop_config(name="pcg_apply_block_jacobi")
-    for row in range(pcg_workspace.n_rows[()]):
-        for i in qd.static(range(3)):
-            value = pcg_workspace.value_type(0.0)
-            for j in qd.static(range(3)):
-                value += precond_inv_diag[row * 9 + i * 3 + j] * pcg_workspace.r[row * 3 + j]
-            pcg_workspace.z[row * 3 + i] = value
-
-
 # ============================================ stages of the solve ============================================
 
 
@@ -390,9 +374,9 @@ def func_pcg_step(pcg_scalars: qd.template()):
         if pcg_scalars.is_converged[()] == 0:
             rz = pcg_scalars.rz[()]
             p_dot_ap = pcg_scalars.p_dot_ap[()]
-            if pcg_scalars.is_curvature_checked[()] != 0 and p_dot_ap <= 0.0 and rz != 0.0:
+            if pcg_scalars.is_curvature_checked[()] != 0 and p_dot_ap <= 0.0 and qd.abs(rz) > 0.0:
                 pcg_scalars.has_breakdown[()] = 1
-            pcg_scalars.alpha[()] = rz / p_dot_ap if p_dot_ap != 0.0 else pcg_scalars.value_type(0.0)
+            pcg_scalars.alpha[()] = rz / p_dot_ap if qd.abs(p_dot_ap) > 0.0 else pcg_scalars.value_type(0.0)
         pcg_scalars.rz_new[()] = 0.0
 
 
@@ -416,7 +400,7 @@ def func_pcg_decide(pcg_scalars: qd.template()):
                 pcg_scalars.is_converged[()] = 1
             elif qd_isfinite(rz_new):
                 is_not_done = 1
-        pcg_scalars.beta[()] = rz_new / rz if rz != 0.0 else pcg_scalars.value_type(0.0)
+        pcg_scalars.beta[()] = rz_new / rz if qd.abs(rz) > 0.0 else pcg_scalars.value_type(0.0)
         pcg_scalars.rz[()] = rz_new
         pcg_scalars.p_dot_ap[()] = 0.0
         pcg_scalars.iter_remaining[()] = remaining

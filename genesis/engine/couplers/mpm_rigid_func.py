@@ -103,7 +103,7 @@ def geom_sdf_grid(
     distance = outside.norm()
     if distance > 0.0:
         for d in qd.static(range(3)):
-            if outside[d] != 0.0:
+            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
                 grad[d] = outside[d] / distance
     return value + distance, grad
 
@@ -831,11 +831,11 @@ def func_rigid_contact_matvec(
             dr = lin + ang.cross(r)
             dxp = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
             H_dr = H @ dr
             for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 for d in qd.static(range(3)):
                     qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dr[d])
             h = H @ (dr - dxp)

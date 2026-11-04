@@ -383,7 +383,7 @@ def fem_contact_terms(
         H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
-        row = 3 * (linear.row_offset + slots[a])
+        row = 3 * slots[a]
         dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
     i_s = newton.contact_tri[s]
     dq = qd.Vector.zero(gs.qd_float, 3)
@@ -413,7 +413,7 @@ def func_fem_contact_matvec(
             i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
             H_dq = H @ dq
             for a in qd.static(range(8)):
-                row = 3 * (linear.row_offset + slots[a])
+                row = 3 * slots[a]
                 for d in qd.static(range(3)):
                     qd.atomic_add(pcg_workspace.ap[row + d], -w[a] * H_dq[d])
             qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
