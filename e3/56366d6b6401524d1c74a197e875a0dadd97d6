@@ -612,6 +612,7 @@ genesis/utils/mesh.py
   s_be364e7a0e7b79::t_63ea0bd1c1a2ad 341-342
   s_be364e7a0e7b79::t_6e0f1f453863e8 309-313,317,321
   s_be364e7a0e7b79::t_04242713843b43 322
+  s_91e0422623a7c7::t_7cfff82671dfcf 319-320,328-330,334
 examples/rigid/bolt_nut_self_screw.py
   s_5f0a6aada3cc7c::t_da3b5aaf1eab50 57
   s_c960e3a1fa9c88::t_2c7cd0d38f9838 57
@@ -898,6 +899,14 @@ genesis/constants.py
       "agent_id": {
         "tool": "claude",
         "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
         "model": "claude-opus-5-5"
       },
       "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
