@@ -320,7 +320,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
                 )
             else:
                 # The meshes drawing one texture share one material, which the rasterizer draws them all with, uploading
-                # the texture once (see 'RasterizerContext.on_rigid')
+                # the texture once (see 'RasterizerContext.on_rigid').
                 material = _TEXTURE_MATERIALS_CACHE.get(
                     texture,
                     weakref.ref(texture),

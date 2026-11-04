@@ -597,7 +597,8 @@ class RasterizerContext:
                     material_keys = [("surface", is_textured, id(geom.surface))]
                     if is_textured:
                         material_keys.append(("material", id(geom.trimesh.visual.material)))
-                    material = next((vis_materials[key] for key in material_keys if key in vis_materials), None)
+                    materials = [vis_materials[key] for key in material_keys if key in vis_materials]
+                    material = materials[0] if materials else None
                     mesh_node = self.add_geom_node(geom, geoms_T, material=material)
                     if mesh_node is not None:
                         for key in material_keys:

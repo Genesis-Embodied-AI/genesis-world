@@ -73,7 +73,7 @@ CHARTS_ROT = np.stack((np.eye(3), gu.euler_to_R(np.array((90.0, 0.0, 0.0)))))
 _TMESH_CACHE = OwnedCache()
 
 # Color and opacity textures created from the image of a trimesh material, by its content and color factor, shared by
-# the meshes created from that image (see 'Mesh.from_trimesh')
+# the meshes created from that image (see 'Mesh.from_trimesh').
 _COLOR_TEXTURES_CACHE = OwnedCache()
 
 
@@ -547,8 +547,8 @@ class Mesh(RBC, serialization.SerializationMixin):
         if must_update_surface:
             metadata["is_visual_overwritten"] = isinstance(surface.texture, gs.textures.ColorTexture)
 
-            # The meshes of every material holding one image share the textures created from it, as long as any of
-            # them lives, rather than holding one full-resolution copy each
+            # The meshes created from one image share the textures created from it as long as any of them lives,
+            # rather than holding one full-resolution copy each.
             color_textures = None
             if color_image is not None:
                 color_textures_key = (get_hashkey(color_image, color_image.shape, color_image.dtype.str), color_factor)
@@ -556,8 +556,9 @@ class Mesh(RBC, serialization.SerializationMixin):
             if color_textures is None:
                 color_texture = mu.create_texture(color_image, color_factor, "srgb")
                 color_textures = (color_texture, None if color_texture is None else color_texture.check_dim(3))
-                # Every mesh created from the image shares the arrays of its textures, so writing into them raises
-                # rather than changing all those meshes
+                # Every mesh created from the image shares these textures, so they must never be modified in place
+                # (apply_cutoff, check_dim). Their arrays are read-only, so that writing into them raises rather than
+                # changing all those meshes.
                 for texture in color_textures:
                     if isinstance(texture, gs.textures.ImageTexture):
                         texture.image_array.flags.writeable = False
@@ -585,8 +586,8 @@ class Mesh(RBC, serialization.SerializationMixin):
             metadata=metadata,
             is_mesh_zup=is_mesh_zup,
         )
-        # The mesh owns the shared textures only while its surface holds one of them, an authored texture or the visual
-        # cleared by a simplification leaving them unused
+        # The mesh owns the shared textures if its surface holds one of them, which an authored texture or a
+        # simplification clearing the visual prevents. Only these surfaces carry an opacity texture.
         if color_textures_key is not None and (
             gs_mesh.surface.texture is color_texture
             or (

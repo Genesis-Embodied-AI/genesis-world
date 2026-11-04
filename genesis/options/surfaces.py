@@ -259,10 +259,10 @@ def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, b
     # reuse a single merged array instead of allocating one full-resolution copy each. A texture update swaps in a new
     # instance, which is a natural cache miss, so no explicit invalidation is needed.
     cache_key = (
-        *(
+        *[
             texture.color if isinstance(texture, ColorTexture) else texture
             for texture in (color_texture, opacity_texture)
-        ),
+        ],
         batch,
     )
     cached = _RGBA_CACHE.get(cache_key)
