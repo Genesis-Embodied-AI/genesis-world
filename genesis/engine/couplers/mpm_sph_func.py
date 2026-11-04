@@ -29,8 +29,8 @@ class MpmSphBoundary:
     """The MPM particles at the start of the substep as boundary particles of SPH (see SPHSolver.set_boundary).
 
     It holds a linear bounding volume hierarchy (LBVH) over them for every environment (see genesis.engine.bvh), the
-    impulse every MPM particle takes, three scalars at 3 (i_b n_mpm + i_p), and the boundary sums and the boundary
-    velocity coefficient `s` of every reordered SPH particle and environment at i_b n + i_s."""
+    impulse every MPM particle takes at [i_p, i_b], and the boundary sums and the boundary velocity coefficient `s` of
+    every reordered SPH particle at [i_s, i_b]."""
 
     def __init__(self, mpm_solver, sph, params, n_envs):
         self.mpm_particles = mpm_solver.particles
@@ -38,17 +38,16 @@ class MpmSphBoundary:
         self.mpm_particles_info = mpm_solver.particles_info
         self.sph = sph
         self.params = params
-        self.n = max(sph.n_particles, 1)
-        self.n_mpm = max(mpm_solver.n_particles, 1)
-        self.n_envs = n_envs
+        n_mpm = max(mpm_solver.n_particles, 1)
+        sph_shape = (max(sph.n_particles, 1), n_envs)
         self.frame = qd.ndarray(gs.qd_int, shape=())
-        self.rho_sum = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.grad_sum = qd.ndarray(gs.qd_float, shape=(3 * self.n * n_envs,))
-        self.vel_grad_sum = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(self.n * n_envs,))
-        self.s = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.impulse = qd.ndarray(gs.qd_float, shape=(3 * self.n_mpm * n_envs,))
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, self.n_mpm)
+        self.rho_sum = qd.ndarray(gs.qd_float, shape=sph_shape)
+        self.grad_sum = qd.ndarray(gs.qd_vec3, shape=sph_shape)
+        self.vel_grad_sum = qd.ndarray(gs.qd_float, shape=sph_shape)
+        self.n_neighbors = qd.ndarray(gs.qd_int, shape=sph_shape)
+        self.s = qd.ndarray(gs.qd_float, shape=sph_shape)
+        self.impulse = qd.ndarray(gs.qd_vec3, shape=(n_mpm, n_envs))
+        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, n_mpm)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         self.results = array_class.get_bvh_query_results(1)
@@ -73,10 +72,6 @@ class MpmSphBoundary:
         transfer."""
         kernel_apply_boundary_impulse(f, self)
 
-    @qd.func
-    def grad_sum_at(self, k: int):
-        return qd.Vector([self.grad_sum[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
-
 
 @qd.func
 def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
@@ -88,14 +83,12 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
     dist = r.norm()
     if dist < qd.static(sph.support_radius):
-        k = i_t * boundary.n + i_q
         volume = boundary.params.particle_volume[()]
         grad = volume * sph.cubic_kernel_derivative(r)
-        boundary.rho_sum[k] += volume * sph.cubic_kernel(dist)
-        for d in qd.static(range(3)):
-            boundary.grad_sum[3 * k + d] += grad[d]
-        boundary.vel_grad_sum[k] += boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
-        boundary.n_neighbors[k] += 1
+        boundary.rho_sum[i_q, i_t] += volume * sph.cubic_kernel(dist)
+        boundary.grad_sum[i_q, i_t] += grad
+        boundary.vel_grad_sum[i_q, i_t] += boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
+        boundary.n_neighbors[i_q, i_t] += 1
     return True
 
 
@@ -108,12 +101,8 @@ def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.temp
     sph = boundary.sph
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
     if r.norm() < qd.static(sph.support_radius):
-        k = i_t * boundary.n + i_q
-        coef = -sph.particles_info_reordered[i_q, i_t].mass * boundary.s[k] * boundary.params.particle_volume[()]
-        impulse = coef * sph.cubic_kernel_derivative(r)
-        base = 3 * (i_t * boundary.n_mpm + i_a)
-        for d in qd.static(range(3)):
-            qd.atomic_add(boundary.impulse[base + d], impulse[d])
+        coef = -sph.particles_info_reordered[i_q, i_t].mass * boundary.s[i_q, i_t] * boundary.params.particle_volume[()]
+        qd.atomic_add(boundary.impulse[i_a, i_t], coef * sph.cubic_kernel_derivative(r))
     return True
 
 
@@ -125,13 +114,11 @@ def kernel_gather_boundary(boundary: qd.template()):
     h = qd.static(sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_gather")
     for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
-        k = i_b * boundary.n + i_s
-        boundary.rho_sum[k] = 0.0
-        for d in qd.static(range(3)):
-            boundary.grad_sum[3 * k + d] = 0.0
-        boundary.vel_grad_sum[k] = 0.0
-        boundary.n_neighbors[k] = 0
-        boundary.s[k] = 0.0
+        boundary.rho_sum[i_s, i_b] = 0.0
+        boundary.grad_sum[i_s, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        boundary.vel_grad_sum[i_s, i_b] = 0.0
+        boundary.n_neighbors[i_s, i_b] = 0
+        boundary.s[i_s, i_b] = 0.0
         if sph.particles_ng_reordered[i_s, i_b].active:
             x = sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
@@ -146,7 +133,7 @@ def kernel_scatter_boundary(boundary: qd.template()):
     h = qd.static(sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_scatter")
     for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
-        if sph.particles_ng_reordered[i_s, i_b].active and boundary.n_neighbors[i_b * boundary.n + i_s] > 0:
+        if sph.particles_ng_reordered[i_s, i_b].active and boundary.n_neighbors[i_s, i_b] > 0:
             x = sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
                 i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary
@@ -159,11 +146,9 @@ def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
     particle-to-grid transfer, and clear them.
 
     The velocities are those of frame f."""
-    for i_p, i_b in qd.ndrange(boundary.n_mpm, boundary.n_envs):
-        base = 3 * (i_b * boundary.n_mpm + i_p)
+    for i_p, i_b in qd.ndrange(boundary.impulse.shape[0], boundary.impulse.shape[1]):
         if boundary.mpm_particles_ng.active[f, i_p, i_b]:
             mass = boundary.mpm_particles_info.mass[i_p] / boundary.params.mass_scale[()]
-            impulse = qd.Vector([boundary.impulse[base + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            impulse = boundary.impulse[i_p, i_b]
             boundary.mpm_particles.vel[f, i_p, i_b] = boundary.mpm_particles.vel[f, i_p, i_b] + impulse / mass
-        for d in qd.static(range(3)):
-            boundary.impulse[base + d] = 0.0
+        boundary.impulse[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)

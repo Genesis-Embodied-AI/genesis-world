@@ -39,41 +39,29 @@ OBSTACLE_REACH = 1.5
 
 @qd.data_oriented
 class PbdNewtonData:
-    """The PBD rows of the joint solve, per reordered PBD particle and environment.
+    """The PBD rows of the joint solve, per reordered PBD particle and environment, indexed [i_q, i_b].
 
-    Every vector holds three scalars per particle at 3 (i_b n + i_q): the projection x~ of PBD's own substep, the
-    gradient, the preconditioned conjugate gradient (PCG) residual, preconditioned residual, direction, operator image
-    and solution, and the line-search start. The inverse of the 3 x 3 diagonal block holds nine scalars per particle."""
+    The vectors are the projection x~ of PBD's own substep, the gradient, the preconditioned conjugate gradient (PCG)
+    residual, preconditioned residual, direction, operator image and solution, and the line-search start. `diag_inv`
+    holds the 3 x 3 diagonal block of every particle, then its inverse."""
 
     def __init__(self, pbd, n_envs):
         self.pbd = pbd
         self.substep_dt = qd.ndarray(gs.qd_float, shape=())
         self.substep_dt.from_numpy(np.array(pbd.substep_dt, dtype=gs.np_float))
-        self.n = max(pbd.n_particles, 1)
-        size = 3 * self.n * n_envs
-        self.target = qd.ndarray(gs.qd_float, shape=(size,))
-        self.grad = qd.ndarray(gs.qd_float, shape=(size,))
-        self.r = qd.ndarray(gs.qd_float, shape=(size,))
-        self.z = qd.ndarray(gs.qd_float, shape=(size,))
-        self.p = qd.ndarray(gs.qd_float, shape=(size,))
-        self.ap = qd.ndarray(gs.qd_float, shape=(size,))
-        self.sol = qd.ndarray(gs.qd_float, shape=(size,))
-        self.x_prev = qd.ndarray(gs.qd_float, shape=(size,))
-        self.diag_inv = qd.ndarray(gs.qd_float, shape=(3 * size,))
+        shape = (max(pbd.n_particles, 1), n_envs)
+        self.target = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.grad = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.r = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.z = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.p = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.ap = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.sol = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.x_prev = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.diag_inv = qd.ndarray(gs.qd_mat3, shape=shape)
 
 
 # ================================================ Layer 0: access ================================================
-
-
-@qd.func
-def vec_at(k: int, a: qd.template()):
-    return qd.Vector([a[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
-
-
-@qd.func
-def set_vec_at(k: int, v: qd.types.vector(3), a: qd.template()):
-    for d in qd.static(range(3)):
-        a[3 * k + d] = v[d]
 
 
 @qd.func
@@ -90,7 +78,7 @@ def func_pbd_begin(pbd_data: qd.template()):
     """The projection of PBD's substep as the target of the inertia, the end positions starting at it."""
     qd.loop_config(name="mpm_pbd_begin")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        set_vec_at(i_b * pbd_data.n + i_q, pbd_data.pbd.particles_reordered[i_q, i_b].pos, pbd_data.target)
+        pbd_data.target[i_q, i_b] = pbd_data.pbd.particles_reordered[i_q, i_b].pos
 
 
 @qd.func(requires_top_level=True)
@@ -98,15 +86,13 @@ def func_pbd_gradient(pbd_data: qd.template()):
     """The gradient m (x - x~) of the inertia and its diagonal block m I, before the contact rows add theirs."""
     qd.loop_config(name="mpm_pbd_gradient")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        k = i_b * pbd_data.n + i_q
         grad = qd.Vector.zero(gs.qd_float, 3)
         m = gs.qd_float(1.0)
         if is_moving(i_q, i_b, pbd_data.pbd):
             m = pbd_data.pbd.particles_info_reordered[i_q, i_b].mass
-            grad = m * (pbd_data.pbd.particles_reordered[i_q, i_b].pos - vec_at(k, pbd_data.target))
-        set_vec_at(k, grad, pbd_data.grad)
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            pbd_data.diag_inv[9 * k + 3 * i + j] = m if i == j else 0.0
+            grad = m * (pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.target[i_q, i_b])
+        pbd_data.grad[i_q, i_b] = grad
+        pbd_data.diag_inv[i_q, i_b] = m * qd.Matrix.identity(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -114,23 +100,17 @@ def func_pbd_factor(pbd_data: qd.template()):
     """The inverse of every particle's diagonal block, once the contact rows added theirs."""
     qd.loop_config(name="mpm_pbd_factor")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        k = i_b * pbd_data.n + i_q
-        A = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            A[i, j] = pbd_data.diag_inv[9 * k + 3 * i + j]
-        A_inv = A.inverse()
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            pbd_data.diag_inv[9 * k + 3 * i + j] = A_inv[i, j]
+        pbd_data.diag_inv[i_q, i_b] = pbd_data.diag_inv[i_q, i_b].inverse()
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_init(pbd_data: qd.template()):
     """The PBD part of the preconditioned conjugate gradient (PCG) start from 0: r = grad, solution and Ap cleared."""
     qd.loop_config(name="mpm_pbd_pcg_init")
-    for i in range(pbd_data.r.shape[0]):
-        pbd_data.r[i] = pbd_data.grad[i]
-        pbd_data.sol[i] = 0.0
-        pbd_data.ap[i] = 0.0
+    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
+        pbd_data.r[i_q, i_b] = pbd_data.grad[i_q, i_b]
+        pbd_data.sol[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -138,23 +118,19 @@ def func_pbd_precondition(pbd_data: qd.template()):
     """z = M^-1 r by the inverse diagonal blocks, with z = 0 for an attached particle so that it keeps its position."""
     qd.loop_config(name="mpm_pbd_precondition")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        k = i_b * pbd_data.n + i_q
         z = qd.Vector.zero(gs.qd_float, 3)
         if is_moving(i_q, i_b, pbd_data.pbd):
-            A_inv = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                A_inv[i, j] = pbd_data.diag_inv[9 * k + 3 * i + j]
-            z = A_inv @ vec_at(k, pbd_data.r)
-        set_vec_at(k, z, pbd_data.z)
+            z = pbd_data.diag_inv[i_q, i_b] @ pbd_data.r[i_q, i_b]
+        pbd_data.z[i_q, i_b] = z
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_init_direction(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Set the first search direction p = z over the PBD rows, and add r . z to rz."""
     qd.loop_config(name="mpm_pbd_pcg_init_direction")
-    for i in range(pbd_data.r.shape[0]):
-        pbd_data.p[i] = pbd_data.z[i]
-        qd.atomic_add(pcg_scalars.rz[()], pbd_data.r[i] * pbd_data.z[i])
+    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
+        pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b]
+        qd.atomic_add(pcg_scalars.rz[()], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -162,50 +138,49 @@ def func_pbd_matvec(pbd_data: qd.template()):
     """Ap = m p over the PBD rows, before the contact rows add their term."""
     qd.loop_config(name="mpm_pbd_matvec")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        k = i_b * pbd_data.n + i_q
         m = gs.qd_float(0.0)
         if is_moving(i_q, i_b, pbd_data.pbd):
             m = pbd_data.pbd.particles_info_reordered[i_q, i_b].mass
-        set_vec_at(k, m * vec_at(k, pbd_data.p), pbd_data.ap)
+        pbd_data.ap[i_q, i_b] = m * pbd_data.p[i_q, i_b]
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_matvec_dot(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Add p . Ap over the PBD rows to p . Ap, once Ap holds the whole joint operator."""
     qd.loop_config(name="mpm_pbd_matvec_dot")
-    for i in range(pbd_data.p.shape[0]):
+    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
         if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], pbd_data.p[i] * pbd_data.ap[i])
+            qd.atomic_add(pcg_scalars.p_dot_ap[()], pbd_data.p[i_q, i_b].dot(pbd_data.ap[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_update_xr(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Update the solution and the residual over the PBD rows, x += alpha p and r -= alpha Ap."""
     qd.loop_config(name="mpm_pbd_pcg_update_xr")
-    for i in range(pbd_data.p.shape[0]):
+    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
         if pcg_scalars.is_converged[()] == 0:
             alpha = pcg_scalars.alpha[()]
-            pbd_data.sol[i] += alpha * pbd_data.p[i]
-            pbd_data.r[i] -= alpha * pbd_data.ap[i]
+            pbd_data.sol[i_q, i_b] += alpha * pbd_data.p[i_q, i_b]
+            pbd_data.r[i_q, i_b] -= alpha * pbd_data.ap[i_q, i_b]
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_dot_rz(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Add r . z over the PBD rows to rz_new."""
     qd.loop_config(name="mpm_pbd_pcg_dot_rz")
-    for i in range(pbd_data.r.shape[0]):
+    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
         if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[()], pbd_data.r[i] * pbd_data.z[i])
+            qd.atomic_add(pcg_scalars.rz_new[()], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_pcg_direction(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Update the search direction p = z + beta p over the PBD rows, and clear Ap."""
     qd.loop_config(name="mpm_pbd_pcg_direction")
-    for i in range(pbd_data.p.shape[0]):
-        pbd_data.ap[i] = 0.0
+    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
+        pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if pcg_scalars.is_converged[()] == 0:
-            pbd_data.p[i] = pbd_data.z[i] + pcg_scalars.beta[()] * pbd_data.p[i]
+            pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b] + pcg_scalars.beta[()] * pbd_data.p[i_q, i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -213,10 +188,8 @@ def func_pbd_start_line_search(pbd_data: qd.template(), control: qd.template()):
     """The line-search start point, and the largest component of the step -x into the Newton measure."""
     qd.loop_config(name="mpm_pbd_start_line_search")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        k = i_b * pbd_data.n + i_q
-        set_vec_at(k, pbd_data.pbd.particles_reordered[i_q, i_b].pos, pbd_data.x_prev)
-        step = vec_at(k, pbd_data.sol)
-        qd.atomic_max(control.max_disp[()], qd.max(qd.abs(step[0]), qd.abs(step[1]), qd.abs(step[2])))
+        pbd_data.x_prev[i_q, i_b] = pbd_data.pbd.particles_reordered[i_q, i_b].pos
+        qd.atomic_max(control.max_disp[()], qd.abs(pbd_data.sol[i_q, i_b]).max())
 
 
 @qd.func(requires_top_level=True)
@@ -224,9 +197,8 @@ def func_pbd_step_forward(pbd_data: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_step_forward")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         if is_moving(i_q, i_b, pbd_data.pbd):
-            k = i_b * pbd_data.n + i_q
-            step = control.alpha[()] * vec_at(k, pbd_data.sol)
-            pbd_data.pbd.particles_reordered[i_q, i_b].pos = vec_at(k, pbd_data.x_prev) - step
+            step = control.alpha[()] * pbd_data.sol[i_q, i_b]
+            pbd_data.pbd.particles_reordered[i_q, i_b].pos = pbd_data.x_prev[i_q, i_b] - step
 
 
 @qd.func(requires_top_level=True)
@@ -235,7 +207,7 @@ def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: b
     qd.loop_config(name="mpm_pbd_energy")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         if is_moving(i_q, i_b, pbd_data.pbd):
-            diff = pbd_data.pbd.particles_reordered[i_q, i_b].pos - vec_at(i_b * pbd_data.n + i_q, pbd_data.target)
+            diff = pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.target[i_q, i_b]
             energy = 0.5 * pbd_data.pbd.particles_info_reordered[i_q, i_b].mass * diff.dot(diff)
             if is_trial:
                 qd.atomic_add(control.energy_trial[()], energy)
@@ -427,11 +399,12 @@ def func_pbd_contact_gradient(
         i_q = newton.contact_pbd[s]
         if i_q >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            k = i_b * pbd_data.n + i_q
-            for d in qd.static(range(3)):
-                qd.atomic_add(pbd_data.grad[3 * k + d], -newton.g_rigid[3 * s + d])
+            g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            H = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i, j in qd.static(qd.ndrange(3, 3)):
-                qd.atomic_add(pbd_data.diag_inv[9 * k + 3 * i + j], newton.h_rigid[9 * s + 3 * i + j])
+                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            qd.atomic_add(pbd_data.grad[i_q, i_b], -g)
+            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], H)
 
 
 @qd.func
@@ -449,7 +422,8 @@ def pbd_contact_terms(
     direction of its PBD particle.
 
     For sorted particle s, the func returns its stencil slots and weights w, its row Hessian H, its trial displacement
-    dxp = sum_a w_a p_u,a along the direction, the PBD row index k and the direction dq of the PBD particle."""
+    dxp = sum_a w_a p_u,a along the direction, its environment i_b and PBD particle i_q, and the direction dq of the
+    PBD particle."""
     pcg_workspace = linear.pcg
     i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
     H = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -459,8 +433,8 @@ def pbd_contact_terms(
     for a in qd.static(range(8)):
         row = 3 * slots[a]
         dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    k = i_b * pbd_data.n + newton.contact_pbd[s]
-    return slots, w, H, dxp, k, vec_at(k, pbd_data.p)
+    i_q = newton.contact_pbd[s]
+    return slots, w, H, dxp, i_b, i_q, pbd_data.p[i_q, i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -480,7 +454,7 @@ def func_pbd_contact_matvec(
     qd.loop_config(name="mpm_pbd_matvec_particles")
     for s in range(grid.n_valid[()]):
         if newton.contact_pbd[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            slots, w, H, dxp, k, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
+            slots, w, H, dxp, i_b, i_q, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
             H_dq = H @ dq
             for a in qd.static(range(8)):
                 row = 3 * slots[a]
@@ -504,10 +478,8 @@ def func_pbd_contact_matvec_post(
     qd.loop_config(name="mpm_pbd_matvec_pbd")
     for s in range(grid.n_valid[()]):
         if newton.contact_pbd[s] >= 0 and pcg_scalars.is_converged[()] == 0:
-            slots, w, H, dxp, k, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
-            h = H @ (dq - dxp)
-            for d in qd.static(range(3)):
-                qd.atomic_add(pbd_data.ap[3 * k + d], h[d])
+            slots, w, H, dxp, i_b, i_q, dq = pbd_contact_terms(f, s, particles, grid, newton, linear, pbd_data, params)
+            qd.atomic_add(pbd_data.ap[i_q, i_b], H @ (dq - dxp))
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -524,7 +496,7 @@ class MpmParticleObstacles:
     every substep. Those rows alone exchange the momentum between the two.
 
     A linear bounding volume hierarchy (LBVH) over the MPM particles of every environment finds the obstacle candidates
-    of each PBD particle once per substep, at (i_b n + i_q) OBSTACLE_NEIGHBORS + k, and every iteration of PBD's loop
+    of each PBD particle once per substep, at [i_q, j, i_b] for the j-th of them, and every iteration of PBD's loop
     reuses them."""
 
     def __init__(self, mpm_solver, pbd, contact: PbdContactParams, n_envs):
@@ -533,11 +505,11 @@ class MpmParticleObstacles:
         self.pbd = pbd
         self.contact = contact
         self.radius = pbd.particle_radius
-        self.n = max(pbd.n_particles, 1)
+        n_pbd = max(pbd.n_particles, 1)
         self.frame = qd.ndarray(gs.qd_int, shape=())
-        self.neighbors_idx = qd.ndarray(gs.qd_int, shape=(self.n * n_envs * OBSTACLE_NEIGHBORS,))
-        self.neighbors_dist = qd.ndarray(gs.qd_float, shape=(self.n * n_envs * OBSTACLE_NEIGHBORS,))
-        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(self.n * n_envs,))
+        self.neighbors_idx = qd.ndarray(gs.qd_int, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
+        self.neighbors_dist = qd.ndarray(gs.qd_float, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
+        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(n_pbd, n_envs))
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -638,21 +610,19 @@ def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.temp
     )
     reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
     if dist < reach:
-        k = i_t * obstacles.n + i_q
-        base = k * qd.static(OBSTACLE_NEIGHBORS)
-        n = obstacles.n_neighbors[k]
+        n = obstacles.n_neighbors[i_q, i_t]
         if n < qd.static(OBSTACLE_NEIGHBORS):
-            obstacles.neighbors_idx[base + n] = i_a
-            obstacles.neighbors_dist[base + n] = dist
-            obstacles.n_neighbors[k] = n + 1
+            obstacles.neighbors_idx[i_q, n, i_t] = i_a
+            obstacles.neighbors_dist[i_q, n, i_t] = dist
+            obstacles.n_neighbors[i_q, i_t] = n + 1
         else:
-            i_worst = 0
+            j_worst = 0
             for j in range(1, qd.static(OBSTACLE_NEIGHBORS)):
-                if obstacles.neighbors_dist[base + j] > obstacles.neighbors_dist[base + i_worst]:
-                    i_worst = j
-            if dist < obstacles.neighbors_dist[base + i_worst]:
-                obstacles.neighbors_idx[base + i_worst] = i_a
-                obstacles.neighbors_dist[base + i_worst] = dist
+                if obstacles.neighbors_dist[i_q, j, i_t] > obstacles.neighbors_dist[i_q, j_worst, i_t]:
+                    j_worst = j
+            if dist < obstacles.neighbors_dist[i_q, j_worst, i_t]:
+                obstacles.neighbors_idx[i_q, j_worst, i_t] = i_a
+                obstacles.neighbors_dist[i_q, j_worst, i_t] = dist
     return True
 
 
@@ -663,7 +633,7 @@ def kernel_gather_obstacle_neighbors(obstacles: qd.template()):
     reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
     qd.loop_config(name="pbd_mpm_obstacle_neighbors")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        obstacles.n_neighbors[i_b * obstacles.n + i_q] = 0
+        obstacles.n_neighbors[i_q, i_b] = 0
         if is_moving(i_q, i_b, obstacles.pbd):
             x0 = obstacles.pbd.particles_reordered[i_q, i_b].ipos
             x1 = obstacles.pbd.particles_reordered[i_q, i_b].pos
@@ -685,9 +655,8 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
     its current or start position."""
     qd.loop_config(name="pbd_mpm_obstacles")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        k = i_b * obstacles.n + i_q
-        for j in range(obstacles.n_neighbors[k]):
-            i_a = obstacles.neighbors_idx[k * qd.static(OBSTACLE_NEIGHBORS) + j]
+        for j in range(obstacles.n_neighbors[i_q, i_b]):
+            i_a = obstacles.neighbors_idx[i_q, j, i_b]
             if qd.static(is_stabilization):
                 func_obstacle_start_filter(i_b, i_a, i_q, obstacles)
             else:
