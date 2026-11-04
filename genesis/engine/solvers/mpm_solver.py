@@ -258,7 +258,7 @@ class MPMSolver(ParticleSolver):
         self.particles_info = get_mpm_particles_info(self._n_particles)
 
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
-        self.errno = qd.field(gs.qd_int, shape=(self._B,))
+        self.errno = array_class.V(dtype=gs.qd_int, shape=(self._B,))
         self.register_errors(
             self.errno,
             {
@@ -519,7 +519,7 @@ class MPMSolver(ParticleSolver):
     @qd.kernel
     def _kernel_flag_non_finite_pos(self, f: int):
         """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
                 self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
 
@@ -530,7 +530,7 @@ class MPMSolver(ParticleSolver):
         non-finite measure since the Newton solver last cleared the latch (see NewtonControl)."""
         for _ in range(1):
             if control.has_failed_non_finite[()] != 0:
-                for i_b in range(self._B):
+                for i_b in range(self.errno.shape[0]):
                     self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_MPM_SOLVE_NAN
 
     # ------------------------------------------------------------------------------------
@@ -705,7 +705,7 @@ class MPMSolver(ParticleSolver):
 
     @qd.kernel
     def copy_frame(self, source: int, target: int):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             self.particles.pos[target, i_p, i_b] = self.particles.pos[source, i_p, i_b]
             self.particles.vel[target, i_p, i_b] = self.particles.vel[source, i_p, i_b]
             self.particles.F[target, i_p, i_b] = self.particles.F[source, i_p, i_b]
@@ -751,7 +751,7 @@ class MPMSolver(ParticleSolver):
         actu: qd.types.ndarray(),  # shape [B, n_particles]
         active: qd.types.ndarray(),  # shape [B, n_particles]
     ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             for j in qd.static(range(3)):
                 self.particles.pos[f, i_p, i_b][j] = pos[i_b, i_p, j]
                 self.particles.vel[f, i_p, i_b][j] = vel[i_b, i_p, j]
@@ -828,7 +828,7 @@ class MPMSolver(ParticleSolver):
                 self._particle_volume_real * mat_rho
             )
 
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
+        for i_p_, i_b in qd.ndrange(n_particles, self.particles.pos.shape[2]):
             i_p = i_p_ + particle_start
 
             self.particles_ng.active[f, i_p, i_b] = qd.cast(active, gs.qd_bool)
