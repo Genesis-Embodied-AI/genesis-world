@@ -90,6 +90,72 @@ def test_rigid_mpm_muscle(show_viewer):
 
 
 @pytest.mark.required
+def test_mpm_on_terrain(show_viewer):
+    # The terrain is the only Rigid geom, so it is in no Rigid collision pair
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            substeps=2,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(0.0, 0.0, -0.2),
+            upper_bound=(2.0, 2.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            n_subterrains=(1, 1),
+            subterrain_size=(2.0, 2.0),
+            subterrain_types="flat_terrain",
+        ),
+        material=gs.materials.Rigid(),
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 1.0, 0.3),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.build()
+
+    for _ in range(60):
+        scene.step()
+    pos = tensor_to_array(block.get_particles_pos())
+    assert np.isfinite(pos).all()
+    dx = 1.0 / 64
+    assert pos[..., 2].min() > -0.5 * dx
+
+
+@pytest.mark.required
+def test_reject_unsupported_mpm_coupling():
+    liquid = (gs.morphs.Box(pos=(0.0, 0.0, 0.3), size=(0.1, 0.1, 0.1)), gs.materials.MPM.Liquid())
+    box = (gs.morphs.Box(pos=(0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.Rigid())
+    soft = (gs.morphs.Box(pos=(-0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.FEM.Elastic())
+    terrain = (gs.morphs.Terrain(), gs.materials.Rigid())
+    for entities, options, requires_grad, match in (
+        ((liquid, box), {"friction_cone": gs.friction_cone.elliptic}, False, "elliptic"),
+        ((liquid, box), {"constraint_solver": gs.constraint_solver.CG}, False, "Newton solver"),
+        ((liquid, box), {"use_hibernation": True}, False, "hibernation"),
+        ((liquid, box), {"noslip_iterations": 5}, False, "noslip"),
+        ((liquid, soft), {}, False, "implicit solver"),
+        ((liquid, terrain), {}, True, "terrain"),
+    ):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(requires_grad=requires_grad),
+            rigid_options=gs.options.RigidOptions(**options),
+            show_viewer=False,
+        )
+        for morph, material in entities:
+            scene.add_entity(morph=morph, material=material)
+        with pytest.raises(gs.GenesisException, match=match):
+            scene.build()
+
+
+@pytest.mark.required
 @pytest.mark.cpu_threads(1)
 def test_rigid_mpm_legacy_coupling(tol, show_viewer):
     # The liquid collapsing against the rigid box pushes it

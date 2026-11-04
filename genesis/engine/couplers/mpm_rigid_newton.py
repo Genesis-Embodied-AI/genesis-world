@@ -38,9 +38,17 @@ class MpmRigidContactConfig(metaclass=array_class.AutoInitMeta):
     rigid_batch_links_info: bool
     # Rigid has constraint rows, which join the solve
     has_rigid_rows: bool
-    # The one switch of Rigid's collider configuration that the signed distance field (SDF) queries read. This config
-    # stands in for it there, so that the kernels compile independently of the rest of that configuration.
+    # A coupled geom is a terrain (see has_coupled_terrain). This config stands in for Rigid's collider configuration in
+    # the signed distance field (SDF) queries, which read this one switch of it.
     has_terrain: bool
+
+
+def has_coupled_terrain(rigid_solver) -> bool:
+    """Whether a Rigid geom that couples with MPM is a terrain.
+
+    Rigid's collider sets its own has_terrain only for a terrain in a Rigid collision pair, so it is unset when the
+    terrain touches particles alone, and the SDF queries would then leave out the gradient of the terrain."""
+    return any(geom.type == gs.GEOM_TYPE.TERRAIN and geom.needs_coup for geom in rigid_solver.geoms)
 
 
 @qd.data_oriented
@@ -226,7 +234,7 @@ class MpmRigidContact:
         self.config = MpmRigidContactConfig(
             rigid_batch_links_info=rigid_solver._options.batch_links_info,
             has_rigid_rows=not rigid_solver._disable_constraint,
-            has_terrain=rigid_solver.collider.collider_config.has_terrain,
+            has_terrain=has_coupled_terrain(rigid_solver),
         )
         self.query = mpm_rigid_func.RigidGeomQuery(rigid_solver, mpm.newton, n_envs, True)
 

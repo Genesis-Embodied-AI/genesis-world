@@ -81,6 +81,9 @@ class LegacyCoupler(RBC):
     def _resolve_mpm_couplings(self) -> None:
         """Decide which solvers the implicit MPM solver couples with, each pair behind its own option, and check that
         each coupled solver supports it."""
+        # Imported here to avoid a circular dependency, as in _build_mpm_couplings
+        from .mpm_rigid_newton import has_coupled_terrain
+
         mpm, rigid, fem = self.mpm_solver, self.rigid_solver, self.fem_solver
         options = self.options
         if mpm.is_active and rigid.is_active and options.rigid_mpm:
@@ -102,7 +105,7 @@ class LegacyCoupler(RBC):
             mpm.is_active and rigid.is_active and options.rigid_mpm and any(geom.needs_coup for geom in rigid.geoms)
         )
         self._mpm_rigid_dofs = self._mpm_rigid and rigid.n_dofs > 0
-        if self._mpm_rigid and self.sim.options.requires_grad and rigid.collider.collider_config.has_terrain:
+        if self._mpm_rigid and self.sim.options.requires_grad and has_coupled_terrain(rigid):
             gs.raise_exception(
                 "Differentiable simulation with the implicit MPM solver does not support the contact with a Rigid "
                 "terrain yet."

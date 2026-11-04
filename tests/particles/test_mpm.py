@@ -210,6 +210,30 @@ def test_non_finite_state_raises(show_viewer):
             scene.step()
 
 
+@pytest.mark.required
+# The SAP coupler, one of the configurations refused, supports 64 bits precision alone
+@pytest.mark.precision("64")
+def test_reject_unsupported_configurations():
+    liquid = gs.morphs.Box(pos=(0.0, 0.0, 0.2), size=(0.1, 0.1, 0.1))
+    for options, requires_grad, force_field, match in (
+        (
+            {"mpm_options": gs.options.MPMOptions(lower_bound=(-0.5, -0.5, 0.0), upper_bound=(600.0, 0.5, 0.5))},
+            False,
+            None,
+            "sparse grid",
+        ),
+        ({"coupler_options": gs.options.SAPCouplerOptions()}, False, None, "LegacyCouplerOptions"),
+        ({"mpm_options": gs.options.MPMOptions(liquid_smoothing_velocity=100.0)}, False, None, "smoothing band"),
+        ({}, True, gs.force_fields.Noise(), "Noise"),
+    ):
+        scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=requires_grad), **options, show_viewer=False)
+        scene.add_entity(morph=liquid, material=gs.materials.MPM.Liquid())
+        if force_field is not None:
+            scene.add_force_field(force_field)
+        with pytest.raises(gs.GenesisException, match=match):
+            scene.build()
+
+
 @pytest.mark.slow  # ~300s from a cold cache, the Newton graph compiling in ~200s
 @pytest.mark.required
 @pytest.mark.precision("64")
