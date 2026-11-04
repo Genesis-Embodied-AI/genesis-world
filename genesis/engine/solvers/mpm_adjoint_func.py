@@ -518,45 +518,45 @@ def func_adjoint_particles(
         x_p = particles.pos[f, i_p, i_b]
         fx = x_p * params.inv_dx[()] - cell.cast(gs.qd_float)
         w, grad_w = q1_stencil(fx, params.inv_dx[()])
-        F_tr, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+        F_trial, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
 
-        Lam = qd.Matrix.zero(gs.qd_float, 3, 3)
+        Lambda = qd.Matrix.zero(gs.qd_float, 3, 3)
         grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
             grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
             lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])
             u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            Lam += lam_a.outer_product(grad_w_a)
+            Lambda += lam_a.outer_product(grad_w_a)
             grad_u += u_a.outer_product(grad_w_a)
-        A_def = qd.Matrix.identity(gs.qd_float, 3) + grad_u
+        F_increment = qd.Matrix.identity(gs.qd_float, 3) + grad_u
 
-        U, S, V = gu.qd_svd(F_tr)
+        U, S, V = gu.qd_svd(F_trial)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         slot = particles_info.material_idx[i_p]
         mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
         psi, g, A_sigma = elastic_principal(slot, sigma, mu, lam, materials)
         P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
-        LamF = Lam @ F
-        Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, LamF)
+        Lambda_F = Lambda @ F
+        Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, Lambda_F)
         # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
         # are proportional, so phi = V dt^2 P : (Lambda F) moves by -SNOW_HARDENING phi with Jp
         Jp_bar = gs.qd_float(0.0)
         if materials.mat_plastic[slot] == PLASTIC_SNOW:
             phi = gs.qd_float(0.0)
             for i, j in qd.static(qd.ndrange(3, 3)):
-                phi += P[i, j] * LamF[i, j]
+                phi += P[i, j] * Lambda_F[i, j]
             Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
         stiffness = material_param(slot, materials, params, PARAM_FIBRE)
         muscle_direction = particles_info.muscle_direction[i_p]
         active_stiffness = stiffness * particles.actu[f, i_p, i_b]
-        F_tr_m = F_tr @ muscle_direction
-        LamF_m = LamF @ muscle_direction
-        P += active_stiffness * F_tr_m.outer_product(muscle_direction)
-        Q += active_stiffness * LamF_m.outer_product(muscle_direction)
+        F_trial_m = F_trial @ muscle_direction
+        Lambda_F_m = Lambda_F @ muscle_direction
+        P += active_stiffness * F_trial_m.outer_product(muscle_direction)
+        Q += active_stiffness * Lambda_F_m.outer_product(muscle_direction)
 
         scale = params.particle_volume[()] * dt * dt
-        F_bar = -scale * (A_def.transpose() @ Q + Lam.transpose() @ P)
-        actu_bar = -scale * stiffness * F_tr_m.dot(LamF_m)
+        F_bar = -scale * (F_increment.transpose() @ Q + Lambda.transpose() @ P)
+        actu_bar = -scale * stiffness * F_trial_m.dot(Lambda_F_m)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
             lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])

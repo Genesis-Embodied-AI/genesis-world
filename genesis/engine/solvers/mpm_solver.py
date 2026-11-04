@@ -1300,7 +1300,12 @@ def build_grid(particles, particles_ng, grid, params, f):
     )
     kernel_grid_blocks(grid, params)
     dynamic_radix_sort(
-        grid.block_sort, grid.nbr_keys, grid.nbr_keys_tmp, grid.nbr_perm, grid.nbr_perm_tmp, grid.n_neighbor_keys
+        grid.block_sort,
+        grid.neighbor_keys,
+        grid.neighbor_keys_tmp,
+        grid.neighbor_perm,
+        grid.neighbor_perm_tmp,
+        grid.n_neighbor_keys,
     )
     kernel_grid_block_flags(grid)
     kernel_dynamic_exclusive_sum(grid.block_flags, grid.block_ranks, grid.n_neighbor_keys, grid.block_scan)

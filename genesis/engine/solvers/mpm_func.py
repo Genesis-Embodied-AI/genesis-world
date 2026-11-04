@@ -749,7 +749,7 @@ def fibre_terms(
     slot: int,
     actu: float,
     m: qd.types.vector(3),
-    F_tr: qd.types.matrix(3, 3),
+    F_trial: qd.types.matrix(3, 3),
     materials: MpmMaterialTable,
     params: qd.template(),
 ):
@@ -760,7 +760,7 @@ def fibre_terms(
     max(k a, 0) since an extension (k a < 0) makes it concave. All three vanish for a material without fibre stiffness.
     """
     ka = material_param(slot, materials, params, PARAM_FIBRE) * actu
-    Fm = F_tr @ m
+    Fm = F_trial @ m
     return 0.5 * ka * Fm.dot(Fm), ka * Fm.outer_product(m), qd.max(ka, 0.0)
 
 
@@ -962,8 +962,8 @@ def func_gen_neighbor_keys(grid: qd.template()):
     for i in range(grid.n_neighbor_keys[()]):
         env, block = unpack_block(grid.pblock_keys[i >> 3])
         o = i & 7
-        grid.nbr_keys[i] = pack_block(env, block + qd.Vector([(o >> 2) & 1, (o >> 1) & 1, o & 1], dt=gs.qd_int))
-        grid.nbr_perm[i] = i
+        grid.neighbor_keys[i] = pack_block(env, block + qd.Vector([(o >> 2) & 1, (o >> 1) & 1, o & 1], dt=gs.qd_int))
+        grid.neighbor_perm[i] = i
 
 
 @qd.func(requires_top_level=True)
@@ -971,7 +971,7 @@ def func_block_flags(grid: qd.template()):
     qd.loop_config(name="mpm_block_flags")
     for i in range(grid.n_neighbor_keys[()]):
         flag = 0
-        if i == 0 or grid.nbr_keys[i] != grid.nbr_keys[i - 1]:
+        if i == 0 or grid.neighbor_keys[i] != grid.neighbor_keys[i - 1]:
             flag = 1
         grid.block_flags[i] = flag
 
@@ -988,9 +988,9 @@ def func_publish_blocks(grid: qd.template()):
         if grid.block_flags[i] != 0:
             slot = grid.block_ranks[i]
             if slot < grid.block_coords.shape[0]:
-                grid.block_coords[slot] = grid.nbr_keys[i]
-                if not grid.hash.insert(grid.nbr_keys[i], slot):
-                    env, block = unpack_block(grid.nbr_keys[i])
+                grid.block_coords[slot] = grid.neighbor_keys[i]
+                if not grid.hash.insert(grid.neighbor_keys[i], slot):
+                    env, block = unpack_block(grid.neighbor_keys[i])
                     flag_env_error(env, grid, array_class.ErrorCode.INVALID_MPM_GRID)
         if i == grid.n_neighbor_keys[()] - 1:
             grid.grid_demand[()] = grid.block_ranks[i] + grid.block_flags[i]
@@ -1677,8 +1677,8 @@ def particle_stencil_terms(
     movable = qd.Vector.zero(gs.qd_float, 8)
     for a in qd.static(range(8)):
         movable[a] = gs.qd_float(grid.node_fixed[slots[a]] == 0)
-    F_tr, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
-    U, S, V = gu.qd_svd(F_tr)
+    F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+    U, S, V = gu.qd_svd(F_trial)
     sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, params)
@@ -1686,7 +1686,7 @@ def particle_stencil_terms(
     scale = params.particle_volume[()] * dt * dt
     P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
     m = particles_info.muscle_direction[i_p]
-    psi_fibre, P_fibre, fibre_curvature = fibre_terms(slot, particles.actu[f, i_p, i_b], m, F_tr, materials, params)
+    psi_fibre, P_fibre, fibre_curvature = fibre_terms(slot, particles.actu[f, i_p, i_b], m, F_trial, materials, params)
     P += P_fibre
     if qd.static(is_exact):
         fibre_curvature = material_param(slot, materials, params, PARAM_FIBRE) * particles.actu[f, i_p, i_b]

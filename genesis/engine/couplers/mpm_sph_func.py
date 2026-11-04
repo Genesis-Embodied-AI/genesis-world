@@ -42,10 +42,10 @@ class MpmSphBoundary:
         self.n_mpm = max(mpm_solver.n_particles, 1)
         self.n_envs = n_envs
         self.frame = qd.ndarray(gs.qd_int, shape=())
-        self.b_rho = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.b_grad = qd.ndarray(gs.qd_float, shape=(3 * self.n * n_envs,))
-        self.b_vel_grad = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
-        self.b_count = qd.ndarray(gs.qd_int, shape=(self.n * n_envs,))
+        self.rho_sum = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
+        self.grad_sum = qd.ndarray(gs.qd_float, shape=(3 * self.n * n_envs,))
+        self.vel_grad_sum = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
+        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(self.n * n_envs,))
         self.s = qd.ndarray(gs.qd_float, shape=(self.n * n_envs,))
         self.impulse = qd.ndarray(gs.qd_float, shape=(3 * self.n_mpm * n_envs,))
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, self.n_mpm)
@@ -74,8 +74,8 @@ class MpmSphBoundary:
         kernel_apply_boundary_impulse(f, self)
 
     @qd.func
-    def b_grad_at(self, k: int):
-        return qd.Vector([self.b_grad[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    def grad_sum_at(self, k: int):
+        return qd.Vector([self.grad_sum[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
 
 
 @qd.func
@@ -91,11 +91,11 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
         k = i_t * boundary.n + i_q
         volume = boundary.params.particle_volume[()]
         grad = volume * sph.cubic_kernel_derivative(r)
-        boundary.b_rho[k] += volume * sph.cubic_kernel(dist)
+        boundary.rho_sum[k] += volume * sph.cubic_kernel(dist)
         for d in qd.static(range(3)):
-            boundary.b_grad[3 * k + d] += grad[d]
-        boundary.b_vel_grad[k] += boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
-        boundary.b_count[k] += 1
+            boundary.grad_sum[3 * k + d] += grad[d]
+        boundary.vel_grad_sum[k] += boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
+        boundary.n_neighbors[k] += 1
     return True
 
 
@@ -126,11 +126,11 @@ def kernel_gather_boundary(boundary: qd.template()):
     qd.loop_config(name="sph_mpm_boundary_gather")
     for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
         k = i_b * boundary.n + i_s
-        boundary.b_rho[k] = 0.0
+        boundary.rho_sum[k] = 0.0
         for d in qd.static(range(3)):
-            boundary.b_grad[3 * k + d] = 0.0
-        boundary.b_vel_grad[k] = 0.0
-        boundary.b_count[k] = 0
+            boundary.grad_sum[3 * k + d] = 0.0
+        boundary.vel_grad_sum[k] = 0.0
+        boundary.n_neighbors[k] = 0
         boundary.s[k] = 0.0
         if sph.particles_ng_reordered[i_s, i_b].active:
             x = sph.particles_reordered[i_s, i_b].pos
@@ -146,7 +146,7 @@ def kernel_scatter_boundary(boundary: qd.template()):
     h = qd.static(sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_scatter")
     for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
-        if sph.particles_ng_reordered[i_s, i_b].active and boundary.b_count[i_b * boundary.n + i_s] > 0:
+        if sph.particles_ng_reordered[i_s, i_b].active and boundary.n_neighbors[i_b * boundary.n + i_s] > 0:
             x = sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
                 i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary

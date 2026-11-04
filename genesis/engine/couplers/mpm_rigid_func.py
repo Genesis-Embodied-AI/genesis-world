@@ -627,8 +627,8 @@ def func_rigid_factor(
                 config,
             )
             for i_d in range(n_dofs):
-                rigid_data.wb_U[i_d, i_b, i_col] = rigid_data.solve_rhs[i_d, i_b]
-                rigid_data.wb_W[i_d, i_b, i_col] = rigid_data.solve_out[i_d, i_b]
+                rigid_data.woodbury_U[i_d, i_b, i_col] = rigid_data.solve_rhs[i_d, i_b]
+                rigid_data.woodbury_W[i_d, i_b, i_col] = rigid_data.solve_out[i_d, i_b]
         # S = I + K U^T W, the rows of a link's block from its K_l and the rows of U^T W of its columns
         for b in range(n_cols):
             for j in range(n_links):
@@ -636,31 +636,32 @@ def func_rigid_factor(
                 for k in qd.static(range(6)):
                     value = gs.qd_float(0.0)
                     for i_d in range(n_dofs):
-                        value += rigid_data.wb_U[i_d, i_b, 6 * j + k] * rigid_data.wb_W[i_d, i_b, b]
+                        value += rigid_data.woodbury_U[i_d, i_b, 6 * j + k] * rigid_data.woodbury_W[i_d, i_b, b]
                     g[k] = value
                 i_l = rigid_data.contact_links[i_b, j]
                 for i in qd.static(range(6)):
                     value = gs.qd_float(1.0) if 6 * j + i == b else gs.qd_float(0.0)
                     for k in qd.static(range(6)):
                         value += rigid_data.link_K[i_l, i_b, 6 * i + k] * g[k]
-                    rigid_data.wb_S[i_b, 6 * j + i, b] = value
+                    rigid_data.capacitance_LU[i_b, 6 * j + i, b] = value
         # In-place lower-upper (LU) factorization with partial pivoting. S is non-singular, K and U^T W being positive
         # semi-definite
         for k in range(n_cols):
             i_max = k
             for i in range(k + 1, n_cols):
-                if qd.abs(rigid_data.wb_S[i_b, i, k]) > qd.abs(rigid_data.wb_S[i_b, i_max, k]):
+                if qd.abs(rigid_data.capacitance_LU[i_b, i, k]) > qd.abs(rigid_data.capacitance_LU[i_b, i_max, k]):
                     i_max = i
-            rigid_data.wb_pivot[i_b, k] = i_max
+            rigid_data.capacitance_pivots[i_b, k] = i_max
             if i_max != k:
                 for j in range(n_cols):
-                    entry = rigid_data.wb_S[i_b, k, j]
-                    rigid_data.wb_S[i_b, k, j] = rigid_data.wb_S[i_b, i_max, j]
-                    rigid_data.wb_S[i_b, i_max, j] = entry
+                    entry = rigid_data.capacitance_LU[i_b, k, j]
+                    rigid_data.capacitance_LU[i_b, k, j] = rigid_data.capacitance_LU[i_b, i_max, j]
+                    rigid_data.capacitance_LU[i_b, i_max, j] = entry
             for i in range(k + 1, n_cols):
-                rigid_data.wb_S[i_b, i, k] = rigid_data.wb_S[i_b, i, k] / rigid_data.wb_S[i_b, k, k]
+                rigid_data.capacitance_LU[i_b, i, k] /= rigid_data.capacitance_LU[i_b, k, k]
+                factor = rigid_data.capacitance_LU[i_b, i, k]
                 for j in range(k + 1, n_cols):
-                    rigid_data.wb_S[i_b, i, j] -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_S[i_b, k, j]
+                    rigid_data.capacitance_LU[i_b, i, j] -= factor * rigid_data.capacitance_LU[i_b, k, j]
 
 
 @qd.func(requires_top_level=True)
@@ -700,15 +701,15 @@ def func_rigid_contact_gradient(
                 for d in qd.static(range(3)):
                     qd.atomic_add(rigid_data.link_F[i_l, i_b, d], g[d])
                     qd.atomic_add(rigid_data.link_F[i_l, i_b, 3 + d], torque[d])
-                R = qd.Matrix([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]], dt=gs.qd_float)
-                HR = H @ R
-                RH = R @ H
-                RHR = RH @ R
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * i + j], H[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * i + 3 + j], -HR[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * (3 + i) + j], RH[i, j])
-                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * (3 + i) + 3 + j], -RHR[i, j])
+                R = gu.qd_vec_to_skew(r)
+                P = qd.Matrix.zero(gs.qd_float, 3, 6)
+                for i in qd.static(range(3)):
+                    P[i, i] = 1.0
+                    for j in qd.static(range(3)):
+                        P[i, 3 + j] = -R[i, j]
+                K = P.transpose() @ H @ P
+                for i, j in qd.static(qd.ndrange(6, 6)):
+                    qd.atomic_add(rigid_data.link_K[i_l, i_b, 6 * i + j], K[i, j])
     func_link_force_to_dofs(-1.0, rigid_data.grad, rigid_data, dyn_state.dofs, dyn_info.links, config)
 
 
@@ -734,38 +735,38 @@ def func_rigid_precondition(
         for a in range(n_cols):
             value = gs.qd_float(0.0)
             for i_d in range(n_dofs):
-                value += rigid_data.wb_U[i_d, i_b, a] * rigid_data.z[i_d, i_b]
-            rigid_data.wb_y[i_b, a] = value
+                value += rigid_data.woodbury_U[i_d, i_b, a] * rigid_data.z[i_d, i_b]
+            rigid_data.woodbury_y[i_b, a] = value
         for j in range(n_links):
             i_l = rigid_data.contact_links[i_b, j]
-            y = qd.Vector([rigid_data.wb_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
+            y = qd.Vector([rigid_data.woodbury_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
             for i in qd.static(range(6)):
                 value = gs.qd_float(0.0)
                 for k in qd.static(range(6)):
                     value += rigid_data.link_K[i_l, i_b, 6 * i + k] * y[k]
-                rigid_data.wb_y[i_b, 6 * j + i] = value
+                rigid_data.woodbury_y[i_b, 6 * j + i] = value
         # S q = K U^T z0 by the lower-upper (LU) factor: the row pivots, then the unit lower and upper triangular solves
         for k in range(n_cols):
-            i_p = rigid_data.wb_pivot[i_b, k]
+            i_p = rigid_data.capacitance_pivots[i_b, k]
             if i_p != k:
-                entry = rigid_data.wb_y[i_b, k]
-                rigid_data.wb_y[i_b, k] = rigid_data.wb_y[i_b, i_p]
-                rigid_data.wb_y[i_b, i_p] = entry
+                entry = rigid_data.woodbury_y[i_b, k]
+                rigid_data.woodbury_y[i_b, k] = rigid_data.woodbury_y[i_b, i_p]
+                rigid_data.woodbury_y[i_b, i_p] = entry
         for i in range(n_cols):
-            value = rigid_data.wb_y[i_b, i]
+            value = rigid_data.woodbury_y[i_b, i]
             for k in range(i):
-                value -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_y[i_b, k]
-            rigid_data.wb_y[i_b, i] = value
+                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
+            rigid_data.woodbury_y[i_b, i] = value
         for i_rev in range(n_cols):
             i = n_cols - 1 - i_rev
-            value = rigid_data.wb_y[i_b, i]
+            value = rigid_data.woodbury_y[i_b, i]
             for k in range(i + 1, n_cols):
-                value -= rigid_data.wb_S[i_b, i, k] * rigid_data.wb_y[i_b, k]
-            rigid_data.wb_y[i_b, i] = value / rigid_data.wb_S[i_b, i, i]
+                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
+            rigid_data.woodbury_y[i_b, i] = value / rigid_data.capacitance_LU[i_b, i, i]
         for i_d in range(n_dofs):
             value = gs.qd_float(0.0)
             for b in range(n_cols):
-                value += rigid_data.wb_W[i_d, i_b, b] * rigid_data.wb_y[i_b, b]
+                value += rigid_data.woodbury_W[i_d, i_b, b] * rigid_data.woodbury_y[i_b, b]
             rigid_data.z[i_d, i_b] -= value
 
 
