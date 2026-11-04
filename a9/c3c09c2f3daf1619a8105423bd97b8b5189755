@@ -1,0 +1,19 @@
+genesis/engine/sensors/raycaster.py
+  s_f2ca59cf81459f::t_33c3f975abf706 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a9c3c09c2f3daf1619a8105423bd97b8b5189755",
+  "prompts": {},
+  "sessions": {
+    "s_f2ca59cf81459f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "999cc930-dc62-4890-9bf6-04062a694115",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
