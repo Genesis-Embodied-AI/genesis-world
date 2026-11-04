@@ -2471,7 +2471,7 @@ class RigidEntity(KinematicEntity):
         `set_pos`, `set_quat`, `set_qpos` and `set_dofs_position` with `zero_velocity=True` (their default), which zero
         the velocity of every dof of the entity. Writing an explicit zero velocity keeps it. A simulation step taken
         under another control mode or with a zero gain also clears it, so changing the mode or the gain back and forth
-        between two steps keeps it. The gain is zero by default.
+        between two steps keeps it. The gain is non-negative, and zero by default.
 
         Parameters
         ----------

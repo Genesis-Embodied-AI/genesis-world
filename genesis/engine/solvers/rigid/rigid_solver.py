@@ -2382,6 +2382,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._set_dofs_info([kv], dofs_idx, "kv", envs_idx)
 
     def set_dofs_ki(self, ki, dofs_idx=None, envs_idx=None):
+        if (torch.as_tensor(ki) < 0.0).any():
+            gs.raise_exception("`ki` must be non-negative.")
         self._set_dofs_info([ki], dofs_idx, "act_ki", envs_idx)
 
     def set_dofs_act_gain(self, act_gain, dofs_idx=None, envs_idx=None):
