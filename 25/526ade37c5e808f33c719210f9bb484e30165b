@@ -1,0 +1,19 @@
+genesis/ext/pyrender/texture.py
+  s_e391ab380bd0fe::t_8f609e3373d8ff 205-206,241-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25526ade37c5e808f33c719210f9bb484e30165b",
+  "prompts": {},
+  "sessions": {
+    "s_e391ab380bd0fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e70dd81f-7da0-4950-b83d-5ea57630b76d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
