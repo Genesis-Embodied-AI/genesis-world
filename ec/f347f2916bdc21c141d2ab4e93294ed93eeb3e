@@ -1,0 +1,45 @@
+examples/coupling/sph_mpm.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 66
+examples/tutorials/mpm.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 40-42
+genesis/options/materials.py
+  s_c960e3a1fa9c88::t_aa413e8d7313b1 78-80,88
+examples/deformable/differentiable_push.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 72,90
+examples/coupling/grasp_soft_cube.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 49-51
+tests/core/test_misc.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 114-116
+tests/particles/test_mpm.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 63-65
+genesis/options/entities.py
+  s_c960e3a1fa9c88::t_aa413e8d7313b1 567
+  s_c960e3a1fa9c88::t_eb5627f6a661ba 645-646
+  s_c960e3a1fa9c88::t_715d26af2a0a34 563,644
+examples/coupling/flush_cubes.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 51,68,86
+tests/rendering/test_offscreen.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 851
+examples/coupling/cut_dragon.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 65-67
+tests/grad/test_hybrid_push.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 65
+tests/coupling/test_hybrid.py
+  s_c960e3a1fa9c88::t_f5c4c558fe93f4 267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ecf347f2916bdc21c141d2ab4e93294ed93eeb3e",
+  "prompts": {},
+  "sessions": {
+    "s_c960e3a1fa9c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f85a0b1c-a7f4-49ca-b375-b50c1b840b61",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

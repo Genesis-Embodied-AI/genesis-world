@@ -1,0 +1,53 @@
+examples/deformable/differentiable_push.py
+  s_c960e3a1fa9c88::t_a68988e9e84a35 40,43,48,50,52,54-57
+genesis/engine/entities/fem_entity.py
+  s_c960e3a1fa9c88::t_5f445b71a7af8b 294-298,448,459,551-552
+genesis/engine/entities/mpm_entity.py
+  s_c960e3a1fa9c88::t_aa401b960f55b5 10,149,166-167,169,185-186
+genesis/engine/entities/particle_entity.py
+  s_c960e3a1fa9c88::t_bb82058f3dc769 16
+genesis/engine/entities/pbd_entity.py
+  s_c960e3a1fa9c88::t_211c023b8a2363 170-174,182-183,338-339,459-466,538-540,543-544,548-549,613-615,618-619
+genesis/engine/entities/sph_entity.py
+  s_c960e3a1fa9c88::t_3e65501f31d8fa 64
+genesis/engine/scene.py
+  s_c960e3a1fa9c88::t_74a24bfee281d5 446
+genesis/engine/solvers/base_solver.py
+  s_c960e3a1fa9c88::t_fc3b7a6ad8943e 13,198-204
+genesis/engine/solvers/fem_solver.py
+  s_c960e3a1fa9c88::t_5ce0446631be46 14,26-27,373,1293-1298
+genesis/engine/solvers/kinematic_solver.py
+  s_c960e3a1fa9c88::t_6c642913f3c7cb 163-166
+genesis/engine/solvers/mpm_solver.py
+  s_c960e3a1fa9c88::t_fdedb073be0fbf 14,30-32
+genesis/engine/solvers/pbd_solver.py
+  s_c960e3a1fa9c88::t_8f32b5b2457ef8 17,34
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_c960e3a1fa9c88::t_b223deeb1fc54b 13
+genesis/engine/solvers/sph_solver.py
+  s_c960e3a1fa9c88::t_641ee422636e08 19
+genesis/options/entities.py
+  s_c960e3a1fa9c88::t_ea1e811d9b1a2c 20
+tests/core/test_misc.py
+  s_c960e3a1fa9c88::t_4cd2cb56c73fc4 441
+tests/grad/test_hybrid_push.py
+  s_c960e3a1fa9c88::t_257ce98701fc39 40,47,49,51-54,144,147-148,162-173
+tests/grad/test_rollout.py
+  s_c960e3a1fa9c88::t_cd39da3a645f54 359-366,368-370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "86f210de4419aa194d5520397e2bc123ea19c004",
+  "prompts": {},
+  "sessions": {
+    "s_c960e3a1fa9c88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f85a0b1c-a7f4-49ca-b375-b50c1b840b61",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+.github/contributing/ARCHITECTURE.md
+  s_a176ca5e4aa9f8::t_ca6eddfa09b379 86,99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8884041e82dd7375391c5974e6e386f3a9e9a6ef",
+  "prompts": {},
+  "sessions": {
+    "s_a176ca5e4aa9f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9d0d8c2d-7032-4d57-b0a2-620fa678cfad",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

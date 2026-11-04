@@ -1,0 +1,19 @@
+tests/core/test_misc.py
+  s_a59f9f6dace53c::t_1a4137d8101aea 494-513
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "732e49738e84ccc2baae27d471e9cb7fb3df6ff7",
+  "prompts": {},
+  "sessions": {
+    "s_a59f9f6dace53c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "49affbf5-130b-4569-9c18-e8fcaf0daa0a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

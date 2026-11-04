@@ -1,0 +1,23 @@
+genesis/engine/scene.py
+  s_a176ca5e4aa9f8::t_68e335b4174fc9 34,517,520,522-530,534,540,542,546-547,551,554-563,568,572-576
+tests/parsers/test_usd.py
+  s_a176ca5e4aa9f8::t_65a28d4bc30547 576-583,585,594-597
+genesis/engine/interactive_scene.py
+  s_a176ca5e4aa9f8::t_041d9640f4364c 282-285
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5b743cc6205a72cec90486024b4c5d5ae94b9cb2",
+  "prompts": {},
+  "sessions": {
+    "s_a176ca5e4aa9f8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9d0d8c2d-7032-4d57-b0a2-620fa678cfad",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

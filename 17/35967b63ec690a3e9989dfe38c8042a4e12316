@@ -1,0 +1,25 @@
+tests/core/test_misc.py
+  s_5f0a6aada3cc7c::t_8282b363f63647 62-79,102-109,439-459,757-758
+  s_5f0a6aada3cc7c::t_6f95eddc923ee3 61
+genesis/utils/urdf.py
+  s_5f0a6aada3cc7c::t_a3386c6b46dbcd 266
+genesis/ext/_trimesh_patch.py
+  s_5f0a6aada3cc7c::t_d6e10f74f5de39 282,284-285
+  s_5f0a6aada3cc7c::t_f949e02eae9775 283,286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1735967b63ec690a3e9989dfe38c8042a4e12316",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
