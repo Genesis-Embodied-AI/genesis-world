@@ -1,0 +1,57 @@
+genesis/ext/pyrender/shaders/mesh.frag
+  s_be364e7a0e7b79::t_465b020356fdeb 65-68,71,73-76,79,362-364,367,479-481,483
+tests/rigid/test_serialization.py
+  s_be364e7a0e7b79::t_6cd61fe2d34d16 172-175,364
+genesis/options/textures.py
+  s_be364e7a0e7b79::t_3edd2471a46bd5 2,10,19,294-296,299-313,316-317,320-324,329-330,340-341,344-345,356,377,383-387,389-394,397-401,403-406,408
+  s_be364e7a0e7b79::t_0ec0f201118abe 297-298,342-343,355,369-374
+  s_be364e7a0e7b79::t_90c63cd20c5a90 331
+  s_be364e7a0e7b79::t_4e6e0123f7c6e1 332-338,352-353,359-368,375-376,378-382,388,395-396,402,407
+genesis/engine/dynamic_texture.py
+  s_be364e7a0e7b79::t_bb65f2b2e3d7f0 26-37,45-50,64,73-75,80,82-85,87-100,103-120,129-130,132-135,137,140-144
+  s_be364e7a0e7b79::t_4e6e0123f7c6e1 78-79
+genesis/ext/pyrender/jit_render.py
+  s_be364e7a0e7b79::t_17d38cf7668b20 935-937
+  s_be364e7a0e7b79::t_84244a3d9ddd88 42,115-123,535-540,634-640,761-762,798-799,869-870,920-925,927,929-930,934,1495-1498,1500-1501
+  s_be364e7a0e7b79::t_504ca0081b673c 549
+  s_be364e7a0e7b79::t_12a59cccc2934c 1422-1423
+  s_be364e7a0e7b79::t_9db71b5aee5a69 1499
+  s_be364e7a0e7b79::t_01012c63aa4644 1502
+tests/rendering/test_offscreen.py
+  s_be364e7a0e7b79::t_6cd61fe2d34d16 208-211,235-242,258,306,317-322,324,336-337,339,341-343,352
+examples/rendering/dynamic_texture_duck.py
+  s_be364e7a0e7b79::t_9a9e941fb8a796 3-4,25,76,81-82,84,111
+  s_be364e7a0e7b79::t_046cc5375d77de 1,41-60,72,79,87,90
+  s_be364e7a0e7b79::t_f401674ea86b1a 32-33
+genesis/ext/pyrender/overlay/plugin.py
+  s_be364e7a0e7b79::t_504ca0081b673c 1068-1073
+genesis/ext/pyrender/texture.py
+  s_be364e7a0e7b79::t_90474a8f957585 29-30,40,67-68,103-104,159,185-189,191-192,197,200-211,230,232-233,242-247
+genesis/ext/pyrender/renderer.py
+  s_be364e7a0e7b79::t_465b020356fdeb 849-850,853-854
+tests/core/test_misc.py
+  s_be364e7a0e7b79::t_6cd61fe2d34d16 501-509
+genesis/vis/rasterizer_context.py
+  s_be364e7a0e7b79::t_504ca0081b673c 32,37,353,355,357,362,365,379,382,398,419,425-437,748-749,751-752,754-755
+  s_be364e7a0e7b79::t_17d38cf7668b20 8,42,44-47,51-52,55-56,222,630-631,633-640,644-645,647-649,1366,1370-1378,1380,1382-1403
+genesis/ext/pyrender/shaders/flat.frag
+  s_be364e7a0e7b79::t_4701684420176c 28-31,34,36-39,42,128-130,133
+genesis/ext/pyrender/primitive.py
+  s_be364e7a0e7b79::t_88e31df952b142 115-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25c24eb5c3672d5c1614f99675abb23cbe71efc1",
+  "prompts": {},
+  "sessions": {
+    "s_be364e7a0e7b79": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d4207219-42a8-4f9b-98c0-dd78a134c7f4",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

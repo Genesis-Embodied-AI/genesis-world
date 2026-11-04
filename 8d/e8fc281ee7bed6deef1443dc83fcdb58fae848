@@ -1,0 +1,42 @@
+tests/rendering/test_offscreen.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 358,382
+tests/rigid/test_serialization.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 366-367
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 8,1126,1132-1133,1142,1149
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 12,733-735,739,741,745-749,753,755
+  s_2e342472cc8daf::t_5dfed102e31381 738
+genesis/engine/scene.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 24,963-965,974
+genesis/__init__.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 505
+examples/rendering/dynamic_texture.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 90,93
+genesis/engine/texture.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 10,30,32,40-42,45,58,60,112,141,168,173-174,178,180
+  s_2e342472cc8daf::t_c6e71276051a35 31,169
+genesis/options/textures.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 13,333,358,360,363,371,477,479-481
+  s_2e342472cc8daf::t_405ad2603a7f2a 298
+genesis/vis/rasterizer_context.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 16,647,657-659
+genesis/constants.py
+  s_2e342472cc8daf::t_2ee4fddfd1f574 204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8de8fc281ee7bed6deef1443dc83fcdb58fae848",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
