@@ -1,10 +1,9 @@
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.misc import qd_debug_asserts, qd_isfinite
+from genesis.utils.misc import get_gpu_resident_blocks, qd_debug_asserts, qd_isfinite
 
 from .fsr_reduce import head_segmented_reduce_add
-from .gpu_occupancy import cuda_resident_blocks
 
 # Threads of a block of the preconditioned conjugate gradient (PCG) launches
 PCG_BLOCK = 256
@@ -73,8 +72,8 @@ class PCGWorkspace:
 
     def __init__(self, max_rows: int, value_type) -> None:
         self.value_type = value_type
-        self.n_blocks = cuda_resident_blocks(PCG_BLOCK, 0, _STREAM_REGISTERS)
-        self.n_spmv_blocks = cuda_resident_blocks(PCG_BLOCK, 0, _SPMV_REGISTERS)
+        self.n_blocks = get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS)
+        self.n_spmv_blocks = get_gpu_resident_blocks(PCG_BLOCK, _SPMV_REGISTERS)
         self.allocate(max_rows)
         self.n_rows = qd.ndarray(gs.qd_int, shape=())
         self.n_rows.fill(0)

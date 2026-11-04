@@ -141,12 +141,12 @@ def kernel_gather_boundary(boundary: qd.template()):
 
 @qd.kernel
 def kernel_scatter_boundary(boundary: qd.template()):
-    """The impulse of every SPH particle with a boundary velocity coefficient on the MPM particles of its support."""
+    """The impulse of every SPH particle on the MPM particles of its support, which the gather counted."""
     sph = boundary.sph
     h = qd.static(sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_scatter")
     for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
-        if sph.particles_ng_reordered[i_s, i_b].active and qd.abs(boundary.s[i_b * boundary.n + i_s]) > 0.0:
+        if sph.particles_ng_reordered[i_s, i_b].active and boundary.b_count[i_b * boundary.n + i_s] > 0:
             x = sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
                 i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary
