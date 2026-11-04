@@ -1147,11 +1147,10 @@ def apic_node_contribution(
 def publish_node_mass_velocity(node: int, mass: float, mom: qd.types.vector(3), fixed: int, grid: qd.template()):
     grid.node_mass[node] = mass
     grid.node_fixed[node] = fixed
-    for d in qd.static(range(3)):
-        v = gs.qd_float(0.0)
-        if mass > 0.0 and fixed == 0:
-            v = mom[d] / mass
-        grid.node_v[3 * node + d] = v
+    v = qd.Vector.zero(gs.qd_float, 3)
+    if mass > 0.0 and fixed == 0:
+        v = mom / mass
+    grid.node_v[node] = v
 
 
 @qd.func(requires_top_level=True)
@@ -1256,14 +1255,13 @@ def func_apply_force_fields(
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):
         env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
         x_n = (block * 4 + local_offset(node % BLOCK_CELLS)).cast(gs.qd_float) * params.dx[()]
-        v = qd.Vector([grid.node_v[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        v = grid.node_v[node]
         if grid.node_mass[node] > 0.0 and grid.node_fixed[node] == 0:
             acceleration = qd.Vector.zero(gs.qd_float, 3)
             for i_ff in qd.static(range(len(force_fields.force_fields))):
                 acceleration += force_fields.force_fields[i_ff].get_acc(x_n, v, t, i=-1)
             v += dt * acceleration
-        for d in qd.static(range(3)):
-            grid.node_v_free[3 * node + d] = v[d]
+        grid.node_v_free[node] = v
 
 
 @qd.func(requires_top_level=True)
@@ -1276,8 +1274,7 @@ def func_reset_contact_rows(grid: qd.template(), newton: qd.template()):
         newton.contact_pbd[s] = -1
         for r in qd.static(range(CONTACT_ROWS)):
             newton.contact_D[CONTACT_ROWS * s + r] = 0.0
-        for d in qd.static(range(3)):
-            newton.contact_dr[3 * s + d] = 0.0
+        newton.contact_dr[s] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -1287,8 +1284,7 @@ def func_gather_node_diag(grid: qd.template(), linear: qd.template()):
     for entry in range(linear.matrix.bcoo_nnz[()]):
         row, col, block = linear.matrix.read_bcoo(entry)
         if row == col:
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                grid.node_diag[9 * row + 3 * i + j] = block[i, j]
+            grid.node_diag[row] = block
 
 
 @qd.func(requires_top_level=True)
@@ -1319,10 +1315,7 @@ def func_contact_invweight(
             w, grad_w = q1_stencil(fx, params.inv_dx[()])
             W = qd.Matrix.zero(gs.qd_float, 3, 3)
             for a in qd.static(range(8)):
-                H = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    H[i, j] = grid.node_diag[9 * slots[a] + 3 * i + j]
-                W += w[a] * w[a] * H.inverse()
+                W += w[a] * w[a] * grid.node_diag[slots[a]].inverse()
             particles_info.contact_invweight[i_p] = 0.5 * (W + W.transpose())
 
 
@@ -1415,9 +1408,9 @@ def func_build_wall_rows(
                     invweight = n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
                     D, t = band_row(sol_params, gaps[d], vel, invweight, dt)
                     k = CONTACT_ROWS * s + d
-                    for e in qd.static(range(3)):
-                        newton.contact_dir[3 * k + e] = 0.0
-                    newton.contact_dir[3 * k + d] = signs[d]
+                    J = qd.Vector.zero(gs.qd_float, 3)
+                    J[d] = signs[d]
+                    newton.contact_dir[k] = J
                     newton.contact_D[k] = D
                     newton.contact_t[k] = t
 
@@ -1498,7 +1491,7 @@ def contact_row_terms(s: int, dx: qd.types.vector(3), newton: qd.template(), r_l
         k = CONTACT_ROWS * s + r
         D = newton.contact_D[k]
         if D > 0.0:
-            J = qd.Vector([newton.contact_dir[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            J = newton.contact_dir[k]
             c = J.dot(dx) - newton.contact_t[k]
             if c < 0.0:
                 energy += 0.5 * D * c * c
@@ -1515,8 +1508,7 @@ def constraint_row_terms(s: int, x: qd.types.vector(3), dx: qd.types.vector(3), 
     three are zero for an unconstrained particle."""
     spring = newton.constraint_spring[s]
     damping = newton.constraint_damping[s]
-    target = qd.Vector([newton.constraint_target[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    gap = x + dx - target
+    gap = x + dx - newton.constraint_target[s]
     energy = 0.5 * spring * gap.norm_sqr() + 0.5 * damping * dx.norm_sqr()
     grad = spring * gap + damping * dx
     return energy, grad, spring + damping
@@ -1557,8 +1549,7 @@ def func_build_constraint_rows(
             damping = dt * 2.0 * qd.sqrt(k * mass)
         newton.constraint_spring[s] = spring
         newton.constraint_damping[s] = damping
-        for d in qd.static(range(3)):
-            newton.constraint_target[3 * s + d] = target[d]
+        newton.constraint_target[s] = target
 
 
 @qd.func
@@ -1692,9 +1683,7 @@ def particle_stencil_terms(
         fibre_curvature = material_param(slot, materials, params, PARAM_FIBRE) * particles.actu[f, i_p, i_b]
     # Fibre direction in the V frame
     fibre_frame = V.transpose() @ m
-    G = scale * P @ F.transpose()
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        newton.g_p[9 * s + 3 * i + j] = G[i, j]
+    newton.g_p[s] = scale * P @ F.transpose()
     S_block, alp, bet = isotropic_projected_modes(sigma, g, A, is_exact)
     # Stencil vectors r_a = V^T F^T grad w_a in the V frame (see isotropic_pair_block)
     r_frame = qd.Matrix.zero(gs.qd_float, 8, 3)
@@ -1704,15 +1693,13 @@ def particle_stencil_terms(
         for d in qd.static(range(3)):
             r_frame[a, d] = r_a[d]
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
-    dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    dr = newton.contact_dr[s]
     energy_wall, grad_wall, hess_wall = contact_row_terms(s, dx, newton, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
     energy_spring, grad_spring, hess_spring = constraint_row_terms(s, particles.pos[f, i_p, i_b], dx, newton)
-    for d in qd.static(range(3)):
-        newton.g_contact[3 * s + d] = grad_wall[d] + grad_rigid[d] + grad_spring[d]
-        newton.g_rigid[3 * s + d] = grad_rigid[d]
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        newton.h_rigid[9 * s + 3 * i + j] = hess_rigid[i, j]
+    newton.g_contact[s] = grad_wall + grad_rigid + grad_spring
+    newton.g_rigid[s] = grad_rigid
+    newton.h_rigid[s] = hess_rigid
     hess_contact = hess_wall + hess_rigid + hess_spring * qd.Matrix.identity(gs.qd_float, 3)
     return slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_contact
 
@@ -1918,23 +1905,19 @@ def add_particle_node_gradient(
     i_p = gid - i_b * params.n_particles[()]
     fx = particles.pos[f, i_p, i_b] * params.inv_dx[()] - c.cast(gs.qd_float)
     w, grad_w = q1_node_weight(o, fx, params.inv_dx[()])
-    for i in qd.static(range(3)):
-        grad[i] += w * newton.g_contact[3 * s + i]
-        for j in qd.static(range(3)):
-            grad[i] += newton.g_p[9 * s + 3 * i + j] * grad_w[j]
-    return grad
+    return grad + w * newton.g_contact[s] + newton.g_p[s] @ grad_w
 
 
 @qd.func
 def publish_node_gradient(
     node: int, grad: qd.types.vector(3), dt: float, grid: qd.template(), newton: qd.template(), linear: qd.template()
 ):
-    mass = grid.node_mass[node]
+    value = qd.Vector.zero(gs.qd_float, 3)
+    if grid.node_fixed[node] == 0:
+        u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        value = grad + grid.node_mass[node] * (u - dt * grid.node_v_free[node])
     for d in qd.static(range(3)):
-        value = gs.qd_float(0.0)
-        if grid.node_fixed[node] == 0:
-            value = grad[d] + mass * (newton.u[3 * node + d] - dt * grid.node_v_free[3 * node + d])
-        linear.b_rhs[3 * node + d] = value
+        linear.b_rhs[3 * node + d] = value[d]
 
 
 @qd.func(requires_top_level=True)
@@ -2553,7 +2536,7 @@ def particle_energy(
     )
     psi += psi_fibre
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
-    dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    dr = newton.contact_dr[s]
     energy_wall, grad_wall, hess_wall = contact_row_terms(s, dx, newton, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
     energy_spring, grad_spring, hess_spring = constraint_row_terms(s, particles.pos[f, i_p, i_b], dx, newton)
@@ -2589,9 +2572,8 @@ def node_kinetic_energy(node: int, dt: float, grid: qd.template(), newton: qd.te
     """1/2 m |u - dt v_free|^2 of a node, zero for a fixed node."""
     energy = gs.qd_float(0.0)
     if grid.node_fixed[node] == 0:
-        for d in qd.static(range(3)):
-            r = newton.u[3 * node + d] - dt * grid.node_v_free[3 * node + d]
-            energy += 0.5 * grid.node_mass[node] * r * r
+        u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        energy = 0.5 * grid.node_mass[node] * (u - dt * grid.node_v_free[node]).norm_sqr()
     return energy
 
 

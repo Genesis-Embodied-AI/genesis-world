@@ -237,7 +237,7 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
     The nearest geom of sorted particle i_q in environment i_t goes to `newton.query_phi` and `newton.query_idx`, and
     the query records no pair."""
     i_g = query.coupled_geoms[i_a]
-    x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    x = query.newton.query_pos[i_q]
     phi = (
         geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
     )
@@ -286,8 +286,7 @@ def func_build_rigid_rows(
         x_p = particles.pos[f, i_p, i_b]
         # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
         # band: the two grown boxes together cover the band of the relative velocity
-        for d in qd.static(range(3)):
-            newton.query_pos[3 * s + d] = x_p[d]
+        newton.query_pos[s] = x_p
         newton.query_phi[s] = float("inf")
         newton.query_idx[s] = -1
         reach = params.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
@@ -327,8 +326,7 @@ def func_build_rigid_rows(
                 J = normal + (qd.static(2 * (i % 2) - 1) * friction) * d
                 D, t = band_row(sol_params, phi, J.dot(v_rel), diag_coef, dt)
                 k = CONTACT_ROWS * s + WALL_ROWS + i
-                for e in qd.static(range(3)):
-                    newton.contact_dir[3 * k + e] = J[e]
+                newton.contact_dir[k] = J
                 newton.contact_D[k] = D
                 newton.contact_t[k] = t + dt * J.dot(v_r)
             newton.contact_link[s] = i_l
@@ -416,9 +414,7 @@ def func_contact_point_disp(
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             lin, ang = link_spatial(i_l, i_b, rigid_data)
-            dr = lin + ang.cross(particle_arm(f, i_p, i_b, i_l, particles, links_state))
-            for d in qd.static(range(3)):
-                newton.contact_dr[3 * s + d] = dr[d]
+            newton.contact_dr[s] = lin + ang.cross(particle_arm(f, i_p, i_b, i_l, particles, links_state))
 
 
 # ============================================== Layer 1: Rigid block ===============================================
@@ -691,10 +687,8 @@ def func_rigid_contact_gradient(
         i_l = newton.contact_link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            g = newton.g_rigid[s]
+            H = newton.h_rigid[s]
             if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
                 r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
                 torque = r.cross(g)
@@ -824,9 +818,7 @@ def func_rigid_contact_matvec(
         i_l = newton.contact_link[s]
         if i_l >= 0 and pcg_scalars.is_converged[()] == 0:
             i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            H = newton.h_rigid[s]
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
             lin, ang = link_spatial(i_l, i_b, rigid_data)
             dr = lin + ang.cross(r)
@@ -1037,7 +1029,7 @@ def func_mpm_reaction(
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             slots = stencil_node_slots(env, cell, grid)
             dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
-            dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            dr = newton.contact_dr[s]
             energy, g, hess = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
             if g.norm_sqr() > 0.0:
                 torque = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links).cross(g)

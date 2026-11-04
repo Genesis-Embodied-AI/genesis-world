@@ -197,7 +197,7 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
     entity, where the grown box of that triangle reaches it and the box of its nearest triangle misses it, so the filter
     drops that triangle. Penetration deeper than the surface elements gives no row."""
     f = query.newton.query_frame[()]
-    x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    x = query.newton.query_pos[i_q]
     tri2v = query.fem.surface[i_a].tri2v
     a = query.fem.elements_v[f, tri2v[0], i_t].pos
     b = query.fem.elements_v[f, tri2v[1], i_t].pos
@@ -222,9 +222,8 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
         query.newton.query_align[i_q] = align
         query.newton.query_phi[i_q] = side * dist - query.contact.thickness[()]
         query.newton.query_idx[i_q] = i_a
-        for k in qd.static(range(3)):
-            query.newton.query_bary[3 * i_q + k] = bary[k]
-            query.newton.query_normal[3 * i_q + k] = normal[k]
+        query.newton.query_bary[i_q] = bary
+        query.newton.query_normal[i_q] = normal
     return True
 
 
@@ -266,8 +265,7 @@ def func_build_fem_rows(
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
-            for d in qd.static(range(3)):
-                newton.query_pos[3 * s + d] = x_p[d]
+            newton.query_pos[s] = x_p
             newton.query_phi[s] = float("inf")
             newton.query_idx[s] = -1
             newton.query_dist[s] = float("inf")
@@ -278,8 +276,8 @@ def func_build_fem_rows(
             )
             best_tri = newton.query_idx[s]
             best_phi = newton.query_phi[s]
-            best_bary = qd.Vector([newton.query_bary[3 * s + k] for k in qd.static(range(3))], dt=gs.qd_float)
-            best_normal = qd.Vector([newton.query_normal[3 * s + k] for k in qd.static(range(3))], dt=gs.qd_float)
+            best_bary = newton.query_bary[s]
+            best_normal = newton.query_normal[s]
             if best_tri >= 0:
                 v_q = qd.Vector.zero(gs.qd_float, 3)
                 inv_mass = gs.qd_float(0.0)
@@ -300,13 +298,11 @@ def func_build_fem_rows(
                             d = d2
                         J = best_normal + (qd.static(2 * (i % 2) - 1) * friction) * d
                         k = CONTACT_ROWS * s + WALL_ROWS + i
-                        for e in qd.static(range(3)):
-                            newton.contact_dir[3 * k + e] = J[e]
+                        newton.contact_dir[k] = J
                         newton.contact_D[k] = D
                         newton.contact_t[k] = -best_phi
                     newton.contact_tri[s] = best_tri
-                    for k in qd.static(range(3)):
-                        newton.contact_bary[3 * s + k] = best_bary[k]
+                    newton.contact_bary[s] = best_bary
 
 
 @qd.func(requires_top_level=True)
@@ -317,10 +313,7 @@ def func_fem_point_disp(f: int, grid: qd.template(), newton: qd.template(), fem:
         i_s = newton.contact_tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            bary = qd.Vector([newton.contact_bary[3 * s + k] for k in qd.static(range(3))], dt=gs.qd_float)
-            dr = triangle_point_disp(i_s, i_b, f, bary, fem)
-            for d in qd.static(range(3)):
-                newton.contact_dr[3 * s + d] = dr[d]
+            newton.contact_dr[s] = triangle_point_disp(i_s, i_b, f, newton.contact_bary[s], fem)
 
 
 @qd.func(requires_top_level=True)
@@ -340,13 +333,12 @@ def func_fem_contact_gradient(grid: qd.template(), newton: qd.template(), fem: q
         i_s = newton.contact_tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            g = newton.g_rigid[s]
+            H = newton.h_rigid[s]
+            bary = newton.contact_bary[s]
             for k in qd.static(range(3)):
                 i_v = fem.surface[i_s].tri2v[k]
-                b_k = newton.contact_bary[3 * s + k]
+                b_k = bary[k]
                 qd.atomic_add(fem.elements_v_energy[i_b, i_v].force, b_k * inv_dt_sq * g)
                 fem.pcg_state_v[i_b, i_v].diag3x3 += (b_k * b_k * inv_dt_sq) * H
 
@@ -378,18 +370,17 @@ def fem_contact_terms(
     closest point."""
     pcg_workspace = linear.pcg
     i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-    H = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+    H = newton.h_rigid[s]
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
         row = 3 * slots[a]
         dxp += w[a] * qd.Vector([pcg_workspace.p[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
     i_s = newton.contact_tri[s]
+    bary = newton.contact_bary[s]
     dq = qd.Vector.zero(gs.qd_float, 3)
     for k in qd.static(range(3)):
         i_v = fem.surface[i_s].tri2v[k]
-        dq += newton.contact_bary[3 * s + k] * fem.pcg_state_v[i_b, i_v].p
+        dq += bary[k] * fem.pcg_state_v[i_b, i_v].p
     return i_b, slots, w, H, dxp, dq
 
 
@@ -437,9 +428,10 @@ def func_fem_contact_matvec_post(
             i_b, slots, w, H, dxp, dq = fem_contact_terms(f, s, particles, grid, newton, linear, fem, params)
             h = H @ (dq - dxp)
             i_s = newton.contact_tri[s]
+            bary = newton.contact_bary[s]
             for k in qd.static(range(3)):
                 i_v = fem.surface[i_s].tri2v[k]
-                qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, newton.contact_bary[3 * s + k] * h)
+                qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, bary[k] * h)
 
 
 # ============================================ Layer 1: the FEM block ============================================

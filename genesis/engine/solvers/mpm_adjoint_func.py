@@ -282,7 +282,7 @@ def func_wall_contact_adjoint(
             for d in qd.static(range(3)):
                 k = CONTACT_ROWS * s + d
                 D = newton.contact_D[k]
-                J = qd.Vector([newton.contact_dir[3 * k + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                J = newton.contact_dir[k]
                 c = J.dot(Delta) - newton.contact_t[k]
                 if D > 0.0 and c < 0.0:
                     a_k = J.dot(delta)
@@ -348,8 +348,7 @@ def func_constraint_adjoint(
                 row = 3 * slots[a]
                 delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
             damping = newton.constraint_damping[s]
-            target = qd.Vector([newton.constraint_target[3 * s + e] for e in qd.static(range(3))], dt=gs.qd_float)
-            g = spring * (x_p + Delta - target) + damping * Delta
+            g = spring * (x_p + Delta - newton.constraint_target[s]) + damping * Delta
             x_bar = -spring * delta
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
@@ -474,8 +473,8 @@ def func_adjoint_nodes(
         if mass > 0.0 and grid.node_fixed[node] == 0:
             lam = qd.Vector([linear.solution[3 * node + d] for d in qd.static(range(3))])
             u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            v = qd.Vector([grid.node_v[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            v_free = qd.Vector([grid.node_v_free[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            v = grid.node_v[node]
+            v_free = grid.node_v_free[node]
             v_free_bar = (mass * dt) * lam
             v_bar = v_free_bar
             if qd.static(len(force_fields.force_fields) > 0):
@@ -485,8 +484,7 @@ def func_adjoint_nodes(
                     v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
             mom_bar = v_bar / mass
             mass_bar = -lam.dot(u - dt * v_free) - v.dot(v_bar) / mass
-        for d in qd.static(range(3)):
-            newton.adj_mom[3 * node + d] = mom_bar[d]
+        newton.adj_mom[node] = mom_bar
         newton.adj_mass[node] = mass_bar
 
 
@@ -573,7 +571,7 @@ def func_adjoint_particles(
         for a in qd.static(range(8)):
             grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
             x_a = (cell + node_offset(a)).cast(gs.qd_float) * params.dx[()]
-            mom_bar = qd.Vector([newton.adj_mom[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            mom_bar = newton.adj_mom[slots[a]]
             mass_bar = newton.adj_mass[slots[a]]
             v_tilde = v_p + C_p @ (x_a - x_p)
             v_bar += (w[a] * m_p) * mom_bar

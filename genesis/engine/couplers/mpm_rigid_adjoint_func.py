@@ -251,7 +251,7 @@ def func_rigid_contact_adjoint(
             for i in qd.static(range(PYRAMID_ROWS)):
                 k = CONTACT_ROWS * s + WALL_ROWS + i
                 D = newton.contact_D[k]
-                J = qd.Vector([newton.contact_dir[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
+                J = newton.contact_dir[k]
                 c = J.dot(Delta) - newton.contact_t[k]
                 if D > 0.0 and c < 0.0:
                     a_k = J.dot(delta)

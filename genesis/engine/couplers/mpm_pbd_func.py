@@ -299,15 +299,13 @@ def func_nearest_pbd_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) 
     The query is that of sorted MPM particle i_q in environment i_t, against PBD particle i_a. The gap is the distance
     minus the PBD radius and the contact thickness. The filter keeps it in `newton.query_phi`, the PBD particle in
     `newton.query_idx` and the normal from it to the MPM particle in `newton.query_normal`, and records no pair."""
-    x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    d = x - query.pbd.particles_reordered[i_a, i_t].ipos
+    d = query.newton.query_pos[i_q] - query.pbd.particles_reordered[i_a, i_t].ipos
     dist = d.norm()
     phi = dist - qd.static(query.radius) - query.contact.thickness[()]
     if phi < query.newton.query_phi[i_q] and dist > gs.EPS:
         query.newton.query_phi[i_q] = phi
         query.newton.query_idx[i_q] = i_a
-        for k in qd.static(range(3)):
-            query.newton.query_normal[3 * i_q + k] = d[k] / dist
+        query.newton.query_normal[i_q] = d / dist
     return True
 
 
@@ -341,8 +339,7 @@ def func_build_pbd_rows(
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
-            for d in qd.static(range(3)):
-                newton.query_pos[3 * s + d] = x_p[d]
+            newton.query_pos[s] = x_p
             newton.query_phi[s] = float("inf")
             newton.query_idx[s] = -1
             reach = contact_band_width(v_p.norm(), dt, params)
@@ -352,7 +349,7 @@ def func_build_pbd_rows(
             i_q = newton.query_idx[s]
             if i_q >= 0:
                 phi = newton.query_phi[s]
-                normal = qd.Vector([newton.query_normal[3 * s + k] for k in qd.static(range(3))], dt=gs.qd_float)
+                normal = newton.query_normal[s]
                 v_rel = v_p - pbd.particles_reordered[i_q, i_b].vel
                 if phi < contact_band_width(-normal.dot(v_rel), dt, params):
                     invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info)
@@ -366,8 +363,7 @@ def func_build_pbd_rows(
                             d = d2
                         J = normal + (qd.static(2 * (i % 2) - 1) * friction) * d
                         k = CONTACT_ROWS * s + WALL_ROWS + i
-                        for e in qd.static(range(3)):
-                            newton.contact_dir[3 * k + e] = J[e]
+                        newton.contact_dir[k] = J
                         newton.contact_D[k] = D
                         newton.contact_t[k] = -phi
                     newton.contact_pbd[s] = i_q
@@ -381,9 +377,7 @@ def func_pbd_point_disp(grid: qd.template(), newton: qd.template(), pbd: qd.temp
         i_q = newton.contact_pbd[s]
         if i_q >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            dq = pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
-            for d in qd.static(range(3)):
-                newton.contact_dr[3 * s + d] = dq[d]
+            newton.contact_dr[s] = pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
 
 
 @qd.func(requires_top_level=True)
@@ -399,12 +393,8 @@ def func_pbd_contact_gradient(
         i_q = newton.contact_pbd[s]
         if i_q >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-            g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
-            qd.atomic_add(pbd_data.grad[i_q, i_b], -g)
-            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], H)
+            qd.atomic_add(pbd_data.grad[i_q, i_b], -newton.g_rigid[s])
+            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], newton.h_rigid[s])
 
 
 @qd.func
@@ -426,9 +416,7 @@ def pbd_contact_terms(
     PBD particle."""
     pcg_workspace = linear.pcg
     i_p, i_b, slots, w = particle_stencil(f, s, particles, grid, params)
-    H = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+    H = newton.h_rigid[s]
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
         row = 3 * slots[a]
