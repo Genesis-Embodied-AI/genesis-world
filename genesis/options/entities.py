@@ -42,6 +42,8 @@ ParticleSamplerType = Literal["pbs", "random", "regular"]
 
 CoupType = Literal["two_way_soft_constraint", "external_articulation", "ipc_only"]
 
+EntityT = TypeVar("EntityT", bound="Entity")
+
 
 def _validate_mpm_sampler(sampler: str) -> str:
     if re.fullmatch(r"pbs(-\d+)?|random|regular", sampler) is None:
@@ -66,10 +68,66 @@ def _reject_fields(options: "BaseEntity", sub_options: Options, field_names: tup
         )
 
 
-EntityT = TypeVar("EntityT", bound="Entity")
+def _merge_fields(fields: dict, options: Options, target: str, names: tuple[str, ...] | None = None) -> None:
+    """Add the fields given explicitly in 'options' to 'fields', raising on a field already given for 'target'.
+
+    A field given as None leaves the value to the scope above, as one left unset does. 'names' restricts the merge to
+    these fields, the others being resolved apart.
+    """
+    for name, value in options:
+        if name not in options.model_fields_set or value is None or (names is not None and name not in names):
+            continue
+        if name in fields:
+            gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
+        fields[name] = value
 
 
-class BaseEntity(Options, Generic[EntityT]):
+def _key_links_by_index(links):
+    """Key the link options by ``LinkIndex``, a name or a tuple of names standing for the links of those names."""
+    if not isinstance(links, Mapping):
+        return links
+    links_by_index = {}
+    for key, link_options in links.items():
+        if isinstance(key, str):
+            key = LinkIndex.named(key)
+        elif isinstance(key, tuple):
+            key = LinkIndex.named(*key)
+        links_by_index[key] = link_options
+    return links_by_index
+
+
+def _get_pbd_material_params(
+    density: float, friction: float | None, kinetic_friction: float | None
+) -> "PBDMaterialParams":
+    friction = 0.15 if friction is None else friction
+    return PBDMaterialParams(density, friction, friction if kinetic_friction is None else kinetic_friction)
+
+
+def get_entity_options_cls(material: BaseMaterial) -> tuple[type["BaseEntity"], ...]:
+    """Return the classes of the entity options admitting a material, in declaration order.
+
+    Each class admits the materials of its declared 'material' field. A kinematic or hybrid entity has no such field.
+    """
+    classes, pending = [], [BaseEntity]
+    while pending:
+        options_cls = pending.pop()
+        classes.append(options_cls)
+        pending.extend(reversed(options_cls.__subclasses__()))
+    return tuple(
+        options_cls
+        for options_cls in classes
+        if "material" in options_cls.model_fields
+        and isinstance(material, options_cls.model_fields["material"].annotation)
+    )
+
+
+class _FrozenOptions(Options):
+    # Assigning to a field of options skips their validators, so the entity options and the options they nest are
+    # immutable, which keeps what their validators checked true and 'entity.options' as authored
+    model_config = ConfigDict(frozen=True)
+
+
+class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits
@@ -88,7 +146,8 @@ class BaseEntity(Options, Generic[EntityT]):
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     """
 
-    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+    # Validated again wherever an instance is handed over, since 'model_copy(update=...)' derives a variant unvalidated
+    model_config = ConfigDict(revalidate_instances="always")
 
     # The class of the scene options configuring the solver that simulates the entity, or None for an entity simulated
     # by no solver of its own, such as a hybrid entity, whose parts are entities of their own
@@ -99,8 +158,13 @@ class BaseEntity(Options, Generic[EntityT]):
     surface: Surface | None = None
     name: str | None = None
 
+    @property
+    def morphs(self) -> tuple[Morph, ...]:
+        """The morphs of the entity, one per variant of a heterogeneous entity and a single one otherwise."""
+        return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
-class RigidEntitySolverOptions(Options):
+
+class RigidEntitySolverOptions(_FrozenOptions):
     """Options of the rigid solver specific to one rigid entity: its coupling with other solvers and its collision grid.
 
     Parameters
@@ -162,7 +226,7 @@ class RigidEntitySolverOptions(Options):
         return self
 
 
-class RigidLinkSolverOptions(Options):
+class RigidLinkSolverOptions(_FrozenOptions):
     """Options of the rigid solver specific to one link: its coupling with other solvers.
 
     A field left to None takes the value of the entity (see ``RigidEntitySolverOptions``).
@@ -180,13 +244,11 @@ class RigidLinkSolverOptions(Options):
         contacts to these links. Default is None.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     needs_coup: StrictBool | None = None
     enable_coup_collision: StrictBool | None = None
 
 
-class Geom(Options):
+class Geom(_FrozenOptions):
     """Options of the collision geoms of a rigid entity that a ``gs.GeomIndex`` selects.
 
     Parameters
@@ -200,12 +262,10 @@ class Geom(Options):
         simulates. If None, the geoms take the material of their link. Default is None.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     material: Material | None = None
 
 
-class VGeom(Options):
+class VGeom(_FrozenOptions):
     """Options of the visual geoms of a rigid or kinematic entity that a ``gs.VGeomIndex`` selects.
 
     Parameters
@@ -216,12 +276,10 @@ class VGeom(Options):
         surface of their link. Default is None.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     surface: Surface | None = None
 
 
-class Link(Options):
+class Link(_FrozenOptions):
     """Options of the links of a rigid entity that a ``gs.LinkIndex`` or link names select.
 
     Parameters
@@ -246,39 +304,12 @@ class Link(Options):
         its asset splits them. They override the options of the link. Default is no visual geom options.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     material: Material | None = None
     geoms: FrozenDictType[GeomIndex, Geom] = {}
     solver_options: RigidLinkSolverOptions | None = None
     use_visual_raycasting: StrictBool | None = None
     surface: Surface | None = None
     vgeoms: FrozenDictType[VGeomIndex, VGeom] = {}
-
-
-def _merge_fields(fields: dict, options: Options, target: str) -> None:
-    """Add the fields given explicitly in 'options' to 'fields', raising on a field already given for 'target'.
-
-    A field given as None leaves the value to the scope above, as one left unset does.
-    """
-    for name, value in options.model_dump(exclude_unset=True, exclude_none=True).items():
-        if name in fields:
-            gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
-        fields[name] = value
-
-
-def _key_links_by_index(links):
-    """Key the link options by ``LinkIndex``, a name or a tuple of names standing for the links of those names."""
-    if not isinstance(links, Mapping):
-        return links
-    links_by_index = {}
-    for key, link_options in links.items():
-        if isinstance(key, str):
-            key = LinkIndex.named(key)
-        elif isinstance(key, tuple):
-            key = LinkIndex.named(*key)
-        links_by_index[key] = link_options
-    return links_by_index
 
 
 class _ArticulatedEntity(BaseEntity[EntityT]):
@@ -293,11 +324,10 @@ class _ArticulatedEntity(BaseEntity[EntityT]):
 
     @model_validator(mode="after")
     def _check_vgeoms(self) -> "_ArticulatedEntity":
-        morphs = self.morph if isinstance(self.morph, tuple) else (self.morph,)
         if any(
             not vgeom_index.is_all and vgeom_index.names is None and vgeom_index.material_names is None
             for vgeom_index in self.vgeoms
-        ) and not all(isinstance(morph, (Mesh, Primitive)) for morph in morphs):
+        ) and not all(isinstance(morph, (Mesh, Primitive)) for morph in self.morphs):
             gs.raise_exception(
                 "Visual geom options of an entity select visual geoms by ordinal only if its morph is a mesh or a "
                 "primitive. Select them with 'gs.VGeomIndex.all()', 'named' or 'with_material', or through the options "
@@ -317,44 +347,29 @@ class _ArticulatedEntity(BaseEntity[EntityT]):
         geom raise an error.
         """
         link_name = link_path[-1]
-        link_surfaces = []
+        link_fields = {}
         vgeoms_options = list(self.vgeoms.items())
         for link_index, link_options in self.links.items():
             if link_index.matches(link_path):
-                if link_options.surface is not None:
-                    link_surfaces.append(link_options.surface)
+                _merge_fields(link_fields, link_options, f"link '{link_name}'", names=("surface",))
                 vgeoms_options.extend(link_options.vgeoms.items())
-        if len(link_surfaces) > 1:
-            gs.raise_exception(f"Two selections of equal specificity give 'surface' of link '{link_name}'.")
-        vgeoms_surface = [link_surfaces[0] if link_surfaces else None for _ in vgeoms_name]
-        is_vgeom_given = [False for _ in vgeoms_name]
+        vgeoms_fields = [{} for _ in vgeoms_name]
         for vgeom_index, vgeom_options in vgeoms_options:
             if vgeom_options.surface is not None:
                 for i_vg in vgeom_index.resolve(vgeoms_name, vgeoms_material_name):
-                    if is_vgeom_given[i_vg]:
-                        gs.raise_exception(
-                            f"Two selections of equal specificity give 'surface' of visual geom {i_vg} of link "
-                            f"'{link_name}'."
-                        )
-                    vgeoms_surface[i_vg] = vgeom_options.surface
-                    is_vgeom_given[i_vg] = True
-        return vgeoms_surface
+                    _merge_fields(vgeoms_fields[i_vg], vgeom_options, f"visual geom {i_vg} of link '{link_name}'")
+        return [vgeom_fields.get("surface", link_fields.get("surface")) for vgeom_fields in vgeoms_fields]
 
     def get_link_use_visual_raycasting(self, link_path: tuple[str, ...]) -> bool:
         """Return whether a link exposes its visual mesh to visual raycasting.
 
         'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``).
         """
-        values = [
-            link_options.use_visual_raycasting
-            for link_index, link_options in self.links.items()
-            if link_index.matches(link_path) and link_options.use_visual_raycasting is not None
-        ]
-        if len(values) > 1:
-            gs.raise_exception(
-                f"Two selections of equal specificity give 'use_visual_raycasting' of link '{link_path[-1]}'."
-            )
-        return values[0] if values else self.use_visual_raycasting
+        fields = {}
+        for link_index, link_options in self.links.items():
+            if link_index.matches(link_path):
+                _merge_fields(fields, link_options, f"link '{link_path[-1]}'", names=("use_visual_raycasting",))
+        return fields.get("use_visual_raycasting", self.use_visual_raycasting)
 
 
 class Rigid(_ArticulatedEntity["RigidEntity"]):
@@ -405,9 +420,8 @@ class Rigid(_ArticulatedEntity["RigidEntity"]):
             friction = None if material is None else material.friction
             if friction is not None and not 0.01 <= friction <= 5.0:
                 gs.raise_exception(f"The friction of a rigid entity must lie between 0.01 and 5, got {friction}.")
-        morphs = self.morph if isinstance(self.morph, tuple) else (self.morph,)
         if any(not geom_index.is_all and geom_index.names is None for geom_index in self.geoms) and not all(
-            isinstance(morph, (Mesh, Primitive)) for morph in morphs
+            isinstance(morph, (Mesh, Primitive)) for morph in self.morphs
         ):
             gs.raise_exception(
                 "Geom options of an entity select geoms by ordinal only if its morph is a mesh or a primitive. Select "
@@ -533,7 +547,7 @@ class Kinematic(_ArticulatedEntity["KinematicEntity"]):
         return self
 
 
-class FEMEntitySolverOptions(Options):
+class FEMEntitySolverOptions(_FrozenOptions):
     """Options of the finite element method (FEM) solver specific to one entity.
 
     Parameters
@@ -559,7 +573,7 @@ class FEMEntitySolverOptions(Options):
     n_groups: PositiveInt = 1
 
 
-class FEMVertexSolverOptions(Options):
+class FEMVertexSolverOptions(_FrozenOptions):
     """Options of the finite element method (FEM) solver specific to vertices of an entity.
 
     Parameters
@@ -571,12 +585,10 @@ class FEMVertexSolverOptions(Options):
         Cloth material rejects it. Default is False.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     is_fixed: StrictBool = False
 
 
-class Vertex(Options):
+class Vertex(_FrozenOptions):
     """Options of the vertices of a deformable entity that a ``gs.VertexIndex`` selects.
 
     Parameters
@@ -585,8 +597,6 @@ class Vertex(Options):
         The options of the solver specific to the selected vertices. If None, the vertices take those of the entity.
         Default is None.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     solver_options: FEMVertexSolverOptions | None = None
 
@@ -640,15 +650,15 @@ class FEM(BaseEntity["FEMEntity"]):
 
         Two selections of equal specificity giving 'is_fixed' of one vertex raise an error.
         """
-        verts_is_fixed = {}
+        verts_fields = {}
         for vertex_index, vertex_options in self.vertices.items():
             solver_options = vertex_options.solver_options
-            if solver_options is not None and "is_fixed" in solver_options.model_fields_set:
+            if solver_options is not None and solver_options.model_fields_set:
                 for i_v in vertex_index.resolve(verts_pos):
-                    if i_v in verts_is_fixed:
-                        gs.raise_exception(f"Two selections of equal specificity give 'is_fixed' of vertex {i_v}.")
-                    verts_is_fixed[i_v] = solver_options.is_fixed
-        return np.array(sorted(i_v for i_v, is_fixed in verts_is_fixed.items() if is_fixed), dtype=gs.np_int)
+                    _merge_fields(verts_fields.setdefault(i_v, {}), solver_options, f"vertex {i_v}")
+        return np.array(
+            sorted(i_v for i_v, fields in verts_fields.items() if fields.get("is_fixed", False)), dtype=gs.np_int
+        )
 
     @property
     def material_params(self) -> FEMMaterialParams:
@@ -665,7 +675,7 @@ class FEM(BaseEntity["FEMEntity"]):
         )
 
 
-class MPMEntitySolverOptions(Options):
+class MPMEntitySolverOptions(_FrozenOptions):
     """Options of the material point method (MPM) solver specific to one entity.
 
     Parameters
@@ -753,7 +763,7 @@ class MPM(BaseEntity["MPMEntity"]):
         return MPMMaterialParams(youngs_modulus, poisson_ratio, model, sampler)
 
 
-class SPHEntitySolverOptions(Options):
+class SPHEntitySolverOptions(_FrozenOptions):
     """Options of the smoothed particle hydrodynamics (SPH) solver specific to one entity.
 
     Parameters
@@ -828,7 +838,7 @@ class PBDMaterialParams(NamedTuple):
     kinetic_friction: float
 
 
-class PBDClothEntitySolverOptions(Options):
+class PBDClothEntitySolverOptions(_FrozenOptions):
     """Options of the position-based dynamics (PBD) solver specific to one cloth entity.
 
     A compliance is the inverse stiffness of a constraint: 0 makes it rigid, and a larger value lets it give way. A
@@ -898,16 +908,11 @@ class PBDCloth(BaseEntity["PBD2DEntity"]):
         defaults to 0.15, and the kinetic one to the friction coefficient.
         """
         material = self.material
-        friction = 0.15 if material.friction is None else material.friction
-        kinetic_friction = self.solver_options.kinetic_friction
-        return PBDMaterialParams(
-            density=4.0 if material.density is None else material.density * material.thickness,
-            friction=friction,
-            kinetic_friction=friction if kinetic_friction is None else kinetic_friction,
-        )
+        density = 4.0 if material.density is None else material.density * material.thickness
+        return _get_pbd_material_params(density, material.friction, self.solver_options.kinetic_friction)
 
 
-class PBDElasticEntitySolverOptions(Options):
+class PBDElasticEntitySolverOptions(_FrozenOptions):
     """Options of the position-based dynamics (PBD) solver specific to one elastic entity.
 
     See ``PBDClothEntitySolverOptions`` for the meaning of a compliance and a relaxation.
@@ -968,16 +973,24 @@ class PBDElastic(BaseEntity["PBD3DEntity"]):
     @property
     def material_params(self) -> PBDMaterialParams:
         """The parameters of the solid, the friction coefficient defaulting to 0.15 and the kinetic one to it."""
-        friction = 0.15 if self.material.friction is None else self.material.friction
-        kinetic_friction = self.solver_options.kinetic_friction
-        return PBDMaterialParams(
-            density=self.material.density,
-            friction=friction,
-            kinetic_friction=friction if kinetic_friction is None else kinetic_friction,
-        )
+        material = self.material
+        return _get_pbd_material_params(material.density, material.friction, self.solver_options.kinetic_friction)
 
 
-class PBDLiquidEntitySolverOptions(Options):
+class _PBDParticles(BaseEntity[EntityT]):
+    """Options shared by the particle entities of the PBD solver, whose Liquid material applies by its density alone."""
+
+    _solver_options_cls = PBDOptions
+
+    material: Liquid = Field(default_factory=Liquid)
+
+    @model_validator(mode="after")
+    def _check_material(self) -> "_PBDParticles":
+        _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
+        return self
+
+
+class PBDLiquidEntitySolverOptions(_FrozenOptions):
     """Options of the position-based dynamics (PBD) solver specific to one liquid entity.
 
     Parameters
@@ -999,7 +1012,7 @@ class PBDLiquidEntitySolverOptions(Options):
     viscosity_relaxation: ValidFloat = 0.01
 
 
-class PBDLiquid(BaseEntity["PBDParticleEntity"]):
+class PBDLiquid(_PBDParticles["PBDParticleEntity"]):
     """Options of a liquid entity, which the position-based dynamics (PBD) solver simulates as incompressible particles.
 
     Use it for a liquid where speed and stability matter more than accurate pressure and viscosity. Each particle
@@ -1015,18 +1028,10 @@ class PBDLiquid(BaseEntity["PBDParticleEntity"]):
         ``PBDLiquidEntitySolverOptions()``.
     """
 
-    _solver_options_cls = PBDOptions
-
-    material: Liquid = Field(default_factory=Liquid)
     solver_options: PBDLiquidEntitySolverOptions = Field(default_factory=PBDLiquidEntitySolverOptions)
 
-    @model_validator(mode="after")
-    def _check_material(self) -> "PBDLiquid":
-        _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
-        return self
 
-
-class PBDParticleEntitySolverOptions(Options):
+class PBDParticleEntitySolverOptions(_FrozenOptions):
     """Options of the position-based dynamics (PBD) solver specific to one set of free particles.
 
     Parameters
@@ -1038,7 +1043,7 @@ class PBDParticleEntitySolverOptions(Options):
     sampler: ParticleSamplerType = DEFAULT_SAMPLER
 
 
-class PBDParticle(BaseEntity["PBDFreeParticleEntity"]):
+class PBDParticle(_PBDParticles["PBDFreeParticleEntity"]):
     """Options of a set of free particles, which the position-based dynamics (PBD) solver moves under external forces.
 
     Use it for particle effects and animations: the particles ignore each other, which makes them the cheapest
@@ -1054,18 +1059,10 @@ class PBDParticle(BaseEntity["PBDFreeParticleEntity"]):
         The options of the PBD solver specific to the entity. Defaults to ``PBDParticleEntitySolverOptions()``.
     """
 
-    _solver_options_cls = PBDOptions
-
-    material: Liquid = Field(default_factory=Liquid)
     solver_options: PBDParticleEntitySolverOptions = Field(default_factory=PBDParticleEntitySolverOptions)
 
-    @model_validator(mode="after")
-    def _check_material(self) -> "PBDParticle":
-        _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
-        return self
 
-
-class HybridEntitySolverOptions(Options):
+class HybridEntitySolverOptions(_FrozenOptions):
     """Options of the solvers simulating the two parts of a hybrid entity.
 
     Parameters
@@ -1169,21 +1166,3 @@ class Hybrid(BaseEntity["HybridEntity"]):
         if isinstance(self.morph, URDF):
             rigid = rigid.model_copy(update={"needs_coup": self.use_default_coupling})
         return rigid
-
-
-def get_entity_options_cls(material: BaseMaterial) -> tuple[type[BaseEntity], ...]:
-    """Return the classes of the entity options admitting a material, in declaration order.
-
-    Each class admits the materials of its declared 'material' field. A kinematic or hybrid entity has no such field.
-    """
-    classes, pending = [], [BaseEntity]
-    while pending:
-        options_cls = pending.pop()
-        classes.append(options_cls)
-        pending.extend(reversed(options_cls.__subclasses__()))
-    return tuple(
-        options_cls
-        for options_cls in classes
-        if "material" in options_cls.model_fields
-        and isinstance(material, options_cls.model_fields["material"].annotation)
-    )

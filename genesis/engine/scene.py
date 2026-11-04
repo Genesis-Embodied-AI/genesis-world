@@ -447,9 +447,7 @@ class Scene(RBC):
             surface = gs.surfaces.Default()
 
         # some morph should not smooth surface normal
-        if isinstance(
-            morph[0] if isinstance(morph, tuple) else morph, (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)
-        ):
+        if isinstance(resolved_options.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
             surface.smooth = False
 
         if surface.double_sided is None:
