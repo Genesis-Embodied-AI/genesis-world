@@ -240,8 +240,8 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
             _resolve_albedo(base_batch[i % len(base_batch)], emissive_batch[i % len(emissive_batch)])
             for i in range(count)
         ]
-        # Return the original batch object when no entry fell back, so its identity stays stable and _make_rgba's
-        # per-instance cache keeps hitting for shared batched textures instead of rebuilding a wrapper each call.
+        # Return the original batch object when no entry fell back, so that it owns the entry of _make_rgba's cache
+        # rather than a wrapper built anew on each call, whose entry would be released and computed again each time.
         if is_base_batched and len(resolved) == len(base_batch) and all(r is b for r, b in zip(resolved, base_batch)):
             return base_texture
         return BatchTexture(textures=resolved)

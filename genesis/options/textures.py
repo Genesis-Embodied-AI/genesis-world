@@ -5,7 +5,7 @@ from typing import Annotated, Hashable, Iterable, Literal, Sequence, cast
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, computed_field, model_validator
+from pydantic import BeforeValidator, Field, PrivateAttr, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
@@ -128,6 +128,9 @@ class ImageTexture(Texture, SerializationMixin):
     image_color: UnitIntervalArrayType
     encoding: Annotated[Literal["srgb", "linear"], BeforeValidator(lambda e: str(e).lower())] = "srgb"
 
+    # Digest of the image array it was computed from, computed again once another array replaces it.
+    _image_digest: tuple[np.ndarray, str] | None = PrivateAttr(default=None)
+
     def __init__(
         self,
         *,
@@ -247,10 +250,11 @@ class ImageTexture(Texture, SerializationMixin):
     def hashkey(self) -> Hashable:
         # An HDR image is never loaded, so its file stands in for its pixels.
         if self.image_array is None:
-            image_key = self.image_path
-        else:
-            image_key = get_hashkey(self.image_array, self.image_array.shape, self.image_array.dtype.str)
-        return (image_key, self.image_color, self.encoding)
+            return (self.image_path, self.image_color, self.encoding)
+        if self._image_digest is None or self._image_digest[0] is not self.image_array:
+            image = self.image_array
+            self._image_digest = (image, get_hashkey(image, image.shape, image.dtype.str))
+        return (self._image_digest[1], self.image_color, self.encoding)
 
     def check_dim(self, dim: int) -> Texture | None:
         if self.image_array is not None:
