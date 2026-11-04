@@ -1,0 +1,122 @@
+genesis/engine/sensors/camera.py
+  s_91e0422623a7c7::t_7d26187d41a66c 504,508
+genesis/utils/serialization.py
+  s_91e0422623a7c7::t_7d26187d41a66c 20,242,272-274,278,361,456
+genesis/ext/pyrender/overlay/plugin.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1047-1048,1065
+genesis/options/morphs.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1255,1282,1375,1402-1416,1460-1462,1475-1476,1480,1486,1489,1492,1498,1502,1506,1510
+genesis/constants.py
+  s_91e0422623a7c7::t_7d26187d41a66c 3-4,27-43,208-212,223-412
+genesis/engine/solvers/sph_solver.py
+  s_91e0422623a7c7::t_7d26187d41a66c 711,716
+genesis/engine/scene.py
+  s_91e0422623a7c7::t_a1bcc17952b99d 480
+  s_91e0422623a7c7::t_7d26187d41a66c 324,335,346,380,414,463,467,469,471,474,500,510,532,745,777,870-871,945-946
+genesis/options/sensors/tactile.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1,181,196
+genesis/engine/entities/emitter.py
+  s_91e0422623a7c7::t_7d26187d41a66c 72,96,98,121,128,134,140
+genesis/options/surfaces.py
+  s_91e0422623a7c7::t_7d26187d41a66c 53,69,91,96,105,478,495,859,867,875
+genesis/engine/mesh.py
+  s_91e0422623a7c7::t_7d26187d41a66c 567,573
+genesis/options/textures.py
+  s_91e0422623a7c7::t_7d26187d41a66c 143,158,167,210-211,326-329,424,452-456,459,461,464,472,591
+genesis/utils/usd/usd_material.py
+  s_91e0422623a7c7::t_7d26187d41a66c 12-13,32,65,70,78,87,94,99
+genesis/vis/batch_renderer.py
+  s_91e0422623a7c7::t_7d26187d41a66c 56,58,60,320,381,383,386,389-390,409,422,438
+genesis/options/solvers.py
+  s_91e0422623a7c7::t_7d26187d41a66c 135,141-143,164,166,168,208,228,233,294,303,306,699,720
+examples/rendering/dynamic_texture.py
+  s_91e0422623a7c7::t_7d26187d41a66c 95
+genesis/options/materials.py
+  s_91e0422623a7c7::t_7d26187d41a66c 3,137,153,160,314
+genesis/utils/gltf.py
+  s_91e0422623a7c7::t_7d26187d41a66c 159,168,202-203,223,238,271
+genesis/utils/usd/usd_utils.py
+  s_91e0422623a7c7::t_7d26187d41a66c 238
+genesis/vis/rasterizer_context.py
+  s_91e0422623a7c7::t_7d26187d41a66c 370,380,382,384,405,420,629,674-676,697,739,770,772,774,866,868,880-883,906,909,931,941,952,954,966,989,992,1011,1029,1035,1037-1038,1052,1063,1074,1105-1106,1113,1125,1145,1167,1172-1176,1194
+genesis/engine/solvers/fem_models.py
+  s_91e0422623a7c7::t_7d26187d41a66c 57,59,62,67,72,228,263,269
+genesis/engine/interactive_scene.py
+  s_91e0422623a7c7::t_7d26187d41a66c 170-171,174,182,189
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_91e0422623a7c7::t_7d26187d41a66c 8,1126,1654,2338,2516,2540,2562,2585,2609
+genesis/options/sensors/camera.py
+  s_91e0422623a7c7::t_7d26187d41a66c 98,120,144
+genesis/engine/couplers/ipc_coupler/utils.py
+  s_91e0422623a7c7::t_7d26187d41a66c 30,34-36
+genesis/options/recorders.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1,154,166
+genesis/engine/sensors/tactile_shared.py
+  s_91e0422623a7c7::t_7d26187d41a66c 559,565
+genesis/engine/sensors/point_cloud_tactile.py
+  s_91e0422623a7c7::t_7d26187d41a66c 2116,2244,2314
+genesis/options/renderers.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1,75,103
+genesis/engine/couplers/sap_coupler.py
+  s_91e0422623a7c7::t_7d26187d41a66c 227-228,230,232
+genesis/logging/logger.py
+  s_91e0422623a7c7::t_7d26187d41a66c 150
+genesis/options/vis.py
+  s_91e0422623a7c7::t_7d26187d41a66c 113,120,127,171,174,206-207
+genesis/utils/cache.py
+  s_91e0422623a7c7::t_7d26187d41a66c 14,449-451
+genesis/utils/terrain.py
+  s_91e0422623a7c7::t_7d26187d41a66c 90,92,98,106,111,116,124,130,136,142
+genesis/utils/particle.py
+  s_91e0422623a7c7::t_7d26187d41a66c 42,47,70,283,289,315,334,358,382,445,450,456,474
+genesis/vis/raytracer.py
+  s_91e0422623a7c7::t_7d26187d41a66c 21-23,169,267,288,302,325,328,330,338,468,474,615,624,645,647,684,703,752,765,771,790
+genesis/options/entities.py
+  s_91e0422623a7c7::t_7d26187d41a66c 7,39-43,120,149,416,540,555,678,687,700,748,751,760,769,984,996,1033,1037
+genesis/options/misc.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1,35,50
+tests/rendering/test_offscreen.py
+  s_91e0422623a7c7::t_7d26187d41a66c 370,401
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_91e0422623a7c7::t_7d26187d41a66c 733,748
+genesis/engine/solvers/mpm_models.py
+  s_91e0422623a7c7::t_7d26187d41a66c 43,47,74,104,279,285
+genesis/engine/solvers/rigid/collider/collider.py
+  s_91e0422623a7c7::t_7d26187d41a66c 471,473
+genesis/utils/geom.py
+  s_91e0422623a7c7::t_7d26187d41a66c 2,13,1573,1639,1784,1790,1800,1813,1826-1827,1837
+genesis/_main.py
+  s_91e0422623a7c7::t_7d26187d41a66c 49,123
+genesis/vis/camera.py
+  s_91e0422623a7c7::t_7d26187d41a66c 30,76,95-97,495-496,506,924,931
+genesis/engine/texture.py
+  s_91e0422623a7c7::t_7d26187d41a66c 42,63,161,213
+genesis/recorders/trajectory.py
+  s_91e0422623a7c7::t_7d26187d41a66c 103-104,493,529,534,537-539,541,543,1157-1159
+tests/rigid/test_serialization.py
+  s_91e0422623a7c7::t_7d26187d41a66c 371-372
+genesis/engine/sensors/kinematic_tactile.py
+  s_91e0422623a7c7::t_7d26187d41a66c 1024,1299
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_91e0422623a7c7::t_7d26187d41a66c 243-247,249
+genesis/__init__.py
+  s_91e0422623a7c7::t_7d26187d41a66c 31,63,81,158,162,493,507-535
+genesis/engine/entities/rigid_entity/drone_entity.py
+  s_91e0422623a7c7::t_7d26187d41a66c 74-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aaee1664b2a9ccec0bdcce3446ca04039f225482",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
