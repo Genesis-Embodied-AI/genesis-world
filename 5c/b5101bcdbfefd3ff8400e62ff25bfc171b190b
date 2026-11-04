@@ -1,0 +1,19 @@
+genesis/options/textures.py
+  s_471e150e8c9aa1::t_cd8a6f88594c0a 131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5cb5101bcdbfefd3ff8400e62ff25bfc171b190b",
+  "prompts": {},
+  "sessions": {
+    "s_471e150e8c9aa1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a62f512-26b6-47f4-a085-3b7218792d2a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
