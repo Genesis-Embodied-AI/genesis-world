@@ -46,7 +46,7 @@ def kernel_exclusive_sum(
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize(("qd_dtype", "np_dtype"), ((qd.u32, np.uint32), (qd.u64, np.uint64)))
 def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
     capacity = 20_000
@@ -75,7 +75,7 @@ def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_dynamic_exclusive_sum_matches_numpy():
     capacity = 100_000
     rng = np.random.default_rng(3)
@@ -126,7 +126,7 @@ def _random_symmetric_triplets(rng, n_rows, n_triplets):
 
 @pytest.mark.required
 @pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
     rng = np.random.default_rng(11)
     n_rows, n_triplets = 40, 500
@@ -184,7 +184,6 @@ def kernel_hash_reset(table: qd.template()):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.gpu])
 def test_open_addressing_hash_inserts_and_looks_up():
     rng = np.random.default_rng(5)
     n_keys = 10_000
@@ -305,7 +304,7 @@ def _pcg_block_system(off_diagonal_scale, check_curvature):
 
 @pytest.mark.required
 @pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_linear_pcg_solves_spd_block_system():
     # A dominant diagonal makes the matrix symmetric positive definite (SPD), which the curvature check accepts
     dense, b, x, pcg_scalars = _pcg_block_system(off_diagonal_scale=0.1, check_curvature=True)
@@ -317,7 +316,7 @@ def test_linear_pcg_solves_spd_block_system():
 
 @pytest.mark.required
 @pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_linear_pcg_flags_non_positive_curvature():
     # Off-diagonal blocks large enough to make the matrix indefinite, its symmetric positive definite (SPD) diagonal
     # keeping the preconditioner SPD
