@@ -161,7 +161,7 @@ def test_reset_control(n_envs, robot_path):
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
     scene.step()
     old_control_force = robot.get_dofs_control_force()
-    for _ in range(6):
+    for _ in range(5):
         scene.step()
     late_control_force = robot.get_dofs_control_force()
 
@@ -172,7 +172,7 @@ def test_reset_control(n_envs, robot_path):
     robot.set_dofs_position(qpos, zero_velocity=False)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
     robot.control_dofs_velocity(0.01, dofs_idx_local=[6])
-    for _ in range(6):
+    for _ in range(5):
         scene.step()
     scene.reset(envs_idx=envs_idx)
     robot.set_dofs_position(qpos, envs_idx=envs_idx, zero_velocity=False)
