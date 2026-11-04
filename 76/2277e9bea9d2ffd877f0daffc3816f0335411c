@@ -1,0 +1,179 @@
+examples/coupling/cut_dragon.py
+  s_91e0422623a7c7::t_dbac8a8608206f 40
+examples/sap_coupling/franka_grasp_rigid_cube.py
+  s_91e0422623a7c7::t_dbac8a8608206f 41-46,50-56
+tests/ipc/test_deformable.py
+  s_91e0422623a7c7::t_93772abe102397 3,17,66-72,74-75,77
+  s_91e0422623a7c7::t_dbac8a8608206f 59-62,227-236,335-340,343-350
+examples/rigid/ik_duck.py
+  s_91e0422623a7c7::t_dbac8a8608206f 26-29,31,35-42
+examples/viewer_plugin/mesh_point_selector.py
+  s_91e0422623a7c7::t_0c96a36d4f82be 260-262
+  s_91e0422623a7c7::t_dbac8a8608206f 266-272,274-275,278-282,284-285
+tests/rendering/test_debug_draw.py
+  s_91e0422623a7c7::t_dbac8a8608206f 146-147
+examples/sensors/tactile_sandbox.py
+  s_91e0422623a7c7::t_dbac8a8608206f 305,358
+examples/ipc/ipc_momentum.py
+  s_91e0422623a7c7::t_dbac8a8608206f 58-69
+examples/viewer_plugin/mouse_interaction.py
+  s_91e0422623a7c7::t_dbac8a8608206f 42-44,46-47,50-53,55-56,62-64,66-67
+  s_91e0422623a7c7::t_0c96a36d4f82be 36-38
+examples/ipc/ipc_objects_falling.py
+  s_91e0422623a7c7::t_dbac8a8608206f 75-84
+tests/rigid/test_collision.py
+  s_91e0422623a7c7::t_dbac8a8608206f 1528-1529,1548-1549,1565-1566,2077-2078,2091-2092,2102-2103
+tests/rigid/test_api.py
+  s_91e0422623a7c7::t_dbac8a8608206f 1383-1385,1387
+examples/rigid/diffik_controller.py
+  s_91e0422623a7c7::t_dbac8a8608206f 34-35,41-42,44,50-56
+tests/rendering/test_offscreen.py
+  s_91e0422623a7c7::t_dbac8a8608206f 249-250
+  s_91e0422623a7c7::t_4eb1182c39b1c4 1343
+examples/sensors/depth_camera_custom_vverts.py
+  s_91e0422623a7c7::t_dbac8a8608206f 65-71,74-76,84-89,92-94
+tests/rigid/test_collision_nonconvex.py
+  s_91e0422623a7c7::t_dbac8a8608206f 461
+examples/sensors/temperature_grid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 87,102
+examples/rigid/screw_constraint.py
+  s_91e0422623a7c7::t_dbac8a8608206f 46
+examples/manipulation/grasp_env.py
+  s_91e0422623a7c7::t_0c96a36d4f82be 399
+  s_91e0422623a7c7::t_bcda1869b733d3 407
+tests/deformable/test_fem.py
+  s_91e0422623a7c7::t_fe408e43d6b0a6 415
+examples/coupling/sph_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 55-60
+  s_91e0422623a7c7::t_0c96a36d4f82be 35
+tests/sensors/test_camera.py
+  s_91e0422623a7c7::t_dbac8a8608206f 76-84
+tests/coupling/test_hybrid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 68-69,118-119,225-228
+  s_91e0422623a7c7::t_fe408e43d6b0a6 472
+examples/rigid/ik_custom_chain.py
+  s_91e0422623a7c7::t_dbac8a8608206f 25-31,36-42
+tests/rigid/test_heterogeneous.py
+  s_91e0422623a7c7::t_dbac8a8608206f 489-490
+tests/rigid/test_islands.py
+  s_91e0422623a7c7::t_293fc627f098d7 404
+  s_91e0422623a7c7::t_dbac8a8608206f 381-382
+tests/rigid/test_asset_loading.py
+  s_91e0422623a7c7::t_bcda1869b733d3 1388
+  s_91e0422623a7c7::t_dbac8a8608206f 389-390,400-401,1212-1213,1219-1220,1243-1244,1344-1345,1382,1707-1708,1714-1717,1729-1730,1736-1737,2058-2060,2062,2065-2067,2069
+  s_91e0422623a7c7::t_0c96a36d4f82be 1748
+examples/rigid/bolt_nut_self_screw.py
+  s_91e0422623a7c7::t_dbac8a8608206f 57
+tests/parsers/test_mesh.py
+  s_91e0422623a7c7::t_dbac8a8608206f 774-775
+examples/viewer_plugin/keyboard_teleop.py
+  s_91e0422623a7c7::t_dbac8a8608206f 58,61-63
+  s_91e0422623a7c7::t_0c96a36d4f82be 64,68-70
+examples/tutorials/advanced_worm.py
+  s_91e0422623a7c7::t_dbac8a8608206f 33-35
+examples/rigid/gravity_compensation.py
+  s_91e0422623a7c7::t_dbac8a8608206f 30-34,39-43
+examples/coupling/grasp_soft_cube.py
+  s_91e0422623a7c7::t_dbac8a8608206f 55-59
+examples/sensors/tactile_franka.py
+  s_91e0422623a7c7::t_dbac8a8608206f 227-228,240-241
+examples/ipc/ipc_robot_cloth_teleop.py
+  s_91e0422623a7c7::t_dbac8a8608206f 155-166
+tests/ipc/test_api.py
+  s_91e0422623a7c7::t_dbac8a8608206f 31-33,37-42,167-170,175-182,227-229,235-240,270-275,280-285
+examples/rigid/authored_decomp.py
+  s_91e0422623a7c7::t_dbac8a8608206f 60-61,79-80,94-95
+tests/sensors/test_raycaster.py
+  s_91e0422623a7c7::t_dbac8a8608206f 147-151,326-333,546-552,690-695,704-709,802-808
+examples/coupling/cloth_attached_to_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 48,51,54
+examples/coupling/sand_wheel.py
+  s_91e0422623a7c7::t_dbac8a8608206f 39-45,48-49,53-60,65-72,77-84,89-96
+examples/tutorials/advanced_hybrid_robot.py
+  s_91e0422623a7c7::t_dbac8a8608206f 71-72
+tests/sensors/test_tactile.py
+  s_91e0422623a7c7::t_dbac8a8608206f 1735
+tests/rigid/test_serialization.py
+  s_91e0422623a7c7::t_dbac8a8608206f 72-75,77,105,198-200,202
+tests/rigid/test_dynamics.py
+  s_91e0422623a7c7::t_dbac8a8608206f 24-25,27,715-716
+  s_91e0422623a7c7::t_293fc627f098d7 6
+tests/rigid/test_kinematics.py
+  s_91e0422623a7c7::t_dbac8a8608206f 782-787,791-797,904-910,963-964,966
+tests/coupling/test_sph_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 54-55,63-64,73-74,137-138,148-149
+tests/rendering/test_interactive_viewer.py
+  s_91e0422623a7c7::t_293fc627f098d7 40-41,515
+  s_91e0422623a7c7::t_dbac8a8608206f 476-480,482,495-501,507-511
+examples/rigid/ik_franka.py
+  s_91e0422623a7c7::t_dbac8a8608206f 26-27,29,33-39
+examples/deformable/differentiable_push.py
+  s_91e0422623a7c7::t_2e716aadb2b0dd 40-49,52-54
+tests/parsers/conftest.py
+  s_91e0422623a7c7::t_dbac8a8608206f 405-406,441-442,482-483
+tests/integration/test_integration.py
+  s_91e0422623a7c7::t_dbac8a8608206f 253-258
+tests/parsers/test_usd.py
+  s_91e0422623a7c7::t_6ba4916c65c777 40
+  s_91e0422623a7c7::t_dbac8a8608206f 393,440-443,445,474,484-485,630-631,670-671
+  s_91e0422623a7c7::t_df2fbec9c05065 21-22
+tests/grad/test_hybrid_push.py
+  s_91e0422623a7c7::t_dbac8a8608206f 40-49
+tests/rendering/test_dynamic_meshes.py
+  s_91e0422623a7c7::t_dbac8a8608206f 65-70,74-82
+examples/sap_coupling/franka_grasp_fem_sphere.py
+  s_91e0422623a7c7::t_dbac8a8608206f 46-51
+tests/rigid/test_sparse.py
+  s_91e0422623a7c7::t_dbac8a8608206f 52
+tests/core/test_recorders.py
+  s_91e0422623a7c7::t_dbac8a8608206f 146-147
+examples/kinematic/go2_kinematic.py
+  s_91e0422623a7c7::t_dbac8a8608206f 43-50
+examples/rigid/ik_franka_batched.py
+  s_91e0422623a7c7::t_dbac8a8608206f 27-28,31-32,34,38-44
+tests/rigid/test_friction.py
+  s_91e0422623a7c7::t_dbac8a8608206f 194-195,202-203,364,374,383,392,465,474,562,575,656,670,776,795,809,992,1003
+tests/benchmarks/test_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 295-297,299,540
+examples/rigid/torsional_grasp.py
+  s_91e0422623a7c7::t_b02c8beaf4e956 16
+  s_91e0422623a7c7::t_dbac8a8608206f 74,83
+examples/rendering/demo.py
+  s_91e0422623a7c7::t_dbac8a8608206f 30-35,41-49,55-62,67-74,79-86,91-98,103-110,115-122,127-130,132,136-145
+examples/rigid/ik_shadow_hand.py
+  s_91e0422623a7c7::t_dbac8a8608206f 25-31,36-42,46-52,56-62
+examples/rigid/rolling_coast.py
+  s_91e0422623a7c7::t_dbac8a8608206f 70,81
+  s_91e0422623a7c7::t_b02c8beaf4e956 15
+tests/sensors/test_contact.py
+  s_91e0422623a7c7::t_dbac8a8608206f 60-61,72-73
+tests/deformable/test_muscle.py
+  s_91e0422623a7c7::t_dbac8a8608206f 33-35
+tests/particles/test_pbd.py
+  s_91e0422623a7c7::t_dbac8a8608206f 201-204,209-215
+tests/ipc/test_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 91-100,227-230,237-245,295-298,305-311,353-355,359-366,370-377,381-388,467-470,497-507,620-630,758-761,766-772,888-893
+examples/coupling/cloth_on_rigid.py
+  s_91e0422623a7c7::t_dbac8a8608206f 34-35,40-41,45-48,50
+examples/sensors/surface_distance_shadowhand.py
+  s_91e0422623a7c7::t_dbac8a8608206f 66,78
+examples/rigid/friction_breakaway.py
+  s_91e0422623a7c7::t_b02c8beaf4e956 19
+  s_91e0422623a7c7::t_dbac8a8608206f 88,97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "762277e9bea9d2ffd877f0daffc3816f0335411c",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
