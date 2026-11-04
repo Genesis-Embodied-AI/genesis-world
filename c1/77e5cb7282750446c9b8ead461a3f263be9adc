@@ -1,0 +1,25 @@
+genesis/utils/cache.py
+  s_77db4cc2b49ce9::t_bb93511e526c9e 25-26,310
+genesis/utils/mesh.py
+  s_77db4cc2b49ce9::t_9277c08db5da61 371
+  s_77db4cc2b49ce9::t_9a7bd4bc24223e 345-346,348,372-374,376
+tests/parsers/test_mesh.py
+  s_77db4cc2b49ce9::t_09faea6976289b 3,5,19,1030,1032-1039,1041-1042
+  s_77db4cc2b49ce9::t_6d775fee0012dc 1031,1040
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c177e5cb7282750446c9b8ead461a3f263be9adc",
+  "prompts": {},
+  "sessions": {
+    "s_77db4cc2b49ce9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef875f89-c453-4c9d-bd55-ca275a4cdd51",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
