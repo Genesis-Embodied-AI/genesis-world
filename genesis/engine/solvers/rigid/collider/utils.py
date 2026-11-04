@@ -1,9 +1,9 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import GEOM_TYPE
+from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
 
 
 @qd.func
@@ -79,9 +79,7 @@ def func_det3(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vecto
 
 
 @qd.func
-def func_point_in_geom_aabb(
-    i_g: int, i_b: int, point: qd.types.vector(3), expansion: float, dyn_state: array_class.DynState
-):
+def func_point_in_geom_aabb(i_g: int, i_b: int, point: qd.types.vector(3), expansion: float, dyn_state: DynState):
     aabb_min = dyn_state.geoms.aabb_min[i_g, i_b] - expansion
     aabb_max = dyn_state.geoms.aabb_max[i_g, i_b] + expansion
     return (point > aabb_min).all() and (point < aabb_max).all()
@@ -92,10 +90,10 @@ def func_is_geom_boxes_overlap(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """Check whether the world-aligned boxes of two geoms overlap, and for two convex geoms their oriented boxes too.
 
@@ -160,7 +158,7 @@ def func_is_geom_boxes_overlap(
 
 
 @qd.func
-def func_is_discrete_geom(i_g: int, dyn_info: array_class.DynInfo):
+def func_is_discrete_geom(i_g: int, dyn_info: DynInfo):
     """
     Check if the given geom is a discrete geometry.
     """
@@ -169,7 +167,7 @@ def func_is_discrete_geom(i_g: int, dyn_info: array_class.DynInfo):
 
 
 @qd.func
-def func_is_discrete_geoms(i_ga: int, i_gb: int, dyn_info: array_class.DynInfo):
+def func_is_discrete_geoms(i_ga: int, i_gb: int, dyn_info: DynInfo):
     """
     Check if the given geoms are discrete geometries.
     """

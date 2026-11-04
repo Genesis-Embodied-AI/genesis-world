@@ -68,66 +68,6 @@ def qd_vec_to_skew(vec):
 
 
 @qd.func
-def qd_svd(F):
-    """Singular value decomposition F = U S V^T of a 3x3 matrix, with the conventions of qd.svd.
-
-    The singular values come in descending order on the diagonal of S, the last one carrying the sign of det(F), and
-    det(U) = det(V) = 1.
-    """
-    # FIXME: quadrants#1051 - the fp64 Sifakis SVD skips the rotations of entries under 1e-6, which leaves an error of
-    # up to 1e-6 in the decomposition of a matrix near the identity. Two one-sided Jacobi sweeps on U^T F V, which is
-    # nearly diagonal, bring it to the precision of fp64: the stress built from it is then a smooth function of F to
-    # that precision, which the finite differences of the gradients need. Its thresholds are absolute, so the
-    # decomposition runs on F scaled to a largest entry of one.
-    F_unit = F
-    scale = gs.qd_float(1.0)
-    if qd.static(gs.qd_float == qd.f64):
-        scale = qd.abs(F).max()
-        if scale > 0.0:
-            F_unit = F / scale
-    U, S, V = qd.svd(F_unit, gs.qd_float)
-    if qd.static(gs.qd_float == qd.f64):
-        B = U.transpose() @ F_unit @ V
-        W = qd.Matrix.identity(gs.qd_float, 3)
-        for _ in qd.static(range(2)):
-            for p, q in qd.static(((0, 1), (0, 2), (1, 2))):
-                alpha, beta, gamma = gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)
-                for r in qd.static(range(3)):
-                    alpha += B[r, p] * B[r, p]
-                    beta += B[r, q] * B[r, q]
-                    gamma += B[r, p] * B[r, q]
-                if qd.abs(gamma) > 0.0:
-                    zeta = (beta - alpha) / (2.0 * gamma)
-                    t = 1.0 / (qd.abs(zeta) + qd.sqrt(1.0 + zeta * zeta))
-                    if zeta < 0.0:
-                        t = -t
-                    c = 1.0 / qd.sqrt(1.0 + t * t)
-                    s = c * t
-                    for r in qd.static(range(3)):
-                        B_p, B_q = B[r, p], B[r, q]
-                        B[r, p] = c * B_p - s * B_q
-                        B[r, q] = s * B_p + c * B_q
-                        W_p, W_q = W[r, p], W[r, q]
-                        W[r, p] = c * W_p - s * W_q
-                        W[r, q] = s * W_p + c * W_q
-        # The columns of B are now orthogonal, of norms the singular values. The third column of U completes the first
-        # two into a rotation, which leaves the sign of det(F) to the last singular value.
-        B_0 = qd.Vector([B[r, 0] for r in qd.static(range(3))], dt=gs.qd_float)
-        B_1 = qd.Vector([B[r, 1] for r in qd.static(range(3))], dt=gs.qd_float)
-        B_2 = qd.Vector([B[r, 2] for r in qd.static(range(3))], dt=gs.qd_float)
-        sigma_0, sigma_1 = B_0.norm(), B_1.norm()
-        # A matrix of rank 1 at most keeps the decomposition of qd.svd, whose second column of U would be undefined
-        if sigma_1 > 0.0:
-            U_0, U_1 = B_0 / sigma_0, B_1 / sigma_1
-            U_2 = U_0.cross(U_1)
-            U = U @ qd.Matrix.cols([U_0, U_1, U_2])
-            S = qd.Matrix([[sigma_0, 0.0, 0.0], [0.0, sigma_1, 0.0], [0.0, 0.0, U_2.dot(B_2)]], dt=gs.qd_float)
-            V = V @ W
-        S = scale * S
-    return U, S, V
-
-
-@qd.func
 def qd_transform_by_quat_fast(v, quat):
     """
     Rotate a vector by a quaternion that is already normalized.
@@ -177,6 +117,42 @@ def qd_xyz_to_quat(xyz):
         dt=gs.qd_float,
     )
     return quat
+
+
+@qd.func
+def qd_svd(A: qd.types.matrix(3, 3)):
+    """Decompose a 3x3 matrix into U S V^T to the rounding of the simulation precision.
+
+    U and V are proper rotations and S is diagonal, its last entry negative where the determinant of the matrix is, as
+    for 'qd.svd'.
+    """
+    U, S, V = qd.svd(A)
+    # FIXME: quadrants#1065 - 'qd.svd' stops at an error near 2e-10 in double precision, which three sweeps of two-sided
+    # Jacobi rotations over the nearly diagonal U^T A V bring down to the rounding, nearly repeated singular values
+    # included, for nine 2x2 decompositions.
+    if qd.static(qd.lang.impl.get_runtime().default_fp == qd.f64):
+        B = U.transpose() @ A @ V
+        for _ in qd.static(range(3)):
+            for p, q in qd.static(((0, 1), (0, 2), (1, 2))):
+                # The block of rows and columns p and q is R(phi) diag(s_p, s_q) R(theta) in closed form, R(.) being the
+                # planar rotation by an angle and s_p, s_q signed
+                e = 0.5 * (B[p, p] + B[q, q])
+                f = 0.5 * (B[p, p] - B[q, q])
+                g = 0.5 * (B[q, p] + B[p, q])
+                h = 0.5 * (B[q, p] - B[p, q])
+                angle_f = qd.atan2(g, f)
+                angle_e = qd.atan2(h, e)
+                phi = 0.5 * (angle_e + angle_f)
+                theta = 0.5 * (angle_e - angle_f)
+                L = qd.Matrix.identity(gs.qd_float, 3)
+                L[p, p], L[p, q], L[q, p], L[q, q] = qd.cos(phi), -qd.sin(phi), qd.sin(phi), qd.cos(phi)
+                R = qd.Matrix.identity(gs.qd_float, 3)
+                R[p, p], R[p, q], R[q, p], R[q, q] = qd.cos(theta), qd.sin(theta), -qd.sin(theta), qd.cos(theta)
+                B = L.transpose() @ B @ R
+                U = U @ L
+                V = V @ R
+        S = qd.Matrix([[B[0, 0], 0.0, 0.0], [0.0, B[1, 1], 0.0], [0.0, 0.0, B[2, 2]]], dt=gs.qd_float)
+    return U, S, V
 
 
 @qd.func
@@ -2604,18 +2580,22 @@ class SpatialHasher:
         else:
             self.n_slots = n_slots
 
-    def build(self, n_batch):
+    def build(self, n_elems, n_batch):
         self._B = n_batch
         # number of elements in each slot
         self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
         # element index offset in each slot
         self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
+        # index of the element each sorted index holds, before the elements of each slot are put in ascending order
+        self.elems_idx = qd.field(gs.qd_int, shape=(n_elems, self._B))
         self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
 
     @qd.func
     def compute_reordered_idx(self, n, pos, active, reordered_idx):
         """
         Reordered element idx based on the given positions and active flags.
+
+        The elements of a slot take their sorted indices in ascending order of element index.
 
         Parameters:
             n (int)       : The number of elements in the positions and active arrays.
@@ -2643,11 +2623,25 @@ class SpatialHasher:
         for i_n, i_b in qd.ndrange(n, self._B):
             if active[i_n, i_b]:
                 slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                reordered_idx[i_n, i_b] = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
+                i_r = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
+                self.elems_idx[i_r, i_b] = i_n
 
         # recover slot_start
         for i_s, i_b in qd.ndrange(self.n_slots, self._B):
             self.slot_start[i_s, i_b] -= self.slot_size[i_s, i_b]
+
+        # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
+        # Ranking the elements of a slot by index fixes the order in which the neighbour queries sum over them, so that
+        # the same state steps on bit-identically.
+        for i_n, i_b in qd.ndrange(n, self._B):
+            if active[i_n, i_b]:
+                slot_idx = self.pos_to_slot(pos[i_n, i_b])
+                slot_start = self.slot_start[slot_idx, i_b]
+                rank = 0
+                for i_r in range(slot_start, slot_start + self.slot_size[slot_idx, i_b]):
+                    if self.elems_idx[i_r, i_b] < i_n:
+                        rank += 1
+                reordered_idx[i_n, i_b] = slot_start + rank
 
     @qd.func
     def for_all_neighbors(self, i_p, pos, task_range, ret: qd.template(), task: qd.template(), i_b):

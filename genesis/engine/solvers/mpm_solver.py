@@ -26,6 +26,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
+from genesis.utils.data import ArrayItem, DataKind, V
 from genesis.utils.misc import (
     DeprecationError,
     broadcast_tensor,
@@ -261,12 +262,13 @@ class MPMSolver(ParticleSolver):
         self.particles_info = get_mpm_particles_info(self._n_particles)
 
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
-        self.errno = array_class.V(dtype=gs.qd_int, shape=(self._B,))
+        self.errno = V(dtype=gs.qd_int, shape=(self._B,))
         self.register_errors(
             self.errno,
             {
-                array_class.ErrorCode.INVALID_PARTICLE_NAN: (
-                    "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
+                array_class.ErrorCode.INVALID_VELOCITY_NAN: (
+                    "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
+                    "adjust the material parameters."
                 ),
                 array_class.ErrorCode.INVALID_MPM_SOLVE_NAN: (
                     "The implicit MPM Newton solve produced non-finite values. Try reducing the time step size or "
@@ -538,10 +540,10 @@ class MPMSolver(ParticleSolver):
     @no_grad
     @qd.kernel
     def _kernel_flag_non_finite_pos(self, f: int):
-        """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
+        """Flag INVALID_VELOCITY_NAN for every env with a particle whose position in the given frame is not finite."""
         for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
-                self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_PARTICLE_NAN
+                self.errno[i_b] = self.errno[i_b] | array_class.ErrorCode.INVALID_VELOCITY_NAN
 
     @no_grad
     @qd.kernel
@@ -751,7 +753,7 @@ class MPMSolver(ParticleSolver):
             ("particles.actu", self.particles.actu),
             ("particles_ng.active", self.particles_ng.active),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     @mutates()
     def set_state(self, f, state, envs_idx=None):

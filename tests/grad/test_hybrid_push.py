@@ -541,11 +541,13 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     )
     block = scene.add_entity(
         morph=gs.morphs.Box(
-            lower=(-0.2, -0.05, -0.05),
-            upper=(-0.05, 0.05, 0.05),
+            lower=(-0.18, -0.05, -0.05),
+            upper=(-0.03, 0.05, 0.05),
         ),
         material=gs.materials.MPM.Elastic(
             E=5e4,
+            # Its front particles, half a spacing behind its face, start 1 cm from the box and hit it within the rollout
+            sampler="regular",
         ),
     )
     box = scene.add_entity(
@@ -557,7 +559,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     scene.build(n_envs=2)
     # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
     block.set_particle_constraints(
-        block.get_particles_in_bbox((-0.2, -0.05, -0.05), (-0.15, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
+        block.get_particles_in_bbox((-0.18, -0.05, -0.05), (-0.13, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
     )
 
     def rollout(vel):
@@ -590,4 +592,74 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             fd_grad[j] = (losses[0] - losses[1]) / (2.0 * eps)
     (grad_rerun,) = torch.autograd.grad(rollout(vel_ana), vel_ana)
     assert_allclose(grad_rerun, vel_ana.grad, tol=1e-10)
+    assert_allclose(vel_ana.grad[0], fd_grad, tol=1e-8)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+def test_fem_link_target_grad_matches_fd(precision, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=4e-3,
+            substeps=4,
+            gravity=(0.0, 0.0, 0.0),
+            requires_grad=True,
+        ),
+        # The collisions of the FEM solver carry no gradient (see 'LegacyCoupler.is_differentiable')
+        coupler_options=gs.options.LegacyCouplerOptions(
+            rigid_fem=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -0.6, 0.4),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.01, 0.0),
+            size=(0.08, 0.08, 0.08),
+        ),
+    )
+    fem_block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.15, 0.0, 0.0),
+            size=(0.1, 0.05, 0.05),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=5e4,
+        ),
+    )
+    scene.build(n_envs=2)
+    # The FEM block follows the box, its near end held at the box and its far end pulled toward it by springs
+    fem_verts_x = tensor_to_array(fem_block.init_positions)[:, 0]
+    fem_block.set_vertex_constraints(np.nonzero(fem_verts_x < 0.1 + gs.EPS)[0], link=box.links[0])
+    fem_block.set_vertex_constraints(
+        np.nonzero(fem_verts_x > 0.2 - gs.EPS)[0], link=box.links[0], is_soft_constraint=True, stiffness=100.0
+    )
+
+    def rollout(vel):
+        scene.reset()
+        box.set_dofs_velocity(vel)
+        for _ in range(20):
+            scene.step()
+        return (fem_block.get_state().pos ** 2).sum()
+
+    vel = np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1))
+    vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    rollout(vel_ana).backward()
+    # The environments run the same inputs apart, so they get the same gradient
+    assert_allclose(vel_ana.grad[1], vel_ana.grad[0], tol=1e-10)
+    # The finite differences of the first environment run on the same scene without gradients
+    eps = 1e-6
+    fd_grad = np.zeros(vel.shape[1])
+    with torch.no_grad():
+        for j in range(vel.shape[1]):
+            losses = []
+            for sign in (+1, -1):
+                perturbed = vel.copy()
+                perturbed[0, j] += sign * eps
+                losses.append(float(rollout(perturbed)))
+            fd_grad[j] = (losses[0] - losses[1]) / (2.0 * eps)
+    print(f"FEM link target gradient: analytic {tensor_to_array(vel_ana.grad[0])}, finite differences {fd_grad}")
     assert_allclose(vel_ana.grad[0], fd_grad, tol=1e-8)

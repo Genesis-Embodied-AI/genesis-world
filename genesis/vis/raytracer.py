@@ -568,8 +568,7 @@ class Raytracer:
             gravity = solver.get_gravity(envs_idx)
             if envs_idx is not None:
                 gravity = gravity[0]
-            self.shape_foamgens[name]["generator"] = pu.init_foam_generator(
-                object_id=name,
+            self.shape_foamgens[name]["generator"] = pu.FoamGenerator(
                 particle_radius=radius,
                 time_step=self.scene.dt,
                 gravity=miscu.tensor_to_array(gravity),
@@ -602,11 +601,7 @@ class Raytracer:
         if self.shape_foamgens[name] is not None:
             if particles_vel is None:
                 gs.raise_exception("Velocities not passed when generating foams.")
-            foam_particles = pu.generate_foam_particles(
-                generator=self.shape_foamgens[name]["generator"],
-                positions=particles,
-                velocities=particles_vel,
-            )
+            foam_particles = self.shape_foamgens[name]["generator"].generate(particles, particles_vel)
             self.update_particles(f"{name}_foams", foam_particles, self.shape_foamgens[name]["radius"])
 
     def add_camera(self, camera):

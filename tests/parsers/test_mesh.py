@@ -527,24 +527,27 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
     tm_scene.export(glb_path)
 
     scene = gs.Scene(show_viewer=False)
-    entity = scene.add_entity(
-        gs.morphs.Mesh(
-            file=str(glb_path),
-            collision=False,
-            fixed=True,
-            file_meshes_are_zup=False,
-        ),
-    )
+    entities = [
+        scene.add_entity(
+            gs.morphs.Mesh(
+                file=str(glb_path),
+                pos=(0.0, 2.0 * i, 0.0),
+                collision=False,
+                fixed=True,
+                file_meshes_are_zup=False,
+            ),
+        )
+        for i in range(2)
+    ]
 
     # Submeshes are kept separate (group_by_material defaults to False to preserve baked convex decompositions), but
-    # they share one Surface whose resolved RGBA texture is memoized, so a single image array backs all of them rather
-    # than one full-resolution copy per submesh.
-    vgeoms = entity.vgeoms
-    assert len(vgeoms) == n_submeshes
-    assert len({id(geom.surface) for geom in vgeoms}) == 1
-    # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
-    rgba_arrays = [geom.surface.get_rgba().image_array for geom in vgeoms]
-    assert len({id(array) for array in rgba_arrays}) == 1
+    # they share one Surface whose resolved RGBA texture is memoized on its content, so a single image array backs all
+    # of them, and those of every other entity loaded from the file, rather than one full-resolution copy per submesh.
+    for entity in entities:
+        assert len(entity.vgeoms) == n_submeshes
+        assert len({id(geom.surface) for geom in entity.vgeoms}) == 1
+    rgba_arrays = [geom.surface.get_rgba().image_array for entity in entities for geom in entity.vgeoms]
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
 
     scene.build()
     retriever = GenesisGeomRetriever(scene.sim.rigid_solver, seg_level="entity")
@@ -901,12 +904,23 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     explicit_uvs = [np.unique(vgeoms["mesh_explicit_a"].uvs, axis=0), np.unique(vgeoms["mesh_explicit_b"].uvs, axis=0)]
     assert_allclose(explicit_uvs, EXPECTED_EXPLICIT_UVS, tol=gs.EPS)
 
+    rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
+    rigid_nodes = scene.visualizer.context.rigid_nodes
+    base_color_textures = [
+        rigid_nodes[vgeom.uid].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
+    ]
+    assert base_color_textures[0] is not None
+    assert all([texture is base_color_textures[0] for texture in base_color_textures])
+    with pytest.raises(ValueError, match="read-only"):
+        vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array[0, 0] = 0
+
 
 # ==================== Surface Reconstruction Tests ====================
 
 
 @pytest.mark.required
-def test_splashsurf_surface_reconstruction(show_viewer):
+def test_surface_reconstruction(show_viewer):
     # The particle size differs from the one of MPM, so that each solver must reconstruct its liquid at its own size
     scene = gs.Scene(
         sph_options=gs.options.SPHOptions(
@@ -917,41 +931,41 @@ def test_splashsurf_surface_reconstruction(show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    sph_liquid = scene.add_entity(
-        material=gs.materials.SPH.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.3, 0.2),
-            size=(0.25, 0.25, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="recon",
-        ),
-    )
-    pbd_liquid = scene.add_entity(
-        material=gs.materials.PBD.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.3, 0.2),
-            size=(0.25, 0.25, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="recon",
-        ),
-    )
+    # The liquids of each backend are placed symmetrically with respect to the camera, so that they look the same
+    liquids = []
+    for material, recon_backend, pos_y in (
+        (gs.materials.SPH.Liquid(), "splashsurf", -0.2),
+        (gs.materials.PBD.Liquid(), "splashsurf", 0.2),
+        (gs.materials.SPH.Liquid(), "levelset", -0.6),
+        (gs.materials.PBD.Liquid(), "levelset", 0.6),
+    ):
+        liquids.append(
+            scene.add_entity(
+                material=material,
+                morph=gs.morphs.Box(
+                    pos=(0.0, pos_y, 0.2),
+                    size=(0.25, 0.25, 0.4),
+                ),
+                surface=gs.surfaces.Default(
+                    color=(0.2, 0.6, 1.0, 1.0),
+                    vis_mode="recon",
+                    recon_backend=recon_backend,
+                ),
+            )
+        )
     cam = scene.add_camera(
-        pos=(2.0, 0.0, 0.2),
+        pos=(3.5, 0.0, 0.2),
         lookat=(0.0, 0.0, 0.2),
         GUI=show_viewer,
     )
     scene.build()
 
-    # Both liquids fill the same box, so their surfaces cover the same area of the image, up to the particle sampling
+    # Both liquids of a backend fill the same box, so their surfaces cover the same area of the image
     _, _, seg, _ = cam.render(rgb=False, depth=False, segmentation=True, colorize_seg=False, normal=False)
     seg_idx = {seg_key: idx for idx, seg_key in scene.segmentation_idx_dict.items()}
-    n_pbd_pixels, n_sph_pixels = (seg == seg_idx[pbd_liquid.idx]).sum(), (seg == seg_idx[sph_liquid.idx]).sum()
-    assert n_sph_pixels > 0
-    assert_allclose(n_pbd_pixels, n_sph_pixels, rtol=0.15)
+    liquids_n_pixels = np.array([(seg == seg_idx[liquid.idx]).sum() for liquid in liquids])
+    assert (liquids_n_pixels > 0).all()
+    assert_allclose(liquids_n_pixels[1::2], liquids_n_pixels[::2], rtol=0.15)
 
 
 # ==================== Mesh Processing/Caching Tests ====================

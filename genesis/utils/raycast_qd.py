@@ -1,10 +1,10 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.bvh import func_build_bvh
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
+from genesis.utils.array_class import BVHState, BVHTreeState, DynInfo, DynState, RaycastResult
 
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
@@ -17,7 +17,7 @@ from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_
 
 
 @qd.func
-def get_triangle_vertices(i_f: int, i_b: int, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo):
+def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
     """
     Get the three vertices of a triangle in world space.
 
@@ -44,9 +44,9 @@ def bvh_ray_cast(
     ray_start: qd.types.vector(3),
     ray_dir: qd.types.vector(3),
     max_range: float,
-    dyn_state: array_class.DynState,
-    bvh_tree_state: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
     eps: float,
 ):
     """
@@ -325,9 +325,9 @@ def update_face_aabb(
     i_a: int,
     i_f: int,
     i_b: int,
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Fit leaf i_a of tree i_t to face i_f from env i_b's current vertex positions.
@@ -363,7 +363,7 @@ def update_face_aabb(
 
 
 @qd.func
-def get_visual_vvert_pos(i_vv: int, i_b: int, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo):
+def get_visual_vvert_pos(i_vv: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
     """
     Return the world-space position of a visual vertex, branching between the custom buffer and FK on the fly.
 
@@ -384,7 +384,7 @@ def get_visual_vvert_pos(i_vv: int, i_b: int, dyn_state: array_class.DynState, d
 
 
 @qd.func
-def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo):
+def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
     """Get the three vertices of a triangle from the visual mesh in world space."""
     tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
     for i in qd.static(range(3)):
@@ -395,15 +395,7 @@ def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: array_class.DynS
 
 @qd.func
 def bvh_ray_cast_visual(
-    i_t,
-    i_b,
-    ray_start,
-    ray_dir,
-    max_range,
-    dyn_state: array_class.DynState,
-    bvh_tree_state: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
-    eps,
+    i_t, i_b, ray_start, ray_dir, max_range, dyn_state: DynState, bvh_tree_state: BVHTreeState, dyn_info: DynInfo, eps
 ):
     """Cast a single ray against the visual-mesh BVH; returns (hit_face, distance, normal).
 
@@ -461,9 +453,9 @@ def update_visual_face_aabb(
     i_f: int,
     i_b: int,
     face_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
     """Fit the AABB of vface i_f in tree slot i_t from env i_b's visual mesh (i_t == i_b for a per-env BVH).
@@ -492,9 +484,9 @@ def update_visual_face_aabb(
 
 @qd.kernel(fastcache=True)
 def kernel_refresh_collision_bvh(
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -513,9 +505,9 @@ def kernel_refresh_collision_bvh(
 @qd.kernel(fastcache=True)
 def kernel_refresh_collision_subset_bvh(
     faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -537,9 +529,9 @@ def kernel_refresh_collision_subset_bvh(
 @qd.kernel(fastcache=True)
 def kernel_refresh_grouped_collision_bvh(
     batch_repr_env: qd.types.ndarray(ndim=1),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -555,9 +547,9 @@ def kernel_refresh_grouped_collision_bvh(
 def kernel_refresh_grouped_collision_subset_bvh(
     batch_repr_env: qd.types.ndarray(ndim=1),
     faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -576,9 +568,9 @@ def kernel_refresh_grouped_collision_subset_bvh(
 @qd.kernel(fastcache=True)
 def kernel_refresh_visual_bvh(
     face_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -593,9 +585,9 @@ def kernel_refresh_visual_bvh(
 def kernel_refresh_grouped_visual_bvh(
     batch_repr_env: qd.types.ndarray(ndim=1),
     face_mask: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    bvh_state: array_class.BVHState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_state: BVHState,
+    dyn_info: DynInfo,
     bvh_config: qd.template(),
     rigid_config: qd.template(),
     eps: float,
@@ -615,10 +607,10 @@ def kernel_cast_ray(
     rays_start: qd.types.ndarray(ndim=2),  # (n_envs, 3)
     envs_idx: qd.types.ndarray(ndim=1),  # [n_envs]
     ray_direction: qd.types.ndarray(ndim=1),  # (3,)
-    dyn_state: array_class.DynState,
-    bvh_tree_state: array_class.BVHTreeState,
-    result: array_class.RaycastResult,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    result: RaycastResult,
+    dyn_info: DynInfo,
     max_range: float,
     eps: float,
     is_visual: qd.template(),
@@ -811,10 +803,10 @@ def kernel_cast_rays(
     sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
     sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
     output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
-    dyn_state: array_class.DynState,
-    bvh_tree_state_a: array_class.BVHTreeState,
-    bvh_tree_state_b: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state_a: BVHTreeState,
+    bvh_tree_state_b: BVHTreeState,
+    dyn_info: DynInfo,
     eps: float,
     is_merge: qd.template(),
     is_last: qd.template(),
@@ -915,9 +907,9 @@ def kernel_cast_rays_visual(
     sensor_point_counts: qd.types.ndarray(ndim=1),
     sensor_return_points: qd.types.ndarray(ndim=1),
     output_hits: qd.types.ndarray(ndim=2),
-    dyn_state: array_class.DynState,
-    bvh_tree_state: array_class.BVHTreeState,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
     eps: float,
     is_merge: qd.template(),
     is_last: qd.template(),

@@ -1,6 +1,3 @@
-import platform
-import sys
-
 import numpy as np
 import pytest
 import torch
@@ -226,15 +223,8 @@ def test_rigid_mpm_legacy_coupling(tol, show_viewer):
     assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
-@pytest.mark.skipif(
-    sys.platform == "linux" and platform.machine() == "aarch64",
-    reason="pygel3d is not supported on Linux ARM (aarch64)",
-)
 def test_mesh_mpm_build(show_viewer):
-    # FIXME: This test is crashing on Linux (x86 & aarch64) Github-hosted runners
-
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
@@ -379,6 +369,61 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=scene.options.newton.velocity_tol)
     assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
+
+
+@pytest.mark.required
+def test_fem_outside_mpm_grid(show_viewer):
+    # The joint solve of MPM and FEM moves the vertices together, so the FEM velocities hold its tolerance
+    VELOCITY_TOL = 1e-3
+
+    def fall(with_mpm):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=1e-2,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.1, -0.1, 0.0),
+                upper_bound=(0.1, 0.1, 0.2),
+            ),
+            # The implicit MPM couples with the implicit FEM alone, in their joint solve
+            fem_options=gs.options.FEMOptions(
+                use_implicit_solver=True,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                velocity_tol=VELOCITY_TOL,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(1.0, -1.0, 0.8),
+                camera_lookat=(0.2, 0.0, 0.3),
+            ),
+            show_viewer=show_viewer,
+        )
+        if with_mpm:
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 0.0, 0.1),
+                    size=(0.05, 0.05, 0.05),
+                ),
+                material=gs.materials.MPM.Elastic(
+                    sampler="regular",
+                ),
+            )
+        fem = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e6,
+            ),
+        )
+        scene.build(n_envs=2)
+        for _ in range(10):
+            scene.step()
+        return fem.get_state().vel
+
+    # A body far from the grid moves in the joint solve as it does in the solve of FEM alone
+    assert_allclose(fall(with_mpm=True), fall(with_mpm=False), tol=VELOCITY_TOL)
 
 
 @pytest.mark.parametrize(

@@ -1,12 +1,12 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.simt as su
+from genesis.utils.array_class import ColliderState, ConstraintState, DynState, RigidInfo
 
 
 @qd.func
-def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid_info: array_class.RigidInfo):
+def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid_info: RigidInfo):
     """LDL^T forward-backward substitution on column i_col of vec, restricted to the mass block containing dof i_d0.
 
     The factor is block-diagonal per mass block (see dofs_mass_block_start in array_class.py), with constant block
@@ -57,7 +57,7 @@ def func_apply_Minv_rows(
     vec: qd.Tensor,
     jac: qd.Tensor,
     jac_n_dofs: qd.Tensor,
-    rigid_info: array_class.RigidInfo,
+    rigid_info: RigidInfo,
 ):
     """Compute vec[:, i_col] = M^{-1} (coef_0 * J[i_row_0]^T + coef_1 * J[i_row_1]^T) over the touched mass blocks.
 
@@ -98,7 +98,7 @@ def func_accumulate_row_blocks(
     vec_src: qd.Tensor,
     vec_dst: qd.Tensor,
     jac_n_dofs: qd.Tensor,
-    rigid_info: array_class.RigidInfo,
+    rigid_info: RigidInfo,
 ):
     """Add coef_0 * vec_src[:, i_col_0] + coef_1 * vec_src[:, i_col_1] to vec_dst[:, i_b] over the mass blocks touched
     by constraint row i_row."""
@@ -125,9 +125,7 @@ def func_dot_row(
 
 
 @qd.func
-def func_color_rows_batch(
-    i_b: int, i_island: int, tid: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
-):
+def func_color_rows_batch(i_b: int, i_island: int, tid: int, constraint_state: ConstraintState, rigid_info: RigidInfo):
     """Color the constraint rows of one island so that the rows of a color touch disjoint mass blocks.
 
     A color is a set of rows that a Gauss-Seidel sweep may update in any order, in parallel included, for the same
@@ -179,9 +177,9 @@ def func_refresh_qacc_batch(
     i_island: int,
     tid: int,
     n_colors: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Recompute qacc = acc_smooth + M^{-1} J^T f from the current constraint forces, over one island.
@@ -258,8 +256,8 @@ def func_noslip_update_row(
     const_start: int,
     const_end: int,
     eps: float,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
 ):
     """Project the force of one constraint row and propagate the change to qacc, returning the change of the cost.
 
@@ -440,10 +438,10 @@ def func_noslip_batch(
     i_island: int,
     tid: int,
     n_colors: int,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Matrix-free noslip force-update sweep over one island.
@@ -518,9 +516,9 @@ def func_dual_finish_batch(
     i_island: int,
     tid: int,
     n_colors: int,
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Map the final constraint forces back to joint space over one island.
@@ -539,7 +537,6 @@ def func_dual_finish_batch(
         if i_d_ < n_dofs:
             i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
             dyn_state.dofs.acc[i_d, i_b] = constraint_state.qacc[i_d, i_b]
-            dyn_state.dofs.qf_constraint[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
             dyn_state.dofs.force[i_d, i_b] = (
                 dyn_state.dofs.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
             )
@@ -547,10 +544,10 @@ def func_dual_finish_batch(
 
 @qd.func
 def func_noslip(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    constraint_state: ConstraintState,
+    rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
     """Noslip pass: matrix-free force-update sweep followed by the dual finish, fused per island.

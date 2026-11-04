@@ -1,8 +1,6 @@
-from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import numpy as np
-from typing_extensions import override
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -60,7 +58,6 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         self.spring_slack = float(spring_slack)
         self.color = tuple(color)
 
-        self._lock: Lock = Lock()
         self._held_link: RigidLink | None = None
         # The plugin is active only while the simulation advances. _last_step_t is the step counter seen at the
         # previous sim-step callback, and _sim_running caches whether it advanced, so that on_draw and the mouse
@@ -81,6 +78,12 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         self._debug_normal_node: "Node | None" = None
         self._unit_cylinder_mesh = None
         self._plane_mesh = None
+
+    @property
+    def _lock(self):
+        # Moving a held link syncs the viewer, which takes its render lock, so the plugin shares that lock rather than
+        # holding one of its own while waiting for it: the render loop takes the render lock before drawing the plugin.
+        return self.viewer.render_lock
 
     def build(self, viewer, camera: "Node", scene: "Scene"):
         super().build(viewer, camera, scene)

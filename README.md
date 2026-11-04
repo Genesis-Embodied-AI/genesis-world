@@ -103,7 +103,7 @@ Install **PyTorch** first following the [official instructions](https://pytorch.
 
 Then, install Genesis via PyPI:
 ```bash
-pip install genesis-world  # Requires Python>=3.10,<3.14;
+pip install genesis-world  # Requires Python>=3.12,<3.14;
 ```
 
 For the latest version to date, make sure that `pip` is up-to-date via `pip install --upgrade pip`, then run command:

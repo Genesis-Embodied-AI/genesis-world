@@ -113,9 +113,6 @@ def test_data_accessor(n_envs, batched, tol):
                     assert len(pad_i) == capacity
                     assert_equal(pad_i[:n_contacts], trim_i[:n_contacts])
 
-    gs_s._func_forward_dynamics()
-    gs_s._func_constraint_force()
-
     # Make sure that all the robots ends up in the different state
     qposs = gs_robot.get_qpos()
     for i in range(n_envs - 1):
@@ -1095,15 +1092,15 @@ def test_inertial_property_setters(
     # entity be weighed side by side through one pair of buffers. Sentinels are written over every row first: those of
     # the tree that is not weighed must come back untouched.
     SENTINEL = -7.0
-    scratch = solver.data_manager.weight_scratch
+    constraint_state = solver.constraint_solver.constraint_state
     dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
     untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
-    for buffer in (scratch.jac_row, scratch.solve_out):
+    for buffer in (constraint_state.grad, constraint_state.Mgrad):
         sentinels = qd_to_numpy(buffer)
         sentinels[dofs_idx] = SENTINEL
         buffer.from_numpy(sentinels)
     free_bodies.links[0].set_mass(2.0)
-    for buffer in (scratch.jac_row, scratch.solve_out):
+    for buffer in (constraint_state.grad, constraint_state.Mgrad):
         assert_allclose(qd_to_numpy(buffer)[untouched], SENTINEL, tol=gs.EPS)
 
 

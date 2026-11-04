@@ -35,8 +35,8 @@ from quadrants.lang import impl
 
 import genesis as gs
 from genesis.grad.kernel_writes import get_written_paths
-from genesis.utils.array_class import iter_state_arrays
 from genesis.utils.cache import OwnedCache
+from genesis.utils.data import iter_state_arrays
 from genesis.utils.misc import qd_from_torch, qd_to_torch
 
 if TYPE_CHECKING:
@@ -372,7 +372,8 @@ class LaunchRecorder:
             arrays_used, arrays_written = set(), []
             for arg_meta, arg in zip(kernel.arg_metas, args):
                 if dataclasses.is_dataclass(arg):
-                    for path, array in iter_state_arrays(arg, (arg_meta.name,)):
+                    for path, array in iter_state_arrays(arg):
+                        path = (arg_meta.name, *path)
                         if flat_names_used is None or "__qd_" + "__qd_".join(path) in flat_names_used:
                             arrays_used.add(id(array))
                             if path in paths_written:

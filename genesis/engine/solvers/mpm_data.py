@@ -21,6 +21,7 @@ from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
 from genesis.engine.numerics.linear_pcg import PCGWorkspace
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
+from genesis.utils.data import V
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -110,12 +111,12 @@ class MpmParticles:
 def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int, requires_grad: bool = False) -> MpmParticles:
     shape = (n_frames, n_particles, n_envs)
     return MpmParticles(
-        pos=array_class.V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        vel=array_class.V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        C=array_class.V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        F=array_class.V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        actu=array_class.V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        Jp=array_class.V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        C=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
+        F=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
+        actu=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        Jp=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
     )
 
 
@@ -129,7 +130,7 @@ class MpmParticlesNG:
 
 
 def get_mpm_particles_ng(n_frames: int, n_particles: int, n_envs: int) -> MpmParticlesNG:
-    return MpmParticlesNG(active=array_class.V(dtype=gs.qd_bool, shape=(n_frames, n_particles, n_envs)))
+    return MpmParticlesNG(active=V(dtype=gs.qd_bool, shape=(n_frames, n_particles, n_envs)))
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -151,13 +152,13 @@ class MpmParticlesInfo:
 def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
     shape = (n_particles,)
     return MpmParticlesInfo(
-        material_idx=array_class.V(dtype=gs.qd_int, shape=shape),
-        mass=array_class.V(dtype=gs.qd_float, shape=shape),
-        default_Jp=array_class.V(dtype=gs.qd_float, shape=shape),
-        free=array_class.V(dtype=gs.qd_bool, shape=shape),
-        muscle_group=array_class.V(dtype=gs.qd_int, shape=shape),
-        muscle_direction=array_class.V(dtype=gs.qd_vec3, shape=shape),
-        contact_invweight=array_class.V(dtype=gs.qd_mat3, shape=shape),
+        material_idx=V(dtype=gs.qd_int, shape=shape),
+        mass=V(dtype=gs.qd_float, shape=shape),
+        default_Jp=V(dtype=gs.qd_float, shape=shape),
+        free=V(dtype=gs.qd_bool, shape=shape),
+        muscle_group=V(dtype=gs.qd_int, shape=shape),
+        muscle_direction=V(dtype=gs.qd_vec3, shape=shape),
+        contact_invweight=V(dtype=gs.qd_mat3, shape=shape),
     )
 
 
@@ -174,9 +175,9 @@ class MpmMaterialTable:
 
 
 def get_mpm_material_table(table: np.ndarray, family: np.ndarray, plastic: np.ndarray) -> MpmMaterialTable:
-    material_table = array_class.V(dtype=gs.qd_float, shape=(max(table.size, 1),))
-    mat_family = array_class.V(dtype=gs.qd_int, shape=(max(family.size, 1),))
-    mat_plastic = array_class.V(dtype=gs.qd_int, shape=(max(plastic.size, 1),))
+    material_table = V(dtype=gs.qd_float, shape=(max(table.size, 1),))
+    mat_family = V(dtype=gs.qd_int, shape=(max(family.size, 1),))
+    mat_plastic = V(dtype=gs.qd_int, shape=(max(plastic.size, 1),))
     material_table.from_numpy(np.resize(table.astype(gs.np_float), max(table.size, 1)))
     mat_family.from_numpy(np.resize(family.astype(gs.np_int), max(family.size, 1)))
     mat_plastic.from_numpy(np.resize(plastic.astype(gs.np_int), max(plastic.size, 1)))

@@ -6,10 +6,10 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.options.sensors import IMU as IMUOptions
 from genesis.options.sensors import CrossCouplingAxisType
+from genesis.utils.array_class import DynState, RigidInfo
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
@@ -29,8 +29,8 @@ def _kernel_update_imu_raw_data(
     offsets_quat: qd.types.ndarray(),
     magnetic_field_vector: qd.types.ndarray(),
     raw_data_T: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
+    dyn_state: DynState,
+    rigid_info: RigidInfo,
 ):
     """
     Compute the raw (linear acceleration, angular velocity, magnetic field) triplet of every IMU in its own frame.

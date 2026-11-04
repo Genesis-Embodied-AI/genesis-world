@@ -144,7 +144,7 @@ class FemNewtonHost(NewtonHost):
 
     def newton_prepare(self, f):
         self._fem_solver.precompute_material_data(f)
-        self._fem_solver.init_pos_and_inertia(f)
+        self._fem_solver.init_pos_and_inertia(f, self._fem_solver.sim.rigid_solver.dyn_state.links)
         kernel_fem_begin(self._fem_solver)
 
     def newton_assemble(self, f, is_exact=False):

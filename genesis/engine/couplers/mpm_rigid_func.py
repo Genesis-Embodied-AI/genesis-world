@@ -129,15 +129,13 @@ def geom_normal(
     geoms_info: array_class.GeomsInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """Outward unit normal of a geom at a world point: the gradient of the distance measured by `geom_sdf`."""
     normal = qd.Vector.zero(gs.qd_float, 3)
     geom_type = geoms_info.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.PLANE or geom_type == gs.GEOM_TYPE.TERRAIN:
-        normal = sdf.sdf_func_normal_world(
-            i_g, i_b, x, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
-        )
+        normal = sdf.sdf_func_normal_world(i_g, i_b, x, geoms_state, geoms_info, rigid_info, sdf_info, collider_config)
     else:
         signed_distance, grad_mesh = geom_sdf_grid(i_g, i_b, x, geoms_state, sdf_info)
         normal = gu.qd_normalize(gu.qd_transform_by_quat(grad_mesh, geoms_state.quat[i_g, i_b]), rigid_info.EPS[None])
@@ -165,14 +163,14 @@ class RigidGeomQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest geom in `newton` and records no pair
-        self.results = array_class.get_bvh_query_results(max_results=1)
+        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
         self.geoms_state = rigid.dyn_state.geoms
         self.geoms_info = rigid.dyn_info.geoms
         self.geoms_init_AABB = rigid.geoms_init_AABB
         self.links_state = rigid.dyn_state.links
         self.links_info = rigid.dyn_info.links
         self.batch_links_info = rigid._options.batch_links_info
-        self.sdf_info = rigid.collider.sdf.sdf_info
+        self.sdf_info = rigid.collider.collider_info.sdf
         self.newton = newton
 
     def build(self, params):
@@ -462,7 +460,7 @@ def func_rigid_evaluate(
     qd.loop_config(name="mpm_rigid_qacc")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.qacc[i_d, i_b] = rigid_data.x[i_d, i_b] * inv_dt_sq
-    initialize_Ma(rigid_data.Ma, rigid_data.qacc, dyn_info, rigid_info, rigid_config)
+    initialize_Ma(rigid_data.Ma, rigid_data.qacc, rigid_info, rigid_config)
     if qd.static(config.has_rigid_rows):
         initialize_Jaref(qacc=rigid_data.qacc, constraint_state=constraint_state, rigid_config=rigid_config)
         func_update_constraint(
@@ -567,9 +565,7 @@ def func_rigid_factor(
     many particles on a link, far stiffer than its inertia, leave the joint preconditioned conjugate gradient (PCG)
     stopping on a direction that barely moves the link."""
     if qd.static(config.has_rigid_rows):
-        func_hessian_and_cholesky_factor_direct(
-            constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
-        )
+        func_hessian_and_cholesky_factor_direct(constraint_state, rigid_info, rigid_config, compute_envelope=True)
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_contact_factor")
@@ -814,7 +810,7 @@ def func_rigid_matvec(
 ):
     """Set Ap_r = (M + J^T D J) p_r over the active rows of Rigid."""
     n_envs = rigid_data.x.shape[1]
-    initialize_Ma(rigid_data.ap, rigid_data.p, dyn_info, rigid_info, rigid_config)
+    initialize_Ma(rigid_data.ap, rigid_data.p, rigid_info, rigid_config)
     if qd.static(config.has_rigid_rows):
         qd.loop_config(name="mpm_rigid_matvec_rows")
         for i_b in range(n_envs):

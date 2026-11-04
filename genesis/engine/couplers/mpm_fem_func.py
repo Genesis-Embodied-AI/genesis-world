@@ -152,7 +152,7 @@ class FemTriangleQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest triangle in `newton` and records no pair
-        self.results = array_class.get_bvh_query_results(1)
+        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaf boxes to the triangles at the substep start and build the trees."""

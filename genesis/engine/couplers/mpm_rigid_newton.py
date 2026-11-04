@@ -14,6 +14,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
+from genesis.utils.data import StaticConfig
 
 from . import mpm_rigid_adjoint_func, mpm_rigid_func
 
@@ -22,7 +23,7 @@ from . import mpm_rigid_adjoint_func, mpm_rigid_func
 MAX_PRECONDITIONED_LINKS = 16
 
 
-class RigidNewtonConfig(metaclass=array_class.AutoInitMeta):
+class RigidNewtonConfig(StaticConfig):
     """Compile-time switches of Rigid's stages in the joint solve: the code paths a scene takes, never its sizes."""
 
     # The links info of Rigid is batched over the environments
@@ -31,7 +32,7 @@ class RigidNewtonConfig(metaclass=array_class.AutoInitMeta):
     has_rigid_rows: bool
 
 
-class MpmRigidContactConfig(metaclass=array_class.AutoInitMeta):
+class MpmRigidContactConfig(StaticConfig):
     """Compile-time switches of the stages of the MPM-Rigid contact rows."""
 
     # The links info of Rigid is batched over the environments
@@ -120,7 +121,7 @@ class RigidNewtonParticipant:
         self.dyn_info = rigid.dyn_info
         self.rigid_info = rigid.rigid_info
         self.rigid_config = rigid.rigid_config
-        self.sdf_info = rigid.collider.sdf.sdf_info
+        self.sdf_info = rigid.collider.collider_info.sdf
         self.config = RigidNewtonConfig(
             rigid_batch_links_info=rigid._options.batch_links_info,
             has_rigid_rows=not rigid._disable_constraint,
@@ -230,7 +231,7 @@ class MpmRigidContact:
         self.constraint_state = rigid_solver.constraint_solver.constraint_state
         self.dyn_info = rigid_solver.dyn_info
         self.rigid_info = rigid_solver.rigid_info
-        self.sdf_info = rigid_solver.collider.sdf.sdf_info
+        self.sdf_info = rigid_solver.collider.collider_info.sdf
         self.config = MpmRigidContactConfig(
             rigid_batch_links_info=rigid_solver._options.batch_links_info,
             has_rigid_rows=not rigid_solver._disable_constraint,

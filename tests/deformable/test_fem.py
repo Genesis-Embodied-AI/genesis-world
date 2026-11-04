@@ -183,6 +183,51 @@ def test_offset_pos(box_obj_path, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+def test_halt_on_nan(show_viewer):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    sphere = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.0, 0.3),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    scene.build(n_envs=2)
+
+    # The explicit integration of a stiff sphere at the default time step diverges until its positions overflow, and
+    # every env is flagged at the very step its positions stop being finite
+    for _ in range(10):
+        scene.step()
+        is_finite = sphere.get_state().pos.isfinite().all(dim=(-2, -1))
+        assert_equal(scene.get_error_envs_mask(), ~is_finite)
+        if not is_finite.any():
+            break
+    assert not is_finite.any()
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(gs.GenesisException, match="NaN detected in FEM states"):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
+            scene.step()
+
+    # Writing some of the vertices leaves the error flagged, since the other vertices stay non-finite
+    sphere.set_verts_pos(sphere.init_positions[:1], verts_idx_local=[0])
+    assert scene.get_error_envs_mask().all()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert sphere.get_state().pos.isfinite().all()
+    assert not scene.get_error_envs_mask().any()
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
     "coupler_type, material_model",
@@ -403,7 +448,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     box.set_position(((0.0, 0.0, 0.0), (0.0, 0.0, 0.2)))
     box.set_velocity((0.0, 0.0, 0.0))
     anchor.set_pos(((10.0, 0.0, HEIGHT), (20.0, 0.0, HEIGHT)), relative=False)
-    anchor.set_quat(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)), relative=False)
+    anchor.set_quat(((1.0, 0.0, 0.0, 0.0), (0.5**0.5, 0.0, 0.0, 0.5**0.5)), relative=False)
     target_poss = box.get_state().pos[..., VERTICES_IDX, :]
     box.set_vertex_constraints(VERTICES_IDX, envs_idx=[1])
     scene.step()
@@ -562,7 +607,7 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 # This test cannot be flagged as required because it takes 400s to run on CPU.
 # @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
-def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
+def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
     DT = 0.01
     HEIGHT = 2.0  # It must be height enough to avoid hitting the ground when dropping the box at the end
     BOX_SIZE = 0.1
@@ -610,14 +655,30 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
             model="linear_corotated",
         ),
     )
+    anchor = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(10.0, 0.0, HEIGHT),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(),
+    )
     scene.build()
 
-    # Attach the sphere to its center
+    # Attach the sphere to a distant rigid anchor by its center
     sphere_poss = sphere.get_state().pos[0]
     sphere_poss -= torch.tensor(sphere.morph.pos, device=gs.device)
     sphere_center_idx = int(torch.argmin(torch.linalg.norm(sphere_poss, dim=-1)))
     sphere_target_poss = sphere.init_positions[sphere_center_idx]
-    sphere.set_vertex_constraints(sphere_center_idx, sphere_target_poss)
+    sphere.set_vertex_constraints(sphere_center_idx, link=anchor.base_link)
+
+    # The center of the sphere follows the anchor, while the box is still far from it
+    for shift in (-0.05, 0.0):
+        anchor.set_pos((10.0, shift, HEIGHT))
+        scene.step()
+        sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
+        shift_pos = torch.tensor((0.0, shift, 0.0), dtype=gs.tc_float, device=gs.device)
+        assert_allclose(sphere_center, sphere_target_poss + shift_pos, tol=tol)
 
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)
@@ -638,9 +699,9 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
 
         # Check that the constrained vertices are at their respective target positions
         corners = box.get_state().pos[..., :8, :]
-        assert_allclose(corners[..., VERTICES_IDX, :], target_poss, tol=1e-8)
+        assert_allclose(corners[..., VERTICES_IDX, :], target_poss, tol=tol)
         sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
-        assert_allclose(sphere_center, sphere_target_poss, tol=1e-8)
+        assert_allclose(sphere_center, sphere_target_poss, tol=tol)
 
         # Check that the box is more or less a box
         e_z = corners[..., 5, :] - corners[..., 4, :]
@@ -692,4 +753,4 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
     com_pos_delta = -0.5 * 9.81 * (n_steps * DT) ** 2
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
     sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
-    assert_allclose(sphere_center, sphere_target_poss, tol=1e-8)
+    assert_allclose(sphere_center, sphere_target_poss, tol=tol)

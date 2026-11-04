@@ -1,7 +1,16 @@
 import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import (
+    ColliderInfo,
+    ColliderState,
+    DiffContactInput,
+    DynInfo,
+    DynState,
+    GJKState,
+    GeomsInitAABB,
+    RigidInfo,
+)
 from . import gjk as GJK, contact, epa
 
 
@@ -16,16 +25,16 @@ def func_gjk_contact(
     gb_quat: qd.types.vector(4),
     pos_tol: float,
     normal_tol: float,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    diff_contact_input: array_class.DiffContactInput,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    diff_contact_input: DiffContactInput,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Detect multiple possible contact points between two geometries using GJK and EPA algorithms, and compute weights
@@ -119,7 +128,7 @@ def func_gjk_contact(
             rigid_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
 
         if gjk_flag == GJK.GJK_RETURN_CODE.INTERSECT:
@@ -130,7 +139,7 @@ def func_gjk_contact(
             gjk_state.polytope.horizon_nedges[i_b] = 0
 
             # Construct the initial polytope from the GJK simplex
-            epa.func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, collider_info)
+            epa.func_safe_epa_init(i_b, gjk_state, collider_info)
 
             if i == 0:
                 # In default configuration, we use the extended EPA algorithm to find multiple contact points.
@@ -151,7 +160,7 @@ def func_gjk_contact(
                         rigid_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
                     max_epa_iter -= num_iter
 
@@ -190,7 +199,7 @@ def func_gjk_contact(
                         dyn_info,
                         collider_info,
                         rigid_config,
-                        collider_static_config,
+                        collider_config,
                     )
 
                     if not found_default_epa:
@@ -233,7 +242,7 @@ def func_gjk_contact(
                     rigid_info,
                     collider_info,
                     rigid_config,
-                    collider_static_config,
+                    collider_config,
                 )
                 if i_f == -1:
                     continue
@@ -253,7 +262,7 @@ def func_gjk_contact(
                     dyn_info,
                     collider_info,
                     rigid_config,
-                    collider_static_config,
+                    collider_config,
                 )
 
         elif i == 0:
@@ -351,13 +360,13 @@ def func_extended_epa(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     max_iter: int,
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Extended version of safe EPA algorithm to find multiple possible contact points for differentiable contact detection.
@@ -415,7 +424,7 @@ def func_extended_epa(
             dyn_info,
             collider_info,
             rigid_config,
-            collider_static_config,
+            collider_config,
         )
         w = gjk_state.polytope_verts.mink[i_b, wi]
 
@@ -533,7 +542,7 @@ def func_extended_epa(
     if i_f_nearest != -1:
         # Nearest face found
         dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
-        flag = epa.func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, collider_info)
+        flag = epa.func_safe_epa_witness(i_b, i_f_nearest, gjk_state, collider_info)
         if flag == GJK.RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
@@ -560,12 +569,12 @@ def func_add_diff_contact_input(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    collider_state: array_class.ColliderState,
-    gjk_state: array_class.GJKState,
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
+    collider_state: ColliderState,
+    gjk_state: GJKState,
+    dyn_info: DynInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
 ):
     """
     Prepare the (non-differentiable) contact data that can be used for computing the differentiable contact data later.
@@ -638,7 +647,7 @@ def func_add_diff_contact_input(
         dyn_info,
         collider_info,
         rigid_config,
-        collider_static_config,
+        collider_config,
         shrink_sphere=False,
     )
 
@@ -660,10 +669,10 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     EPS = rigid_info.EPS[None]
 
@@ -724,9 +733,9 @@ def func_differentiable_contact(
     i_b: int,
     i_c: int,
     ref_penetration: float,
-    dyn_state: array_class.DynState,
-    diff_contact_input: array_class.DiffContactInput,
-    collider_info: array_class.ColliderInfo,
+    dyn_state: DynState,
+    diff_contact_input: DiffContactInput,
+    collider_info: ColliderInfo,
 ):
     """
     Compute the contact normal, penetration, and point for contact [i_c] from the corresponding [diff_contact_input]
@@ -832,13 +841,7 @@ def func_differentiable_contact(
 
 
 @qd.func
-def func_plane_contact_frame(
-    i_b: int,
-    i_ga: int,
-    i_gb: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-):
+def func_plane_contact_frame(i_b: int, i_ga: int, i_gb: int, dyn_state: DynState, dyn_info: DynInfo):
     """World contact normal and convex-side radius of a plane [i_ga] vs convex [i_gb] pair: normal =
     -normalize(R(quat_plane) @ plane_local_dir), radius = data[0] for SPHERE / CAPSULE and 0 otherwise.
 
@@ -856,53 +859,14 @@ def func_plane_contact_frame(
 
 
 @qd.func
-def func_differentiable_sphere_contact(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-):
-    """Differentiable sphere-sphere contact reconstruction.
-
-    The contact is a smooth closed form of the two geom centers, so gradients flow directly through
-    [dyn_state.geoms.pos]; the Minkowski-triangle reconstruction of func_differentiable_contact is degenerate for two
-    smoothly-curved surfaces, on which EPA never converges. Must match func_sphere_sphere_contact in
-    capsule_contact.py.
-
-    At coincident centers the distance is a non-differentiable cusp: the normal (delta / dist) and the distance's own
-    gradient (also delta / dist) are both 0/0 there, which reverse-mode turns into NaN. The sqrt only runs when the
-    centers are separated; otherwise the same arbitrary direction and constant penetration as the forward hold (the
-    contact is degenerate there anyway).
-    """
-    EPS = rigid_info.EPS[None]
-
-    radius_a = dyn_info.geoms.data[i_ga][0]
-    radius_b = dyn_info.geoms.data[i_gb][0]
-    delta = dyn_state.geoms.pos[i_ga, i_b] - dyn_state.geoms.pos[i_gb, i_b]
-    dist_sq = delta.dot(delta)
-
-    contact_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
-    penetration = radius_a + radius_b
-    if dist_sq > EPS * EPS:
-        dist = qd.sqrt(dist_sq)
-        contact_normal = delta / dist
-        penetration = radius_a + radius_b - dist
-
-    contact_pos = dyn_state.geoms.pos[i_ga, i_b] - (radius_a - 0.5 * penetration) * contact_normal
-    return contact_pos, contact_normal, penetration, gs.qd_float(1.0)
-
-
-@qd.func
 def func_differentiable_plane_contact(
     i_ga: int,
     i_gb: int,
     i_b: int,
     i_c: int,
-    dyn_state: array_class.DynState,
-    diff_contact_input: array_class.DiffContactInput,
-    dyn_info: array_class.DynInfo,
+    dyn_state: DynState,
+    diff_contact_input: DiffContactInput,
+    dyn_info: DynInfo,
 ):
     """Differentiable plane-convex contact reconstruction.
 
@@ -914,9 +878,13 @@ def func_differentiable_plane_contact(
 
     [i_ga] is the plane geom and [i_gb] the convex geom. [core_local] (box vertex / sphere center / capsule nearest
     endpoint, in the convex geom's local frame) is the pose-independent witness stored by
-    func_fill_diff_contact_input_analytic; [radius] and the plane direction come from the geoms info. Gradients flow to
+    func_fill_diff_contact_input_plane; [radius] and the plane direction come from the geoms info. Gradients flow to
     both geom poses through the geoms state pos / quat. For a sphere, [core_local] is the local origin, so the
     orientation gradient is zero, matching the rotation-invariant forward contact.
+
+    A contact whose penetration the detection returned as zero keeps it, with zero derivative: the detection clamps the
+    penetration of a grazing contact, and slides a contact of the multi-contact search past the edge of the patch to
+    where its depth vanishes, so that its penetration stays zero as the poses move.
     """
     trans_plane = dyn_state.geoms.pos[i_ga, i_b]
     trans_convex = dyn_state.geoms.pos[i_gb, i_b]
@@ -930,6 +898,8 @@ def func_differentiable_plane_contact(
 
     penetration = normal.dot(v_world - trans_plane)
     contact_pos = v_world - 0.5 * penetration * normal
+    if diff_contact_input.has_zero_penetration[i_b, i_c]:
+        penetration = gs.qd_float(0.0)
     weight = gs.qd_float(1.0)
     return contact_pos, normal, penetration, weight
 

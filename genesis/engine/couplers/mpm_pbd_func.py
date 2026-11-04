@@ -266,7 +266,7 @@ class PbdParticleQuery:
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
         # Every query keeps its nearest PBD particle in `newton` and records no pair
-        self.results = array_class.get_bvh_query_results(1)
+        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self):
         """Fit the leaf boxes to the PBD particles' sweeps over the substep and build the trees."""
@@ -450,7 +450,7 @@ class MpmParticleObstacles:
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
-        self.results = array_class.get_bvh_query_results(1)
+        self.results = array_class.BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaves to the MPM particles, build the trees, and gather the obstacle candidates of every PBD

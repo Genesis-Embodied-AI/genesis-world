@@ -11,7 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.array_class as array_class
+from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, DynState, GeomsInitAABB, RigidInfo
 from . import support_field
 
 from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
@@ -22,11 +22,10 @@ def func_sphere_box_contact(
     i_ga: int,
     i_gb: int,
     ga_pos: qd.types.vector(3),
-    ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
 ):
     """
     Analytical sphere-box collision detection.
@@ -110,14 +109,14 @@ def func_plane_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
+    geoms_init_AABB: GeomsInitAABB,
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
+    collider_config: qd.template(),
     errno: qd.Tensor,
 ):
     ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
@@ -160,7 +159,7 @@ def func_plane_box_contact(
             for i_v in range(dyn_info.geoms.vert_start[i_gb], dyn_info.geoms.vert_end[i_gb]):
                 # Plane-box pairs are sized with the convex cap (they are not in the large-contact mask), so the
                 # emission must stay within it to avoid overflowing a buffer allocated as a convex pair.
-                if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
+                if n_con < qd.static(collider_config.n_contacts_per_convex_pair):
                     pos_corner = gu.qd_transform_by_trans_quat_fast(dyn_info.verts.init_pos[i_v], gb_pos, gb_quat)
                     penetration = normal.dot(pos_corner - ga_pos)
                     if penetration > 0.0:
@@ -191,12 +190,12 @@ def func_box_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    collider_static_config: qd.template(),
+    dyn_state: DynState,
+    collider_state: ColliderState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    collider_info: ColliderInfo,
+    collider_config: qd.template(),
     errno: qd.Tensor,
 ):
     """
@@ -513,7 +512,7 @@ def func_box_box_contact(
             n_added = 0
             n_start = collider_state.n_contacts[i_b]
             for i in range(n):
-                if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
+                if n_added < qd.static(collider_config.n_contacts_per_nonconvex_pair):
                     dist = collider_state.box_depth[i, i_b]
                     collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                     contact_pos = p + r @ collider_state.box_points[i, i_b]
@@ -794,7 +793,7 @@ def func_box_box_contact(
                 n_added = 0
                 n_start = collider_state.n_contacts[i_b]
                 for i in range(n):
-                    if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
+                    if n_added < qd.static(collider_config.n_contacts_per_nonconvex_pair):
                         dist = collider_state.box_depth[i, i_b]
                         collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                         contact_pos = pos1 + (r @ collider_state.box_points[i, i_b])
