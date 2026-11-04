@@ -1,0 +1,20 @@
+genesis/utils/urdf.py
+  s_6858d35ba64773::t_56645a6f695a9b 418-422,424-428
+  s_6858d35ba64773::t_9a5891b897c209 423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d34fb6bf1083af6f6cf7daeefb0a7d8c0c4d9dad",
+  "prompts": {},
+  "sessions": {
+    "s_6858d35ba64773": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e4a9e300-a27f-4874-bff9-b02d7a2d9e97",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
