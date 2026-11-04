@@ -4,6 +4,7 @@ import quadrants as qd
 from pydantic import PrivateAttr, model_validator
 
 import genesis as gs
+import genesis.utils.geom as gu
 
 from .base import Base
 
@@ -86,7 +87,7 @@ class Elastic(Base):
 
     @qd.func
     def _pre_compute_linear_corotated(self, J, F, i_e, i_b):
-        U, S, V = qd.svd(F)
+        U, S, V = gu.qd_svd(F)
         R = U @ V.transpose()
         self._R[i_b, i_e] = R
 

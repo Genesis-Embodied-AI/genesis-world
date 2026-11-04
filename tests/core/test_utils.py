@@ -50,6 +50,14 @@ def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
             for I in qd.grouped(qd.ndrange(*qd_in.shape)):
                 qd_out[I] = qd_func(qd_in[I], *args)
 
+    elif num_inputs == 1 and num_outputs == 3:
+
+        @qd.kernel
+        def kernel(qd_in: qd.template(), qd_out_1: qd.template(), qd_out_2: qd.template(), qd_out_3: qd.template()):
+            qd.loop_config(serialize=False)
+            for I in qd.grouped(qd.ndrange(*qd_in.shape)):
+                qd_out_1[I], qd_out_2[I], qd_out_3[I] = qd_func(qd_in[I], *args)
+
     elif num_inputs == 2 and num_outputs == 1:
 
         @qd.kernel
@@ -301,6 +309,19 @@ def test_geom_quadrants_identity(batch_shape):
             kernel(*qd_args[i : (i + 2)])
 
         np.testing.assert_allclose(qd_args[0].to_numpy(), qd_args[-1].to_numpy(), atol=1e2 * gs.EPS)
+
+    qd_A, qd_U, qd_S, qd_V = [qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape) for _ in range(4)]
+    # Rotations of noisy identities, from nearly repeated to well separated singular values
+    rotation, _ = np.linalg.qr(np.random.randn(*batch_shape, 3, 3))
+    noise_scale = 10.0 ** np.random.uniform(-12.0, 0.0, (*batch_shape, 1, 1))
+    qd_A.from_numpy((rotation @ (np.eye(3) + noise_scale * np.random.randn(*batch_shape, 3, 3))).astype(gs.np_float))
+    _qd_kernel_wrapper(gu.qd_svd, 1, 3)(qd_A, qd_U, qd_S, qd_V)
+    A, U, S, V = qd_A.to_numpy(), qd_U.to_numpy(), qd_S.to_numpy(), qd_V.to_numpy()
+    np.testing.assert_allclose(U @ S @ np.swapaxes(V, -1, -2), A, atol=1e2 * gs.EPS)
+    np.testing.assert_allclose(S, S * np.eye(3), atol=0.0)
+    for R in (U, V):
+        np.testing.assert_allclose(np.swapaxes(R, -1, -2) @ R, np.broadcast_to(np.eye(3), R.shape), atol=1e2 * gs.EPS)
+        np.testing.assert_allclose(np.linalg.det(R), 1.0, atol=1e2 * gs.EPS)
 
 
 @pytest.mark.required
