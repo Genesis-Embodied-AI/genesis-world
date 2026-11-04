@@ -1,0 +1,47 @@
+genesis/engine/texture.py
+  s_2e342472cc8daf::t_272434d4b14d21 30-32
+  s_2e342472cc8daf::t_a915ce3b24e78e 37,43,104-105
+  s_2e342472cc8daf::t_d0d395628cacef 10,25,40,56-58,110,139,166-167,169,171-172,176,178
+genesis/options/textures.py
+  s_2e342472cc8daf::t_d0d395628cacef 13,299,329,333,354,356,359,367,376,384-385,415,424,473,475
+  s_2e342472cc8daf::t_a915ce3b24e78e 302,335,395
+  s_2e342472cc8daf::t_272434d4b14d21 331,474
+tests/rigid/test_serialization.py
+  s_2e342472cc8daf::t_d0d395628cacef 366-367
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_2e342472cc8daf::t_d0d395628cacef 8,1117,1140
+  s_2e342472cc8daf::t_272434d4b14d21 1123-1124,1132-1133
+genesis/engine/scene.py
+  s_2e342472cc8daf::t_d0d395628cacef 24,945,951-953,962,2143
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_2e342472cc8daf::t_d0d395628cacef 12,621,733,739,743,747,749
+  s_2e342472cc8daf::t_a915ce3b24e78e 736
+genesis/engine/mesh.py
+  s_2e342472cc8daf::t_d0d395628cacef 690
+genesis/vis/rasterizer_context.py
+  s_2e342472cc8daf::t_d0d395628cacef 16,647,658
+  s_2e342472cc8daf::t_a915ce3b24e78e 644
+genesis/__init__.py
+  s_2e342472cc8daf::t_d0d395628cacef 505
+tests/rendering/test_offscreen.py
+  s_2e342472cc8daf::t_d0d395628cacef 357-358,380-381
+  s_2e342472cc8daf::t_a915ce3b24e78e 364
+genesis/constants.py
+  s_2e342472cc8daf::t_d0d395628cacef 203-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c25819016490252661f78fa5c9ed9ddc51118531",
+  "prompts": {},
+  "sessions": {
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
