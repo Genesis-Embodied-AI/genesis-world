@@ -131,7 +131,7 @@ def func_pbd_pcg_init_direction(pbd_data: qd.template(), pcg_scalars: qd.templat
     qd.loop_config(name="mpm_pbd_pcg_init_direction")
     for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
         pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b]
-        qd.atomic_add(pcg_scalars.rz[()], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
+        qd.atomic_add(pcg_scalars.rz[i_b], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -150,8 +150,8 @@ def func_pbd_matvec_dot(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Add p . Ap over the PBD rows to p . Ap, once Ap holds the whole joint operator."""
     qd.loop_config(name="mpm_pbd_matvec_dot")
     for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], pbd_data.p[i_q, i_b].dot(pbd_data.ap[i_q, i_b]))
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], pbd_data.p[i_q, i_b].dot(pbd_data.ap[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -159,8 +159,8 @@ def func_pbd_pcg_update_xr(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Update the solution and the residual over the PBD rows, x += alpha p and r -= alpha Ap."""
     qd.loop_config(name="mpm_pbd_pcg_update_xr")
     for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
-        if pcg_scalars.is_converged[()] == 0:
-            alpha = pcg_scalars.alpha[()]
+        if pcg_scalars.is_converged[i_b] == 0:
+            alpha = pcg_scalars.alpha[i_b]
             pbd_data.sol[i_q, i_b] += alpha * pbd_data.p[i_q, i_b]
             pbd_data.r[i_q, i_b] -= alpha * pbd_data.ap[i_q, i_b]
 
@@ -170,8 +170,8 @@ def func_pbd_pcg_dot_rz(pbd_data: qd.template(), pcg_scalars: qd.template()):
     """Add r . z over the PBD rows to rz_new."""
     qd.loop_config(name="mpm_pbd_pcg_dot_rz")
     for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[()], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.rz_new[i_b], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -180,8 +180,8 @@ def func_pbd_pcg_direction(pbd_data: qd.template(), pcg_scalars: qd.template()):
     qd.loop_config(name="mpm_pbd_pcg_direction")
     for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
         pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        if pcg_scalars.is_converged[()] == 0:
-            pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b] + pcg_scalars.beta[()] * pbd_data.p[i_q, i_b]
+        if pcg_scalars.is_converged[i_b] == 0:
+            pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b] + pcg_scalars.beta[i_b] * pbd_data.p[i_q, i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -190,7 +190,7 @@ def func_pbd_start_line_search(pbd_data: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_start_line_search")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         pbd_data.x_prev[i_q, i_b] = pbd_data.pbd.particles_reordered[i_q, i_b].pos
-        qd.atomic_max(control.max_disp[()], qd.abs(pbd_data.sol[i_q, i_b]).max())
+        qd.atomic_max(control.max_disp[i_b], qd.abs(pbd_data.sol[i_q, i_b]).max())
 
 
 @qd.func(requires_top_level=True)
@@ -198,12 +198,12 @@ def func_pbd_step_forward(pbd_data: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_step_forward")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         if is_moving(i_q, i_b, pbd_data.pbd):
-            step = control.alpha[()] * pbd_data.sol[i_q, i_b]
+            step = control.alpha[i_b] * pbd_data.sol[i_q, i_b]
             pbd_data.pbd.particles_reordered[i_q, i_b].pos = pbd_data.x_prev[i_q, i_b] - step
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: bool):
+def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: qd.template()):
     """Add the inertia 1/2 m |x - x~|^2 of the PBD particles to the start or trial energy."""
     qd.loop_config(name="mpm_pbd_energy")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
@@ -211,9 +211,9 @@ def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: b
             diff = pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.target[i_q, i_b]
             energy = 0.5 * pbd_data.pbd.particles_info_reordered[i_q, i_b].mass * diff.dot(diff)
             if is_trial:
-                qd.atomic_add(control.energy_trial[()], energy)
+                qd.atomic_add(control.energy_trial[i_b], energy)
             else:
-                qd.atomic_add(control.energy_start[()], energy)
+                qd.atomic_add(control.energy_start[i_b], energy)
 
 
 @qd.func(requires_top_level=True)
@@ -412,8 +412,8 @@ def func_pbd_contact_matvec(
     qd.loop_config(name="mpm_pbd_contact_matvec")
     for s in range(grid.n_valid[()]):
         i_q = newton.contact_pbd[s]
-        if i_q >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        if i_q >= 0 and pcg_scalars.is_converged[i_b] == 0:
             dq = pbd_data.p[i_q, i_b]
             h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, params)
             qd.atomic_add(pbd_data.ap[i_q, i_b], h)
@@ -659,7 +659,7 @@ class PbdNewtonParticipant:
         func_pbd_step_forward(self.pbd_data, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
+    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         func_pbd_energy(self.pbd_data, control, is_trial)
 
 

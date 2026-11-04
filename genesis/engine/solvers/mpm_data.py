@@ -276,9 +276,6 @@ class MpmNewton:
 
     def allocate(self, n_sort: int, max_nodes: int) -> None:
         n_padded = _padded(n_sort)
-        n_partials = n_padded // REDUCE_BLOCK_DIM + _padded(max_nodes) // REDUCE_BLOCK_DIM
-        # Offset of the node partials of the energy, after the particle partials
-        self.n_particle_partials = _scalar(gs.qd_int, n_padded // REDUCE_BLOCK_DIM)
         self.u = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.u_temp = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
@@ -303,7 +300,6 @@ class MpmNewton:
         self.constraint_target = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
         for array in (self.constraint_spring, self.constraint_damping, self.constraint_target):
             array.fill(0.0)
-        self.energy_partials = qd.ndarray(gs.qd_float, shape=(n_partials,))
         # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
         # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
         # 1/2 D min(0, J.dx - t)^2, and the Rigid link of the particle's pyramid rows (-1 if none)

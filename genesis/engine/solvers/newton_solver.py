@@ -24,7 +24,14 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.linear_pcg import PCGScalars, func_pcg_arm, func_pcg_decide, func_pcg_reset, func_pcg_step
+from genesis.engine.numerics.linear_pcg import (
+    PCGScalars,
+    func_pcg_arm,
+    func_pcg_decide,
+    func_pcg_reset,
+    func_pcg_select_envs,
+    func_pcg_step,
+)
 from genesis.engine.numerics.newton_control import (
     NEWTON_FAILED_LINE_SEARCH,
     NewtonControl,
@@ -131,11 +138,15 @@ def func_contact_gradient(f: int, participants: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_start(pcg_scalars: qd.template(), participants: qd.template()):
+def func_pcg_start(
+    newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template(), is_adjoint: qd.template()
+):
     """Build the preconditioner of every participant and start the preconditioned conjugate gradient from 0.
 
     The start sets r = -grad, z = M^-1 r and p = z over the rows of every participant, then the convergence threshold
-    from the r . z they all added."""
+    from the r . z they all added. The environments whose Newton solve stopped take no part, except in an adjoint
+    solve."""
+    func_pcg_select_envs(pcg_scalars, newton_control, is_adjoint)
     func_pcg_reset(pcg_scalars)
     for member in qd.static(participants.members):
         member.func_factor()
@@ -191,7 +202,7 @@ def func_step_forward(f: int, newton_control: qd.template(), participants: qd.te
 
 
 @qd.func(requires_top_level=True)
-def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: bool):
+def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
     """Evaluate the total energy at the start or trial point, which every participant adds its own to."""
     func_reset_energy(newton_control, is_trial)
     for member in qd.static(participants.members):
@@ -213,8 +224,10 @@ def kernel_contact_gradient(f: int, participants: qd.template()):
 
 
 @qd.kernel
-def kernel_pcg_start(pcg_scalars: qd.template(), participants: qd.template()):
-    func_pcg_start(pcg_scalars, participants)
+def kernel_pcg_start(
+    newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template(), is_adjoint: qd.template()
+):
+    func_pcg_start(newton_control, pcg_scalars, participants, is_adjoint)
 
 
 @qd.kernel(graph=True)
@@ -235,7 +248,7 @@ def kernel_start_line_search(f: int, newton_control: qd.template(), participants
 
 
 @qd.kernel
-def kernel_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: bool):
+def kernel_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
     func_energy(f, newton_control, participants, is_trial)
 
 
@@ -272,7 +285,7 @@ def kernel_newton_loop(f: int, newton_control: qd.template(), pcg_scalars: qd.te
     """
     while qd.graph.do_while(newton_control.is_newton_running):
         func_assemble(f, participants)
-        func_pcg_start(pcg_scalars, participants)
+        func_pcg_start(newton_control, pcg_scalars, participants, False)
         while qd.graph.do_while(pcg_scalars.is_running):
             func_pcg_iteration(f, pcg_scalars, participants)
         func_start_line_search(f, newton_control, participants)
@@ -299,14 +312,9 @@ class NewtonSolver(Solver):
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "NewtonOptions"):
         super().__init__(scene, sim, options)
-        self.control = NewtonControl(
-            gs.qd_float,
-            options.max_iterations,
-            options.line_search_max_iterations,
-            options.line_search_shrink,
-            options.strict,
-        )
-        self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol)
+        # The scalars of the solve, one per environment, allocated once the participants register (see `register`)
+        self.control = None
+        self.pcg_scalars = None
         bits = 64 if gs.qd_float == qd.f64 else 32
         self._adjoint_pcg_tol = options.adjoint_pcg_tol or DEFAULT_ADJOINT_PCG_TOL[bits]
         self._participant_hosts = []
@@ -314,8 +322,6 @@ class NewtonSolver(Solver):
         self._participants = None
         self._is_loop_graph = options.graph == "newton"
         self._has_coupling_devices = False
-        # Whether a solve of the current step stopped on a non-finite measure
-        self._is_step_failed = False
         self._has_warned_adjoint_projection = False
 
     def register(self, participants, couplings):
@@ -324,6 +330,16 @@ class NewtonSolver(Solver):
 
         A coupling acting on one participant alone, whose cross terms vanish, gives None as its device object and runs
         its host stages only."""
+        options = self._options
+        self.control = NewtonControl(
+            gs.qd_float,
+            options.max_iterations,
+            options.line_search_max_iterations,
+            options.line_search_shrink,
+            options.strict,
+            self._sim._B,
+        )
+        self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol, self._sim._B)
         coupling_devices = [device for _, device in couplings if device is not None]
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, which those of the participants
         # besides MPM do in a scene tracking gradients
@@ -354,9 +370,9 @@ class NewtonSolver(Solver):
 
         The solver owns no physical state, so no checkpoint reads them: the simulator frees them with its solvers (see
         'Simulator.destroy')."""
-        yield from iter_data_oriented("control", self.control, DataKind.SCRATCH)
-        yield from iter_data_oriented("pcg_scalars", self.pcg_scalars, DataKind.SCRATCH)
         if self._participants is not None:
+            yield from iter_data_oriented("control", self.control, DataKind.SCRATCH)
+            yield from iter_data_oriented("pcg_scalars", self.pcg_scalars, DataKind.SCRATCH)
             yield from iter_data_oriented("participants", self._participants, DataKind.SCRATCH)
 
     @property
@@ -375,51 +391,47 @@ class NewtonSolver(Solver):
         The launches of the solve of substep `f` form one entry of the step recorded for a backward pass, which
         `backward` reverses: the solve is differentiated by the implicit function theorem rather than launch by launch.
 
-        Once a solve of the step stopped on a non-finite measure, the remaining substeps of the step skip the solve,
-        which would only carry the non-finite values on, and the step raises at its end (see `_check_failures`).
+        An environment whose solve stopped on a non-finite measure keeps its state for the rest of the step, each
+        participant leaving it as it was, and the step raises for it at its end (see `_check_failures`), while the other
+        environments step on.
         """
         if not self.is_active:
             return
-        if not self._is_step_failed:
-            with custom_backward(self.backward, f):
-                self._step(f)
-            if self._options.strict:
-                self._check_line_search(f)
-            # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred
-            # substep
-            for host in self._hosts:
-                host.newton_end(f)
-            # FIXME: This read waits for the device at every substep. A conditional graph node (graph `if`) on the latch,
-            # or stages that idle once it is set, would skip the solve on the device instead.
-            self._is_step_failed = bool(int(qd_to_numpy(self.control.has_failed_non_finite)))
+        with custom_backward(self.backward, f):
+            self._step(f)
+        if self._options.strict:
+            self._check_line_search(f)
+        # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
+        for host in self._hosts:
+            host.newton_end(f)
         self._check_failures()
 
     def _check_line_search(self, f):
         """Raise at once on a solve whose line search found no lower energy, in strict mode."""
         control = self.control
-        if int(qd_to_numpy(control.failed)) == NEWTON_FAILED_LINE_SEARCH:
+        failed = qd_to_numpy(control.failed)
+        for i_b in np.flatnonzero(failed == NEWTON_FAILED_LINE_SEARCH):
             gs.raise_exception(
-                f"Strict Newton solve: the line search of Newton iteration {int(qd_to_numpy(control.newton_iter))} of "
-                f"substep {self._sim.cur_substep_global} found no energy below {float(qd_to_numpy(control.energy_start))} "
-                f"within {self._options.line_search_max_iterations} trials, the last one giving "
-                f"{float(qd_to_numpy(control.energy_trial))}. The energy disagrees with its gradient or with the "
-                "curvature of its Newton system."
+                f"Strict Newton solve: the line search of Newton iteration {int(qd_to_numpy(control.newton_iter)[i_b])} "
+                f"of substep {self._sim.cur_substep_global} in environment {i_b} found no energy below "
+                f"{float(qd_to_numpy(control.energy_start)[i_b])} within {self._options.line_search_max_iterations} "
+                f"trials, the last one giving {float(qd_to_numpy(control.energy_trial)[i_b])}. The energy disagrees "
+                "with its gradient or with the curvature of its Newton system."
             )
 
     def _check_failures(self):
         """Report the solves that failed since the last check.
 
-        A solve stopped on a non-finite measure is handed to every participant once a step is over, which flags it for
-        the environments it reports errors on, an error being raised at the beginning of the next step. A solve that
-        reached `max_iterations` is warned of every `failure_check_interval` substeps, each check waiting for the
-        device."""
+        The environments whose solve stopped on a non-finite measure are handed to every participant once a step is
+        over, which flags them for the environments it reports errors on, an error being raised at the beginning of the
+        next step. A solve that reached `max_iterations` is warned of every `failure_check_interval` substeps, each
+        check waiting for the device."""
         control = self.control
         sim = self._sim
         if (sim.cur_substep_global + 1) % sim._substeps == 0:
             for host in self._participant_hosts:
                 host.newton_flag_non_finite(control)
             kernel_clear_non_finite(control)
-            self._is_step_failed = False
         if sim.cur_substep_global % self._options.failure_check_interval == 0:
             if int(qd_to_numpy(control.has_failed_iterations)):
                 control.has_failed_iterations.from_numpy(np.array(0, dtype=gs.np_int))
@@ -488,7 +500,7 @@ class NewtonSolver(Solver):
         pcg_scalars = self.pcg_scalars
         pcg_scalars.tol_rate.from_numpy(np.array(self._adjoint_pcg_tol, dtype=gs.np_float))
         pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
-        self._pcg(f)
+        self._pcg(f, is_adjoint=True)
         pcg_scalars.tol_rate.from_numpy(np.array(self._options.pcg_tol, dtype=gs.np_float))
         if not check_curvature:
             return True
@@ -523,11 +535,12 @@ class NewtonSolver(Solver):
         if self._has_coupling_devices:
             kernel_contact_gradient(f, self._participants)
 
-    def _pcg(self, f):
-        """Run the conjugate gradient iterations of a substep from its staged right-hand side, as one graph."""
+    def _pcg(self, f, is_adjoint=False):
+        """Run the conjugate gradient iterations of a substep from its staged right-hand side, as one graph, over the
+        environments whose Newton solve runs, or every environment with `is_adjoint`."""
         participants = self._participants
         pcg_scalars = self.pcg_scalars
-        kernel_pcg_start(pcg_scalars, participants)
+        kernel_pcg_start(self.control, pcg_scalars, participants, is_adjoint)
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one,
         # with a device read each, when other participants take part in a scene tracking gradients
         if not (self._requires_grad and self._is_joint):

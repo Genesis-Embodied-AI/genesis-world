@@ -205,7 +205,7 @@ class RigidNewtonParticipant:
         mpm_rigid_func.func_rigid_step_forward(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
+    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         self.func_evaluate(f)
         mpm_rigid_func.func_rigid_energy(self.rigid_data, control, self.params, is_trial)
 

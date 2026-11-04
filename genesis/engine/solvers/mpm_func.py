@@ -24,8 +24,8 @@ import quadrants as qd
 import genesis as gs
 from genesis.utils.array_class import ErrorCode, LinksState
 import genesis.utils.geom as gu
-from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM, write_block_partial
-from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add
+from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
+from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add, warp_add_by_key, warp_max_by_key
 from genesis.engine.numerics.open_addressing_hash import EMPTY_KEY, func_reset_hash
 from genesis.engine.numerics.soft_contact import soft_row
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
@@ -1110,7 +1110,7 @@ def contact_cross_matvec(
     for a in qd.static(range(8)):
         for d in qd.static(range(3)):
             qd.atomic_add(pcg_workspace.ap[3 * slots[a] + d], -w[a] * H_dq[d])
-    qd.atomic_add(pcg_scalars.p_dot_ap[()], -dxp.dot(H_dq))
+    qd.atomic_add(pcg_scalars.p_dot_ap[env], -dxp.dot(H_dq))
     return H @ (dq - dxp)
 
 
@@ -1653,45 +1653,48 @@ def func_g2p_advect(
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     params: qd.template(),
+    frozen: qd.template(),
 ):
     """Advance every particle to the next frame: grid-to-particle (G2P) transfer, advection, deformation gradient update
     and plastic return map.
 
     The velocity is the particle-in-cell (PIC) one and the velocity gradient the affine particle-in-cell (APIC) one.
-    Valid particles run in sorted order for locality, and inactive ones carry their state over unchanged.
+    Valid particles run in sorted order for locality, and inactive ones carry their state over unchanged, as do the
+    particles of an environment set in `frozen`, whose Newton solve stopped on a non-finite measure.
     """
     qd.loop_config(name="mpm_g2p_advect")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
-        slots = stencil_node_slots(env, cell, grid)
-        pos = particles.pos[f, i_p, i_b]
-        fx = pos * params.inv_dx[()] - cell.cast(gs.qd_float)
-        w, grad_w = q1_stencil(fx, params.inv_dx[()])
-        vel = qd.Vector.zero(gs.qd_float, 3)
-        C = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for a in qd.static(range(8)):
-            v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
-            vel += w[a] * v_a
-            C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
-        particles.pos[f + 1, i_p, i_b] = pos + dt * vel
-        particles.vel[f + 1, i_p, i_b] = vel
-        particles.C[f + 1, i_p, i_b] = C
-        slot = particles_info.material_idx[i_p]
-        F_new, Jp_new = return_map(
-            slot,
-            materials.mat_plastic[slot],
-            (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ particles.F[f, i_p, i_b],
-            particles.Jp[f, i_p, i_b],
-            materials,
-            params,
-        )
-        particles.F[f + 1, i_p, i_b] = F_new
-        particles.Jp[f + 1, i_p, i_b] = Jp_new
-        particles.actu[f + 1, i_p, i_b] = particles.actu[f, i_p, i_b]
+        if frozen[i_b] == 0:
+            slots = stencil_node_slots(env, cell, grid)
+            pos = particles.pos[f, i_p, i_b]
+            fx = pos * params.inv_dx[()] - cell.cast(gs.qd_float)
+            w, grad_w = q1_stencil(fx, params.inv_dx[()])
+            vel = qd.Vector.zero(gs.qd_float, 3)
+            C = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for a in qd.static(range(8)):
+                v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
+                vel += w[a] * v_a
+                C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+            particles.pos[f + 1, i_p, i_b] = pos + dt * vel
+            particles.vel[f + 1, i_p, i_b] = vel
+            particles.C[f + 1, i_p, i_b] = C
+            slot = particles_info.material_idx[i_p]
+            F_new, Jp_new = return_map(
+                slot,
+                materials.mat_plastic[slot],
+                (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ particles.F[f, i_p, i_b],
+                particles.Jp[f, i_p, i_b],
+                materials,
+                params,
+            )
+            particles.F[f + 1, i_p, i_b] = F_new
+            particles.Jp[f + 1, i_p, i_b] = Jp_new
+            particles.actu[f + 1, i_p, i_b] = particles.actu[f, i_p, i_b]
 
     qd.loop_config(name="mpm_carry_inactive")
     for i_p, i_b in qd.ndrange(params.n_particles[()], params.n_envs[()]):
-        if not particles_ng.active[f, i_p, i_b]:
+        if not particles_ng.active[f, i_p, i_b] or frozen[i_b] != 0:
             particles.pos[f + 1, i_p, i_b] = particles.pos[f, i_p, i_b]
             particles.vel[f + 1, i_p, i_b] = particles.vel[f, i_p, i_b]
             particles.C[f + 1, i_p, i_b] = particles.C[f, i_p, i_b]
@@ -2657,25 +2660,28 @@ def func_contribute_newton_max_disp(
     control: qd.template(),
     params: qd.template(),
 ):
-    """Reduce into the Newton control the largest |du| component that the particles see through sum_a w_a du_a.
+    """Reduce into the Newton control of every environment the largest |du| component that its particles see through
+    sum_a w_a du_a.
 
-    A GPU takes a block maximum, then one atomic max per block, and a CPU backend one atomic max per particle. The
-    maximum is taken over the particles rather than the nodes: a node reached by a sliver of a particle stencil carries
-    a vanishing mass and Hessian diagonal, so the preconditioned conjugate gradient (PCG) leaves its du loose while it
-    moves no particle."""
+    A GPU takes the maximum of each run of one environment in a warp, then one atomic max per run, and a CPU backend one
+    atomic max per particle. The maximum is taken over the particles rather than the nodes: a node reached by a sliver
+    of a particle stencil carries a vanishing mass and Hessian diagonal, so the preconditioned conjugate gradient (PCG)
+    leaves its du loose while it moves no particle."""
     if qd.static(gs.backend == gs.cpu):
         qd.loop_config(name="mpm_contribute_newton_max_disp_cpu")
         for s in range(grid.n_valid[()]):
-            qd.atomic_max(control.max_disp[()], particle_max_disp(f, s, particles, grid, newton, params))
+            _, _, env, _ = particle_of_sorted(s, grid, params)
+            qd.atomic_max(control.max_disp[env], particle_max_disp(f, s, particles, grid, newton, params))
     else:
         qd.loop_config(name="mpm_contribute_newton_max_disp", block_dim=REDUCE_BLOCK_DIM)
         for s in range(grid.n_valid_reduce_blocks[()] * REDUCE_BLOCK_DIM):
             disp = gs.qd_float(0.0)
+            env = gs.qd_int(-1)
             if s < grid.n_valid[()]:
+                _, _, env_, _ = particle_of_sorted(s, grid, params)
+                env = env_
                 disp = particle_max_disp(f, s, particles, grid, newton, params)
-            block_max = qd.simt.block.reduce_max(disp, REDUCE_BLOCK_DIM, gs.qd_float)
-            if qd.simt.block.thread_idx() == 0:
-                qd.atomic_max(control.max_disp[()], block_max)
+            warp_max_by_key(disp, env, control.max_disp)
 
 
 @qd.func(requires_top_level=True)
@@ -2712,7 +2718,7 @@ def func_cap_inversion_step(
             if c0 > 0.0:
                 root = cubic_first_root(c0, c1, c2, c3, t_max)
                 if root <= t_max:
-                    qd.atomic_min(control.alpha[()], INVERSION_STEP_SLACK * root)
+                    qd.atomic_min(control.alpha[env], INVERSION_STEP_SLACK * root)
 
 
 @qd.func
@@ -2733,42 +2739,55 @@ def particle_max_disp(
 
 
 @qd.func(requires_top_level=True)
-def func_step_forward(grid: qd.template(), newton: qd.template(), control: qd.template()):
+def func_step_forward(grid: qd.template(), newton: qd.template(), linear: qd.template(), control: qd.template()):
+    """Move the nodes of every environment to the trial point of its line-search step."""
     qd.loop_config(name="mpm_step_forward")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.u[i] = newton.u_temp[i] + control.alpha[()] * newton.du[i]
+        newton.u[i] = newton.u_temp[i] + control.alpha[linear.pcg.row_env[i // 3]] * newton.du[i]
 
 
 @qd.func(requires_top_level=True)
-def func_elastic_energy_partial(
+def func_node_envs(grid: qd.template(), linear: qd.template()):
+    """Write the environment of every node row of the linear system, which the reductions of its solve key on."""
+    qd.loop_config(name="mpm_node_envs")
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        env, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        linear.pcg.row_env[node] = env
+
+
+@qd.func(requires_top_level=True)
+def func_elastic_energy(
     f: int,
     dt: float,
     particles: MpmParticles,
     grid: qd.template(),
     newton: qd.template(),
+    energies: qd.template(),
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     params: qd.template(),
 ):
-    """Write the per-block partial sums of V dt^2 psi(F_trial), of the contact-row energy and of the constraint spring
-    energy over the sorted particles.
+    """Add V dt^2 psi(F_trial), the contact-row energy and the constraint spring energy of the sorted particles into
+    the entry of their environment in `energies`.
 
-    A GPU takes a block reduction and a CPU the ordered sum of one thread per block, both bitwise reproducible."""
+    A GPU sums each run of one environment in a warp and adds one atomic per run, and a CPU adds one atomic per
+    particle."""
     if qd.static(gs.backend == gs.cpu):
-        qd.loop_config(name="mpm_elastic_energy_partial_cpu")
-        for block in range(grid.n_valid_reduce_blocks[()]):
-            total = gs.qd_float(0.0)
-            end = qd.min(block * REDUCE_BLOCK_DIM + REDUCE_BLOCK_DIM, grid.n_valid[()])
-            for s in range(block * REDUCE_BLOCK_DIM, end):
-                total += particle_energy(f, s, dt, particles, grid, newton, particles_info, materials, params)
-            newton.energy_partials[block] = total
+        qd.loop_config(name="mpm_elastic_energy_cpu")
+        for s in range(grid.n_valid[()]):
+            _, _, env, _ = particle_of_sorted(s, grid, params)
+            energy = particle_energy(f, s, dt, particles, grid, newton, particles_info, materials, params)
+            qd.atomic_add(energies[env], energy)
     else:
-        qd.loop_config(name="mpm_elastic_energy_partial", block_dim=REDUCE_BLOCK_DIM)
+        qd.loop_config(name="mpm_elastic_energy", block_dim=REDUCE_BLOCK_DIM)
         for s in range(grid.n_valid_reduce_blocks[()] * REDUCE_BLOCK_DIM):
             energy = gs.qd_float(0.0)
+            env = gs.qd_int(-1)
             if s < grid.n_valid[()]:
+                _, _, env_, _ = particle_of_sorted(s, grid, params)
+                env = env_
                 energy = particle_energy(f, s, dt, particles, grid, newton, particles_info, materials, params)
-            write_block_partial(s // REDUCE_BLOCK_DIM, energy, newton.energy_partials, gs.qd_float)
+            warp_add_by_key(energy, env, energies)
 
 
 @qd.func
@@ -2804,27 +2823,24 @@ def particle_energy(
 
 
 @qd.func(requires_top_level=True)
-def func_kinetic_energy_partial(dt: float, grid: qd.template(), newton: qd.template()):
-    """Write the per-block partial sums of 1/2 m |u - dt v_free|^2 over the free nodes, after the particle partials
-    (see func_elastic_energy_partial)."""
+def func_kinetic_energy(dt: float, grid: qd.template(), newton: qd.template(), energies: qd.template()):
+    """Add 1/2 m |u - dt v_free|^2 of the free nodes into the entry of their environment in `energies`, reduced as in
+    func_elastic_energy."""
     if qd.static(gs.backend == gs.cpu):
-        qd.loop_config(name="mpm_kinetic_energy_partial_cpu")
-        for block in range(grid.n_node_reduce_blocks[()]):
-            total = gs.qd_float(0.0)
-            end = qd.min(block * REDUCE_BLOCK_DIM + REDUCE_BLOCK_DIM, grid.n_blocks[()] * BLOCK_CELLS)
-            for node in range(block * REDUCE_BLOCK_DIM, end):
-                total += node_kinetic_energy(node, dt, grid, newton)
-            n_particle_partials = newton.n_particle_partials[()]
-            newton.energy_partials[n_particle_partials + block] = total
+        qd.loop_config(name="mpm_kinetic_energy_cpu")
+        for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+            env, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+            qd.atomic_add(energies[env], node_kinetic_energy(node, dt, grid, newton))
     else:
-        qd.loop_config(name="mpm_kinetic_energy_partial", block_dim=REDUCE_BLOCK_DIM)
+        qd.loop_config(name="mpm_kinetic_energy", block_dim=REDUCE_BLOCK_DIM)
         for node in range(grid.n_node_reduce_blocks[()] * REDUCE_BLOCK_DIM):
             energy = gs.qd_float(0.0)
+            env = gs.qd_int(-1)
             if node < grid.n_blocks[()] * BLOCK_CELLS:
+                env_, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+                env = env_
                 energy = node_kinetic_energy(node, dt, grid, newton)
-            write_block_partial(
-                newton.n_particle_partials[()] + node // REDUCE_BLOCK_DIM, energy, newton.energy_partials, gs.qd_float
-            )
+            warp_add_by_key(energy, env, energies)
 
 
 @qd.func
@@ -2838,45 +2854,6 @@ def node_kinetic_energy(node: int, dt: float, grid: qd.template(), newton: qd.te
 
 
 @qd.func(requires_top_level=True)
-def func_energy_final(grid: qd.template(), newton: qd.template(), control: qd.template(), is_trial: bool):
-    """Sum the particle and node partials in a fixed order, and add the sum to the start or the trial energy: one block
-    on a GPU, one thread on a CPU."""
-    if qd.static(gs.backend == gs.cpu):
-        for _ in range(1):
-            n_particle_partials = newton.n_particle_partials[()]
-            total = gs.qd_float(0.0)
-            for i in range(grid.n_valid_reduce_blocks[()]):
-                total += newton.energy_partials[i]
-            for i in range(grid.n_node_reduce_blocks[()]):
-                total += newton.energy_partials[n_particle_partials + i]
-            if is_trial:
-                control.energy_trial[()] += total
-            else:
-                control.energy_start[()] += total
-    else:
-        qd.loop_config(name="mpm_energy_final", block_dim=REDUCE_BLOCK_DIM)
-        for tid in range(REDUCE_BLOCK_DIM):
-            n_valid_reduce_blocks = grid.n_valid_reduce_blocks[()]
-            n_node_reduce_blocks = grid.n_node_reduce_blocks[()]
-            n_particle_partials = newton.n_particle_partials[()]
-            value = gs.qd_float(0.0)
-            for i_chunk_ in range((n_valid_reduce_blocks + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM):
-                i = i_chunk_ * REDUCE_BLOCK_DIM + tid
-                if i < n_valid_reduce_blocks:
-                    value += newton.energy_partials[i]
-            for i_chunk_ in range((n_node_reduce_blocks + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM):
-                i = i_chunk_ * REDUCE_BLOCK_DIM + tid
-                if i < n_node_reduce_blocks:
-                    value += newton.energy_partials[n_particle_partials + i]
-            total = qd.simt.block.reduce_add(value, REDUCE_BLOCK_DIM, gs.qd_float)
-            if tid == 0:
-                if is_trial:
-                    control.energy_trial[()] += total
-                else:
-                    control.energy_start[()] += total
-
-
-@qd.func(requires_top_level=True)
 def func_energy(
     f: int,
     dt: float,
@@ -2887,8 +2864,12 @@ def func_energy(
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     params: qd.template(),
-    is_trial: bool,
+    is_trial: qd.template(),
 ):
-    func_elastic_energy_partial(f, dt, particles, grid, newton, particles_info, materials, params)
-    func_kinetic_energy_partial(dt, grid, newton)
-    func_energy_final(grid, newton, control, is_trial)
+    """Add the energy of the particles and nodes of every environment into its start or trial energy."""
+    if qd.static(is_trial):
+        func_elastic_energy(f, dt, particles, grid, newton, control.energy_trial, particles_info, materials, params)
+        func_kinetic_energy(dt, grid, newton, control.energy_trial)
+    else:
+        func_elastic_energy(f, dt, particles, grid, newton, control.energy_start, particles_info, materials, params)
+        func_kinetic_energy(dt, grid, newton, control.energy_start)

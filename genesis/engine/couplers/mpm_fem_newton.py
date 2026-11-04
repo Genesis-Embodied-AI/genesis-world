@@ -72,7 +72,7 @@ class FemNewtonParticipant:
         mpm_fem_func.func_fem_step_forward(f, self.fem, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
+    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         mpm_fem_func.func_fem_energy(f, self.fem.substep_dt, self.fem, control, is_trial)
 
 

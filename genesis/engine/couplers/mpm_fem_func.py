@@ -371,8 +371,8 @@ def func_fem_contact_matvec(
     qd.loop_config(name="mpm_fem_contact_matvec")
     for s in range(grid.n_valid[()]):
         i_s = newton.contact_tri[s]
-        if i_s >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        if i_s >= 0 and pcg_scalars.is_converged[i_b] == 0:
             bary = newton.contact_bary[s]
             tri2v = fem.surface[i_s].tri2v
             dq = qd.Vector.zero(gs.qd_float, 3)
@@ -420,7 +420,7 @@ def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
     qd.loop_config(name="mpm_fem_pcg_init_direction")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z
-        qd.atomic_add(pcg_scalars.rz[()], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
+        qd.atomic_add(pcg_scalars.rz[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
 
 @qd.func(requires_top_level=True)
@@ -437,8 +437,8 @@ def func_fem_matvec_dot(fem: qd.template(), pcg_scalars: qd.template()):
     """Add p . Ap over the FEM vertices to p . Ap, once Ap holds the whole joint operator."""
     qd.loop_config(name="mpm_fem_matvec_dot")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
 
 
 @qd.func(requires_top_level=True)
@@ -446,8 +446,8 @@ def func_fem_pcg_update_xr(fem: qd.template(), pcg_scalars: qd.template()):
     """Update the solution and the residual over the FEM vertices, x += alpha p and r -= alpha Ap."""
     qd.loop_config(name="mpm_fem_pcg_update_xr")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[()] == 0:
-            alpha = pcg_scalars.alpha[()]
+        if pcg_scalars.is_converged[i_b] == 0:
+            alpha = pcg_scalars.alpha[i_b]
             fem.pcg_state_v[i_b, i_v].x = fem.pcg_state_v[i_b, i_v].x + alpha * fem.pcg_state_v[i_b, i_v].p
             fem.pcg_state_v[i_b, i_v].r = fem.pcg_state_v[i_b, i_v].r - alpha * fem.pcg_state_v[i_b, i_v].Ap
 
@@ -457,8 +457,8 @@ def func_fem_pcg_dot_rz(fem: qd.template(), pcg_scalars: qd.template()):
     """Add r . z over the FEM vertices to rz_new."""
     qd.loop_config(name="mpm_fem_pcg_dot_rz")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[()], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.rz_new[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
 
 @qd.func(requires_top_level=True)
@@ -467,8 +467,8 @@ def func_fem_pcg_direction(fem: qd.template(), pcg_scalars: qd.template()):
     qd.loop_config(name="mpm_fem_pcg_direction")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
-        if pcg_scalars.is_converged[()] == 0:
-            beta = pcg_scalars.beta[()]
+        if pcg_scalars.is_converged[i_b] == 0:
+            beta = pcg_scalars.beta[i_b]
             fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z + beta * fem.pcg_state_v[i_b, i_v].p
 
 
@@ -479,7 +479,7 @@ def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template(
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.linesearch_state_v[i_b, i_v].x_prev = fem.elements_v[f + 1, i_v, i_b].pos
         step = fem.pcg_state_v[i_b, i_v].x
-        qd.atomic_max(control.max_disp[()], qd.max(qd.abs(step[0]), qd.abs(step[1]), qd.abs(step[2])))
+        qd.atomic_max(control.max_disp[i_b], qd.max(qd.abs(step[0]), qd.abs(step[1]), qd.abs(step[2])))
 
 
 @qd.func(requires_top_level=True)
@@ -487,12 +487,12 @@ def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_fem_step_forward")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.elements_v[f + 1, i_v, i_b].pos = (
-            fem.linesearch_state_v[i_b, i_v].x_prev - control.alpha[()] * fem.pcg_state_v[i_b, i_v].x
+            fem.linesearch_state_v[i_b, i_v].x_prev - control.alpha[i_b] * fem.pcg_state_v[i_b, i_v].x
         )
 
 
 @qd.func(requires_top_level=True)
-def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(), is_trial: bool):
+def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(), is_trial: qd.template()):
     """Add FEM's incremental potential at the end-of-substep positions, times dt^2, to the start or trial energy.
 
     The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
@@ -507,14 +507,14 @@ def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(
             step = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v[f, i_v, i_b].pos
             energy += 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * step.dot(step) * damping_alpha_dt
         if is_trial:
-            qd.atomic_add(control.energy_trial[()], dt_sq * energy)
+            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
         else:
-            qd.atomic_add(control.energy_start[()], dt_sq * energy)
+            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
     fem._func_compute_ele_energy(f)
     qd.loop_config(name="mpm_fem_energy_elements")
     for i_b, i_e in qd.ndrange(fem._B, fem.n_elements):
         energy = fem.elements_el_energy[i_b, i_e].energy * fem.elements_i[i_e].V
         if is_trial:
-            qd.atomic_add(control.energy_trial[()], dt_sq * energy)
+            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
         else:
-            qd.atomic_add(control.energy_start[()], dt_sq * energy)
+            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)

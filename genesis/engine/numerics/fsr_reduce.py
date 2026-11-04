@@ -37,6 +37,53 @@ def head_segmented_reduce_add(value, tail_flag):
     return value
 
 
+@qd.func
+def head_segmented_reduce_max(value, tail_flag):
+    """Maximum counterpart of head_segmented_reduce_add: the head lane of each run gets the maximum over the run."""
+    lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+    tail_mask = qd.u32(qd.simt.subgroup.ballot(gs.qd_int(tail_flag != 0))) | qd.u32(0x80000000)
+    tails_at_or_above = tail_mask & (qd.u32(0xFFFFFFFF) << qd.u32(lane))
+    lowest_tail = tails_at_or_above & (qd.u32(0) - tails_at_or_above)
+    tail_lane = gs.qd_int(31) - gs.qd_int(qd.math.clz(lowest_tail))
+    distance = tail_lane - lane
+    for level in qd.static(range(5)):
+        offset = qd.static(1 << level)
+        partner = qd.simt.subgroup.shuffle_down(value, qd.u32(offset))
+        if distance >= offset:
+            value = qd.max(value, partner)
+    return value
+
+
+@qd.func
+def _key_runs(key):
+    """Whether the lane starts and ends a run of equal keys in its warp."""
+    lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+    previous_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.max(lane - 1, 0)))
+    next_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.min(lane + 1, 31)))
+    return lane == 0 or key != previous_key, lane == 31 or key != next_key
+
+
+@qd.func
+def warp_add_by_key(value, key, out: qd.template()):
+    """Add the values of every run of lanes of one key in a warp into the entry of the key in `out`, one atomic per run.
+
+    The lanes hold consecutive entries sorted by key, a lane of no entry holding the key -1, which adds nothing. Every
+    lane of the warp must take part."""
+    is_head, is_tail = _key_runs(key)
+    total = head_segmented_reduce_add(value, is_tail)
+    if key >= 0 and is_head:
+        qd.atomic_add(out[key], total)
+
+
+@qd.func
+def warp_max_by_key(value, key, out: qd.template()):
+    """Maximum counterpart of warp_add_by_key."""
+    is_head, is_tail = _key_runs(key)
+    total = head_segmented_reduce_max(value, is_tail)
+    if key >= 0 and is_head:
+        qd.atomic_max(out[key], total)
+
+
 @qd.func(requires_top_level=True)
 def func_fsr_reduce(
     seg_ids: qd.template(),

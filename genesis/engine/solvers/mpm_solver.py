@@ -113,6 +113,7 @@ class MpmNewtonParticipant:
 
         See kernel_newton_loop in newton_solver.py."""
         mpm_func.func_report_extent(self.grid, self.linear)
+        mpm_func.func_node_envs(self.grid, self.linear)
         mpm_func.func_check_loop_capacity(self.grid, self.linear, self.params)
         mpm_func.func_assemble(
             f,
@@ -177,10 +178,10 @@ class MpmNewtonParticipant:
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
-        mpm_func.func_step_forward(self.grid, self.newton, control)
+        mpm_func.func_step_forward(self.grid, self.newton, self.linear, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: bool):
+    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         mpm_func.func_energy(
             f,
             self.params.substep_dt[()],
@@ -548,12 +549,11 @@ class MPMSolver(ParticleSolver):
     @no_grad
     @qd.kernel
     def _kernel_flag_newton_non_finite(self, control: qd.template()):
-        """Flag INVALID_MPM_SOLVE_NAN for every environment (they share the solve) if a Newton solve stopped on a
-        non-finite measure since the Newton solver last cleared the latch (see NewtonControl)."""
-        for _ in range(1):
-            if control.has_failed_non_finite[()] != 0:
-                for i_b in range(self.errno.shape[0]):
-                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
+        """Flag INVALID_MPM_SOLVE_NAN for every environment whose Newton solve stopped on a non-finite measure since the
+        Newton solver last cleared the latch (see NewtonControl)."""
+        for i_b in range(self.errno.shape[0]):
+            if control.has_failed_non_finite[i_b] != 0:
+                self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -662,7 +662,8 @@ class MPMSolver(ParticleSolver):
         self._assemble(f, is_exact)
 
     def newton_finish(self, f):
-        """Transfer the solved grid displacement back to the particles."""
+        """Transfer the solved grid displacement back to the particles, those of an environment whose solve stopped on
+        a non-finite measure keeping their state."""
         kernel_finalize(
             f,
             self.particles,
@@ -672,6 +673,7 @@ class MPMSolver(ParticleSolver):
             self.particles_info,
             self._mpm_materials,
             self._mpm_params,
+            self._sim.newton_solver.control.has_failed_non_finite,
         )
 
     def newton_after(self, f):
@@ -1432,6 +1434,7 @@ def kernel_assemble(
 ):
     dt = params.substep_dt[()]
     mpm_func.func_report_extent(grid, linear)
+    mpm_func.func_node_envs(grid, linear)
     mpm_func.func_assemble(f, dt, particles, grid, newton, linear, particles_info, materials, params, is_exact)
 
 
@@ -1445,9 +1448,10 @@ def kernel_finalize(
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     params: qd.template(),
+    frozen: qd.types.ndarray(),
 ):
     dt = params.substep_dt[()]
-    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, params)
+    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, params, frozen)
 
 
 @qd.kernel

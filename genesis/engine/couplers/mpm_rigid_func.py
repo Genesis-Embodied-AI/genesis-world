@@ -495,18 +495,17 @@ def func_rigid_evaluate(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_energy(rigid_data: qd.template(), control: qd.template(), params: qd.template(), is_trial: bool):
-    """Add Rigid's cost times dt^4, after func_rigid_evaluate, to the start or trial energy of the MPM energy pass."""
+def func_rigid_energy(
+    rigid_data: qd.template(), control: qd.template(), params: qd.template(), is_trial: qd.template()
+):
+    """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, to its start or trial energy."""
     n_envs = rigid_data.x.shape[1]
     dt_sq = params.substep_dt[()] * params.substep_dt[()]
-    for _ in range(1):
-        total = gs.qd_float(0.0)
-        for i_b in range(n_envs):
-            total += rigid_data.cost[i_b]
+    for i_b in range(n_envs):
         if is_trial:
-            control.energy_trial[()] += dt_sq * dt_sq * total
+            control.energy_trial[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
         else:
-            control.energy_start[()] += dt_sq * dt_sq * total
+            control.energy_start[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -774,7 +773,7 @@ def func_rigid_pcg_init_direction(rigid_data: qd.template(), pcg_scalars: qd.tem
     qd.loop_config(name="mpm_rigid_pcg_init_direction")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.p[i_d, i_b] = rigid_data.z[i_d, i_b]
-        qd.atomic_add(pcg_scalars.rz[()], rigid_data.r[i_d, i_b] * rigid_data.z[i_d, i_b])
+        qd.atomic_add(pcg_scalars.rz[i_b], rigid_data.r[i_d, i_b] * rigid_data.z[i_d, i_b])
 
 
 @qd.func(requires_top_level=True)
@@ -800,8 +799,8 @@ def func_rigid_contact_matvec(
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
-        if i_l >= 0 and pcg_scalars.is_converged[()] == 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        if i_l >= 0 and pcg_scalars.is_converged[i_b] == 0:
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
             dr = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
             h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, params)
@@ -851,8 +850,8 @@ def func_rigid_matvec_dot(rigid_data: qd.template(), pcg_scalars: qd.template())
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_matvec_dot")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[()], rigid_data.p[i_d, i_b] * rigid_data.ap[i_d, i_b])
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], rigid_data.p[i_d, i_b] * rigid_data.ap[i_d, i_b])
 
 
 @qd.func(requires_top_level=True)
@@ -862,8 +861,8 @@ def func_rigid_pcg_update_xr(rigid_data: qd.template(), pcg_scalars: qd.template
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_pcg_update_xr")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[()] == 0:
-            alpha = pcg_scalars.alpha[()]
+        if pcg_scalars.is_converged[i_b] == 0:
+            alpha = pcg_scalars.alpha[i_b]
             rigid_data.sol[i_d, i_b] += alpha * rigid_data.p[i_d, i_b]
             rigid_data.r[i_d, i_b] -= alpha * rigid_data.ap[i_d, i_b]
 
@@ -875,8 +874,8 @@ def func_rigid_pcg_dot_rz(rigid_data: qd.template(), pcg_scalars: qd.template())
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_pcg_dot_rz")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[()] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[()], rigid_data.r[i_d, i_b] * rigid_data.z[i_d, i_b])
+        if pcg_scalars.is_converged[i_b] == 0:
+            qd.atomic_add(pcg_scalars.rz_new[i_b], rigid_data.r[i_d, i_b] * rigid_data.z[i_d, i_b])
 
 
 @qd.func(requires_top_level=True)
@@ -887,8 +886,8 @@ def func_rigid_pcg_direction(rigid_data: qd.template(), pcg_scalars: qd.template
     qd.loop_config(name="mpm_rigid_pcg_direction")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.ap[i_d, i_b] = 0.0
-        if pcg_scalars.is_converged[()] == 0:
-            rigid_data.p[i_d, i_b] = rigid_data.z[i_d, i_b] + pcg_scalars.beta[()] * rigid_data.p[i_d, i_b]
+        if pcg_scalars.is_converged[i_b] == 0:
+            rigid_data.p[i_d, i_b] = rigid_data.z[i_d, i_b] + pcg_scalars.beta[i_b] * rigid_data.p[i_d, i_b]
 
 
 # ============================================== Layer 1: Newton steps ==============================================
@@ -904,7 +903,7 @@ def func_rigid_start_line_search(rigid_data: qd.template(), control: qd.template
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.dx[i_d, i_b] = -rigid_data.sol[i_d, i_b]
         rigid_data.x_temp[i_d, i_b] = rigid_data.x[i_d, i_b]
-        qd.atomic_max(control.max_disp[()], qd.abs(rigid_data.sol[i_d, i_b]))
+        qd.atomic_max(control.max_disp[i_b], qd.abs(rigid_data.sol[i_d, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -913,7 +912,7 @@ def func_rigid_step_forward(rigid_data: qd.template(), control: qd.template()):
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_step_forward")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.x[i_d, i_b] = rigid_data.x_temp[i_d, i_b] + control.alpha[()] * rigid_data.dx[i_d, i_b]
+        rigid_data.x[i_d, i_b] = rigid_data.x_temp[i_d, i_b] + control.alpha[i_b] * rigid_data.dx[i_d, i_b]
 
 
 @qd.func(requires_top_level=True)

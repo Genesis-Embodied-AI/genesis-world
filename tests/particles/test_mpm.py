@@ -7,7 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -176,17 +176,20 @@ def test_perf_dispatch(variant, show_viewer):
     assert final_liquid_pos[..., 2].min() > -0.5 * dx
 
 
-@pytest.mark.required
-def test_non_finite_state_raises(show_viewer):
+def _falling_block(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=4e-3,
-            substeps=4,
+            dt=1e-2,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.1),
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=32,
+        ),
+        # Converged far below the rounding the order of the sums of the reductions leaves, so that a solve does not
+        # stop an iteration apart from the same solve in another batch
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=1e-10,
         ),
         show_viewer=show_viewer,
     )
@@ -202,18 +205,67 @@ def test_non_finite_state_raises(show_viewer):
             sampler="regular",
         ),
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
+    return scene, block
 
+
+@pytest.mark.required
+# fp32 cannot resolve the Newton tolerance the comparison of two batches needs
+@pytest.mark.precision("64")
+def test_envs_solve_apart(precision, show_viewer):
+    # The environments of a batch run their own Newton solves: the block resting in the first and the one thrown aside
+    # in the last move as they do alone, while the solves of the second, whose block hits the plane, run up to four times
+    # as many iterations. That impact lands, run to run, on one of two converged states that the order of the sums of
+    # the GPU reductions picks, alone as in a batch, so its environment takes no part in the comparison.
+    velocities = ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, -0.5))
+    scene, block = _falling_block(len(velocities), show_viewer)
+    block.set_velocity(velocities)
+    for _ in range(10):
+        scene.step()
+    pos = block.get_particles_pos()
+    scene.destroy()
+    for i_b in (0, 2):
+        scene, block = _falling_block(0, show_viewer)
+        block.set_velocity(velocities[i_b])
+        for _ in range(10):
+            scene.step()
+        assert_allclose(pos[i_b], block.get_particles_pos(), tol=1e-11)
+        scene.destroy()
+
+
+@pytest.mark.required
+# fp32 cannot resolve the Newton tolerance the comparison of two batches needs
+@pytest.mark.precision("64")
+def test_halt_on_nan(precision, show_viewer):
+    scene, block = _falling_block(2, show_viewer)
+    scene.step()
+    pos_init = block.get_particles_pos()
+
+    # A velocity that is not finite in the second environment fails its Newton solve alone: its particles keep their
+    # state, and the first environment steps on as it does without it
     vel = block.get_particles_vel()
-    vel[0, 0] = float("nan")
+    vel[1, 0] = float("nan")
     block.set_particles_vel(vel)
     scene.step()
-    assert scene.get_error_envs_mask().all()
-    # The error raises at the beginning of a later step, one step later where the check of the flags does not wait for
-    # the device
-    with pytest.raises(gs.GenesisException, match="Invalid MPM particle velocities"):
-        for _ in range(2):
+    assert_equal(scene.get_error_envs_mask(), (False, True))
+    pos = block.get_particles_pos()
+    assert_equal(pos[1], pos_init[1])
+    assert pos[0].isfinite().all()
+    reference_scene, reference_block = _falling_block(0, show_viewer)
+    for _ in range(2):
+        reference_scene.step()
+    assert_allclose(pos[0], reference_block.get_particles_pos(), tol=1e-12)
+
+    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+    with pytest.raises(gs.GenesisException, match="Newton solve produced non-finite values"):
+        for _ in range(1 if gs.backend == gs.cpu else 2):
             scene.step()
+
+    # Resetting the scene clears the error, so the simulation proceeds
+    scene.reset()
+    scene.step()
+    assert block.get_particles_pos().isfinite().all()
+    assert not scene.get_error_envs_mask().any()
 
 
 @pytest.mark.required
