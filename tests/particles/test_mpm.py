@@ -3,6 +3,8 @@ import pytest
 import torch
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
 
 from ..utils.assertions import assert_allclose
@@ -212,6 +214,52 @@ def test_non_finite_state_raises(show_viewer):
     with pytest.raises(gs.GenesisException, match="Invalid MPM particle velocities"):
         for _ in range(2):
             scene.step()
+
+
+@pytest.mark.required
+def test_destroy_frees_data(show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.3, -0.3, -0.1),
+            upper_bound=(0.3, 0.3, 0.4),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.05),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.15),
+            size=(0.05, 0.05, 0.05),
+        ),
+    )
+    scene.build(n_envs=2)
+    for _ in range(3):
+        scene.step()
+
+    # The data of the implicit step and of the joint Newton solve with Rigid, which kernels compiled for the scene keep
+    # referencing, are freed with the scene
+    items = [*scene.sim.mpm_solver.data, *scene.sim.newton_solver.data]
+    roots = {item.name.split(".")[0] for item in items}
+    assert {"particles", "particles_info", "mpm_grid", "mpm_newton", "mpm_linear", "control", "participants"} <= roots
+    arrays = [item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array for item in items]
+    ndarrays = [array for array in arrays if isinstance(array, qd.Ndarray)]
+    assert ndarrays
+    scene.destroy()
+    assert all(array.arr is None for array in ndarrays)
 
 
 @pytest.mark.required

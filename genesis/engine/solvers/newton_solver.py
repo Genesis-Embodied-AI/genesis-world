@@ -38,6 +38,7 @@ from genesis.engine.numerics.newton_control import (
     func_update_convergence,
 )
 from genesis.grad.bridge import custom_backward
+from genesis.utils.data import DataKind, iter_data_oriented
 from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
@@ -345,6 +346,18 @@ class NewtonSolver(Solver):
     @property
     def is_active(self):
         return self._participants is not None
+
+    @property
+    def data(self):
+        """Yield the scalars of the solve and the arrays of its participants and couplings, which every substep rebuilds
+        before reading them (see 'Solver.data').
+
+        The solver owns no physical state, so no checkpoint reads them: the simulator frees them with its solvers (see
+        'Simulator.destroy')."""
+        yield from iter_data_oriented("control", self.control, DataKind.SCRATCH)
+        yield from iter_data_oriented("pcg_scalars", self.pcg_scalars, DataKind.SCRATCH)
+        if self._participants is not None:
+            yield from iter_data_oriented("participants", self._participants, DataKind.SCRATCH)
 
     @property
     def _hosts(self):

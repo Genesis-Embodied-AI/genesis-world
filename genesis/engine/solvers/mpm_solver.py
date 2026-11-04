@@ -26,7 +26,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
-from genesis.utils.data import ArrayItem, DataKind, V
+from genesis.utils.data import ArrayItem, DataKind, V, iter_data_oriented
 from genesis.utils.misc import (
     DeprecationError,
     broadcast_tensor,
@@ -743,7 +743,9 @@ class MPMSolver(ParticleSolver):
 
     @property
     def data(self):
-        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
+        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds, then the particle and
+        material parameters, and the grid, Newton and linear-system arrays of the implicit step, which a step rebuilds
+        before reading them (see 'Solver.data')."""
         for name, field in (
             ("particles.pos", self.particles.pos),
             ("particles.vel", self.particles.vel),
@@ -754,6 +756,13 @@ class MPMSolver(ParticleSolver):
             ("particles_ng.active", self.particles_ng.active),
         ):
             yield ArrayItem(name, DataKind.STATE, field)
+        if not self.is_built or not self.is_active:
+            return
+        yield from iter_data_oriented("particles_info", self.particles_info, DataKind.INFO)
+        yield from iter_data_oriented("mpm_params", self._mpm_params, DataKind.CONSTANT)
+        yield from iter_data_oriented("mpm_materials", self._mpm_materials, DataKind.CONSTANT)
+        for name in ("mpm_grid", "mpm_newton", "mpm_linear"):
+            yield from iter_data_oriented(name, getattr(self, f"_{name}"), DataKind.SCRATCH)
 
     @mutates()
     def set_state(self, f, state, envs_idx=None):

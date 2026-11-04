@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
@@ -293,16 +295,17 @@ class Simulator(RBC):
         self._sensor_manager.destroy()
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
-        # They are gathered first, since 'data' reads the gradient of an array after yielding it.
-        for solver in self._active_solvers:
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it, and each once, since
+        # the participants of the Newton solver reach the arrays of their solvers too.
+        arrays = {}
+        for solver in (*self._active_solvers, self.newton_solver):
             if type(solver).data is not Solver.data:
-                arrays = [
-                    item.array
-                    for item in solver.data
-                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
-                ]
-                for array in arrays:
-                    qd_destroy_data(array)
+                for item in solver.data:
+                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor):
+                        array = item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array
+                        arrays.setdefault(id(array), item.array)
+        for array in arrays.values():
+            qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
