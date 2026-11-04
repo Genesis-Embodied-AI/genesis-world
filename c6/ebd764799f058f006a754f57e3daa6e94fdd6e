@@ -1,0 +1,55 @@
+genesis/options/textures.py
+  s_5f0a6aada3cc7c::t_c32a6cb33b0df6 359-362,370-371
+  s_5f0a6aada3cc7c::t_fc554a79529626 300-303,372-374
+  s_5f0a6aada3cc7c::t_61ec8d24679fbe 379,394,400,404,409,415,432,434
+  s_5f0a6aada3cc7c::t_84c9c7397da5a5 298,358,367-369,378,380,382,389,399,405-406,410-414,416-422,424,427-430,433,438-439
+  s_5f0a6aada3cc7c::t_3b27ce0d0a5a0d 383,396
+genesis/vis/rasterizer_context.py
+  s_5f0a6aada3cc7c::t_61ec8d24679fbe 640
+  s_5f0a6aada3cc7c::t_5e1b81caba7998 45,1379
+examples/rendering/dynamic_texture_duck.py
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 1,3,42,48,71,78,80,82-83,89-91,116-118
+genesis/engine/entities/rigid_entity/description.py
+  s_5f0a6aada3cc7c::t_5e1b81caba7998 504-505,512,521-522,524-526,528-529
+  s_5f0a6aada3cc7c::t_61ec8d24679fbe 527
+tests/rendering/test_offscreen.py
+  s_5f0a6aada3cc7c::t_3b27ce0d0a5a0d 245,325,361
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 237,260,316,324,349,352,387
+  s_5f0a6aada3cc7c::t_2fa8eb81fa591b 330
+  s_5f0a6aada3cc7c::t_8305f9ea28a43e 367-369
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 732
+  s_5f0a6aada3cc7c::t_48de5d5e45e800 741
+  s_5f0a6aada3cc7c::t_3b27ce0d0a5a0d 731,734,737,740,743,745
+genesis/engine/scene.py
+  s_5f0a6aada3cc7c::t_8305f9ea28a43e 962-964
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_5f0a6aada3cc7c::t_48de5d5e45e800 1108
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 1099
+  s_5f0a6aada3cc7c::t_8305f9ea28a43e 1112-1114
+  s_5f0a6aada3cc7c::t_3b27ce0d0a5a0d 1098,1101,1104,1107,1110
+tests/rigid/test_serialization.py
+  s_5f0a6aada3cc7c::t_61ec8d24679fbe 366
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 172
+genesis/engine/dynamic_texture.py
+  s_5f0a6aada3cc7c::t_5e1b81caba7998 19,31,33-34,36,94,100,102-103,122,153
+  s_5f0a6aada3cc7c::t_e7f8db68de93ce 70
+  s_5f0a6aada3cc7c::t_61ec8d24679fbe 48-49,117,154
+  s_5f0a6aada3cc7c::t_3b27ce0d0a5a0d 54,56,157-160,164-165,169,171-174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c6ebd764799f058f006a754f57e3daa6e94fdd6e",
+  "prompts": {},
+  "sessions": {
+    "s_5f0a6aada3cc7c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6f1eebe-3849-4c69-aba6-5138480f0f9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

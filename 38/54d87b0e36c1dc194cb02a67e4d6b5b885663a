@@ -1,0 +1,59 @@
+examples/rendering/dynamic_texture.py
+  s_2e342472cc8daf::t_3b975b04ffaede 1-33,35-61,63-66,68-118,120-157,159-208,212-213,215,235-274
+  s_2e342472cc8daf::t_af818afa2ae1eb 62,67
+  s_2e342472cc8daf::t_e1d35b3b70c720 158
+  s_be364e7a0e7b79::t_046cc5375d77de 119
+  s_e391ab380bd0fe::t_6c61f2a4fccbd6 232
+genesis/vis/camera.py
+  s_2e342472cc8daf::t_c5d8b9f34d4968 908
+tests/rendering/test_offscreen.py
+  s_e391ab380bd0fe::t_cd75e283c119c5 467
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3854d87b0e36c1dc194cb02a67e4d6b5b885663a",
+  "prompts": {},
+  "sessions": {
+    "s_2d51769caa06e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a362-c466-7452-8e4a-dc0a34d8f256",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_2e342472cc8daf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2268f062-a406-4874-8a92-94027fe77985",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_be364e7a0e7b79": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d4207219-42a8-4f9b-98c0-dd78a134c7f4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_e391ab380bd0fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e70dd81f-7da0-4950-b83d-5ea57630b76d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
