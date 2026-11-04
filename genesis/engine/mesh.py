@@ -550,7 +550,7 @@ class Mesh(RBC, serialization.SerializationMixin):
 
             color_textures = None
             if color_image is not None:
-                color_textures_key = (get_hashkey(color_image, color_image.shape, color_image.dtype.str), color_factor)
+                color_textures_key = get_hashkey(color_image, color_factor)
                 color_textures = _COLOR_TEXTURES_CACHE.find(color_textures_key)
             if color_textures is None:
                 color_texture = mu.create_texture(color_image, color_factor, "srgb")

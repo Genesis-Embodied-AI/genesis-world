@@ -1,16 +1,15 @@
 import os
 from functools import cached_property
-from typing import Annotated, Hashable, Iterable, Literal, Sequence, cast
+from typing import Annotated, Iterable, Literal, Sequence, cast
 
 import numpy as np
 
 from PIL import Image
-from pydantic import BeforeValidator, Field, PrivateAttr, computed_field, model_validator
+from pydantic import BeforeValidator, Field, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
 from genesis.typing import LaxFArrayType, LaxUnitIntervalArrayType, NDArrayType, UnitIntervalArrayType
-from genesis.utils.cache import get_hashkey
 from genesis.utils.serialization import Exporting, Loading, SerializationMixin
 
 from .options import Options
@@ -55,11 +54,6 @@ class Texture(Options):
     def requires_uv(self) -> bool:
         raise NotImplementedError
 
-    @property
-    def hashkey(self) -> Hashable:
-        """Key of the content of the texture, shared by the textures holding the same colors."""
-        raise NotImplementedError
-
 
 class ColorTexture(Texture):
     """
@@ -99,10 +93,6 @@ class ColorTexture(Texture):
     def requires_uv(self) -> bool:
         return False
 
-    @property
-    def hashkey(self) -> Hashable:
-        return self.color
-
 
 class ImageTexture(Texture, SerializationMixin):
     """
@@ -127,9 +117,6 @@ class ImageTexture(Texture, SerializationMixin):
     image_array: NDArrayType | None
     image_color: UnitIntervalArrayType
     encoding: Annotated[Literal["srgb", "linear"], BeforeValidator(lambda e: str(e).lower())] = "srgb"
-
-    # Digest of the image array it was computed from, computed again once another array replaces it
-    _image_digest: tuple[np.ndarray, str] | None = PrivateAttr(default=None)
 
     def __init__(
         self,
@@ -246,16 +233,6 @@ class ImageTexture(Texture, SerializationMixin):
             return np.ones(3, dtype=np.float16)
         return cast(np.ndarray, (np.mean(self.image_array, axis=(0, 1), dtype=np.float32) / 255).astype(np.float16))
 
-    @property
-    def hashkey(self) -> Hashable:
-        # An HDR image is never loaded, so its file stands in for its pixels
-        if self.image_array is None:
-            return (self.image_path, self.image_color, self.encoding)
-        if self._image_digest is None or self._image_digest[0] is not self.image_array:
-            image = self.image_array
-            self._image_digest = (image, get_hashkey(image, image.shape, image.dtype.str))
-        return (self._image_digest[1], self.image_color, self.encoding)
-
     def check_dim(self, dim: int) -> Texture | None:
         if self.image_array is not None:
             if self.channel > dim:
@@ -278,7 +255,7 @@ class ImageTexture(Texture, SerializationMixin):
             return
         # The cutoff applies to the texel alpha scaled by the material's alpha factor, which image_color holds
         self.image_array = np.where(self.image_array * self.image_color >= 255.0 * cutoff, 255, 0).astype(np.uint8)
-        self.image_color = (1.0,) * len(self.image_color)
+        self.image_color = np.ones_like(self.image_color)
 
     def export(self, exporting: Exporting) -> dict | None:
         """Return the pixels of the image and how they are read, or None where a file can hold none of it.
@@ -414,10 +391,6 @@ class BatchTexture(Texture):
     @cached_property
     def requires_uv(self) -> bool:
         return any(texture is not None and texture.requires_uv for texture in self.textures)
-
-    @property
-    def hashkey(self) -> Hashable:
-        return tuple([None if texture is None else texture.hashkey for texture in self.textures])
 
     def check_dim(self, dim: int) -> "BatchTexture":
         return BatchTexture(

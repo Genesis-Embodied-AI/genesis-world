@@ -8,7 +8,7 @@ from pydantic import Field, StrictBool, field_validator, model_validator
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
 from genesis.utils import mesh as mu
-from genesis.utils.cache import OwnedCache
+from genesis.utils.cache import OwnedCache, get_hashkey
 
 from .misc import FoamOptions
 from .options import Options
@@ -254,7 +254,7 @@ def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | No
 
 def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
     input_textures = [texture for texture in (color_texture, opacity_texture) if texture is not None]
-    cache_key = (*[None if texture is None else texture.hashkey for texture in (color_texture, opacity_texture)], batch)
+    cache_key = get_hashkey(color_texture, opacity_texture, batch)
     result = _RGBA_CACHE.find(cache_key)
     if result is None:
         all_textures = []

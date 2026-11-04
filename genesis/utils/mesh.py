@@ -314,7 +314,7 @@ def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
             assert texture.image_array.dtype == np.uint8
             material = _TEXTURE_MATERIALS_CACHE.get(
                 texture,
-                (weakref.ref(texture), emission.hashkey if emissive_kwargs else None),
+                (weakref.ref(texture), get_hashkey(emission) if emissive_kwargs else None),
                 lambda: (
                     trimesh.visual.material.PBRMaterial(
                         baseColorTexture=Image.fromarray(texture.image_array),
