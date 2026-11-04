@@ -101,10 +101,10 @@ An entity is constructed from typed options, whose class decides the kind of ent
 scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))  # rigid
 scene.add_entity(options=gs.entities.Kinematic(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))))
 scene.add_entity(options=gs.entities.MPM(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.Elastic()))
-scene.add_entity(options=gs.entities.SPH(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), solver_options=gs.options.SPHEntitySolverOptions(sampler="pbs")))
+scene.add_entity(options=gs.entities.SPH(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), solver_options=gs.options.SPHEntitySolverOptions(sampler="regular")))
 ```
 
-Rigid and kinematic entity options hold `links`, rigid ones `geoms` as well, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a geom, the coupling and the visual raycasting of a link, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms.
+Rigid and kinematic entity options hold `links` and `vgeoms`, rigid ones `geoms` as well, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VGeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom`, `gs.options.VGeom` or `gs.options.Vertex`. They carry only the settings the solver or the visualizer already holds at that granularity: the density and friction of a collision geom, the coupling and the visual raycasting of a link, the surface of a link or a visual geom, and the fixed vertices of an FEM entity. A geom or visual geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms. A `VGeomIndex` counts the visual geoms of a link as its asset splits them.
 
 ```python
 scene.add_entity(
