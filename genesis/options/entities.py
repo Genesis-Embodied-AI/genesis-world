@@ -27,13 +27,10 @@ if TYPE_CHECKING:
         HybridEntity,
         KinematicEntity,
         MPMEntity,
-        PBD2DEntity,
-        PBD3DEntity,
-        PBDFreeParticleEntity,
-        PBDParticleEntity,
         RigidEntity,
         SPHEntity,
     )
+    from genesis.engine.entities.pbd_entity import PBDBaseEntity
 
 
 DEFAULT_SAMPLER = (
@@ -225,8 +222,6 @@ class RigidEntitySolverOptions(_FrozenOptions):
     def _check_consistency(self) -> "RigidEntitySolverOptions":
         if self.sdf_min_res > self.sdf_max_res:
             gs.raise_exception("'sdf_min_res' must be smaller than or equal to 'sdf_max_res'.")
-        if self.coup_restitution > 0.0:
-            gs.logger.warning("Non-zero 'coup_restitution' could lead to instability. Use with caution.")
         return self
 
 

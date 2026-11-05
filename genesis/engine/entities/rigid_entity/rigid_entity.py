@@ -1522,6 +1522,9 @@ class RigidEntity(KinematicEntity):
         self._visualize_contact: bool = desc.visualize_contact
         # How the IPC coupler simulates the entity (see 'RigidEntitySolverOptions.coup_type')
         self._coup_type = desc.options.solver_options.coup_type
+        # Warned here rather than by the options, whose validators run again whenever the options are handed over
+        if desc.options.solver_options.coup_restitution > 0.0:
+            gs.logger.warning("Non-zero 'coup_restitution' could lead to instability. Use with caution.")
 
         self._batch_fixed_verts: bool = desc.morphs[0].batch_fixed_verts
 
