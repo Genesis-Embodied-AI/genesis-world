@@ -445,6 +445,7 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
     # with the scene. No array of the walk is one of theirs, and each is reached once
     arrays_replaced = [array() for array in arrays_built if array() is not None]
     assert not {id(array) for array in arrays_replaced} & {id(array) for array in arrays}
+    assert all(array.arr is None for array in arrays_replaced)
     assert len({id(array) for array in arrays}) == len(arrays)
 
     scene.destroy()
@@ -455,12 +456,14 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
 @pytest.mark.precision("64")
 @pytest.mark.cpu_threads(1)
 @pytest.mark.parametrize("backend", [gs.cpu])
-def test_grow_grid_and_matrix_matches_full_capacity(monkeypatch, show_viewer):
-    positions, velocities, capacities = [], [], []
-    for max_blocks, max_triplets in ((1, 1), (512, 100_000)):
-        monkeypatch.setattr(
-            "genesis.engine.solvers.mpm_solver.initial_capacities", lambda *_, **__: (max_blocks, max_triplets)
-        )
+@pytest.mark.parametrize("has_rigid_dofs", [True, False])
+def test_grow_grid_and_matrix_matches_full_capacity(has_rigid_dofs, monkeypatch, show_viewer):
+    positions, velocities, capacities, capacities_built = [], [], [], []
+    for max_blocks, max_triplets in ((None, None), (2048, 500_000)):
+        if max_blocks is not None:
+            monkeypatch.setattr(
+                "genesis.engine.solvers.mpm_solver.initial_capacities", lambda *_, **__: (max_blocks, max_triplets)
+            )
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=1e-2,
@@ -483,7 +486,19 @@ def test_grow_grid_and_matrix_matches_full_capacity(monkeypatch, show_viewer):
                 sampler="regular",
             ),
         )
+        if has_rigid_dofs:
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 0.0, 0.15),
+                    size=(0.05, 0.05, 0.05),
+                ),
+            )
         scene.build(n_envs=2)
+        # Spreading the particles grows the data, whose replaced arrays are held on purpose
+        arrays_held = [*scene.sim.newton_solver.data]
+        arrays = {item.name: item.array for item in arrays_held}
+        capacities_built.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
+        mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
         for _ in range(3):
             scene.step()
         positions.append(mpm_box.get_particles_pos().clone())
@@ -492,8 +507,8 @@ def test_grow_grid_and_matrix_matches_full_capacity(monkeypatch, show_viewer):
         capacities.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
         scene.destroy()
 
-    assert capacities[0][0] > 1 and capacities[0][1] > 1
-    assert capacities[1] == (512, 100_000)
+    assert capacities[0][0] > capacities_built[0][0] and capacities[0][1] > capacities_built[0][1]
+    assert capacities[1] == (2048, 500_000)
     assert_equal(positions[0], positions[1])
     assert_equal(velocities[0], velocities[1])
 
