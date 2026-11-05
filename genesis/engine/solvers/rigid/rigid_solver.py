@@ -1426,6 +1426,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         `finish_deferred_solve`, then `integrate_deferred_substep` once it is over."""
         self._is_constraint_solve_deferred = True
 
+    @property
+    def has_coupled_terrain(self) -> bool:
+        """Whether a Rigid geom that couples with MPM is a terrain.
+
+        Rigid's collider sets its own has_terrain only for a terrain in a Rigid collision pair, so it is unset when the
+        terrain touches particles alone, and the SDF queries would then leave out the gradient of the terrain."""
+        return any(geom.type == gs.GEOM_TYPE.TERRAIN and geom.needs_coup for geom in self.geoms)
+
     def build_newton_participant(self, is_member: bool = True) -> tuple[NewtonHost, RigidNewtonParticipant]:
         """Build the participant of Rigid's dofs in the joint Newton solve and hand its constraint solve over to it.
 

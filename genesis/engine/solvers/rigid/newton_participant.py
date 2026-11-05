@@ -28,14 +28,9 @@ class RigidNewtonConfig(StaticConfig):
     rigid_batch_links_info: bool
     # Rigid has constraint rows, which join the solve
     has_rigid_rows: bool
-
-
-def has_coupled_terrain(rigid_solver) -> bool:
-    """Whether a Rigid geom that couples with MPM is a terrain.
-
-    Rigid's collider sets its own has_terrain only for a terrain in a Rigid collision pair, so it is unset when the
-    terrain touches particles alone, and the SDF queries would then leave out the gradient of the terrain."""
-    return any(geom.type == gs.GEOM_TYPE.TERRAIN and geom.needs_coup for geom in rigid_solver.geoms)
+    # A coupled geom is a terrain (see RigidSolver.has_coupled_terrain). This config stands in for Rigid's collider
+    # configuration in the signed distance field (SDF) queries, which read this one switch of it.
+    has_terrain: bool
 
 
 @qd.data_oriented
@@ -98,10 +93,14 @@ class RigidNewtonData:
 
 @qd.data_oriented
 class RigidNewtonParticipant:
-    """Device stages of Rigid's dofs in the joint solve, which own the Rigid data of the solve."""
+    """Device stages of Rigid's dofs in the joint solve, which own the Rigid data of the solve.
+
+    It is the one place that selects the Rigid arrays the couplings read, and `coupled_geoms_idx` lists the geoms the
+    couplings act on."""
 
     def __init__(self, rigid, n_envs: int):
         self.rigid_data = RigidNewtonData(rigid.n_dofs_, rigid.n_links, n_envs)
+        self.coupled_geoms_idx = np.array([geom.idx for geom in rigid.geoms if geom.needs_coup], dtype=gs.np_int)
         self.dyn_state = rigid.dyn_state
         self.constraint_state = rigid.constraint_solver.constraint_state
         self.dyn_info = rigid.dyn_info
@@ -111,8 +110,13 @@ class RigidNewtonParticipant:
         self.config = RigidNewtonConfig(
             rigid_batch_links_info=rigid._options.batch_links_info,
             has_rigid_rows=not rigid._disable_constraint,
+            has_terrain=rigid.has_coupled_terrain,
         )
         self.params = RigidNewtonParams(rigid.substep_dt)
+
+    @property
+    def geoms_init_AABB(self):
+        return self.rigid_info.geoms_init_AABB
 
     @qd.func(requires_top_level=True)
     def func_evaluate(self, f: int):

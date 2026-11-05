@@ -7,6 +7,8 @@ participants of MPM and FEM (see FEMSolver.build_newton_participant).
 
 import quadrants as qd
 
+from genesis.engine.solvers.fem_newton import FemNewtonParticipant
+from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_solver import NewtonHost
 
 from . import mpm_fem_func
@@ -17,43 +19,45 @@ class MpmFemContact:
     """Device stages of the MPM-FEM contact rows in the joint solve: their share of the FEM gradient, their cross terms
     in both blocks of the operator, and the contact point displacement at every iterate."""
 
-    def __init__(self, mpm, fem, query):
-        self.particles = mpm.particles
-        self.particles_info = mpm.particles_info
-        self.grid = mpm.grid
-        self.newton = mpm.newton
-        self.linear = mpm.linear
-        self.params = mpm.params
-        self.fem = fem.fem
+    def __init__(self, mpm: MpmNewtonParticipant, fem: FemNewtonParticipant, query: mpm_fem_func.FemTriangleQuery):
+        self.mpm = mpm
+        self.fem = fem
         self.query = query
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        mpm_fem_func.func_fem_contact_gradient(self.grid, self.newton, self.fem, self.params)
+        mpm_fem_func.func_fem_contact_gradient(self.mpm.grid, self.mpm.newton, self.fem, self.mpm.params)
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
         mpm_fem_func.func_fem_contact_matvec(
-            f, self.particles, self.grid, self.newton, self.linear, self.fem, pcg_scalars, self.params
+            f,
+            self.mpm.particles,
+            self.mpm.grid,
+            self.mpm.newton,
+            self.mpm.linear,
+            self.fem,
+            pcg_scalars,
+            self.mpm.params,
         )
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
-        mpm_fem_func.func_fem_point_disp(f, self.grid, self.newton, self.fem, self.params)
+        mpm_fem_func.func_fem_point_disp(f, self.mpm.grid, self.mpm.newton, self.fem, self.mpm.params)
 
 
 @qd.kernel
 def kernel_fem_rows(f: int, contact: qd.template()):
     mpm_fem_func.func_build_fem_rows(
         f,
-        contact.params.substep_dt[()],
-        contact.particles,
-        contact.grid,
-        contact.newton,
+        contact.mpm.params.substep_dt[()],
+        contact.mpm.particles,
+        contact.mpm.grid,
+        contact.mpm.newton,
         contact.fem,
         contact.query,
-        contact.particles_info,
-        contact.params,
+        contact.mpm.particles_info,
+        contact.mpm.params,
     )
     contact.func_after_step(f)
 

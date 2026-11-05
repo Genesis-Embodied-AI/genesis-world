@@ -172,10 +172,42 @@ def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(
 
 @qd.data_oriented
 class FemNewtonParticipant:
-    """Device stages of the FEM vertex positions in the joint solve."""
+    """Device stages of the FEM vertex positions in the joint solve.
+
+    It is the one place that selects the FEM arrays the couplings read. The arrays are properties of the solver the
+    participant holds, so that the walk over the data of the NewtonSolver (see iter_data_oriented) stops at the solver,
+    which owns them."""
 
     def __init__(self, fem):
         self.fem = fem
+
+    @property
+    def n_surfaces(self):
+        return self.fem.n_surfaces
+
+    @property
+    def surface(self):
+        return self.fem.surface
+
+    @property
+    def elements_v(self):
+        return self.fem.elements_v
+
+    @property
+    def elements_i(self):
+        return self.fem.elements_i
+
+    @property
+    def elements_v_info(self):
+        return self.fem.elements_v_info
+
+    @property
+    def elements_v_energy(self):
+        return self.fem.elements_v_energy
+
+    @property
+    def pcg_state_v(self):
+        return self.fem.pcg_state_v
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int):

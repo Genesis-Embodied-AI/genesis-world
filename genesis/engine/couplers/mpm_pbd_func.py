@@ -24,6 +24,7 @@ from genesis.engine.solvers.mpm_func import (
     particle_of_sorted,
     pyramid_dirs,
 )
+from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_solver import NewtonHost
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
@@ -59,11 +60,11 @@ class PbdParticleQuery:
     """The linear bounding volume hierarchy (LBVH) over the PBD particles of every environment, in PBD's reordered
     layout (see genesis.engine.bvh).
 
-    It also holds the data the filter of its queries reads: the PBD solver, the values of the MPM kernels `params`, the
-    values of the contact rows `contact`, and the query point and nearest PBD particle of each sorted MPM particle in
-    `newton`."""
+    It also holds the data the filter of its queries reads: the PBD participant, the values of the MPM kernels `params`,
+    the values of the contact rows `contact`, and the query point and nearest PBD particle of each sorted MPM particle
+    in `newton`."""
 
-    def __init__(self, pbd, newton, params, contact: PbdContactParams, n_envs):
+    def __init__(self, pbd: PbdNewtonParticipant, newton, params, contact: PbdContactParams, n_envs):
         self.pbd = pbd
         self.newton = newton
         self.params = params
@@ -415,43 +416,45 @@ class MpmPbdContact:
     """Device stages of the MPM-PBD contact rows in the joint solve: their share of the PBD gradient, their cross terms
     in both blocks of the operator, and the PBD particle displacement at every iterate."""
 
-    def __init__(self, mpm, pbd_participant: PbdNewtonParticipant, query: PbdParticleQuery):
-        self.particles = mpm.particles
-        self.particles_info = mpm.particles_info
-        self.grid = mpm.grid
-        self.newton = mpm.newton
-        self.linear = mpm.linear
-        self.params = mpm.params
-        self.pbd_data = pbd_participant.pbd_data
+    def __init__(self, mpm: MpmNewtonParticipant, pbd: PbdNewtonParticipant, query: PbdParticleQuery):
+        self.mpm = mpm
+        self.pbd = pbd
         self.query = query
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        func_pbd_contact_gradient(self.grid, self.newton, self.pbd_data, self.params)
+        func_pbd_contact_gradient(self.mpm.grid, self.mpm.newton, self.pbd.pbd_data, self.mpm.params)
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
         func_pbd_contact_matvec(
-            f, self.particles, self.grid, self.newton, self.linear, self.pbd_data, pcg_scalars, self.params
+            f,
+            self.mpm.particles,
+            self.mpm.grid,
+            self.mpm.newton,
+            self.mpm.linear,
+            self.pbd.pbd_data,
+            pcg_scalars,
+            self.mpm.params,
         )
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
-        func_pbd_point_disp(self.grid, self.newton, self.pbd_data.pbd, self.params)
+        func_pbd_point_disp(self.mpm.grid, self.mpm.newton, self.pbd, self.mpm.params)
 
 
 @qd.kernel
 def kernel_pbd_rows(f: int, contact: qd.template()):
     func_build_pbd_rows(
         f,
-        contact.params.substep_dt[()],
-        contact.particles,
-        contact.grid,
-        contact.newton,
-        contact.pbd_data.pbd,
+        contact.mpm.params.substep_dt[()],
+        contact.mpm.particles,
+        contact.mpm.grid,
+        contact.mpm.newton,
+        contact.pbd,
         contact.query,
-        contact.particles_info,
-        contact.params,
+        contact.mpm.particles_info,
+        contact.mpm.params,
     )
     contact.func_after_step(f)
 

@@ -36,6 +36,7 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
+from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 from genesis.utils.array_class import (
     BVHQueryResults,
     ConstraintState,
@@ -146,16 +147,14 @@ def geom_normal(
 class RigidGeomQuery:
     """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment.
 
-    The tree comes from genesis.engine.bvh. The query also holds the data read by the filter of its queries: the geoms,
-    and the query point and nearest geom of each sorted particle in `newton`. An inactive query holds no geom and skips
-    the build."""
+    The tree comes from genesis.engine.bvh. The query also holds the data read by the filter of its queries: the geoms
+    of the Rigid participant `rigid`, and the query point and nearest geom of each sorted particle in `newton`."""
 
-    def __init__(self, rigid, newton, n_envs, is_active):
-        coupled_geoms = [geom.idx for geom in rigid.geoms if geom.needs_coup] if is_active else []
-        self.n_coupled = len(coupled_geoms)
+    def __init__(self, rigid: RigidNewtonParticipant, newton, n_envs: int):
+        self.n_coupled = len(rigid.coupled_geoms_idx)
         self.coupled_geoms = qd.ndarray(gs.qd_int, shape=(max(self.n_coupled, 1),))
         if self.n_coupled:
-            self.coupled_geoms.from_numpy(np.array(coupled_geoms, dtype=gs.np_int))
+            self.coupled_geoms.from_numpy(rigid.coupled_geoms_idx)
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(self.n_coupled, 1), is_active=self.n_coupled > 0)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -166,8 +165,8 @@ class RigidGeomQuery:
         self.geoms_init_AABB = rigid.geoms_init_AABB
         self.links_state = rigid.dyn_state.links
         self.links_info = rigid.dyn_info.links
-        self.batch_links_info = rigid._options.batch_links_info
-        self.sdf_info = rigid.collider.collider_info.sdf
+        self.batch_links_info = rigid.config.rigid_batch_links_info
+        self.sdf_info = rigid.sdf_info
         self.newton = newton
 
     def build(self, params):

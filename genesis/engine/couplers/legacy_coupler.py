@@ -98,9 +98,6 @@ class LegacyCoupler(RBC):
     def _resolve_mpm_couplings(self) -> None:
         """Decide which solvers the implicit MPM solver couples with, each pair behind its own option, and check that
         each coupled solver supports it."""
-        # Imported here to avoid a circular dependency, as in _build_mpm_couplings
-        from genesis.engine.solvers.rigid.newton_participant import has_coupled_terrain
-
         mpm, rigid, fem = self.mpm_solver, self.rigid_solver, self.fem_solver
         options = self.options
         if mpm.is_active and rigid.is_active and options.rigid_mpm:
@@ -122,7 +119,7 @@ class LegacyCoupler(RBC):
             mpm.is_active and rigid.is_active and options.rigid_mpm and any(geom.needs_coup for geom in rigid.geoms)
         )
         self._mpm_rigid_dofs = self._mpm_rigid and rigid.n_dofs > 0
-        if self._mpm_rigid and self.sim.options.requires_grad and has_coupled_terrain(rigid):
+        if self._mpm_rigid and self.sim.options.requires_grad and rigid.has_coupled_terrain:
             gs.raise_exception(
                 "Differentiable simulation with the implicit MPM solver does not support the contact with a Rigid "
                 "terrain yet."
@@ -155,6 +152,7 @@ class LegacyCoupler(RBC):
             PbdContactParams,
             PbdParticleQuery,
         )
+        from .mpm_rigid_func import RigidGeomQuery
         from .mpm_rigid_newton import MpmRigidContact, MpmRigidContactHost
         from .mpm_sph_func import MpmSphBoundary
 
@@ -172,7 +170,8 @@ class LegacyCoupler(RBC):
             rigid_host, rigid_participant = rigid.build_newton_participant(is_member=self._mpm_rigid_dofs)
             if self._mpm_rigid_dofs:
                 participants.append((rigid_host, rigid_participant))
-            contact = MpmRigidContact(mpm_participant, rigid, rigid_participant.rigid_data, n_envs)
+            query = RigidGeomQuery(rigid_participant, mpm_participant.newton, n_envs)
+            contact = MpmRigidContact(mpm_participant, rigid_participant, query)
             # Without Rigid dofs the cross terms of the rows vanish, and the coupling runs its host stages alone
             device = contact if self._mpm_rigid_dofs else None
             couplings.append((MpmRigidContactHost(contact, self._mpm_rigid_dofs), device))
@@ -182,7 +181,7 @@ class LegacyCoupler(RBC):
             fem_host, fem_participant = fem.build_newton_participant()
             participants.append((fem_host, fem_participant))
             query = FemTriangleQuery(
-                fem, mpm_participant.newton, mpm_participant.params, FemContactParams(mpm.dx), n_envs
+                fem_participant, mpm_participant.newton, mpm_participant.params, FemContactParams(mpm.dx), n_envs
             )
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((MpmFemContactHost(contact), contact))
@@ -190,7 +189,9 @@ class LegacyCoupler(RBC):
             pbd_contact = PbdContactParams(mpm.dx)
             pbd_host, pbd_participant = pbd.build_newton_participant()
             participants.append((pbd_host, pbd_participant))
-            query = PbdParticleQuery(pbd, mpm_participant.newton, mpm_participant.params, pbd_contact, n_envs)
+            query = PbdParticleQuery(
+                pbd_participant, mpm_participant.newton, mpm_participant.params, pbd_contact, n_envs
+            )
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((MpmPbdContactHost(contact), contact))
             pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))

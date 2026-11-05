@@ -230,10 +230,34 @@ def func_pbd_finish(dt: float, pbd_data: qd.template(), control: qd.template()):
 
 @qd.data_oriented
 class PbdNewtonParticipant:
-    """Device stages of the PBD end positions in the joint solve, which own the PBD data of the solve."""
+    """Device stages of the PBD end positions in the joint solve, which own the PBD data of the solve.
+
+    It is the one place that selects the PBD arrays the couplings read, the particles in PBD's reordered layout. They
+    are properties of the solver in `pbd_data`, so that the walk over the data of the NewtonSolver (see
+    iter_data_oriented) stops at the solver, which owns them."""
 
     def __init__(self, pbd, n_envs: int):
         self.pbd_data = PbdNewtonData(pbd, n_envs)
+
+    @property
+    def n_particles(self):
+        return self.pbd_data.pbd.n_particles
+
+    @property
+    def particle_radius(self):
+        return self.pbd_data.pbd.particle_radius
+
+    @property
+    def particles_reordered(self):
+        return self.pbd_data.pbd.particles_reordered
+
+    @property
+    def particles_ng_reordered(self):
+        return self.pbd_data.pbd.particles_ng_reordered
+
+    @property
+    def particles_info_reordered(self):
+        return self.pbd_data.pbd.particles_info_reordered
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int):
