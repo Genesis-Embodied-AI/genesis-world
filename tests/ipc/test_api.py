@@ -225,9 +225,6 @@ def test_collision_delegation_ipc_vs_rigid(coup_type, enable_rigid_ground_contac
 
     plane = scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=False,
-        ),
     )
 
     # Non-IPC box — always handled by rigid solver
