@@ -2140,10 +2140,11 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
 
 @nb.jit(nopython=True, cache=True)
 def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    if isinstance(theta, (float, np.float32, np.float64)):
+    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+    if isinstance(cos_theta, (float, np.float32, np.float64)):
         assert axis.ndim == 1
     else:
-        assert axis.ndim - 1 == theta.ndim
+        assert axis.ndim - 1 == cos_theta.ndim
     if out is None:
         out_ = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
     else:
@@ -2152,9 +2153,8 @@ def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray, out: np.ndarray | None 
 
     axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
     axis = axis / axis_norm
-    if not isinstance(theta, (float, np.float32, np.float64)):
-        theta = theta[..., None]
-    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+    if not isinstance(cos_theta, (float, np.float32, np.float64)):
+        cos_theta, sin_theta = cos_theta[..., None], sin_theta[..., None]
     cos1_axis = (1.0 - cos_theta) * axis
     sin_axis = sin_theta * axis
 
