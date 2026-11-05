@@ -19,6 +19,8 @@ from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_q
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+from .fem_newton import FemNewtonHost, FemNewtonParticipant
+from .newton_solver import NewtonHost
 
 
 @qd.data_oriented
@@ -37,7 +39,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._floor_height = options.floor_height
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
-        # Whether the NewtonSolver runs the implicit substep (see defer_solve)
+        # Whether the NewtonSolver runs the implicit substep (see build_newton_participant)
         self._is_solve_deferred = False
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
@@ -986,10 +988,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def defer_solve(self):
-        """Leave the implicit solve of every substep to the NewtonSolver, which solves it jointly with the solvers
-        coupled with FEM (see FemNewtonHost)."""
+    def build_newton_participant(self) -> tuple[NewtonHost, FemNewtonParticipant]:
+        """Build the participant of the FEM vertex positions in the joint Newton solve and hand its implicit solve over
+        to it.
+
+        The joint solve then replaces the implicit solve of every substep, which solves it jointly with the solvers
+        coupled with FEM (see FemNewtonHost). The caller registers the returned host and participant."""
+        participant = FemNewtonParticipant(self)
         self._is_solve_deferred = True
+        return FemNewtonHost(self, participant), participant
 
     def substep_pre_coupling(self, f):
         if self.is_active:

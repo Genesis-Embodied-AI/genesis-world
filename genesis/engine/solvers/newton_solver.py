@@ -328,16 +328,18 @@ class NewtonSolver(Solver):
         self._participant_hosts = []
         self._coupling_hosts = []
         self._participants = None
+        self._host_only_devices = ()
         self._is_loop_graph = options.graph == "newton"
         self._has_coupling_devices = False
         self._has_warned_adjoint_projection = False
 
-    def register(self, participants, couplings):
+    def register(self, participants, couplings, host_only_devices=()):
         """Register the participants of the Newton solve and the couplings between them, each as a pair of its host
         object and its device object, which activates the solver.
 
         A coupling acting on one participant alone, whose cross terms vanish, gives None as its device object and runs
-        its host stages only."""
+        its host stages only. `host_only_devices` lists the device objects of these couplings, whose arrays the solver
+        frees with its own (see `data`)."""
         options = self._options
         self.control = NewtonControl(
             gs.qd_float,
@@ -366,6 +368,7 @@ class NewtonSolver(Solver):
             participant_group("NewtonCouplings", coupling_devices),
         )
         self._has_coupling_devices = bool(coupling_devices)
+        self._host_only_devices = tuple(host_only_devices)
 
     @property
     def is_active(self):
@@ -381,7 +384,10 @@ class NewtonSolver(Solver):
         if self._participants is not None:
             yield from iter_data_oriented("control", self.control, DataKind.SCRATCH)
             yield from iter_data_oriented("pcg_scalars", self.pcg_scalars, DataKind.SCRATCH)
-            yield from iter_data_oriented("participants", self._participants, DataKind.SCRATCH)
+            # One walk over both, so that an array the host-only devices share with the participants is yielded once
+            yield from iter_data_oriented(
+                "participants", (self._participants, self._host_only_devices), DataKind.SCRATCH
+            )
 
     @property
     def _hosts(self):

@@ -99,7 +99,7 @@ class LegacyCoupler(RBC):
         """Decide which solvers the implicit MPM solver couples with, each pair behind its own option, and check that
         each coupled solver supports it."""
         # Imported here to avoid a circular dependency, as in _build_mpm_couplings
-        from .mpm_rigid_newton import has_coupled_terrain
+        from genesis.engine.solvers.rigid.newton_participant import has_coupled_terrain
 
         mpm, rigid, fem = self.mpm_solver, self.rigid_solver, self.fem_solver
         options = self.options
@@ -147,23 +147,15 @@ class LegacyCoupler(RBC):
         # Imported here to avoid a circular dependency: the couplings with MPM import the solvers, whose entities import
         # the couplers
         from .mpm_fem_func import FemContactParams, FemTriangleQuery
-        from .mpm_fem_newton import FemNewtonHost, FemNewtonParticipant, MpmFemContact, MpmFemContactHost
+        from .mpm_fem_newton import MpmFemContact, MpmFemContactHost
         from .mpm_pbd_func import (
             MpmParticleObstacles,
             MpmPbdContact,
             MpmPbdContactHost,
             PbdContactParams,
-            PbdNewtonHost,
-            PbdNewtonParticipant,
             PbdParticleQuery,
         )
-        from .mpm_rigid_newton import (
-            MpmRigidContact,
-            MpmRigidContactHost,
-            RigidNewtonData,
-            RigidNewtonHost,
-            RigidNewtonParticipant,
-        )
+        from .mpm_rigid_newton import MpmRigidContact, MpmRigidContactHost
         from .mpm_sph_func import MpmSphBoundary
 
         mpm = self.mpm_solver
@@ -171,25 +163,24 @@ class LegacyCoupler(RBC):
             return
         rigid, fem, pbd = self.rigid_solver, self.fem_solver, self.pbd_solver
         n_envs = self.sim._B
-        mpm_participant = mpm.newton_participant
-        participants = [(mpm, mpm_participant)]
+        mpm_host, mpm_participant = mpm.build_newton_participant()
+        participants = [(mpm_host, mpm_participant)]
         couplings = []
+        host_only_devices = []
         if self._mpm_rigid:
+            # Without Rigid dofs, the participant holds the Rigid data the rows read, and the solve leaves Rigid's own
+            rigid_host, rigid_participant = rigid.build_newton_participant(is_member=self._mpm_rigid_dofs)
             if self._mpm_rigid_dofs:
-                rigid_participant = RigidNewtonParticipant(rigid, n_envs)
-                rigid_data = rigid_participant.rigid_data
-                participants.append((RigidNewtonHost(rigid, rigid_participant), rigid_participant))
-                rigid.defer_constraint_solve()
-            else:
-                rigid_data = RigidNewtonData(rigid.n_dofs_, rigid.n_links, n_envs)
-            contact = MpmRigidContact(mpm_participant, rigid, rigid_data, n_envs)
+                participants.append((rigid_host, rigid_participant))
+            contact = MpmRigidContact(mpm_participant, rigid, rigid_participant.rigid_data, n_envs)
             # Without Rigid dofs the cross terms of the rows vanish, and the coupling runs its host stages alone
             device = contact if self._mpm_rigid_dofs else None
             couplings.append((MpmRigidContactHost(contact, self._mpm_rigid_dofs), device))
+            if device is None:
+                host_only_devices.append(contact)
         if self._mpm_fem:
-            fem_participant = FemNewtonParticipant(fem)
-            participants.append((FemNewtonHost(fem, fem_participant, self), fem_participant))
-            fem.defer_solve()
+            fem_host, fem_participant = fem.build_newton_participant()
+            participants.append((fem_host, fem_participant))
             query = FemTriangleQuery(
                 fem, mpm_participant.newton, mpm_participant.params, FemContactParams(mpm.dx), n_envs
             )
@@ -197,8 +188,8 @@ class LegacyCoupler(RBC):
             couplings.append((MpmFemContactHost(contact), contact))
         if self._mpm_pbd:
             pbd_contact = PbdContactParams(mpm.dx)
-            pbd_participant = PbdNewtonParticipant(pbd, n_envs)
-            participants.append((PbdNewtonHost(pbd_participant), pbd_participant))
+            pbd_host, pbd_participant = pbd.build_newton_participant()
+            participants.append((pbd_host, pbd_participant))
             query = PbdParticleQuery(pbd, mpm_participant.newton, mpm_participant.params, pbd_contact, n_envs)
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((MpmPbdContactHost(contact), contact))
@@ -206,7 +197,7 @@ class LegacyCoupler(RBC):
         if self._mpm_sph:
             self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.params, n_envs)
             self.sph_solver.set_boundary(self._sph_boundary)
-        self.sim.newton_solver.register(participants, couplings)
+        self.sim.newton_solver.register(participants, couplings, host_only_devices)
 
     def reset(self, envs_idx=None) -> None:
         if self._rigid_sph:

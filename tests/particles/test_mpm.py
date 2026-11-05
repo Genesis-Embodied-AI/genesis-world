@@ -377,7 +377,8 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
 
 
 @pytest.mark.required
-def test_destroy_frees_data(show_viewer):
+@pytest.mark.parametrize("has_rigid_dofs", [True, False])
+def test_destroy_frees_data(has_rigid_dofs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -400,21 +401,24 @@ def test_destroy_frees_data(show_viewer):
             sampler="regular",
         ),
     )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.15),
-            size=(0.05, 0.05, 0.05),
-        ),
-    )
+    if has_rigid_dofs:
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.15),
+                size=(0.05, 0.05, 0.05),
+            ),
+        )
     scene.build(n_envs=2)
     for _ in range(3):
         scene.step()
 
     # The data of the implicit step and of the joint Newton solve with Rigid, which kernels compiled for the scene keep
-    # referencing, are freed with the scene
+    # referencing, are freed with the scene, including the Rigid data read by the contact of a Rigid without dofs
     items = [*scene.sim.mpm_solver.data, *scene.sim.newton_solver.data]
     roots = {item.name.split(".")[0] for item in items}
     assert {"particles", "particles_info", "mpm_grid", "mpm_newton", "mpm_linear", "control", "participants"} <= roots
+    assert any(".rigid_data." in item.name for item in items)
+    assert any(".query." in item.name for item in items)
     arrays = [item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array for item in items]
     ndarrays = [array for array in arrays if isinstance(array, qd.Ndarray)]
     assert ndarrays

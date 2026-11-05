@@ -50,6 +50,7 @@ from ..kinematic_solver import (
     _offset_world_shift,
     _select_links_offset,
 )
+from ..newton_solver import NewtonHost
 from .abd.accessor import (
     ConstraintType,
     kernel_control_dofs_force,
@@ -146,6 +147,7 @@ from .constraint.solver import (
     func_resolve_post,
     func_solve_body,
 )
+from .newton_participant import RigidNewtonHost, RigidNewtonParticipant
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -1423,6 +1425,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         unknowns, writes the constraint solution (qacc, Jaref, active, efc_force, qfrc_constraint), calls
         `finish_deferred_solve`, then `integrate_deferred_substep` once it is over."""
         self._is_constraint_solve_deferred = True
+
+    def build_newton_participant(self, is_member: bool = True) -> tuple[NewtonHost, RigidNewtonParticipant]:
+        """Build the participant of Rigid's dofs in the joint Newton solve and hand its constraint solve over to it.
+
+        With `is_member`, the participant joins the solve, which runs the constraint solve of every substep (see
+        `defer_constraint_solve`). Without it, the participant only holds the Rigid data that a coupling reads, and the
+        substep keeps its own constraint solve. The caller registers the returned host and participant."""
+        participant = RigidNewtonParticipant(self, self._B)
+        if is_member:
+            self.defer_constraint_solve()
+        return RigidNewtonHost(self, participant), participant
 
     def finish_deferred_solve(self):
         """Update the accelerations and the contact forces from the constraint solution written by a solve coupled

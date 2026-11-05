@@ -6,7 +6,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import ErrorCode, LinksState
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
@@ -26,6 +25,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
+from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind, V, iter_data_oriented
 from genesis.utils.misc import (
     DeprecationError,
@@ -328,9 +328,12 @@ class MPMSolver(ParticleSolver):
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
         self._mpm_force_fields = MpmForceFields(self._ffs)
 
-        # The grid displacement is an unknown of the substep's Newton solve, which the coupler registers together with
-        # the participants MPM couples with and the couplings between them (see LegacyCoupler)
-        self.newton_participant = MpmNewtonParticipant(
+    def build_newton_participant(self) -> tuple["MPMSolver", MpmNewtonParticipant]:
+        """Build the participant of the grid displacement in the joint Newton solve, with this solver as its host.
+
+        The grid displacement is an unknown of the Newton solve of every substep, which the coupler registers together
+        with the participants MPM couples with and the couplings between them (see LegacyCoupler)."""
+        participant = MpmNewtonParticipant(
             self.particles,
             self.particles_info,
             self._mpm_materials,
@@ -339,6 +342,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_linear,
             self._mpm_params,
         )
+        return self, participant
 
     @property
     def params(self) -> MpmParams:

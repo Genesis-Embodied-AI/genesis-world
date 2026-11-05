@@ -20,7 +20,9 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.geom import SpatialHasher
 
+from .newton_solver import NewtonHost
 from .particle_solver import ParticleSolver
+from .pbd_newton import PbdNewtonHost, PbdNewtonParticipant
 
 if TYPE_CHECKING:
     from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
@@ -238,6 +240,14 @@ class PBDSolver(ParticleSolver):
             dtype=gs.qd_float, shape=(max(1, self._n_particles), self._B, COLLISION_NEIGHBORS)
         )
         self.collision_nbr_count = qd.field(dtype=gs.qd_int, shape=(max(1, self._n_particles), self._B))
+
+    def build_newton_participant(self) -> tuple[NewtonHost, PbdNewtonParticipant]:
+        """Build the participant of the PBD particle positions in the joint Newton solve.
+
+        The solve takes the end positions of the projection of PBD's own substep as the target of the particles'
+        inertia (see PbdNewtonHost). The caller registers the returned host and participant."""
+        participant = PbdNewtonParticipant(self, self._B)
+        return PbdNewtonHost(participant), participant
 
     def set_particle_obstacles(self, obstacles):
         """Make the PBD particles collide with the particles of another solver as immovable obstacles.

@@ -1,10 +1,6 @@
-"""Stages of the implicit finite element method (FEM) as a participant of the NewtonSolver, and of the contact rows of
-the material point method (MPM) with FEM as a coupling.
-
-The FEM unknown is the end-of-substep vertex position x, starting at the substep start. Its share of the joint energy is
-FEM's own incremental potential (inertia, elasticity and the linearized damping of its implicit solver) times dt^2, in
-the displacement units of the MPM energy. The joint solve replaces FEM's own solve and takes its preconditioned
-conjugate gradient (PCG) vectors: pcg_state_v.r, z, p, Ap and x, the solution, whose negative is the Newton direction.
+"""Stages of the contact rows of the material point method (MPM) with the implicit finite element method (FEM), the
+coupling of the joint Newton solve over the grid displacement and the FEM vertex positions (see fem_newton.py for the
+FEM unknown and its stages).
 
 An MPM particle gets penalty rows against the nearest FEM surface triangle, at its signed distance minus a contact
 thickness: the triangles have no volume of their own, and a coarse surface would otherwise let the material slip between
@@ -18,7 +14,6 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import BVHQueryResults
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
@@ -29,6 +24,7 @@ from genesis.engine.solvers.mpm_func import (
     particle_of_sorted,
     pyramid_dirs,
 )
+from genesis.utils.array_class import BVHQueryResults
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
@@ -346,14 +342,6 @@ def func_fem_contact_gradient(grid: qd.template(), newton: qd.template(), fem: q
 
 
 @qd.func(requires_top_level=True)
-def func_fem_factor(fem: qd.template()):
-    """FEM's preconditioner, the inverse of every vertex's diagonal block, once the contact rows added theirs."""
-    qd.loop_config(name="mpm_fem_factor")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.pcg_state_v[i_b, i_v].prec = fem.pcg_state_v[i_b, i_v].diag3x3.inverse()
-
-
-@qd.func(requires_top_level=True)
 def func_fem_contact_matvec(
     f: int,
     particles: MpmParticles,
@@ -383,144 +371,3 @@ def func_fem_contact_matvec(
             for k in qd.static(range(3)):
                 i_v = tri2v[k]
                 qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, bary[k] * h)
-
-
-# ============================================ Layer 1: the FEM block ============================================
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pcg_init(dt: float, fem: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
-    """The FEM part of the preconditioned conjugate gradient (PCG) start from 0: r = grad = -dt^2 force, solution and Ap
-    cleared.
-
-    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
-    qd.loop_config(name="mpm_fem_pcg_init")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.pcg_state_v[i_b, i_v].r = -dt * dt * fem.elements_v_energy[i_b, i_v].force
-        is_kept = False
-        if qd.static(is_adjoint):
-            is_kept = pcg_scalars.is_converged[i_b] != 0
-        if not is_kept:
-            fem.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
-        fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
-
-
-@qd.func(requires_top_level=True)
-def func_fem_precondition(dt: float, fem: qd.template()):
-    """z = M^-1 r by FEM's inverse 3x3 diagonal blocks, scaled to the joint energy.
-
-    A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contact rows leave it in
-    place."""
-    qd.loop_config(name="mpm_fem_precondition")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        z = (fem.pcg_state_v[i_b, i_v].prec @ fem.pcg_state_v[i_b, i_v].r) / (dt * dt)
-        if qd.static(fem._enable_vertex_constraints):
-            if fem.vertex_constraints.is_constrained[i_v, i_b]:
-                z = qd.Vector.zero(gs.qd_float, 3)
-        fem.pcg_state_v[i_b, i_v].z = z
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
-    """Set the first search direction p = z over the FEM vertices, and add r . z to rz."""
-    qd.loop_config(name="mpm_fem_pcg_init_direction")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z
-        qd.atomic_add(pcg_scalars.rz[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
-
-
-@qd.func(requires_top_level=True)
-def func_fem_matvec(dt: float, fem: qd.template()):
-    """Ap = dt^2 H p over the FEM vertices with FEM's own operator, before the FEM rows add their term."""
-    fem.compute_Ap()
-    qd.loop_config(name="mpm_fem_matvec_scale")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.pcg_state_v[i_b, i_v].Ap = dt * dt * fem.pcg_state_v[i_b, i_v].Ap
-
-
-@qd.func(requires_top_level=True)
-def func_fem_matvec_dot(fem: qd.template(), pcg_scalars: qd.template()):
-    """Add p . Ap over the FEM vertices to p . Ap, once Ap holds the whole joint operator."""
-    qd.loop_config(name="mpm_fem_matvec_dot")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pcg_update_xr(fem: qd.template(), pcg_scalars: qd.template()):
-    """Update the solution and the residual over the FEM vertices, x += alpha p and r -= alpha Ap."""
-    qd.loop_config(name="mpm_fem_pcg_update_xr")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[i_b] == 0:
-            alpha = pcg_scalars.alpha[i_b]
-            fem.pcg_state_v[i_b, i_v].x = fem.pcg_state_v[i_b, i_v].x + alpha * fem.pcg_state_v[i_b, i_v].p
-            fem.pcg_state_v[i_b, i_v].r = fem.pcg_state_v[i_b, i_v].r - alpha * fem.pcg_state_v[i_b, i_v].Ap
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pcg_dot_rz(fem: qd.template(), pcg_scalars: qd.template()):
-    """Add r . z over the FEM vertices to rz_new."""
-    qd.loop_config(name="mpm_fem_pcg_dot_rz")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pcg_direction(fem: qd.template(), pcg_scalars: qd.template()):
-    """Update the search direction p = z + beta p over the FEM vertices, and clear Ap."""
-    qd.loop_config(name="mpm_fem_pcg_direction")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
-        if pcg_scalars.is_converged[i_b] == 0:
-            beta = pcg_scalars.beta[i_b]
-            fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z + beta * fem.pcg_state_v[i_b, i_v].p
-
-
-@qd.func(requires_top_level=True)
-def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template()):
-    """The line-search start point, and the largest component of the step -x into the Newton measure."""
-    qd.loop_config(name="mpm_fem_start_line_search")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.linesearch_state_v[i_b, i_v].x_prev = fem.elements_v[f + 1, i_v, i_b].pos
-        step = fem.pcg_state_v[i_b, i_v].x
-        qd.atomic_max(control.max_disp[i_b], qd.max(qd.abs(step[0]), qd.abs(step[1]), qd.abs(step[2])))
-
-
-@qd.func(requires_top_level=True)
-def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
-    qd.loop_config(name="mpm_fem_step_forward")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        fem.elements_v[f + 1, i_v, i_b].pos = (
-            fem.linesearch_state_v[i_b, i_v].x_prev - control.alpha[i_b] * fem.pcg_state_v[i_b, i_v].x
-        )
-
-
-@qd.func(requires_top_level=True)
-def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(), is_trial: qd.template()):
-    """Add FEM's incremental potential at the end-of-substep positions, times dt^2, to the start or trial energy.
-
-    The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
-    the elements, at the positions of frame f + 1."""
-    dt_sq = dt * dt
-    damping_alpha_dt = fem._damping_alpha * fem._substep_dt
-    qd.loop_config(name="mpm_fem_energy_vertices")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
-        diff = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v_energy[i_b, i_v].inertia
-        energy = 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-        if qd.static(fem._damping_alpha > 0.0):
-            step = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v[f, i_v, i_b].pos
-            energy += 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * step.dot(step) * damping_alpha_dt
-        if is_trial:
-            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
-        else:
-            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
-    fem._func_compute_ele_energy(f)
-    qd.loop_config(name="mpm_fem_energy_elements")
-    for i_b, i_e in qd.ndrange(fem._B, fem.n_elements):
-        energy = fem.elements_el_energy[i_b, i_e].energy * fem.elements_i[i_e].V
-        if is_trial:
-            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
-        else:
-            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
