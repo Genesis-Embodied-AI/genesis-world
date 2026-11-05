@@ -76,6 +76,7 @@ class OffscreenRenderer(object):
         plane_reflection=False,
         split_envs=False,
         skip_markers=False,
+        env_idx=None,
     ):
         """Render a scene with the given set of flags.
 
@@ -137,7 +138,7 @@ class OffscreenRenderer(object):
         first_pass_done = False
         if rgb or depth or seg:
             flags |= RenderFlags.OFFSCREEN
-            retval = renderer.render(scene, flags, seg_node_map)
+            retval = renderer.render(scene, flags, seg_node_map, env_idx=env_idx)
             assert retval is not None
             first_pass_done = True
         else:
@@ -154,7 +155,9 @@ class OffscreenRenderer(object):
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True)
+            normal_arr, *_ = renderer.render(
+                scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True, env_idx=env_idx
+            )
             retval = (*retval, normal_arr)
 
             renderer._program_cache = old_cache

@@ -74,6 +74,10 @@ class Rasterizer(RBC):
 
         rgb_arr, depth_arr, seg_idxc_arr, normal_arr = None, None, None, None
         skip_markers = not camera.debug if isinstance(camera, Camera) else True
+        env_idx = None
+        if isinstance(camera, Camera) and camera.env_idx is not None and self._context.split_envs:
+            env_idx = self._context.rendered_envs_idx.index(camera.env_idx)
+            split_envs = True
         if self._offscreen:
             # Set the context
             self._renderer.make_current()
@@ -92,6 +96,7 @@ class Rasterizer(RBC):
                         plane_reflection=rgb and self._context.plane_reflection,
                         shadow=rgb and self._context.shadow,
                         skip_markers=skip_markers,
+                        env_idx=env_idx,
                     )
 
                 if segmentation:
@@ -107,6 +112,7 @@ class Rasterizer(RBC):
                         plane_reflection=False,
                         shadow=False,
                         skip_markers=skip_markers,
+                        env_idx=env_idx,
                     )
             finally:
                 # Unset the context
@@ -123,6 +129,7 @@ class Rasterizer(RBC):
                     seg=False,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    env_idx=env_idx,
                 )
 
             if segmentation:
@@ -135,6 +142,7 @@ class Rasterizer(RBC):
                     seg=True,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    env_idx=env_idx,
                 )
 
         if segmentation:

@@ -115,7 +115,7 @@ class Renderer(object):
     def point_size(self, value):
         self._point_size = float(value)
 
-    def render(self, scene, flags, seg_node_map=None, *, is_first_pass=True, force_skip_shadows=False):
+    def render(self, scene, flags, seg_node_map=None, *, is_first_pass=True, force_skip_shadows=False, env_idx=None):
         """Render a scene with the given set of flags.
 
         Parameters
@@ -163,17 +163,18 @@ class Renderer(object):
         if flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY or flags & RenderFlags.FLAT:
             flags &= ~RenderFlags.REFLECTIVE_FLOOR
 
-        if flags & RenderFlags.ENV_SEPARATE and flags & RenderFlags.OFFSCREEN:
-            n_envs = scene.n_envs
-            use_env_idx = True and scene.n_envs > 1
+        if env_idx is not None:
+            envs_idx = (env_idx,)
+            use_env_idx = False
+        elif flags & RenderFlags.ENV_SEPARATE and flags & RenderFlags.OFFSCREEN and scene.n_envs > 1:
+            envs_idx = range(scene.n_envs)
+            use_env_idx = True
         else:
-            n_envs = 1
+            envs_idx = (-1,)
             use_env_idx = False
 
         retval_list = None
-        for i in range(n_envs):
-            env_idx = i if use_env_idx else -1
-
+        for env_idx in envs_idx:
             # Render necessary shadow maps
             if not (force_skip_shadows or flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY):
                 for ln in scene.light_nodes:
