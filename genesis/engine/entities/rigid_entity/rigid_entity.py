@@ -2312,6 +2312,39 @@ class RigidEntity(KinematicEntity):
         self._solver.set_dofs_kv(kv, dofs_idx, envs_idx)
 
     @gs.assert_built
+    def set_dofs_ki(self, ki, dofs_idx_local=None, envs_idx=None):
+        """
+        Set the entity's dofs' integral gains, which add an integral term to the position and velocity controllers.
+
+        The integral term accumulates the control error over time, which removes the steady-state error that a constant
+        load such as gravity leaves: a dof under position control settles on its target instead of short of it by
+        `load / kp`, and a dof under velocity control reaches its target velocity instead of falling short of it by
+        `load / kv`. Under velocity control, the integral of the velocity error is the distance between the dof and
+        where its target velocity would have taken it, so a blocked dof pushes harder over time. The cost is overshoot
+        and slower settling, which grow with the gain. The accumulated error stops growing while the actuation force is
+        held at the limit of the force range of the dof, so a saturated actuator does not wind it up. Force control
+        ignores the gain.
+
+        The accumulated error restarts from zero when the scene is reset, and when the velocity of the dof is zeroed as
+        in the reset of an episode: by `zero_all_dofs_velocity`, by `set_dofs_velocity` without a velocity, and by
+        `set_pos`, `set_quat`, `set_qpos` and `set_dofs_position` with `zero_velocity=True` (their default), which zero
+        the velocity of every dof of the entity. Writing an explicit zero velocity keeps it. A simulation step taken
+        under another control mode or with a zero gain also clears it, so changing the mode or the gain back and forth
+        between two steps keeps it. The gain is non-negative, and zero by default.
+
+        Parameters
+        ----------
+        ki : array_like
+            The integral gains to set.
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        self._solver.set_dofs_ki(ki, dofs_idx, envs_idx)
+
+    @gs.assert_built
     def set_dofs_act_gain(self, act_gain, dofs_idx_local=None, envs_idx=None):
         """
         Set the actuator gain for the entity's dofs. Invalidates PD-reducibility.
@@ -2659,6 +2692,26 @@ class RigidEntity(KinematicEntity):
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_kv(dofs_idx, envs_idx)
+
+    @gs.assert_built
+    def get_dofs_ki(self, dofs_idx_local=None, envs_idx=None):
+        """
+        Get the integral gain (ki) for the entity's dofs used by the position and velocity controllers.
+
+        Parameters
+        ----------
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        ki : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+            The integral gain (ki) for the entity's dofs.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        return self._solver.get_dofs_ki(dofs_idx, envs_idx)
 
     @gs.assert_built
     def get_dofs_act_gain(self, dofs_idx_local=None, envs_idx=None):

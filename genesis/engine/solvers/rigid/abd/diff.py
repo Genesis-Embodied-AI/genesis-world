@@ -16,7 +16,7 @@ from .forward_dynamics import func_clear_coupling_wrench
 
 @qd.func
 def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor):
-    """Copy the integrated velocities and positions of every env to its state, unless one of them is not finite.
+    """Copy the integrated velocities, positions and control-error integrals of every env to its state, if finite.
 
     A 'nan' or an 'inf' raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env
     as it was so that the value does not propagate. Every velocity and position takes its own thread.
@@ -25,7 +25,11 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
     for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
         is_valid = True
         if i_dq < dyn_state.dofs.vel.shape[0]:
-            is_valid = qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b])
+            is_valid = (
+                qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b])
+                and qd_isfinite(dyn_state.dofs.ctrl_pos_err_int_next[i_dq, i_b])
+                and qd_isfinite(dyn_state.dofs.ctrl_vel_err_int_next[i_dq, i_b])
+            )
         if i_dq < rigid_info.qpos.shape[0]:
             is_valid = is_valid and qd_isfinite(rigid_info.qpos_next[i_dq, i_b])
         if not is_valid:
@@ -37,6 +41,8 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
         if (errno[i_b] & ErrorCode.INVALID_ACC_NAN) == 0:
             if i_dq < dyn_state.dofs.vel.shape[0]:
                 dyn_state.dofs.vel[i_dq, i_b] = dyn_state.dofs.vel_next[i_dq, i_b]
+                dyn_state.dofs.ctrl_pos_err_int[i_dq, i_b] = dyn_state.dofs.ctrl_pos_err_int_next[i_dq, i_b]
+                dyn_state.dofs.ctrl_vel_err_int[i_dq, i_b] = dyn_state.dofs.ctrl_vel_err_int_next[i_dq, i_b]
             if i_dq < rigid_info.qpos.shape[0]:
                 rigid_info.qpos[i_dq, i_b] = rigid_info.qpos_next[i_dq, i_b]
 

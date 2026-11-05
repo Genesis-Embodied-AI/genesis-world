@@ -251,6 +251,7 @@ def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, pre
     for entity in (pair.entity_ana, pair.entity_fd):
         entity.set_dofs_kp(4.0)
         entity.set_dofs_kv(0.8)
+        entity.set_dofs_ki(3.0)
     n_dofs = pair.entity_ana.n_dofs
     batch_shape = (n_envs,) if n_envs > 0 else ()
     inputs = [None] * 8
