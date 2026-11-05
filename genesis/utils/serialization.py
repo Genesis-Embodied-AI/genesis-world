@@ -263,9 +263,6 @@ def declared_schema(expect: dict) -> dict:
             declared = _unwrap_annotation(declarations.pop())
             # A declaration is reached through the arguments it is written with, so a list of morphs reaches Morph.
             declarations.extend(typing.get_args(declared))
-            # A literal declares the enumeration of its members.
-            if isinstance(declared, Enum):
-                declared = type(declared)
             if not isinstance(declared, type) or declared in seen:
                 continue
             seen.add(declared)
