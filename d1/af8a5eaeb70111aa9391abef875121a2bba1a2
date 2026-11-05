@@ -1,0 +1,29 @@
+genesis/utils/geom.py
+  s_d9f4fe65d43318::t_70f7eaa72887bc 2143-2144,2147,2156-2158,2203,2205
+tests/core/test_utils.py
+  s_c62ec9da443b15::t_0e7fff7f3507d2 365,402-410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1af8a5eaeb70111aa9391abef875121a2bba1a2",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_d9f4fe65d43318": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "28292a26-d879-43e5-9ff1-942148683501",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
