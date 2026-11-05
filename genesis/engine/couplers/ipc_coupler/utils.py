@@ -16,7 +16,6 @@ from uipc.core import Scene
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
-    from genesis.options.entities import CoupType
 
 
 def has_articulation_dofs(entity: "RigidEntity") -> bool:
@@ -28,13 +27,13 @@ def has_articulation_dofs(entity: "RigidEntity") -> bool:
     return entity.n_dofs > 0
 
 
-def default_coup_type(entity: "RigidEntity") -> "CoupType":
+def default_coup_type(entity: "RigidEntity") -> gs.coup_type:
     """Auto-select coup_type when the entity solver options leave it None. See has_articulation_dofs."""
     if has_articulation_dofs(entity):
         if entity.base_link.is_fixed:
-            return "external_articulation"
-        return "two_way_soft_constraint"
-    return "ipc_only"
+            return gs.coup_type.external_articulation
+        return gs.coup_type.two_way_soft_constraint
+    return gs.coup_type.ipc_only
 
 
 def find_target_link_for_fixed_merge(link):

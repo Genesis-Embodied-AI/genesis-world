@@ -17,7 +17,7 @@ import typing
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
-from enum import IntEnum
+from enum import Enum
 from functools import lru_cache, partial
 from typing import Callable, NamedTuple
 
@@ -233,7 +233,7 @@ def _has_declared_fields(expect) -> bool:
 
 def _layout(cls: type) -> list[str] | dict[str, int]:
     """What one class is made of: the value of every member where it enumerates, its field names otherwise."""
-    if issubclass(cls, IntEnum):
+    if issubclass(cls, Enum):
         return {member.name: member.value for member in cls}
     return sorted(_declared_fields(cls))
 
@@ -263,10 +263,13 @@ def declared_schema(expect: dict) -> dict:
             declared = _unwrap_annotation(declarations.pop())
             # A declaration is reached through the arguments it is written with, so a list of morphs reaches Morph.
             declarations.extend(typing.get_args(declared))
+            # A literal declares the enumeration of its members.
+            if isinstance(declared, Enum):
+                declared = type(declared)
             if not isinstance(declared, type) or declared in seen:
                 continue
             seen.add(declared)
-            if issubclass(declared, IntEnum):
+            if issubclass(declared, Enum):
                 layout[declared.__name__] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
@@ -359,7 +362,7 @@ def _export_value(value, expect, exported: "Exported"):
         return _export_any(value, exported)
     if isinstance(value, np.generic):
         return value.item()
-    if isinstance(value, IntEnum):
+    if isinstance(value, Enum):
         exported.classes.add(type(value))
         return value.name
     codec = _class_codec(type(value))
@@ -454,7 +457,7 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
     expect = _unwrap_annotation(expect)
     if expect is typing.Any or expect is object:
         return _load_any(raw, loaded)
-    if isinstance(expect, type) and issubclass(expect, IntEnum):
+    if isinstance(expect, type) and issubclass(expect, Enum):
         return expect[raw]
     if isinstance(raw, dict) and "@class" in raw:
         cls = _classes_by_name(expect).get(raw["@class"])

@@ -4,7 +4,7 @@ import platform
 import re
 import sys
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Callable, ClassVar, Generic, Literal, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Annotated, Callable, ClassVar, Generic, NamedTuple, TypeVar
 
 import numpy as np
 
@@ -36,11 +36,11 @@ if TYPE_CHECKING:
     )
 
 
-DEFAULT_SAMPLER = "pbs" if (sys.platform == "linux" and platform.machine() == "x86_64") else "random"
-
-ParticleSamplerType = Literal["pbs", "random", "regular"]
-
-CoupType = Literal["two_way_soft_constraint", "external_articulation", "ipc_only"]
+DEFAULT_SAMPLER = (
+    gs.particle_sampler.pbs
+    if (sys.platform == "linux" and platform.machine() == "x86_64")
+    else gs.particle_sampler.random
+)
 
 EntityT = TypeVar("EntityT", bound="Entity")
 
@@ -185,7 +185,7 @@ class RigidEntitySolverOptions(_FrozenOptions):
     coup_restitution : float, optional
         The restitution coefficient of the contacts with the particles of other solvers, between 0 and 1. A non-zero
         value bounces particles off, at the cost of numerical stability. Default is 0.0.
-    coup_type : str | None, optional
+    coup_type : gs.coup_type | None, optional
         How the IPC coupler simulates the entity, which requires a coupled link (see 'needs_coup').
         'two_way_soft_constraint' couples each link with a soft constraint, and alone couples some links of the entity
         without the others. 'external_articulation' couples the joint positions, for articulated entities. 'ipc_only'
@@ -214,7 +214,7 @@ class RigidEntitySolverOptions(_FrozenOptions):
     coup_friction: NonNegativeFloat = 0.1
     coup_softness: NonNegativeFloat = 0.002
     coup_restitution: Annotated[ValidFloat, Field(ge=0.0, le=1.0)] = 0.0
-    coup_type: CoupType | None = None
+    coup_type: gs.coup_type | None = None
     enable_coup_collision: StrictBool = True
     contact_resistance: PositiveFloat | None = None
     sdf_cell_size: PositiveFloat = 0.005
@@ -432,7 +432,7 @@ class Rigid(_ArticulatedEntity["RigidEntity"]):
                 "them with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named', or through the options of their link instead."
             )
         solver_options = self.solver_options
-        if solver_options.coup_type == "ipc_only" and abs(self.gravity_compensation) > gs.EPS:
+        if solver_options.coup_type == gs.coup_type.ipc_only and abs(self.gravity_compensation) > gs.EPS:
             gs.raise_exception("'gravity_compensation' must be 0 with coup_type='ipc_only', since IPC applies gravity.")
         links_solver_options = [
             link_options.solver_options
@@ -556,7 +556,7 @@ class FEMEntitySolverOptions(_FrozenOptions):
 
     Parameters
     ----------
-    model : str, optional
+    model : gs.fem_model, optional
         The constitutive model of an Elastic or Muscle material. 'linear' is the cheapest and suits small deformations.
         'stable_neohookean' stays accurate under large deformations, at a higher cost per step, and only the explicit
         solver supports it. 'linear_corotated' handles large rotations under small strain, and only the implicit solver
@@ -571,7 +571,7 @@ class FEMEntitySolverOptions(_FrozenOptions):
         The number of muscle groups of a Muscle material, each actuated on its own. Default is 1.
     """
 
-    model: Literal["linear", "stable_neohookean", "linear_corotated"] = "linear"
+    model: gs.fem_model = gs.fem_model.linear
     hydroelastic_modulus: PositiveFloat = 1e7
     contact_resistance: PositiveFloat | None = None
     n_groups: PositiveInt = 1
@@ -690,7 +690,7 @@ class MPMEntitySolverOptions(_FrozenOptions):
         also the slowest to build, and supported on Linux x86 alone. 'pbs-<N>' samples with a signed distance field of
         resolution N. If None, 'random' for Sand and Snow, and otherwise 'pbs' on Linux x86 and 'random' elsewhere.
         Default is None.
-    model : str | None, optional
+    model : gs.mpm_model | None, optional
         The stress model of an Elastic or Muscle material. 'corotation' handles large rotations accurately, while
         'neohooken' stays robust under large compression and skips a decomposition per particle, which makes it
         faster. If None, 'corotation' for Elastic and 'neohooken' for Muscle. Default is None.
@@ -699,7 +699,7 @@ class MPMEntitySolverOptions(_FrozenOptions):
     """
 
     sampler: Annotated[str, AfterValidator(_validate_mpm_sampler)] | None = None
-    model: Literal["corotation", "neohooken"] | None = None
+    model: gs.mpm_model | None = None
     n_groups: PositiveInt = 1
 
 
@@ -712,7 +712,7 @@ class MPMMaterialParams(NamedTuple):
 
     youngs_modulus: float
     poisson_ratio: float
-    model: str | None
+    model: gs.mpm_model | None
     sampler: str
 
 
@@ -766,10 +766,10 @@ class MPM(_EmittableParticles["MPMEntity"]):
             youngs_modulus, poisson_ratio = material.youngs_modulus, material.poisson_ratio
         model = solver_options.model
         if model is None and isinstance(material, (Elastic, Muscle)):
-            model = "corotation" if isinstance(material, Elastic) else "neohooken"
+            model = gs.mpm_model.corotation if isinstance(material, Elastic) else gs.mpm_model.neohooken
         sampler = solver_options.sampler
         if sampler is None:
-            sampler = "random" if isinstance(material, (Sand, Snow)) else DEFAULT_SAMPLER
+            sampler = gs.particle_sampler.random if isinstance(material, (Sand, Snow)) else DEFAULT_SAMPLER
         return MPMMaterialParams(youngs_modulus, poisson_ratio, model, sampler)
 
 
@@ -778,7 +778,7 @@ class SPHEntitySolverOptions(_FrozenOptions):
 
     Parameters
     ----------
-    sampler : str, optional
+    sampler : gs.particle_sampler, optional
         How the morph is filled with particles. 'regular' lays them on a grid, which keeps the density uniform and the
         simulation stable at rest, 'random' scatters them uniformly, and 'pbs' spreads them evenly by Poisson disk
         sampling, supported on Linux x86 alone. Default is 'regular'.
@@ -787,7 +787,7 @@ class SPHEntitySolverOptions(_FrozenOptions):
         more sharply, at the cost of a stiffer and less stable simulation. Default is 7.0.
     """
 
-    sampler: ParticleSamplerType = "regular"
+    sampler: gs.particle_sampler = gs.particle_sampler.regular
     exponent: PositiveFloat = 7.0
 
 
@@ -1005,7 +1005,7 @@ class PBDLiquidEntitySolverOptions(_FrozenOptions):
 
     Parameters
     ----------
-    sampler : str, optional
+    sampler : gs.particle_sampler, optional
         How the morph is filled with particles. 'regular' lays them on a grid, 'random' scatters them uniformly, and
         'pbs' spreads them evenly by Poisson disk sampling, supported on Linux x86 alone. Defaults to 'pbs' on Linux
         x86 and 'random' elsewhere.
@@ -1017,7 +1017,7 @@ class PBDLiquidEntitySolverOptions(_FrozenOptions):
         the flow more, as honey does. Default is 0.01.
     """
 
-    sampler: ParticleSamplerType = DEFAULT_SAMPLER
+    sampler: gs.particle_sampler = DEFAULT_SAMPLER
     density_relaxation: ValidFloat = 0.2
     viscosity_relaxation: ValidFloat = 0.01
 
@@ -1046,11 +1046,11 @@ class PBDParticleEntitySolverOptions(_FrozenOptions):
 
     Parameters
     ----------
-    sampler : str, optional
+    sampler : gs.particle_sampler, optional
         See ``PBDLiquidEntitySolverOptions``. Defaults to 'pbs' on Linux x86 and 'random' elsewhere.
     """
 
-    sampler: ParticleSamplerType = DEFAULT_SAMPLER
+    sampler: gs.particle_sampler = DEFAULT_SAMPLER
 
 
 class PBDParticle(_PBDParticles["PBDFreeParticleEntity"]):

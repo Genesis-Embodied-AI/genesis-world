@@ -1,6 +1,6 @@
 """Materials, each stating the parameters of one physical law, whichever solver simulates the entity."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
@@ -134,7 +134,7 @@ class ElastoPlastic(BaseMaterial):
         The Young's modulus, in Pa. Default is 1e6.
     poisson_ratio : float, optional
         The Poisson ratio, between -1 and 0.5. Default is 0.2.
-    yield_criterion : str, optional
+    yield_criterion : gs.yield_criterion, optional
         The law deciding when the solid yields. 'von_mises' yields once the shear stress exceeds 'yield_stress',
         whatever the pressure, as metals and dough do. 'stretch_clamp' yields once a principal stretch leaves the
         bounds 'critical_compression' and 'critical_stretch', as a crumbly material does. Each criterion rejects an
@@ -150,14 +150,14 @@ class ElastoPlastic(BaseMaterial):
     density: PositiveFloat = 1000.0
     youngs_modulus: PositiveFloat = 1e6
     poisson_ratio: PoissonRatio = 0.2
-    yield_criterion: Literal["von_mises", "stretch_clamp"] = "von_mises"
+    yield_criterion: gs.yield_criterion = gs.yield_criterion.von_mises
     yield_stress: PositiveFloat = 1e4
     critical_compression: NonNegativeFloat = 2.5e-2
     critical_stretch: NonNegativeFloat = 4.5e-3
 
     @model_validator(mode="after")
     def _check_yield_parameters(self) -> "ElastoPlastic":
-        if self.yield_criterion == "von_mises":
+        if self.yield_criterion == gs.yield_criterion.von_mises:
             names = sorted({"critical_compression", "critical_stretch"} & self.model_fields_set)
         else:
             names = sorted({"yield_stress"} & self.model_fields_set)
@@ -311,7 +311,7 @@ class Rigid(Kinematic):
     coup_friction: NonNegativeFloat | None = None
     coup_softness: NonNegativeFloat | None = None
     coup_restitution: Annotated[ValidFloat, Field(ge=0.0, le=1.0)] | None = None
-    coup_type: Literal["two_way_soft_constraint", "external_articulation", "ipc_only"] | None = None
+    coup_type: gs.coup_type | None = None
     coup_links: StrArrayType | None = None
     enable_coup_collision: StrictBool | None = None
     coup_collision_links: StrArrayType | None = None
