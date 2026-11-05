@@ -1,0 +1,27 @@
+tests/deformable/test_fem.py
+  s_c62ec9da443b15::t_eced9977d568db 9,512-611
+  s_c62ec9da443b15::t_9fd8e9346dc157 612-613
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_ffb6dd1a9239b0 1-554
+tests/parsers/conftest.py
+  s_c62ec9da443b15::t_ea39646db827bc 38-81
+tests/parsers/test_mesh.py
+  s_c62ec9da443b15::t_ea39646db827bc 300-392
+  s_c62ec9da443b15::t_6167d64c89f81b 299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d2838c756e08c1eb6f60d7402998a503b434cead",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
