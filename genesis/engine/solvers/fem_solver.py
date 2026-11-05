@@ -551,7 +551,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             for model_idx in qd.static(range(len(self._models))):
                 if self.elements_i[i_e].mat_idx == model_idx:
-                    if self._models[model_idx].is_hessian_ready:
+                    if self._models[model_idx].is_hessian_computed:
                         (
                             self.elements_el_energy[i_b, i_e].energy,
                             self.elements_el_energy[i_b, i_e].gradient,
@@ -946,8 +946,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             # If the hessian is invariant, we only need to compute it once
             for model in self._models:
-                if model.hessian_invariant:
-                    model.is_hessian_ready = True
+                if model.is_hessian_invariant:
+                    model.is_hessian_computed = True
 
             # accumulate vertex force and preconditioner
             self.accumulate_vertex_force_preconditioner(f)

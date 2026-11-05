@@ -19,8 +19,8 @@ class FEMModel:
     """
 
     def __init__(self) -> None:
-        self.hessian_invariant = False
-        self.is_hessian_ready = False
+        self.is_hessian_invariant = False
+        self.is_hessian_computed = False
 
     def build(self, fem_solver) -> None:
         pass
@@ -56,7 +56,7 @@ class FEMElasticModel(FEMModel):
 
     def __init__(self, model: str) -> None:
         super().__init__()
-        self.hessian_invariant = model == "linear"
+        self.is_hessian_invariant = model == "linear"
         # The rotation of each element under the linear corotated model, allocated once the element count is known
         self._R = None
         if model == "linear":
