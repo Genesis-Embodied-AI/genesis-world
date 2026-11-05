@@ -180,8 +180,7 @@ def qd_rotvec_to_R(rotvec, eps):
 
     angle = rotvec.norm()
     if angle > eps:
-        c = qd.cos(angle)
-        s = qd.sqrt(1.0 - c**2)
+        c, s = qd.cos(angle), qd.sin(angle)
         t = 1.0 - c
         x, y, z = rotvec / angle
 

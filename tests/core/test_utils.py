@@ -310,6 +310,18 @@ def test_geom_quadrants_identity(batch_shape):
 
         np.testing.assert_allclose(qd_args[0].to_numpy(), qd_args[-1].to_numpy(), atol=1e2 * gs.EPS)
 
+    # Rotation angles beyond pi, whose sine is negative
+    qd_rotvec = qd.Vector.field(3, dtype=gs.qd_float, shape=batch_shape)
+    qd_R = qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape)
+    axis = np.random.randn(*batch_shape, 3)
+    rotvec = (
+        axis / np.linalg.norm(axis, axis=-1, keepdims=True) * np.random.uniform(0.0, 2.0 * math.pi, (*batch_shape, 1))
+    )
+    qd_rotvec.from_numpy(rotvec.astype(gs.np_float))
+    _qd_kernel_wrapper(gu.qd_rotvec_to_R, 1, 1, gs.EPS)(qd_rotvec, qd_R)
+    R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+    np.testing.assert_allclose(qd_R.to_numpy(), R_true, atol=1e2 * gs.EPS)
+
     qd_A, qd_U, qd_S, qd_V = [qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape) for _ in range(4)]
     # Rotations of noisy identities, from nearly repeated to well separated singular values
     rotation, _ = np.linalg.qr(np.random.randn(*batch_shape, 3, 3))
