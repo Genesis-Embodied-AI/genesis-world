@@ -30,10 +30,11 @@ class MPMModel:
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = 2 * self.mu * (F_new - U @ V.transpose()) @ F_new.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
+        return self._compute_corotated_stress(U, V, F_new, J, self.mu, self.lam)
+
+    @qd.func
+    def _compute_corotated_stress(self, U, V, F, J, mu, lam):
+        return 2 * mu * (F - U @ V.transpose()) @ F.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)
 
 
 @qd.data_oriented
@@ -42,7 +43,6 @@ class MPMElasticModel(MPMModel):
 
     def __init__(self, youngs_modulus: float, poisson_ratio: float, model: str) -> None:
         super().__init__(youngs_modulus, poisson_ratio)
-        self.update_F_S_Jp = self._update_F_S_Jp_elastic
         # The 'corotation' model keeps the stress of the base model, which reads U @ V.T from the decomposition of F_tmp
         if model == "neohookean":
             self.update_stress = self._update_stress_neohookean
@@ -50,11 +50,8 @@ class MPMElasticModel(MPMModel):
             self.needs_svd = False
 
     @qd.func
-    def _update_F_S_Jp_elastic(self, J, F_tmp, U, S, V, Jp):
-        F_new = F_tmp
-        S_new = S
-        Jp_new = Jp
-        return F_new, S_new, Jp_new
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+        return F_tmp, S, Jp
 
     @qd.func
     def _update_stress_neohookean(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
@@ -171,10 +168,8 @@ class MPMLiquidModel(MPMModel):
 
     @qd.func
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = 2 * self.mu * (F_tmp - U @ V.transpose()) @ F_tmp.transpose() + qd.Matrix.identity(
-            gs.qd_float, 3
-        ) * self.lam * J * (J - 1)
-        return stress
+        # The viscosity resists the deformation of the substep, which F_tmp holds before its reset to a volume change
+        return self._compute_corotated_stress(U, V, F_tmp, J, self.mu, self.lam)
 
 
 @qd.data_oriented
@@ -188,12 +183,12 @@ class MPMSandModel(MPMModel):
         self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
 
     @qd.func
-    def _sand_projection(self, S, Jp):
-        S_out = qd.Matrix.zero(gs.qd_float, 3, 3)
+    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+        S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         epsilon = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(3)):
             epsilon[i] = qd.log(max(abs(S[i, i]), 1e-4))
-            S_out[i, i] = 1
+            S_new[i, i] = 1
         tr = epsilon.sum() + Jp
         epsilon_hat = epsilon - tr / 3
         epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
@@ -205,13 +200,8 @@ class MPMSandModel(MPMModel):
             Jp_new = 0.0
             delta_gamma = epsilon_hat_norm + (3 * self.lam + 2 * self.mu) / (2 * self.mu) * tr * self.alpha
             for i in qd.static(range(3)):
-                S_out[i, i] = qd.exp(epsilon[i] - max(0, delta_gamma) / epsilon_hat_norm * epsilon_hat[i])
+                S_new[i, i] = qd.exp(epsilon[i] - max(0, delta_gamma) / epsilon_hat_norm * epsilon_hat[i])
 
-        return S_out, Jp_new
-
-    @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
-        S_new, Jp_new = self._sand_projection(S, Jp)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
@@ -253,12 +243,7 @@ class MPMSnowModel(MPMModel):
     def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         # The hardening coefficient stiffens the snow as it compacts
         h = qd.exp(10 * (1.0 - Jp))
-        mu, lam = self.mu * h, self.lam * h
-
-        r = U @ V.transpose()
-        stress = 2 * mu * (F_new - r) @ F_new.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)
-
-        return stress
+        return self._compute_corotated_stress(U, V, F_new, J, self.mu * h, self.lam * h)
 
 
 @dataclass(frozen=True)
