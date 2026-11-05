@@ -420,6 +420,7 @@ def test_geom_tensor_identity(batch_shape):
     R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
     assert_allclose(gu.axis_angle_to_R(axis.astype(gs.np_float), theta.astype(gs.np_float)), R_true, atol=tol)
     assert_allclose(gu.rotvec_to_R(rotvec.astype(gs.np_float)), R_true, atol=tol)
+    assert_allclose(gu.rotvec_to_R(np.zeros(3, dtype=gs.np_float)), np.eye(3), atol=tol)
     R_true = Rotation.from_rotvec([0.0, 0.0, -3.0]).as_matrix()
     assert_allclose(gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), -3), R_true, atol=tol)
 

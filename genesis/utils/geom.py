@@ -2139,44 +2139,58 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
 
 
 @nb.jit(nopython=True, cache=True)
+def _np_unit_axis_cos_sin_to_R(x: float, y: float, z: float, c: float, s: float, R: np.ndarray) -> None:
+    t = 1.0 - c
+    t_xy, t_xz, t_yz = t * x * y, t * x * z, t * y * z
+    R[0, 0], R[0, 1], R[0, 2] = t * x * x + c, t_xy - s * z, t_xz + s * y
+    R[1, 0], R[1, 1], R[1, 2] = t_xy + s * z, t * y * y + c, t_yz - s * x
+    R[2, 0], R[2, 1], R[2, 2] = t_xz - s * y, t_yz + s * x, t * z * z + c
+
+
+@nb.jit(nopython=True, cache=True)
 def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
-    if isinstance(cos_theta, (float, np.float32, np.float64)):
+    if isinstance(theta, (int, float, np.int32, np.int64, np.float32, np.float64)):
         assert axis.ndim == 1
     else:
-        assert axis.ndim - 1 == cos_theta.ndim
+        assert axis.shape[:-1] == theta.shape
     if out is None:
         out_ = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
     else:
         assert out.shape == (*axis.shape[:-1], 3, 3)
         out_ = out
 
-    axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
-    axis = axis / axis_norm
-    if not isinstance(cos_theta, (float, np.float32, np.float64)):
-        cos_theta, sin_theta = cos_theta[..., None], sin_theta[..., None]
-    cos1_axis = (1.0 - cos_theta) * axis
-    sin_axis = sin_theta * axis
-
-    tmp = cos1_axis[..., 0] * axis[..., 1]
-    out_[..., 0, 1] = tmp - sin_axis[..., 2]
-    out_[..., 1, 0] = tmp + sin_axis[..., 2]
-    tmp = cos1_axis[..., 0] * axis[..., 2]
-    out_[..., 0, 2] = tmp + sin_axis[..., 1]
-    out_[..., 2, 0] = tmp - sin_axis[..., 1]
-    tmp = cos1_axis[..., 1] * axis[..., 2]
-    out_[..., 1, 2] = tmp - sin_axis[..., 0]
-    out_[..., 2, 1] = tmp + sin_axis[..., 0]
-    tmp = cos1_axis * axis + cos_theta
-    out_[..., 0, 0] = tmp[..., 0]
-    out_[..., 1, 1] = tmp[..., 1]
-    out_[..., 2, 2] = tmp[..., 2]
+    for i in np.ndindex(axis.shape[:-1]):
+        x, y, z = axis[i]
+        axis_norm_inv = 1.0 / np.sqrt(x * x + y * y + z * z)
+        if isinstance(theta, (int, float, np.int32, np.int64, np.float32, np.float64)):
+            c, s = np.cos(theta), np.sin(theta)
+        else:
+            c, s = np.cos(theta[i]), np.sin(theta[i])
+        _np_unit_axis_cos_sin_to_R(x * axis_norm_inv, y * axis_norm_inv, z * axis_norm_inv, c, s, out_[i])
 
     return out_
 
 
-def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
-    return axis_angle_to_R(rotvec, np.linalg.norm(rotvec, axis=-1))
+@nb.jit(nopython=True, cache=True)
+def rotvec_to_R(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    if out is None:
+        out_ = np.empty((*rotvec.shape[:-1], 3, 3), dtype=rotvec.dtype)
+    else:
+        assert out.shape == (*rotvec.shape[:-1], 3, 3)
+        out_ = out
+
+    for i in np.ndindex(rotvec.shape[:-1]):
+        x, y, z = rotvec[i]
+        R = out_[i]
+        theta = np.sqrt(x * x + y * y + z * z)
+        if theta > gs.EPS:
+            theta_inv = 1.0 / theta
+            _np_unit_axis_cos_sin_to_R(x * theta_inv, y * theta_inv, z * theta_inv, np.cos(theta), np.sin(theta), R)
+        else:
+            R[:] = 0.0
+            R[0, 0] = R[1, 1] = R[2, 2] = 1.0
+
+    return out_
 
 
 @nb.jit(nopython=True, cache=True)
@@ -2201,7 +2215,46 @@ def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     This operation is computed by rotating the world frame by moving the original z-axis to the given vector via the
     shortest path. It matches `z_to_quat`, including for the zero, antipodal and non-finite directions.
     """
-    return _np_quat_to_R(z_to_quat(v_a), out)
+    if out is None:
+        out_ = np.empty((*v_a.shape[:-1], 3, 3), dtype=v_a.dtype)
+    else:
+        assert out.shape == (*v_a.shape[:-1], 3, 3)
+        out_ = out
+
+    for i in np.ndindex(v_a.shape[:-1]):
+        v_x, v_y, v_z = v_a[i]
+        R = out_[i]
+
+        # See z_to_quat for the handling of non-finite and zero directions
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
+            R[:] = np.nan
+            continue
+        if v_norm < gs.EPS:
+            R[:] = 0.0
+            R[0, 0] = R[1, 1] = R[2, 2] = 1.0
+            continue
+
+        v_norm_inv = 1.0 / v_norm
+        v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
+        if v_z >= 0.0:
+            f = 1.0 / (1.0 + v_z)
+        else:
+            # Near -z, 1 + v_z loses its digits to cancellation. Use the equal (1 - v_z) / (v_x^2 + v_y^2) instead.
+            transverse_sq = v_x * v_x + v_y * v_y
+            if transverse_sq > 0.0:
+                f = (1.0 - v_z) / transverse_sq
+            else:
+                # Rotation by pi about the y-axis, as for z_to_quat
+                R[:] = 0.0
+                R[0, 0], R[1, 1], R[2, 2] = -1.0, 1.0, -1.0
+                continue
+        f_xy = -f * v_x * v_y
+        R[0, 0], R[0, 1], R[0, 2] = 1.0 - f * v_x * v_x, f_xy, v_x
+        R[1, 0], R[1, 1], R[1, 2] = f_xy, 1.0 - f * v_y * v_y, v_y
+        R[2, 0], R[2, 1], R[2, 2] = -v_x, -v_y, v_z
+
+    return out_
 
 
 @nb.jit(nopython=True, cache=True)
@@ -2238,13 +2291,11 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
             quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
         else:
             # Near -z, 1 + v_z loses cos(theta/2) to cancellation. Recover it from the transverse norm instead.
-            transverse_norm = np.hypot(v_x, v_y)
+            transverse_norm = np.sqrt(v_x * v_x + v_y * v_y)
             if transverse_norm > 0.0:
                 sin_half_angle = np.sqrt(0.5 * (1.0 - v_z))
-                quat[0] = transverse_norm / (2.0 * sin_half_angle)
-                quat[1] = -v_y / transverse_norm * sin_half_angle
-                quat[2] = v_x / transverse_norm * sin_half_angle
-                quat[3] = 0.0
+                axis_scale = sin_half_angle / transverse_norm
+                quat[:] = 0.5 * transverse_norm / sin_half_angle, -v_y * axis_scale, v_x * axis_scale, 0.0
             else:
                 # The exact antipode has no unique rotation axis, so pick the y-axis arbitrarily
                 quat[:] = 0.0, 0.0, 1.0, 0.0
