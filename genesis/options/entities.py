@@ -931,14 +931,10 @@ class PBDElasticEntitySolverOptions(_FrozenOptions):
     ----------
     stretch_compliance : float, optional
         The compliance of the edges against stretching, in m/N. Default is 0.0.
-    bending_compliance : float, optional
-        The compliance against bending, in rad/N. Default is 0.0.
     volume_compliance : float, optional
         The compliance of the elements against a change of volume, in m^3/N. Default is 0.0.
     stretch_relaxation : float, optional
         The relaxation of the stretching constraints. Default is 0.1.
-    bending_relaxation : float, optional
-        The relaxation of the bending constraints. Default is 0.1.
     volume_relaxation : float, optional
         The relaxation of the volume constraints. Default is 0.1.
     kinetic_friction : float | None, optional
@@ -946,10 +942,8 @@ class PBDElasticEntitySolverOptions(_FrozenOptions):
     """
 
     stretch_compliance: NonNegativeFloat = 0.0
-    bending_compliance: NonNegativeFloat = 0.0
     volume_compliance: NonNegativeFloat = 0.0
     stretch_relaxation: ValidFloat = 0.1
-    bending_relaxation: ValidFloat = 0.1
     volume_relaxation: ValidFloat = 0.1
     kinetic_friction: NonNegativeFloat | None = None
 
