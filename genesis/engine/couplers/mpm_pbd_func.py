@@ -36,6 +36,7 @@ from genesis.engine.solvers.mpm_func import (
     contact_invweight,
     particle_of_sorted,
     pyramid_dirs,
+    pyramid_row_terms,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
@@ -53,7 +54,9 @@ class MpmPbdContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,
     """Position based dynamics (PBD) side of the pyramid rows of every sorted particle."""
 
     # The PBD particle of the particle's pyramid rows, in PBD's reordered layout, -1 if PBD gave it none
-    particle: qd.Tensor = field(int)
+    particle: qd.Tensor = field(int, ndarray=True)
+    # The Hessian of those rows on the displacement of the PBD particle
+    h: qd.Tensor = field((float, (3, 3)), ndarray=True)
 
 
 # ============================================== Layer 1: broad phase ==============================================
@@ -215,28 +218,35 @@ def func_pbd_point_disp(
         i_q = rows.particle[s]
         if i_q >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            newton.contact_dr[s] = pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
+            newton.contact_point_disp[s] = (
+                pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
+            )
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_contact_gradient(
+    f: int,
+    particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     rows: MpmPbdContactScratch,
     pbd_data: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Add the share of the PBD rows to the PBD gradient and diagonal blocks.
+    """Add the share of the position based dynamics (PBD) rows to the PBD gradient and diagonal blocks.
 
-    It runs after the inertia terms and after the MPM assembly that staged the row gradients g and Hessians H. The PBD
-    particle takes -g and H."""
+    It runs after the inertia terms and after the material point method (MPM) assembly, at the same iterate. The
+    gradient g and Hessian H of the rows of each particle come from `pyramid_row_terms`, and H stays in `rows.h` for
+    the matvec. The PBD particle takes -g and H."""
     qd.loop_config(name="mpm_pbd_contact_gradient")
     for s in range(grid.n_valid[()]):
         i_q = rows.particle[s]
         if i_q >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            qd.atomic_add(pbd_data.grad[i_q, i_b], -newton.g_rigid[s])
-            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], newton.h_rigid[s])
+            _, g, H = pyramid_row_terms(f, s, particles, grid, newton, mpm_info)
+            rows.h[s] = H
+            qd.atomic_add(pbd_data.grad[i_q, i_b], -g)
+            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], H)
 
 
 @qd.func(requires_top_level=True)
@@ -244,7 +254,6 @@ def func_pbd_contact_matvec(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
     rows: MpmPbdContactScratch,
     pbd_data: qd.template(),
@@ -261,7 +270,7 @@ def func_pbd_contact_matvec(
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         if i_q >= 0 and pcg_scalars.is_converged[i_b] == 0:
             dq = pbd_data.p[i_q, i_b]
-            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, mpm_info)
+            h = contact_cross_matvec(f, s, rows.h[s], dq, particles, grid, linear, pcg_scalars, mpm_info)
             qd.atomic_add(pbd_data.ap[i_q, i_b], h)
 
 
@@ -475,7 +484,9 @@ class MpmPbdContact(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        func_pbd_contact_gradient(self.mpm.grid, self.mpm.newton, self.pbd_rows, self.pbd.pbd_data, self.mpm.mpm_info)
+        func_pbd_contact_gradient(
+            f, self.mpm.particles, self.mpm.grid, self.mpm.newton, self.pbd_rows, self.pbd.pbd_data, self.mpm.mpm_info
+        )
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
@@ -483,7 +494,6 @@ class MpmPbdContact(NewtonDevice):
             f,
             self.mpm.particles,
             self.mpm.grid,
-            self.mpm.newton,
             self.mpm.linear,
             self.pbd_rows,
             self.pbd.pbd_data,

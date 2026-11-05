@@ -34,6 +34,7 @@ from genesis.engine.solvers.mpm_func import (
     contact_invweight,
     particle_of_sorted,
     pyramid_dirs,
+    pyramid_row_terms,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.utils.array_class import BVHQueryResults
@@ -49,9 +50,11 @@ class MpmFemContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,
     """Finite element method (FEM) side of the pyramid rows of every sorted particle."""
 
     # The FEM surface triangle of the particle's pyramid rows, -1 if FEM gave it none
-    tri: qd.Tensor = field(int)
+    tri: qd.Tensor = field(int, ndarray=True)
     # The barycentric coordinates of the closest point of the particle on that triangle
-    bary: qd.Tensor = field((float, 3))
+    bary: qd.Tensor = field((float, 3), ndarray=True)
+    # The Hessian of those rows on the displacement of the closest point
+    h: qd.Tensor = field((float, (3, 3)), ndarray=True)
 
 
 # =============================================== Layer 0: geometry ===============================================
@@ -344,18 +347,25 @@ def func_fem_point_disp(
         i_s = rows.tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            newton.contact_dr[s] = triangle_point_disp(i_s, i_b, f, rows.bary[s], fem)
+            newton.contact_point_disp[s] = triangle_point_disp(i_s, i_b, f, rows.bary[s], fem)
 
 
 @qd.func(requires_top_level=True)
 def func_fem_contact_gradient(
-    grid: MpmGridScratch, newton: MpmNewtonScratch, rows: MpmFemContactScratch, fem: qd.template(), mpm_info: MpmInfo
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    rows: MpmFemContactScratch,
+    fem: qd.template(),
+    mpm_info: MpmInfo,
 ):
-    """Add the share of the FEM rows to the FEM gradient and to its preconditioner.
+    """Add the share of the finite element method (FEM) rows to the FEM gradient and to its preconditioner.
 
-    It runs after FEM's own force and diagonal blocks, and after the MPM assembly that staged the row gradients g and
-    Hessians H. The vertices of the closest point take the gradient -b_k g, entered in FEM's force (the negative
-    gradient over dt^2) as b_k g / dt^2, and b_k^2 H / dt^2 on their diagonal block.
+    It runs after FEM's own force and diagonal blocks, and after the material point method (MPM) assembly, at the same
+    iterate. The gradient g and Hessian H of the rows of each particle come from `pyramid_row_terms`, and H stays in
+    `rows.h` for the matvec. The vertices of the closest point take the gradient -b_k g, entered in FEM's force (the
+    negative gradient over dt^2) as b_k g / dt^2, and b_k^2 H / dt^2 on their diagonal block.
 
     The rows of the many particles against one triangle are far stiffer than the inertia of its vertices, so a FEM
     preconditioner without them would leave the joint preconditioned conjugate gradient (PCG) stopping on a direction
@@ -366,8 +376,8 @@ def func_fem_contact_gradient(
         i_s = rows.tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            g = newton.g_rigid[s]
-            H = newton.h_rigid[s]
+            _, g, H = pyramid_row_terms(f, s, particles, grid, newton, mpm_info)
+            rows.h[s] = H
             bary = rows.bary[s]
             for k in qd.static(range(3)):
                 i_v = fem.surface[i_s].tri2v[k]
@@ -381,7 +391,6 @@ def func_fem_contact_matvec(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
     rows: MpmFemContactScratch,
     fem: qd.template(),
@@ -403,7 +412,7 @@ def func_fem_contact_matvec(
             for k in qd.static(range(3)):
                 i_v = tri2v[k]
                 dq += bary[k] * fem.pcg_state_v[i_b, i_v].p
-            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, mpm_info)
+            h = contact_cross_matvec(f, s, rows.h[s], dq, particles, grid, linear, pcg_scalars, mpm_info)
             for k in qd.static(range(3)):
                 i_v = tri2v[k]
                 qd.atomic_add(fem.pcg_state_v[i_b, i_v].Ap, bary[k] * h)

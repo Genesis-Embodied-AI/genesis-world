@@ -374,13 +374,16 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
     # The snapshots PBD keeps of its substep start are freed with the scene, as the other data of the solve
     ndarrays = {item.name: item.array for item in scene.sim.newton_solver.data if isinstance(item.array, qd.Ndarray)}
     assert sum(name.endswith((".pos_begin", ".vel_begin")) for name in ndarrays) == 2
+    # Every coupling of the scene holds the rows of the sorted particles
+    names = [item.name for item in scene.sim.newton_solver.data]
+    assert all(any(name.startswith(prefix) for name in names) for prefix in ("rigid_rows.", "fem_rows.", "pbd_rows."))
     scene.destroy()
     assert all(array.arr is None for array in ndarrays.values())
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("has_rigid_dofs", [True, False])
-def test_destroy_frees_data(has_rigid_dofs, show_viewer):
+@pytest.mark.parametrize(("has_plane", "has_rigid_dofs"), [(True, True), (True, False), (False, False)])
+def test_destroy_frees_data(has_plane, has_rigid_dofs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -388,6 +391,11 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.3, -0.3, -0.1),
             upper_bound=(0.3, 0.3, 0.4),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.9, -0.9, 0.6),
+            camera_lookat=(0.0, 0.0, 0.15),
+            camera_fov=40,
         ),
         show_viewer=show_viewer,
     )
@@ -425,10 +433,14 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
     # referencing, are freed with the scene, including the Rigid data read by the contact of a Rigid without dofs
     items = [*scene.sim.mpm_solver.data, *scene.sim.newton_solver.data]
     roots = {item.name.split(".")[0] for item in items}
-    assert {"particles", "particles_info", "grid", "newton", "linear", "control", "participants"} <= roots
-    assert any(item.name.startswith("rigid_data.") for item in items)
-    assert any(".query." in item.name for item in items)
-    assert any(item.name.startswith("newton_info.") for item in items)
+    assert {"particles", "particles_info", "grid", "newton", "linear", "control"} <= roots
+    # The rows of a coupling exist with the coupling alone, and the Rigid ones with any Rigid geom
+    assert ("participants" in roots) == has_plane
+    assert any(item.name.startswith("rigid_rows.") for item in items) == has_plane
+    assert not any(item.name.startswith(("fem_rows.", "pbd_rows.")) for item in items)
+    assert any(item.name.startswith("rigid_data.") for item in items) == has_plane
+    assert any(".query." in item.name for item in items) == has_plane
+    assert any(item.name.startswith("newton_info.") for item in items) == has_plane
     arrays = [item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array for item in items]
     ndarrays = [array for array in arrays if isinstance(array, qd.Ndarray)]
     assert ndarrays
@@ -457,60 +469,62 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
 @pytest.mark.cpu_threads(1)
 @pytest.mark.parametrize("backend", [gs.cpu])
 @pytest.mark.parametrize("has_rigid_dofs", [True, False])
-def test_grow_grid_and_matrix_matches_full_capacity(has_rigid_dofs, monkeypatch, show_viewer):
-    positions, velocities, capacities, capacities_built = [], [], [], []
-    for max_blocks, max_triplets in ((None, None), (2048, 500_000)):
-        if max_blocks is not None:
-            monkeypatch.setattr(
-                "genesis.engine.solvers.mpm_solver.initial_capacities", lambda *_, **__: (max_blocks, max_triplets)
-            )
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=1e-2,
-            ),
-            mpm_options=gs.options.MPMOptions(
-                lower_bound=(-0.3, -0.3, -0.1),
-                upper_bound=(0.3, 0.3, 0.4),
-            ),
-            show_viewer=show_viewer,
-        )
+def test_grow_grid_and_matrix_matches_full_capacity(has_rigid_dofs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.3, -0.3, -0.1),
+            upper_bound=(0.3, 0.3, 0.4),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.9, -0.9, 0.6),
+            camera_lookat=(0.0, 0.0, 0.15),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    mpm_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.05),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    if has_rigid_dofs:
         scene.add_entity(
-            morph=gs.morphs.Plane(),
-        )
-        mpm_box = scene.add_entity(
             morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.05),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.MPM.Elastic(
-                sampler="regular",
+                pos=(0.0, 0.0, 0.15),
+                size=(0.05, 0.05, 0.05),
             ),
         )
-        if has_rigid_dofs:
-            scene.add_entity(
-                morph=gs.morphs.Box(
-                    pos=(0.0, 0.0, 0.15),
-                    size=(0.05, 0.05, 0.05),
-                ),
-            )
-        scene.build(n_envs=2)
-        # Spreading the particles grows the data, whose replaced arrays are held on purpose
-        arrays_held = [*scene.sim.newton_solver.data]
-        arrays = {item.name: item.array for item in arrays_held}
-        capacities_built.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
+    scene.build(n_envs=2)
+
+    # The first run spreads the particles of a scene sized to their start, which grows its storage. The second run, from
+    # the same state, finds the capacity the first one grew to, which no longer grows: no run can be compared with a
+    # full capacity from a build of its own, since a capacity only grows
+    arrays = {item.name: item.array for item in scene.sim.newton_solver.data}
+    capacities = [(arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0])]
+    states = []
+    for _ in range(2):
+        scene.reset()
         mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
         for _ in range(3):
             scene.step()
-        positions.append(mpm_box.get_particles_pos().clone())
-        velocities.append(mpm_box.get_particles_vel().clone())
+        states.append((mpm_box.get_particles_pos().clone(), mpm_box.get_particles_vel().clone()))
         arrays = {item.name: item.array for item in scene.sim.newton_solver.data}
         capacities.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
-        scene.destroy()
 
-    assert capacities[0][0] > capacities_built[0][0] and capacities[0][1] > capacities_built[0][1]
-    assert capacities[1] == (2048, 500_000)
-    assert_equal(positions[0], positions[1])
-    assert_equal(velocities[0], velocities[1])
+    assert capacities[1][0] > capacities[0][0] and capacities[1][1] > capacities[0][1]
+    assert capacities[2] == capacities[1]
+    assert_equal(states[0][0], states[1][0])
+    assert_equal(states[0][1], states[1][1])
 
 
 @pytest.mark.required

@@ -67,7 +67,6 @@ class MpmRigidContact(NewtonDevice):
             f,
             self.mpm.particles,
             self.mpm.grid,
-            self.mpm.newton,
             self.mpm.linear,
             self.rigid_rows,
             self.rigid.rigid_data,

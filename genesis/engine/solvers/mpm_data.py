@@ -1,4 +1,4 @@
-"""Data of the implicit MPM solver.
+"""Data of the implicit material point method (MPM) solver.
 
 The particle state keeps the layout of the solver's public fields. This module holds the data the implicit step adds:
 the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the linear
@@ -218,11 +218,6 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     g_p: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
     # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
     g_contact: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs of
-    # its link, and the displacement of its contact point on the link over the substep
-    g_rigid: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    h_rigid: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
-    contact_dr: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
     # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
     # build them only once a constraint exists.
@@ -231,10 +226,12 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     constraint_target: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
     # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
-    # 1/2 D min(0, J.dx - t)^2
+    # 1/2 D min(0, J.dx - t)^2. The pyramid rows act on dx - dr instead, with dr the displacement over the substep of
+    # their contact point, which the coupling owning them writes (zero by default)
     contact_dir: qd.Tensor = field((float, 3), shape=(CONTACT_ROWS * SORT,), ndarray=True)
     contact_D: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
     contact_t: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
+    contact_point_disp: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Whether a coupling built the pyramid rows of the particle, which the couplings building after it leave alone
     # (see func_build_pbd_rows)
     has_pyramid_rows: qd.Tensor = field(bool, shape=(SORT,), ndarray=True)
@@ -341,7 +338,7 @@ def build_mpm_linear(max_blocks: int, max_triplets: int) -> MpmLinearScratch:
 
 @qd.data_oriented
 class MpmForceFields:
-    """The force fields acting on the MPM grid, read with a static loop over the list."""
+    """The force fields acting on the material point method (MPM) grid, read with a static loop over the list."""
 
     def __init__(self, force_fields) -> None:
         self.force_fields = list(force_fields)

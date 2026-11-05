@@ -44,7 +44,7 @@ class MpmFemContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
         mpm_fem_func.func_fem_contact_gradient(
-            self.mpm.grid, self.mpm.newton, self.fem_rows, self.fem, self.mpm.mpm_info
+            f, self.mpm.particles, self.mpm.grid, self.mpm.newton, self.fem_rows, self.fem, self.mpm.mpm_info
         )
 
     @qd.func(requires_top_level=True)
@@ -53,7 +53,6 @@ class MpmFemContact(NewtonDevice):
             f,
             self.mpm.particles,
             self.mpm.grid,
-            self.mpm.newton,
             self.mpm.linear,
             self.fem_rows,
             self.fem,

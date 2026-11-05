@@ -13,10 +13,11 @@ every substep.
 The stages that combine the values of several particles or nodes (the gathers of the particle-to-grid (P2G) transfer and
 of the gradient, the assembly of the stencil blocks, the brick inversion, the reductions of the energy and of the
 displacement update) have one implementation per backend, `_gpu` and `_cpu`, a dispatcher picking one at compile time.
-On a GPU they map a node, a 32-particle chunk or a brick to a warp, whose lanes combine their values by shuffles and
-ballots, and a reduction to a block. The CPU backend of Quadrants has none of these operations and runs a few dozen
-threads: each thread takes a whole node, cell or brick and walks it serially, in the same fixed order, which needs
-neither lanes nor atomics. The stages that map each particle or node on its own are the same for both backends.
+On a graphics processing unit (GPU) they map a node, a 32-particle chunk or a brick to a warp, whose lanes combine
+their values by shuffles and ballots, and a reduction to a block. The central processing unit (CPU) backend of
+Quadrants has none of these operations and runs a few dozen threads: each thread takes a whole node, cell or brick and
+walks it serially, in the same fixed order, which needs neither lanes nor atomics. The stages that map each particle or
+node on its own are the same for both backends.
 """
 
 import quadrants as qd
@@ -1099,26 +1100,27 @@ def pyramid_dirs(normal: qd.types.vector(3), friction: float):
 def contact_cross_matvec(
     f: int,
     s: int,
+    H: qd.types.matrix(3, 3),
     dq: qd.types.vector(3),
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
     pcg_scalars: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Add the cross term of the pyramid rows of a sorted particle on the MPM rows, and return their term on the other
-    side of the contact.
+    """Add the cross term of the pyramid rows of a sorted particle on the material point method (MPM) rows.
 
-    The rows of Hessian H act on the relative displacement dxp - dq, with dxp = sum_a w_a p_u,a and dq the displacement
-    of the contact point along the direction. Their term w_a w_b H is in the MPM matrix, so they add -w_a H dq to Ap_u,a
-    and -dxp . H dq to p.Ap. Returns h = H (dq - dxp), which the coupling adds to the unknowns of the contact point."""
+    Return their term on the other side of the contact.
+
+    The rows of Hessian `H` act on the relative displacement dxp - dq, with dxp = sum_a w_a p_u,a and dq the
+    displacement of the contact point along the direction. Their term w_a w_b H is in the MPM matrix, so they add
+    -w_a H dq to Ap_u,a and -dxp . H dq to p.Ap. Returns h = H (dq - dxp), which the coupling adds to the unknowns of
+    the contact point."""
     i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
     slots = stencil_node_slots(env, cell, grid)
     w, grad_w = q1_stencil(
         particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()]
     )
-    H = newton.h_rigid[s]
     dxp = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
         dxp += w[a] * qd.Vector([linear.pcg.p[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
@@ -1514,7 +1516,7 @@ def func_reset_contact_rows(grid: MpmGridScratch, newton: MpmNewtonScratch):
         newton.has_pyramid_rows[s] = False
         for r in qd.static(range(CONTACT_ROWS)):
             newton.contact_D[CONTACT_ROWS * s + r] = 0.0
-        newton.contact_dr[s] = qd.Vector.zero(gs.qd_float, 3)
+        newton.contact_point_disp[s] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -1746,6 +1748,20 @@ def contact_row_terms(
 
 
 @qd.func
+def pyramid_row_terms(
+    f: int, s: int, particles: MpmParticles, grid: MpmGridScratch, newton: MpmNewtonScratch, mpm_info: MpmInfo
+):
+    """Energy, gradient and Hessian of the pyramid rows of a sorted particle at the current iterate.
+
+    The rows act on the trial displacement of the particle relative to `newton.contact_point_disp`, the displacement of
+    their contact point that the coupling owning them reports."""
+    i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
+    slots = stencil_node_slots(env, cell, grid)
+    dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
+    return contact_row_terms(s, dx - newton.contact_point_disp[s], newton, WALL_ROWS, CONTACT_ROWS)
+
+
+@qd.func
 def constraint_row_terms(s: int, x: qd.types.vector(3), dx: qd.types.vector(3), newton: MpmNewtonScratch):
     """Energy, gradient and Hessian scale of the constraint spring of a sorted particle.
 
@@ -1935,13 +1951,11 @@ def particle_stencil_terms(
         for d in qd.static(range(3)):
             r_frame[a, d] = r_a[d]
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    dr = newton.contact_dr[s]
+    dr = newton.contact_point_disp[s]
     energy_wall, grad_wall, hess_wall = contact_row_terms(s, dx, newton, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
     energy_spring, grad_spring, hess_spring = constraint_row_terms(s, particles.pos[f, i_p, i_b], dx, newton)
     newton.g_contact[s] = grad_wall + grad_rigid + grad_spring
-    newton.g_rigid[s] = grad_rigid
-    newton.h_rigid[s] = hess_rigid
     hess_contact = hess_wall + hess_rigid + hess_spring * qd.Matrix.identity(gs.qd_float, 3)
     return slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_contact
 
@@ -2844,7 +2858,7 @@ def particle_energy(
     )
     psi += psi_fibre
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    dr = newton.contact_dr[s]
+    dr = newton.contact_point_disp[s]
     energy_wall, grad_wall, hess_wall = contact_row_terms(s, dx, newton, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
     energy_spring, grad_spring, hess_spring = constraint_row_terms(s, particles.pos[f, i_p, i_b], dx, newton)

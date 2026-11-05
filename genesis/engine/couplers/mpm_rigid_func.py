@@ -39,11 +39,9 @@ from genesis.engine.solvers.mpm_func import (
     contact_band_width,
     contact_cross_matvec,
     contact_invweight,
-    contact_row_terms,
     particle_of_sorted,
-    particle_trial_disp,
     pyramid_dirs,
-    stencil_node_slots,
+    pyramid_row_terms,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
@@ -72,7 +70,10 @@ class MpmRigidContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLE
     """Rigid side of the pyramid rows of every sorted particle."""
 
     # The link of the particle's pyramid rows, -1 if Rigid gave it none
-    link: qd.Tensor = field(int)
+    link: qd.Tensor = field(int, ndarray=True)
+    # The Hessian of those rows on the displacement of the contact point, which couples the particle with the dofs of
+    # its link
+    h: qd.Tensor = field((float, (3, 3)), ndarray=True)
 
 
 # ============================================ Layer 0: spatial algebra =============================================
@@ -370,7 +371,9 @@ def func_contact_point_disp(
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             r = particle_arm(f, i_p, i_b, i_l, particles, links_state)
-            newton.contact_dr[s] = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
+            newton.contact_point_disp[s] = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[
+                i_l, i_b
+            ].cross(r)
 
 
 # ========================================== Layer 1: contact gradient on Rigid ==========================================
@@ -391,10 +394,11 @@ def func_rigid_contact_gradient(
 ):
     """Add the share of the Rigid contact rows to the gradient in x, and sum the spatial contact stiffness of each link.
 
-    Runs after func_rigid_gradient and after the MPM assembly that staged the row gradients and Hessians. The gradient
-    takes minus the generalized force of the rows of the particles on their links. The spatial stiffness K_l = sum_s
-    P_s^T H_s P_s of each link feeds the preconditioner, with P_s = [I, -[r_s]x] mapping the spatial displacement of the
-    link to that of the contact point at arm r_s."""
+    Runs after func_rigid_gradient and after the material point method (MPM) assembly, at the same iterate. The
+    gradient g and Hessian H of the rows of each particle come from `pyramid_row_terms`, and H stays in `rows.h` for the
+    matvec. The gradient takes minus the generalized force of the rows of the particles on their links. The spatial
+    stiffness K_l = sum_s P_s^T H_s P_s of each link feeds the preconditioner, with P_s = [I, -[r_s]x] mapping the
+    spatial displacement of the link to that of the contact point at arm r_s."""
     func_link_spatial_disp(
         src=rigid_data.x,
         rigid_data=rigid_data,
@@ -410,8 +414,8 @@ def func_rigid_contact_gradient(
         i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            g = newton.g_rigid[s]
-            H = newton.h_rigid[s]
+            _, g, H = pyramid_row_terms(f, s, particles, grid, newton, mpm_info)
+            rows.h[s] = H
             if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
                 r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
                 qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
@@ -441,7 +445,6 @@ def func_rigid_contact_matvec(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
     rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
@@ -470,7 +473,7 @@ def func_rigid_contact_matvec(
         if i_l >= 0 and pcg_scalars.is_converged[i_b] == 0:
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
             dr = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
-            h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, mpm_info)
+            h = contact_cross_matvec(f, s, rows.h[s], dr, particles, grid, linear, pcg_scalars, mpm_info)
             qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], h)
             qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(h))
 
@@ -526,10 +529,7 @@ def func_mpm_reaction(
         i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            slots = stencil_node_slots(env, cell, grid)
-            dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-            dr = newton.contact_dr[s]
-            energy, g, hess = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
+            _, g, _ = pyramid_row_terms(f, s, particles, grid, newton, mpm_info)
             if g.norm_sqr() > 0.0:
                 r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
                 qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
