@@ -364,7 +364,7 @@ def test_geom_tensor_identity(batch_shape):
 
     # Directions near -z in every quadrant, with transverse components and norms spanning several decades
     tol = 1e1 * gs.EPS
-    transverse = 10.0 ** np.random.uniform(-9.0, -1.0, (*batch_shape, 1)) * np.random.randn(*batch_shape, 2)
+    transverse = 10.0 ** np.random.uniform(-30.0, -1.0, (*batch_shape, 1)) * np.random.randn(*batch_shape, 2)
     unit = np.concatenate((transverse, -np.sqrt(1.0 - np.sum(transverse**2, axis=-1, keepdims=True))), axis=-1)
     directions = (10.0 ** np.random.uniform(-3.0, 5.0, (*batch_shape, 1)) * unit).astype(gs.np_float)
     axis = np.cross([0.0, 0.0, 1.0], unit)
