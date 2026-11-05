@@ -421,15 +421,17 @@ def test_fluid_emitter(n_envs, options_cls, material_type, show_viewer):
     )
     emitter = scene.add_emitter(
         options_cls(
-            morph=gs.morphs.Nowhere(
-                n_particles=5000,
-            ),
             surface=gs.surfaces.Glass(
                 color=(0.7, 0.85, 1.0, 0.7),
             ),
             material=material_type(),
         ),
+        max_particles=5000,
     )
+    with pytest.raises(gs.GenesisException, match="emitter sets the morph"):
+        scene.add_emitter(options_cls(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=material_type()))
+    with pytest.raises(gs.GenesisException, match="requires a morph"):
+        scene.add_entity(options=options_cls(material=material_type()))
     scene.build(n_envs=n_envs)
 
     emitter.emit_omni()

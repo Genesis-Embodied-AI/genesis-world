@@ -142,7 +142,8 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     ----------
     morph : Morph | tuple[Morph, ...]
         The geometry or asset of the entity. A sequence of morphs makes the entity heterogeneous: each parallel
-        environment simulates one of them (see ``Scene.add_entity``).
+        environment simulates one of them (see ``Scene.add_entity``). The options of a particle entity given to
+        ``Scene.add_emitter`` leave it None, since the emitter sets it.
     surface : Surface | None, optional
         The appearance of the entity, its visualization mode included. If None, use ``gs.surfaces.Default()``.
     name : str | None, optional
@@ -715,7 +716,13 @@ class MPMMaterialParams(NamedTuple):
     sampler: str
 
 
-class MPM(BaseEntity["MPMEntity"]):
+class _EmittableParticles(BaseEntity[EntityT]):
+    """Options of the particle entities an emitter can hold, whose morph ``Scene.add_emitter`` sets."""
+
+    morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(strict=False)] | None = None
+
+
+class MPM(_EmittableParticles["MPMEntity"]):
     """Options of a particle entity, which the material point method (MPM) solver simulates on a background grid.
 
     Use it for a continuum that deforms without bound, tears or flows, such as sand, snow, dough or a liquid. Its
@@ -795,7 +802,7 @@ class SPHMaterialParams(NamedTuple):
     surface_tension: float
 
 
-class SPH(BaseEntity["SPHEntity"]):
+class SPH(_EmittableParticles["SPHEntity"]):
     """Options of a liquid entity, which the smoothed particle hydrodynamics (SPH) solver simulates as particles.
 
     Use it for a liquid whose free surface and splashes matter. Each particle interacts with its neighbors, so the cost
@@ -980,7 +987,7 @@ class PBDElastic(BaseEntity["PBD3DEntity"]):
         return _get_pbd_material_params(material.density, material.friction, self.solver_options.kinetic_friction)
 
 
-class _PBDParticles(BaseEntity[EntityT]):
+class _PBDParticles(_EmittableParticles[EntityT]):
     """Options shared by the particle entities of the PBD solver, whose Liquid material applies by its density alone."""
 
     _solver_options_cls = PBDOptions

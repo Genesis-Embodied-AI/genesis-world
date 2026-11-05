@@ -168,7 +168,7 @@ class Morph(Options):
 ############################ Nowhere ############################
 class Nowhere(Morph):
     """
-    The morph of the particles of an emitter (see ``Scene.add_emitter``), which start outside of the scene.
+    The morph of the particles of an emitter, which start outside of the scene. ``Scene.add_emitter`` sets it.
 
     Parameters
     ----------

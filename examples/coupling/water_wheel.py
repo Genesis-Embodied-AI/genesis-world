@@ -60,9 +60,6 @@ def main():
         options_cls, solver_options_cls = gs.entities.MPM, gs.options.MPMEntitySolverOptions
     emitter = scene.add_emitter(
         options_cls(
-            morph=gs.morphs.Nowhere(
-                n_particles=100000,
-            ),
             surface=gs.surfaces.Glass(
                 color=(0.7, 0.85, 1.0, 0.7),
                 vis_mode="recon" if args.recon else "particle",
@@ -72,6 +69,7 @@ def main():
                 sampler="regular",
             ),
         ),
+        max_particles=100000,
     )
     scene.build(n_envs=0)
 

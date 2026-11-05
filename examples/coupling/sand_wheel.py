@@ -99,14 +99,12 @@ def main():
 
     emitter = scene.add_emitter(
         gs.entities.MPM(
-            morph=gs.morphs.Nowhere(
-                n_particles=200000,
-            ),
             surface=gs.surfaces.Rough(
                 color=(1.0, 0.9, 0.6, 1.0),
             ),
             material=gs.materials.Sand(),
         ),
+        max_particles=200000,
     )
     scene.build(n_envs=0)
 

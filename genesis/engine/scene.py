@@ -433,6 +433,8 @@ class Scene(RBC):
             gs.raise_exception(
                 "gs.entities.BaseEntity selects no entity family. Use one of its subclasses, such as gs.entities.Rigid."
             )
+        if options.morph is None:
+            gs.raise_exception("Entity construction requires a morph.")
         # Revalidated, since 'model_copy(update=...)' bypasses validation. The entity owns the authored copy, while
         # the resolution below modifies the morph and the surface of a copy of its own.
         options = type(options).model_validate(options).model_copy(deep=True)
@@ -824,7 +826,11 @@ class Scene(RBC):
         )
 
     @gs.assert_unbuilt
-    def add_emitter(self, options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBDLiquid | gs.entities.PBDParticle):
+    def add_emitter(
+        self,
+        options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBDLiquid | gs.entities.PBDParticle,
+        max_particles: int = 20000,
+    ):
         """
         Add a fluid emitter to the scene.
 
@@ -832,11 +838,12 @@ class Scene(RBC):
         ----------
         options : gs.entities.BaseEntity
             The entity options of the emitted particles, whose class decides the solver simulating them: one of
-            ``gs.entities.MPM``, ``gs.entities.SPH``, ``gs.entities.PBDLiquid``
-            or ``gs.entities.PBDParticle``. Their morph is ``gs.morphs.Nowhere(n_particles=...)``, which
-            sets the maximum number of particles the emitter holds, recycled once all are emitted. If their surface is
-            None, use ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``, and its visualization mode defaults to
-            'particle'.
+            ``gs.entities.MPM``, ``gs.entities.SPH``, ``gs.entities.PBDLiquid`` or ``gs.entities.PBDParticle``. Their
+            morph is left None, since the emitter sets it. If their surface is None, use
+            ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``, and its visualization mode defaults to 'particle'.
+        max_particles : int, optional
+            The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
+            memory and simulation time from the start, emitted or not. Default is 20000.
 
         Returns
         -------
@@ -853,10 +860,8 @@ class Scene(RBC):
                 f"Non-supported entity options for emitter: gs.entities.{type(options).__name__}. Supported ones are "
                 "gs.entities.MPM, gs.entities.SPH, gs.entities.PBDLiquid and gs.entities.PBDParticle."
             )
-        if not isinstance(options.morph, gs.morphs.Nowhere):
-            gs.raise_exception(
-                f"The morph of an emitter must be gs.morphs.Nowhere, got {type(options.morph).__name__}."
-            )
+        if options.morph is not None:
+            gs.raise_exception("The emitter sets the morph of its entity options. Leave it None.")
 
         surface = options.surface
         if surface is None:
@@ -866,8 +871,9 @@ class Scene(RBC):
         if surface.vis_mode == "visual":
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
-        emitter = Emitter(options.morph.n_particles)
-        entity = self.add_entity(options=options.model_copy(update={"surface": surface}))
+        emitter = Emitter(max_particles)
+        morph = gs.morphs.Nowhere(n_particles=max_particles)
+        entity = self.add_entity(options=options.model_copy(update={"morph": morph, "surface": surface}))
         emitter.set_entity(entity)
         self._emitters.append(emitter)
         return emitter

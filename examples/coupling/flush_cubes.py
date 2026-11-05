@@ -89,9 +89,6 @@ def main():
     )
     emitter1 = scene.add_emitter(
         gs.entities.MPM(
-            morph=gs.morphs.Nowhere(
-                n_particles=800000,
-            ),
             surface=gs.surfaces.Rough(
                 color=(0.0, 0.9, 0.4, 1.0),
             ),
@@ -100,12 +97,10 @@ def main():
                 sampler="random",
             ),
         ),
+        max_particles=800000,
     )
     emitter2 = scene.add_emitter(
         gs.entities.MPM(
-            morph=gs.morphs.Nowhere(
-                n_particles=800000,
-            ),
             surface=gs.surfaces.Rough(
                 color=(0.0, 0.4, 0.9, 1.0),
             ),
@@ -114,6 +109,7 @@ def main():
                 sampler="random",
             ),
         ),
+        max_particles=800000,
     )
     scene.build(n_envs=0)
 
