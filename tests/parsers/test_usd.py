@@ -588,6 +588,12 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
                 morph=gs.morphs.USD(file=collision_filtering_usd), links={"base": gs.options.Link()}
             )
         )
+    with pytest.raises(gs.GenesisException, match="no link options"):
+        scene.add_stage(
+            options=gs.entities.Kinematic(
+                morph=gs.morphs.USD(file=collision_filtering_usd), vgeoms={gs.VGeomIndex.named("*"): gs.options.VGeom()}
+            )
+        )
     scene.build()
     ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
