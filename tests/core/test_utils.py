@@ -402,6 +402,18 @@ def test_geom_tensor_identity(batch_shape):
     assert_allclose(out, quat_true, atol=tol)
     assert_allclose(gu.z_to_R(directions), gu.quat_to_R(out), atol=tol)
 
+    # Writing one quaternion must not overwrite a direction that has not been read yet.
+    for stride in (1, 2, -1, -2):
+        for offset in (0, 2):
+            storage = np.zeros((8 + offset) * abs(stride), dtype=gs.np_float)
+            shared = storage[::stride]
+            out = shared[offset:].reshape((2, 4))
+            directions = shared[:6].reshape((2, 3))
+            directions[:] = [[1.0, 0.0, 0.0], [1.0, 1.0, -1.0]]
+            quat_true = gu.z_to_quat(directions.copy())
+            assert gu.z_to_quat(directions, out=out) is out
+            assert_allclose(out, quat_true, atol=tol)
+
     for value in (np.nan, np.inf, -np.inf):
         directions = np.array(
             [

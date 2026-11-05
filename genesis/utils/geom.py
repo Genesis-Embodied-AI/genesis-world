@@ -2257,6 +2257,18 @@ def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     return out_
 
 
+@nb.jit(nopython=True, cache=True, inline="always")
+def _np_byte_bounds(array: np.ndarray) -> tuple[int, int]:
+    """Return the bounding byte addresses of a nonempty array, including negative strides."""
+    lower = np.intp(array.ctypes.data)
+    upper = lower + array.itemsize
+    for size, stride in zip(array.shape, array.strides):
+        offset = (size - 1) * stride
+        lower += min(offset, 0)
+        upper += max(offset, 0)
+    return lower, upper
+
+
 @nb.jit(nopython=True, cache=True)
 def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     """
@@ -2267,6 +2279,12 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     else:
         assert out.shape == (*v_a.shape[:-1], 4)
         out_ = out
+        if v_a.size:
+            v_lower, v_upper = _np_byte_bounds(v_a)
+            out_lower, out_upper = _np_byte_bounds(out)
+            if v_lower < out_upper and out_lower < v_upper:
+                # An output quaternion can overlap a direction that a later iteration has not read yet.
+                v_a = v_a.copy()
 
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
