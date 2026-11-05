@@ -2240,35 +2240,27 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         assert out.shape == (*v_a.shape[:-1], 4)
         out_ = out
 
-    # Output writes can overlap input vectors that have not been read yet
-    if out is not None:
-        v_a = v_a.copy()
-
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
         quat = out_[i]
 
-        if not (np.isfinite(v_x) and np.isfinite(v_y) and np.isfinite(v_z)):
+        # A non-finite norm comes from a non-finite component, or from a squared norm that overflows
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
             quat[:] = np.nan
             continue
-
-        # Finite directions can overflow a squared norm. Keep the zero threshold in scaled coordinates
-        scale = max(abs(v_x), abs(v_y), abs(v_z), gs.EPS)
-        v_x, v_y, v_z = v_x / scale, v_y / scale, v_z / scale
-        scaled_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
-        if scaled_norm < gs.EPS / scale:
+        if v_norm < gs.EPS:
             quat[:] = 1.0, 0.0, 0.0, 0.0
             continue
 
-        scaled_norm_inv = 1.0 / scaled_norm
-        v_x, v_y, v_z = v_x * scaled_norm_inv, v_y * scaled_norm_inv, v_z * scaled_norm_inv
+        v_norm_inv = 1.0 / v_norm
+        v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
         if v_z >= 0.0:
             s = np.sqrt(2.0 * (1.0 + v_z))
             s_inv = 1.0 / s
             quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
         else:
-            # Near -z, 1 + v_z loses the small rotation component to cancellation. Recover cos(theta/2)
-            # from the transverse direction instead, keeping both axis signs in every quadrant.
+            # Near -z, 1 + v_z loses cos(theta/2) to cancellation. Recover it from the transverse norm instead.
             transverse_norm = np.hypot(v_x, v_y)
             if transverse_norm > 0.0:
                 sin_half_angle = np.sqrt(0.5 * (1.0 - v_z))
@@ -2277,7 +2269,7 @@ def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
                 quat[2] = v_x / transverse_norm * sin_half_angle
                 quat[3] = 0.0
             else:
-                # The exact antipodal direction has no unique rotation axis. Pick y
+                # The exact antipode has no unique rotation axis, so pick the y-axis arbitrarily
                 quat[:] = 0.0, 0.0, 1.0, 0.0
 
             # First order quaternion normalization is accurate enough
