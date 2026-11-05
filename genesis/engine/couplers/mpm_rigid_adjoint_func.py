@@ -18,7 +18,6 @@ func_contact_invweight).
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.mpm_adjoint_func import band_row_bw, polar_rotation_bw
@@ -26,12 +25,16 @@ from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
     WALL_ROWS,
+    MpmGridScratch,
     MpmInfo,
+    MpmLinearScratch,
+    MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
 )
 from genesis.engine.solvers.mpm_func import particle_of_sorted, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
+from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 
 from .mpm_rigid_func import geom_normal
 
@@ -172,9 +175,9 @@ def link_chain_spatial(
 def func_rigid_contact_adjoint(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     rigid_data: qd.template(),
     geoms_state: GeomsState,
     links_state: LinksState,

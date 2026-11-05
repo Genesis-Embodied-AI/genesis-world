@@ -25,7 +25,10 @@ from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
     WALL_ROWS,
+    MpmGridScratch,
     MpmInfo,
+    MpmLinearScratch,
+    MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
 )
@@ -41,6 +44,7 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_dirs,
     stencil_node_slots,
 )
+from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
@@ -155,9 +159,10 @@ class RigidGeomQuery:
     """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment.
 
     The tree comes from genesis.engine.bvh. The query also holds the data read by the filter of its queries: the geoms
-    of the Rigid participant `rigid`, and the query point and nearest geom of each sorted particle in `newton`."""
+    of the Rigid participant `rigid`, and the query point and nearest geom of each sorted particle in the Newton
+    state of the material point method (MPM) participant `mpm`."""
 
-    def __init__(self, rigid: RigidNewtonParticipant, newton, n_envs: int):
+    def __init__(self, rigid: RigidNewtonParticipant, mpm: MpmNewtonParticipant, n_envs: int):
         self.n_coupled = len(rigid.coupled_geoms_idx)
         self.coupled_geoms = qd.ndarray(gs.qd_int, shape=(max(self.n_coupled, 1),))
         if self.n_coupled:
@@ -174,7 +179,7 @@ class RigidGeomQuery:
         self.links_info = rigid.dyn_info.links
         self.batch_links_info = rigid.config.rigid_batch_links_info
         self.sdf_info = rigid.sdf_info
-        self.newton = newton
+        self.mpm = mpm
 
     def build(self, mpm_info):
         """Fit the leaf boxes to the geoms of the substep and build the trees."""
@@ -231,13 +236,13 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
     The nearest geom of sorted particle i_q in environment i_t goes to `newton.query_phi` and `newton.query_idx`, and
     the query records no pair."""
     i_g = query.coupled_geoms[i_a]
-    x = query.newton.query_pos[i_q]
+    x = query.mpm.newton.query_pos[i_q]
     phi = (
         geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
     )
-    if phi < query.newton.query_phi[i_q]:
-        query.newton.query_phi[i_q] = phi
-        query.newton.query_idx[i_q] = i_g
+    if phi < query.mpm.newton.query_phi[i_q]:
+        query.mpm.newton.query_phi[i_q] = phi
+        query.mpm.newton.query_idx[i_q] = i_g
     return True
 
 
@@ -249,8 +254,8 @@ def func_build_rigid_rows(
     f: int,
     dt: float,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     geoms_state: GeomsState,
     links_state: LinksState,
     query: qd.template(),
@@ -330,8 +335,8 @@ def func_build_rigid_rows(
 def func_contact_point_disp(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     rigid_data: qd.template(),
     links_state: LinksState,
     mpm_info: MpmInfo,
@@ -356,8 +361,8 @@ def func_contact_point_disp(
 def func_rigid_contact_gradient(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     rigid_data: qd.template(),
     dyn_state: DynState,
     dyn_info: DynInfo,
@@ -402,9 +407,9 @@ def func_rigid_contact_gradient(
 def func_rigid_contact_matvec(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     rigid_data: qd.template(),
     pcg_scalars: qd.template(),
     dyn_state: DynState,
@@ -445,8 +450,8 @@ def func_rigid_contact_matvec_post(
 def func_mpm_reaction(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     rigid_data: qd.template(),
     dyn_state: DynState,
     constraint_state: ConstraintState,

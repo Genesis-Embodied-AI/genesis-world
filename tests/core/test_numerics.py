@@ -3,12 +3,28 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.bcoo_matrix import BCOOMatrix, func_sort_reduce_bcoo, sort_reduce_bcoo
-from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum, func_dynamic_exclusive_sum
-from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort, func_dynamic_radix_sort
+from genesis.engine.numerics.bcoo_matrix import (
+    BCOOMatrixScratch,
+    bcoo_matrix_sizes,
+    func_read_bcoo,
+    func_sort_reduce_bcoo,
+    func_write_triplet,
+    init_bcoo_matrix,
+    sort_reduce_bcoo,
+)
+from genesis.engine.numerics.dynamic_exclusive_sum import (
+    DynamicExclusiveSumScratch,
+    dynamic_exclusive_sum_sizes,
+    func_dynamic_exclusive_sum,
+)
+from genesis.engine.numerics.dynamic_radix_sort import (
+    DynamicRadixSortScratch,
+    dynamic_radix_sort_sizes,
+    func_dynamic_radix_sort,
+)
 from genesis.engine.numerics.linear_pcg import (
     PCGScalars,
-    PCGWorkspace,
+    PCGWorkspaceScratch,
     func_init_linear_pcg_direction,
     func_init_linear_pcg_residual,
     func_linear_pcg_direction,
@@ -22,7 +38,13 @@ from genesis.engine.numerics.linear_pcg import (
     func_pcg_step,
 )
 from genesis.engine.numerics.newton_control import NewtonControl
-from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash, func_reset_hash
+from genesis.engine.numerics.open_addressing_hash import (
+    OpenAddressingHashScratch,
+    func_insert_hash,
+    func_lookup_hash,
+    func_reset_hash,
+    open_addressing_hash_sizes,
+)
 from genesis.utils.misc import qd_to_numpy
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -30,21 +52,22 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 @qd.kernel(graph=True)
 def kernel_radix_sort(
-    sorter: qd.template(),
+    sorter: DynamicRadixSortScratch,
     keys_a: qd.types.ndarray(),
     keys_b: qd.types.ndarray(),
     perm_a: qd.types.ndarray(),
     perm_b: qd.types.ndarray(),
     n: qd.types.ndarray(),
+    key_bits: qd.template(),
 ):
-    func_dynamic_radix_sort(keys_a, keys_b, perm_a, perm_b, sorter, n[()])
+    func_dynamic_radix_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
 
 
 @qd.kernel(graph=True)
 def kernel_exclusive_sum(
-    scanner: qd.template(), values: qd.types.ndarray(), output: qd.types.ndarray(), n: qd.types.ndarray()
+    scanner: DynamicExclusiveSumScratch, values: qd.types.ndarray(), output: qd.types.ndarray(), n: qd.types.ndarray()
 ):
-    func_dynamic_exclusive_sum(values, output, scanner, n[()])
+    func_dynamic_exclusive_sum(values, output, n, scanner)
 
 
 @pytest.mark.required
@@ -52,8 +75,9 @@ def kernel_exclusive_sum(
 @pytest.mark.parametrize(("qd_dtype", "np_dtype"), ((qd.u32, np.uint32), (qd.u64, np.uint64)))
 def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
     capacity = 20_000
+    key_bits = np.iinfo(np_dtype).bits
     rng = np.random.default_rng(7)
-    sorter = DynamicRadixSort(qd_dtype, capacity)
+    sorter = DynamicRadixSortScratch(sizes=dynamic_radix_sort_sizes(key_bits, capacity))
     keys_a = qd.ndarray(qd_dtype, shape=(capacity,))
     keys_b = qd.ndarray(qd_dtype, shape=(capacity,))
     perm_a = qd.ndarray(gs.qd_int, shape=(capacity,))
@@ -68,7 +92,7 @@ def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
         perm_a.from_numpy(permutation)
         n.from_numpy(np.array(count, dtype=gs.np_int))
 
-        kernel_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n)
+        kernel_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n, key_bits)
         qd.sync()
 
         order = np.argsort(keys[:count], kind="stable")
@@ -81,7 +105,7 @@ def test_dynamic_radix_sort_matches_stable_numpy(qd_dtype, np_dtype):
 def test_dynamic_exclusive_sum_matches_numpy():
     capacity = 100_000
     rng = np.random.default_rng(3)
-    scanner = DynamicExclusiveSum(capacity)
+    scanner = DynamicExclusiveSumScratch(sizes=dynamic_exclusive_sum_sizes(capacity))
     values = qd.ndarray(gs.qd_int, shape=(capacity,))
     output = qd.ndarray(gs.qd_int, shape=(capacity,))
     n = qd.ndarray(gs.qd_int, shape=())
@@ -98,18 +122,20 @@ def test_dynamic_exclusive_sum_matches_numpy():
 
 @qd.kernel
 def kernel_write_triplets(
-    matrix: qd.template(), rows: qd.types.ndarray(), cols: qd.types.ndarray(), values: qd.types.ndarray()
+    matrix: BCOOMatrixScratch, rows: qd.types.ndarray(), cols: qd.types.ndarray(), values: qd.types.ndarray()
 ):
     for slot in range(matrix.n_triplets[()]):
-        block = qd.Matrix.zero(matrix.value_type, 3, 3)
+        block = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i, j in qd.static(qd.ndrange(3, 3)):
             block[i, j] = values[slot, i, j]
-        matrix.write_triplet(slot, rows[slot], cols[slot], block)
+        func_write_triplet(slot, rows[slot], cols[slot], block, matrix, is_symmetric=True)
 
 
 @qd.kernel(graph=True)
-def kernel_sort_reduce_and_multiply(pcg_workspace: qd.template(), pcg_scalars: qd.template(), matrix: qd.template()):
-    func_sort_reduce_bcoo(matrix)
+def kernel_sort_reduce_and_multiply(
+    pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch
+):
+    func_sort_reduce_bcoo(matrix, block_scalars=9)
     func_linear_pcg_spmv(pcg_workspace, pcg_scalars, matrix)
 
 
@@ -133,22 +159,17 @@ def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
     rng = np.random.default_rng(11)
     n_rows, n_triplets = 40, 500
     rows, cols, values, dense = _random_symmetric_triplets(rng, n_rows, n_triplets)
-    matrix = BCOOMatrix(
-        shape=(n_rows, n_rows),
-        block_shape=(3, 3),
-        value_type=gs.qd_float,
-        symmetric=True,
-        initial_triplets=n_triplets,
-        max_triplets=n_triplets,
-    )
+    matrix = BCOOMatrixScratch(sizes=bcoo_matrix_sizes(n_triplets, block_shape=(3, 3)))
+    init_bcoo_matrix(matrix, n_triplets)
     rows_nd, cols_nd = qd.ndarray(gs.qd_int, shape=(n_triplets,)), qd.ndarray(gs.qd_int, shape=(n_triplets,))
     values_nd = qd.ndarray(gs.qd_float, shape=(n_triplets, 3, 3))
     rows_nd.from_numpy(rows)
     cols_nd.from_numpy(cols)
     values_nd.from_numpy(values)
     x = rng.standard_normal(3 * n_rows)
-    pcg_workspace = PCGWorkspace(n_rows, gs.qd_float)
+    pcg_workspace = PCGWorkspaceScratch(sizes=dict(pcg_rows=n_rows))
     pcg_workspace.n_rows.from_numpy(np.array(n_rows, dtype=gs.np_int))
+    pcg_workspace.row_env.fill(0)
     pcg_workspace.p.from_numpy(x)
     pcg_scalars = PCGScalars(gs.qd_float, max_iter=1, tol_rate=0.0)
 
@@ -169,19 +190,19 @@ def test_symmetric_bcoo_reduces_duplicates_and_multiplies():
 
 
 @qd.kernel
-def kernel_hash_insert(table: qd.template(), keys: qd.types.ndarray()):
+def kernel_hash_insert(table: OpenAddressingHashScratch, keys: qd.types.ndarray()):
     for i in range(keys.shape[0]):
-        table.insert(keys[i], i)
+        func_insert_hash(keys[i], i, table)
 
 
 @qd.kernel
-def kernel_hash_lookup(table: qd.template(), keys: qd.types.ndarray(), out: qd.types.ndarray()):
+def kernel_hash_lookup(table: OpenAddressingHashScratch, keys: qd.types.ndarray(), out: qd.types.ndarray()):
     for i in range(keys.shape[0]):
-        out[i] = table.lookup(keys[i])
+        out[i] = func_lookup_hash(keys[i], table)
 
 
 @qd.kernel
-def kernel_hash_reset(table: qd.template()):
+def kernel_hash_reset(table: OpenAddressingHashScratch):
     func_reset_hash(table)
 
 
@@ -192,7 +213,7 @@ def test_open_addressing_hash_inserts_and_looks_up():
     keys = np.unique(rng.integers(0, np.iinfo(np.uint64).max - 1, size=2 * n_keys, dtype=np.uint64))[:n_keys]
     missing = keys + np.uint64(1)
     missing = missing[~np.isin(missing, keys)]
-    table = OpenAddressingHash(n_keys)
+    table = OpenAddressingHashScratch(sizes=open_addressing_hash_sizes(n_keys))
     keys_nd, missing_nd = qd.ndarray(qd.u64, shape=(len(keys),)), qd.ndarray(qd.u64, shape=(len(missing),))
     found_nd, absent_nd = qd.ndarray(gs.qd_int, shape=(len(keys),)), qd.ndarray(gs.qd_int, shape=(len(missing),))
     keys_nd.from_numpy(keys)
@@ -209,9 +230,9 @@ def test_open_addressing_hash_inserts_and_looks_up():
 
 
 @qd.kernel
-def kernel_invert_block_diagonal(matrix: qd.template(), precond_inv_diag: qd.types.ndarray()):
+def kernel_invert_block_diagonal(matrix: BCOOMatrixScratch, precond_inv_diag: qd.types.ndarray()):
     for entry in range(matrix.bcoo_nnz[()]):
-        row, col, block = matrix.read_bcoo(entry)
+        row, col, block = func_read_bcoo(entry, matrix, block_rows=3, block_cols=3)
         if row == col:
             inverse = block.inverse()
             for i, j in qd.static(qd.ndrange(3, 3)):
@@ -219,10 +240,10 @@ def kernel_invert_block_diagonal(matrix: qd.template(), precond_inv_diag: qd.typ
 
 
 @qd.func(requires_top_level=True)
-def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: qd.template()):
+def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: PCGWorkspaceScratch):
     for row in range(pcg_workspace.n_rows[()]):
         for i in qd.static(range(3)):
-            value = pcg_workspace.value_type(0.0)
+            value = gs.qd_float(0.0)
             for j in qd.static(range(3)):
                 value += precond_inv_diag[row * 9 + i * 3 + j] * pcg_workspace.r[row * 3 + j]
             pcg_workspace.z[row * 3 + i] = value
@@ -230,10 +251,10 @@ def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: qd.t
 
 @qd.kernel(graph=True)
 def kernel_pcg_solve(
-    pcg_workspace: qd.template(),
+    pcg_workspace: PCGWorkspaceScratch,
     pcg_scalars: qd.template(),
     newton_control: qd.template(),
-    matrix: qd.template(),
+    matrix: BCOOMatrixScratch,
     precond_inv_diag: qd.types.ndarray(),
     b: qd.types.ndarray(),
     x: qd.types.ndarray(),
@@ -290,14 +311,8 @@ def _pcg_block_system(off_diagonal_scales, check_curvature, pcg_scalars=None, x_
     rows, cols, values = np.concatenate(rows), np.concatenate(cols), np.concatenate(values)
     n_triplets = len(rows)
 
-    matrix = BCOOMatrix(
-        shape=(n_rows, n_rows),
-        block_shape=(3, 3),
-        value_type=gs.qd_float,
-        symmetric=True,
-        initial_triplets=n_triplets,
-        max_triplets=n_triplets,
-    )
+    matrix = BCOOMatrixScratch(sizes=bcoo_matrix_sizes(n_triplets, block_shape=(3, 3)))
+    init_bcoo_matrix(matrix, n_triplets)
     rows_nd, cols_nd = qd.ndarray(gs.qd_int, shape=(n_triplets,)), qd.ndarray(gs.qd_int, shape=(n_triplets,))
     values_nd = qd.ndarray(gs.qd_float, shape=(n_triplets, 3, 3))
     rows_nd.from_numpy(rows)
@@ -305,7 +320,7 @@ def _pcg_block_system(off_diagonal_scales, check_curvature, pcg_scalars=None, x_
     values_nd.from_numpy(values)
     kernel_write_triplets(matrix, rows_nd, cols_nd, values_nd)
 
-    pcg_workspace = PCGWorkspace(n_rows, gs.qd_float)
+    pcg_workspace = PCGWorkspaceScratch(sizes=dict(pcg_rows=n_rows))
     pcg_workspace.n_rows.from_numpy(np.array(n_rows, dtype=gs.np_int))
     pcg_workspace.row_env.from_numpy(np.repeat(np.arange(n_envs, dtype=gs.np_int), n_env_rows))
     is_adjoint = pcg_scalars is not None
@@ -321,7 +336,7 @@ def _pcg_block_system(off_diagonal_scales, check_curvature, pcg_scalars=None, x_
     if is_adjoint:
         x_nd.from_numpy(x_init)
 
-    sort_reduce_bcoo(matrix)
+    sort_reduce_bcoo(matrix, block_scalars=9)
     kernel_invert_block_diagonal(matrix, precond_inv_diag)
     kernel_pcg_solve(
         pcg_workspace, pcg_scalars, newton_control, matrix, precond_inv_diag, b_nd, x_nd, is_adjoint=is_adjoint

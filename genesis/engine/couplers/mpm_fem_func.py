@@ -20,7 +20,10 @@ from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
     WALL_ROWS,
+    MpmGridScratch,
     MpmInfo,
+    MpmLinearScratch,
+    MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
 )
@@ -31,6 +34,7 @@ from genesis.engine.solvers.mpm_func import (
     particle_of_sorted,
     pyramid_dirs,
 )
+from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.utils.array_class import BVHQueryResults
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
@@ -142,13 +146,13 @@ class FemTriangleQuery:
     """The linear bounding volume hierarchy (LBVH) over the finite element method (FEM) surface triangles of every
     environment (see genesis.engine.bvh).
 
-    It also holds the data the filter of its queries reads: the FEM solver, the values of the MPM kernels `mpm_info`, the
-    values of the contact rows `contact`, and the query point, frame and nearest triangle of each sorted particle in
-    `newton`."""
+    It also holds the data the filter of its queries reads: the FEM solver, the values of the material point method
+    (MPM) kernels `mpm_info`, the values of the contact rows `contact`, and the query point, frame and nearest triangle
+    of each sorted particle in the Newton state of the MPM participant `mpm`."""
 
-    def __init__(self, fem, newton, mpm_info, contact: FemContactParams, n_envs):
+    def __init__(self, fem, mpm: MpmNewtonParticipant, mpm_info, contact: FemContactParams, n_envs):
         self.fem = fem
-        self.newton = newton
+        self.mpm = mpm
         self.mpm_info = mpm_info
         self.contact = contact
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, fem.n_surfaces)
@@ -205,8 +209,8 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
     whose box the leaf of the triangle spans. Behind any other found triangle, the particle may lie far outside the
     entity, where the grown box of that triangle reaches it and the box of its nearest triangle misses it, so the filter
     drops that triangle. Penetration deeper than the surface elements gives no row."""
-    f = query.newton.query_frame[()]
-    x = query.newton.query_pos[i_q]
+    f = query.mpm.newton.query_frame[()]
+    x = query.mpm.newton.query_pos[i_q]
     tri2v = query.fem.surface[i_a].tri2v
     a = query.fem.elements_v[f, tri2v[0], i_t].pos
     b = query.fem.elements_v[f, tri2v[1], i_t].pos
@@ -221,18 +225,18 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
         side = -1.0
         is_valid = is_in_element(query.fem.surface[i_a].tri2el, i_t, f, x, query.fem)
     align = qd.abs(d.dot(n_tri)) / qd.max(dist, gs.EPS)
-    best_dist = query.newton.query_dist[i_q]
+    best_dist = query.mpm.newton.query_dist[i_q]
     is_tie = qd.abs(dist - best_dist) <= TIE_DIST_RATIO * query.mpm_info.dx[()]
-    if is_valid and ((dist < best_dist and not is_tie) or (is_tie and align > query.newton.query_align[i_q])):
+    if is_valid and ((dist < best_dist and not is_tie) or (is_tie and align > query.mpm.newton.query_align[i_q])):
         normal = n_tri
         if side > 0.0 and dist > gs.EPS:
             normal = d / dist
-        query.newton.query_dist[i_q] = dist
-        query.newton.query_align[i_q] = align
-        query.newton.query_phi[i_q] = side * dist - query.contact.thickness[()]
-        query.newton.query_idx[i_q] = i_a
-        query.newton.query_bary[i_q] = bary
-        query.newton.query_normal[i_q] = normal
+        query.mpm.newton.query_dist[i_q] = dist
+        query.mpm.newton.query_align[i_q] = align
+        query.mpm.newton.query_phi[i_q] = side * dist - query.contact.thickness[()]
+        query.mpm.newton.query_idx[i_q] = i_a
+        query.mpm.newton.query_bary[i_q] = bary
+        query.mpm.newton.query_normal[i_q] = normal
     return True
 
 
@@ -244,8 +248,8 @@ def func_build_fem_rows(
     f: int,
     dt: float,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     fem: qd.template(),
     query: qd.template(),
     particles_info: MpmParticlesInfo,
@@ -311,7 +315,7 @@ def func_build_fem_rows(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_point_disp(f: int, grid: qd.template(), newton: qd.template(), fem: qd.template(), mpm_info: MpmInfo):
+def func_fem_point_disp(f: int, grid: MpmGridScratch, newton: MpmNewtonScratch, fem: qd.template(), mpm_info: MpmInfo):
     """Displacement of the contact point of every particle with FEM rows at the current FEM iterate."""
     qd.loop_config(name="mpm_fem_point_disp")
     for s in range(grid.n_valid[()]):
@@ -322,7 +326,7 @@ def func_fem_point_disp(f: int, grid: qd.template(), newton: qd.template(), fem:
 
 
 @qd.func(requires_top_level=True)
-def func_fem_contact_gradient(grid: qd.template(), newton: qd.template(), fem: qd.template(), mpm_info: MpmInfo):
+def func_fem_contact_gradient(grid: MpmGridScratch, newton: MpmNewtonScratch, fem: qd.template(), mpm_info: MpmInfo):
     """Add the share of the FEM rows to the FEM gradient and to its preconditioner.
 
     It runs after FEM's own force and diagonal blocks, and after the MPM assembly that staged the row gradients g and
@@ -352,9 +356,9 @@ def func_fem_contact_gradient(grid: qd.template(), newton: qd.template(), fem: q
 def func_fem_contact_matvec(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     fem: qd.template(),
     pcg_scalars: qd.template(),
     mpm_info: MpmInfo,

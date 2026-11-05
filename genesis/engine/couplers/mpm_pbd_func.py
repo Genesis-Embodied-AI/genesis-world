@@ -19,7 +19,10 @@ from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
     WALL_ROWS,
+    MpmGridScratch,
     MpmInfo,
+    MpmLinearScratch,
+    MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
 )
@@ -67,13 +70,15 @@ class PbdParticleQuery:
     """The linear bounding volume hierarchy (LBVH) over the position based dynamics (PBD) particles of every
     environment, in PBD's reordered layout (see genesis.engine.bvh).
 
-    It also holds the data the filter of its queries reads: the PBD participant, the values of the MPM kernels `mpm_info`,
-    the values of the contact rows `contact`, and the query point and nearest PBD particle of each sorted MPM particle
-    in `newton`."""
+    It also holds the data the filter of its queries reads: the PBD participant, the values of the material point
+    method (MPM) kernels `mpm_info`, the values of the contact rows `contact`, and the query point and nearest PBD
+    particle of each sorted MPM particle in `newton`."""
 
-    def __init__(self, pbd: PbdNewtonParticipant, newton, mpm_info, contact: PbdContactParams, n_envs):
+    def __init__(
+        self, pbd: PbdNewtonParticipant, mpm: MpmNewtonParticipant, mpm_info, contact: PbdContactParams, n_envs
+    ):
         self.pbd = pbd
-        self.newton = newton
+        self.mpm = mpm
         self.mpm_info = mpm_info
         self.contact = contact
         self.radius = pbd.particle_radius
@@ -115,13 +120,13 @@ def func_nearest_pbd_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) 
     The query is that of sorted MPM particle i_q in environment i_t, against PBD particle i_a. The gap is the distance
     minus the PBD radius and the contact thickness. The filter keeps it in `newton.query_phi`, the PBD particle in
     `newton.query_idx` and the normal from it to the MPM particle in `newton.query_normal`, and records no pair."""
-    d = query.newton.query_pos[i_q] - query.pbd.particles_reordered[i_a, i_t].ipos
+    d = query.mpm.newton.query_pos[i_q] - query.pbd.particles_reordered[i_a, i_t].ipos
     dist = d.norm()
     phi = dist - qd.static(query.radius) - query.contact.thickness[()]
-    if phi < query.newton.query_phi[i_q] and dist > gs.EPS:
-        query.newton.query_phi[i_q] = phi
-        query.newton.query_idx[i_q] = i_a
-        query.newton.query_normal[i_q] = d / dist
+    if phi < query.mpm.newton.query_phi[i_q] and dist > gs.EPS:
+        query.mpm.newton.query_phi[i_q] = phi
+        query.mpm.newton.query_idx[i_q] = i_a
+        query.mpm.newton.query_normal[i_q] = d / dist
     return True
 
 
@@ -133,8 +138,8 @@ def func_build_pbd_rows(
     f: int,
     dt: float,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     pbd: qd.template(),
     query: qd.template(),
     particles_info: MpmParticlesInfo,
@@ -182,7 +187,7 @@ def func_build_pbd_rows(
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_point_disp(grid: qd.template(), newton: qd.template(), pbd: qd.template(), mpm_info: MpmInfo):
+def func_pbd_point_disp(grid: MpmGridScratch, newton: MpmNewtonScratch, pbd: qd.template(), mpm_info: MpmInfo):
     """Displacement over the substep of the PBD particle of every particle with PBD rows, at the current iterate."""
     qd.loop_config(name="mpm_pbd_point_disp")
     for s in range(grid.n_valid[()]):
@@ -193,7 +198,9 @@ def func_pbd_point_disp(grid: qd.template(), newton: qd.template(), pbd: qd.temp
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_contact_gradient(grid: qd.template(), newton: qd.template(), pbd_data: qd.template(), mpm_info: MpmInfo):
+def func_pbd_contact_gradient(
+    grid: MpmGridScratch, newton: MpmNewtonScratch, pbd_data: qd.template(), mpm_info: MpmInfo
+):
     """Add the share of the PBD rows to the PBD gradient and diagonal blocks.
 
     It runs after the inertia terms and after the MPM assembly that staged the row gradients g and Hessians H. The PBD
@@ -211,9 +218,9 @@ def func_pbd_contact_gradient(grid: qd.template(), newton: qd.template(), pbd_da
 def func_pbd_contact_matvec(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     pbd_data: qd.template(),
     pcg_scalars: qd.template(),
     mpm_info: MpmInfo,

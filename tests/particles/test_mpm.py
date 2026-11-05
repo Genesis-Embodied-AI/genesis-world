@@ -416,7 +416,7 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
     # referencing, are freed with the scene, including the Rigid data read by the contact of a Rigid without dofs
     items = [*scene.sim.mpm_solver.data, *scene.sim.newton_solver.data]
     roots = {item.name.split(".")[0] for item in items}
-    assert {"particles", "particles_info", "mpm_grid", "mpm_newton", "mpm_linear", "control", "participants"} <= roots
+    assert {"particles", "particles_info", "grid", "newton", "linear", "control", "participants"} <= roots
     assert any(".rigid_data." in item.name for item in items)
     assert any(".query." in item.name for item in items)
     assert any(item.name.startswith("newton_info.") for item in items)

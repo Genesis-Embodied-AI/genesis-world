@@ -22,14 +22,17 @@ return_map_vjp), and the snow hardening reverses through the Lame parameters rea
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import LinksState
 import genesis.utils.geom as gu
+from genesis.utils.array_class import LinksState
 
 from .mpm_data import (
     BLOCK_CELLS,
     CONTACT_ROWS,
+    MpmGridScratch,
     MpmInfo,
+    MpmLinearScratch,
     MpmMaterialTable,
+    MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
     MpmParticlesNG,
@@ -165,9 +168,9 @@ def func_wall_contact_adjoint(
     f: int,
     dt: float,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     particles_info: MpmParticlesInfo,
     mpm_info: MpmInfo,
 ):
@@ -243,9 +246,9 @@ def func_wall_contact_adjoint(
 def func_constraint_adjoint(
     f: int,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     links_state: LinksState,
     mpm_info: MpmInfo,
     constraints: qd.template(),
@@ -291,7 +294,7 @@ def func_constraint_adjoint(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_reset_u_bar(grid: qd.template(), newton: qd.template()):
+def func_adjoint_reset_u_bar(grid: MpmGridScratch, newton: MpmNewtonScratch):
     """Clear the adjoint of u*, which the reverse of the grid-to-particle transfer (G2P) accumulates into `newton.du`
     (free once the forward solve is over)."""
     qd.loop_config(name="mpm_adjoint_reset_u_bar")
@@ -304,8 +307,8 @@ def func_adjoint_g2p(
     f: int,
     dt: float,
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
@@ -362,7 +365,7 @@ def func_adjoint_g2p(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_rhs(grid: qd.template(), newton: qd.template(), linear: qd.template()):
+def func_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch):
     """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed nodes, whose rows of
     the Newton matrix are the identity."""
     qd.loop_config(name="mpm_adjoint_rhs")
@@ -377,9 +380,9 @@ def func_adjoint_rhs(grid: qd.template(), newton: qd.template(), linear: qd.temp
 def func_adjoint_nodes(
     t: float,
     dt: float,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     force_fields: qd.template(),
     mpm_info: MpmInfo,
 ):
@@ -420,9 +423,9 @@ def func_adjoint_particles(
     dt: float,
     gravity: qd.template(),
     particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: MpmLinearScratch,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,

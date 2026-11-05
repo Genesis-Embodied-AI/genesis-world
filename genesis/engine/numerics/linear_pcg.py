@@ -1,8 +1,10 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import Data, DataKind, Size, field
 from genesis.utils.misc import get_gpu_resident_blocks, qd_debug_asserts, qd_isfinite
 
+from .bcoo_matrix import BCOOMatrixScratch, func_read_bcoo
 from .fsr_reduce import head_segmented_reduce_add, warp_add_by_key
 
 # Threads of a block of the preconditioned conjugate gradient (PCG) launches
@@ -63,8 +65,10 @@ class PCGScalars:
         self.is_converged = per_env(gs.qd_int, 0)
 
 
-@qd.data_oriented
-class PCGWorkspace:
+PCG_ROWS = Size("pcg_rows")
+
+
+class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
     """Vectors of a preconditioned conjugate gradient (PCG) over the 3x3 block rows of one owner.
 
     The owner runs each of its stages over its live block rows `n_rows`, by grid-striding loops on a resident grid, and
@@ -78,100 +82,82 @@ class PCGWorkspace:
     the same for both.
     """
 
-    def __init__(self, max_rows: int, value_type) -> None:
-        self.value_type = value_type
-        self.n_blocks = get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS)
-        self.n_spmv_blocks = get_gpu_resident_blocks(PCG_BLOCK, _SPMV_REGISTERS)
-        self.allocate(max_rows)
-        self.n_rows = qd.ndarray(gs.qd_int, shape=())
-        self.n_rows.fill(0)
-
-    def allocate(self, max_rows: int) -> None:
-        """Allocate the vectors for a capacity of block rows, replacing the current ones and keeping this object."""
-        length = max(3 * max(max_rows, 1), 1)
-        self.r = qd.ndarray(self.value_type, shape=(length,))
-        self.z = qd.ndarray(self.value_type, shape=(length,))
-        self.p = qd.ndarray(self.value_type, shape=(length,))
-        self.ap = qd.ndarray(self.value_type, shape=(length,))
-        self.row_env = qd.ndarray(gs.qd_int, shape=(max(max_rows, 1),))
-        self.row_env.fill(0)
+    r: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
+    z: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
+    p: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
+    ap: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
+    row_env: qd.Tensor = field(int, shape=(PCG_ROWS,), ndarray=True)
+    n_rows: qd.Tensor = field(int, ndarray=True)
 
 
 @qd.func(requires_top_level=True)
-def _func_dot_into(
-    a: qd.template(), b: qd.template(), pcg_workspace: qd.template(), pcg_scalars: qd.template(), is_new: qd.template()
-):
-    """Add the dot product of two vectors over the live rows of every running environment to its rz, or to its rz_new
-    with `is_new`.
+def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), is_new: qd.template()):
+    """Add the dot product of r and z over the live rows of every running environment to its rz, or to its rz_new with
+    `is_new`.
 
-    As in every reduction of the rows, a GPU sums the products of each run of one environment in a warp by shuffles and
-    adds one atomic per run, and a CPU sums each of _CPU_CHUNKS contiguous chunks in one thread and adds one atomic per
-    environment of the chunk.
+    As in every reduction of the rows, a graphics processing unit (GPU) sums the products of each run of one
+    environment in a warp by shuffles and adds one atomic per run, and a central processing unit (CPU) sums each of
+    _CPU_CHUNKS contiguous chunks in one thread and adds one atomic per environment of the chunk.
     """
     if qd.static(gs.backend == gs.cpu):
         if qd.static(is_new):
-            _func_dot_into_cpu(a, b, pcg_workspace, pcg_scalars, pcg_scalars.rz_new)
+            _func_dot_into_cpu(pcg_scalars.rz_new, pcg_workspace, pcg_scalars)
         else:
-            _func_dot_into_cpu(a, b, pcg_workspace, pcg_scalars, pcg_scalars.rz)
+            _func_dot_into_cpu(pcg_scalars.rz, pcg_workspace, pcg_scalars)
     else:
         if qd.static(is_new):
-            _func_dot_into_gpu(a, b, pcg_workspace, pcg_scalars, pcg_scalars.rz_new)
+            _func_dot_into_gpu(pcg_scalars.rz_new, pcg_workspace, pcg_scalars)
         else:
-            _func_dot_into_gpu(a, b, pcg_workspace, pcg_scalars, pcg_scalars.rz)
+            _func_dot_into_gpu(pcg_scalars.rz, pcg_workspace, pcg_scalars)
 
 
 @qd.func(requires_top_level=True)
-def _func_dot_into_cpu(
-    a: qd.template(), b: qd.template(), pcg_workspace: qd.template(), pcg_scalars: qd.template(), out: qd.template()
-):
+def _func_dot_into_cpu(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
     qd.loop_config(name="pcg_dot_rz_cpu")
-    for chunk in range(_CPU_CHUNKS):
+    for i_chunk in range(_CPU_CHUNKS):
         n_rows = pcg_workspace.n_rows[()]
         size = (n_rows + _CPU_CHUNKS - 1) // _CPU_CHUNKS
-        value = pcg_workspace.value_type(0.0)
-        current_env = gs.qd_int(-1)
-        for v in range(chunk * size, qd.min(chunk * size + size, n_rows)):
-            env = pcg_workspace.row_env[v]
-            if env != current_env:
-                if current_env >= 0:
-                    qd.atomic_add(out[current_env], value)
-                current_env = env
-                value = pcg_workspace.value_type(0.0)
-            if pcg_scalars.is_converged[env] == 0:
+        value = gs.qd_float(0.0)
+        j_b = gs.qd_int(-1)
+        for i_r in range(i_chunk * size, qd.min(i_chunk * size + size, n_rows)):
+            i_b = pcg_workspace.row_env[i_r]
+            if i_b != j_b:
+                if j_b >= 0:
+                    qd.atomic_add(out[j_b], value)
+                j_b = i_b
+                value = gs.qd_float(0.0)
+            if pcg_scalars.is_converged[i_b] == 0:
                 for d in qd.static(range(3)):
-                    value += a[3 * v + d] * b[3 * v + d]
-        if current_env >= 0:
-            qd.atomic_add(out[current_env], value)
+                    value += pcg_workspace.r[3 * i_r + d] * pcg_workspace.z[3 * i_r + d]
+        if j_b >= 0:
+            qd.atomic_add(out[j_b], value)
 
 
 @qd.func(requires_top_level=True)
-def _func_dot_into_gpu(
-    a: qd.template(), b: qd.template(), pcg_workspace: qd.template(), pcg_scalars: qd.template(), out: qd.template()
-):
+def _func_dot_into_gpu(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+    n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_blocks * PCG_BLOCK):
+    for i_th in range(n_blocks * PCG_BLOCK):
         n_rows = pcg_workspace.n_rows[()]
         padded = ((n_rows + 31) // 32) * 32
-        for i_chunk_ in range(
-            (padded + pcg_workspace.n_blocks * PCG_BLOCK - 1) // (pcg_workspace.n_blocks * PCG_BLOCK)
-        ):
-            v = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
-            env = gs.qd_int(-1)
-            value = pcg_workspace.value_type(0.0)
-            if v < n_rows:
-                row_env = pcg_workspace.row_env[v]
-                if pcg_scalars.is_converged[row_env] == 0:
-                    env = row_env
+        for i_chunk_ in range((padded + n_blocks * PCG_BLOCK - 1) // (n_blocks * PCG_BLOCK)):
+            i_r = i_chunk_ * n_blocks * PCG_BLOCK + i_th
+            i_b = gs.qd_int(-1)
+            value = gs.qd_float(0.0)
+            if i_r < n_rows:
+                j_b = pcg_workspace.row_env[i_r]
+                if pcg_scalars.is_converged[j_b] == 0:
+                    i_b = j_b
                     for d in qd.static(range(3)):
-                        value += a[3 * v + d] * b[3 * v + d]
-            warp_add_by_key(value, env, out)
+                        value += pcg_workspace.r[3 * i_r + d] * pcg_workspace.z[3 * i_r + d]
+            warp_add_by_key(value, i_b, out)
 
 
 @qd.func(requires_top_level=True)
 def func_init_linear_pcg_residual(
     b: qd.template(),
     x: qd.template(),
-    pcg_workspace: qd.template(),
+    pcg_workspace: PCGWorkspaceScratch,
     pcg_scalars: qd.template(),
     is_adjoint: qd.template(),
 ):
@@ -181,41 +167,37 @@ def func_init_linear_pcg_residual(
     `env_active` keeps its solution, which an earlier adjoint solve left. Next, the owner applies its preconditioner
     (z = M^-1 r) and calls func_init_linear_pcg_direction to set the first direction.
     """
+    n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_blocks * PCG_BLOCK):
-        for i_chunk_ in range(
-            (3 * pcg_workspace.n_rows[()] + pcg_workspace.n_blocks * PCG_BLOCK - 1)
-            // (pcg_workspace.n_blocks * PCG_BLOCK)
-        ):
-            i = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
-            if i < 3 * pcg_workspace.n_rows[()]:
+    for i_th in range(n_blocks * PCG_BLOCK):
+        for i_chunk_ in range((3 * pcg_workspace.n_rows[()] + n_blocks * PCG_BLOCK - 1) // (n_blocks * PCG_BLOCK)):
+            i_val = i_chunk_ * n_blocks * PCG_BLOCK + i_th
+            if i_val < 3 * pcg_workspace.n_rows[()]:
                 is_kept = False
                 if qd.static(is_adjoint):
-                    env = pcg_workspace.row_env[i // 3]
-                    is_kept = pcg_scalars.is_converged[env] != 0
+                    i_b = pcg_workspace.row_env[i_val // 3]
+                    is_kept = pcg_scalars.is_converged[i_b] != 0
                 if not is_kept:
-                    x[i] = 0.0
-                pcg_workspace.r[i] = b[i]
-                pcg_workspace.ap[i] = 0.0
+                    x[i_val] = 0.0
+                pcg_workspace.r[i_val] = b[i_val]
+                pcg_workspace.ap[i_val] = 0.0
 
 
 @qd.func(requires_top_level=True)
-def func_init_linear_pcg_direction(pcg_workspace: qd.template(), pcg_scalars: qd.template()):
+def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
     """Set the first search direction p = z, and add r . z to rz."""
+    n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_blocks * PCG_BLOCK):
-        for i_chunk_ in range(
-            (3 * pcg_workspace.n_rows[()] + pcg_workspace.n_blocks * PCG_BLOCK - 1)
-            // (pcg_workspace.n_blocks * PCG_BLOCK)
-        ):
-            i = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
-            if i < 3 * pcg_workspace.n_rows[()]:
-                pcg_workspace.p[i] = pcg_workspace.z[i]
-    _func_dot_into(pcg_workspace.r, pcg_workspace.z, pcg_workspace, pcg_scalars, False)
+    for i_th in range(n_blocks * PCG_BLOCK):
+        for i_chunk_ in range((3 * pcg_workspace.n_rows[()] + n_blocks * PCG_BLOCK - 1) // (n_blocks * PCG_BLOCK)):
+            i_val = i_chunk_ * n_blocks * PCG_BLOCK + i_th
+            if i_val < 3 * pcg_workspace.n_rows[()]:
+                pcg_workspace.p[i_val] = pcg_workspace.z[i_val]
+    _func_dot_into(pcg_workspace, pcg_scalars, False)
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_spmv(pcg_workspace: qd.template(), pcg_scalars: qd.template(), matrix: qd.template()):
+def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch):
     """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form.
 
     The energy form sums w p_r^T B p_c over the stored upper blocks (w = 1 on the diagonal, 2 off it, for the mirrored
@@ -234,148 +216,141 @@ def func_linear_pcg_spmv(pcg_workspace: qd.template(), pcg_scalars: qd.template(
 
 
 @qd.func(requires_top_level=True)
-def _func_linear_pcg_spmv_cpu(pcg_workspace: qd.template(), pcg_scalars: qd.template(), matrix: qd.template()):
+def _func_linear_pcg_spmv_cpu(
+    pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch
+):
     """Run func_linear_pcg_spmv over contiguous chunks of the row-sorted entries, one thread per chunk.
 
     The products of a row accumulate in the thread and add once to Ap where the row ends, the mirrored products of the
     lower triangle add per entry, and p.Ap adds once per environment of the chunk.
     """
     qd.loop_config(name="pcg_spmv_pap_cpu")
-    for chunk in range(_CPU_CHUNKS):
+    for i_chunk in range(_CPU_CHUNKS):
         nnz = matrix.bcoo_nnz[()]
         size = (nnz + _CPU_CHUNKS - 1) // _CPU_CHUNKS
-        energy_sum = pcg_workspace.value_type(0.0)
-        current_env = gs.qd_int(-1)
-        row_sum = qd.Vector.zero(pcg_workspace.value_type, 3)
-        current_row = gs.qd_int(-1)
-        for entry in range(chunk * size, qd.min(chunk * size + size, nnz)):
-            row, col, block = matrix.read_bcoo(entry)
-            env = pcg_workspace.row_env[row]
-            if env != current_env:
-                if current_env >= 0:
-                    qd.atomic_add(pcg_scalars.p_dot_ap[current_env], energy_sum)
-                current_env = env
-                energy_sum = pcg_workspace.value_type(0.0)
-            if pcg_scalars.is_converged[env] == 0:
-                if row != current_row:
-                    if current_row >= 0:
+        energy_sum = gs.qd_float(0.0)
+        j_b = gs.qd_int(-1)
+        row_sum = qd.Vector.zero(gs.qd_float, 3)
+        j_r = gs.qd_int(-1)
+        for i_nz in range(i_chunk * size, qd.min(i_chunk * size + size, nnz)):
+            i_r, i_c, block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)
+            i_b = pcg_workspace.row_env[i_r]
+            if i_b != j_b:
+                if j_b >= 0:
+                    qd.atomic_add(pcg_scalars.p_dot_ap[j_b], energy_sum)
+                j_b = i_b
+                energy_sum = gs.qd_float(0.0)
+            if pcg_scalars.is_converged[i_b] == 0:
+                if i_r != j_r:
+                    if j_r >= 0:
                         for d in qd.static(range(3)):
-                            qd.atomic_add(pcg_workspace.ap[3 * current_row + d], row_sum[d])
-                    current_row = row
-                    row_sum = qd.Vector.zero(pcg_workspace.value_type, 3)
-                p_col = qd.Vector(
-                    [pcg_workspace.p[3 * col + d] for d in qd.static(range(3))], dt=pcg_workspace.value_type
-                )
+                            qd.atomic_add(pcg_workspace.ap[3 * j_r + d], row_sum[d])
+                    j_r = i_r
+                    row_sum = qd.Vector.zero(gs.qd_float, 3)
+                p_col = qd.Vector([pcg_workspace.p[3 * i_c + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 product = block @ p_col
                 row_sum += product
-                if row != col:
-                    p_row = qd.Vector(
-                        [pcg_workspace.p[3 * row + d] for d in qd.static(range(3))], dt=pcg_workspace.value_type
-                    )
+                if i_r != i_c:
+                    p_row = qd.Vector([pcg_workspace.p[3 * i_r + d] for d in qd.static(range(3))], dt=gs.qd_float)
                     product_mirrored = block.transpose() @ p_row
                     for d in qd.static(range(3)):
-                        qd.atomic_add(pcg_workspace.ap[3 * col + d], product_mirrored[d])
+                        qd.atomic_add(pcg_workspace.ap[3 * i_c + d], product_mirrored[d])
                     energy_sum += 2.0 * p_row.dot(product)
                 else:
                     energy_sum += p_col.dot(product)
-        if current_row >= 0:
+        if j_r >= 0:
             for d in qd.static(range(3)):
-                qd.atomic_add(pcg_workspace.ap[3 * current_row + d], row_sum[d])
-        if current_env >= 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[current_env], energy_sum)
+                qd.atomic_add(pcg_workspace.ap[3 * j_r + d], row_sum[d])
+        if j_b >= 0:
+            qd.atomic_add(pcg_scalars.p_dot_ap[j_b], energy_sum)
 
 
 @qd.func(requires_top_level=True)
-def _func_linear_pcg_spmv_gpu(pcg_workspace: qd.template(), pcg_scalars: qd.template(), matrix: qd.template()):
+def _func_linear_pcg_spmv_gpu(
+    pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch
+):
+    n_spmv_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _SPMV_REGISTERS))
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_spmv_blocks * PCG_BLOCK):
-        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+    for i_th in range(n_spmv_blocks * PCG_BLOCK):
+        i_lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
         nnz = matrix.bcoo_nnz[()]
         padded = ((nnz + 31) // 32) * 32
-        for i_chunk_ in range(
-            (padded + pcg_workspace.n_spmv_blocks * PCG_BLOCK - 1) // (pcg_workspace.n_spmv_blocks * PCG_BLOCK)
-        ):
-            entry = i_chunk_ * pcg_workspace.n_spmv_blocks * PCG_BLOCK + t
-            if entry < padded:
-                row = gs.qd_int(-1)
-                env = gs.qd_int(-1)
-                energy = pcg_workspace.value_type(0.0)
-                product = qd.Vector.zero(pcg_workspace.value_type, 3)
-                if entry < nnz:
-                    row_, col, block = matrix.read_bcoo(entry)
-                    row_env = pcg_workspace.row_env[row_]
-                    if pcg_scalars.is_converged[row_env] == 0:
-                        row = row_
-                        env = row_env
-                        p_col = qd.Vector(
-                            [pcg_workspace.p[3 * col + d] for d in qd.static(range(3))], dt=pcg_workspace.value_type
-                        )
+        for i_chunk_ in range((padded + n_spmv_blocks * PCG_BLOCK - 1) // (n_spmv_blocks * PCG_BLOCK)):
+            i_nz = i_chunk_ * n_spmv_blocks * PCG_BLOCK + i_th
+            if i_nz < padded:
+                i_r = gs.qd_int(-1)
+                i_b = gs.qd_int(-1)
+                energy = gs.qd_float(0.0)
+                product = qd.Vector.zero(gs.qd_float, 3)
+                if i_nz < nnz:
+                    j_r, i_c, block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)
+                    j_b = pcg_workspace.row_env[j_r]
+                    if pcg_scalars.is_converged[j_b] == 0:
+                        i_r = j_r
+                        i_b = j_b
+                        p_col = qd.Vector([pcg_workspace.p[3 * i_c + d] for d in qd.static(range(3))], dt=gs.qd_float)
                         product = block @ p_col
-                        if row != col:
+                        if i_r != i_c:
                             p_row = qd.Vector(
-                                [pcg_workspace.p[3 * row + d] for d in qd.static(range(3))],
-                                dt=pcg_workspace.value_type,
+                                [pcg_workspace.p[3 * i_r + d] for d in qd.static(range(3))],
+                                dt=gs.qd_float,
                             )
                             product_mirrored = block.transpose() @ p_row
                             for d in qd.static(range(3)):
-                                qd.atomic_add(pcg_workspace.ap[3 * col + d], product_mirrored[d])
+                                qd.atomic_add(pcg_workspace.ap[3 * i_c + d], product_mirrored[d])
                             energy = 2.0 * p_row.dot(product)
                         else:
                             energy = p_col.dot(product)
-                previous_row = qd.simt.subgroup.shuffle(row, qd.u32(qd.max(lane - 1, 0)))
-                next_row = qd.simt.subgroup.shuffle(row, qd.u32(qd.min(lane + 1, 31)))
-                is_head = lane == 0 or row != previous_row
-                is_tail = lane == 31 or row != next_row
-                row_sum = qd.Vector.zero(pcg_workspace.value_type, 3)
+                i_r_prev = qd.simt.subgroup.shuffle(i_r, qd.u32(qd.max(i_lane - 1, 0)))
+                i_r_next = qd.simt.subgroup.shuffle(i_r, qd.u32(qd.min(i_lane + 1, 31)))
+                is_head = i_lane == 0 or i_r != i_r_prev
+                is_tail = i_lane == 31 or i_r != i_r_next
+                row_sum = qd.Vector.zero(gs.qd_float, 3)
                 for d in qd.static(range(3)):
                     row_sum[d] = head_segmented_reduce_add(product[d], is_tail)
-                if row >= 0 and is_head:
+                if i_r >= 0 and is_head:
                     for d in qd.static(range(3)):
-                        qd.atomic_add(pcg_workspace.ap[3 * row + d], row_sum[d])
-                warp_add_by_key(energy, env, pcg_scalars.p_dot_ap)
+                        qd.atomic_add(pcg_workspace.ap[3 * i_r + d], row_sum[d])
+                warp_add_by_key(energy, i_b, pcg_scalars.p_dot_ap)
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: qd.template(), pcg_scalars: qd.template()):
+def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
     """Update the solution and the residual of every running environment along its search direction, x += alpha p and
     r -= alpha Ap."""
+    n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_blocks * PCG_BLOCK):
-        for i_chunk_ in range(
-            (3 * pcg_workspace.n_rows[()] + pcg_workspace.n_blocks * PCG_BLOCK - 1)
-            // (pcg_workspace.n_blocks * PCG_BLOCK)
-        ):
-            i = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
-            if i < 3 * pcg_workspace.n_rows[()]:
-                env = pcg_workspace.row_env[i // 3]
-                if pcg_scalars.is_converged[env] == 0:
-                    alpha = pcg_scalars.alpha[env]
-                    x[i] += alpha * pcg_workspace.p[i]
-                    pcg_workspace.r[i] -= alpha * pcg_workspace.ap[i]
+    for i_th in range(n_blocks * PCG_BLOCK):
+        for i_chunk_ in range((3 * pcg_workspace.n_rows[()] + n_blocks * PCG_BLOCK - 1) // (n_blocks * PCG_BLOCK)):
+            i_val = i_chunk_ * n_blocks * PCG_BLOCK + i_th
+            if i_val < 3 * pcg_workspace.n_rows[()]:
+                i_b = pcg_workspace.row_env[i_val // 3]
+                if pcg_scalars.is_converged[i_b] == 0:
+                    alpha = pcg_scalars.alpha[i_b]
+                    x[i_val] += alpha * pcg_workspace.p[i_val]
+                    pcg_workspace.r[i_val] -= alpha * pcg_workspace.ap[i_val]
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_dot_rz(pcg_workspace: qd.template(), pcg_scalars: qd.template()):
+def func_linear_pcg_dot_rz(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
     """Add r . z of the preconditioned residual to rz_new."""
-    _func_dot_into(pcg_workspace.r, pcg_workspace.z, pcg_workspace, pcg_scalars, True)
+    _func_dot_into(pcg_workspace, pcg_scalars, True)
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_direction(pcg_workspace: qd.template(), pcg_scalars: qd.template()):
+def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
     """Update the search direction of every running environment, p = z + beta p, and zero Ap for the product of the
     next iteration."""
+    n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_update_p", block_dim=PCG_BLOCK)
-    for t in range(pcg_workspace.n_blocks * PCG_BLOCK):
-        for i_chunk_ in range(
-            (3 * pcg_workspace.n_rows[()] + pcg_workspace.n_blocks * PCG_BLOCK - 1)
-            // (pcg_workspace.n_blocks * PCG_BLOCK)
-        ):
-            i = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
-            if i < 3 * pcg_workspace.n_rows[()]:
-                pcg_workspace.ap[i] = 0.0
-                env = pcg_workspace.row_env[i // 3]
-                if pcg_scalars.is_converged[env] == 0:
-                    pcg_workspace.p[i] = pcg_workspace.z[i] + pcg_scalars.beta[env] * pcg_workspace.p[i]
+    for i_th in range(n_blocks * PCG_BLOCK):
+        for i_chunk_ in range((3 * pcg_workspace.n_rows[()] + n_blocks * PCG_BLOCK - 1) // (n_blocks * PCG_BLOCK)):
+            i_val = i_chunk_ * n_blocks * PCG_BLOCK + i_th
+            if i_val < 3 * pcg_workspace.n_rows[()]:
+                pcg_workspace.ap[i_val] = 0.0
+                i_b = pcg_workspace.row_env[i_val // 3]
+                if pcg_scalars.is_converged[i_b] == 0:
+                    pcg_workspace.p[i_val] = pcg_workspace.z[i_val] + pcg_scalars.beta[i_b] * pcg_workspace.p[i_val]
 
 
 # ============================================ stages of the solve ============================================

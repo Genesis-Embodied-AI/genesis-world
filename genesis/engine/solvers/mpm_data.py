@@ -2,8 +2,9 @@
 
 The particle state keeps the layout of the solver's public fields. This module holds the data the implicit step adds:
 the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the linear
-system the Newton solve assembles. The grid, Newton and linear-system roots are mutable data-oriented objects, so that
-growing a capacity replaces an array on an existing path while every kernel keeps the same object.
+system the Newton solve assembles. The grid, Newton and linear-system structs are built at a capacity in blocks and
+triplets. Growing a capacity builds a struct again and swaps it on the participant of the Newton solve that holds it
+(see MpmNewtonParticipant).
 """
 
 import numpy as np
@@ -11,13 +12,13 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.bcoo_matrix import BCOOMatrix
+from genesis.engine.numerics.bcoo_matrix import BCOOMatrixScratch, bcoo_matrix_sizes, init_bcoo_matrix
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
-from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
-from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
-from genesis.engine.numerics.linear_pcg import PCGWorkspace
-from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
-from genesis.utils.data import ENVS, Data, DataKind, Size, field
+from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSumScratch, dynamic_exclusive_sum_sizes
+from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSortScratch, dynamic_radix_sort_sizes
+from genesis.engine.numerics.linear_pcg import PCG_ROWS, PCGWorkspaceScratch
+from genesis.engine.numerics.open_addressing_hash import OpenAddressingHashScratch, open_addressing_hash_sizes
+from genesis.utils.data import ENVS, Data, DataKind, Size, field, requires
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -41,19 +42,23 @@ WALL_ROWS = 3
 PYRAMID_ROWS = 4
 CONTACT_ROWS = WALL_ROWS + PYRAMID_ROWS
 
+# Sizes of the data of the implicit step that grows: the sorted particle keys, the blocks of the grid and its particle
+# blocks, the nodes of the blocks, the keys of the neighbor blocks of the particle blocks, and the bricks of the nodes
+SORT = Size("sort")
+BLOCKS = Size("blocks")
+PARTICLE_BLOCKS = Size("particle_blocks")
+NODES = BLOCKS * BLOCK_CELLS
+NEIGHBORS = 8 * PARTICLE_BLOCKS
+BRICKS = NODES // BRICK_NODES
+# Entries of the scratch of the serial brick inversion of a CPU backend
+BRICK_SCRATCH = Size("brick_scratch")
+
 # Sizes of the particle data: the frames of the substep window and the particles
 FRAMES = Size("frames")
 PARTICLES = Size("particles")
 # Sizes of the material table: the materials and the parameters of each
 MATERIALS = Size("materials")
 MATERIAL_PARAMS = Size("material_params")
-
-
-def _scalar(dtype, value=0):
-    result = qd.ndarray(dtype, shape=())
-    np_dtype = {gs.qd_int: gs.np_int, gs.qd_float: gs.np_float}[dtype]
-    result.from_numpy(np.array(value, dtype=np_dtype))
-    return result
 
 
 class MpmInfo(Data, kind=DataKind.CONSTANT, shape=()):
@@ -120,181 +125,220 @@ class MpmMaterialTable(Data, kind=DataKind.CONSTANT):
     mat_plastic: qd.Tensor = field(int, shape=(MATERIALS,))
 
 
+class MpmErrno(Data, kind=DataKind.STATE, shape=(ENVS,)):
+    """Error flags of the implicit material point method (MPM) solver per environment.
+
+    The kernels building and reading the grid raise them instead of indexing out of bounds (see
+    mpm_func.flag_env_error).
+    """
+
+    errno: qd.Tensor = field(int)
+
+
 def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:
     return max(((max(length, 1) + multiple - 1) // multiple) * multiple, multiple)
 
 
-@qd.data_oriented
-class MpmGrid:
+class MpmGridScratch(Data, kind=DataKind.SCRATCH):
     """Block-sparse grid rebuilt from the particles every substep.
 
     Particles are sorted by (environment, block, cell). Every particle block activates its positive-octant neighbour
     blocks as node storage. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is
-    `block_slot * BLOCK_CELLS + local index`.
-
-    `errno` holds the error flags of the MPM solver per environment, which the kernels building and reading the grid
-    raise instead of indexing out of bounds (see mpm_func.flag_env_error).
+    `block_slot * BLOCK_CELLS + local index`. The capacities in blocks and in sorted particles are the sizes of the
+    arrays (see build_mpm_grid).
     """
 
-    def __init__(self, n_sort: int, max_blocks: int, max_particle_blocks: int, errno) -> None:
-        self.errno = errno
-        self.allocate(n_sort, max_blocks, max_particle_blocks)
-        # Number of particle keys sorted, n_envs * n_particles
-        self.n_sort_keys = _scalar(gs.qd_int)
-        self.n_valid = _scalar(gs.qd_int)
-        self.n_valid_chunks = _scalar(gs.qd_int)
-        self.n_valid_reduce_blocks = _scalar(gs.qd_int)
-        self.n_particle_blocks = _scalar(gs.qd_int)
-        self.n_neighbor_keys = _scalar(gs.qd_int)
-        self.n_blocks = _scalar(gs.qd_int)
-        self.n_node_reduce_blocks = _scalar(gs.qd_int)
-        self.n_active_cells = _scalar(gs.qd_int)
-        self.n_tasks = _scalar(gs.qd_int)
-        self.has_grid_overflow = _scalar(gs.qd_int)
-        self.grid_demand = _scalar(gs.qd_int)
+    errors: MpmErrno = requires()
+    # Number of particle keys sorted, n_envs * n_particles
+    n_sort_keys: qd.Tensor = field(int, ndarray=True)
+    n_valid: qd.Tensor = field(int, ndarray=True)
+    n_valid_chunks: qd.Tensor = field(int, ndarray=True)
+    n_valid_reduce_blocks: qd.Tensor = field(int, ndarray=True)
+    n_particle_blocks: qd.Tensor = field(int, ndarray=True)
+    n_neighbor_keys: qd.Tensor = field(int, ndarray=True)
+    n_blocks: qd.Tensor = field(int, ndarray=True)
+    n_node_reduce_blocks: qd.Tensor = field(int, ndarray=True)
+    n_active_cells: qd.Tensor = field(int, ndarray=True)
+    n_tasks: qd.Tensor = field(int, ndarray=True)
+    has_grid_overflow: qd.Tensor = field(int, ndarray=True)
+    grid_demand: qd.Tensor = field(int, ndarray=True)
 
-    def allocate(self, n_sort: int, max_blocks: int, max_particle_blocks: int) -> None:
-        n_sort_padded = _padded(n_sort)
-        n_neighbors = 8 * max_particle_blocks
-        max_nodes = max_blocks * BLOCK_CELLS
-        self.n_sort = n_sort
-        self.max_blocks = max_blocks
-        self.max_particle_blocks = max_particle_blocks
+    sort_keys: qd.Tensor = field(qd.u64, shape=(SORT,), ndarray=True)
+    sort_keys_tmp: qd.Tensor = field(qd.u64, shape=(SORT,), ndarray=True)
+    sort_ids: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    sort_ids_tmp: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    particle_sort: DynamicRadixSortScratch
 
-        self.sort_keys = qd.ndarray(qd.u64, shape=(n_sort_padded,))
-        self.sort_keys_tmp = qd.ndarray(qd.u64, shape=(n_sort_padded,))
-        self.sort_ids = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.sort_ids_tmp = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.particle_sort = DynamicRadixSort(qd.u64, n_sort_padded)
+    pblock_keys: qd.Tensor = field(qd.u64, shape=(PARTICLE_BLOCKS,), ndarray=True)
+    neighbor_keys: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
+    neighbor_keys_tmp: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
+    neighbor_perm: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    neighbor_perm_tmp: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    block_sort: DynamicRadixSortScratch
+    block_flags: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    block_ranks: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    block_scan: DynamicExclusiveSumScratch
+    block_coords: qd.Tensor = field(qd.u64, shape=(BLOCKS,), ndarray=True)
+    hash: OpenAddressingHashScratch
 
-        self.pblock_keys = qd.ndarray(qd.u64, shape=(max_particle_blocks,))
-        self.neighbor_keys = qd.ndarray(qd.u64, shape=(n_neighbors,))
-        self.neighbor_keys_tmp = qd.ndarray(qd.u64, shape=(n_neighbors,))
-        self.neighbor_perm = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
-        self.neighbor_perm_tmp = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
-        self.block_sort = DynamicRadixSort(qd.u64, n_neighbors)
-        self.block_flags = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
-        self.block_ranks = qd.ndarray(gs.qd_int, shape=(n_neighbors,))
-        self.block_scan = DynamicExclusiveSum(n_neighbors)
-        self.block_coords = qd.ndarray(qd.u64, shape=(max_blocks,))
-        self.hash = OpenAddressingHash(max_blocks)
+    cell_flags: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    cell_ranks: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    cell_scan: DynamicExclusiveSumScratch
+    cell_starts: qd.Tensor = field(int, shape=(SORT + 1,), ndarray=True)
+    task_flags: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    task_ranks: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    task_scan: DynamicExclusiveSumScratch
+    cell_seg_start: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
+    cell_seg_end: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
 
-        self.cell_flags = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.cell_ranks = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.cell_scan = DynamicExclusiveSum(n_sort_padded)
-        self.cell_starts = qd.ndarray(gs.qd_int, shape=(n_sort_padded + 1,))
-        self.task_flags = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.task_ranks = qd.ndarray(gs.qd_int, shape=(n_sort_padded,))
-        self.task_scan = DynamicExclusiveSum(n_sort_padded)
-        self.cell_seg_start = qd.ndarray(gs.qd_int, shape=(max_nodes,))
-        self.cell_seg_end = qd.ndarray(gs.qd_int, shape=(max_nodes,))
-
-        self.node_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
-        # Node touched by a non-free particle, whose displacement the Newton solve holds at zero
-        self.node_fixed = qd.ndarray(gs.qd_int, shape=(max_nodes,))
-        # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights
-        # of the particles in their contact rows are computed once (see func_contact_invweight)
-        self.node_diag = qd.ndarray(gs.qd_mat3, shape=(max_nodes,))
-        self.node_v = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
-        self.node_v_free = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
-
-    @property
-    def max_nodes(self) -> int:
-        return self.max_blocks * BLOCK_CELLS
+    node_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
+    # Node touched by a non-free particle, whose displacement the Newton solve holds at zero
+    node_fixed: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
+    # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights of
+    # the particles in their contact rows are computed once (see func_contact_invweight)
+    node_diag: qd.Tensor = field((float, (3, 3)), shape=(NODES,), ndarray=True)
+    node_v: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    node_v_free: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
 
 
-@qd.data_oriented
-class MpmNewton:
+class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     """Newton state of the grid displacement `u`, the per-particle staging of the assembly, and the soft contact rows
     of the particles."""
 
-    def __init__(self, n_sort: int, max_nodes: int) -> None:
-        self.allocate(n_sort, max_nodes)
-
-    def allocate(self, n_sort: int, max_nodes: int) -> None:
-        n_padded = _padded(n_sort)
-        self.u = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        self.u_temp = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
-        # gathers to the particles
-        self.adj_mom = qd.ndarray(gs.qd_vec3, shape=(max_nodes,))
-        self.adj_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
-        # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
-        self.g_p = qd.ndarray(gs.qd_mat3, shape=(n_padded,))
-        # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
-        self.g_contact = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs
-        # of its link, and the displacement of its contact point on the link over the substep
-        self.g_rigid = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        self.h_rigid = qd.ndarray(gs.qd_mat3, shape=(n_padded,))
-        self.contact_dr = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
-        # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
-        # build them only once a constraint exists.
-        self.constraint_spring = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.constraint_damping = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.constraint_target = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        for array in (self.constraint_spring, self.constraint_damping, self.constraint_target):
-            array.fill(0.0)
-        # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
-        # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
-        # 1/2 D min(0, J.dx - t)^2, and the Rigid link of the particle's pyramid rows (-1 if none)
-        self.contact_dir = qd.ndarray(gs.qd_vec3, shape=(CONTACT_ROWS * n_padded,))
-        self.contact_D = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
-        self.contact_t = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
-        self.contact_link = qd.ndarray(gs.qd_int, shape=(n_padded,))
-        # The FEM surface triangle of the particle's pyramid rows (-1 if none), and the barycentric coordinates of its
-        # closest point on it
-        self.contact_tri = qd.ndarray(gs.qd_int, shape=(n_padded,))
-        self.contact_bary = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
-        self.contact_pbd = qd.ndarray(gs.qd_int, shape=(n_padded,))
-        # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and,
-        # for a triangle, the distance to it and the alignment of its normal with the direction to the particle (which
-        # together pick the triangle), the barycentric coordinates of the closest point and the contact normal. The
-        # query point and the frame at which the obstacles are read sit alongside, for the filter measuring the gaps.
-        self.query_phi = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.query_idx = qd.ndarray(gs.qd_int, shape=(n_padded,))
-        self.query_dist = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.query_align = qd.ndarray(gs.qd_float, shape=(n_padded,))
-        self.query_bary = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        self.query_normal = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        self.query_pos = qd.ndarray(gs.qd_vec3, shape=(n_padded,))
-        self.query_frame = qd.ndarray(gs.qd_int, shape=())
+    u: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    u_temp: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    du: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
+    # gathers to the particles
+    adj_mom: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    adj_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
+    # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
+    g_p: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
+    # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
+    g_contact: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs of
+    # its link, and the displacement of its contact point on the link over the substep
+    g_rigid: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    h_rigid: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
+    contact_dr: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
+    # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
+    # build them only once a constraint exists.
+    constraint_spring: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
+    constraint_damping: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
+    constraint_target: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
+    # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
+    # 1/2 D min(0, J.dx - t)^2, and the Rigid link of the particle's pyramid rows (-1 if none)
+    contact_dir: qd.Tensor = field((float, 3), shape=(CONTACT_ROWS * SORT,), ndarray=True)
+    contact_D: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
+    contact_t: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
+    contact_link: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    # The FEM surface triangle of the particle's pyramid rows (-1 if none), and the barycentric coordinates of its
+    # closest point on it
+    contact_tri: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    contact_bary: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
+    contact_pbd: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and, for a
+    # triangle, the distance to it and the alignment of its normal with the direction to the particle (which together
+    # pick the triangle), the barycentric coordinates of the closest point and the contact normal. The query point and
+    # the frame at which the obstacles are read sit alongside, for the filter measuring the gaps.
+    query_phi: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
+    query_idx: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    query_dist: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
+    query_align: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
+    query_bary: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    query_normal: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    query_pos: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    query_frame: qd.Tensor = field(int, ndarray=True)
 
 
-@qd.data_oriented
-class MpmLinearSystem:
+class MpmLinearScratch(Data, kind=DataKind.SCRATCH):
     """Block-sparse Newton matrix over 3x3 node blocks, its right-hand side, solution, preconditioner and conjugate
     gradient state."""
 
-    def __init__(self, max_nodes: int, max_triplets: int) -> None:
-        self.matrix = BCOOMatrix(
-            shape=(max_nodes, max_nodes),
-            block_shape=(3, 3),
-            value_type=gs.qd_float,
-            symmetric=True,
-            initial_triplets=0,
-            max_triplets=max_triplets,
-        )
-        self.pcg = PCGWorkspace(max_nodes, gs.qd_float)
-        self.allocate_rows(max_nodes)
+    matrix: BCOOMatrixScratch
+    pcg: PCGWorkspaceScratch
+    b_rhs: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    solution: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    # Brick preconditioner: per brick, its packed 48 x 48 matrix and then inverse, and the mask of its nodes coupled to
+    # another node of the brick
+    brick: qd.Tensor = field(float, shape=(BRICKS * BRICK_SCALARS,), ndarray=True)
+    brick_mask: qd.Tensor = field(int, shape=(BRICKS,), ndarray=True)
+    # The serial inversion of a CPU backend: per brick, the equilibration of its rows and the pivot column
+    brick_scratch: qd.Tensor = field(float, shape=(BRICK_SCRATCH,), ndarray=True)
 
-    def allocate_rows(self, max_nodes: int) -> None:
-        """(Re)allocate everything sized by the node rows, keeping this object."""
-        self.max_nodes = max_nodes
-        self.pcg.allocate(max_nodes)
-        self.b_rhs = qd.ndarray(gs.qd_float, shape=(self.pcg.r.shape[0],))
-        self.solution = qd.ndarray(gs.qd_float, shape=(self.pcg.r.shape[0],))
-        # Brick preconditioner: per brick, its packed 48 x 48 matrix and then inverse, and the mask of its nodes
-        # coupled to another node of the brick
-        n_bricks = max(max_nodes // BRICK_NODES, 1)
-        self.brick = qd.ndarray(gs.qd_float, shape=(n_bricks * BRICK_SCALARS,))
-        self.brick_mask = qd.ndarray(gs.qd_int, shape=(n_bricks,))
-        # The serial inversion of a CPU backend: per brick, the equilibration of its rows and the pivot column
-        n_scratch = n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1
-        self.brick_scratch = qd.ndarray(gs.qd_float, shape=(n_scratch,))
+
+def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
+    """Build the grid of a capacity of sorted particles and blocks, with every counter at zero.
+
+    `n_sort` is the number of sorted particles and `max_blocks` the capacity in blocks. The error flags of the solver
+    must be built in the entered namespace (see `requires`).
+    """
+    n_sort_padded = _padded(n_sort)
+    n_neighbors = 8 * max_blocks
+    grid = MpmGridScratch(
+        sizes={
+            SORT: n_sort_padded,
+            BLOCKS: max_blocks,
+            PARTICLE_BLOCKS: max_blocks,
+            MpmGridScratch.particle_sort: dynamic_radix_sort_sizes(key_bits=64, capacity=n_sort_padded),
+            MpmGridScratch.block_sort: dynamic_radix_sort_sizes(key_bits=64, capacity=n_neighbors),
+            MpmGridScratch.block_scan: dynamic_exclusive_sum_sizes(n_neighbors),
+            MpmGridScratch.hash: open_addressing_hash_sizes(max_blocks),
+            MpmGridScratch.cell_scan: dynamic_exclusive_sum_sizes(n_sort_padded),
+            MpmGridScratch.task_scan: dynamic_exclusive_sum_sizes(n_sort_padded),
+        }
+    )
+    for counter in (
+        grid.n_sort_keys,
+        grid.n_valid,
+        grid.n_valid_chunks,
+        grid.n_valid_reduce_blocks,
+        grid.n_particle_blocks,
+        grid.n_neighbor_keys,
+        grid.n_blocks,
+        grid.n_node_reduce_blocks,
+        grid.n_active_cells,
+        grid.n_tasks,
+        grid.has_grid_overflow,
+        grid.grid_demand,
+    ):
+        counter.fill(0)
+    return grid
+
+
+def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
+    """Build the Newton state of a capacity of sorted particles and blocks, with the particle constraints at zero.
+
+    `n_sort` is the number of sorted particles and `max_blocks` the capacity in blocks.
+    """
+    newton = MpmNewtonScratch(sizes={SORT: _padded(n_sort), BLOCKS: max_blocks})
+    for constraint in (newton.constraint_spring, newton.constraint_damping, newton.constraint_target):
+        constraint.fill(0.0)
+    return newton
+
+
+def build_mpm_linear(max_blocks: int, max_triplets: int) -> MpmLinearScratch:
+    """Build the linear system of a capacity of blocks and triplets, with no live row and no live triplet.
+
+    `max_blocks` is the capacity in blocks and `max_triplets` the capacity in triplets.
+    """
+    max_nodes = max_blocks * BLOCK_CELLS
+    n_bricks = max(max_nodes // BRICK_NODES, 1)
+    linear = MpmLinearScratch(
+        sizes={
+            BLOCKS: max_blocks,
+            BRICK_SCRATCH: n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1,
+            MpmLinearScratch.matrix: bcoo_matrix_sizes(max_triplets, block_shape=(3, 3)),
+            MpmLinearScratch.pcg: {PCG_ROWS: max_nodes},
+        }
+    )
+    init_bcoo_matrix(linear.matrix, n_triplets=0)
+    linear.pcg.n_rows.fill(0)
+    linear.pcg.row_env.fill(0)
+    return linear
 
 
 @qd.data_oriented

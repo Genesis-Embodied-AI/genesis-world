@@ -170,7 +170,7 @@ class LegacyCoupler(RBC):
             rigid_host, rigid_participant = rigid.build_newton_participant(is_member=self._mpm_rigid_dofs)
             if self._mpm_rigid_dofs:
                 participants.append((rigid_host, rigid_participant))
-            query = RigidGeomQuery(rigid_participant, mpm_participant.newton, n_envs)
+            query = RigidGeomQuery(rigid_participant, mpm_participant, n_envs)
             contact = MpmRigidContact(mpm_participant, rigid_participant, query)
             # Without Rigid dofs the cross terms of the rows vanish, and the coupling runs its host stages alone
             device = contact if self._mpm_rigid_dofs else None
@@ -181,7 +181,7 @@ class LegacyCoupler(RBC):
             fem_host, fem_participant = fem.build_newton_participant()
             participants.append((fem_host, fem_participant))
             query = FemTriangleQuery(
-                fem_participant, mpm_participant.newton, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs
+                fem_participant, mpm_participant, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs
             )
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((MpmFemContactHost(contact), contact))
@@ -189,9 +189,7 @@ class LegacyCoupler(RBC):
             pbd_contact = PbdContactParams(mpm.dx)
             pbd_host, pbd_participant = pbd.build_newton_participant()
             participants.append((pbd_host, pbd_participant))
-            query = PbdParticleQuery(
-                pbd_participant, mpm_participant.newton, mpm_participant.mpm_info, pbd_contact, n_envs
-            )
+            query = PbdParticleQuery(pbd_participant, mpm_participant, mpm_participant.mpm_info, pbd_contact, n_envs)
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((MpmPbdContactHost(contact), contact))
             pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
