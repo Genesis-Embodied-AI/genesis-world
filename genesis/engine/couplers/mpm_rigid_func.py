@@ -46,7 +46,11 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
+from genesis.engine.solvers.rigid.newton_func import (
+    RigidNewtonScratch,
+    func_link_force_to_dofs,
+    func_link_spatial_disp,
+)
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 from genesis.utils.array_class import (
     BVHQueryResults,
@@ -337,7 +341,7 @@ def func_contact_point_disp(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     links_state: LinksState,
     mpm_info: MpmInfo,
 ):
@@ -363,7 +367,7 @@ def func_rigid_contact_gradient(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     dyn_info: DynInfo,
     mpm_info: MpmInfo,
@@ -375,7 +379,13 @@ def func_rigid_contact_gradient(
     takes minus the generalized force of the rows of the particles on their links. The spatial stiffness K_l = sum_s
     P_s^T H_s P_s of each link feeds the preconditioner, with P_s = [I, -[r_s]x] mapping the spatial displacement of the
     link to that of the contact point at arm r_s."""
-    func_link_spatial_disp(rigid_data.x, rigid_data, dyn_state.dofs, dyn_info.links, config)
+    func_link_spatial_disp(
+        src=rigid_data.x,
+        rigid_data=rigid_data,
+        dofs_state=dyn_state.dofs,
+        links_info=dyn_info.links,
+        config=config,
+    )
     qd.loop_config(name="mpm_rigid_link_K_clear")
     for i_l, i_b in qd.ndrange(rigid_data.link_K.shape[0], rigid_data.link_K.shape[1]):
         rigid_data.link_K[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
@@ -397,7 +407,14 @@ def func_rigid_contact_gradient(
                     for j in qd.static(range(3)):
                         P[i, 3 + j] = -R[i, j]
                 qd.atomic_add(rigid_data.link_K[i_l, i_b], P.transpose() @ H @ P)
-    func_link_force_to_dofs(-1.0, rigid_data.grad, rigid_data, dyn_state.dofs, dyn_info.links, config)
+    func_link_force_to_dofs(
+        scale=-1.0,
+        out=rigid_data.grad,
+        rigid_data=rigid_data,
+        dofs_state=dyn_state.dofs,
+        links_info=dyn_info.links,
+        config=config,
+    )
 
 
 # ========================================= Layer 1: joint PCG over (u, x) ==========================================
@@ -410,7 +427,7 @@ def func_rigid_contact_matvec(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     pcg_scalars: qd.template(),
     dyn_state: DynState,
     dyn_info: DynInfo,
@@ -422,7 +439,13 @@ def func_rigid_contact_matvec(
     The contact point of a particle moves by dr of p_r along the direction. The rows add their cross term on the MPM
     rows (see contact_cross_matvec), and the spatial force (h, r x h) to the link in `link_force_vel` /
     `link_force_ang`, which func_rigid_contact_matvec_post hands to Ap_r."""
-    func_link_spatial_disp(rigid_data.p, rigid_data, dyn_state.dofs, dyn_info.links, config)
+    func_link_spatial_disp(
+        src=rigid_data.p,
+        rigid_data=rigid_data,
+        dofs_state=dyn_state.dofs,
+        links_info=dyn_info.links,
+        config=config,
+    )
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
@@ -437,10 +460,17 @@ def func_rigid_contact_matvec(
 
 @qd.func(requires_top_level=True)
 def func_rigid_contact_matvec_post(
-    rigid_data: qd.template(), dyn_state: DynState, dyn_info: DynInfo, config: qd.template()
+    rigid_data: RigidNewtonScratch, dyn_state: DynState, dyn_info: DynInfo, config: qd.template()
 ):
     """Add to Ap_r the generalized force of the spatial forces accumulated on the links by func_rigid_contact_matvec."""
-    func_link_force_to_dofs(1.0, rigid_data.ap, rigid_data, dyn_state.dofs, dyn_info.links, config)
+    func_link_force_to_dofs(
+        scale=1.0,
+        out=rigid_data.ap,
+        rigid_data=rigid_data,
+        dofs_state=dyn_state.dofs,
+        links_info=dyn_info.links,
+        config=config,
+    )
 
 
 # =============================================== Layer 1: reaction on Rigid ===============================================
@@ -452,7 +482,7 @@ def func_mpm_reaction(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MpmInfo,
@@ -494,7 +524,7 @@ def func_mpm_reaction(
 
 
 @qd.func(requires_top_level=True)
-def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: LinksState, mpm_info: MpmInfo):
+def func_add_mpm_contact_force(rigid_data: RigidNewtonScratch, links_state: LinksState, mpm_info: MpmInfo):
     """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
     contact forces were written by the post-solve stage of its substep."""
     n_links = rigid_data.link_force_vel.shape[0]

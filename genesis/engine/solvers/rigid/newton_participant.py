@@ -36,55 +36,6 @@ class RigidNewtonConfig(StaticConfig):
 
 
 @qd.data_oriented
-class RigidNewtonData:
-    """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors.
-
-    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the displacement
-    units of the MPM energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`, `p`, `ap` and `sol` are the
-    Rigid rows of the conjugate gradient residual, preconditioned residual, direction, operator image and solution. Per
-    link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof vector and `link_force_vel` /
-    `link_force_ang` accumulate a spatial force, about the root center of mass, for the couplings acting on the links.
-    """
-
-    def __init__(self, n_dofs: int, n_links: int, n_envs: int) -> None:
-        shape = (max(n_dofs, 1), n_envs)
-        self.x = qd.ndarray(gs.qd_float, shape=shape)
-        self.x_temp = qd.ndarray(gs.qd_float, shape=shape)
-        self.dx = qd.ndarray(gs.qd_float, shape=shape)
-        self.grad = qd.ndarray(gs.qd_float, shape=shape)
-        self.qacc = qd.ndarray(gs.qd_float, shape=shape)
-        self.Ma = qd.ndarray(gs.qd_float, shape=shape)
-        self.r = qd.ndarray(gs.qd_float, shape=shape)
-        self.z = qd.ndarray(gs.qd_float, shape=shape)
-        self.p = qd.ndarray(gs.qd_float, shape=shape)
-        self.ap = qd.ndarray(gs.qd_float, shape=shape)
-        self.sol = qd.ndarray(gs.qd_float, shape=shape)
-        self.cost = qd.ndarray(gs.qd_float, shape=(n_envs,))
-        link_shape = (max(n_links, 1), n_envs)
-        self.link_motion_vel = qd.ndarray(gs.qd_vec3, shape=link_shape)
-        self.link_motion_ang = qd.ndarray(gs.qd_vec3, shape=link_shape)
-        self.link_force_vel = qd.ndarray(gs.qd_vec3, shape=link_shape)
-        self.link_force_ang = qd.ndarray(gs.qd_vec3, shape=link_shape)
-        # The contact stiffness the couplings put on the links, which the preconditioner takes in by the Woodbury
-        # identity on Rigid's factor A. Per link, its 6 x 6 spatial stiffness K_l. Per environment, the links in contact
-        # (at most `n_contact_links`, the second dimension of `contact_links` that the kernels read), the cdof map U of
-        # their chains with one column per spatial component, W = A^-1 U, and the lower-upper (LU) factor of
-        # S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
-        n_contact_links = min(max(n_links, 1), MAX_PRECONDITIONED_LINKS)
-        n_cols = 6 * n_contact_links
-        self.link_K = qd.ndarray(qd.types.matrix(6, 6, gs.qd_float), shape=link_shape)
-        self.contact_links = qd.ndarray(gs.qd_int, shape=(n_envs, n_contact_links))
-        self.n_links_in_contact = qd.ndarray(gs.qd_int, shape=(n_envs,))
-        self.woodbury_U = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
-        self.woodbury_W = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
-        self.capacitance_LU = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols, n_cols))
-        self.capacitance_pivots = qd.ndarray(gs.qd_int, shape=(n_envs, n_cols))
-        self.woodbury_y = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols))
-        self.solve_rhs = qd.ndarray(gs.qd_float, shape=shape)
-        self.solve_out = qd.ndarray(gs.qd_float, shape=shape)
-
-
-@qd.data_oriented
 class RigidNewtonParticipant(NewtonDevice):
     """Device stages of Rigid's dofs in the joint solve, which own the Rigid data of the solve.
 
@@ -92,7 +43,14 @@ class RigidNewtonParticipant(NewtonDevice):
     couplings act on."""
 
     def __init__(self, rigid, n_envs: int):
-        self.rigid_data = RigidNewtonData(rigid.n_dofs_, rigid.n_links, n_envs)
+        self.rigid_data = newton_func.RigidNewtonScratch(
+            sizes=dict(
+                dofs=rigid.n_dofs_,
+                links=rigid.n_links,
+                envs=n_envs,
+                contact_links=min(max(rigid.n_links, 1), MAX_PRECONDITIONED_LINKS),
+            )
+        )
         self.coupled_geoms_idx = np.array([geom.idx for geom in rigid.geoms if geom.needs_coup], dtype=gs.np_int)
         self.dyn_state = rigid.dyn_state
         self.constraint_state = rigid.constraint_solver.constraint_state
@@ -109,6 +67,7 @@ class RigidNewtonParticipant(NewtonDevice):
 
     @property
     def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "rigid_data")
         yield from iter_data(self, "newton_info")
 
     @property

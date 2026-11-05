@@ -15,7 +15,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.utils.array_class import ConstraintState, DofsState, DynInfo, DynState, LinksInfo, RigidInfo
-from genesis.utils.data import Data, DataKind, field
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
 from .abd.forward_dynamics import func_solve_mass_batch
 from .constraint.island import func_group_constraints_by_island
@@ -31,7 +31,58 @@ from .constraint.solver import (
 class RigidNewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
     """Scene values of Rigid's stages in the joint solve, as device scalars."""
 
-    substep_dt: qd.Tensor = field(float)
+    substep_dt: qd.Tensor = field(float, ndarray=True)
+
+
+# The dofs, the links and the links in contact of Rigid in the joint solve, and the spatial components of the latter
+DOFS = Size("dofs")
+LINKS = Size("links")
+CONTACT_LINKS = Size("contact_links")
+CONTACT_COLS = 6 * CONTACT_LINKS
+
+
+class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
+    """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors.
+
+    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the displacement
+    units of the material point method (MPM) energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`,
+    `p`, `ap` and `sol` are the Rigid rows of the conjugate gradient residual, preconditioned residual, direction,
+    operator image and solution. Per link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof
+    vector and `link_force_vel` / `link_force_ang` accumulate a spatial force, about the root center of mass, for the
+    couplings acting on the links.
+    """
+
+    x: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    x_temp: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    dx: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    grad: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    Ma: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    r: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    z: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    p: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    ap: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    sol: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    cost: qd.Tensor = field(float, shape=(ENVS,), ndarray=True)
+    link_motion_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    link_motion_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    link_force_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    link_force_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    # The contact stiffness the couplings put on the links, which the preconditioner takes in by the Woodbury identity
+    # on Rigid's factor A. Per link, its 6 x 6 spatial stiffness K_l. Per environment, the links in contact (at most
+    # `contact_links`, the first dimension of `contact_links` that the kernels read), the cdof map U of their chains
+    # with one column per spatial component, W = A^-1 U, and the lower-upper (LU) factor of S = I + K U^T W with its
+    # row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
+    link_K: qd.Tensor = field((float, (6, 6)), shape=(LINKS, ENVS), ndarray=True)
+    contact_links: qd.Tensor = field(int, shape=(CONTACT_LINKS, ENVS), ndarray=True)
+    n_links_in_contact: qd.Tensor = field(int, shape=(ENVS,), ndarray=True)
+    woodbury_U: qd.Tensor = field(float, shape=(DOFS, CONTACT_COLS, ENVS), ndarray=True)
+    woodbury_W: qd.Tensor = field(float, shape=(DOFS, CONTACT_COLS, ENVS), ndarray=True)
+    capacitance_LU: qd.Tensor = field(float, shape=(CONTACT_COLS, CONTACT_COLS, ENVS), ndarray=True)
+    capacitance_pivots: qd.Tensor = field(int, shape=(CONTACT_COLS, ENVS), ndarray=True)
+    woodbury_y: qd.Tensor = field(float, shape=(CONTACT_COLS, ENVS), ndarray=True)
+    solve_rhs: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    solve_out: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
 
 
 # ============================================ Layer 1: link kinematics =============================================
@@ -40,7 +91,7 @@ class RigidNewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
 @qd.func(requires_top_level=True)
 def func_link_spatial_disp(
     src: qd.template(),
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dofs_state: DofsState,
     links_info: LinksInfo,
     config: qd.template(),
@@ -71,7 +122,7 @@ def func_link_spatial_disp(
 def func_link_force_to_dofs(
     scale: float,
     out: qd.template(),
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dofs_state: DofsState,
     links_info: LinksInfo,
     config: qd.template(),
@@ -100,7 +151,7 @@ def func_link_force_to_dofs(
 
 @qd.func(requires_top_level=True)
 def func_rigid_begin(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dofs_state: DofsState,
     constraint_state: ConstraintState,
     newton_info: RigidNewtonInfo,
@@ -131,7 +182,7 @@ def func_rigid_begin(
 
 @qd.func(requires_top_level=True)
 def func_rigid_evaluate(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -177,7 +228,7 @@ def func_rigid_evaluate(
 
 @qd.func(requires_top_level=True)
 def func_rigid_energy(
-    rigid_data: qd.template(), control: qd.template(), newton_info: RigidNewtonInfo, is_trial: qd.template()
+    rigid_data: RigidNewtonScratch, control: qd.template(), newton_info: RigidNewtonInfo, is_trial: qd.template()
 ):
     """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, to its start or trial energy."""
     n_envs = rigid_data.x.shape[1]
@@ -191,7 +242,7 @@ def func_rigid_energy(
 
 @qd.func(requires_top_level=True)
 def func_rigid_gradient(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     newton_info: RigidNewtonInfo,
@@ -237,7 +288,7 @@ def rigid_solve(
 
 @qd.func(requires_top_level=True)
 def func_rigid_factor(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
@@ -262,13 +313,13 @@ def func_rigid_factor(
     for i_b in range(n_envs):
         n_links = 0
         for i_l in range(rigid_data.link_K.shape[0]):
-            if rigid_data.link_K[i_l, i_b].norm_sqr() > 0.0 and n_links < rigid_data.contact_links.shape[1]:
-                rigid_data.contact_links[i_b, n_links] = i_l
+            if rigid_data.link_K[i_l, i_b].norm_sqr() > 0.0 and n_links < rigid_data.contact_links.shape[0]:
+                rigid_data.contact_links[n_links, i_b] = i_l
                 n_links += 1
         rigid_data.n_links_in_contact[i_b] = n_links
         n_cols = 6 * n_links
         for i_col in range(n_cols):
-            i_l = rigid_data.contact_links[i_b, i_col // 6]
+            i_l = rigid_data.contact_links[i_col // 6, i_b]
             component = i_col % 6
             for i_d in range(n_dofs):
                 rigid_data.solve_rhs[i_d, i_b] = 0.0
@@ -295,8 +346,8 @@ def func_rigid_factor(
                 config,
             )
             for i_d in range(n_dofs):
-                rigid_data.woodbury_U[i_d, i_b, i_col] = rigid_data.solve_rhs[i_d, i_b]
-                rigid_data.woodbury_W[i_d, i_b, i_col] = rigid_data.solve_out[i_d, i_b]
+                rigid_data.woodbury_U[i_d, i_col, i_b] = rigid_data.solve_rhs[i_d, i_b]
+                rigid_data.woodbury_W[i_d, i_col, i_b] = rigid_data.solve_out[i_d, i_b]
         # S = I + K U^T W, the rows of a link's block from its K_l and the rows of U^T W of its columns
         for b in range(n_cols):
             for j in range(n_links):
@@ -304,38 +355,38 @@ def func_rigid_factor(
                 for k in qd.static(range(6)):
                     value = gs.qd_float(0.0)
                     for i_d in range(n_dofs):
-                        value += rigid_data.woodbury_U[i_d, i_b, 6 * j + k] * rigid_data.woodbury_W[i_d, i_b, b]
+                        value += rigid_data.woodbury_U[i_d, 6 * j + k, i_b] * rigid_data.woodbury_W[i_d, b, i_b]
                     g[k] = value
-                i_l = rigid_data.contact_links[i_b, j]
+                i_l = rigid_data.contact_links[j, i_b]
                 K_g = rigid_data.link_K[i_l, i_b] @ g
                 for i in qd.static(range(6)):
                     value = K_g[i]
                     if 6 * j + i == b:
                         value += 1.0
-                    rigid_data.capacitance_LU[i_b, 6 * j + i, b] = value
+                    rigid_data.capacitance_LU[6 * j + i, b, i_b] = value
         # In-place lower-upper (LU) factorization with partial pivoting. S is non-singular, K and U^T W being positive
         # semi-definite
         for k in range(n_cols):
             i_max = k
             for i in range(k + 1, n_cols):
-                if qd.abs(rigid_data.capacitance_LU[i_b, i, k]) > qd.abs(rigid_data.capacitance_LU[i_b, i_max, k]):
+                if qd.abs(rigid_data.capacitance_LU[i, k, i_b]) > qd.abs(rigid_data.capacitance_LU[i_max, k, i_b]):
                     i_max = i
-            rigid_data.capacitance_pivots[i_b, k] = i_max
+            rigid_data.capacitance_pivots[k, i_b] = i_max
             if i_max != k:
                 for j in range(n_cols):
-                    entry = rigid_data.capacitance_LU[i_b, k, j]
-                    rigid_data.capacitance_LU[i_b, k, j] = rigid_data.capacitance_LU[i_b, i_max, j]
-                    rigid_data.capacitance_LU[i_b, i_max, j] = entry
+                    entry = rigid_data.capacitance_LU[k, j, i_b]
+                    rigid_data.capacitance_LU[k, j, i_b] = rigid_data.capacitance_LU[i_max, j, i_b]
+                    rigid_data.capacitance_LU[i_max, j, i_b] = entry
             for i in range(k + 1, n_cols):
-                rigid_data.capacitance_LU[i_b, i, k] /= rigid_data.capacitance_LU[i_b, k, k]
-                factor = rigid_data.capacitance_LU[i_b, i, k]
+                rigid_data.capacitance_LU[i, k, i_b] /= rigid_data.capacitance_LU[k, k, i_b]
+                factor = rigid_data.capacitance_LU[i, k, i_b]
                 for j in range(k + 1, n_cols):
-                    rigid_data.capacitance_LU[i_b, i, j] -= factor * rigid_data.capacitance_LU[i_b, k, j]
+                    rigid_data.capacitance_LU[i, j, i_b] -= factor * rigid_data.capacitance_LU[k, j, i_b]
 
 
 @qd.func(requires_top_level=True)
 def func_rigid_precondition(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
@@ -355,36 +406,36 @@ def func_rigid_precondition(
         for a in range(n_cols):
             value = gs.qd_float(0.0)
             for i_d in range(n_dofs):
-                value += rigid_data.woodbury_U[i_d, i_b, a] * rigid_data.z[i_d, i_b]
-            rigid_data.woodbury_y[i_b, a] = value
+                value += rigid_data.woodbury_U[i_d, a, i_b] * rigid_data.z[i_d, i_b]
+            rigid_data.woodbury_y[a, i_b] = value
         for j in range(n_links):
-            i_l = rigid_data.contact_links[i_b, j]
-            y = qd.Vector([rigid_data.woodbury_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
+            i_l = rigid_data.contact_links[j, i_b]
+            y = qd.Vector([rigid_data.woodbury_y[6 * j + k, i_b] for k in qd.static(range(6))], dt=gs.qd_float)
             K_y = rigid_data.link_K[i_l, i_b] @ y
             for i in qd.static(range(6)):
-                rigid_data.woodbury_y[i_b, 6 * j + i] = K_y[i]
+                rigid_data.woodbury_y[6 * j + i, i_b] = K_y[i]
         # S q = K U^T z0 by the lower-upper (LU) factor: the row pivots, then the unit lower and upper triangular solves
         for k in range(n_cols):
-            i_p = rigid_data.capacitance_pivots[i_b, k]
+            i_p = rigid_data.capacitance_pivots[k, i_b]
             if i_p != k:
-                entry = rigid_data.woodbury_y[i_b, k]
-                rigid_data.woodbury_y[i_b, k] = rigid_data.woodbury_y[i_b, i_p]
-                rigid_data.woodbury_y[i_b, i_p] = entry
+                entry = rigid_data.woodbury_y[k, i_b]
+                rigid_data.woodbury_y[k, i_b] = rigid_data.woodbury_y[i_p, i_b]
+                rigid_data.woodbury_y[i_p, i_b] = entry
         for i in range(n_cols):
-            value = rigid_data.woodbury_y[i_b, i]
+            value = rigid_data.woodbury_y[i, i_b]
             for k in range(i):
-                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
-            rigid_data.woodbury_y[i_b, i] = value
+                value -= rigid_data.capacitance_LU[i, k, i_b] * rigid_data.woodbury_y[k, i_b]
+            rigid_data.woodbury_y[i, i_b] = value
         for i_rev in range(n_cols):
             i = n_cols - 1 - i_rev
-            value = rigid_data.woodbury_y[i_b, i]
+            value = rigid_data.woodbury_y[i, i_b]
             for k in range(i + 1, n_cols):
-                value -= rigid_data.capacitance_LU[i_b, i, k] * rigid_data.woodbury_y[i_b, k]
-            rigid_data.woodbury_y[i_b, i] = value / rigid_data.capacitance_LU[i_b, i, i]
+                value -= rigid_data.capacitance_LU[i, k, i_b] * rigid_data.woodbury_y[k, i_b]
+            rigid_data.woodbury_y[i, i_b] = value / rigid_data.capacitance_LU[i, i, i_b]
         for i_d in range(n_dofs):
             value = gs.qd_float(0.0)
             for b in range(n_cols):
-                value += rigid_data.woodbury_W[i_d, i_b, b] * rigid_data.woodbury_y[i_b, b]
+                value += rigid_data.woodbury_W[i_d, b, i_b] * rigid_data.woodbury_y[b, i_b]
             rigid_data.z[i_d, i_b] -= value
 
 
@@ -392,7 +443,7 @@ def func_rigid_precondition(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init(rigid_data: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
+def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template(), is_adjoint: qd.template()):
     """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared.
 
     With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
@@ -410,7 +461,7 @@ def func_rigid_pcg_init(rigid_data: qd.template(), pcg_scalars: qd.template(), i
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init_direction(rigid_data: qd.template(), pcg_scalars: qd.template()):
+def func_rigid_pcg_init_direction(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
     """Set the first search direction p = z over the Rigid dofs, and add r . z to rz."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -422,7 +473,7 @@ def func_rigid_pcg_init_direction(rigid_data: qd.template(), pcg_scalars: qd.tem
 
 @qd.func(requires_top_level=True)
 def func_rigid_matvec(
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -448,7 +499,7 @@ def func_rigid_matvec(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_matvec_dot(rigid_data: qd.template(), pcg_scalars: qd.template()):
+def func_rigid_matvec_dot(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
     """Add p_r . Ap_r to p . Ap, once Ap_r holds the whole joint operator."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -459,7 +510,7 @@ def func_rigid_matvec_dot(rigid_data: qd.template(), pcg_scalars: qd.template())
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_update_xr(rigid_data: qd.template(), pcg_scalars: qd.template()):
+def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
     """Update the solution and the residual over the Rigid dofs, x += alpha p and r -= alpha Ap."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -472,7 +523,7 @@ def func_rigid_pcg_update_xr(rigid_data: qd.template(), pcg_scalars: qd.template
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_dot_rz(rigid_data: qd.template(), pcg_scalars: qd.template()):
+def func_rigid_pcg_dot_rz(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
     """Add r . z over the Rigid dofs to rz_new."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -483,7 +534,7 @@ def func_rigid_pcg_dot_rz(rigid_data: qd.template(), pcg_scalars: qd.template())
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_direction(rigid_data: qd.template(), pcg_scalars: qd.template()):
+def func_rigid_pcg_direction(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
     """Update the search direction p = z + beta p over the Rigid dofs, and clear Ap."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -498,7 +549,7 @@ def func_rigid_pcg_direction(rigid_data: qd.template(), pcg_scalars: qd.template
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_start_line_search(rigid_data: qd.template(), control: qd.template()):
+def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: qd.template()):
     """Set the line-search direction dx = -solution and its start point, and take |dx| into the largest displacement of
     the Newton step, after the MPM rows."""
     n_dofs = rigid_data.x.shape[0]
@@ -511,7 +562,7 @@ def func_rigid_start_line_search(rigid_data: qd.template(), control: qd.template
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_step_forward(rigid_data: qd.template(), control: qd.template()):
+def func_rigid_step_forward(rigid_data: RigidNewtonScratch, control: qd.template()):
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_step_forward")
@@ -520,7 +571,7 @@ def func_rigid_step_forward(rigid_data: qd.template(), control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_write_back(rigid_data: qd.template(), constraint_state: ConstraintState, config: qd.template()):
+def func_rigid_write_back(rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, config: qd.template()):
     """Hand the converged qacc to Rigid as the solution of its constraint solve.
 
     Runs after func_rigid_evaluate at the converged x, which left the row activity, forces and qfrc_constraint of Rigid
@@ -535,7 +586,9 @@ def func_rigid_write_back(rigid_data: qd.template(), constraint_state: Constrain
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_adjoint_rhs(rigid_data: qd.template(), constraint_state: ConstraintState, newton_info: RigidNewtonInfo):
+def func_rigid_adjoint_rhs(
+    rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
+):
     """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts.
 
     The right-hand side is the adjoint of x = dt^2 qacc, dL/dqacc / dt^2, with dL/dqacc as taken by Rigid's own adjoint
@@ -550,7 +603,7 @@ def func_rigid_adjoint_rhs(rigid_data: qd.template(), constraint_state: Constrai
 
 @qd.func(requires_top_level=True)
 def func_rigid_adjoint_finish(
-    rigid_data: qd.template(), constraint_state: ConstraintState, newton_info: RigidNewtonInfo
+    rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
 ):
     """Set the solution of Rigid's adjoint solve from that of the joint one.
 

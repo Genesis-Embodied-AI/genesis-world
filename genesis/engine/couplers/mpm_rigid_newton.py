@@ -66,11 +66,11 @@ class MpmRigidContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
         func_link_spatial_disp(
-            self.rigid.rigid_data.x,
-            self.rigid.rigid_data,
-            self.rigid.dyn_state.dofs,
-            self.rigid.dyn_info.links,
-            self.rigid.config,
+            src=self.rigid.rigid_data.x,
+            rigid_data=self.rigid.rigid_data,
+            dofs_state=self.rigid.dyn_state.dofs,
+            links_info=self.rigid.dyn_info.links,
+            config=self.rigid.config,
         )
         mpm_rigid_func.func_contact_point_disp(
             f,

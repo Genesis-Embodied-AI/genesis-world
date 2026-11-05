@@ -34,6 +34,7 @@ from genesis.engine.solvers.mpm_data import (
 )
 from genesis.engine.solvers.mpm_func import particle_of_sorted, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
+from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 
 from .mpm_rigid_func import geom_normal
@@ -178,7 +179,7 @@ def func_rigid_contact_adjoint(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
-    rigid_data: qd.template(),
+    rigid_data: RigidNewtonScratch,
     geoms_state: GeomsState,
     links_state: LinksState,
     dofs_state: DofsState,
