@@ -9,7 +9,6 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializationInfo,
-    SerializeAsAny,
     SerializerFunctionWrapHandler,
     StrictBool,
     model_serializer,
@@ -36,16 +35,6 @@ class _Selection(Options):
     def _dump_hashable(self, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
         dumped = handler(self)
         return tuple(dumped.items()) if info.mode == "python" else dumped
-
-
-class Slice(_Selection):
-    """A slice of a range of elements, as Python slices one (``slice(start, stop, step)``)."""
-
-    model_config = ConfigDict(frozen=True)
-
-    start: StrictInt | None = None
-    stop: StrictInt | None = None
-    step: StrictInt | None = None
 
 
 def get_links_path(links_name: list[str], links_parent_idx: list[int]) -> list[tuple[str, ...]]:
@@ -128,7 +117,7 @@ class _OrdinalIndex(_Selection):
 
     ordinals: IArrayType | None = None
     mask: BArrayType | None = None
-    span: Slice | None = None
+    span: tuple[StrictInt | None, StrictInt | None, StrictInt | None] | None = None
 
     @model_validator(mode="after")
     def _check_single_selection(self) -> Self:
@@ -140,7 +129,7 @@ class _OrdinalIndex(_Selection):
     def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
         """Select the elements a numpy index picks: an ordinal, ordinals, a boolean mask or a slice."""
         if isinstance(idx, slice):
-            return cls(span=Slice(start=idx.start, stop=idx.stop, step=idx.step))
+            return cls(span=(idx.start, idx.stop, idx.step))
         idx = np.atleast_1d(idx)
         if idx.dtype == np.bool_:
             return cls(mask=tuple(idx.tolist()))
@@ -154,7 +143,7 @@ class _OrdinalIndex(_Selection):
         if self.is_all:
             return np.arange(n, dtype=gs.np_int)
         if self.span is not None:
-            idx = slice(self.span.start, self.span.stop, self.span.step)
+            idx = slice(*self.span)
         elif self.mask is not None:
             idx = np.array(self.mask)
         else:
@@ -271,7 +260,7 @@ class VGeomIndex(_NamedOrdinalIndex):
         return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
-class VertexIndex(_Selection):
+class VertexIndex(_OrdinalIndex):
     """Select vertices of an entity, by ordinal or by position in the frame of its morph.
 
     A selection resolves once, as the entity is added, on the vertices of its simulation mesh. The frame of the morph
@@ -279,94 +268,66 @@ class VertexIndex(_Selection):
     offset place them, so a selection keeps its vertices wherever the entity starts. Combine selections with ``|``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    box: tuple[Vec3FType, Vec3FType] | None = None
+    closest_pos: Vec3FType | None = None
+    max_distance: PositiveFloat | None = None
+    members: Annotated[tuple["VertexIndex", ...], Field(min_length=2, strict=False)] | None = None
 
     @model_validator(mode="after")
-    def _reject_base(self) -> Self:
-        if type(self) is VertexIndex:
-            gs.raise_exception("Select vertices with 'VertexIndex.at', 'in_box' or 'closest_to'.")
+    def _check_single_selection(self) -> Self:
+        selections = (self.ordinals, self.mask, self.span, self.box, self.closest_pos, self.members)
+        if sum(selection is not None for selection in selections) != 1:
+            gs.raise_exception("Select vertices with 'VertexIndex.at', 'in_box' or 'closest_to', combined with '|'.")
+        if (self.closest_pos is None) != (self.max_distance is None):
+            gs.raise_exception("'VertexIndex.closest_to' takes a position and a max distance together.")
+        if self.box is not None and any(lower > upper for lower, upper in zip(*self.box)):
+            gs.raise_exception(f"The lower corner {self.box[0]} of a box exceeds its upper corner {self.box[1]}.")
         return self
 
     @classmethod
-    def at(cls, idx: "int | slice | np.typing.ArrayLike") -> "VertexOrdinalIndex":
-        """Select the vertices a numpy index picks: an ordinal, ordinals, a boolean mask or a slice."""
-        return VertexOrdinalIndex.at(idx)
-
-    @classmethod
-    def in_box(cls, lower: Vec3FType, upper: Vec3FType) -> "VertexBoxIndex":
+    def in_box(cls, lower: Vec3FType, upper: Vec3FType) -> Self:
         """Select the vertices inside an axis-aligned box of the frame of the morph, bounds included."""
-        return VertexBoxIndex(lower=lower, upper=upper)
+        return cls(box=(lower, upper))
 
     @classmethod
-    def closest_to(cls, pos: Vec3FType, max_distance: float) -> "VertexClosestIndex":
+    def closest_to(cls, pos: Vec3FType, max_distance: float) -> Self:
         """Select the vertex closest to a point of the frame of the morph, which must lie within 'max_distance'."""
-        return VertexClosestIndex(pos=pos, max_distance=max_distance)
+        return cls(closest_pos=pos, max_distance=max_distance)
 
-    def __or__(self, other: "VertexIndex") -> "VertexUnionIndex":
+    @property
+    def is_all(self) -> bool:
+        """Whether the selection holds every vertex, which no vertex selection does since each states its vertices."""
+        return False
+
+    def __or__(self, other: "VertexIndex") -> "VertexIndex":
         if not isinstance(other, VertexIndex):
             return NotImplemented
-        members = []
-        for index in (self, other):
-            members.extend(index.members if isinstance(index, VertexUnionIndex) else (index,))
-        return VertexUnionIndex(members=members)
+        members = [member for index in (self, other) for member in (index.members or (index,))]
+        return VertexIndex(members=members)
 
     def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
         """Return the sorted indices of the selected vertices, given their positions in the frame of the morph."""
-        raise NotImplementedError
-
-
-class VertexOrdinalIndex(_OrdinalIndex, VertexIndex):
-    """Select vertices by ordinal (see ``VertexIndex.at``)."""
-
-    def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
+        if self.members is not None:
+            return np.unique(np.concatenate([member.resolve(verts_pos) for member in self.members]))
+        if self.box is not None:
+            # A vertex on a bound counts as inside, within a rounding error of its position that scales with the mesh
+            tol = 1e-6 * max(np.ptp(verts_pos, axis=0).max(), 1.0)
+            lower, upper = np.array(self.box[0]) - tol, np.array(self.box[1]) + tol
+            is_inside = np.all((lower <= verts_pos) & (verts_pos <= upper), axis=-1)
+            if not is_inside.any():
+                gs.raise_exception(f"No vertex lies inside the box from {self.box[0]} to {self.box[1]}.")
+            return np.flatnonzero(is_inside).astype(gs.np_int, copy=False)
+        if self.closest_pos is not None:
+            distances = np.linalg.norm(verts_pos - np.array(self.closest_pos), axis=-1)
+            i_v = np.argmin(distances)
+            if distances[i_v] > self.max_distance:
+                gs.raise_exception(
+                    f"The vertex closest to {self.closest_pos} lies {distances[i_v]:.4g} m away, beyond max_distance "
+                    f"{self.max_distance}."
+                )
+            if np.count_nonzero(distances <= distances[i_v] + gs.EPS) > 1:
+                gs.raise_exception(
+                    f"Several vertices are the closest to {self.closest_pos}. Move the point to pick one."
+                )
+            return np.array([i_v], dtype=gs.np_int)
         return self._resolve_ordinals(len(verts_pos), "vertex")
-
-
-class VertexBoxIndex(VertexIndex):
-    """Select the vertices inside an axis-aligned box (see ``VertexIndex.in_box``)."""
-
-    lower: Vec3FType
-    upper: Vec3FType
-
-    @model_validator(mode="after")
-    def _check_bounds(self) -> Self:
-        if any(lower > upper for lower, upper in zip(self.lower, self.upper)):
-            gs.raise_exception(f"The lower corner {self.lower} of a box exceeds its upper corner {self.upper}.")
-        return self
-
-    def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
-        # A vertex on a bound counts as inside, within the rounding error of its position, which scales with the mesh
-        tol = 1e-6 * max(np.ptp(verts_pos, axis=0).max(), 1.0)
-        lower, upper = np.array(self.lower) - tol, np.array(self.upper) + tol
-        is_inside = np.all((lower <= verts_pos) & (verts_pos <= upper), axis=-1)
-        if not is_inside.any():
-            gs.raise_exception(f"No vertex lies inside the box from {self.lower} to {self.upper}.")
-        return np.flatnonzero(is_inside).astype(gs.np_int, copy=False)
-
-
-class VertexClosestIndex(VertexIndex):
-    """Select the vertex closest to a point (see ``VertexIndex.closest_to``)."""
-
-    pos: Vec3FType
-    max_distance: PositiveFloat
-
-    def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
-        distances = np.linalg.norm(verts_pos - np.array(self.pos), axis=-1)
-        i_v = np.argmin(distances)
-        if distances[i_v] > self.max_distance:
-            gs.raise_exception(
-                f"The vertex closest to {self.pos} lies {distances[i_v]:.4g} m away, beyond max_distance "
-                f"{self.max_distance}."
-            )
-        if np.count_nonzero(distances <= distances[i_v] + gs.EPS) > 1:
-            gs.raise_exception(f"Several vertices are the closest to {self.pos}. Move the point to pick one.")
-        return np.array([i_v], dtype=gs.np_int)
-
-
-class VertexUnionIndex(VertexIndex):
-    """Select the vertices any of several selections picks (see ``VertexIndex.__or__``)."""
-
-    members: Annotated[tuple[SerializeAsAny[VertexIndex], ...], Field(min_length=2, strict=False)]
-
-    def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
-        return np.unique(np.concatenate([member.resolve(verts_pos) for member in self.members]))
