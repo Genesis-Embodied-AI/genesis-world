@@ -44,8 +44,8 @@ class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
         List of lights to add for this camera backend. Each light is a dict with
         backend-specific parameters. Default is empty list.
     offset_T : array-like, shape (4, 4), optional
-        4x4 transformation matrix specifying the camera's pose relative to the attached link.
-        If provided, this takes priority over pos_offset and euler_offset. Default is None.
+        4x4 transformation matrix specifying the camera's pose relative to the attached link. If provided, this takes
+        priority over pos, lookat and up. Default is None.
     entity_idx : int
         The global entity index of the RigidEntity to which this sensor is attached. -1 or None for static sensors.
     link_idx_local : int, optional
