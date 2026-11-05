@@ -396,10 +396,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 gs.raise_exception(
                     "Model 'linear_corotated' requires the implicit solver ('use_implicit_solver=True')."
                 )
+        # The model of a new key is registered once the entity is accepted, so a refused entity leaves the solver as it was
         model_key = get_fem_model_key(options)
-        if model_key not in self._models_key:
-            self._models_key.append(model_key)
-            self._models.append(build_fem_model(model_key))
+        is_new_model = model_key not in self._models_key
+        model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
         # create entity
         entity = FEMEntity(
@@ -409,7 +409,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             morph=morph,
             surface=surface,
             idx=idx,
-            model_idx=self._models_key.index(model_key),
+            model_idx=model_idx,
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
@@ -427,6 +427,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 )
             self._enable_vertex_constraints = True
 
+        if is_new_model:
+            self._models_key.append(model_key)
+            self._models.append(build_fem_model(model_key))
         self._entities.append(entity)
         return entity
 

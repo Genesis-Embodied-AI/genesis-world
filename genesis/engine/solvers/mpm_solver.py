@@ -268,9 +268,10 @@ class MPMSolver(ParticleSolver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "MPMEntity":
+        # The key of a new model is registered once the entity is accepted (see 'FEMSolver.add_entity')
         model_key = get_mpm_model_key(options)
-        if model_key not in self._models_key:
-            self._models_key.append(model_key)
+        is_new_model = model_key not in self._models_key
+        model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
         # create entity
         entity = MPMEntity(
@@ -281,13 +282,15 @@ class MPMSolver(ParticleSolver):
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
-            model_idx=self._models_key.index(model_key),
+            model_idx=model_idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
             options=options,
         )
+        if is_new_model:
+            self._models_key.append(model_key)
         self._entities.append(entity)
 
         return entity
