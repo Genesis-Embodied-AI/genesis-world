@@ -105,12 +105,18 @@ def func_pbd_factor(pbd_data: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_pcg_init(pbd_data: qd.template()):
-    """The PBD part of the preconditioned conjugate gradient (PCG) start from 0: r = grad, solution and Ap cleared."""
+def func_pbd_pcg_init(pbd_data: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
+    """The PBD part of the preconditioned conjugate gradient (PCG) start from 0: r = grad, solution and Ap cleared.
+
+    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
     qd.loop_config(name="mpm_pbd_pcg_init")
     for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
         pbd_data.r[i_q, i_b] = pbd_data.grad[i_q, i_b]
-        pbd_data.sol[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        is_kept = False
+        if qd.static(is_adjoint):
+            is_kept = pcg_scalars.is_converged[i_b] != 0
+        if not is_kept:
+            pbd_data.sol[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
         pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
@@ -619,8 +625,8 @@ class PbdNewtonParticipant:
         func_pbd_factor(self.pbd_data)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init(self):
-        func_pbd_pcg_init(self.pbd_data)
+    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+        func_pbd_pcg_init(self.pbd_data, pcg_scalars, is_adjoint)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):

@@ -135,8 +135,10 @@ class MpmNewtonParticipant:
         mpm_func.func_invert_brick(self.grid, self.linear)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init(self):
-        func_init_linear_pcg_residual(self.linear.b_rhs, self.linear.solution, self.pcg_workspace)
+    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+        func_init_linear_pcg_residual(
+            self.linear.b_rhs, self.linear.solution, self.pcg_workspace, pcg_scalars, is_adjoint
+        )
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):

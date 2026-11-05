@@ -18,8 +18,10 @@ from genesis.engine.numerics.linear_pcg import (
     func_pcg_arm,
     func_pcg_decide,
     func_pcg_reset,
+    func_pcg_select_envs,
     func_pcg_step,
 )
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash, func_reset_hash
 from genesis.utils.misc import qd_to_numpy
 
@@ -230,13 +232,16 @@ def func_apply_block_jacobi(precond_inv_diag: qd.template(), pcg_workspace: qd.t
 def kernel_pcg_solve(
     pcg_workspace: qd.template(),
     pcg_scalars: qd.template(),
+    newton_control: qd.template(),
     matrix: qd.template(),
     precond_inv_diag: qd.types.ndarray(),
     b: qd.types.ndarray(),
     x: qd.types.ndarray(),
+    is_adjoint: qd.template(),
 ):
+    func_pcg_select_envs(pcg_scalars, newton_control, is_adjoint)
     func_pcg_reset(pcg_scalars)
-    func_init_linear_pcg_residual(b, x, pcg_workspace)
+    func_init_linear_pcg_residual(b, x, pcg_workspace, pcg_scalars, is_adjoint)
     func_apply_block_jacobi(precond_inv_diag, pcg_workspace)
     func_init_linear_pcg_direction(pcg_workspace, pcg_scalars)
     func_pcg_arm(pcg_scalars)
@@ -250,26 +255,40 @@ def kernel_pcg_solve(
         func_linear_pcg_direction(pcg_workspace, pcg_scalars)
 
 
-def _pcg_block_system(off_diagonal_scale, check_curvature):
-    """Solve a random symmetric block system by block-Jacobi preconditioned conjugate gradient (PCG).
+def _pcg_block_system(off_diagonal_scales, check_curvature, pcg_scalars=None, x_init=None):
+    """Solve random symmetric block systems, one per environment, by block-Jacobi preconditioned conjugate gradient (PCG).
 
     The diagonal blocks a^T a + c I are symmetric positive definite (SPD), which keeps the preconditioner SPD whatever
-    the off-diagonal blocks, scaled by 'off_diagonal_scale'. With 'check_curvature', the solve flags a non-positive
-    curvature in its scalars. Return the dense matrix, the right-hand side, the solution and the scalars of the solve.
+    the off-diagonal blocks, scaled by the entry of 'off_diagonal_scales' of their environment. With 'check_curvature',
+    the solve flags a non-positive curvature in its scalars. Return the dense matrix of every environment, the
+    right-hand side, the solution and the scalars of the solve, whose rows run environment by environment.
+
+    Without 'pcg_scalars' the solve is a forward one over every environment. With the scalars of an earlier solve and
+    its solution 'x_init', it is an adjoint solve over the environments of 'is_env_adjoint', which leave the other
+    environments at 'x_init'. The matrices of the two solves differ by their off-diagonal scales alone.
     """
     rng = np.random.default_rng(17)
-    n_rows, n_triplets = 60, 400
-    rows, cols, values, _ = _random_symmetric_triplets(rng, n_rows, n_triplets)
-    diag_values = np.stack([a.T @ a + 30.0 * np.eye(3) for a in rng.standard_normal((n_rows, 3, 3))])
-    rows = np.concatenate((rows, np.arange(n_rows, dtype=gs.np_int)))
-    cols = np.concatenate((cols, np.arange(n_rows, dtype=gs.np_int)))
-    values = np.concatenate((off_diagonal_scale * values, diag_values))
+    n_envs = len(off_diagonal_scales)
+    n_env_rows, n_env_triplets = 60, 400
+    n_rows = n_envs * n_env_rows
+    rows, cols, values, denses = [], [], [], []
+    for i_b, off_diagonal_scale in enumerate(off_diagonal_scales):
+        env_rows, env_cols, env_values, _ = _random_symmetric_triplets(rng, n_env_rows, n_env_triplets)
+        diag_values = np.stack([a.T @ a + 30.0 * np.eye(3) for a in rng.standard_normal((n_env_rows, 3, 3))])
+        env_rows = np.concatenate((env_rows, np.arange(n_env_rows, dtype=gs.np_int)))
+        env_cols = np.concatenate((env_cols, np.arange(n_env_rows, dtype=gs.np_int)))
+        env_values = np.concatenate((off_diagonal_scale * env_values, diag_values))
+        dense = np.zeros((3 * n_env_rows, 3 * n_env_rows))
+        for row, col, block in zip(env_rows, env_cols, env_values):
+            dense[3 * row : 3 * row + 3, 3 * col : 3 * col + 3] += block
+            if row != col:
+                dense[3 * col : 3 * col + 3, 3 * row : 3 * row + 3] += block.T
+        rows.append(env_rows + i_b * n_env_rows)
+        cols.append(env_cols + i_b * n_env_rows)
+        values.append(env_values)
+        denses.append(dense)
+    rows, cols, values = np.concatenate(rows), np.concatenate(cols), np.concatenate(values)
     n_triplets = len(rows)
-    dense = np.zeros((3 * n_rows, 3 * n_rows))
-    for row, col, block in zip(rows, cols, values):
-        dense[3 * row : 3 * row + 3, 3 * col : 3 * col + 3] += block
-        if row != col:
-            dense[3 * col : 3 * col + 3, 3 * row : 3 * row + 3] += block.T
 
     matrix = BCOOMatrix(
         shape=(n_rows, n_rows),
@@ -288,18 +307,27 @@ def _pcg_block_system(off_diagonal_scale, check_curvature):
 
     pcg_workspace = PCGWorkspace(n_rows, gs.qd_float)
     pcg_workspace.n_rows.from_numpy(np.array(n_rows, dtype=gs.np_int))
-    pcg_scalars = PCGScalars(gs.qd_float, max_iter=1024, tol_rate=1e-20)
+    pcg_workspace.row_env.from_numpy(np.repeat(np.arange(n_envs, dtype=gs.np_int), n_env_rows))
+    is_adjoint = pcg_scalars is not None
+    if not is_adjoint:
+        pcg_scalars = PCGScalars(gs.qd_float, max_iter=1024, tol_rate=1e-20, n_envs=n_envs)
     pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
+    newton_control = NewtonControl(gs.qd_float, 1, 1, 1.0, False, n_envs)
+    newton_control.is_env_running.fill(1)
     precond_inv_diag = qd.ndarray(gs.qd_float, shape=(9 * n_rows,))
     b = rng.standard_normal(3 * n_rows)
     b_nd, x_nd = qd.ndarray(gs.qd_float, shape=(3 * n_rows,)), qd.ndarray(gs.qd_float, shape=(3 * n_rows,))
     b_nd.from_numpy(b)
+    if is_adjoint:
+        x_nd.from_numpy(x_init)
 
     sort_reduce_bcoo(matrix)
     kernel_invert_block_diagonal(matrix, precond_inv_diag)
-    kernel_pcg_solve(pcg_workspace, pcg_scalars, matrix, precond_inv_diag, b_nd, x_nd)
+    kernel_pcg_solve(
+        pcg_workspace, pcg_scalars, newton_control, matrix, precond_inv_diag, b_nd, x_nd, is_adjoint=is_adjoint
+    )
     qd.sync()
-    return dense, b, qd_to_numpy(x_nd), pcg_scalars
+    return denses, b, qd_to_numpy(x_nd), pcg_scalars
 
 
 @pytest.mark.required
@@ -307,19 +335,35 @@ def _pcg_block_system(off_diagonal_scale, check_curvature):
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_linear_pcg_solves_spd_block_system():
     # A dominant diagonal makes the matrix symmetric positive definite (SPD), which the curvature check accepts
-    dense, b, x, pcg_scalars = _pcg_block_system(off_diagonal_scale=0.1, check_curvature=True)
+    (dense,), b, x, pcg_scalars = _pcg_block_system(off_diagonal_scales=(0.1,), check_curvature=True)
     assert np.all(np.linalg.eigvalsh(dense) > 0)
     assert_allclose(x, np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
     assert 0 < int(qd_to_numpy(pcg_scalars.iter_remaining)) < int(qd_to_numpy(pcg_scalars.max_iter))
-    assert int(qd_to_numpy(pcg_scalars.has_breakdown)) == 0
+    assert_equal(qd_to_numpy(pcg_scalars.has_breakdown), 0)
 
 
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_linear_pcg_flags_non_positive_curvature():
-    # Off-diagonal blocks large enough to make the matrix indefinite, its symmetric positive definite (SPD) diagonal
-    # keeping the preconditioner SPD
-    dense, b, x, pcg_scalars = _pcg_block_system(off_diagonal_scale=10.0, check_curvature=True)
-    assert np.linalg.eigvalsh(dense)[0] < 0
-    assert int(qd_to_numpy(pcg_scalars.has_breakdown)) == 1
+    # Off-diagonal blocks large enough to make the matrix of the second environment indefinite, its symmetric positive
+    # definite (SPD) diagonal keeping the preconditioner SPD. The first environment solves as it does alone.
+    (dense_spd, dense_indefinite), b, x, pcg_scalars = _pcg_block_system(
+        off_diagonal_scales=(0.1, 10.0), check_curvature=True
+    )
+    assert np.linalg.eigvalsh(dense_spd)[0] > 0
+    assert np.linalg.eigvalsh(dense_indefinite)[0] < 0
+    assert_equal(qd_to_numpy(pcg_scalars.has_breakdown), (0, 1))
+    n_env_dofs = dense_spd.shape[0]
+    assert_allclose(x[:n_env_dofs], np.linalg.solve(dense_spd, b[:n_env_dofs]), rtol=1e-7, atol=1e-8)
+
+    # The retry of the adjoint solve over the broken environment alone, on a matrix made SPD, leaves the solution of the
+    # other environment as it was. This covers the keep guard of func_init_linear_pcg_residual, which the solutions of
+    # the other participants (Rigid, FEM, PBD) repeat in their own func_pcg_init.
+    pcg_scalars.is_env_adjoint.from_numpy(np.array((0, 1), dtype=gs.np_int))
+    (_, dense_retry), b, x_retry, pcg_scalars = _pcg_block_system(
+        off_diagonal_scales=(0.1, 0.1), check_curvature=False, pcg_scalars=pcg_scalars, x_init=x
+    )
+    assert np.linalg.eigvalsh(dense_retry)[0] > 0
+    assert_equal(x_retry[:n_env_dofs], x[:n_env_dofs])
+    assert_allclose(x_retry[n_env_dofs:], np.linalg.solve(dense_retry, b[n_env_dofs:]), rtol=1e-7, atol=1e-8)

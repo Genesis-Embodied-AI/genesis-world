@@ -150,7 +150,7 @@ def func_pcg_start(
     func_pcg_reset(pcg_scalars)
     for member in qd.static(participants.members):
         member.func_factor()
-        member.func_pcg_init()
+        member.func_pcg_init(pcg_scalars, is_adjoint)
         member.func_precondition()
         member.func_pcg_init_direction(pcg_scalars)
     func_pcg_arm(pcg_scalars)
@@ -459,17 +459,20 @@ class NewtonSolver(Solver):
         """Solve the adjoint system of substep `f` on the Hessian at its solution by the conjugate gradient of the
         forward solve, and hand the solution to every participant and coupling.
 
-        The Hessian is exact or projected to positive definite, as `adjoint_hessian` selects. With 'auto', a solve
-        meeting a direction of non-positive curvature on the exact Hessian runs again on the projected one."""
+        The Hessian is exact or projected to positive definite, as `adjoint_hessian` selects. With 'auto', an environment
+        whose solve met a direction of non-positive curvature on the exact Hessian runs again on the projected one, the
+        other environments keeping their solution of the exact one."""
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
         self._stage_adjoint(f, is_exact)
-        if not self._pcg_adjoint(f, check_curvature=is_exact):
-            # At a converged solution the Hessian of the incremental potential is positive definite
+        envs_breakdown = self._pcg_adjoint(f, check_curvature=is_exact)
+        # At a converged solution the Hessian of the incremental potential is positive definite
+        if is_exact and envs_breakdown.any():
             if mode == "exact":
                 gs.raise_exception(
-                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution, which the "
-                    "forward Newton solve most likely stopped short of: tighten NewtonOptions(velocity_tol), or use "
+                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution in "
+                    f"environments {np.flatnonzero(envs_breakdown).tolist()}, which the forward Newton solve most "
+                    "likely stopped short of: tighten NewtonOptions(velocity_tol), or use "
                     "NewtonOptions(adjoint_hessian='auto') or 'projected'."
                 )
             if not self._has_warned_adjoint_projection:
@@ -478,6 +481,8 @@ class NewtonSolver(Solver):
                     "forward Newton solve most likely stopped short of: its adjoint solves on the projected Hessian, "
                     "whose gradients are approximate. Tighten NewtonOptions(velocity_tol) for exact ones."
                 )
+        pcg_scalars = self.pcg_scalars
+        pcg_scalars.is_env_adjoint.fill(1)
                 self._has_warned_adjoint_projection = True
             self._stage_adjoint(f, is_exact=False)
             self._pcg_adjoint(f)
@@ -491,21 +496,22 @@ class NewtonSolver(Solver):
         for host in self._hosts:
             host.newton_adjoint_rhs(f)
 
-    def _pcg_adjoint(self, f, check_curvature=False) -> bool:
+    def _pcg_adjoint(self, f, check_curvature=False):
         """Solve the staged adjoint system H lambda = b by the conjugate gradient of the forward solve, at the tighter
-        tolerance of the adjoint.
+        tolerance of the adjoint, over the environments of `is_env_adjoint` (see PCGScalars).
+            pcg_scalars.is_env_adjoint.from_numpy(envs_breakdown)
 
-        With `check_curvature`, meant for a Hessian without positive definite projection, returns whether the solve met
-        no direction of non-positive curvature. Otherwise returns True."""
+        With `check_curvature`, meant for a Hessian without positive definite projection, returns for every environment
+        whether its solve met a direction of non-positive curvature."""
         pcg_scalars = self.pcg_scalars
         pcg_scalars.tol_rate.from_numpy(np.array(self._adjoint_pcg_tol, dtype=gs.np_float))
         pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
         self._pcg(f, is_adjoint=True)
         pcg_scalars.tol_rate.from_numpy(np.array(self._options.pcg_tol, dtype=gs.np_float))
         if not check_curvature:
-            return True
+            return None
         pcg_scalars.is_curvature_checked.from_numpy(np.array(0, dtype=gs.np_int))
-        return not int(qd_to_numpy(pcg_scalars.has_breakdown))
+        return qd_to_numpy(pcg_scalars.has_breakdown)
 
     def _step(self, f):
         control = self.control
@@ -524,7 +530,7 @@ class NewtonSolver(Solver):
             self._newton_loop_launches(f)
 
         for host in self._hosts:
-            host.newton_finish(f)
+            host.newton_finish(f, control)
         for host in self._hosts:
             host.newton_after(f)
 

@@ -161,8 +161,8 @@ class RigidNewtonParticipant:
         )
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init(self):
-        mpm_rigid_func.func_rigid_pcg_init(self.rigid_data)
+    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+        mpm_rigid_func.func_rigid_pcg_init(self.rigid_data, pcg_scalars, is_adjoint)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):

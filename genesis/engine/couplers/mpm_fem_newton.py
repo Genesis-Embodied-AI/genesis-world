@@ -32,8 +32,8 @@ class FemNewtonParticipant:
         mpm_fem_func.func_fem_factor(self.fem)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init(self):
-        mpm_fem_func.func_fem_pcg_init(self.fem.substep_dt, self.fem)
+    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+        mpm_fem_func.func_fem_pcg_init(self.fem.substep_dt, self.fem, pcg_scalars, is_adjoint)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):

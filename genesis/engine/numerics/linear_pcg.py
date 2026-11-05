@@ -25,7 +25,10 @@ class PCGScalars:
     has not converged (`is_running`), within one budget for the batch.
 
     A solve runs `max_iter` iterations at most, and an environment converges once its r . z falls to `tol_rate` times
-    its start value. An environment left out by `env_active` (see func_pcg_reset) starts converged.
+    its start value. An environment left out by `env_active` (see func_pcg_reset) starts converged. An adjoint solve
+    takes the environments of `is_env_adjoint` (see func_pcg_select_envs). With `is_curvature_checked` set, it flags in
+    `has_breakdown` the environments whose operator is indefinite, which a solve on a matrix without symmetric positive
+    definite (SPD) projection checks for.
     """
 
     def __init__(self, value_type, max_iter: int, tol_rate: float, n_envs: int = 1) -> None:
@@ -45,13 +48,12 @@ class PCGScalars:
         self.max_iter = scalar(gs.qd_int, max_iter)
         self.iter_remaining = scalar(gs.qd_int, 0)
         self.tol_rate = scalar(value_type, tol_rate)
-        # With is_curvature_checked set, a direction of non-positive curvature (p.Ap <= 0) in any environment sets
-        # has_breakdown: the operator is then indefinite, which a solve on a matrix without symmetric positive definite
-        # (SPD) projection checks for
         self.is_curvature_checked = scalar(gs.qd_int, 0)
-        self.has_breakdown = scalar(gs.qd_int, 0)
 
         self.env_active = per_env(gs.qd_int, 1)
+        self.is_env_adjoint = per_env(gs.qd_int, 1)
+        # A direction of non-positive curvature (p.Ap <= 0) of an environment flags it, the operator being indefinite
+        self.has_breakdown = per_env(gs.qd_int, 0)
         self.tol_sq = per_env(value_type, 0.0)
         self.rz = per_env(value_type, 0.0)
         self.rz_new = per_env(value_type, 0.0)
@@ -166,10 +168,17 @@ def _func_dot_into_gpu(
 
 
 @qd.func(requires_top_level=True)
-def func_init_linear_pcg_residual(b: qd.template(), x: qd.template(), pcg_workspace: qd.template()):
+def func_init_linear_pcg_residual(
+    b: qd.template(),
+    x: qd.template(),
+    pcg_workspace: qd.template(),
+    pcg_scalars: qd.template(),
+    is_adjoint: qd.template(),
+):
     """Start a solve of the linear system from a zero solution, with the right-hand side as the residual.
 
-    The solve of A x = b starts from x = 0 with r = b and Ap = 0. Next, the owner applies its preconditioner
+    The solve of A x = b starts from x = 0 with r = b and Ap = 0. With `is_adjoint`, an environment left out by
+    `env_active` keeps its solution, which an earlier adjoint solve left. Next, the owner applies its preconditioner
     (z = M^-1 r) and calls func_init_linear_pcg_direction to set the first direction.
     """
     qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
@@ -180,7 +189,12 @@ def func_init_linear_pcg_residual(b: qd.template(), x: qd.template(), pcg_worksp
         ):
             i = i_chunk_ * pcg_workspace.n_blocks * PCG_BLOCK + t
             if i < 3 * pcg_workspace.n_rows[()]:
-                x[i] = 0.0
+                is_kept = False
+                if qd.static(is_adjoint):
+                    env = pcg_workspace.row_env[i // 3]
+                    is_kept = pcg_scalars.is_converged[env] != 0
+                if not is_kept:
+                    x[i] = 0.0
                 pcg_workspace.r[i] = b[i]
                 pcg_workspace.ap[i] = 0.0
 
@@ -369,11 +383,11 @@ def func_linear_pcg_direction(pcg_workspace: qd.template(), pcg_scalars: qd.temp
 
 @qd.func(requires_top_level=True)
 def func_pcg_select_envs(pcg_scalars: qd.template(), newton_control: qd.template(), is_adjoint: qd.template()):
-    """Take part in the next solve the environments whose Newton solve runs, or every environment for an adjoint solve,
-    which follows a converged forward solve."""
+    """Take part in the next solve the environments whose Newton solve runs, or those of `is_env_adjoint` for an adjoint
+    solve, which follows a converged forward solve."""
     for i_b in range(pcg_scalars.env_active.shape[0]):
         if qd.static(is_adjoint):
-            pcg_scalars.env_active[i_b] = 1
+            pcg_scalars.env_active[i_b] = pcg_scalars.is_env_adjoint[i_b]
         else:
             pcg_scalars.env_active[i_b] = newton_control.is_env_running[i_b]
 
@@ -384,9 +398,9 @@ def func_pcg_reset(pcg_scalars: qd.template()):
 
     An environment outside `env_active` starts converged, so that the owners leave its rows as they are."""
     for _ in range(1):
-        pcg_scalars.has_breakdown[()] = 0
         pcg_scalars.iter_remaining[()] = pcg_scalars.max_iter[()]
     for i_b in range(pcg_scalars.rz.shape[0]):
+        pcg_scalars.has_breakdown[i_b] = 0
         pcg_scalars.rz[i_b] = 0.0
         pcg_scalars.rz_new[i_b] = 0.0
         pcg_scalars.p_dot_ap[i_b] = 0.0
@@ -410,14 +424,14 @@ def func_pcg_step(pcg_scalars: qd.template()):
     """Take the step alpha = rz / p.Ap of every running environment once every owner added its p.Ap, and zero rz_new
     for the dots that follow.
 
-    With is_curvature_checked set, a non-positive p.Ap along a non-zero direction sets has_breakdown.
+    With is_curvature_checked set, a non-positive p.Ap along a non-zero direction flags has_breakdown of its environment.
     """
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
             rz = pcg_scalars.rz[i_b]
             p_dot_ap = pcg_scalars.p_dot_ap[i_b]
             if pcg_scalars.is_curvature_checked[()] != 0 and p_dot_ap <= 0.0 and qd.abs(rz) > 0.0:
-                qd.atomic_max(pcg_scalars.has_breakdown[()], 1)
+                pcg_scalars.has_breakdown[i_b] = 1
             pcg_scalars.alpha[i_b] = rz / p_dot_ap if qd.abs(p_dot_ap) > 0.0 else pcg_scalars.value_type(0.0)
         pcg_scalars.rz_new[i_b] = 0.0
 

@@ -389,13 +389,19 @@ def func_fem_contact_matvec(
 
 
 @qd.func(requires_top_level=True)
-def func_fem_pcg_init(dt: float, fem: qd.template()):
+def func_fem_pcg_init(dt: float, fem: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
     """The FEM part of the preconditioned conjugate gradient (PCG) start from 0: r = grad = -dt^2 force, solution and Ap
-    cleared."""
+    cleared.
+
+    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
     qd.loop_config(name="mpm_fem_pcg_init")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].r = -dt * dt * fem.elements_v_energy[i_b, i_v].force
-        fem.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
+        is_kept = False
+        if qd.static(is_adjoint):
+            is_kept = pcg_scalars.is_converged[i_b] != 0
+        if not is_kept:
+            fem.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
         fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
 
 

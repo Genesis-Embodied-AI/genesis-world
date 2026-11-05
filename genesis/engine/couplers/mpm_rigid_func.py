@@ -754,14 +754,20 @@ def func_rigid_precondition(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init(rigid_data: qd.template()):
-    """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared."""
+def func_rigid_pcg_init(rigid_data: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
+    """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared.
+
+    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_pcg_init")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.r[i_d, i_b] = rigid_data.grad[i_d, i_b]
-        rigid_data.sol[i_d, i_b] = 0.0
+        is_kept = False
+        if qd.static(is_adjoint):
+            is_kept = pcg_scalars.is_converged[i_b] != 0
+        if not is_kept:
+            rigid_data.sol[i_d, i_b] = 0.0
         rigid_data.ap[i_d, i_b] = 0.0
 
 
