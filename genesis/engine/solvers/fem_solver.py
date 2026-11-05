@@ -13,6 +13,7 @@ from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.solvers.fem_models import FEMModel, FEMModelKey, build_fem_model, get_fem_model_key
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
+from genesis.options.materials import Cloth
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
@@ -381,6 +382,20 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "FEMEntity":
+        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
+        from genesis.engine.couplers import IPCCoupler
+
+        # The IPC coupler simulates the elements itself, otherwise each solver supports some of the models alone
+        model = options.solver_options.model
+        if not isinstance(material, Cloth) and not isinstance(self._sim.coupler, IPCCoupler):
+            if self._use_implicit_solver and model == gs.fem_model.stable_neohookean:
+                gs.raise_exception(
+                    "Model 'stable_neohookean' requires the explicit solver ('use_implicit_solver=False')."
+                )
+            if not self._use_implicit_solver and model == gs.fem_model.linear_corotated:
+                gs.raise_exception(
+                    "Model 'linear_corotated' requires the implicit solver ('use_implicit_solver=True')."
+                )
         model_key = get_fem_model_key(options)
         if model_key not in self._models_key:
             self._models_key.append(model_key)

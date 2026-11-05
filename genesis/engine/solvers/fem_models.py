@@ -64,15 +64,13 @@ class FEMElasticModel(FEMModel):
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear
             self.compute_energy_gradient = self._compute_energy_gradient_linear
             self.compute_energy = self._compute_energy_linear
+        # The explicit solver alone simulates the stable Neo-Hookean model, and the implicit one alone the linear
+        # corotated model (see 'FEMSolver.add_entity'), so each binds the methods of its solver
         elif model == "stable_neohookean":
             self.update_stress = self._update_stress_stable_neohookean
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_stable_neohookean
-            self.compute_energy_gradient = self._compute_energy_gradient_stable_neohookean
-            self.compute_energy = self._compute_energy_stable_neohookean
         elif model == "linear_corotated":
             self.build = self._build_linear_corotated
             self.pre_compute = self._pre_compute_linear_corotated
-            self.update_stress = self._update_stress_linear_corotated
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear_corotated
             self.compute_energy_gradient = self._compute_energy_gradient_linear_corotated
             self.compute_energy = self._compute_energy_linear_corotated
@@ -96,11 +94,7 @@ class FEMElasticModel(FEMModel):
 
     @qd.func
     def _compute_energy_gradient_hessian_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * eps + lam * trEps * I
+        energy, gradient = self._compute_energy_gradient_linear(mu, lam, J, F, actu, m_dir, i_e, i_b)
 
         for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
             hessian_field[i_b, i, i_e].fill(0.0)
@@ -132,10 +126,7 @@ class FEMElasticModel(FEMModel):
 
     @qd.func
     def _compute_energy_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
+        energy, _ = self._compute_energy_gradient_linear(mu, lam, J, F, actu, m_dir, i_e, i_b)
         return energy
 
     # --- Stable Neo-Hookean model ---
@@ -151,39 +142,12 @@ class FEMElasticModel(FEMModel):
         stress = mu * (1 - 1 / (IC + 1)) * F + lam * (J - alpha) * dJdF
         return stress
 
-    @qd.func
-    def _compute_energy_gradient_hessian_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        raise NotImplementedError("Hessian computation is not implemented for stable_neohookean model.")
-
-    @qd.func
-    def _compute_energy_gradient_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        gs.raise_exception("Gradient computation is not implemented for stable_neohookean model.")
-
-    @qd.func
-    def _compute_energy_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        _lambda = lam + mu
-        _alpha = 1.0 + mu / _lambda
-        Ic = F.norm_sqr()
-        Jminus1 = J - _alpha
-        energy = 0.5 * (mu * (Ic - 3.0) + _lambda * Jminus1**2)
-        return energy
-
     # --- Linear corotated model ---
-
-    @qd.func
-    def _update_stress_linear_corotated(self, mu, lam, J, F, actu, m_dir):
-        gs.raise_exception("Linear corotated stress update is not implemented yet.")
 
     @qd.func
     def _compute_energy_gradient_hessian_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
         R = self._R[i_b, i_e]
-        F_hat = R.transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * R @ eps + lam * trEps * R
+        energy, gradient = self._compute_energy_gradient_linear_corotated(mu, lam, J, F, actu, m_dir, i_e, i_b)
 
         for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
             hessian_field[i_b, i, i_e].fill(0.0)
@@ -198,23 +162,14 @@ class FEMElasticModel(FEMModel):
 
     @qd.func
     def _compute_energy_gradient_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        F_hat = self._R[i_b, i_e].transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * self._R[i_b, i_e] @ eps + lam * trEps * self._R[i_b, i_e]
-        return energy, gradient
+        # The linear model of the deformation with the rotation of the element removed, its gradient rotated back
+        R = self._R[i_b, i_e]
+        energy, gradient = self._compute_energy_gradient_linear(mu, lam, J, R.transpose() @ F, actu, m_dir, i_e, i_b)
+        return energy, R @ gradient
 
     @qd.func
     def _compute_energy_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
-        F_hat = self._R[i_b, i_e].transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
+        energy, _ = self._compute_energy_gradient_linear_corotated(mu, lam, J, F, actu, m_dir, i_e, i_b)
         return energy
 
 

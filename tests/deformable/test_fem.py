@@ -299,6 +299,22 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
             material=gs.materials.Elastic(),
         ),
     )
+    with pytest.raises(gs.GenesisException, match="requires the explicit solver"):
+        scene.add_entity(
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(),
+                material=gs.materials.Elastic(),
+                solver_options=gs.options.FEMEntitySolverOptions(model="stable_neohookean"),
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="requires the implicit solver"):
+        gs.Scene().add_entity(
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(),
+                material=gs.materials.Elastic(),
+                solver_options=gs.options.FEMEntitySolverOptions(model="linear_corotated"),
+            )
+        )
 
     # Build the scene
     scene.build()
