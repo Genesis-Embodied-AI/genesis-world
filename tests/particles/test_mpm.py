@@ -121,7 +121,7 @@ def test_perf_dispatch(variant, show_viewer):
         # The shear modulus 1e6 / (2 * (1 + 0.2)) Pa applied over one substep of 2e-3 / 10 s
         liquid_viscosity = 1e6 / (2.0 * (1.0 + 0.2)) * (2e-3 / 10)
     else:
-        elastic_model = "neohooken"
+        elastic_model = "neohookean"
         liquid_viscosity = None
 
     scene = gs.Scene(

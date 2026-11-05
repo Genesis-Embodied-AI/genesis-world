@@ -565,7 +565,7 @@ class MPMSolver(ParticleSolver):
                 self.compute_F_tmp_and_svd(f)
             else:
                 # All registered materials ignore U/V/S; skip SVD entirely (e.g. scenes of only non-viscous Liquid
-                # and/or neohooken Elastic).
+                # and/or neohookean Elastic).
                 self.compute_F_tmp_only(f)
         self.p2g(
             f,

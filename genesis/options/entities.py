@@ -687,8 +687,8 @@ class MPMEntitySolverOptions(_FrozenOptions):
         Default is None.
     model : gs.mpm_model | None, optional
         The stress model of an Elastic or Muscle material. 'corotation' handles large rotations accurately, while
-        'neohooken' stays robust under large compression and skips a decomposition per particle, which makes it
-        faster. If None, 'corotation' for Elastic and 'neohooken' for Muscle. Default is None.
+        'neohookean' stays robust under large compression and skips a decomposition per particle, which makes it
+        faster. If None, 'corotation' for Elastic and 'neohookean' for Muscle. Default is None.
     n_groups : int, optional
         The number of muscle groups of a Muscle material, each actuated on its own. Default is 1.
     """
@@ -751,7 +751,7 @@ class MPM(_EmittableParticles["MPMEntity"]):
         """The parameters of the material, the defaults of the MPM solver filled in.
 
         A Liquid takes the Lame parameters of a Young's modulus of 1e6 Pa and a Poisson ratio of 0.2 (see
-        'MPMLiquidModel'). The stress model defaults to 'corotation' for Elastic and 'neohooken' for Muscle, and the
+        'MPMLiquidModel'). The stress model defaults to 'corotation' for Elastic and 'neohookean' for Muscle, and the
         sampler to 'random' for Sand and Snow and to 'pbs' on Linux x86 and 'random' elsewhere otherwise.
         """
         material, solver_options = self.material, self.solver_options
@@ -761,7 +761,7 @@ class MPM(_EmittableParticles["MPMEntity"]):
             youngs_modulus, poisson_ratio = material.youngs_modulus, material.poisson_ratio
         model = solver_options.model
         if model is None and isinstance(material, (Elastic, Muscle)):
-            model = gs.mpm_model.corotation if isinstance(material, Elastic) else gs.mpm_model.neohooken
+            model = gs.mpm_model.corotation if isinstance(material, Elastic) else gs.mpm_model.neohookean
         sampler = solver_options.sampler
         if sampler is None:
             sampler = gs.particle_sampler.random if isinstance(material, (Sand, Snow)) else DEFAULT_SAMPLER

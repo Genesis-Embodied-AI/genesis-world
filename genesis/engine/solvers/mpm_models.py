@@ -44,8 +44,8 @@ class MPMElasticModel(MPMModel):
         super().__init__(youngs_modulus, poisson_ratio)
         self.update_F_S_Jp = self._update_F_S_Jp_elastic
         # The 'corotation' model keeps the stress of the base model, which reads U @ V.T from the decomposition of F_tmp
-        if model == "neohooken":
-            self.update_stress = self._update_stress_neohooken
+        if model == "neohookean":
+            self.update_stress = self._update_stress_neohookean
             # The Neo-Hookean stress only reads F_tmp and J = det(F_tmp)
             self.needs_svd = False
 
@@ -57,7 +57,7 @@ class MPMElasticModel(MPMModel):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def _update_stress_neohooken(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def _update_stress_neohookean(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
         stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
             self.lam * qd.log(J) - self.mu
         )

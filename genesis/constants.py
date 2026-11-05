@@ -239,7 +239,7 @@ class fem_model(StrEnum):
 # stress model of an MPM material
 class mpm_model(StrEnum):
     corotation = enum.auto()
-    neohooken = enum.auto()
+    neohookean = enum.auto()
 
 
 class yield_criterion(StrEnum):
