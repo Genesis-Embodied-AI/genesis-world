@@ -36,35 +36,9 @@ def mesh_path(mesh_file):
 
 
 @pytest.fixture
-def three_objects_obj(asset_tmp_path):
-    # Three objects, of which two share a material
-    (asset_tmp_path / "three_objects.mtl").write_text("newmtl plastic\nKd 0.5 0.5 0.5\nnewmtl lcd\nKd 0.0 0.0 0.0\n")
-    lines = ["mtllib three_objects.mtl"]
-    for i, (name, material) in enumerate((("body", "plastic"), ("knob", "plastic"), ("screen", "lcd"))):
-        lines += [f"o {name}", f"usemtl {material}"]
-        lines += [f"v {0.1 * i + dx} {dy} 0.0" for dx, dy in ((0.0, 0.0), (0.05, 0.0), (0.05, 0.05), (0.0, 0.05))]
-        lines += [f"f {4 * i + 1} {4 * i + 2} {4 * i + 3}", f"f {4 * i + 1} {4 * i + 3} {4 * i + 4}"]
-    obj_path = asset_tmp_path / "three_objects.obj"
-    obj_path.write_text("\n".join(lines) + "\n")
-    return obj_path
-
-
-@pytest.fixture
-def three_objects_urdf(three_objects_obj):
-    robot = ET.Element("robot", name="panel")
-    link = ET.SubElement(robot, "link", name="panel")
-    visual = ET.SubElement(link, "visual")
-    ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(three_objects_obj))
-    collision = ET.SubElement(link, "collision")
-    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.25 0.05 0.01")
-    return ET.tostring(robot, encoding="unicode")
-
-
-@pytest.fixture
 def lamp_urdf(asset_tmp_path):
     # A visual of a single object, and a visual whose asset has no material, which the URDF material names
-    bulb_path = asset_tmp_path / "bulb.obj"
-    bulb_path.write_text("o bulb\nv 0.0 0.0 0.0\nv 0.05 0.0 0.0\nv 0.0 0.05 0.0\nf 1 2 3\n")
+    bulb_path = os.path.join(get_assets_dir(), "xml/thin_cube.obj")
     shade_path = asset_tmp_path / "shade.glb"
     trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(shade_path)
     robot = ET.Element("robot", name="lamp")

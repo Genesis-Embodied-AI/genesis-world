@@ -297,22 +297,23 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, color, show_viewer):
 
 
 @pytest.mark.required
-def test_obj_visual_geom_selection(three_objects_obj, three_objects_urdf, lamp_urdf):
+@pytest.mark.parametrize("mesh_file", ["meshes/stirrer.obj"])
+def test_obj_visual_geom_selection(mesh_path, mesh_urdf, lamp_urdf):
     scene = gs.Scene()
     # The objects of an OBJ file stay apart as visual geoms named after them, whether the file is a mesh or the visual
     # of a URDF link
-    knob_surface = gs.surfaces.Default(
+    green_surface = gs.surfaces.Default(
         color=(0.0, 1.0, 0.0),
     )
     objects_mesh = scene.add_entity(
         options=gs.entities.Rigid(
             morph=gs.morphs.Mesh(
-                file=str(three_objects_obj),
+                file=mesh_path,
                 fixed=True,
             ),
             vgeoms={
-                gs.VGeomIndex.named("knob"): gs.options.VGeom(
-                    surface=knob_surface,
+                gs.VGeomIndex.named("mesh1"): gs.options.VGeom(
+                    surface=green_surface,
                 ),
             },
         ),
@@ -320,14 +321,14 @@ def test_obj_visual_geom_selection(three_objects_obj, three_objects_urdf, lamp_u
     objects_urdf = scene.add_entity(
         options=gs.entities.Rigid(
             morph=gs.morphs.URDF(
-                file=three_objects_urdf,
+                file=mesh_urdf,
                 fixed=True,
             ),
             links={
-                "panel": gs.options.Link(
+                "base": gs.options.Link(
                     vgeoms={
-                        gs.VGeomIndex.named("knob"): gs.options.VGeom(
-                            surface=knob_surface,
+                        gs.VGeomIndex.named("mesh1"): gs.options.VGeom(
+                            surface=green_surface,
                         ),
                     },
                 ),
@@ -343,8 +344,8 @@ def test_obj_visual_geom_selection(three_objects_obj, three_objects_urdf, lamp_u
                 fixed=True,
             ),
             vgeoms={
-                gs.VGeomIndex.named("bulb"): gs.options.VGeom(
-                    surface=knob_surface,
+                gs.VGeomIndex.named("Cube"): gs.options.VGeom(
+                    surface=green_surface,
                 ),
                 gs.VGeomIndex.with_material("steel"): gs.options.VGeom(
                     surface=gs.surfaces.Default(
@@ -374,10 +375,10 @@ def test_obj_visual_geom_selection(three_objects_obj, three_objects_urdf, lamp_u
 
     for entity in (objects_mesh, objects_urdf):
         vgeoms_name = sorted(vgeom.metadata["name"] for vgeom in entity.vgeoms)
-        assert vgeoms_name == ["body", "knob", "screen"]
+        assert vgeoms_name == ["mesh0", "mesh1", "mesh2"]
         for vgeom in entity.vgeoms:
-            is_knob_color = np.allclose(vgeom.surface.get_rgba().color[:3], (0.0, 1.0, 0.0), atol=gs.EPS)
-            assert is_knob_color == (vgeom.metadata["name"] == "knob")
+            is_green = np.allclose(vgeom.surface.get_rgba().color[:3], (0.0, 1.0, 0.0), atol=gs.EPS)
+            assert is_green == (vgeom.metadata["name"] == "mesh1")
     lamp_vgeoms_color = [vgeom.surface.get_rgba().color[:3] for vgeom in lamp.vgeoms]
     assert_allclose(lamp_vgeoms_color, ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), tol=gs.EPS)
     assert sorted(vgeom.metadata["material_name"] for vgeom in boat.vgeoms) == [
