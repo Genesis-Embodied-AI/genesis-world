@@ -37,7 +37,7 @@ from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 
-from .mpm_rigid_func import geom_normal
+from .mpm_rigid_func import MpmRigidContactScratch, geom_normal
 
 # ============================================== Layer 0: reverses ===============================================
 
@@ -179,6 +179,7 @@ def func_rigid_contact_adjoint(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
+    rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
     geoms_state: GeomsState,
     links_state: LinksState,
@@ -202,7 +203,7 @@ def func_rigid_contact_adjoint(
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for s in range(grid.n_valid[()]):
-        i_l = newton.contact_link[s]
+        i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)

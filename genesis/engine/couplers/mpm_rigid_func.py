@@ -24,6 +24,7 @@ from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
+    SORTED_PARTICLES,
     WALL_ROWS,
     MpmGridScratch,
     MpmInfo,
@@ -64,6 +65,14 @@ from genesis.utils.array_class import (
     RigidInfo,
     SDFInfo,
 )
+from genesis.utils.data import Data, DataKind, field
+
+
+class MpmRigidContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
+    """Rigid side of the pyramid rows of every sorted particle."""
+
+    # The link of the particle's pyramid rows, -1 if Rigid gave it none
+    link: qd.Tensor = field(int)
 
 
 # ============================================ Layer 0: spatial algebra =============================================
@@ -260,6 +269,7 @@ def func_build_rigid_rows(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
+    rows: MpmRigidContactScratch,
     geoms_state: GeomsState,
     links_state: LinksState,
     query: qd.template(),
@@ -281,10 +291,13 @@ def func_build_rigid_rows(
     and every row `normal + mu d_k` of the pyramid gets `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`,
     with `mu_reg^2 = mu^2 / impratio`. The row target `dt J.v_p + dt^2 aref` is on the displacement of the particle
     relative to the motion J_pt x of its contact point beyond the link's velocity at the substep start. The nearest geom
-    gives rows, by `band_row`, to a particle within its range or short of it by less than `contact_band_width`.
+    gives rows, by `band_row`, to a particle within its range or short of it by less than `contact_band_width`. A
+    particle that got rows is marked in `newton.has_pyramid_rows` and its link is in `rows.link`, which holds -1 for the
+    others.
     """
     qd.loop_config(name="mpm_build_rigid_rows")
     for s in range(grid.n_valid[()]):
+        rows.link[s] = -1
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         x_p = particles.pos[f, i_p, i_b]
         # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
@@ -329,7 +342,8 @@ def func_build_rigid_rows(
                 newton.contact_dir[k] = J
                 newton.contact_D[k] = D
                 newton.contact_t[k] = t + dt * J.dot(v_r)
-            newton.contact_link[s] = i_l
+            rows.link[s] = i_l
+            newton.has_pyramid_rows[s] = True
 
 
 # ============================================ Layer 1: contact point motion ============================================
@@ -341,6 +355,7 @@ def func_contact_point_disp(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
+    rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
     links_state: LinksState,
     mpm_info: MpmInfo,
@@ -351,7 +366,7 @@ def func_contact_point_disp(
     keep theirs, from `func_reset_contact_rows` or from the coupling that gave them rows."""
     qd.loop_config(name="mpm_contact_point_disp")
     for s in range(grid.n_valid[()]):
-        i_l = newton.contact_link[s]
+        i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             r = particle_arm(f, i_p, i_b, i_l, particles, links_state)
@@ -367,6 +382,7 @@ def func_rigid_contact_gradient(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
+    rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     dyn_info: DynInfo,
@@ -391,7 +407,7 @@ def func_rigid_contact_gradient(
         rigid_data.link_K[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
     qd.loop_config(name="mpm_rigid_row_forces")
     for s in range(grid.n_valid[()]):
-        i_l = newton.contact_link[s]
+        i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             g = newton.g_rigid[s]
@@ -427,6 +443,7 @@ def func_rigid_contact_matvec(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
+    rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
     pcg_scalars: qd.template(),
     dyn_state: DynState,
@@ -448,7 +465,7 @@ def func_rigid_contact_matvec(
     )
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
-        i_l = newton.contact_link[s]
+        i_l = rows.link[s]
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         if i_l >= 0 and pcg_scalars.is_converged[i_b] == 0:
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
@@ -482,6 +499,7 @@ def func_mpm_reaction(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
+    rows: MpmRigidContactScratch,
     rigid_data: RigidNewtonScratch,
     dyn_state: DynState,
     constraint_state: ConstraintState,
@@ -505,7 +523,7 @@ def func_mpm_reaction(
         rigid_data.link_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
     qd.loop_config(name="mpm_reaction_rows")
     for s in range(grid.n_valid[()]):
-        i_l = newton.contact_link[s]
+        i_l = rows.link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)

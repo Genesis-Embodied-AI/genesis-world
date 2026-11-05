@@ -56,6 +56,8 @@ BRICK_SCRATCH = Size("brick_scratch")
 # Sizes of the particle data: the frames of the substep window and the particles
 FRAMES = Size("frames")
 PARTICLES = Size("particles")
+# Size of the data of the sorted particles that a coupling owns, the sort capacity n_envs * n_particles
+SORTED_PARTICLES = Size("sorted_particles")
 # Sizes of the material table: the materials and the parameters of each
 MATERIALS = Size("materials")
 MATERIAL_PARAMS = Size("material_params")
@@ -229,17 +231,13 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     constraint_target: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
     # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
-    # 1/2 D min(0, J.dx - t)^2, and the Rigid link of the particle's pyramid rows (-1 if none)
+    # 1/2 D min(0, J.dx - t)^2
     contact_dir: qd.Tensor = field((float, 3), shape=(CONTACT_ROWS * SORT,), ndarray=True)
     contact_D: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
     contact_t: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
-    contact_link: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    # The FEM surface triangle of the particle's pyramid rows (-1 if none), and the barycentric coordinates of its
-    # closest point on it
-    contact_tri: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    contact_bary: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
-    contact_pbd: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    # Whether a coupling built the pyramid rows of the particle, which the couplings building after it leave alone
+    # (see func_build_pbd_rows)
+    has_pyramid_rows: qd.Tensor = field(bool, shape=(SORT,), ndarray=True)
     # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and, for a
     # triangle, the distance to it and the alignment of its normal with the direction to the particle (which together
     # pick the triangle), the barycentric coordinates of the closest point and the contact normal. The query point and

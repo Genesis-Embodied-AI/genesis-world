@@ -5,28 +5,47 @@ The stage functions are those of `mpm_fem_func`, and this module binds them to t
 participants of MPM and FEM (see FEMSolver.build_newton_participant).
 """
 
+from collections.abc import Iterator
+
 import quadrants as qd
 
 from genesis.engine.solvers.fem_newton import FemNewtonParticipant
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
+from genesis.utils.data import DataItem, iter_data
 
 from . import mpm_fem_func
 
 
 @qd.data_oriented
 class MpmFemContact(NewtonDevice):
-    """Device stages of the MPM-FEM contact rows in the joint solve: their share of the FEM gradient, their cross terms
-    in both blocks of the operator, and the contact point displacement at every iterate."""
+    """Device stages of the contact rows between the material point method (MPM) and the finite element method (FEM).
 
-    def __init__(self, mpm: MpmNewtonParticipant, fem: FemNewtonParticipant, query: mpm_fem_func.FemTriangleQuery):
+    They add their share of the FEM gradient, their cross terms in both blocks of the operator, and the contact point
+    displacement at every iterate. `fem_rows` holds the FEM side of the rows of the sorted particles."""
+
+    def __init__(
+        self,
+        mpm: MpmNewtonParticipant,
+        fem: FemNewtonParticipant,
+        query: mpm_fem_func.FemTriangleQuery,
+        fem_rows: mpm_fem_func.MpmFemContactScratch,
+    ):
         self.mpm = mpm
         self.fem = fem
         self.query = query
+        self.fem_rows = fem_rows
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        """Yield the rows of the sorted particles on the finite element method (FEM) side, rebuilt every substep."""
+        yield from iter_data(self, "fem_rows")
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        mpm_fem_func.func_fem_contact_gradient(self.mpm.grid, self.mpm.newton, self.fem, self.mpm.mpm_info)
+        mpm_fem_func.func_fem_contact_gradient(
+            self.mpm.grid, self.mpm.newton, self.fem_rows, self.fem, self.mpm.mpm_info
+        )
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
@@ -36,6 +55,7 @@ class MpmFemContact(NewtonDevice):
             self.mpm.grid,
             self.mpm.newton,
             self.mpm.linear,
+            self.fem_rows,
             self.fem,
             pcg_scalars,
             self.mpm.mpm_info,
@@ -43,7 +63,7 @@ class MpmFemContact(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
-        mpm_fem_func.func_fem_point_disp(f, self.mpm.grid, self.mpm.newton, self.fem, self.mpm.mpm_info)
+        mpm_fem_func.func_fem_point_disp(f, self.mpm.grid, self.mpm.newton, self.fem_rows, self.fem, self.mpm.mpm_info)
 
 
 @qd.kernel
@@ -54,6 +74,7 @@ def kernel_fem_rows(f: int, contact: qd.template()):
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
+        contact.fem_rows,
         contact.fem,
         contact.query,
         contact.mpm.particles_info,

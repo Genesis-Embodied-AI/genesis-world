@@ -1507,12 +1507,11 @@ def func_apply_force_fields(t: float, dt: float, grid: MpmGridScratch, force_fie
 
 @qd.func(requires_top_level=True)
 def func_reset_contact_rows(grid: MpmGridScratch, newton: MpmNewtonScratch):
-    """Clear the contact rows of every valid particle, so that an assembly before the rows are built is physical."""
+    """Clear the contact rows of every valid particle and the mark of those with pyramid rows (see
+    `func_build_rigid_rows`), so that an assembly before the rows are built is physical."""
     qd.loop_config(name="mpm_reset_contact_rows")
     for s in range(grid.n_valid[()]):
-        newton.contact_link[s] = -1
-        newton.contact_tri[s] = -1
-        newton.contact_pbd[s] = -1
+        newton.has_pyramid_rows[s] = False
         for r in qd.static(range(CONTACT_ROWS)):
             newton.contact_D[CONTACT_ROWS * s + r] = 0.0
         newton.contact_dr[s] = qd.Vector.zero(gs.qd_float, 3)

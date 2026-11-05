@@ -19,6 +19,7 @@ from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
+    SORTED_PARTICLES,
     WALL_ROWS,
     MpmGridScratch,
     MpmInfo,
@@ -36,11 +37,21 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.utils.array_class import BVHQueryResults
+from genesis.utils.data import Data, DataKind, field
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
 # Distances to two triangles within this fraction of the grid spacing are those to a closest point they share
 TIE_DIST_RATIO = 1e-6
+
+
+class MpmFemContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
+    """Finite element method (FEM) side of the pyramid rows of every sorted particle."""
+
+    # The FEM surface triangle of the particle's pyramid rows, -1 if FEM gave it none
+    tri: qd.Tensor = field(int)
+    # The barycentric coordinates of the closest point of the particle on that triangle
+    bary: qd.Tensor = field((float, 3))
 
 
 # =============================================== Layer 0: geometry ===============================================
@@ -250,6 +261,7 @@ def func_build_fem_rows(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
+    rows: MpmFemContactScratch,
     fem: qd.template(),
     query: qd.template(),
     particles_info: MpmParticlesInfo,
@@ -269,12 +281,14 @@ def func_build_fem_rows(
     point, sum_k b_k^2 / m_k. The row energy depends on the end positions alone, so the rows add no energy, as a
     reference acceleration from the start gap would. The next substep builds its rows anew and drops the tangential part
     of a pyramid row, which makes it a dissipative friction bounded by the cone. The friction coefficient is the
-    element's, at least MIN_FRICTION."""
+    element's, at least MIN_FRICTION. A particle that got rows is marked in `newton.has_pyramid_rows` and its triangle
+    is in `rows.tri`, which holds -1 for the others."""
     for _ in range(1):
         newton.query_frame[()] = f
     qd.loop_config(name="mpm_build_fem_rows")
     for s in range(grid.n_valid[()]):
-        if newton.contact_link[s] < 0:
+        rows.tri[s] = -1
+        if not newton.has_pyramid_rows[s]:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
@@ -310,23 +324,33 @@ def func_build_fem_rows(
                         newton.contact_dir[k] = dirs[i, :]
                         newton.contact_D[k] = D
                         newton.contact_t[k] = -best_phi
-                    newton.contact_tri[s] = best_tri
-                    newton.contact_bary[s] = best_bary
+                    rows.tri[s] = best_tri
+                    rows.bary[s] = best_bary
+                    newton.has_pyramid_rows[s] = True
 
 
 @qd.func(requires_top_level=True)
-def func_fem_point_disp(f: int, grid: MpmGridScratch, newton: MpmNewtonScratch, fem: qd.template(), mpm_info: MpmInfo):
+def func_fem_point_disp(
+    f: int,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    rows: MpmFemContactScratch,
+    fem: qd.template(),
+    mpm_info: MpmInfo,
+):
     """Displacement of the contact point of every particle with FEM rows at the current FEM iterate."""
     qd.loop_config(name="mpm_fem_point_disp")
     for s in range(grid.n_valid[()]):
-        i_s = newton.contact_tri[s]
+        i_s = rows.tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            newton.contact_dr[s] = triangle_point_disp(i_s, i_b, f, newton.contact_bary[s], fem)
+            newton.contact_dr[s] = triangle_point_disp(i_s, i_b, f, rows.bary[s], fem)
 
 
 @qd.func(requires_top_level=True)
-def func_fem_contact_gradient(grid: MpmGridScratch, newton: MpmNewtonScratch, fem: qd.template(), mpm_info: MpmInfo):
+def func_fem_contact_gradient(
+    grid: MpmGridScratch, newton: MpmNewtonScratch, rows: MpmFemContactScratch, fem: qd.template(), mpm_info: MpmInfo
+):
     """Add the share of the FEM rows to the FEM gradient and to its preconditioner.
 
     It runs after FEM's own force and diagonal blocks, and after the MPM assembly that staged the row gradients g and
@@ -339,12 +363,12 @@ def func_fem_contact_gradient(grid: MpmGridScratch, newton: MpmNewtonScratch, fe
     inv_dt_sq = 1.0 / (mpm_info.substep_dt[()] * mpm_info.substep_dt[()])
     qd.loop_config(name="mpm_fem_contact_gradient")
     for s in range(grid.n_valid[()]):
-        i_s = newton.contact_tri[s]
+        i_s = rows.tri[s]
         if i_s >= 0:
             i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             g = newton.g_rigid[s]
             H = newton.h_rigid[s]
-            bary = newton.contact_bary[s]
+            bary = rows.bary[s]
             for k in qd.static(range(3)):
                 i_v = fem.surface[i_s].tri2v[k]
                 b_k = bary[k]
@@ -359,6 +383,7 @@ def func_fem_contact_matvec(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
+    rows: MpmFemContactScratch,
     fem: qd.template(),
     pcg_scalars: qd.template(),
     mpm_info: MpmInfo,
@@ -369,10 +394,10 @@ def func_fem_contact_matvec(
     the MPM rows (see contact_cross_matvec), and b_k h to Ap_v,k of the vertices of the triangle."""
     qd.loop_config(name="mpm_fem_contact_matvec")
     for s in range(grid.n_valid[()]):
-        i_s = newton.contact_tri[s]
+        i_s = rows.tri[s]
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         if i_s >= 0 and pcg_scalars.is_converged[i_b] == 0:
-            bary = newton.contact_bary[s]
+            bary = rows.bary[s]
             tri2v = fem.surface[i_s].tri2v
             dq = qd.Vector.zero(gs.qd_float, 3)
             for k in qd.static(range(3)):

@@ -6,12 +6,15 @@ substep, which MPM assembles with its own, and on the geoms of a Rigid without d
 displacement alone.
 """
 
+from collections.abc import Iterator
+
 import quadrants as qd
 
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.newton_func import func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
+from genesis.utils.data import DataItem, iter_data
 
 from . import mpm_rigid_adjoint_func, mpm_rigid_func
 
@@ -23,12 +26,25 @@ class MpmRigidContact(NewtonDevice):
     They build the rows of the substep with `query`, the tree of the coupled geoms, add the cross terms of the rows to
     the Rigid gradient and to both blocks of the operator, and update the contact point displacement at every iterate.
     `rigid` is the participant of Rigid, whose dofs the rows act on. A Rigid without dofs gives a participant that is
-    no member of the solve, and the rows then act on the particle displacement alone."""
+    no member of the solve, and the rows then act on the particle displacement alone. `rigid_rows` holds the Rigid side
+    of the rows of the sorted particles."""
 
-    def __init__(self, mpm: MpmNewtonParticipant, rigid: RigidNewtonParticipant, query: mpm_rigid_func.RigidGeomQuery):
+    def __init__(
+        self,
+        mpm: MpmNewtonParticipant,
+        rigid: RigidNewtonParticipant,
+        query: mpm_rigid_func.RigidGeomQuery,
+        rigid_rows: mpm_rigid_func.MpmRigidContactScratch,
+    ):
         self.mpm = mpm
         self.rigid = rigid
         self.query = query
+        self.rigid_rows = rigid_rows
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        """Yield the rows of the sorted particles on the Rigid side, which every substep rebuilds."""
+        yield from iter_data(self, "rigid_rows")
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
@@ -37,6 +53,7 @@ class MpmRigidContact(NewtonDevice):
             self.mpm.particles,
             self.mpm.grid,
             self.mpm.newton,
+            self.rigid_rows,
             self.rigid.rigid_data,
             self.rigid.dyn_state,
             self.rigid.dyn_info,
@@ -52,6 +69,7 @@ class MpmRigidContact(NewtonDevice):
             self.mpm.grid,
             self.mpm.newton,
             self.mpm.linear,
+            self.rigid_rows,
             self.rigid.rigid_data,
             pcg_scalars,
             self.rigid.dyn_state,
@@ -77,6 +95,7 @@ class MpmRigidContact(NewtonDevice):
             self.mpm.particles,
             self.mpm.grid,
             self.mpm.newton,
+            self.rigid_rows,
             self.rigid.rigid_data,
             self.rigid.dyn_state.links,
             self.mpm.mpm_info,
@@ -91,6 +110,7 @@ def kernel_rigid_rows(f: int, contact: qd.template()):
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
+        contact.rigid_rows,
         contact.rigid.dyn_state.geoms,
         contact.rigid.dyn_state.links,
         contact.query,
@@ -116,6 +136,7 @@ def kernel_mpm_reaction(f: int, contact: qd.template()):
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
+        contact.rigid_rows,
         contact.rigid.rigid_data,
         contact.rigid.dyn_state,
         contact.rigid.constraint_state,
@@ -138,6 +159,7 @@ def kernel_rigid_contact_adjoint(f: int, contact: qd.template()):
         contact.mpm.grid,
         contact.mpm.newton,
         contact.mpm.linear,
+        contact.rigid_rows,
         contact.rigid.rigid_data,
         contact.rigid.dyn_state.geoms,
         contact.rigid.dyn_state.links,
