@@ -784,13 +784,14 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         value = values
         for name in leaf.path:
             value = value[name]
-        array = V(dtype=dtype, shape=())
+        is_ndarray = leaf.spec.is_ndarray or gs.use_ndarray
+        array = qd.tensor(dtype, shape=(), backend=qd.Backend.NDARRAY if is_ndarray else qd.Backend.FIELD)
         if isinstance(value, tuple):
             value = qd.Vector(value, dt=dtype.dtype)
         # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
         # materialization (see quadrants#941 above). An ndarray is filled at once: on CPU and Compute Unified Device
         # Architecture (CUDA) GPUs, its zero-copy export materializes nothing, so a deferred fill would come too late.
-        if not gs.use_ndarray:
+        if not is_ndarray:
             _pending_fields_fill.append((array, value))
         else:
             array.fill(value)

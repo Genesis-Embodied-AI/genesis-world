@@ -15,6 +15,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.utils.array_class import ConstraintState, DofsState, DynInfo, DynState, LinksInfo, RigidInfo
+from genesis.utils.data import Data, DataKind, field
 
 from .abd.forward_dynamics import func_solve_mass_batch
 from .constraint.island import func_group_constraints_by_island
@@ -25,6 +26,12 @@ from .constraint.solver import (
     initialize_Jaref,
     initialize_Ma,
 )
+
+
+class RigidNewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """Scene values of Rigid's stages in the joint solve, as device scalars."""
+
+    substep_dt: qd.Tensor = field(float)
 
 
 # ============================================ Layer 1: link kinematics =============================================
@@ -96,7 +103,7 @@ def func_rigid_begin(
     rigid_data: qd.template(),
     dofs_state: DofsState,
     constraint_state: ConstraintState,
-    params: qd.template(),
+    newton_info: RigidNewtonInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -106,7 +113,7 @@ def func_rigid_begin(
     every dof, including those of islands without rows."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
-    dt = params.substep_dt[()]
+    dt = newton_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_begin")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         qacc = dofs_state.acc_smooth[i_d, i_b]
@@ -129,7 +136,7 @@ def func_rigid_evaluate(
     constraint_state: ConstraintState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    params: qd.template(),
+    newton_info: RigidNewtonInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
@@ -140,7 +147,7 @@ def func_rigid_evaluate(
     Rigid constraint rows."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
-    inv_dt_sq = 1.0 / (params.substep_dt[()] * params.substep_dt[()])
+    inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])
     qd.loop_config(name="mpm_rigid_qacc")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.qacc[i_d, i_b] = rigid_data.x[i_d, i_b] * inv_dt_sq
@@ -170,11 +177,11 @@ def func_rigid_evaluate(
 
 @qd.func(requires_top_level=True)
 def func_rigid_energy(
-    rigid_data: qd.template(), control: qd.template(), params: qd.template(), is_trial: qd.template()
+    rigid_data: qd.template(), control: qd.template(), newton_info: RigidNewtonInfo, is_trial: qd.template()
 ):
     """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, to its start or trial energy."""
     n_envs = rigid_data.x.shape[1]
-    dt_sq = params.substep_dt[()] * params.substep_dt[()]
+    dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     for i_b in range(n_envs):
         if is_trial:
             control.energy_trial[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
@@ -187,7 +194,7 @@ def func_rigid_gradient(
     rigid_data: qd.template(),
     dyn_state: DynState,
     constraint_state: ConstraintState,
-    params: qd.template(),
+    newton_info: RigidNewtonInfo,
     config: qd.template(),
 ):
     """Compute the gradient of Rigid's share of the joint energy in x, after func_rigid_evaluate at the current x.
@@ -195,7 +202,7 @@ def func_rigid_gradient(
     The gradient is dt^2 (M qacc - qf_smooth - qfrc_constraint)."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
-    dt_sq = params.substep_dt[()] * params.substep_dt[()]
+    dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_gradient")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         value = rigid_data.Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b]
@@ -528,28 +535,30 @@ def func_rigid_write_back(rigid_data: qd.template(), constraint_state: Constrain
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_adjoint_rhs(rigid_data: qd.template(), constraint_state: ConstraintState, params: qd.template()):
+def func_rigid_adjoint_rhs(rigid_data: qd.template(), constraint_state: ConstraintState, newton_info: RigidNewtonInfo):
     """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts.
 
     The right-hand side is the adjoint of x = dt^2 qacc, dL/dqacc / dt^2, with dL/dqacc as taken by Rigid's own adjoint
     solve (see ConstraintSolver.backward)."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
-    inv_dt_sq = 1.0 / (params.substep_dt[()] * params.substep_dt[()])
+    inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])
     qd.loop_config(name="mpm_rigid_adjoint_rhs")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.grad[i_d, i_b] = constraint_state.dL_dqacc[i_d, i_b] * inv_dt_sq
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_adjoint_finish(rigid_data: qd.template(), constraint_state: ConstraintState, params: qd.template()):
+def func_rigid_adjoint_finish(
+    rigid_data: qd.template(), constraint_state: ConstraintState, newton_info: RigidNewtonInfo
+):
     """Set the solution of Rigid's adjoint solve from that of the joint one.
 
     Rigid's share of the joint energy is dt^4 times its cost of x / dt^2, whose gradient in the parameters of Rigid's
     rows is dt^2 times that of its cost, so u = dt^2 lambda_x."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
-    dt_sq = params.substep_dt[()] * params.substep_dt[()]
+    dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_adjoint_finish")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         constraint_state.bw_u[i_d, i_b] = dt_sq * rigid_data.sol[i_d, i_b]

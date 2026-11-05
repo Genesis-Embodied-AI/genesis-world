@@ -28,7 +28,7 @@ from genesis.utils.array_class import (
     RigidInfo,
     RigidSimStaticConfig,
 )
-from genesis.utils.data import ConfigItem, DataItem
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -232,6 +232,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Whether a solve coupled strongly with Rigid solves the constraint rows jointly with its own unknowns and
         # finishes the substep (see defer_constraint_solve)
         self._is_constraint_solve_deferred = False
+        # The participant of Rigid's dofs in the joint Newton solve, which owns the scene values of its stages (see data)
+        self._newton_participant = None
         self._max_collision_pairs = options.max_collision_pairs
         self._integrator = options.integrator
         self._box_box_detection = options.box_box_detection
@@ -1441,6 +1443,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         `defer_constraint_solve`). Without it, the participant only holds the Rigid data that a coupling reads, and the
         substep keeps its own constraint solve. The caller registers the returned host and participant."""
         participant = RigidNewtonParticipant(self, self._B)
+        self._newton_participant = participant
         if is_member:
             self.defer_constraint_solve()
         return RigidNewtonHost(self, participant), participant
@@ -1879,6 +1882,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         yield from super().data
         yield from self.collider.data
         yield from self.constraint_solver.data
+        if self._newton_participant is not None:
+            yield from iter_data(self._newton_participant, "newton_info")
 
     def _restart(self):
         """Clear the contact and equality caches of the last query and re-arm the once-per-step propeller guard of

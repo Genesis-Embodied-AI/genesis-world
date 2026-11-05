@@ -26,7 +26,7 @@ class MpmFemContact:
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        mpm_fem_func.func_fem_contact_gradient(self.mpm.grid, self.mpm.newton, self.fem, self.mpm.params)
+        mpm_fem_func.func_fem_contact_gradient(self.mpm.grid, self.mpm.newton, self.fem, self.mpm.mpm_info)
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
@@ -38,26 +38,26 @@ class MpmFemContact:
             self.mpm.linear,
             self.fem,
             pcg_scalars,
-            self.mpm.params,
+            self.mpm.mpm_info,
         )
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
-        mpm_fem_func.func_fem_point_disp(f, self.mpm.grid, self.mpm.newton, self.fem, self.mpm.params)
+        mpm_fem_func.func_fem_point_disp(f, self.mpm.grid, self.mpm.newton, self.fem, self.mpm.mpm_info)
 
 
 @qd.kernel
 def kernel_fem_rows(f: int, contact: qd.template()):
     mpm_fem_func.func_build_fem_rows(
         f,
-        contact.mpm.params.substep_dt[()],
+        contact.mpm.mpm_info.substep_dt[()],
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
         contact.fem,
         contact.query,
         contact.mpm.particles_info,
-        contact.mpm.params,
+        contact.mpm.mpm_info,
     )
     contact.func_after_step(f)
 

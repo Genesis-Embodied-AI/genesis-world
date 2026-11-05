@@ -17,7 +17,7 @@ from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
 from genesis.engine.numerics.linear_pcg import PCGWorkspace
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
-from genesis.utils.data import ENVS, Data, DataKind, Size, V, field
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -56,45 +56,29 @@ def _scalar(dtype, value=0):
     return result
 
 
-@qd.data_oriented
-class MpmParams:
-    """Scene values of the implicit MPM kernels, as device scalars, so that a scene of another size or resolution runs
-    the kernels compiled for the previous one."""
+class MpmInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """Scene values of the implicit material point method (MPM) kernels, as device scalars.
 
-    def __init__(
-        self,
-        n_envs: int,
-        n_particles: int,
-        substep_dt: float,
-        dx: float,
-        particle_volume: float,
-        mass_scale: float,
-        n_materials: int,
-        wall_sol_params,
-        wall_lower,
-        wall_upper,
-        liquid_band: float,
-    ) -> None:
-        self.n_envs = _scalar(gs.qd_int, n_envs)
-        self.n_particles = _scalar(gs.qd_int, n_particles)
-        self.substep_dt = _scalar(gs.qd_float, substep_dt)
-        self.dx = _scalar(gs.qd_float, dx)
-        self.inv_dx = _scalar(gs.qd_float, 1.0 / dx)
-        self.particle_volume = _scalar(gs.qd_float, particle_volume)
-        self.mass_scale = _scalar(gs.qd_float, mass_scale)
-        self.n_materials = _scalar(gs.qd_int, n_materials)
-        # Width in volume ratio of the band below J = 1 over which the stiffness of the liquid rises (see
-        # liquid_volume_terms)
-        self.liquid_band = _scalar(gs.qd_float, liquid_band)
-        # The solref / solimp parameters of the wall rows, in Rigid's form: timeconst, dampratio, dmin, dmax, width, mid,
-        # power
-        self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
-        self.wall_sol_params.from_numpy(np.array(wall_sol_params, dtype=gs.np_float))
-        # Planes of the domain walls, `CubeBoundary.lower` / `upper`
-        self.wall_lower = qd.ndarray(gs.qd_float, shape=(3,))
-        self.wall_upper = qd.ndarray(gs.qd_float, shape=(3,))
-        self.wall_lower.from_numpy(wall_lower)
-        self.wall_upper.from_numpy(wall_upper)
+    A scene of another size or resolution runs the kernels compiled for the previous one.
+    """
+
+    n_envs: qd.Tensor = field(int, ndarray=True)
+    n_particles: qd.Tensor = field(int, ndarray=True)
+    substep_dt: qd.Tensor = field(float, ndarray=True)
+    dx: qd.Tensor = field(float, ndarray=True)
+    inv_dx: qd.Tensor = field(float, ndarray=True)
+    particle_volume: qd.Tensor = field(float, ndarray=True)
+    mass_scale: qd.Tensor = field(float, ndarray=True)
+    n_materials: qd.Tensor = field(int, ndarray=True)
+    # Width in volume ratio of the band below J = 1 over which the stiffness of the liquid rises (see
+    # liquid_volume_terms)
+    liquid_band: qd.Tensor = field(float, ndarray=True)
+    # The solref / solimp parameters of the wall rows, in Rigid's form: timeconst, dampratio, dmin, dmax, width, mid,
+    # power
+    wall_sol_params: qd.Tensor = field((float, 7), ndarray=True)
+    # Planes of the domain walls, `CubeBoundary.lower` / `upper`
+    wall_lower: qd.Tensor = field((float, 3), ndarray=True)
+    wall_upper: qd.Tensor = field((float, 3), ndarray=True)
 
 
 class MpmParticles(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):

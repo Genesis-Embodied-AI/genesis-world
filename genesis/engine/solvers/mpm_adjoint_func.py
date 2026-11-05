@@ -25,7 +25,15 @@ import genesis as gs
 from genesis.utils.array_class import LinksState
 import genesis.utils.geom as gu
 
-from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
+from .mpm_data import (
+    BLOCK_CELLS,
+    CONTACT_ROWS,
+    MpmInfo,
+    MpmMaterialTable,
+    MpmParticles,
+    MpmParticlesInfo,
+    MpmParticlesNG,
+)
 from .mpm_func import (
     LIQUID_J_MIN,
     PLASTIC_LIQUID,
@@ -57,7 +65,7 @@ def return_map_vjp(
     F_new_bar: qd.types.matrix(3, 3),
     Jp_new_bar: float,
     materials: MpmMaterialTable,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Reverse of `return_map`, from the adjoints of the returned deformation gradient and plastic state.
 
@@ -84,7 +92,7 @@ def return_map_vjp(
         U, S, V = gu.qd_svd(F)
         sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
-            slot, kind, sigma, Jp, materials, params
+            slot, kind, sigma, Jp, materials, mpm_info
         )
         if is_changed:
             F_bar = isotropic_first_piola_differential(U, V, sigma, h, dh.transpose(), F_new_bar)
@@ -161,7 +169,7 @@ def func_wall_contact_adjoint(
     newton: qd.template(),
     linear: qd.template(),
     particles_info: MpmParticlesInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Pull the wall rows of every valid particle (see func_build_wall_rows) back into the adjoint of the particles.
 
@@ -171,7 +179,7 @@ def func_wall_contact_adjoint(
     and through the coefficients via the gap, the velocity along the normal and the inverse weight of the particle."""
     qd.loop_config(name="mpm_wall_contact_adjoint")
     for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         has_row = False
         for d in qd.static(range(3)):
             has_row = has_row or newton.contact_D[CONTACT_ROWS * s + d] > 0.0
@@ -179,7 +187,7 @@ def func_wall_contact_adjoint(
             slots = stencil_node_slots(env, cell, grid)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
-            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
+            w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
             Delta = qd.Vector.zero(gs.qd_float, 3)
             delta = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
@@ -189,7 +197,7 @@ def func_wall_contact_adjoint(
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()
             W = particles_info.contact_invweight[i_p]
-            sol_params = qd.Vector([params.wall_sol_params[i] for i in qd.static(range(7))], dt=gs.qd_float)
+            sol_params = mpm_info.wall_sol_params[()]
             x_bar = qd.Vector.zero(gs.qd_float, 3)
             v_bar = qd.Vector.zero(gs.qd_float, 3)
             R_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -205,10 +213,10 @@ def func_wall_contact_adjoint(
                     Delta_bar -= D * a_k * J
                     delta_bar -= D * c * J
                     # The row as func_build_wall_rows built it
-                    phi = x_p[d] - params.wall_lower[d]
+                    phi = x_p[d] - mpm_info.wall_lower[()][d]
                     sign = gs.qd_float(1.0)
-                    if params.wall_upper[d] - x_p[d] < phi:
-                        phi = params.wall_upper[d] - x_p[d]
+                    if mpm_info.wall_upper[()][d] - x_p[d] < phi:
+                        phi = mpm_info.wall_upper[()][d] - x_p[d]
                         sign = -1.0
                     n = qd.Vector.zero(gs.qd_float, 3)
                     n[d] = sign
@@ -239,7 +247,7 @@ def func_constraint_adjoint(
     newton: qd.template(),
     linear: qd.template(),
     links_state: LinksState,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     constraints: qd.template(),
 ):
     """Pull the constraint springs (see func_build_constraint_rows) back into the adjoints of the particles and links.
@@ -253,10 +261,10 @@ def func_constraint_adjoint(
     for s in range(grid.n_valid[()]):
         spring = newton.constraint_spring[s]
         if spring > 0.0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)
             x_p = particles.pos[f, i_p, i_b]
-            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
+            w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
             Delta = qd.Vector.zero(gs.qd_float, 3)
             delta = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
@@ -300,7 +308,7 @@ def func_adjoint_g2p(
     newton: qd.template(),
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Reverse of the grid-to-particle transfer (G2P) and of the advection, from the adjoint of the next frame.
 
@@ -310,10 +318,10 @@ def func_adjoint_g2p(
     """
     qd.loop_config(name="mpm_adjoint_g2p")
     for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         slots = stencil_node_slots(env, cell, grid)
-        fx = particles.pos[f, i_p, i_b] * params.inv_dx[()] - cell.cast(gs.qd_float)
-        w, grad_w = q1_stencil(fx, params.inv_dx[()])
+        fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
+        w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
         C = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
             v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
@@ -329,7 +337,7 @@ def func_adjoint_g2p(
             particles.F.grad[f + 1, i_p, i_b],
             particles.Jp.grad[f + 1, i_p, i_b],
             materials,
-            params,
+            mpm_info,
         )
 
         x_bar_next = particles.pos.grad[f + 1, i_p, i_b]
@@ -343,7 +351,9 @@ def func_adjoint_g2p(
             u_bar = (w[a] * v_bar + C_bar @ grad_w_a) / dt
             for d in qd.static(range(3)):
                 qd.atomic_add(newton.du[3 * slots[a] + d], u_bar[d])
-            x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(fx, params.inv_dx[()], a) @ (C_bar.transpose() @ v_a)
+            x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(fx, mpm_info.inv_dx[()], a) @ (
+                C_bar.transpose() @ v_a
+            )
 
         particles.pos.grad[f, i_p, i_b] += x_bar
         particles.F.grad[f, i_p, i_b] += (qd.Matrix.identity(gs.qd_float, 3) + dt * C).transpose() @ F_trial_bar
@@ -371,7 +381,7 @@ def func_adjoint_nodes(
     newton: qd.template(),
     linear: qd.template(),
     force_fields: qd.template(),
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Pull lambda back through the kinetic term and reverse the free velocity of every node.
 
@@ -395,7 +405,7 @@ def func_adjoint_nodes(
             v_bar = v_free_bar
             if qd.static(len(force_fields.force_fields) > 0):
                 env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-                x_n = (block * 4 + local_offset(node % BLOCK_CELLS)).cast(gs.qd_float) * params.dx[()]
+                x_n = (block * 4 + local_offset(node % BLOCK_CELLS)).cast(gs.qd_float) * mpm_info.dx[()]
                 for i_ff in qd.static(range(len(force_fields.force_fields))):
                     v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
             mom_bar = v_bar / mass
@@ -415,7 +425,7 @@ def func_adjoint_particles(
     linear: qd.template(),
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Pull lambda back through the elastic term and reverse the particle-to-grid transfer (P2G) of valid particles.
 
@@ -427,12 +437,12 @@ def func_adjoint_particles(
     """
     qd.loop_config(name="mpm_adjoint_particles")
     for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         slots = stencil_node_slots(env, cell, grid)
         x_p = particles.pos[f, i_p, i_b]
-        fx = x_p * params.inv_dx[()] - cell.cast(gs.qd_float)
-        w, grad_w = q1_stencil(fx, params.inv_dx[()])
-        F_trial, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, params)
+        fx = x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
+        w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
+        F_trial, grad_w_, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
 
         Lambda = qd.Matrix.zero(gs.qd_float, 3, 3)
         grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -445,7 +455,7 @@ def func_adjoint_particles(
         F_increment = qd.Matrix.identity(gs.qd_float, 3) + grad_u
 
         slot, U, sigma, V, g, A_sigma, P = particle_elastic_stress(
-            f, i_p, i_b, F_trial, particles, particles_info, materials, params
+            f, i_p, i_b, F_trial, particles, particles_info, materials, mpm_info
         )
         Lambda_F = Lambda @ F
         Q = isotropic_first_piola_differential(U, V, sigma, g, A_sigma, Lambda_F)
@@ -456,35 +466,35 @@ def func_adjoint_particles(
             phi = gs.qd_float(0.0)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 phi += P[i, j] * Lambda_F[i, j]
-            Jp_bar = qd.static(SNOW_HARDENING) * params.particle_volume[()] * dt * dt * phi
+            Jp_bar = qd.static(SNOW_HARDENING) * mpm_info.particle_volume[()] * dt * dt * phi
         muscle_direction = particles_info.muscle_direction[i_p]
         active_stiffness, dactive_stiffness = active_fibre_stiffness(
-            slot, particles.actu[f, i_p, i_b], materials, params
+            slot, particles.actu[f, i_p, i_b], materials, mpm_info
         )
         F_trial_m = F_trial @ muscle_direction
         Lambda_F_m = Lambda_F @ muscle_direction
         P += active_stiffness * F_trial_m.outer_product(muscle_direction)
         Q += active_stiffness * Lambda_F_m.outer_product(muscle_direction)
 
-        scale = params.particle_volume[()] * dt * dt
+        scale = mpm_info.particle_volume[()] * dt * dt
         F_bar = -scale * (F_increment.transpose() @ Q + Lambda.transpose() @ P)
         actu_bar = -scale * dactive_stiffness * F_trial_m.dot(Lambda_F_m)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
             lam_a = qd.Vector([linear.solution[3 * slots[a] + d] for d in qd.static(range(3))])
             u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            H_a = q1_weight_hessian(fx, params.inv_dx[()], a)
+            H_a = q1_weight_hessian(fx, mpm_info.inv_dx[()], a)
             x_bar -= scale * (H_a @ (F @ (Q.transpose() @ u_a + P.transpose() @ lam_a)))
 
         # Reverse of the particle-to-grid transfer (P2G)
-        m_p = particles_info.mass[i_p] / params.mass_scale[()]
+        m_p = particles_info.mass[i_p] / mpm_info.mass_scale[()]
         v_p = particles.vel[f, i_p, i_b] + dt * gravity[i_b]
         C_p = particles.C[f, i_p, i_b]
         v_bar = qd.Vector.zero(gs.qd_float, 3)
         C_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
             grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
-            x_a = (cell + node_offset(a)).cast(gs.qd_float) * params.dx[()]
+            x_a = (cell + node_offset(a)).cast(gs.qd_float) * mpm_info.dx[()]
             mom_bar = newton.adj_mom[slots[a]]
             mass_bar = newton.adj_mass[slots[a]]
             v_tilde = v_p + C_p @ (x_a - x_p)
@@ -501,14 +511,14 @@ def func_adjoint_particles(
 
 
 @qd.func(requires_top_level=True)
-def func_adjoint_consume(f: int, particles: MpmParticles, particles_ng: MpmParticlesNG, params: qd.template()):
+def func_adjoint_consume(f: int, particles: MpmParticles, particles_ng: MpmParticlesNG, mpm_info: MpmInfo):
     """Clear the adjoint of the next frame, which the substep consumed.
 
     The substep carries an inactive particle over unchanged, so its adjoint of frame f + 1 first adds to that of frame
     f.
     """
     qd.loop_config(name="mpm_adjoint_consume")
-    for i_p, i_b in qd.ndrange(params.n_particles[()], params.n_envs[()]):
+    for i_p, i_b in qd.ndrange(mpm_info.n_particles[()], mpm_info.n_envs[()]):
         if not particles_ng.active[f, i_p, i_b]:
             particles.pos.grad[f, i_p, i_b] += particles.pos.grad[f + 1, i_p, i_b]
             particles.vel.grad[f, i_p, i_b] += particles.vel.grad[f + 1, i_p, i_b]

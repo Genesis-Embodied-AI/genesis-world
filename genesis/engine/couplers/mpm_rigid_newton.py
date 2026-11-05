@@ -40,7 +40,7 @@ class MpmRigidContact:
             self.rigid.rigid_data,
             self.rigid.dyn_state,
             self.rigid.dyn_info,
-            self.mpm.params,
+            self.mpm.mpm_info,
             self.rigid.config,
         )
 
@@ -56,7 +56,7 @@ class MpmRigidContact:
             pcg_scalars,
             self.rigid.dyn_state,
             self.rigid.dyn_info,
-            self.mpm.params,
+            self.mpm.mpm_info,
             self.rigid.config,
         )
         mpm_rigid_func.func_rigid_contact_matvec_post(
@@ -79,7 +79,7 @@ class MpmRigidContact:
             self.mpm.newton,
             self.rigid.rigid_data,
             self.rigid.dyn_state.links,
-            self.mpm.params,
+            self.mpm.mpm_info,
         )
 
 
@@ -87,7 +87,7 @@ class MpmRigidContact:
 def kernel_rigid_rows(f: int, contact: qd.template()):
     mpm_rigid_func.func_build_rigid_rows(
         f,
-        contact.mpm.params.substep_dt[()],
+        contact.mpm.mpm_info.substep_dt[()],
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
@@ -99,7 +99,7 @@ def kernel_rigid_rows(f: int, contact: qd.template()):
         contact.rigid.dyn_info.links,
         contact.rigid.rigid_info,
         contact.rigid.sdf_info,
-        contact.mpm.params,
+        contact.mpm.mpm_info,
         contact.rigid.config,
     )
 
@@ -119,14 +119,14 @@ def kernel_mpm_reaction(f: int, contact: qd.template()):
         contact.rigid.rigid_data,
         contact.rigid.dyn_state,
         contact.rigid.constraint_state,
-        contact.mpm.params,
+        contact.mpm.mpm_info,
     )
 
 
 @qd.kernel
 def kernel_add_mpm_contact_force(contact: qd.template()):
     mpm_rigid_func.func_add_mpm_contact_force(
-        contact.rigid.rigid_data, contact.rigid.dyn_state.links, contact.mpm.params
+        contact.rigid.rigid_data, contact.rigid.dyn_state.links, contact.mpm.mpm_info
     )
 
 
@@ -147,7 +147,7 @@ def kernel_rigid_contact_adjoint(f: int, contact: qd.template()):
         contact.rigid.dyn_info.links,
         contact.rigid.rigid_info,
         contact.rigid.sdf_info,
-        contact.mpm.params,
+        contact.mpm.mpm_info,
         contact.rigid.config,
     )
 
@@ -167,7 +167,7 @@ class MpmRigidContactHost(NewtonHost):
         self._has_rigid_dofs = has_rigid_dofs
 
     def newton_prepare(self, f):
-        self._device.query.build(self._device.mpm.params)
+        self._device.query.build(self._device.mpm.mpm_info)
         kernel_rigid_rows(f, self._device)
         if self._has_rigid_dofs:
             kernel_contact_point_disp(f, self._device)

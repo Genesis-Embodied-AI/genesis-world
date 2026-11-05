@@ -15,7 +15,14 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
+from genesis.engine.solvers.mpm_data import (
+    CONTACT_ROWS,
+    PYRAMID_ROWS,
+    WALL_ROWS,
+    MpmInfo,
+    MpmParticles,
+    MpmParticlesInfo,
+)
 from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     contact_band_width,
@@ -57,17 +64,17 @@ class PbdContactParams:
 
 @qd.data_oriented
 class PbdParticleQuery:
-    """The linear bounding volume hierarchy (LBVH) over the PBD particles of every environment, in PBD's reordered
-    layout (see genesis.engine.bvh).
+    """The linear bounding volume hierarchy (LBVH) over the position based dynamics (PBD) particles of every
+    environment, in PBD's reordered layout (see genesis.engine.bvh).
 
-    It also holds the data the filter of its queries reads: the PBD participant, the values of the MPM kernels `params`,
+    It also holds the data the filter of its queries reads: the PBD participant, the values of the MPM kernels `mpm_info`,
     the values of the contact rows `contact`, and the query point and nearest PBD particle of each sorted MPM particle
     in `newton`."""
 
-    def __init__(self, pbd: PbdNewtonParticipant, newton, params, contact: PbdContactParams, n_envs):
+    def __init__(self, pbd: PbdNewtonParticipant, newton, mpm_info, contact: PbdContactParams, n_envs):
         self.pbd = pbd
         self.newton = newton
-        self.params = params
+        self.mpm_info = mpm_info
         self.contact = contact
         self.radius = pbd.particle_radius
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.n_particles, 1))
@@ -131,7 +138,7 @@ def func_build_pbd_rows(
     pbd: qd.template(),
     query: qd.template(),
     particles_info: MpmParticlesInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Pyramid penalty rows of every valid particle without Rigid or FEM rows against the nearest PBD particle within
     its contact range or short of it by less than `contact_band_width`.
@@ -145,13 +152,13 @@ def func_build_pbd_rows(
     qd.loop_config(name="mpm_build_pbd_rows")
     for s in range(grid.n_valid[()]):
         if newton.contact_link[s] < 0 and newton.contact_tri[s] < 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
             newton.query_pos[s] = x_p
             newton.query_phi[s] = float("inf")
             newton.query_idx[s] = -1
-            reach = contact_band_width(v_p.norm(), dt, params)
+            reach = contact_band_width(v_p.norm(), dt, mpm_info)
             func_bvh_query_aabb(
                 i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_pbd_filter, query
             )
@@ -160,7 +167,7 @@ def func_build_pbd_rows(
                 phi = newton.query_phi[s]
                 normal = newton.query_normal[s]
                 v_rel = v_p - pbd.particles_reordered[i_q, i_b].vel
-                if phi < contact_band_width(-normal.dot(v_rel), dt, params):
+                if phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info):
                     invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info)
                     if is_moving(i_q, i_b, pbd):
                         invweight += 1.0 / pbd.particles_info_reordered[i_q, i_b].mass
@@ -175,20 +182,18 @@ def func_build_pbd_rows(
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_point_disp(grid: qd.template(), newton: qd.template(), pbd: qd.template(), params: qd.template()):
+def func_pbd_point_disp(grid: qd.template(), newton: qd.template(), pbd: qd.template(), mpm_info: MpmInfo):
     """Displacement over the substep of the PBD particle of every particle with PBD rows, at the current iterate."""
     qd.loop_config(name="mpm_pbd_point_disp")
     for s in range(grid.n_valid[()]):
         i_q = newton.contact_pbd[s]
         if i_q >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             newton.contact_dr[s] = pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_contact_gradient(
-    grid: qd.template(), newton: qd.template(), pbd_data: qd.template(), params: qd.template()
-):
+def func_pbd_contact_gradient(grid: qd.template(), newton: qd.template(), pbd_data: qd.template(), mpm_info: MpmInfo):
     """Add the share of the PBD rows to the PBD gradient and diagonal blocks.
 
     It runs after the inertia terms and after the MPM assembly that staged the row gradients g and Hessians H. The PBD
@@ -197,7 +202,7 @@ def func_pbd_contact_gradient(
     for s in range(grid.n_valid[()]):
         i_q = newton.contact_pbd[s]
         if i_q >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             qd.atomic_add(pbd_data.grad[i_q, i_b], -newton.g_rigid[s])
             qd.atomic_add(pbd_data.diag_inv[i_q, i_b], newton.h_rigid[s])
 
@@ -211,7 +216,7 @@ def func_pbd_contact_matvec(
     linear: qd.template(),
     pbd_data: qd.template(),
     pcg_scalars: qd.template(),
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """The PBD rows' share of the joint operator, after the own operators of MPM and PBD set their Ap.
 
@@ -220,10 +225,10 @@ def func_pbd_contact_matvec(
     qd.loop_config(name="mpm_pbd_contact_matvec")
     for s in range(grid.n_valid[()]):
         i_q = newton.contact_pbd[s]
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         if i_q >= 0 and pcg_scalars.is_converged[i_b] == 0:
             dq = pbd_data.p[i_q, i_b]
-            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, params)
+            h = contact_cross_matvec(f, s, dq, particles, grid, newton, linear, pcg_scalars, mpm_info)
             qd.atomic_add(pbd_data.ap[i_q, i_b], h)
 
 
@@ -423,7 +428,7 @@ class MpmPbdContact:
 
     @qd.func(requires_top_level=True)
     def func_contact_gradient(self, f: int):
-        func_pbd_contact_gradient(self.mpm.grid, self.mpm.newton, self.pbd.pbd_data, self.mpm.params)
+        func_pbd_contact_gradient(self.mpm.grid, self.mpm.newton, self.pbd.pbd_data, self.mpm.mpm_info)
 
     @qd.func(requires_top_level=True)
     def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
@@ -435,26 +440,26 @@ class MpmPbdContact:
             self.mpm.linear,
             self.pbd.pbd_data,
             pcg_scalars,
-            self.mpm.params,
+            self.mpm.mpm_info,
         )
 
     @qd.func(requires_top_level=True)
     def func_after_step(self, f: int):
-        func_pbd_point_disp(self.mpm.grid, self.mpm.newton, self.pbd, self.mpm.params)
+        func_pbd_point_disp(self.mpm.grid, self.mpm.newton, self.pbd, self.mpm.mpm_info)
 
 
 @qd.kernel
 def kernel_pbd_rows(f: int, contact: qd.template()):
     func_build_pbd_rows(
         f,
-        contact.mpm.params.substep_dt[()],
+        contact.mpm.mpm_info.substep_dt[()],
         contact.mpm.particles,
         contact.mpm.grid,
         contact.mpm.newton,
         contact.pbd,
         contact.query,
         contact.mpm.particles_info,
-        contact.mpm.params,
+        contact.mpm.mpm_info,
     )
     contact.func_after_step(f)
 

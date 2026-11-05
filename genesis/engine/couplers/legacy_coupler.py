@@ -181,7 +181,7 @@ class LegacyCoupler(RBC):
             fem_host, fem_participant = fem.build_newton_participant()
             participants.append((fem_host, fem_participant))
             query = FemTriangleQuery(
-                fem_participant, mpm_participant.newton, mpm_participant.params, FemContactParams(mpm.dx), n_envs
+                fem_participant, mpm_participant.newton, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs
             )
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((MpmFemContactHost(contact), contact))
@@ -190,13 +190,13 @@ class LegacyCoupler(RBC):
             pbd_host, pbd_participant = pbd.build_newton_participant()
             participants.append((pbd_host, pbd_participant))
             query = PbdParticleQuery(
-                pbd_participant, mpm_participant.newton, mpm_participant.params, pbd_contact, n_envs
+                pbd_participant, mpm_participant.newton, mpm_participant.mpm_info, pbd_contact, n_envs
             )
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((MpmPbdContactHost(contact), contact))
             pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
         if self._mpm_sph:
-            self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.params, n_envs)
+            self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.mpm_info, n_envs)
             self.sph_solver.set_boundary(self._sph_boundary)
         self.sim.newton_solver.register(participants, couplings, host_only_devices)
 

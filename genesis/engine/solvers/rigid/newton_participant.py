@@ -34,15 +34,6 @@ class RigidNewtonConfig(StaticConfig):
 
 
 @qd.data_oriented
-class RigidNewtonParams:
-    """Scene values of Rigid's stages in the joint solve, as device scalars."""
-
-    def __init__(self, substep_dt: float) -> None:
-        self.substep_dt = qd.ndarray(gs.qd_float, shape=())
-        self.substep_dt.from_numpy(np.array(substep_dt, dtype=gs.np_float))
-
-
-@qd.data_oriented
 class RigidNewtonData:
     """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors.
 
@@ -112,7 +103,7 @@ class RigidNewtonParticipant:
             has_rigid_rows=not rigid._disable_constraint,
             has_terrain=rigid.has_coupled_terrain,
         )
-        self.params = RigidNewtonParams(rigid.substep_dt)
+        self.newton_info = newton_func.RigidNewtonInfo(values=dict(substep_dt=rigid.substep_dt))
 
     @property
     def geoms_init_AABB(self):
@@ -126,7 +117,7 @@ class RigidNewtonParticipant:
             self.constraint_state,
             self.dyn_info,
             self.rigid_info,
-            self.params,
+            self.newton_info,
             self.rigid_config,
             self.config,
         )
@@ -135,7 +126,7 @@ class RigidNewtonParticipant:
     def func_assemble(self, f: int):
         self.func_evaluate(f)
         newton_func.func_rigid_gradient(
-            self.rigid_data, self.dyn_state, self.constraint_state, self.params, self.config
+            self.rigid_data, self.dyn_state, self.constraint_state, self.newton_info, self.config
         )
 
     @qd.func(requires_top_level=True)
@@ -197,13 +188,18 @@ class RigidNewtonParticipant:
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         self.func_evaluate(f)
-        newton_func.func_rigid_energy(self.rigid_data, control, self.params, is_trial)
+        newton_func.func_rigid_energy(self.rigid_data, control, self.newton_info, is_trial)
 
 
 @qd.kernel
 def kernel_rigid_begin(rigid: qd.template()):
     newton_func.func_rigid_begin(
-        rigid.rigid_data, rigid.dyn_state.dofs, rigid.constraint_state, rigid.params, rigid.rigid_config, rigid.config
+        rigid.rigid_data,
+        rigid.dyn_state.dofs,
+        rigid.constraint_state,
+        rigid.newton_info,
+        rigid.rigid_config,
+        rigid.config,
     )
 
 
@@ -222,12 +218,12 @@ def kernel_rigid_freeze(rigid: qd.template(), control: qd.template()):
 
 @qd.kernel
 def kernel_rigid_adjoint_rhs(rigid: qd.template()):
-    newton_func.func_rigid_adjoint_rhs(rigid.rigid_data, rigid.constraint_state, rigid.params)
+    newton_func.func_rigid_adjoint_rhs(rigid.rigid_data, rigid.constraint_state, rigid.newton_info)
 
 
 @qd.kernel
 def kernel_rigid_adjoint_finish(rigid: qd.template()):
-    newton_func.func_rigid_adjoint_finish(rigid.rigid_data, rigid.constraint_state, rigid.params)
+    newton_func.func_rigid_adjoint_finish(rigid.rigid_data, rigid.constraint_state, rigid.newton_info)
 
 
 class RigidNewtonHost(NewtonHost):

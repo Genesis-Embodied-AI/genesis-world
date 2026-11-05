@@ -18,8 +18,8 @@ goes to the MPM material.
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import BVHQueryResults
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
+from genesis.utils.array_class import BVHQueryResults
 
 from .mpm_pbd_func import kernel_fit_mpm_obstacle_leaves
 
@@ -32,12 +32,12 @@ class MpmSphBoundary:
     impulse every MPM particle takes at [i_p, i_b], and the boundary sums and the boundary velocity coefficient `s` of
     every reordered SPH particle at [i_s, i_b]."""
 
-    def __init__(self, mpm_solver, sph, params, n_envs):
+    def __init__(self, mpm_solver, sph, mpm_info, n_envs):
         self.mpm_particles = mpm_solver.particles
         self.mpm_particles_ng = mpm_solver.particles_ng
         self.mpm_particles_info = mpm_solver.particles_info
         self.sph = sph
-        self.params = params
+        self.mpm_info = mpm_info
         n_mpm = max(mpm_solver.n_particles, 1)
         sph_shape = (max(sph.n_particles, 1), n_envs)
         self.frame = qd.ndarray(gs.qd_int, shape=())
@@ -83,7 +83,7 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
     dist = r.norm()
     if dist < qd.static(sph.support_radius):
-        volume = boundary.params.particle_volume[()]
+        volume = boundary.mpm_info.particle_volume[()]
         grad = volume * sph.cubic_kernel_derivative(r)
         boundary.rho_sum[i_q, i_t] += volume * sph.cubic_kernel(dist)
         boundary.grad_sum[i_q, i_t] += grad
@@ -101,7 +101,9 @@ def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.temp
     sph = boundary.sph
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
     if r.norm() < qd.static(sph.support_radius):
-        coef = -sph.particles_info_reordered[i_q, i_t].mass * boundary.s[i_q, i_t] * boundary.params.particle_volume[()]
+        coef = (
+            -sph.particles_info_reordered[i_q, i_t].mass * boundary.s[i_q, i_t] * boundary.mpm_info.particle_volume[()]
+        )
         qd.atomic_add(boundary.impulse[i_a, i_t], coef * sph.cubic_kernel_derivative(r))
     return True
 
@@ -148,7 +150,7 @@ def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
     The velocities are those of frame f."""
     for i_p, i_b in qd.ndrange(boundary.impulse.shape[0], boundary.impulse.shape[1]):
         if boundary.mpm_particles_ng.active[f, i_p, i_b]:
-            mass = boundary.mpm_particles_info.mass[i_p] / boundary.params.mass_scale[()]
+            mass = boundary.mpm_particles_info.mass[i_p] / boundary.mpm_info.mass_scale[()]
             impulse = boundary.impulse[i_p, i_b]
             boundary.mpm_particles.vel[f, i_p, i_b] = boundary.mpm_particles.vel[f, i_p, i_b] + impulse / mass
         boundary.impulse[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)

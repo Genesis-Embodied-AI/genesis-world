@@ -5,7 +5,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.mpm_adjoint_func import return_map_vjp
-from genesis.engine.solvers.mpm_data import MpmMaterialTable, MpmParams
+from genesis.engine.solvers.mpm_data import MpmInfo, MpmMaterialTable
 from genesis.engine.solvers.mpm_func import (
     EXTENSION_SIGMA_MIN,
     EXTENSION_STIFFNESS,
@@ -371,7 +371,7 @@ def test_crushed_states_restore(family, unextended):
 @qd.kernel
 def kernel_fibre(
     materials: MpmMaterialTable,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     actu: float,
     m_in: qd.types.ndarray(),
     F_in: qd.types.ndarray(),
@@ -382,8 +382,8 @@ def kernel_fibre(
     for _ in range(1):
         F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
         m = qd.Vector([m_in[0], m_in[1], m_in[2]], dt=gs.qd_float)
-        psi, P, curvature = fibre_terms(0, actu, m, F, materials, params)
-        ka, dka = active_fibre_stiffness(0, actu, materials, params)
+        psi, P, curvature = fibre_terms(0, actu, m, F, materials, mpm_info)
+        ka, dka = active_fibre_stiffness(0, actu, materials, mpm_info)
         out_psi[()] = psi
         for i, j in qd.static(qd.ndrange(3, 3)):
             out_P[i, j] = P[i, j]
@@ -403,18 +403,21 @@ def test_fibre_terms():
     materials.material_table.from_numpy(columns)
     materials.mat_family.from_numpy(np.array([0], dtype=gs.np_int))
     materials.mat_plastic.from_numpy(np.array([0], dtype=gs.np_int))
-    params = MpmParams(
-        n_envs=1,
-        n_particles=1,
-        substep_dt=1e-3,
-        dx=0.1,
-        particle_volume=1e-3,
-        mass_scale=1.0,
-        n_materials=1,
-        wall_sol_params=np.zeros(7),
-        wall_lower=np.zeros(3),
-        wall_upper=np.ones(3),
-        liquid_band=0.0,
+    mpm_info = MpmInfo(
+        values=dict(
+            n_envs=1,
+            n_particles=1,
+            substep_dt=1e-3,
+            dx=0.1,
+            inv_dx=10.0,
+            particle_volume=1e-3,
+            mass_scale=1.0,
+            n_materials=1,
+            liquid_band=0.0,
+            wall_sol_params=(0.0,) * 7,
+            wall_lower=(0.0,) * 3,
+            wall_upper=(1.0,) * 3,
+        )
     )
     m = np.array([0.0, 0.6, 0.8])
     F = np.eye(3) + 0.2 * rng.standard_normal((3, 3))
@@ -425,7 +428,7 @@ def test_fibre_terms():
 
     def evaluate(F, actu):
         F_nd.from_numpy(F)
-        kernel_fibre(materials, params, actu, m_nd, F_nd, psi_nd, P_nd, stiffness_nd)
+        kernel_fibre(materials, mpm_info, actu, m_nd, F_nd, psi_nd, P_nd, stiffness_nd)
         return float(qd_to_numpy(psi_nd)), qd_to_numpy(P_nd, copy=True), qd_to_numpy(stiffness_nd, copy=True)
 
     # An active fibre pulls along its direction, with the stress of its energy and the actuation derivative the adjoint
@@ -644,7 +647,7 @@ def test_first_piola_differential(family):
 @qd.kernel
 def kernel_return_map(
     materials: MpmMaterialTable,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     kind: int,
     F_in: qd.types.ndarray(),
     Jp: float,
@@ -657,9 +660,9 @@ def kernel_return_map(
     for _ in range(1):
         F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
         F_bar = qd.Matrix([[F_bar_in[i, j] for j in range(3)] for i in range(3)], dt=gs.qd_float)
-        F_new, Jp_new = return_map(slot=0, kind=kind, F=F, Jp=Jp, materials=materials, params=params)
+        F_new, Jp_new = return_map(slot=0, kind=kind, F=F, Jp=Jp, materials=materials, mpm_info=mpm_info)
         F_bar_old, Jp_bar_old = return_map_vjp(
-            slot=0, kind=kind, F=F, Jp=Jp, F_new_bar=F_bar, Jp_new_bar=Jp_bar, materials=materials, params=params
+            slot=0, kind=kind, F=F, Jp=Jp, F_new_bar=F_bar, Jp_new_bar=Jp_bar, materials=materials, mpm_info=mpm_info
         )
         for i, j in qd.static(qd.ndrange(3, 3)):
             F_out[i, j] = F_new[i, j]
@@ -694,18 +697,21 @@ def test_return_map_vjp(kind, sigma, Jp):
     materials.material_table.from_numpy(columns)
     materials.mat_family.from_numpy(np.array([0], dtype=gs.np_int))
     materials.mat_plastic.from_numpy(np.array([kind], dtype=gs.np_int))
-    params = MpmParams(
-        n_envs=1,
-        n_particles=1,
-        substep_dt=1e-3,
-        dx=0.1,
-        particle_volume=1e-3,
-        mass_scale=1.0,
-        n_materials=1,
-        wall_sol_params=np.zeros(7),
-        wall_lower=np.zeros(3),
-        wall_upper=np.ones(3),
-        liquid_band=0.0,
+    mpm_info = MpmInfo(
+        values=dict(
+            n_envs=1,
+            n_particles=1,
+            substep_dt=1e-3,
+            dx=0.1,
+            inv_dx=10.0,
+            particle_volume=1e-3,
+            mass_scale=1.0,
+            n_materials=1,
+            liquid_band=0.0,
+            wall_sol_params=(0.0,) * 7,
+            wall_lower=(0.0,) * 3,
+            wall_upper=(1.0,) * 3,
+        )
     )
     F_nd, F_bar_nd = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
     F_out, F_bar_out = qd.ndarray(gs.qd_float, shape=(3, 3)), qd.ndarray(gs.qd_float, shape=(3, 3))
@@ -719,7 +725,7 @@ def test_return_map_vjp(kind, sigma, Jp):
 
     def evaluate(F, Jp):
         F_nd.from_numpy(F)
-        kernel_return_map(materials, params, kind, F_nd, Jp, F_bar_nd, w_Jp, F_out, F_bar_out, Jp_out)
+        kernel_return_map(materials, mpm_info, kind, F_nd, Jp, F_bar_nd, w_Jp, F_out, F_bar_out, Jp_out)
         Jp_values = qd_to_numpy(Jp_out)
         return np.sum(W * qd_to_numpy(F_out)) + w_Jp * Jp_values[0], qd_to_numpy(F_bar_out, copy=True), Jp_values[1]
 

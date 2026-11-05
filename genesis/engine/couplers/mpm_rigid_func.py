@@ -21,7 +21,14 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
+from genesis.engine.solvers.mpm_data import (
+    CONTACT_ROWS,
+    PYRAMID_ROWS,
+    WALL_ROWS,
+    MpmInfo,
+    MpmParticles,
+    MpmParticlesInfo,
+)
 from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     band_row,
@@ -169,10 +176,10 @@ class RigidGeomQuery:
         self.sdf_info = rigid.sdf_info
         self.newton = newton
 
-    def build(self, params):
+    def build(self, mpm_info):
         """Fit the leaf boxes to the geoms of the substep and build the trees."""
         if self.n_coupled:
-            kernel_fit_geom_leaves(self, params)
+            kernel_fit_geom_leaves(self, mpm_info)
             build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
 
 
@@ -213,8 +220,8 @@ def func_fit_geom_leaves(dt: float, query: qd.template()):
 
 
 @qd.kernel
-def kernel_fit_geom_leaves(query: qd.template(), params: qd.template()):
-    func_fit_geom_leaves(params.substep_dt[()], query)
+def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
+    func_fit_geom_leaves(mpm_info.substep_dt[()], query)
 
 
 @qd.func
@@ -252,7 +259,7 @@ def func_build_rigid_rows(
     links_info: LinksInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     config: qd.template(),
 ):
     """Build the pyramid contact rows of every valid particle within the soft range of a coupled geom, after
@@ -269,14 +276,14 @@ def func_build_rigid_rows(
     """
     qd.loop_config(name="mpm_build_rigid_rows")
     for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         x_p = particles.pos[f, i_p, i_b]
         # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
         # band: the two grown boxes together cover the band of the relative velocity
         newton.query_pos[s] = x_p
         newton.query_phi[s] = float("inf")
         newton.query_idx[s] = -1
-        reach = params.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
+        reach = mpm_info.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
         func_bvh_query_aabb(
             i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_geom_filter, query
         )
@@ -291,12 +298,12 @@ def func_build_rigid_rows(
             v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
             v_rel = particles.vel[f, i_p, i_b] - v_r
             # The relative speed bounds the normal approach speed, which needs the normal
-            is_candidate = phi < contact_band_width(v_rel.norm(), dt, params)
+            is_candidate = phi < contact_band_width(v_rel.norm(), dt, mpm_info)
         normal = qd.Vector.zero(gs.qd_float, 3)
         is_in_range = False
         if is_candidate:
             normal = geom_normal(i_g_contact, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, config)
-            is_in_range = phi < contact_band_width(-normal.dot(v_rel), dt, params)
+            is_in_range = phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info)
         if is_in_range:
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
             friction = qd.max(geoms_info.friction[i_g_contact] * geoms_state.friction_ratio[i_g_contact, i_b], 1e-2)
@@ -327,7 +334,7 @@ def func_contact_point_disp(
     newton: qd.template(),
     rigid_data: qd.template(),
     links_state: LinksState,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Set the displacement J_pt x of the contact point of every particle with Rigid rows.
 
@@ -337,7 +344,7 @@ def func_contact_point_disp(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             r = particle_arm(f, i_p, i_b, i_l, particles, links_state)
             newton.contact_dr[s] = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
 
@@ -354,7 +361,7 @@ def func_rigid_contact_gradient(
     rigid_data: qd.template(),
     dyn_state: DynState,
     dyn_info: DynInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     config: qd.template(),
 ):
     """Add the share of the Rigid contact rows to the gradient in x, and sum the spatial contact stiffness of each link.
@@ -371,7 +378,7 @@ def func_rigid_contact_gradient(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             g = newton.g_rigid[s]
             H = newton.h_rigid[s]
             if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
@@ -402,7 +409,7 @@ def func_rigid_contact_matvec(
     pcg_scalars: qd.template(),
     dyn_state: DynState,
     dyn_info: DynInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     config: qd.template(),
 ):
     """Apply the Rigid contact rows' share of the joint operator, after the own operators of MPM and Rigid set their Ap.
@@ -414,11 +421,11 @@ def func_rigid_contact_matvec(
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
         if i_l >= 0 and pcg_scalars.is_converged[i_b] == 0:
             r = particle_arm(f, i_p, i_b, i_l, particles, dyn_state.links)
             dr = rigid_data.link_motion_vel[i_l, i_b] + rigid_data.link_motion_ang[i_l, i_b].cross(r)
-            h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, params)
+            h = contact_cross_matvec(f, s, dr, particles, grid, newton, linear, pcg_scalars, mpm_info)
             qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], h)
             qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(h))
 
@@ -443,7 +450,7 @@ def func_mpm_reaction(
     rigid_data: qd.template(),
     dyn_state: DynState,
     constraint_state: ConstraintState,
-    params: qd.template(),
+    mpm_info: MpmInfo,
 ):
     """Apply the force of the MPM contact rows on Rigid at the converged solve, after func_rigid_write_back.
 
@@ -465,9 +472,9 @@ def func_mpm_reaction(
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)
-            dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, params)
+            dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
             dr = newton.contact_dr[s]
             energy, g, hess = contact_row_terms(s, dx - dr, newton, WALL_ROWS, CONTACT_ROWS)
             if g.norm_sqr() > 0.0:
@@ -482,12 +489,12 @@ def func_mpm_reaction(
 
 
 @qd.func(requires_top_level=True)
-def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: LinksState, params: qd.template()):
+def func_add_mpm_contact_force(rigid_data: qd.template(), links_state: LinksState, mpm_info: MpmInfo):
     """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
     contact forces were written by the post-solve stage of its substep."""
     n_links = rigid_data.link_force_vel.shape[0]
     n_envs = rigid_data.link_force_vel.shape[1]
-    dt = params.substep_dt[()]
+    dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_add_contact_force")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
         force = rigid_data.link_force_vel[i_l, i_b]

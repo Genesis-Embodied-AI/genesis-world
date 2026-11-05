@@ -22,7 +22,14 @@ from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInf
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.mpm_adjoint_func import band_row_bw, polar_rotation_bw
-from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
+from genesis.engine.solvers.mpm_data import (
+    CONTACT_ROWS,
+    PYRAMID_ROWS,
+    WALL_ROWS,
+    MpmInfo,
+    MpmParticles,
+    MpmParticlesInfo,
+)
 from genesis.engine.solvers.mpm_func import particle_of_sorted, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 
@@ -177,7 +184,7 @@ def func_rigid_contact_adjoint(
     links_info: LinksInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
-    params: qd.template(),
+    mpm_info: MpmInfo,
     config: qd.template(),
 ):
     """Pull the Rigid contact rows of every particle back into the adjoints of the particles and of Rigid's state.
@@ -188,16 +195,16 @@ def func_rigid_contact_adjoint(
     J_k. Delta and delta move with the weights, the arm r = x_p - root_COM of the particle and the cdofs of its chain.
     The rows move with the particle state, with the geom pose through its distance and normal, and with the link
     velocity at the particle."""
-    dt = params.substep_dt[()]
+    dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, params)
+            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
-            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
+            w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
             dxp = qd.Vector.zero(gs.qd_float, 3)
             lam_p = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
