@@ -32,7 +32,7 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_dirs,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_solver import NewtonHost
+from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
 
@@ -417,7 +417,7 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
 
 
 @qd.data_oriented
-class MpmPbdContact:
+class MpmPbdContact(NewtonDevice):
     """Device stages of the MPM-PBD contact rows in the joint solve: their share of the PBD gradient, their cross terms
     in both blocks of the operator, and the PBD particle displacement at every iterate."""
 

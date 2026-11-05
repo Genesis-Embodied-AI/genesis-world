@@ -5,14 +5,16 @@ joint energy and its preconditioner are described there. The host stages start t
 the converged qacc back to Rigid and integrate its deferred substep (see RigidSolver.build_newton_participant).
 """
 
+from collections.abc import Iterator
+
 import numpy as np
 
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
+from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 from genesis.grad.bridge import no_grad
-from genesis.utils.data import StaticConfig
+from genesis.utils.data import DataItem, StaticConfig, iter_data
 
 from . import newton_func
 
@@ -83,7 +85,7 @@ class RigidNewtonData:
 
 
 @qd.data_oriented
-class RigidNewtonParticipant:
+class RigidNewtonParticipant(NewtonDevice):
     """Device stages of Rigid's dofs in the joint solve, which own the Rigid data of the solve.
 
     It is the one place that selects the Rigid arrays the couplings read, and `coupled_geoms_idx` lists the geoms the
@@ -104,6 +106,10 @@ class RigidNewtonParticipant:
             has_terrain=rigid.has_coupled_terrain,
         )
         self.newton_info = newton_func.RigidNewtonInfo(values=dict(substep_dt=rigid.substep_dt))
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "newton_info")
 
     @property
     def geoms_init_AABB(self):

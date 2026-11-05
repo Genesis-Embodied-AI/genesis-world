@@ -9,7 +9,7 @@ displacement alone.
 import quadrants as qd
 
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_solver import NewtonHost
+from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.newton_func import func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 
@@ -17,8 +17,8 @@ from . import mpm_rigid_adjoint_func, mpm_rigid_func
 
 
 @qd.data_oriented
-class MpmRigidContact:
-    """Device stages of the MPM-Rigid contact rows in the joint solve.
+class MpmRigidContact(NewtonDevice):
+    """Device stages of the contact rows between the material point method (MPM) and Rigid in the joint solve.
 
     They build the rows of the substep with `query`, the tree of the coupled geoms, add the cross terms of the rows to
     the Rigid gradient and to both blocks of the operator, and update the contact point displacement at every iterate.

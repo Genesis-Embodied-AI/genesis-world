@@ -53,6 +53,7 @@ from .mpm_data import (
     initial_capacities,
     triplet_capacity,
 )
+from .newton_solver import NewtonDevice
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ def material_table_column(material):
 
 
 @qd.data_oriented
-class MpmNewtonParticipant:
+class MpmNewtonParticipant(NewtonDevice):
     """Grid displacement as a participant of the NewtonSolver.
 
     Its share of the operator is a block coordinate (BCOO) matrix, preconditioned by bricks, and it owns the vectors of

@@ -176,7 +176,7 @@ class LegacyCoupler(RBC):
             device = contact if self._mpm_rigid_dofs else None
             couplings.append((MpmRigidContactHost(contact, self._mpm_rigid_dofs), device))
             if device is None:
-                host_only_devices.append(contact)
+                host_only_devices.extend((contact, rigid_participant))
         if self._mpm_fem:
             fem_host, fem_participant = fem.build_newton_participant()
             participants.append((fem_host, fem_participant))

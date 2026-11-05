@@ -14,7 +14,7 @@ import quadrants as qd
 
 import genesis as gs
 
-from .newton_solver import NewtonHost, kernel_assemble_participant
+from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 
 
 @qd.data_oriented
@@ -229,7 +229,7 @@ def func_pbd_finish(dt: float, pbd_data: qd.template(), control: qd.template()):
 
 
 @qd.data_oriented
-class PbdNewtonParticipant:
+class PbdNewtonParticipant(NewtonDevice):
     """Device stages of the PBD end positions in the joint solve, which own the PBD data of the solve.
 
     It is the one place that selects the PBD arrays the couplings read, the particles in PBD's reordered layout. They

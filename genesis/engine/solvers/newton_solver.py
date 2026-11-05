@@ -17,6 +17,7 @@ couplings in @qd.data_oriented NamedTuples that the composed stages iterate with
 
 import collections
 import functools
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -45,7 +46,7 @@ from genesis.engine.numerics.newton_control import (
     func_update_convergence,
 )
 from genesis.grad.bridge import custom_backward
-from genesis.utils.data import DataKind, iter_data_oriented
+from genesis.utils.data import DataItem, DataKind, iter_data_oriented
 from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
@@ -71,6 +72,18 @@ class NewtonParticipants:
     def __init__(self, members, couplings):
         self.members = members
         self.couplings = couplings
+
+
+class NewtonDevice:
+    """Base of the device objects of the participants and the couplings of a Newton solve.
+
+    A device holding declared structs (see Data) overrides `data` to yield them, which the Newton solver frees with its
+    own data. The arrays a device holds in plain data-oriented objects are reached by the solver itself.
+    """
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from ()
 
 
 def participant_group(name: str, devices: list):
@@ -329,6 +342,7 @@ class NewtonSolver(Solver):
         self._coupling_hosts = []
         self._participants = None
         self._host_only_devices = ()
+        self._devices = []
         self._is_loop_graph = options.graph == "newton"
         self._has_coupling_devices = False
         self._has_warned_adjoint_projection = False
@@ -369,6 +383,9 @@ class NewtonSolver(Solver):
         )
         self._has_coupling_devices = bool(coupling_devices)
         self._host_only_devices = tuple(host_only_devices)
+        self._devices.clear()
+        self._devices.extend(device for _, device in participants)
+        self._devices.extend((*coupling_devices, *host_only_devices))
 
     @property
     def is_active(self):
@@ -388,6 +405,8 @@ class NewtonSolver(Solver):
             yield from iter_data_oriented(
                 "participants", (self._participants, self._host_only_devices), DataKind.SCRATCH
             )
+            for device in self._devices:
+                yield from device.data
 
     @property
     def _hosts(self):

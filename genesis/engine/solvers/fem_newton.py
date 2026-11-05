@@ -16,7 +16,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.utils.data import StaticConfig
 
-from .newton_solver import NewtonHost, kernel_assemble_participant
+from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 
 
 # ============================================ Layer 1: the FEM block ============================================
@@ -181,7 +181,7 @@ class FemNewtonConfig(StaticConfig):
 
 
 @qd.data_oriented
-class FemNewtonParticipant:
+class FemNewtonParticipant(NewtonDevice):
     """Device stages of the FEM vertex positions in the joint solve.
 
     It is the one place that selects the FEM arrays and scalars the stages and the couplings read, and `solver` gives
