@@ -27,15 +27,6 @@ def has_articulation_dofs(entity: "RigidEntity") -> bool:
     return entity.n_dofs > 0
 
 
-def default_coup_type(entity: "RigidEntity") -> gs.coup_type:
-    """Auto-select coup_type when the entity solver options leave it None. See has_articulation_dofs."""
-    if has_articulation_dofs(entity):
-        if entity.base_link.is_fixed:
-            return gs.coup_type.external_articulation
-        return gs.coup_type.two_way_soft_constraint
-    return gs.coup_type.ipc_only
-
-
 def find_target_link_for_fixed_merge(link):
     """
     Find the target link for merging fixed joints.

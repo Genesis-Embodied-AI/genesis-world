@@ -28,6 +28,7 @@ from .rigid_link import KinematicLink, RigidLink
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
+    from genesis.options.entities import RigidLinkSolverOptions
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
 
@@ -1520,8 +1521,10 @@ class RigidEntity(KinematicEntity):
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._visualize_contact: bool = desc.visualize_contact
-        # How the IPC coupler simulates the entity (see 'RigidEntitySolverOptions.coup_type')
-        self._coup_type = desc.options.solver_options.coup_type
+        # The solver options of each link, the coupled links and the coupling type, resolved once as the links are added
+        # for the IPC coupler and the rigid collider (see 'coup_type')
+        self._links_solver_options: list["RigidLinkSolverOptions"] = []
+        self._coup_type: gs.coup_type | None = None
         # Warned here rather than by the options, whose validators run again whenever the options are handed over
         if desc.options.solver_options.coup_restitution > 0.0:
             gs.logger.warning("Non-zero 'coup_restitution' could lead to instability. Use with caution.")
@@ -1532,7 +1535,7 @@ class RigidEntity(KinematicEntity):
 
     def _add_heterogeneous_variant(self, link, v_link):
         # Add collision geometries
-        needs_coup = self._options.get_link_solver_options(self._links_path[link.idx_local]).needs_coup
+        needs_coup = self._links_solver_options[link.idx_local].needs_coup
         for g_desc in v_link.geoms:
             link._add_geom(g_desc, needs_coup=needs_coup)
 
@@ -1595,18 +1598,35 @@ class RigidEntity(KinematicEntity):
         from genesis.engine.couplers import IPCCoupler
 
         # Make sure that the entity is not object
+        coup_type = self._options.solver_options.coup_type
         if (
             isinstance(self.sim.coupler, IPCCoupler)
-            and self._coup_type == "ipc_only"
+            and coup_type == gs.coup_type.ipc_only
             and any(l_desc.is_robot for l_desc in self._desc.links)
         ):
             gs.raise_exception("coup_type='ipc_only' is only supported by rigid non-articulated entities.")
 
+        self._links_solver_options.clear()
         super()._load_model()
 
         # Add equality constraints sequentially
         for e_desc in self._desc.equalities:
             self._add_equality(e_desc)
+
+        # A coupling type requires a coupled link (see 'gs.entities.Rigid'), and coupling some links alone takes the
+        # two-way coupling (see 'RigidLinkSolverOptions')
+        n_coup_links = len(self.coup_links)
+        if n_coup_links == 0:
+            coup_type = None
+        elif coup_type is None and n_coup_links < self.n_links:
+            coup_type = gs.coup_type.two_way_soft_constraint
+        elif coup_type is None and self.n_dofs > 0:
+            coup_type = (
+                gs.coup_type.external_articulation if self.base_link.is_fixed else gs.coup_type.two_way_soft_constraint
+            )
+        elif coup_type is None:
+            coup_type = gs.coup_type.ipc_only
+        self._coup_type = coup_type
 
     def attach(
         self,
@@ -1682,9 +1702,10 @@ class RigidEntity(KinematicEntity):
         # Add visual geometries
         for g_desc in l_desc.vgeoms:
             link._add_vgeom(g_desc)
-        needs_coup = self._options.get_link_solver_options(self._links_path[link.idx_local]).needs_coup
+        link_solver_options = self._options.get_link_solver_options(self._links_path[link.idx_local])
+        self._links_solver_options.append(link_solver_options)
         for g_desc in l_desc.geoms:
-            link._add_geom(g_desc, needs_coup=needs_coup)
+            link._add_geom(g_desc, needs_coup=link_solver_options.needs_coup)
 
         return link, joints
 
@@ -3249,6 +3270,26 @@ class RigidEntity(KinematicEntity):
     @property
     def is_free(self) -> bool:
         raise DeprecationError("This property has been removed.")
+
+    @property
+    def links_solver_options(self) -> tuple["RigidLinkSolverOptions", ...]:
+        """The solver options of each link, those of its link options over those of the entity."""
+        return tuple(self._links_solver_options)
+
+    @property
+    def coup_links(self) -> list[RigidLink]:
+        """The links the IPC coupler couples, whose solver options set 'needs_coup'."""
+        return [link for link, options in zip(self._links, self._links_solver_options) if options.needs_coup]
+
+    @property
+    def coup_type(self) -> gs.coup_type | None:
+        """How the IPC coupler simulates the entity, None when it couples no link of the entity.
+
+        It resolves the 'coup_type' of the solver options when they leave it None: the two-way coupling when some links
+        alone are coupled, otherwise 'external_articulation' for an articulated entity with a fixed base,
+        'two_way_soft_constraint' for an articulated one with a free base, and 'ipc_only' for a single body.
+        """
+        return self._coup_type
 
     @property
     def is_local_collision_mask(self):

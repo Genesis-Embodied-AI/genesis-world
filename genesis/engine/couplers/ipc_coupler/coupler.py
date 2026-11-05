@@ -53,7 +53,6 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
     from .utils import (
         build_ipc_scene_config,
         compute_link_to_link_transform,
-        default_coup_type,
         find_target_link_for_fixed_merge,
         has_articulation_dofs,
         read_ipc_geometry_metadata,
@@ -226,23 +225,11 @@ class IPCCoupler(RBC):
 
         entity: "RigidEntity"
         for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):
-            # An entity takes part in the coupling as soon as one of its links does
-            links_solver_options = [
-                entity._options.get_link_solver_options(entity._links_path[link.idx_local]) for link in entity.links
-            ]
-            coup_links = {
-                link
-                for link, link_solver_options in zip(entity.links, links_solver_options)
-                if link_solver_options.needs_coup
-            }
-            if not coup_links:
+            # An entity takes part in the coupling as soon as one of its links does (see 'RigidEntity.coup_type')
+            if entity.coup_type is None:
                 continue
-            coup_type = entity._options.solver_options.coup_type
-            if coup_type is None:
-                # Only the two-way coupling couples some links of an entity alone (see 'RigidLinkSolverOptions')
-                coup_type = "two_way_soft_constraint" if len(coup_links) < entity.n_links else default_coup_type(entity)
-
-            self._coup_type_by_entity[entity] = coup_type = getattr(COUPLING_TYPE, coup_type.upper())
+            coup_links = set(entity.coup_links)
+            self._coup_type_by_entity[entity] = coup_type = COUPLING_TYPE[entity.coup_type.upper()]
             if coup_type == COUPLING_TYPE.EXTERNAL_ARTICULATION:
                 if not entity.base_link.is_fixed:
                     gs.raise_exception(
@@ -261,7 +248,7 @@ class IPCCoupler(RBC):
                 gs.logger.debug(f"Rigid entity {i_e}: IPC link filter set to {len(coup_links)} link(s)")
             collision_settings = {
                 link: False
-                for link, link_solver_options in zip(entity.links, links_solver_options)
+                for link, link_solver_options in zip(entity.links, entity.links_solver_options)
                 if not link_solver_options.enable_coup_collision
             }
             if collision_settings:
