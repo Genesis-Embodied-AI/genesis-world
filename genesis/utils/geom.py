@@ -2140,11 +2140,11 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
 
 
 @nb.jit(nopython=True, cache=True)
-def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    if isinstance(cos_theta, (float, np.float32, np.float64)):
+def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    if isinstance(theta, (float, np.float32, np.float64)):
         assert axis.ndim == 1
     else:
-        assert axis.ndim - 1 == cos_theta.ndim
+        assert axis.ndim - 1 == theta.ndim
     if out is None:
         out_ = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
     else:
@@ -2153,9 +2153,9 @@ def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.nda
 
     axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
     axis = axis / axis_norm
-    if not isinstance(cos_theta, (float, np.float32, np.float64)):
-        cos_theta = cos_theta[..., None]
-    sin_theta = np.sqrt(1.0 - cos_theta**2)
+    if not isinstance(theta, (float, np.float32, np.float64)):
+        theta = theta[..., None]
+    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
     cos1_axis = (1.0 - cos_theta) * axis
     sin_axis = sin_theta * axis
 
@@ -2174,10 +2174,6 @@ def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.nda
     out_[..., 2, 2] = tmp[..., 2]
 
     return out_
-
-
-def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    return _np_axis_cos_angle_to_R(axis, np.cos(theta))
 
 
 def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
@@ -2204,27 +2200,9 @@ def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a rotation matrix.
 
     This operation is computed by rotating the world frame by moving the original z-axis to the given vector via the
-    shortest path.
+    shortest path. It matches `z_to_quat`, including for the zero, antipodal and non-finite directions.
     """
-    B = v_a.shape[:-1]
-
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*B, 1)))
-    v_a = v_a / v_a_norm
-
-    axis = np.empty((*B, 3), dtype=v_a.dtype)
-    cos_theta = np.empty(B, dtype=v_a.dtype)
-    for i in np.ndindex(B):
-        axis_i = axis[i]
-        v_x, v_y, v_z = v_a[i]
-        cos_theta[i] = v_z
-        if abs(cos_theta[i]) < 1.0 - gs.EPS:
-            axis_i[0] = -v_y
-            axis_i[1] = v_x
-            axis_i[2] = 0.0
-        else:
-            axis_i[:] = 0.0, 1.0, 0.0
-
-    return _np_axis_cos_angle_to_R(axis, cos_theta, out)
+    return _np_quat_to_R(z_to_quat(v_a), out)
 
 
 @nb.jit(nopython=True, cache=True)

@@ -362,6 +362,7 @@ def test_geom_tensor_identity(batch_shape):
     quat = gu.z_to_quat(directions)
     assert_allclose(gu.quat_to_R(quat), R_true, atol=tol)
     assert_allclose(np.linalg.norm(quat, axis=-1), 1.0, atol=tol)
+    assert_allclose(gu.z_to_R(directions), R_true, atol=tol)
 
     directions = np.array(
         [
@@ -398,6 +399,15 @@ def test_geom_tensor_identity(batch_shape):
             dtype=gs.np_float,
         )
         assert_equal(np.isnan(gu.z_to_quat(directions)), True)
+        assert_equal(np.isnan(gu.z_to_R(directions)), True)
+
+    # Rotation angles of both signs and beyond pi, whose sine is negative
+    axis = np.random.randn(*batch_shape, 3)
+    theta = np.random.uniform(-2.0 * math.pi, 2.0 * math.pi, batch_shape)
+    rotvec = axis / np.linalg.norm(axis, axis=-1, keepdims=True) * theta[..., None]
+    R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+    assert_allclose(gu.axis_angle_to_R(axis.astype(gs.np_float), theta.astype(gs.np_float)), R_true, atol=tol)
+    assert_allclose(gu.rotvec_to_R(rotvec.astype(gs.np_float)), R_true, atol=tol)
 
 
 @pytest.mark.required
