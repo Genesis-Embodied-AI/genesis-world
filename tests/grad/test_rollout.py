@@ -359,7 +359,7 @@ def test_reject_non_differentiable_solvers():
     fem_options = gs.entities.FEM(morph=box, material=gs.materials.Elastic())
     rigid_options = gs.entities.Rigid(morph=box)
     for entities_options, scene_options, component_name in (
-        ((gs.entities.PBDLiquid(morph=box),), {}, "PBDSolver"),
+        ((gs.entities.PBD(morph=box, material=gs.materials.Liquid()),), {}, "PBDSolver"),
         ((gs.entities.SPH(morph=box),), {}, "SPHSolver"),
         ((fem_options,), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
         ((fem_options, rigid_options), {}, "LegacyCoupler"),

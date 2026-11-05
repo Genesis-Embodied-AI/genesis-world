@@ -849,7 +849,7 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
             *entities_config,
             (gs.entities.FEM, gs.materials.Elastic(), "visual"),
             (gs.entities.MPM, gs.materials.Elastic(youngs_modulus=3e5), particle_mode),
-            (gs.entities.PBDCloth, gs.materials.Cloth(), particle_mode),
+            (gs.entities.PBD, gs.materials.Cloth(), particle_mode),
             (
                 gs.entities.SPH,
                 gs.materials.Liquid(),

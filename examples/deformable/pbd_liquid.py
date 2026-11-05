@@ -31,7 +31,7 @@ def main():
     )
 
     liquid = scene.add_entity(
-        options=gs.entities.PBDLiquid(
+        options=gs.entities.PBD(
             morph=gs.morphs.Box(
                 lower=(0.2, 0.1, 0.1),
                 upper=(0.4, 0.3, 0.5),
@@ -39,7 +39,7 @@ def main():
             material=gs.materials.Liquid(
                 density=1.0,
             ),
-            solver_options=gs.options.PBDLiquidEntitySolverOptions(
+            solver_options=gs.options.PBDEntitySolverOptions(
                 sampler="regular",
                 density_relaxation=1.0,
                 viscosity_relaxation=0.0,

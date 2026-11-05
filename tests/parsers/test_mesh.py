@@ -1029,9 +1029,9 @@ def test_surface_reconstruction(show_viewer):
     liquids = []
     for options_cls, recon_backend, pos_y in (
         (gs.entities.SPH, "splashsurf", -0.2),
-        (gs.entities.PBDLiquid, "splashsurf", 0.2),
+        (gs.entities.PBD, "splashsurf", 0.2),
         (gs.entities.SPH, "levelset", -0.6),
-        (gs.entities.PBDLiquid, "levelset", 0.6),
+        (gs.entities.PBD, "levelset", 0.6),
     ):
         liquids.append(
             scene.add_entity(
@@ -1045,6 +1045,7 @@ def test_surface_reconstruction(show_viewer):
                         vis_mode="recon",
                         recon_backend=recon_backend,
                     ),
+                    material=gs.materials.Liquid(),
                 ),
             )
         )

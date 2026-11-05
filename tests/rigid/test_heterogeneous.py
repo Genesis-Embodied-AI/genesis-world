@@ -447,8 +447,9 @@ def test_invalid_variant_specification_raises():
     # PBD material should raise an exception
     with pytest.raises(gs.GenesisException, match="created from one morph"):
         scene.add_entity(
-            options=gs.entities.PBDCloth(
+            options=gs.entities.PBD(
                 morph=morphs_heterogeneous,
+                material=gs.materials.Cloth(),
             ),
         )
 

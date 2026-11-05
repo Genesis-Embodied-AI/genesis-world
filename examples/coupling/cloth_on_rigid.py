@@ -51,7 +51,7 @@ def main():
     )
 
     cloth = scene.add_entity(
-        options=gs.entities.PBDCloth(
+        options=gs.entities.PBD(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 scale=1.0,
@@ -61,6 +61,7 @@ def main():
             surface=gs.surfaces.Default(
                 color=(0.2, 0.4, 0.8, 1.0),
             ),
+            material=gs.materials.Cloth(),
         ),
     )
 

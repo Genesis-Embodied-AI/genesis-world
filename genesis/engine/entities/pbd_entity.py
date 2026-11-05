@@ -9,6 +9,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.options.materials import Cloth
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -166,18 +167,17 @@ class PBDTetEntity(PBDBaseEntity):
             rho_rest=0.0,
             mu_s=self._options.material_params.static_friction,
             mu_k=self._options.material_params.kinetic_friction,
-            air_resistance=self._options.solver_options.air_resistance
-            if isinstance(self._options, gs.entities.PBDCloth)
-            else 0.0,
+            air_resistance=self._options.solver_options.air_resistance if isinstance(self._material, Cloth) else 0.0,
             density_relaxation=0.0,
             viscosity_relaxation=0.0,
             particles=self._particles,
         )
+        stretch_compliance, stretch_relaxation = self._options.stretch_params
         self._solver.add_edges(
             self._edge_start,
             self._particle_start,
-            self._options.solver_options.stretch_compliance,
-            self._options.solver_options.stretch_relaxation,
+            stretch_compliance,
+            stretch_relaxation,
             self._edges,
             self._edges_len_rest,
         )

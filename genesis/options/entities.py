@@ -848,222 +848,130 @@ class PBDMaterialParams(NamedTuple):
     kinetic_friction: float
 
 
-class PBDClothEntitySolverOptions(_FrozenOptions):
-    """Options of the position-based dynamics (PBD) solver specific to one cloth entity.
+class PBDEntitySolverOptions(_FrozenOptions):
+    """Options of the position-based dynamics (PBD) solver specific to one entity.
 
-    A compliance is the inverse stiffness of a constraint: 0 makes it rigid, and a larger value lets it give way. A
-    relaxation scales each correction of a constraint: a smaller value weakens it but converges more smoothly.
+    The material of the entity decides which options apply (see ``gs.entities.PBD``), and an option given explicitly
+    for another kind of entity is ignored with a warning. A compliance is the inverse stiffness of a constraint: 0
+    makes it rigid, and a larger value lets it give way. A relaxation scales each correction of a constraint: a smaller
+    value weakens it but converges more smoothly.
 
     Parameters
     ----------
-    stretch_compliance : float, optional
-        The compliance of the edges against stretching, in m/N. Default is 1e-7.
+    stretch_compliance : float | None, optional
+        The compliance of the edges against stretching, in m/N, for a sheet or a volume. If None, 1e-7 for a sheet and
+        0.0 for a volume. Default is None.
     bending_compliance : float, optional
-        The compliance of the sheet against bending, in rad/N. Default is 1e-5.
-    stretch_relaxation : float, optional
-        The relaxation of the stretching constraints. Default is 0.3.
+        The compliance of a sheet against bending, in rad/N. Default is 1e-5.
+    volume_compliance : float, optional
+        The compliance of the elements of a volume against a change of volume, in m^3/N. Default is 0.0.
+    stretch_relaxation : float | None, optional
+        The relaxation of the stretching constraints of a sheet or a volume. If None, 0.3 for a sheet and 0.1 for a
+        volume. Default is None.
     bending_relaxation : float, optional
-        The relaxation of the bending constraints. Default is 0.1.
+        The relaxation of the bending constraints of a sheet. Default is 0.1.
+    volume_relaxation : float, optional
+        The relaxation of the volume constraints of a volume. Default is 0.1.
     air_resistance : float, optional
-        The damping of the particle velocities by air drag. A larger value slows the fall and the swing of the sheet.
-        Default is 1e-3.
+        The damping of the particle velocities of a sheet by air drag. A larger value slows the fall and the swing of
+        the sheet. Default is 1e-3.
     kinetic_friction : float | None, optional
-        The friction coefficient of a particle sliding on a contact, the friction of the material holding a particle
-        that sticks. A smaller value lets the sheet slide on more easily once it moves. If None, the friction of the
-        material. Default is None.
+        The friction coefficient of a particle of a sheet or a volume sliding on a contact, the friction of the
+        material holding a particle that sticks. A smaller value lets the entity slide on more easily once it moves.
+        If None, the friction of the material. Default is None.
+    sampler : gs.particle_sampler, optional
+        How the morph of a liquid is filled with particles. 'regular' lays them on a grid, 'random' scatters them
+        uniformly, and 'pbs' spreads them evenly by Poisson disk sampling, supported on Linux x86 alone. Defaults to
+        'pbs' on Linux x86 and 'random' elsewhere.
+    particle_interaction : bool, optional
+        Whether the particles of a liquid interact with each other. False makes them free particles moved by external
+        forces alone, the cheapest particle entity, at the cost of any volume or cohesion: use it for particle effects
+        and animations. Default is True.
+    density_relaxation : float, optional
+        The relaxation of the constraint keeping the density of an interacting liquid at rest. A larger value keeps the
+        volume more constant but converges less smoothly. Default is 0.2.
+    viscosity_relaxation : float, optional
+        The relaxation of the viscosity of an interacting liquid, which smooths the velocities of neighboring
+        particles. A larger value damps the flow more, as honey does. Default is 0.01.
     """
 
-    stretch_compliance: NonNegativeFloat = 1e-7
+    stretch_compliance: NonNegativeFloat | None = None
     bending_compliance: NonNegativeFloat = 1e-5
-    stretch_relaxation: ValidFloat = 0.3
+    volume_compliance: NonNegativeFloat = 0.0
+    stretch_relaxation: ValidFloat | None = None
     bending_relaxation: ValidFloat = 0.1
+    volume_relaxation: ValidFloat = 0.1
     air_resistance: NonNegativeFloat = 1e-3
     kinetic_friction: NonNegativeFloat | None = None
+    sampler: gs.particle_sampler = DEFAULT_SAMPLER
+    particle_interaction: StrictBool = True
+    density_relaxation: ValidFloat = 0.2
+    viscosity_relaxation: ValidFloat = 0.01
 
 
-class PBDCloth(BaseEntity["PBD2DEntity"]):
-    """Options of a cloth entity, which the position-based dynamics (PBD) solver simulates as a mesh of particles.
+class PBD(_EmittableParticles["PBDBaseEntity"]):
+    """Options of an entity the position-based dynamics (PBD) solver simulates, whose material decides its kind.
 
-    Use it for a thin sheet that stretches and bends, such as a towel or a flag. The surface mesh is remeshed to the
-    particle size of the solver, so a smaller particle size gives finer folds at a higher cost. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
+    Use it where speed and stability matter more than physically accurate stiffness, pressure and viscosity, which the
+    finite element method (FEM), the material point method (MPM) and smoothed particle hydrodynamics (SPH) offer at a
+    higher cost. A Cloth material makes a sheet, such as a towel or a flag, remeshed to the particle size of the
+    solver. An Elastic material makes a soft solid on a volume mesh. A Liquid material makes a liquid of incompressible
+    particles, each interacting with its neighbors so that the cost grows with the particle count, or free particles
+    (see 'particle_interaction'). Parameters follow ``gs.entities.BaseEntity``, plus the following.
 
     Parameters
     ----------
-    material : gs.materials.Cloth, optional
-        The physical properties of the sheet. Defaults to ``gs.materials.Cloth()``.
-    solver_options : PBDClothEntitySolverOptions, optional
+    material : gs.materials.Cloth | gs.materials.Elastic | gs.materials.Liquid
+        The physical properties of the entity. PBD expresses stiffness through its solver options, so a Cloth or an
+        Elastic material rejects an explicit Young's modulus, Poisson ratio or bending stiffness. A Liquid material
+        applies by its density alone, and rejects an explicit bulk modulus, viscosity or surface tension.
+    solver_options : PBDEntitySolverOptions, optional
         The options of the PBD solver specific to the entity, among which its stiffness. Defaults to
-        ``PBDClothEntitySolverOptions()``.
+        ``PBDEntitySolverOptions()``.
     """
 
     _solver_options_cls = PBDOptions
 
-    material: Cloth = Field(default_factory=Cloth)
-    solver_options: PBDClothEntitySolverOptions = Field(default_factory=PBDClothEntitySolverOptions)
+    material: Cloth | Elastic | Liquid
+    solver_options: PBDEntitySolverOptions = Field(default_factory=PBDEntitySolverOptions)
 
     @model_validator(mode="after")
-    def _check_material(self) -> "PBDCloth":
-        _reject_fields(self, self.material, ("youngs_modulus", "poisson_ratio", "bending_stiffness"))
+    def _check_material(self) -> "PBD":
+        if isinstance(self.material, Liquid):
+            _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
+        else:
+            _reject_fields(self, self.material, ("youngs_modulus", "poisson_ratio", "bending_stiffness"))
         # The mass per unit area defaults to a value of its own when no density is given, which leaves the thickness out
-        if self.material.density is None:
+        if isinstance(self.material, Cloth) and self.material.density is None:
             _reject_fields(self, self.material, ("thickness",), " without a density")
         return self
 
     @property
     def material_params(self) -> PBDMaterialParams:
-        """The parameters of the sheet, the defaults of the PBD solver filled in.
+        """The parameters of a sheet or a volume, the defaults of the PBD solver filled in.
 
-        The mass per unit area is ``density * thickness``, and defaults to 4.0 kg/m^2. The friction coefficient
-        defaults to 0.15, and the kinetic one to the friction coefficient.
+        The mass per unit area of a sheet is ``density * thickness``, and defaults to 4.0 kg/m^2. The friction
+        coefficient defaults to 0.15, and the kinetic one to the friction coefficient.
         """
         material = self.material
-        density = 4.0 if material.density is None else material.density * material.thickness
+        if isinstance(material, Cloth):
+            density = 4.0 if material.density is None else material.density * material.thickness
+        else:
+            density = material.density
         return _get_pbd_material_params(density, material.friction, self.solver_options.kinetic_friction)
 
-
-class PBDElasticEntitySolverOptions(_FrozenOptions):
-    """Options of the position-based dynamics (PBD) solver specific to one elastic entity.
-
-    See ``PBDClothEntitySolverOptions`` for the meaning of a compliance and a relaxation.
-
-    Parameters
-    ----------
-    stretch_compliance : float, optional
-        The compliance of the edges against stretching, in m/N. Default is 0.0.
-    volume_compliance : float, optional
-        The compliance of the elements against a change of volume, in m^3/N. Default is 0.0.
-    stretch_relaxation : float, optional
-        The relaxation of the stretching constraints. Default is 0.1.
-    volume_relaxation : float, optional
-        The relaxation of the volume constraints. Default is 0.1.
-    kinetic_friction : float | None, optional
-        See ``PBDClothEntitySolverOptions``. If None, the friction of the material. Default is None.
-    """
-
-    stretch_compliance: NonNegativeFloat = 0.0
-    volume_compliance: NonNegativeFloat = 0.0
-    stretch_relaxation: ValidFloat = 0.1
-    volume_relaxation: ValidFloat = 0.1
-    kinetic_friction: NonNegativeFloat | None = None
-
-
-class PBDElastic(BaseEntity["PBD3DEntity"]):
-    """Options of an elastic solid, which the position-based dynamics (PBD) solver simulates on a volume mesh.
-
-    Use it for a soft solid where speed and stability matter more than physically accurate stiffness, which the
-    finite element method (FEM) solver offers at a higher cost (see ``gs.entities.FEM``). Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
-
-    Parameters
-    ----------
-    material : gs.materials.Elastic, optional
-        The physical properties of the solid. Defaults to ``gs.materials.Elastic()``.
-    solver_options : PBDElasticEntitySolverOptions, optional
-        The options of the PBD solver specific to the entity, among which its stiffness. Defaults to
-        ``PBDElasticEntitySolverOptions()``.
-    """
-
-    _solver_options_cls = PBDOptions
-
-    material: Elastic = Field(default_factory=Elastic)
-    solver_options: PBDElasticEntitySolverOptions = Field(default_factory=PBDElasticEntitySolverOptions)
-
-    @model_validator(mode="after")
-    def _check_material(self) -> "PBDElastic":
-        _reject_fields(self, self.material, ("youngs_modulus", "poisson_ratio"))
-        return self
-
     @property
-    def material_params(self) -> PBDMaterialParams:
-        """The parameters of the solid, the friction coefficient defaulting to 0.15 and the kinetic one to it."""
-        material = self.material
-        return _get_pbd_material_params(material.density, material.friction, self.solver_options.kinetic_friction)
-
-
-class _PBDParticles(_EmittableParticles[EntityT]):
-    """Options shared by the particle entities of the PBD solver, whose Liquid material applies by its density alone."""
-
-    _solver_options_cls = PBDOptions
-
-    material: Liquid = Field(default_factory=Liquid)
-
-    @model_validator(mode="after")
-    def _check_material(self) -> "_PBDParticles":
-        _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
-        return self
-
-
-class PBDLiquidEntitySolverOptions(_FrozenOptions):
-    """Options of the position-based dynamics (PBD) solver specific to one liquid entity.
-
-    Parameters
-    ----------
-    sampler : gs.particle_sampler, optional
-        How the morph is filled with particles. 'regular' lays them on a grid, 'random' scatters them uniformly, and
-        'pbs' spreads them evenly by Poisson disk sampling, supported on Linux x86 alone. Defaults to 'pbs' on Linux
-        x86 and 'random' elsewhere.
-    density_relaxation : float, optional
-        The relaxation of the constraint keeping the density at rest. A larger value keeps the volume more constant
-        but converges less smoothly. Default is 0.2.
-    viscosity_relaxation : float, optional
-        The relaxation of the viscosity, which smooths the velocities of neighboring particles. A larger value damps
-        the flow more, as honey does. Default is 0.01.
-    """
-
-    sampler: gs.particle_sampler = DEFAULT_SAMPLER
-    density_relaxation: ValidFloat = 0.2
-    viscosity_relaxation: ValidFloat = 0.01
-
-
-class PBDLiquid(_PBDParticles["PBDParticleEntity"]):
-    """Options of a liquid entity, which the position-based dynamics (PBD) solver simulates as incompressible particles.
-
-    Use it for a liquid where speed and stability matter more than accurate pressure and viscosity. Each particle
-    interacts with its neighbors, so the cost grows with the particle count. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
-
-    Parameters
-    ----------
-    material : gs.materials.Liquid, optional
-        The physical properties of the liquid. Defaults to ``gs.materials.Liquid()``.
-    solver_options : PBDLiquidEntitySolverOptions, optional
-        The options of the PBD solver specific to the entity, among which its viscosity. Defaults to
-        ``PBDLiquidEntitySolverOptions()``.
-    """
-
-    solver_options: PBDLiquidEntitySolverOptions = Field(default_factory=PBDLiquidEntitySolverOptions)
-
-
-class PBDParticleEntitySolverOptions(_FrozenOptions):
-    """Options of the position-based dynamics (PBD) solver specific to one set of free particles.
-
-    Parameters
-    ----------
-    sampler : gs.particle_sampler, optional
-        See ``PBDLiquidEntitySolverOptions``. Defaults to 'pbs' on Linux x86 and 'random' elsewhere.
-    """
-
-    sampler: gs.particle_sampler = DEFAULT_SAMPLER
-
-
-class PBDParticle(_PBDParticles["PBDFreeParticleEntity"]):
-    """Options of a set of free particles, which the position-based dynamics (PBD) solver moves under external forces.
-
-    Use it for particle effects and animations: the particles ignore each other, which makes them the cheapest
-    particle entity, at the cost of any volume or cohesion. Parameters follow
-    ``gs.entities.BaseEntity``, plus the following.
-
-    Parameters
-    ----------
-    material : gs.materials.Liquid, optional
-        The physical properties of the particles, of which only the density applies. Defaults to
-        ``gs.materials.Liquid()``.
-    solver_options : PBDParticleEntitySolverOptions, optional
-        The options of the PBD solver specific to the entity. Defaults to ``PBDParticleEntitySolverOptions()``.
-    """
-
-    solver_options: PBDParticleEntitySolverOptions = Field(default_factory=PBDParticleEntitySolverOptions)
+    def stretch_params(self) -> tuple[float, float]:
+        """The compliance and the relaxation of the stretching constraints, the defaults of its kind filled in."""
+        solver_options = self.solver_options
+        is_sheet = isinstance(self.material, Cloth)
+        compliance = solver_options.stretch_compliance
+        if compliance is None:
+            compliance = 1e-7 if is_sheet else 0.0
+        relaxation = solver_options.stretch_relaxation
+        if relaxation is None:
+            relaxation = 0.3 if is_sheet else 0.1
+        return compliance, relaxation
 
 
 class HybridEntitySolverOptions(_FrozenOptions):

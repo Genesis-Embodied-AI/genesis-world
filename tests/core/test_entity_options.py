@@ -48,10 +48,10 @@ def test_reject_material_for_solver():
     # A material parameter the solver of the entity cannot honor is refused rather than ignored, and the shorthand for
     # rigid entities names the classes admitting a deformable material
     with pytest.raises(gs.GenesisException, match="youngs_modulus"):
-        gs.entities.PBDElastic(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(youngs_modulus=1e6))
+        gs.entities.PBD(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(youngs_modulus=1e6))
     with pytest.raises(gs.GenesisException, match="gs.entities.FEM or gs.entities.MPM"):
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Elastic())
-    with pytest.raises(gs.GenesisException, match="SPH or gs.entities.PBDLiquid or gs.entities.PBDParticle"):
+    with pytest.raises(gs.GenesisException, match=r"gs\.entities\.SPH or gs\.entities\.PBD\("):
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Liquid())
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))

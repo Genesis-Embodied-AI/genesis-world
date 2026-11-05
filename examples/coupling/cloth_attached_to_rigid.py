@@ -56,7 +56,7 @@ def main():
     cloth_pos = (0.25, 0.25, 0.25 + 0.125 + particle_size)
     cloth_scale = 0.5
     cloth = scene.add_entity(
-        options=gs.entities.PBDCloth(
+        options=gs.entities.PBD(
             morph=gs.morphs.Mesh(
                 pos=cloth_pos,
                 file="meshes/cloth.obj",

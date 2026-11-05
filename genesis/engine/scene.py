@@ -453,16 +453,16 @@ class Scene(RBC):
             surface.smooth = False
 
         if surface.double_sided is None:
-            surface.double_sided = isinstance(options, gs.entities.PBDCloth) or isinstance(material, Cloth)
+            surface.double_sided = isinstance(material, Cloth)
 
         # validate and populate default surface.vis_mode considering the kind of entity
         if isinstance(options, (gs.entities.Rigid, gs.entities.Kinematic)):
             vis_modes = ("visual", "collision", "sdf")
-        elif isinstance(options, (gs.entities.PBDLiquid, gs.entities.PBDParticle, gs.entities.SPH)) or (
-            isinstance(options, gs.entities.MPM) and isinstance(material, (Liquid, Sand, Snow))
+        elif isinstance(options, gs.entities.SPH) or (
+            isinstance(options, (gs.entities.MPM, gs.entities.PBD)) and isinstance(material, (Liquid, Sand, Snow))
         ):
             vis_modes = ("particle", "recon")
-        elif isinstance(options, (gs.entities.PBDCloth, gs.entities.PBDElastic, gs.entities.MPM)):
+        elif isinstance(options, (gs.entities.PBD, gs.entities.MPM)):
             vis_modes = ("visual", "particle", "recon")
         elif isinstance(options, gs.entities.FEM):
             vis_modes = ("visual",)
@@ -828,7 +828,7 @@ class Scene(RBC):
     @gs.assert_unbuilt
     def add_emitter(
         self,
-        options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBDLiquid | gs.entities.PBDParticle,
+        options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD,
         max_particles: int = 20000,
     ):
         """
@@ -838,7 +838,7 @@ class Scene(RBC):
         ----------
         options : gs.entities.BaseEntity
             The entity options of the emitted particles, whose class decides the solver simulating them: one of
-            ``gs.entities.MPM``, ``gs.entities.SPH``, ``gs.entities.PBDLiquid`` or ``gs.entities.PBDParticle``. Their
+            ``gs.entities.MPM``, ``gs.entities.SPH`` or ``gs.entities.PBD`` with a Liquid material. Their
             morph is left None, since the emitter sets it. If their surface is None, use
             ``gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))``, and its visualization mode defaults to 'particle'.
         max_particles : int, optional
@@ -855,10 +855,12 @@ class Scene(RBC):
         if self.requires_grad:
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
-        if not isinstance(options, (gs.entities.MPM, gs.entities.SPH, gs.entities.PBDLiquid, gs.entities.PBDParticle)):
+        if not isinstance(options, (gs.entities.MPM, gs.entities.SPH)) and not (
+            isinstance(options, gs.entities.PBD) and isinstance(options.material, Liquid)
+        ):
             gs.raise_exception(
                 f"Non-supported entity options for emitter: gs.entities.{type(options).__name__}. Supported ones are "
-                "gs.entities.MPM, gs.entities.SPH, gs.entities.PBDLiquid and gs.entities.PBDParticle."
+                "gs.entities.MPM, gs.entities.SPH and gs.entities.PBD with a Liquid material."
             )
         if options.morph is not None:
             gs.raise_exception("The emitter sets the morph of its entity options. Leave it None.")

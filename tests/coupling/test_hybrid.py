@@ -229,7 +229,7 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     cloth = scene.add_entity(
-        options=gs.entities.PBDCloth(
+        options=gs.entities.PBD(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 scale=0.6,
@@ -239,6 +239,7 @@ def test_deformable_parallel(show_viewer):
             surface=gs.surfaces.Default(
                 color=(0.2, 0.4, 0.8, 1.0),
             ),
+            material=gs.materials.Cloth(),
         ),
     )
     water = scene.add_entity(
@@ -375,7 +376,7 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
         pytest.param(0, gs.entities.SPH, gs.materials.Liquid, marks=pytest.mark.required),
         (1, gs.entities.SPH, gs.materials.Liquid),
         (2, gs.entities.SPH, gs.materials.Liquid),
-        pytest.param(2, gs.entities.PBDLiquid, gs.materials.Liquid, marks=pytest.mark.required),
+        pytest.param(2, gs.entities.PBD, gs.materials.Liquid, marks=pytest.mark.required),
         pytest.param(2, gs.entities.MPM, gs.materials.Liquid, marks=pytest.mark.required),
         (2, gs.entities.MPM, gs.materials.Sand),
         (2, gs.entities.MPM, gs.materials.Snow),

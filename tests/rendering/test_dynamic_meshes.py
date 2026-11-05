@@ -83,7 +83,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.add_entity(
-        options=gs.entities.PBDCloth(
+        options=gs.entities.PBD(
             morph=gs.morphs.Mesh(
                 file="meshes/cloth.obj",
                 scale=1.0,
@@ -93,6 +93,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
             surface=gs.surfaces.Default(
                 color=(0.2, 0.4, 0.8, 1.0),
             ),
+            material=gs.materials.Cloth(),
         ),
     )
     scene.add_entity(
@@ -206,7 +207,7 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
     # Add PBD cloth with checker texture
     asset_path = get_hf_dataset(pattern="uv_plane.obj")
     scene.add_entity(
-        options=gs.entities.PBDCloth(
+        options=gs.entities.PBD(
             morph=gs.morphs.Mesh(
                 file=f"{asset_path}/uv_plane.obj",
                 scale=0.4,
@@ -218,6 +219,7 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
                     image_path="textures/checker.png",
                 ),
             ),
+            material=gs.materials.Cloth(),
         ),
     )
 
