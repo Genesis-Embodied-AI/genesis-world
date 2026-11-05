@@ -508,8 +508,16 @@ class IPCCoupler(RBC):
                 if self.sim.n_envs > 0:
                     self._ipc_subscenes[env_idx].apply_to(rigid_link_geom)
 
-                # Apply per-entity contact element or no-collision marker
-                if self._coupling_collision_settings.get(entity, {}).get(target_link, True):
+                # Apply the contact element or the no-collision marker, which covers every link merged into the body
+                collision_settings = self._coupling_collision_settings.get(entity, {})
+                is_coup_collision = collision_settings.get(target_link, True)
+                for source_link in source_links:
+                    if collision_settings.get(source_link, True) != is_coup_collision:
+                        gs.raise_exception(
+                            f"The IPC coupler merges link '{source_link.name}' of entity '{entity.name}' into link "
+                            f"'{target_link.name}' through a fixed joint, so both take the same 'enable_coup_collision'."
+                        )
+                if is_coup_collision:
                     if entity not in self._ipc_abd_contacts:
                         abd_contact = self._ipc_contact_tabular.create(f"abd_contact_{i_e}")
                         self._ipc_abd_contacts[entity] = abd_contact

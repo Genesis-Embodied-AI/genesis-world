@@ -405,3 +405,17 @@ def test_link_coup_collision():
     )
     with pytest.raises(gs.GenesisException, match="density"):
         scene_with_link_density.build()
+
+    # IPC merges a link into the affine body of its parent, whose geometry collides or not as a whole
+    scene_with_link_collision = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(two_way_coupling=True))
+    scene_with_link_collision.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda_non_overlap.xml"),
+            solver_options=gs.options.RigidEntitySolverOptions(coup_type="two_way_soft_constraint"),
+            links={
+                "hand": gs.options.Link(solver_options=gs.options.RigidLinkSolverOptions(enable_coup_collision=False))
+            },
+        )
+    )
+    with pytest.raises(gs.GenesisException, match="enable_coup_collision"):
+        scene_with_link_collision.build()
