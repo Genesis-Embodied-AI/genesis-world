@@ -5,7 +5,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.mpm_adjoint_func import return_map_vjp
-from genesis.engine.solvers.mpm_data import MpmMaterialTable, MpmParams, get_mpm_material_table
+from genesis.engine.solvers.mpm_data import MpmMaterialTable, MpmParams
 from genesis.engine.solvers.mpm_func import (
     EXTENSION_SIGMA_MIN,
     EXTENSION_STIFFNESS,
@@ -399,7 +399,10 @@ def test_fibre_terms():
     stiffness, h = 2.0, 1e-7
     columns = np.zeros(N_MATERIAL_PARAMS)
     columns[[PARAM_MU, PARAM_LAM, PARAM_FIBRE]] = 3.0, 5.0, stiffness
-    materials = get_mpm_material_table(columns, family=np.array([0]), plastic=np.array([0]))
+    materials = MpmMaterialTable(sizes=dict(materials=1, material_params=N_MATERIAL_PARAMS))
+    materials.material_table.from_numpy(columns)
+    materials.mat_family.from_numpy(np.array([0], dtype=gs.np_int))
+    materials.mat_plastic.from_numpy(np.array([0], dtype=gs.np_int))
     params = MpmParams(
         n_envs=1,
         n_particles=1,
@@ -687,7 +690,10 @@ def test_return_map_vjp(kind, sigma, Jp):
     columns = np.zeros(N_MATERIAL_PARAMS)
     columns[[PARAM_MU, PARAM_LAM]] = 3.0, 5.0
     columns[[PARAM_YIELD_LOWER, PARAM_YIELD_HIGHER, PARAM_YIELD_STRESS, PARAM_SAND_ALPHA]] = 0.1, 0.05, 0.5, 0.3
-    materials = get_mpm_material_table(columns, family=np.array([0]), plastic=np.array([kind]))
+    materials = MpmMaterialTable(sizes=dict(materials=1, material_params=N_MATERIAL_PARAMS))
+    materials.material_table.from_numpy(columns)
+    materials.mat_family.from_numpy(np.array([0], dtype=gs.np_int))
+    materials.mat_plastic.from_numpy(np.array([kind], dtype=gs.np_int))
     params = MpmParams(
         n_envs=1,
         n_particles=1,

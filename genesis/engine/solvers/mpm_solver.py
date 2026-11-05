@@ -26,7 +26,7 @@ from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
 from genesis.utils.array_class import ErrorCode, LinksState
-from genesis.utils.data import ArrayItem, DataKind, V, iter_data_oriented
+from genesis.utils.data import DataKind, V, iter_data, iter_data_oriented
 from genesis.utils.misc import (
     DeprecationError,
     broadcast_tensor,
@@ -50,10 +50,6 @@ from .mpm_data import (
     MpmParticles,
     MpmParticlesInfo,
     MpmParticlesNG,
-    get_mpm_material_table,
-    get_mpm_particles,
-    get_mpm_particles_info,
-    get_mpm_particles_ng,
     initial_capacities,
     triplet_capacity,
 )
@@ -260,9 +256,10 @@ class MPMSolver(ParticleSolver):
     def init_particle_fields(self):
         # Particle state of the frames, its gradient-free part and the static info, as dynamic tensors in the default
         # array mode, so that a scene with another particle count reuses the compiled kernels
-        self.particles = get_mpm_particles(self.n_frames, self._n_particles, self._B, self._requires_grad)
-        self.particles_ng = get_mpm_particles_ng(self.n_frames, self._n_particles, self._B)
-        self.particles_info = get_mpm_particles_info(self._n_particles)
+        sizes_state = dict(frames=self.n_frames, particles=self._n_particles, envs=self._B)
+        self.particles = MpmParticles(sizes=sizes_state, requires_grad=self._requires_grad)
+        self.particles_ng = MpmParticlesNG(sizes=sizes_state)
+        self.particles_info = MpmParticlesInfo(sizes=dict(particles=self._n_particles))
 
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.errno = V(dtype=gs.qd_int, shape=(self._B,))
@@ -322,7 +319,12 @@ class MPMSolver(ParticleSolver):
             wall_upper=self.boundary.upper,
             liquid_band=self._liquid_band(),
         )
-        self._mpm_materials = get_mpm_material_table(table.reshape(-1), family, plastic)
+        self.mpm_materials = MpmMaterialTable(
+            sizes=dict(materials=n_materials, material_params=mpm_func.N_MATERIAL_PARAMS)
+        )
+        self.mpm_materials.material_table.from_numpy(table.reshape(-1))
+        self.mpm_materials.mat_family.from_numpy(family)
+        self.mpm_materials.mat_plastic.from_numpy(plastic)
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks, self.errno)
         self._mpm_newton = MpmNewton(n_sort, max_blocks * BLOCK_CELLS)
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
@@ -336,7 +338,7 @@ class MPMSolver(ParticleSolver):
         participant = MpmNewtonParticipant(
             self.particles,
             self.particles_info,
-            self._mpm_materials,
+            self.mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
@@ -617,7 +619,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_newton,
             self._mpm_linear,
             self.particles_info,
-            self._mpm_materials,
+            self.mpm_materials,
             self._mpm_params,
             is_exact,
         )
@@ -680,7 +682,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_grid,
             self._mpm_newton,
             self.particles_info,
-            self._mpm_materials,
+            self.mpm_materials,
             self._mpm_params,
             control.has_failed_non_finite,
         )
@@ -698,7 +700,7 @@ class MPMSolver(ParticleSolver):
         `solve` at the converged u*, then the pullback and the reverse of the particle-to-grid transfer into the adjoint
         of frame `f`."""
         grid, newton, linear = self._mpm_grid, self._mpm_newton, self._mpm_linear
-        kernel_adjoint_g2p(f, self.particles, grid, newton, self.particles_info, self._mpm_materials, self._mpm_params)
+        kernel_adjoint_g2p(f, self.particles, grid, newton, self.particles_info, self.mpm_materials, self._mpm_params)
         solve()
         if self._constraints_initialized:
             kernel_constraint_adjoint(
@@ -721,7 +723,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_newton,
             self._mpm_linear,
             self.particles_info,
-            self._mpm_materials,
+            self.mpm_materials,
             self._mpm_force_fields,
             self._mpm_params,
         )
@@ -757,21 +759,13 @@ class MPMSolver(ParticleSolver):
         """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds, then the particle and
         material parameters, and the grid, Newton and linear-system arrays of the implicit step, which a step rebuilds
         before reading them (see 'Solver.data')."""
-        for name, field in (
-            ("particles.pos", self.particles.pos),
-            ("particles.vel", self.particles.vel),
-            ("particles.C", self.particles.C),
-            ("particles.F", self.particles.F),
-            ("particles.Jp", self.particles.Jp),
-            ("particles.actu", self.particles.actu),
-            ("particles_ng.active", self.particles_ng.active),
-        ):
-            yield ArrayItem(name, DataKind.STATE, field)
+        yield from iter_data(self, "particles")
+        yield from iter_data(self, "particles_ng")
         if not self.is_built or not self.is_active:
             return
-        yield from iter_data_oriented("particles_info", self.particles_info, DataKind.INFO)
+        yield from iter_data(self, "particles_info")
         yield from iter_data_oriented("mpm_params", self._mpm_params, DataKind.CONSTANT)
-        yield from iter_data_oriented("mpm_materials", self._mpm_materials, DataKind.CONSTANT)
+        yield from iter_data(self, "mpm_materials")
         for name in ("mpm_grid", "mpm_newton", "mpm_linear"):
             yield from iter_data_oriented(name, getattr(self, f"_{name}"), DataKind.SCRATCH)
 

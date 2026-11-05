@@ -6,9 +6,6 @@ system the Newton solve assembles. The grid, Newton and linear-system roots are 
 growing a capacity replaces an array on an existing path while every kernel keeps the same object.
 """
 
-import dataclasses
-from typing import ClassVar
-
 import numpy as np
 
 import quadrants as qd
@@ -20,7 +17,7 @@ from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
 from genesis.engine.numerics.linear_pcg import PCGWorkspace
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
-from genesis.utils.data import DataKind, V
+from genesis.utils.data import ENVS, Data, DataKind, Size, V, field
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -43,6 +40,13 @@ BRICK_INVERT_WARPS = 4
 WALL_ROWS = 3
 PYRAMID_ROWS = 4
 CONTACT_ROWS = WALL_ROWS + PYRAMID_ROWS
+
+# Sizes of the particle data: the frames of the substep window and the particles
+FRAMES = Size("frames")
+PARTICLES = Size("particles")
+# Sizes of the material table: the materials and the parameters of each
+MATERIALS = Size("materials")
+MATERIAL_PARAMS = Size("material_params")
 
 
 def _scalar(dtype, value=0):
@@ -93,94 +97,43 @@ class MpmParams:
         self.wall_upper.from_numpy(wall_upper)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MpmParticles:
-    """Particle state of every frame of the substep window, shape (frames, n_particles, n_envs)."""
+class MpmParticles(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):
+    """Particle state of every frame of the substep window."""
 
-    kind: ClassVar[DataKind] = DataKind.STATE
-
-    pos: qd.Tensor
-    vel: qd.Tensor
-    C: qd.Tensor
-    F: qd.Tensor
-    actu: qd.Tensor
-    Jp: qd.Tensor
+    pos: qd.Tensor = field((float, 3), grad=True)
+    vel: qd.Tensor = field((float, 3), grad=True)
+    C: qd.Tensor = field((float, (3, 3)), grad=True)
+    F: qd.Tensor = field((float, (3, 3)), grad=True)
+    actu: qd.Tensor = field(float, grad=True)
+    Jp: qd.Tensor = field(float, grad=True)
 
 
-def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int, requires_grad: bool = False) -> MpmParticles:
-    shape = (n_frames, n_particles, n_envs)
-    return MpmParticles(
-        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        C=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        F=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        actu=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        Jp=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-    )
+class MpmParticlesNG(Data, kind=DataKind.STATE, shape=(FRAMES, PARTICLES, ENVS)):
+    """Particle state without gradient."""
+
+    active: qd.Tensor = field(bool)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MpmParticlesNG:
-    """Particle state without gradient, shape (frames, n_particles, n_envs)."""
+class MpmParticlesInfo(Data, kind=DataKind.INFO, shape=(PARTICLES,)):
+    """Static per-particle data."""
 
-    kind: ClassVar[DataKind] = DataKind.STATE
-
-    active: qd.Tensor
-
-
-def get_mpm_particles_ng(n_frames: int, n_particles: int, n_envs: int) -> MpmParticlesNG:
-    return MpmParticlesNG(active=V(dtype=gs.qd_bool, shape=(n_frames, n_particles, n_envs)))
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MpmParticlesInfo:
-    """Static per-particle data, shape (n_particles,)."""
-
-    kind: ClassVar[DataKind] = DataKind.INFO
-
-    material_idx: qd.Tensor
-    mass: qd.Tensor
-    default_Jp: qd.Tensor
-    free: qd.Tensor
-    muscle_group: qd.Tensor
-    muscle_direction: qd.Tensor
+    material_idx: qd.Tensor = field(int)
+    mass: qd.Tensor = field(float)
+    default_Jp: qd.Tensor = field(float)
+    free: qd.Tensor = field(bool)
+    muscle_group: qd.Tensor = field(int)
+    muscle_direction: qd.Tensor = field((float, 3))
     # Inverse weight matrix of the particle in its contact rows, a model constant (see func_contact_invweight)
-    contact_invweight: qd.Tensor
+    contact_invweight: qd.Tensor = field((float, (3, 3)))
 
 
-def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
-    shape = (n_particles,)
-    return MpmParticlesInfo(
-        material_idx=V(dtype=gs.qd_int, shape=shape),
-        mass=V(dtype=gs.qd_float, shape=shape),
-        default_Jp=V(dtype=gs.qd_float, shape=shape),
-        free=V(dtype=gs.qd_bool, shape=shape),
-        muscle_group=V(dtype=gs.qd_int, shape=shape),
-        muscle_direction=V(dtype=gs.qd_vec3, shape=shape),
-        contact_invweight=V(dtype=gs.qd_mat3, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MpmMaterialTable:
+class MpmMaterialTable(Data, kind=DataKind.CONSTANT):
     """Parameter-major material table, `material_table[param * n_materials + slot]`, and the energy family and the
     return map of each slot."""
 
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    material_table: qd.Tensor
-    mat_family: qd.Tensor
-    mat_plastic: qd.Tensor
-
-
-def get_mpm_material_table(table: np.ndarray, family: np.ndarray, plastic: np.ndarray) -> MpmMaterialTable:
-    material_table = V(dtype=gs.qd_float, shape=(max(table.size, 1),))
-    mat_family = V(dtype=gs.qd_int, shape=(max(family.size, 1),))
-    mat_plastic = V(dtype=gs.qd_int, shape=(max(plastic.size, 1),))
-    material_table.from_numpy(np.resize(table.astype(gs.np_float), max(table.size, 1)))
-    mat_family.from_numpy(np.resize(family.astype(gs.np_int), max(family.size, 1)))
-    mat_plastic.from_numpy(np.resize(plastic.astype(gs.np_int), max(plastic.size, 1)))
-    return MpmMaterialTable(material_table=material_table, mat_family=mat_family, mat_plastic=mat_plastic)
+    material_table: qd.Tensor = field(float, shape=(MATERIAL_PARAMS * MATERIALS,))
+    mat_family: qd.Tensor = field(int, shape=(MATERIALS,))
+    mat_plastic: qd.Tensor = field(int, shape=(MATERIALS,))
 
 
 def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:
