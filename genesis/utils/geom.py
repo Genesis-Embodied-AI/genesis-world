@@ -2261,8 +2261,6 @@ def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
 def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
     """
     Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a quaternion (q_w, q_x, q_y, q_z).
-
-    This method is (surprisingly) slower than `z_up_to_R`, w/ and w/o chaining `transform_by_(quat|R)`.
     """
     if out is None:
         out_ = np.empty((*v_a.shape[:-1], 4), dtype=v_a.dtype)

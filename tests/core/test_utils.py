@@ -400,6 +400,7 @@ def test_geom_tensor_identity(batch_shape):
     out = np.full((len(directions), 4), np.nan, dtype=gs.np_float)
     assert gu.z_to_quat(directions, out=out) is out
     assert_allclose(out, quat_true, atol=tol)
+    assert_allclose(gu.z_to_R(directions), gu.quat_to_R(out), atol=tol)
 
     for value in (np.nan, np.inf, -np.inf):
         directions = np.array(
