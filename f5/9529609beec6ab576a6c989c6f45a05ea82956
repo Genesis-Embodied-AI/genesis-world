@@ -142,6 +142,7 @@ tests/rendering/test_interactive_viewer.py
   s_91e0422623a7c7::t_a74ee3e9b56fc4 475,496,508
 tests/rendering/test_offscreen.py
   s_91e0422623a7c7::t_2e8fa96fa288f5 380-381,1473
+  s_c62ec9da443b15::t_13d37d9b166ff0 206-335
 tests/rigid/test_api.py
   s_91e0422623a7c7::t_d8bb244171345a 1384-1387
   s_91e0422623a7c7::t_a74ee3e9b56fc4 1383
@@ -169,6 +170,7 @@ tests/rigid/test_kinematics.py
 tests/rigid/test_serialization.py
   s_91e0422623a7c7::t_f97c25bf7c50ae 73-78,107,209-212
   s_91e0422623a7c7::t_a74ee3e9b56fc4 71,208
+  s_c62ec9da443b15::t_13d37d9b166ff0 156-157,170-176,362
 tests/rigid/test_sparse.py
   s_91e0422623a7c7::t_654617aa5f802e 52
 tests/sensors/test_camera.py
@@ -181,6 +183,40 @@ tests/sensors/test_raycaster.py
   s_91e0422623a7c7::t_a74ee3e9b56fc4 147,326,546,690,704,802
 tests/sensors/test_tactile.py
   s_91e0422623a7c7::t_5fa92166827422 1735
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 30-31,1097-1118
+genesis/options/textures.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 8,12-18,291-360
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 19-20,728-734
+genesis/ext/pyrender/texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 167-193,199
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 24-25,51,270,926-951,1052-1057,2122-2131,2137-2140
+genesis/ext/pyrender/scene.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 85-86
+genesis/options/surfaces.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 15,142-150,265-268
+genesis/ext/pyrender/renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 150-152
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 182,323-328,691
+genesis/vis/raytracer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 215-216
+genesis/vis/rasterizer_context.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 19,31-34,39,43-55,219-220,322,350,352-353,355-356,364,378,381-382,397-400,402,423,429-443,614-621,633-636,648-672,768,771-772,1386-1405
+genesis/vis/batch_renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 294-295
+genesis/engine/dynamic_texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 1-131
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 309-313,317,319-322,328-330,334,341-342
+genesis/__init__.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 498
+genesis/constants.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 218-223
+examples/rendering/dynamic_texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 1-74
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -192,6 +228,14 @@ tests/sensors/test_tactile.py
       "agent_id": {
         "tool": "claude",
         "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
         "model": "claude-opus-5-5"
       },
       "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
