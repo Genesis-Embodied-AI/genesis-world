@@ -36,6 +36,50 @@ def mesh_path(mesh_file):
 
 
 @pytest.fixture
+def three_objects_obj(asset_tmp_path):
+    # Three objects, of which two share a material
+    (asset_tmp_path / "three_objects.mtl").write_text("newmtl plastic\nKd 0.5 0.5 0.5\nnewmtl lcd\nKd 0.0 0.0 0.0\n")
+    lines = ["mtllib three_objects.mtl"]
+    for i, (name, material) in enumerate((("body", "plastic"), ("knob", "plastic"), ("screen", "lcd"))):
+        lines += [f"o {name}", f"usemtl {material}"]
+        lines += [f"v {0.1 * i + dx} {dy} 0.0" for dx, dy in ((0.0, 0.0), (0.05, 0.0), (0.05, 0.05), (0.0, 0.05))]
+        lines += [f"f {4 * i + 1} {4 * i + 2} {4 * i + 3}", f"f {4 * i + 1} {4 * i + 3} {4 * i + 4}"]
+    obj_path = asset_tmp_path / "three_objects.obj"
+    obj_path.write_text("\n".join(lines) + "\n")
+    return obj_path
+
+
+@pytest.fixture
+def three_objects_urdf(three_objects_obj):
+    robot = ET.Element("robot", name="panel")
+    link = ET.SubElement(robot, "link", name="panel")
+    visual = ET.SubElement(link, "visual")
+    ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(three_objects_obj))
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.25 0.05 0.01")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture
+def lamp_urdf(asset_tmp_path):
+    # A visual of a single object, and a visual whose asset has no material, which the URDF material names
+    bulb_path = asset_tmp_path / "bulb.obj"
+    bulb_path.write_text("o bulb\nv 0.0 0.0 0.0\nv 0.05 0.0 0.0\nv 0.0 0.05 0.0\nf 1 2 3\n")
+    shade_path = asset_tmp_path / "shade.glb"
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(shade_path)
+    robot = ET.Element("robot", name="lamp")
+    link = ET.SubElement(robot, "link", name="lamp")
+    for mesh_path in (bulb_path, shade_path):
+        visual = ET.SubElement(link, "visual")
+        ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(mesh_path))
+    material = ET.SubElement(visual, "material", name="steel")
+    ET.SubElement(material, "color", rgba="0.5 0.5 0.5 1.0")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.05 0.05 0.05")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture
 def mesh_urdf(mesh_path):
     """URDF content wrapping the mesh as the visual geometry of a one-link robot."""
     robot = ET.Element("robot", name="model")
