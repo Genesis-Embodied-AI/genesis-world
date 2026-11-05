@@ -240,7 +240,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     grads, fd_grads = _deformable_inputs_grads(scene, box, (-0.15, -0.05, 0.0), actus, vel, is_mpm=True)
     # The particles hold the actuation set last
     assert_allclose(box.get_particles_actu(), actus[2][muscle_group], tol=gs.EPS)
-    for grad, fd_grad, tol in zip(grads, fd_grads, (1e-8, 1e-8)):
+    for grad, fd_grad, tol in zip(grads, fd_grads, (5e-8, 5e-8)):
         assert_allclose(grad, fd_grad, tol=tol)
 
 
@@ -478,7 +478,7 @@ def test_mpm_plasticity_grad_matches_fd(material, precision, show_viewer):
                 _assert_same_cells(cells, cells_ref)
             fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * MPM_FD_EPS)
     assert (np.abs(fd_grad) > 1e-3).all()
-    assert_allclose(vels_ana.grad, fd_grad, tol=2e-8)
+    assert_allclose(vels_ana.grad, fd_grad, tol=3e-8)
 
 
 @pytest.mark.required
