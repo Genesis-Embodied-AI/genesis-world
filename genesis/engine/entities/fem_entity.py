@@ -455,7 +455,7 @@ class FEMEntity(Entity):
         else:
             elems_np = self.elems.astype(gs.np_int, copy=False)
             material_params = self._options.material_params
-            mat_mu, mat_lam = eu.lame_parameters(material_params.youngs_modulus, material_params.poisson_ratio)
+            mat_mu, mat_lam = eu.compute_lame_parameters(material_params.youngs_modulus, material_params.poisson_ratio)
             self._solver.add_elements(
                 f=self._sim.cur_substep_local,
                 mat_idx=self._model_idx,

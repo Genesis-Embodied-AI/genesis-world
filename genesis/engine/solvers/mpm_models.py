@@ -8,7 +8,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.options.materials import Elastic, ElastoPlastic, Liquid, Muscle, Sand, Snow
-from genesis.utils.element import lame_parameters
+from genesis.utils.element import compute_lame_parameters
 
 
 @qd.data_oriented
@@ -20,7 +20,7 @@ class MPMModel:
     """
 
     def __init__(self, youngs_modulus: float, poisson_ratio: float) -> None:
-        self.mu, self.lam = lame_parameters(youngs_modulus, poisson_ratio)
+        self.mu, self.lam = compute_lame_parameters(youngs_modulus, poisson_ratio)
         self.needs_svd = True
         self.default_Jp = 1.0
 
