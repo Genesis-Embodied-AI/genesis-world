@@ -14,6 +14,7 @@ its velocities from them and runs the rest of its coupling after the solve (see 
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import StaticConfig
 
 from .newton_solver import NewtonHost, kernel_assemble_participant
 
@@ -25,7 +26,7 @@ from .newton_solver import NewtonHost, kernel_assemble_participant
 def func_fem_factor(fem: qd.template()):
     """FEM's preconditioner, the inverse of every vertex's diagonal block, once the contact rows added theirs."""
     qd.loop_config(name="mpm_fem_factor")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].prec = fem.pcg_state_v[i_b, i_v].diag3x3.inverse()
 
 
@@ -36,7 +37,7 @@ def func_fem_pcg_init(dt: float, fem: qd.template(), pcg_scalars: qd.template(),
 
     With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
     qd.loop_config(name="mpm_fem_pcg_init")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].r = -dt * dt * fem.elements_v_energy[i_b, i_v].force
         is_kept = False
         if qd.static(is_adjoint):
@@ -53,9 +54,9 @@ def func_fem_precondition(dt: float, fem: qd.template()):
     A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contact rows leave it in
     place."""
     qd.loop_config(name="mpm_fem_precondition")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         z = (fem.pcg_state_v[i_b, i_v].prec @ fem.pcg_state_v[i_b, i_v].r) / (dt * dt)
-        if qd.static(fem._enable_vertex_constraints):
+        if qd.static(fem.config.has_vertex_constraints):
             if fem.vertex_constraints.is_constrained[i_v, i_b]:
                 z = qd.Vector.zero(gs.qd_float, 3)
         fem.pcg_state_v[i_b, i_v].z = z
@@ -65,7 +66,7 @@ def func_fem_precondition(dt: float, fem: qd.template()):
 def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
     """Set the first search direction p = z over the FEM vertices, and add r . z to rz."""
     qd.loop_config(name="mpm_fem_pcg_init_direction")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].p = fem.pcg_state_v[i_b, i_v].z
         qd.atomic_add(pcg_scalars.rz[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
@@ -73,9 +74,9 @@ def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
 @qd.func(requires_top_level=True)
 def func_fem_matvec(dt: float, fem: qd.template()):
     """Ap = dt^2 H p over the FEM vertices with FEM's own operator, before the FEM rows add their term."""
-    fem.compute_Ap()
+    fem.solver.compute_Ap()
     qd.loop_config(name="mpm_fem_matvec_scale")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].Ap = dt * dt * fem.pcg_state_v[i_b, i_v].Ap
 
 
@@ -83,7 +84,7 @@ def func_fem_matvec(dt: float, fem: qd.template()):
 def func_fem_matvec_dot(fem: qd.template(), pcg_scalars: qd.template()):
     """Add p . Ap over the FEM vertices to p . Ap, once Ap holds the whole joint operator."""
     qd.loop_config(name="mpm_fem_matvec_dot")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         if pcg_scalars.is_converged[i_b] == 0:
             qd.atomic_add(pcg_scalars.p_dot_ap[i_b], fem.pcg_state_v[i_b, i_v].p.dot(fem.pcg_state_v[i_b, i_v].Ap))
 
@@ -92,7 +93,7 @@ def func_fem_matvec_dot(fem: qd.template(), pcg_scalars: qd.template()):
 def func_fem_pcg_update_xr(fem: qd.template(), pcg_scalars: qd.template()):
     """Update the solution and the residual over the FEM vertices, x += alpha p and r -= alpha Ap."""
     qd.loop_config(name="mpm_fem_pcg_update_xr")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         if pcg_scalars.is_converged[i_b] == 0:
             alpha = pcg_scalars.alpha[i_b]
             fem.pcg_state_v[i_b, i_v].x = fem.pcg_state_v[i_b, i_v].x + alpha * fem.pcg_state_v[i_b, i_v].p
@@ -103,7 +104,7 @@ def func_fem_pcg_update_xr(fem: qd.template(), pcg_scalars: qd.template()):
 def func_fem_pcg_dot_rz(fem: qd.template(), pcg_scalars: qd.template()):
     """Add r . z over the FEM vertices to rz_new."""
     qd.loop_config(name="mpm_fem_pcg_dot_rz")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         if pcg_scalars.is_converged[i_b] == 0:
             qd.atomic_add(pcg_scalars.rz_new[i_b], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
@@ -112,7 +113,7 @@ def func_fem_pcg_dot_rz(fem: qd.template(), pcg_scalars: qd.template()):
 def func_fem_pcg_direction(fem: qd.template(), pcg_scalars: qd.template()):
     """Update the search direction p = z + beta p over the FEM vertices, and clear Ap."""
     qd.loop_config(name="mpm_fem_pcg_direction")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].Ap = qd.Vector.zero(gs.qd_float, 3)
         if pcg_scalars.is_converged[i_b] == 0:
             beta = pcg_scalars.beta[i_b]
@@ -123,7 +124,7 @@ def func_fem_pcg_direction(fem: qd.template(), pcg_scalars: qd.template()):
 def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template()):
     """The line-search start point, and the largest component of the step -x into the Newton measure."""
     qd.loop_config(name="mpm_fem_start_line_search")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.linesearch_state_v[i_b, i_v].x_prev = fem.elements_v[f + 1, i_v, i_b].pos
         step = fem.pcg_state_v[i_b, i_v].x
         qd.atomic_max(control.max_disp[i_b], qd.max(qd.abs(step[0]), qd.abs(step[1]), qd.abs(step[2])))
@@ -132,7 +133,7 @@ def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template(
 @qd.func(requires_top_level=True)
 def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_fem_step_forward")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.elements_v[f + 1, i_v, i_b].pos = (
             fem.linesearch_state_v[i_b, i_v].x_prev - control.alpha[i_b] * fem.pcg_state_v[i_b, i_v].x
         )
@@ -145,21 +146,21 @@ def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(
     The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
     the elements, at the positions of frame f + 1."""
     dt_sq = dt * dt
-    damping_alpha_dt = fem._damping_alpha * fem._substep_dt
+    damping_alpha_dt = fem.damping_alpha_dt
     qd.loop_config(name="mpm_fem_energy_vertices")
-    for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
+    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         diff = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v_energy[i_b, i_v].inertia
         energy = 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-        if qd.static(fem._damping_alpha > 0.0):
+        if qd.static(fem.config.has_damping):
             step = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v[f, i_v, i_b].pos
             energy += 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * step.dot(step) * damping_alpha_dt
         if is_trial:
             qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
         else:
             qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
-    fem._func_compute_ele_energy(f)
+    fem.solver.func_compute_ele_energy(f)
     qd.loop_config(name="mpm_fem_energy_elements")
-    for i_b, i_e in qd.ndrange(fem._B, fem.n_elements):
+    for i_b, i_e in qd.ndrange(fem.n_envs, fem.n_elements):
         energy = fem.elements_el_energy[i_b, i_e].energy * fem.elements_i[i_e].V
         if is_trial:
             qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
@@ -170,102 +171,142 @@ def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(
 # ============================================ Layer 2: participant =============================================
 
 
+class FemNewtonConfig(StaticConfig):
+    """Compile-time switches of FEM's stages in the joint solve: the code paths a scene takes, never its sizes."""
+
+    # Some vertices are constrained to a target, which the preconditioner leaves in place
+    has_vertex_constraints: bool
+    # The implicit solver damps the vertex velocity
+    has_damping: bool
+
+
 @qd.data_oriented
 class FemNewtonParticipant:
     """Device stages of the FEM vertex positions in the joint solve.
 
-    It is the one place that selects the FEM arrays the couplings read. The arrays are properties of the solver the
-    participant holds, so that the walk over the data of the NewtonSolver (see iter_data_oriented) stops at the solver,
-    which owns them."""
+    It is the one place that selects the FEM arrays and scalars the stages and the couplings read, and `solver` gives
+    the stages access to the functions of FEM's own implicit solver. The step sizes are plain floats, compiled into the
+    stages as constants. The arrays are properties of the solver, so that
+    the walk over the data of the NewtonSolver (see iter_data_oriented) stops at the solver, which owns them."""
 
-    def __init__(self, fem):
-        self.fem = fem
+    def __init__(self, fem, n_envs: int):
+        self.solver = fem
+        self.n_envs = n_envs
+        self.n_vertices = fem.n_vertices
+        self.n_elements = fem.n_elements
+        self.n_surfaces = fem.n_surfaces
+        self.config = FemNewtonConfig(
+            has_vertex_constraints=fem._enable_vertex_constraints, has_damping=fem._damping_alpha > 0.0
+        )
+        self.substep_dt = fem.substep_dt
+        self.damping_alpha_dt = fem._damping_alpha * fem._substep_dt
 
     @property
-    def n_surfaces(self):
-        return self.fem.n_surfaces
+    def vertex_constraints(self):
+        """The constrained vertices, which exist only when the solver enables vertex constraints."""
+        return self.solver.vertex_constraints
 
     @property
     def surface(self):
-        return self.fem.surface
+        return self.solver.surface
+
+    @property
+    def batch_active(self):
+        return self.solver.batch_active
+
+    @property
+    def batch_pcg_active(self):
+        return self.solver.batch_pcg_active
+
+    @property
+    def batch_linesearch_active(self):
+        return self.solver.batch_linesearch_active
 
     @property
     def elements_v(self):
-        return self.fem.elements_v
+        return self.solver.elements_v
 
     @property
     def elements_i(self):
-        return self.fem.elements_i
+        return self.solver.elements_i
 
     @property
     def elements_v_info(self):
-        return self.fem.elements_v_info
+        return self.solver.elements_v_info
 
     @property
     def elements_v_energy(self):
-        return self.fem.elements_v_energy
+        return self.solver.elements_v_energy
+
+    @property
+    def elements_el_energy(self):
+        return self.solver.elements_el_energy
 
     @property
     def pcg_state_v(self):
-        return self.fem.pcg_state_v
+        return self.solver.pcg_state_v
+
+    @property
+    def linesearch_state_v(self):
+        return self.solver.linesearch_state_v
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int):
-        self.fem._func_compute_ele_hessian_gradient(f)
-        self.fem._func_accumulate_vertex_force_preconditioner(f)
+        self.solver.func_compute_ele_hessian_gradient(f)
+        self.solver.func_accumulate_vertex_force_preconditioner(f)
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
-        func_fem_factor(self.fem)
+        func_fem_factor(self)
 
     @qd.func(requires_top_level=True)
     def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
-        func_fem_pcg_init(self.fem.substep_dt, self.fem, pcg_scalars, is_adjoint)
+        func_fem_pcg_init(self.substep_dt, self, pcg_scalars, is_adjoint)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
-        func_fem_precondition(self.fem.substep_dt, self.fem)
+        func_fem_precondition(self.substep_dt, self)
 
     @qd.func(requires_top_level=True)
     def func_pcg_init_direction(self, pcg_scalars: qd.template()):
-        func_fem_pcg_init_direction(self.fem, pcg_scalars)
+        func_fem_pcg_init_direction(self, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_matvec(self, pcg_scalars: qd.template()):
-        func_fem_matvec(self.fem.substep_dt, self.fem)
+        func_fem_matvec(self.substep_dt, self)
 
     @qd.func(requires_top_level=True)
     def func_matvec_dot(self, pcg_scalars: qd.template()):
-        func_fem_matvec_dot(self.fem, pcg_scalars)
+        func_fem_matvec_dot(self, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_pcg_update_xr(self, pcg_scalars: qd.template()):
-        func_fem_pcg_update_xr(self.fem, pcg_scalars)
+        func_fem_pcg_update_xr(self, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_pcg_dot_rz(self, pcg_scalars: qd.template()):
-        func_fem_pcg_dot_rz(self.fem, pcg_scalars)
+        func_fem_pcg_dot_rz(self, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_pcg_direction(self, pcg_scalars: qd.template()):
-        func_fem_pcg_direction(self.fem, pcg_scalars)
+        func_fem_pcg_direction(self, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
-        func_fem_start_line_search(f, self.fem, control)
+        func_fem_start_line_search(f, self, control)
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
-        func_fem_step_forward(f, self.fem, control)
+        func_fem_step_forward(f, self, control)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
-        func_fem_energy(f, self.fem.substep_dt, self.fem, control, is_trial)
+        func_fem_energy(f, self.substep_dt, self, control, is_trial)
 
 
 @qd.kernel
 def kernel_fem_begin(fem: qd.template()):
-    for i_b in range(fem._B):
+    for i_b in range(fem.n_envs):
         fem.batch_active[i_b] = True
         fem.batch_pcg_active[i_b] = True
         fem.batch_linesearch_active[i_b] = True
@@ -273,7 +314,7 @@ def kernel_fem_begin(fem: qd.template()):
 
 @qd.kernel
 def kernel_fem_freeze(f: int, fem: qd.template(), control: qd.template()):
-    for i_v, i_b in qd.ndrange(fem.n_vertices, fem._B):
+    for i_v, i_b in qd.ndrange(fem.n_vertices, fem.n_envs):
         if control.has_failed_non_finite[i_b] != 0:
             fem.elements_v[f + 1, i_v, i_b].pos = fem.elements_v[f, i_v, i_b].pos
             fem.elements_v[f + 1, i_v, i_b].vel = fem.elements_v[f, i_v, i_b].vel
@@ -293,14 +334,14 @@ class FemNewtonHost(NewtonHost):
     def newton_prepare(self, f):
         self._fem_solver.precompute_material_data(f)
         self._fem_solver.init_pos_and_inertia(f, self._fem_solver.sim.rigid_solver.dyn_state.links)
-        kernel_fem_begin(self._fem_solver)
+        kernel_fem_begin(self._device)
 
     def newton_assemble(self, f, is_exact=False):
         kernel_assemble_participant(f, self._device)
 
     def newton_finish(self, f, control):
         self._fem_solver.setup_pos_vel(f)
-        kernel_fem_freeze(f, self._fem_solver, control)
+        kernel_fem_freeze(f, self._device, control)
 
     def newton_after(self, f):
         self._fem_solver.sim.coupler.couple_fem(f)
@@ -309,4 +350,4 @@ class FemNewtonHost(NewtonHost):
         # FEM takes the vertex positions of the substep from the velocities here, in place of its post-coupling phase,
         # so that the mask of the solve still holds
         self._fem_solver.compute_pos(f)
-        kernel_fem_freeze(f, self._fem_solver, control)
+        kernel_fem_freeze(f, self._device, control)

@@ -546,10 +546,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def compute_ele_hessian_gradient(self, f: qd.i32):
-        self._func_compute_ele_hessian_gradient(f)
+        self.func_compute_ele_hessian_gradient(f)
 
     @qd.func
-    def _func_compute_ele_hessian_gradient(self, f: qd.i32):
+    def func_compute_ele_hessian_gradient(self, f: int):
         """Energy density, its gradient and its Hessian of every element at the end-of-substep positions.
 
         The positions are those of frame f + 1."""
@@ -607,10 +607,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return S
 
     @qd.func
-    def _func_compute_ele_energy(self, f: qd.i32):
-        """
-        Compute the energy for each element in the batch. Should only be used in linesearch.
-        """
+    def func_compute_ele_energy(self, f: int):
+        """Energy of every element at the end-of-substep positions, with the linearized damping energy.
+
+        The positions are those of frame f + 1, and the energy goes to `elements_el_energy`. Only the environments with
+        an active line search take part."""
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_linesearch_active[i_b]:
                 continue
@@ -656,14 +657,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def accumulate_vertex_force_preconditioner(self, f: qd.i32):
-        self._func_accumulate_vertex_force_preconditioner(f)
+        self.func_accumulate_vertex_force_preconditioner(f)
 
     @qd.func
-    def _func_accumulate_vertex_force_preconditioner(self, f: qd.i32):
+    def func_accumulate_vertex_force_preconditioner(self, f: int):
         """The force of every vertex, minus the energy gradient at the end-of-substep positions, and the inverse of its
         3x3 diagonal Hessian block.
 
-        It runs after _func_compute_ele_hessian_gradient, on the positions of frame f + 1."""
+        It runs after func_compute_ele_hessian_gradient, on the positions of frame f + 1."""
         damping_alpha_dt = self._damping_alpha * self._substep_dt
         damping_alpha_factor = damping_alpha_dt + 1.0
         damping_beta_over_dt = self._damping_beta / self._substep_dt
@@ -749,6 +750,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.func
     def compute_Ap(self):
+        """Product of the Hessian of FEM's incremental potential with the search direction p of its own conjugate
+        gradient.
+
+        The Hessian is taken at the end-of-substep positions of the last `func_compute_ele_hessian_gradient`, and the
+        product goes to the `Ap` of the vertices that have an active conjugate gradient."""
         damping_alpha_dt = self._damping_alpha * self._substep_dt
         damping_alpha_factor = damping_alpha_dt + 1.0
         damping_beta_over_dt = self._damping_beta / self._substep_dt
@@ -915,7 +921,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 )
 
         # compute elastic energy
-        self._func_compute_ele_energy(f)
+        self.func_compute_ele_energy(f)
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_linesearch_active[i_b]:
                 continue
@@ -994,7 +1000,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         The joint solve then replaces the implicit solve of every substep, which solves it jointly with the solvers
         coupled with FEM (see FemNewtonHost). The caller registers the returned host and participant."""
-        participant = FemNewtonParticipant(self)
+        participant = FemNewtonParticipant(self, self._B)
         self._is_solve_deferred = True
         return FemNewtonHost(self, participant), participant
 
