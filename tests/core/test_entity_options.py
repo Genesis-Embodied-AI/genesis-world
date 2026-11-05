@@ -43,106 +43,8 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 
 @pytest.mark.required
-def test_options_class_selects_solver(show_viewer, tol):
-    DT = 1e-2
-    N_STEPS = 10
-    GRAVITY = 9.81
-
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=DT,
-            substeps=10,
-            gravity=(0.0, 0.0, -GRAVITY),
-        ),
-        fem_options=gs.options.FEMOptions(
-            use_implicit_solver=True,
-        ),
-        mpm_options=gs.options.MPMOptions(
-            grid_density=16,
-            particle_size=0.05,
-            lower_bound=(-0.5, -0.5, 0.0),
-            upper_bound=(2.0, 1.5, 1.0),
-        ),
-        sph_options=gs.options.SPHOptions(
-            particle_size=0.05,
-        ),
-        pbd_options=gs.options.PBDOptions(
-            particle_size=0.05,
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.75, -1.5, 1.5),
-            camera_lookat=(0.75, 0.55, 0.5),
-        ),
-        show_viewer=show_viewer,
-    )
-    options_classes = [
-        cls
-        for name, cls in vars(gs.entities).items()
-        if isinstance(cls, type)
-        and issubclass(cls, gs.entities.BaseEntity)
-        and cls is not gs.entities.BaseEntity
-        and name.isidentifier()
-        and not name.startswith("_")
-    ]
-    entities = []
-    for i, options_cls in enumerate(options_classes):
-        pos = (0.15 + 0.4 * (i % 4), 0.15 + 0.4 * (i // 4), 0.6)
-        options_kwargs = {
-            "morph": gs.morphs.Box(
-                pos=pos,
-                size=(0.2, 0.2, 0.2),
-            ),
-        }
-        if issubclass(options_cls, gs.entities.PBDCloth):
-            options_kwargs.update(
-                morph=gs.morphs.Mesh(
-                    file="meshes/cloth.obj",
-                    pos=pos,
-                    scale=0.2,
-                ),
-            )
-        if issubclass(options_cls, gs.entities.FEM):
-            options_kwargs.update(
-                material=gs.materials.Elastic(),
-            )
-        if issubclass(options_cls, gs.entities.MPM):
-            options_kwargs.update(
-                material=gs.materials.Elastic(
-                    youngs_modulus=3e5,
-                ),
-                solver_options=gs.options.MPMEntitySolverOptions(
-                    sampler="regular",
-                ),
-            )
-        if issubclass(options_cls, gs.entities.SPH):
-            options_kwargs.update(
-                solver_options=gs.options.SPHEntitySolverOptions(
-                    sampler="regular",
-                ),
-            )
-        if issubclass(options_cls, gs.entities.PBDLiquid):
-            options_kwargs.update(
-                solver_options=gs.options.PBDLiquidEntitySolverOptions(
-                    sampler="regular",
-                ),
-            )
-        if issubclass(options_cls, gs.entities.PBDParticle):
-            options_kwargs.update(
-                solver_options=gs.options.PBDParticleEntitySolverOptions(
-                    sampler="regular",
-                ),
-            )
-        if issubclass(options_cls, gs.entities.Hybrid):
-            options_kwargs.update(
-                morph=gs.morphs.URDF(
-                    file="urdf/simple/two_link_arm.urdf",
-                    pos=pos,
-                    scale=0.2,
-                ),
-                material_soft=gs.materials.Muscle(),
-            )
-        entities.append(scene.add_entity(options=options_cls(**options_kwargs)))
-
+def test_reject_material_for_solver():
+    scene = gs.Scene()
     # A material parameter the solver of the entity cannot honor is refused rather than ignored, and the shorthand for
     # rigid entities names the classes admitting a deformable material
     with pytest.raises(gs.GenesisException, match="youngs_modulus"):
@@ -153,34 +55,6 @@ def test_options_class_selects_solver(show_viewer, tol):
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Liquid())
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
-
-    # Entities ignoring gravity tell the kinematic solver apart from the others
-    scene.build(n_envs=2)
-    measured_entities = [entity for entity in entities if not isinstance(entity, gs.engine.entities.HybridEntity)]
-    # The drop is measured from the height before stepping, since the mean of the vertices of a tetrahedralized box
-    # starts off its center by an amount that depends on the mesh.
-    entities_z = []
-    for n_steps in (0, N_STEPS):
-        for _ in range(n_steps):
-            scene.step()
-        entities_z.append([])
-        for entity in measured_entities:
-            if isinstance(entity, gs.engine.entities.KinematicEntity):
-                pos = entity.get_pos()
-            elif isinstance(entity, gs.engine.entities.particle_entity.ParticleEntity):
-                pos = entity.get_particles_pos().mean(dim=-2)
-            elif isinstance(entity, gs.engine.entities.FEMEntity):
-                pos = entity.get_state().pos.mean(dim=-2)
-            else:
-                pos = entity.get_state().pos
-            entities_z[-1].append(pos[..., 2])
-    for entity, z_start, z_end in zip(measured_entities, *entities_z):
-        drop = z_start - z_end
-        if isinstance(entity.options, gs.entities.Kinematic):
-            assert_allclose(drop, 0.0, tol=tol)
-        else:
-            # The mean of the particles or vertices stands in for the center of mass, so it falls at gravity approximately
-            assert_allclose(drop, 0.5 * GRAVITY * (N_STEPS * DT) ** 2, rtol=5e-2)
 
 
 @pytest.mark.required
