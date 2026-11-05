@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 import pytest
 import torch
@@ -389,10 +391,11 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-    scene.add_entity(
+    if has_plane:
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+    mpm_box = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.05),
             size=(0.1, 0.1, 0.1),
@@ -409,6 +412,12 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
             ),
         )
     scene.build(n_envs=2)
+    arrays_built = [
+        weakref.ref(item.array._unwrap())
+        for item in scene.sim.newton_solver.data
+        if item.name.startswith(("grid.", "newton.", "linear.")) and ".errors." not in item.name
+    ]
+    mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
     for _ in range(3):
         scene.step()
 
@@ -417,14 +426,76 @@ def test_destroy_frees_data(has_rigid_dofs, show_viewer):
     items = [*scene.sim.mpm_solver.data, *scene.sim.newton_solver.data]
     roots = {item.name.split(".")[0] for item in items}
     assert {"particles", "particles_info", "grid", "newton", "linear", "control", "participants"} <= roots
-    assert any(".rigid_data." in item.name for item in items)
+    assert any(item.name.startswith("rigid_data.") for item in items)
     assert any(".query." in item.name for item in items)
     assert any(item.name.startswith("newton_info.") for item in items)
     arrays = [item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array for item in items]
     ndarrays = [array for array in arrays if isinstance(array, qd.Ndarray)]
     assert ndarrays
+
+    # Only the particle data, the material table and the error flags of the grid are fields in performance mode, which
+    # a destroy cannot free
+    names_field = [item.name for item, array in zip(items, arrays) if not isinstance(array, qd.Ndarray)]
+    assert all(
+        name.startswith(("particles", "mpm_materials.", "grid.errors.")) or name.endswith(".geoms_init_AABB")
+        for name in names_field
+    )
+
+    # Spreading the particles grows the grid, the Newton state and the linear system, which replaces the structs built
+    # with the scene. No array of the walk is one of theirs, and each is reached once
+    arrays_replaced = [array() for array in arrays_built if array() is not None]
+    assert not {id(array) for array in arrays_replaced} & {id(array) for array in arrays}
+    assert len({id(array) for array in arrays}) == len(arrays)
+
     scene.destroy()
     assert all(array.arr is None for array in ndarrays)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.cpu_threads(1)
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_grow_grid_and_matrix_matches_full_capacity(monkeypatch, show_viewer):
+    positions, velocities, capacities = [], [], []
+    for max_blocks, max_triplets in ((1, 1), (512, 100_000)):
+        monkeypatch.setattr(
+            "genesis.engine.solvers.mpm_solver.initial_capacities", lambda *_, **__: (max_blocks, max_triplets)
+        )
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=1e-2,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.3, -0.3, -0.1),
+                upper_bound=(0.3, 0.3, 0.4),
+            ),
+            show_viewer=show_viewer,
+        )
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+        mpm_box = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.05),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="regular",
+            ),
+        )
+        scene.build(n_envs=2)
+        for _ in range(3):
+            scene.step()
+        positions.append(mpm_box.get_particles_pos().clone())
+        velocities.append(mpm_box.get_particles_vel().clone())
+        arrays = {item.name: item.array for item in scene.sim.newton_solver.data}
+        capacities.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
+        scene.destroy()
+
+    assert capacities[0][0] > 1 and capacities[0][1] > 1
+    assert capacities[1] == (512, 100_000)
+    assert_equal(positions[0], positions[1])
+    assert_equal(velocities[0], velocities[1])
 
 
 @pytest.mark.required

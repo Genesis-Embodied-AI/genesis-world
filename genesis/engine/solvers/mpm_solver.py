@@ -27,10 +27,11 @@ from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
 from genesis.utils.array_class import ErrorCode, LinksState
-from genesis.utils.data import DataItem, iter_data, namespace
+from genesis.utils.data import DataItem, Namespace, iter_data, iter_state_arrays, namespace
 from genesis.utils.misc import (
     DeprecationError,
     broadcast_tensor,
+    qd_destroy_data,
     qd_isfinite,
     qd_to_numpy,
     qd_to_torch,
@@ -89,6 +90,17 @@ def material_table_column(material):
     if isinstance(material, MPM.Elastic) and material.model == "neohooken":
         return column, mpm_func.FAMILY_STABLE_NEOHOOKEAN, mpm_func.PLASTIC_NONE
     return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_NONE
+
+
+def destroy_scratch(*scratches) -> None:
+    """Free the arrays of the grid, Newton or linear-system structs a growth replaced.
+
+    The error flags of a grid belong to the solver, whose next grid binds them again.
+    """
+    for scratch in scratches:
+        for path, array in iter_state_arrays(scratch):
+            if path[0] != "errors":
+                qd_destroy_data(array)
 
 
 @qd.data_oriented
@@ -591,17 +603,19 @@ class MPMSolver(ParticleSolver):
 
     def _resize_blocks(self, max_blocks, max_triplets):
         """Build the grid, the Newton state and the linear system again for new capacities of node blocks and triplets,
-        and swap them on the participant.
+        and swap them on the participant, which frees the replaced ones.
 
         The grid carries no state across substeps and the growth happens before any consumer reads it, so nothing is
         copied. The new grid binds the error flags of the solver, found in the namespace of the scene.
         """
         n_sort = self._B * self._n_particles
         participant = self._newton_participant
+        scratches_replaced = (participant.grid, participant.newton, participant.linear)
         with namespace(self._scene._namespace):
             participant.grid = build_mpm_grid(n_sort, max_blocks)
         participant.newton = build_mpm_newton(n_sort, max_blocks)
         participant.linear = build_mpm_linear(max_blocks, max_triplets)
+        destroy_scratch(*scratches_replaced)
 
     def _size_to_particles(self, f):
         positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
@@ -622,7 +636,9 @@ class MPMSolver(ParticleSolver):
         matrix = participant.linear.matrix
         demand = int(qd_to_numpy(matrix.triplet_demand))
         max_triplets = max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), matrix.triplet_row.shape[0] + 1)
+        linear_replaced = participant.linear
         participant.linear = build_mpm_linear(participant.grid.block_coords.shape[0], max_triplets)
+        destroy_scratch(linear_replaced)
 
     def substep_post_coupling(self, f):
         """Finish the substep with the check of the particle positions.
