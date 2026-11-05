@@ -1,0 +1,59 @@
+tests/grad/test_rollout.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 362
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 852
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_5fb0a16fb6495c 456,461-462,465,831,841,858-860
+  s_c62ec9da443b15::t_c5d31a7b07eb0c 863
+tests/rigid/test_heterogeneous.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 450,452
+tests/rendering/test_dynamic_meshes.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 86,96,210,222
+examples/coupling/cloth_on_rigid.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 54,64
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_62e01bf0fa90d7 353-355,373-375,393-394,408-409,423-426,429
+  s_c62ec9da443b15::t_9ab309ef16d53a 19,427-428
+tests/parsers/test_mesh.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 1032,1034
+  s_c62ec9da443b15::t_511791b82204c7 1048
+examples/deformable/elastic_dragon.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 30
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_9f98ce14089768 8,49
+tests/coupling/test_hybrid.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 232,242,379
+examples/coupling/cloth_attached_to_rigid.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 59
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_c5d31a7b07eb0c 12
+  s_c62ec9da443b15::t_5fb0a16fb6495c 170,175,179-180
+tests/particles/test_pbd.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 21,27,33,40,62,68,95,109,222,231
+examples/deformable/pbd_liquid.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 34,42
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_0ef5cd841e9c75 54
+  s_c62ec9da443b15::t_d6e98b124fb87a 51
+genesis/options/entities.py
+  s_c62ec9da443b15::t_4e06573a0e62c8 965
+  s_c62ec9da443b15::t_50bafe879932f2 851-852,854-857,861-863,865-870,872-874,876-877,879-895,898,900-901,903,906-909,912-913,915-920,924-928,930,935-936,939-943,945,951,953-954,957-960,964,966-974
+examples/tutorials/pbd_cloth.py
+  s_c62ec9da443b15::t_d6e98b124fb87a 25,36,41,52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eee5e1b4ca66cd21e2eb68c8323356d829c571cd",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
