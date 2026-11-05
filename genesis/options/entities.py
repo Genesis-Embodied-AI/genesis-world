@@ -840,11 +840,11 @@ class PBDMaterialParams(NamedTuple):
     """The parameters of a cloth or an elastic material as the PBD solver simulates it, the defaults filled in.
 
     The density is a mass per unit area for a cloth, in kg/m^2, and a mass per unit volume otherwise, in kg/m^3. The
-    friction coefficient holds a particle that sticks, and the kinetic friction coefficient slows one that slides.
+    static friction coefficient holds a sticking particle, and the kinetic one slows a sliding particle.
     """
 
     density: float
-    friction: float
+    static_friction: float
     kinetic_friction: float
 
 
