@@ -93,9 +93,17 @@ class NewtonHost:
 
     A participant also assembles its share of the Newton system from the host (`newton_assemble`), reverses the part of
     its substep that the solve takes over around the joint adjoint solve (`newton_backward`), and flags a solve stopped
-    on a non-finite measure for the environments its solver reports errors on (`newton_flag_non_finite`)."""
+    on a non-finite measure for the environments its solver reports errors on (`newton_flag_non_finite`).
+
+    `newton_begin` runs before the pre-coupling phase of every solver, for a participant whose solver advances its own
+    state there to keep the state of the substep start. `newton_finish` and `newton_end` take the control of the solve
+    (see NewtonControl) and leave the state of every environment of `control.has_failed_non_finite` as it was at the
+    substep start."""
 
     is_differentiable = False
+
+    def newton_begin(self, f):
+        pass
 
     def newton_prepare(self, f):
         pass
@@ -103,13 +111,13 @@ class NewtonHost:
     def newton_flag_non_finite(self, control):
         pass
 
-    def newton_finish(self, f):
+    def newton_finish(self, f, control):
         pass
 
     def newton_after(self, f):
         pass
 
-    def newton_end(self, f):
+    def newton_end(self, f, control):
         pass
 
     def newton_adjoint_rhs(self, f):
@@ -384,6 +392,13 @@ class NewtonSolver(Solver):
         """Whether the device stages of the solve span several participants."""
         return len(self._participant_hosts) > 1 or self._has_coupling_devices
 
+    def begin(self, f):
+        """Run the host stages that precede the pre-coupling phase of the solvers in substep `f`."""
+        if not self.is_active:
+            return
+        for host in self._hosts:
+            host.newton_begin(f)
+
     def step(self, f):
         """Run the Newton solve of a substep: the preparation of the participants, the start energy, the Newton
         iterations and the hand-back of the solution.
@@ -403,7 +418,7 @@ class NewtonSolver(Solver):
             self._check_line_search(f)
         # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
         for host in self._hosts:
-            host.newton_end(f)
+            host.newton_end(f, self.control)
         self._check_failures()
 
     def _check_line_search(self, f):
@@ -464,6 +479,8 @@ class NewtonSolver(Solver):
         other environments keeping their solution of the exact one."""
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
+        pcg_scalars = self.pcg_scalars
+        pcg_scalars.is_env_adjoint.fill(1)
         self._stage_adjoint(f, is_exact)
         envs_breakdown = self._pcg_adjoint(f, check_curvature=is_exact)
         # At a converged solution the Hessian of the incremental potential is positive definite
@@ -481,9 +498,8 @@ class NewtonSolver(Solver):
                     "forward Newton solve most likely stopped short of: its adjoint solves on the projected Hessian, "
                     "whose gradients are approximate. Tighten NewtonOptions(velocity_tol) for exact ones."
                 )
-        pcg_scalars = self.pcg_scalars
-        pcg_scalars.is_env_adjoint.fill(1)
                 self._has_warned_adjoint_projection = True
+            pcg_scalars.is_env_adjoint.from_numpy(envs_breakdown)
             self._stage_adjoint(f, is_exact=False)
             self._pcg_adjoint(f)
         for host in self._hosts:
@@ -499,7 +515,6 @@ class NewtonSolver(Solver):
     def _pcg_adjoint(self, f, check_curvature=False):
         """Solve the staged adjoint system H lambda = b by the conjugate gradient of the forward solve, at the tighter
         tolerance of the adjoint, over the environments of `is_env_adjoint` (see PCGScalars).
-            pcg_scalars.is_env_adjoint.from_numpy(envs_breakdown)
 
         With `check_curvature`, meant for a Hessian without positive definite projection, returns for every environment
         whether its solve met a direction of non-positive curvature."""

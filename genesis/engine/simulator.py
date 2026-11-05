@@ -503,6 +503,7 @@ class Simulator(RBC):
         self._steps.copy_(steps_start)
 
     def substep(self, f):
+        self.newton_solver.begin(f)
         self._coupler.preprocess(f)
         self.substep_pre_coupling(f)
         self._coupler.couple(f)

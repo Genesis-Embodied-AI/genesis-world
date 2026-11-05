@@ -627,6 +627,9 @@ class MPMSolver(ParticleSolver):
     # --------------------------- Newton solver participant ------------------------------
     # ------------------------------------------------------------------------------------
 
+    def newton_begin(self, f):
+        pass
+
     def newton_prepare(self, f):
         """Run the substep up to the Newton solve.
 
@@ -663,7 +666,7 @@ class MPMSolver(ParticleSolver):
     def newton_assemble(self, f, is_exact=False):
         self._assemble(f, is_exact)
 
-    def newton_finish(self, f):
+    def newton_finish(self, f, control):
         """Transfer the solved grid displacement back to the particles, those of an environment whose solve stopped on
         a non-finite measure keeping their state."""
         kernel_finalize(
@@ -675,13 +678,13 @@ class MPMSolver(ParticleSolver):
             self.particles_info,
             self._mpm_materials,
             self._mpm_params,
-            self._sim.newton_solver.control.has_failed_non_finite,
+            control.has_failed_non_finite,
         )
 
     def newton_after(self, f):
         pass
 
-    def newton_end(self, f):
+    def newton_end(self, f, control):
         pass
 
     def newton_backward(self, f, solve):

@@ -64,6 +64,9 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
     qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
+    # Envs whose integrated state is left out of the state update, set by a solve coupled strongly with Rigid for the
+    # envs where it failed (see func_copy_next_to_curr)
+    is_env_frozen: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.SCRATCH)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers
     # striding i_d1 across lanes. The writers striding i_b have cooperative variants under the same flag.

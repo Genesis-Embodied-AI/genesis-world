@@ -1015,7 +1015,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def substep_post_coupling(self, f):
         if self.is_active:
-            self.compute_pos(f)
+            # The NewtonSolver integrates the positions of a deferred solve itself (see FemNewtonHost)
+            if not self._is_solve_deferred:
+                self.compute_pos(f)
             if self._constraints_initialized and not self._use_implicit_solver:
                 self.apply_hard_constraints(f, self._sim.rigid_solver.dyn_state.links)
 

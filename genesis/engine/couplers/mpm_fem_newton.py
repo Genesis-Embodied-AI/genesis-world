@@ -115,6 +115,14 @@ def kernel_fem_begin(fem: qd.template()):
 
 
 @qd.kernel
+def kernel_fem_freeze(f: int, fem: qd.template(), control: qd.template()):
+    for i_v, i_b in qd.ndrange(fem.n_vertices, fem._B):
+        if control.has_failed_non_finite[i_b] != 0:
+            fem.elements_v[f + 1, i_v, i_b].pos = fem.elements_v[f, i_v, i_b].pos
+            fem.elements_v[f + 1, i_v, i_b].vel = fem.elements_v[f, i_v, i_b].vel
+
+
+@qd.kernel
 def kernel_fem_rows(f: int, contact: qd.template()):
     mpm_fem_func.func_build_fem_rows(
         f,
@@ -150,11 +158,18 @@ class FemNewtonHost(NewtonHost):
     def newton_assemble(self, f, is_exact=False):
         kernel_assemble_participant(f, self._device)
 
-    def newton_finish(self, f):
+    def newton_finish(self, f, control):
         self._fem_solver.setup_pos_vel(f)
+        kernel_fem_freeze(f, self._fem_solver, control)
 
     def newton_after(self, f):
         self._coupler.couple_fem(f)
+
+    def newton_end(self, f, control):
+        # FEM takes the vertex positions of the substep from the velocities here, in place of its post-coupling phase,
+        # so that the mask of the solve still holds
+        self._fem_solver.compute_pos(f)
+        kernel_fem_freeze(f, self._fem_solver, control)
 
 
 class MpmFemContactHost(NewtonHost):

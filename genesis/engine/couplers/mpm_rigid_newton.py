@@ -14,6 +14,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.solvers.newton_solver import NewtonHost, kernel_assemble_participant
+from genesis.grad.bridge import no_grad
 from genesis.utils.data import StaticConfig
 
 from . import mpm_rigid_adjoint_func, mpm_rigid_func
@@ -338,6 +339,13 @@ def kernel_add_mpm_contact_force(contact: qd.template()):
     mpm_rigid_func.func_add_mpm_contact_force(contact.rigid_data, contact.dyn_state.links, contact.params)
 
 
+@no_grad
+@qd.kernel
+def kernel_rigid_freeze(rigid: qd.template(), control: qd.template()):
+    for i_b in range(rigid.rigid_info.is_env_frozen.shape[0]):
+        rigid.rigid_info.is_env_frozen[i_b] = control.has_failed_non_finite[i_b]
+
+
 @qd.kernel
 def kernel_rigid_adjoint_rhs(rigid: qd.template()):
     mpm_rigid_func.func_rigid_adjoint_rhs(rigid.rigid_data, rigid.constraint_state, rigid.params)
@@ -389,13 +397,15 @@ class RigidNewtonHost(NewtonHost):
     def newton_assemble(self, f, is_exact=False):
         kernel_assemble_participant(f, self._device)
 
-    def newton_finish(self, f):
+    def newton_finish(self, f, control):
         kernel_rigid_write_back(f, self._device)
 
     def newton_after(self, f):
         self._rigid_solver.finish_deferred_solve()
 
-    def newton_end(self, f):
+    def newton_end(self, f, control):
+        # The integration keeps the state of the environments the mask names (see func_copy_next_to_curr)
+        kernel_rigid_freeze(self._device, control)
         self._rigid_solver.integrate_deferred_substep()
 
     def newton_backward(self, f, solve):
@@ -431,7 +441,7 @@ class MpmRigidContactHost(NewtonHost):
         if self._has_rigid_dofs:
             kernel_contact_point_disp(f, self._device)
 
-    def newton_finish(self, f):
+    def newton_finish(self, f, control):
         if self._has_rigid_dofs:
             kernel_mpm_reaction(f, self._device)
 

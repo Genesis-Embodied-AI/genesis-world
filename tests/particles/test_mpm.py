@@ -271,6 +271,112 @@ def test_halt_on_nan(precision, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.precision("64")
+def test_halt_on_nan_freezes_participants(precision, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=32,
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=1e-2,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.7),
+            camera_lookat=(0.0, 0.0, 0.2),
+            camera_fov=32,
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.15, 0.0, 0.15),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    rigid_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.25, 0.0, 0.3),
+            size=(0.05, 0.05, 0.05),
+        ),
+    )
+    fem_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.3, 0.3),
+            size=(0.06, 0.06, 0.06),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            scale=0.2,
+            pos=(0.0, -0.3, 0.3),
+        ),
+        material=gs.materials.PBD.Cloth(),
+    )
+    scene.build(n_envs=2)
+
+    # A velocity that is not finite in the second environment fails its Newton solve alone: every participant of the
+    # solve keeps the state of that environment, and moves the other one at its velocity as it does without the failure
+    states_by_run = []
+    for is_nan_injected in (True, False):
+        scene.reset()
+        rigid_box.set_dofs_velocity((0.1, 0.0, 0.0), dofs_idx_local=slice(0, 3))
+        fem_box.set_velocity((0.1, 0.0, 0.0))
+        cloth.set_velocity((0.1, 0.0, 0.0))
+        states = []
+        for i_step in range(2):
+            scene.step()
+            states.append(
+                tuple(
+                    state.clone()
+                    for state in (
+                        rigid_box.get_pos(),
+                        rigid_box.get_quat(),
+                        rigid_box.get_vel(),
+                        rigid_box.get_ang(),
+                        fem_box.get_state().pos,
+                        fem_box.get_state().vel,
+                        cloth.get_particles_pos(),
+                        cloth.get_particles_vel(),
+                    )
+                )
+            )
+            if is_nan_injected and i_step == 0:
+                vel = block.get_particles_vel()
+                vel[1, 0] = float("nan")
+                block.set_particles_vel(vel)
+        states_by_run.append(states)
+        if is_nan_injected:
+            assert_equal(scene.get_error_envs_mask(), (False, True))
+    states_nan, states_clean = states_by_run
+    for state_init, state_end in zip(*states_nan):
+        assert_allclose(state_end[1], state_init[1], tol=1e-12)
+    for state_nan, state_clean in zip(states_nan[1], states_clean[1]):
+        assert_allclose(state_nan[0], state_clean[0], tol=1e-11)
+    for i_pos in (0, 4, 6):
+        assert (states_nan[1][i_pos][0, ..., 0] - states_nan[0][i_pos][0, ..., 0] > 5e-4).all()
+
+    # The snapshots PBD keeps of its substep start are freed with the scene, as the other data of the solve
+    ndarrays = {item.name: item.array for item in scene.sim.newton_solver.data if isinstance(item.array, qd.Ndarray)}
+    assert sum(name.endswith((".pos_begin", ".vel_begin")) for name in ndarrays) == 2
+    scene.destroy()
+    assert all(array.arr is None for array in ndarrays.values())
+
+
+@pytest.mark.required
 def test_destroy_frees_data(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

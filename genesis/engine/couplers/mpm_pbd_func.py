@@ -44,13 +44,18 @@ class PbdNewtonData:
 
     The vectors are the projection x~ of PBD's own substep, the gradient, the preconditioned conjugate gradient (PCG)
     residual, preconditioned residual, direction, operator image and solution, and the line-search start. `diag_inv`
-    holds the 3 x 3 diagonal block of every particle, then its inverse."""
+    holds the 3 x 3 diagonal block of every particle, then its inverse.
+
+    `pos_begin` and `vel_begin` hold the position and velocity of every PBD particle at the start of the substep,
+    indexed [i_p, i_b] like PBD's own particles, which the particles of a failed environment return to."""
 
     def __init__(self, pbd, n_envs):
         self.pbd = pbd
         self.substep_dt = qd.ndarray(gs.qd_float, shape=())
         self.substep_dt.from_numpy(np.array(pbd.substep_dt, dtype=gs.np_float))
         shape = (max(pbd.n_particles, 1), n_envs)
+        self.pos_begin = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.vel_begin = qd.ndarray(gs.qd_vec3, shape=shape)
         self.target = qd.ndarray(gs.qd_vec3, shape=shape)
         self.grad = qd.ndarray(gs.qd_vec3, shape=shape)
         self.r = qd.ndarray(gs.qd_vec3, shape=shape)
@@ -223,14 +228,22 @@ def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: q
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_finish(dt: float, pbd_data: qd.template()):
-    """The velocity of every moving PBD particle from its displacement over the substep."""
+def func_pbd_finish(dt: float, pbd_data: qd.template(), control: qd.template()):
+    """The velocity of every moving PBD particle from its displacement over the substep, then the position and velocity
+    of the substep start for every particle of an environment whose solve failed."""
     qd.loop_config(name="mpm_pbd_finish")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         if is_moving(i_q, i_b, pbd_data.pbd):
             pbd_data.pbd.particles_reordered[i_q, i_b].vel = (
                 pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.pbd.particles_reordered[i_q, i_b].ipos
             ) / dt
+
+    qd.loop_config(name="mpm_pbd_freeze")
+    for i_p, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
+        if control.has_failed_non_finite[i_b] != 0 and pbd_data.pbd.particles_ng[i_p, i_b].active:
+            i_q = pbd_data.pbd.particles_ng[i_p, i_b].reordered_idx
+            pbd_data.pbd.particles_reordered[i_q, i_b].pos = pbd_data.pos_begin[i_p, i_b]
+            pbd_data.pbd.particles_reordered[i_q, i_b].vel = pbd_data.vel_begin[i_p, i_b]
 
 
 # ============================================== Layer 1: broad phase ==============================================
@@ -700,13 +713,20 @@ class MpmPbdContact:
 
 
 @qd.kernel
+def kernel_pbd_save(pbd_data: qd.template()):
+    for i_p, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
+        pbd_data.pos_begin[i_p, i_b] = pbd_data.pbd.particles[i_p, i_b].pos
+        pbd_data.vel_begin[i_p, i_b] = pbd_data.pbd.particles[i_p, i_b].vel
+
+
+@qd.kernel
 def kernel_pbd_begin(pbd_data: qd.template()):
     func_pbd_begin(pbd_data)
 
 
 @qd.kernel
-def kernel_pbd_finish(pbd_data: qd.template()):
-    func_pbd_finish(pbd_data.substep_dt[()], pbd_data)
+def kernel_pbd_finish(pbd_data: qd.template(), control: qd.template()):
+    func_pbd_finish(pbd_data.substep_dt[()], pbd_data, control)
 
 
 @qd.kernel
@@ -727,10 +747,15 @@ def kernel_pbd_rows(f: int, contact: qd.template()):
 
 class PbdNewtonHost(NewtonHost):
     """Host stages of PBD around the joint solve: the projection of its substep as the inertia target before, and its
-    velocities from the solved positions after."""
+    velocities from the solved positions after.
+
+    PBD runs its own substep before the solve, so the host saves the start of the substep first."""
 
     def __init__(self, device: PbdNewtonParticipant):
         self._device = device
+
+    def newton_begin(self, f):
+        kernel_pbd_save(self._device.pbd_data)
 
     def newton_prepare(self, f):
         kernel_pbd_begin(self._device.pbd_data)
@@ -738,8 +763,8 @@ class PbdNewtonHost(NewtonHost):
     def newton_assemble(self, f, is_exact=False):
         kernel_assemble_participant(f, self._device)
 
-    def newton_finish(self, f):
-        kernel_pbd_finish(self._device.pbd_data)
+    def newton_finish(self, f, control):
+        kernel_pbd_finish(self._device.pbd_data, control)
 
 
 class MpmPbdContactHost(NewtonHost):
