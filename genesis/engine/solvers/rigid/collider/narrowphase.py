@@ -1854,8 +1854,8 @@ def func_recompute_perturbed_contact(
     witness_b = contact_pos + 0.5 * penetration * normal
     if used_gjk:
         # The polytope face normal can differ from the witness separation, so recover each material point directly
-        witness_a = gjk_state.witness.point_obj1[i_scratch, 0]
-        witness_b = gjk_state.witness.point_obj2[i_scratch, 0]
+        witness_a = gjk_state.witness.point_obj1[0, i_scratch]
+        witness_b = gjk_state.witness.point_obj2[0, i_scratch]
     witness_a = R_inv @ (witness_a - contact_pos_0) + contact_pos_0
     witness_b = R @ (witness_b - contact_pos_0) + contact_pos_0
 
@@ -1892,7 +1892,7 @@ def func_recompute_perturbed_contact(
             support_b = qd.Vector.zero(gs.qd_float, 3)
             if used_gjk:
                 i_f = gjk_state.nearest_face[i_scratch]
-                i_pv = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][i_v]
+                i_pv = gjk_state.polytope_faces.verts_idx[i_f, i_scratch][i_v]
                 # Boxes, meshes and spheres provide native local supports. Other supports are stored in world space.
                 geom_type_a = dyn_info.geoms.type[i_ga]
                 geom_type_b = dyn_info.geoms.type[i_gb]
@@ -1902,10 +1902,10 @@ def func_recompute_perturbed_contact(
                     or geom_type_a == gs.GEOM_TYPE.SPHERE
                 ):
                     support_a = gu.qd_transform_by_trans_quat(
-                        gjk_state.polytope_verts.local_obj1[i_scratch, i_pv], ga_pos_original, ga_quat_original
+                        gjk_state.polytope_verts.local_obj1[i_pv, i_scratch], ga_pos_original, ga_quat_original
                     )
                 else:
-                    support_a = gjk_state.polytope_verts.obj1[i_scratch, i_pv]
+                    support_a = gjk_state.polytope_verts.obj1[i_pv, i_scratch]
                     support_a = R_inv @ (support_a - contact_pos_0) + contact_pos_0
                 if (
                     geom_type_b == gs.GEOM_TYPE.BOX
@@ -1913,10 +1913,10 @@ def func_recompute_perturbed_contact(
                     or geom_type_b == gs.GEOM_TYPE.SPHERE
                 ):
                     support_b = gu.qd_transform_by_trans_quat(
-                        gjk_state.polytope_verts.local_obj2[i_scratch, i_pv], gb_pos_original, gb_quat_original
+                        gjk_state.polytope_verts.local_obj2[i_pv, i_scratch], gb_pos_original, gb_quat_original
                     )
                 else:
-                    support_b = gjk_state.polytope_verts.obj2[i_scratch, i_pv]
+                    support_b = gjk_state.polytope_verts.obj2[i_pv, i_scratch]
                     support_b = R @ (support_b - contact_pos_0) + contact_pos_0
             else:
                 support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
@@ -3070,9 +3070,9 @@ def func_convex_convex_contact(
                                             i_gb,
                                             i_b,
                                             i_pair,
-                                            gjk_state.normal[i_b, i_c],
-                                            gjk_state.contact_pos[i_b, i_c],
-                                            gjk_state.diff_penetration[i_b, i_c],
+                                            gjk_state.normal[i_c, i_b],
+                                            gjk_state.contact_pos[i_c, i_b],
+                                            gjk_state.diff_penetration[i_c, i_b],
                                             dyn_state,
                                             collider_state,
                                             dyn_info,
@@ -3089,8 +3089,8 @@ def func_convex_convex_contact(
                                         for i_c in range(n_contacts):
                                             # Ignore contact points if the number of contacts exceeds the limit.
                                             if i_c < collider_config.n_contacts_per_convex_pair:
-                                                contact_pos = gjk_state.contact_pos[i_b, i_c]
-                                                normal = gjk_state.normal[i_b, i_c]
+                                                contact_pos = gjk_state.contact_pos[i_c, i_b]
+                                                normal = gjk_state.normal[i_c, i_b]
                                                 contact_pos = func_apply_smooth_refinement(
                                                     i_ga,
                                                     i_gb,
@@ -3123,8 +3123,8 @@ def func_convex_convex_contact(
 
                                         break
                                     else:
-                                        contact_pos = gjk_state.contact_pos[i_b, 0]
-                                        normal = gjk_state.normal[i_b, 0]
+                                        contact_pos = gjk_state.contact_pos[0, i_b]
+                                        normal = gjk_state.normal[0, i_b]
 
             # Refine the unperturbed (i_detection == 0) contact here; perturbed contacts are refined inside
             # func_recompute_perturbed_contact after the perturbation is reverted, on the canonical (unperturbed) pose.
@@ -3290,11 +3290,11 @@ def func_convex_convex_contact(
                 # contact 0 of the pair, which needs the discrete choices of the forward pass (see
                 # func_narrow_phase_diff_convex_vs_convex)
                 if is_analytic_pair and i_c_added >= 0:
-                    collider_state.diff_contact_input.geom_a[i_b, i_c_added] = i_ga
-                    collider_state.diff_contact_input.geom_b[i_b, i_c_added] = i_gb
-                    collider_state.diff_contact_input.ref_id[i_b, i_c_added] = i_c_0
-                    collider_state.diff_contact_input.detection_idx[i_b, i_c_added] = i_detection
-                    collider_state.diff_contact_input.valid[i_b, i_c_added] = 1
+                    collider_state.diff_contact_input.geom_a[i_c_added, i_b] = i_ga
+                    collider_state.diff_contact_input.geom_b[i_c_added, i_b] = i_gb
+                    collider_state.diff_contact_input.ref_id[i_c_added, i_b] = i_c_0
+                    collider_state.diff_contact_input.detection_idx[i_c_added, i_b] = i_detection
+                    collider_state.diff_contact_input.valid[i_c_added, i_b] = 1
 
 
 @qd.func
@@ -3415,8 +3415,8 @@ def _func_multicontact_run_detection(
                 is_col = gjk_state.is_col[i_scratch] == 1
                 penetration = gjk_state.penetration[i_scratch]
                 if is_col:
-                    contact_pos = gjk_state.contact_pos[i_scratch, 0]
-                    normal = gjk_state.normal[i_scratch, 0]
+                    contact_pos = gjk_state.contact_pos[0, i_scratch]
+                    normal = gjk_state.normal[0, i_scratch]
                 used_gjk = True
 
     return is_col, normal, contact_pos, penetration, used_gjk
@@ -3642,13 +3642,13 @@ def _func_multicontact_detect(
                             )
                             is_gjk_multi_done = True
                     for i_c in range(n_contacts_manifold):
-                        manifold_normal = gjk_state.normal[i_scratch, i_c]
+                        manifold_normal = gjk_state.normal[i_c, i_scratch]
                         manifold_pos = func_apply_smooth_refinement(
                             i_ga,
                             i_gb,
                             manifold_normal,
                             penetration,
-                            gjk_state.contact_pos[i_scratch, i_c],
+                            gjk_state.contact_pos[i_c, i_scratch],
                             ga_pos_original,
                             ga_quat_original,
                             gb_pos_original,
@@ -4545,10 +4545,10 @@ def func_narrow_phase_diff_convex_vs_convex(
         for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
             i_c = i_chunk_ * N_LANES + i_lane
             if i_c < collider_state.n_contacts[i_b]:
-                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                ref_id = collider_state.diff_contact_input.ref_id[i_c, i_b]
                 is_ref = i_c == ref_id
-                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+                i_ga = collider_state.diff_contact_input.geom_a[i_c, i_b]
+                i_gb = collider_state.diff_contact_input.geom_b[i_c, i_b]
 
                 if is_ref:
                     ref_penetration = -1.0
@@ -4579,7 +4579,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                         contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
                             i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
                         )
-                    collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
+                    collider_state.diff_contact_input.ref_penetration[i_c, i_b] = penetration
 
                     func_set_contact(
                         i_ga,
@@ -4603,10 +4603,10 @@ def func_narrow_phase_diff_convex_vs_convex(
         for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
             i_c = i_chunk_ * N_LANES + i_lane
             if i_c < collider_state.n_contacts[i_b]:
-                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                ref_id = collider_state.diff_contact_input.ref_id[i_c, i_b]
                 is_ref = i_c == ref_id
-                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+                i_ga = collider_state.diff_contact_input.geom_a[i_c, i_b]
+                i_gb = collider_state.diff_contact_input.geom_b[i_c, i_b]
 
                 if not is_ref:
                     contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
@@ -4632,7 +4632,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                             normal_0 = collider_state.contact_data.normal[ref_id, i_b]
                             contact_pos_0 = collider_state.contact_data.pos[ref_id, i_b]
                             penetration_0 = collider_state.contact_data.penetration[ref_id, i_b]
-                            i_detection = collider_state.diff_contact_input.detection_idx[i_b, i_c]
+                            i_detection = collider_state.diff_contact_input.detection_idx[i_c, i_b]
 
                             axis_0, axis_1 = func_contact_orthogonals(
                                 i_ga,
@@ -4700,7 +4700,7 @@ def func_narrow_phase_diff_convex_vs_convex(
                             )
                             weight = 1.0
                     else:
-                        ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
+                        ref_penetration = collider_state.diff_contact_input.ref_penetration[ref_id, i_b]
                         contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
                             i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
                         )
@@ -4753,12 +4753,12 @@ def func_fill_diff_contact_input_plane(
                 core_world = support_pos - radius * normal
                 core_local = gu.qd_transform_by_quat(core_world - trans_convex, gu.qd_inv_quat(quat_convex))
 
-                collider_state.diff_contact_input.geom_a[i_b, i_c] = i_ga
-                collider_state.diff_contact_input.geom_b[i_b, i_c] = i_gb
-                collider_state.diff_contact_input.core_local[i_b, i_c] = core_local
-                collider_state.diff_contact_input.has_zero_penetration[i_b, i_c] = penetration <= 0.0
-                collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c
-                collider_state.diff_contact_input.valid[i_b, i_c] = 1
+                collider_state.diff_contact_input.geom_a[i_c, i_b] = i_ga
+                collider_state.diff_contact_input.geom_b[i_c, i_b] = i_gb
+                collider_state.diff_contact_input.core_local[i_c, i_b] = core_local
+                collider_state.diff_contact_input.has_zero_penetration[i_c, i_b] = penetration <= 0.0
+                collider_state.diff_contact_input.ref_id[i_c, i_b] = i_c
+                collider_state.diff_contact_input.valid[i_c, i_b] = 1
 
 
 @qd.func
