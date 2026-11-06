@@ -140,7 +140,7 @@ jobs:
         id: publish_check
         uses: actions/github-script@v8
         env:
-          CHECK_NAME: Benchmark Comparison
+          CHECK_NAME: '_Artifact: Benchmark Comparison'
           CHECK_OUTPUT: ${{ env.CHECK_OUTPUT }}
           HAS_REGRESSIONS: ${{ env.HAS_REGRESSIONS }}
           HAS_ALERTS: ${{ env.HAS_ALERTS }}
