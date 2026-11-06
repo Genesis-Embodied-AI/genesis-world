@@ -64,24 +64,32 @@ def _key_runs(key):
 
 
 @qd.func
-def warp_add_by_key(value, key, out: qd.template()):
-    """Add the values of every run of lanes of one key in a warp into the entry of the key in `out`, one atomic per run.
+def add_by_key(value, key, out: qd.template()):
+    """Add the value of an entry into the entry of its key in `out`, an entry of key -1 adding nothing.
 
-    The lanes hold consecutive entries sorted by key, a lane of no entry holding the key -1, which adds nothing. Every
-    lane of the warp must take part."""
-    is_head, is_tail = _key_runs(key)
-    total = head_segmented_reduce_add(value, is_tail)
-    if key >= 0 and is_head:
-        qd.atomic_add(out[key], total)
+    On a GPU, the lanes of a warp hold consecutive entries sorted by key, every lane of the warp takes part, and each
+    run of one key adds its sum by one atomic. A CPU has no lanes, and every entry adds alone."""
+    if qd.static(gs.backend == gs.cpu):
+        if key >= 0:
+            qd.atomic_add(out[key], value)
+    else:
+        is_head, is_tail = _key_runs(key)
+        total = head_segmented_reduce_add(value, is_tail)
+        if key >= 0 and is_head:
+            qd.atomic_add(out[key], total)
 
 
 @qd.func
-def warp_max_by_key(value, key, out: qd.template()):
-    """Maximum counterpart of warp_add_by_key."""
-    is_head, is_tail = _key_runs(key)
-    total = head_segmented_reduce_max(value, is_tail)
-    if key >= 0 and is_head:
-        qd.atomic_max(out[key], total)
+def max_by_key(value, key, out: qd.template()):
+    """Maximum counterpart of add_by_key."""
+    if qd.static(gs.backend == gs.cpu):
+        if key >= 0:
+            qd.atomic_max(out[key], value)
+    else:
+        is_head, is_tail = _key_runs(key)
+        total = head_segmented_reduce_max(value, is_tail)
+        if key >= 0 and is_head:
+            qd.atomic_max(out[key], total)
 
 
 @qd.func(requires_top_level=True)

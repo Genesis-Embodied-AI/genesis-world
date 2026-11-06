@@ -25,8 +25,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_write_triplet
-from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
-from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add, warp_add_by_key, warp_max_by_key
+from genesis.engine.numerics.fsr_reduce import add_by_key, head_segmented_reduce_add, max_by_key
 from genesis.engine.numerics.open_addressing_hash import (
     EMPTY_KEY,
     func_insert_hash,
@@ -38,7 +37,6 @@ from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
 
 from .mpm_data import (
-    MpmBrickScratch,
     BLOCK_CELLS,
     BRICK_DIM,
     BRICK_INVERT_WARPS,
@@ -47,7 +45,9 @@ from .mpm_data import (
     BRICK_SYM_BLOCKS,
     BRICKS_PER_BLOCK,
     PYRAMID_ROWS,
+    REDUCE_BLOCK,
     STENCIL_BLOCKS,
+    MpmBrickScratch,
     MpmGridScratch,
     MpmInfo,
     MpmMaterialTable,
@@ -286,22 +286,56 @@ def q1_node_weight(o, fx: qd.types.vector(3), inv_dx: float):
     return w, grad_w
 
 
-# ============================================= Layer 0: warp reductions ==============================================
+# ============================================= Layer 0: gather lanes ==============================================
+
+
+def gather_lanes() -> int:
+    """Lanes that gather the particles of one node: the 32 lanes of a warp on a GPU, one thread on a CPU, which has no
+    lanes to share a node over."""
+    return 1 if gs.backend == gs.cpu else _WARP
 
 
 @qd.func
-def warp_sum(value):
-    """Sum over the 32 lanes of a warp by a fixed butterfly, so every lane holds the same, reproducible total."""
-    for level in qd.static(range(5)):
-        value = value + qd.simt.subgroup.shuffle_xor(value, qd.u32(16 >> level))
+def gather_lane():
+    lane = gs.qd_int(0)
+    if qd.static(gather_lanes() > 1):
+        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
+    return lane
+
+
+@qd.func
+def lanes_sum(value):
+    """Sum over the gather lanes by a fixed butterfly, so every lane holds the same, reproducible total."""
+    if qd.static(gather_lanes() > 1):
+        for level in qd.static(range(5)):
+            value = value + qd.simt.subgroup.shuffle_xor(value, qd.u32(16 >> level))
     return value
 
 
 @qd.func
-def warp_max(value):
-    for level in qd.static(range(5)):
-        value = qd.max(value, qd.simt.subgroup.shuffle_xor(value, qd.u32(16 >> level)))
+def lanes_max(value):
+    if qd.static(gather_lanes() > 1):
+        for level in qd.static(range(5)):
+            value = qd.max(value, qd.simt.subgroup.shuffle_xor(value, qd.u32(16 >> level)))
     return value
+
+
+@qd.func
+def cell_segment(env: int, c, lane: int, grid: MpmGridScratch):
+    """Range of the sorted particles of cell `c` of an environment, looked up by lane 0 and broadcast to the gather
+    lanes."""
+    lo = 0
+    hi = 0
+    if lane == 0:
+        block_slot = func_lookup_hash(pack_block(env, block_of(c)), grid.hash)
+        if block_slot >= 0:
+            cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
+            lo = grid.cell_seg_start[cell_slot]
+            hi = grid.cell_seg_end[cell_slot]
+    if qd.static(gather_lanes() > 1):
+        lo = qd.simt.subgroup.shuffle(lo, qd.u32(0))
+        hi = qd.simt.subgroup.shuffle(hi, qd.u32(0))
+    return lo, hi
 
 
 # ============================================== Layer 0: constitution ================================================
@@ -1193,7 +1227,6 @@ def func_append_particle_blocks(grid: MpmGridScratch, mpm_info: MpmInfo):
     for _ in range(1):
         n_valid = grid.n_valid[()]
         grid.n_valid_chunks[()] = (n_valid + _WARP - 1) // _WARP
-        grid.n_valid_reduce_blocks[()] = (n_valid + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM
         n_particle_blocks = qd.min(grid.n_particle_blocks[()], grid.pblock_keys.shape[0])
         grid.n_neighbor_keys[()] = 8 * n_particle_blocks
         if grid.n_particle_blocks[()] > grid.pblock_keys.shape[0]:
@@ -1321,7 +1354,6 @@ def func_publish_grid_demand(grid: MpmGridScratch):
         demand = grid.grid_demand[()]
         n_blocks = qd.min(demand, grid.block_coords.shape[0])
         grid.n_blocks[()] = n_blocks
-        grid.n_node_reduce_blocks[()] = (n_blocks * BLOCK_CELLS + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM
         if demand > grid.block_coords.shape[0]:
             grid.has_grid_overflow[()] = 1
 
@@ -1350,12 +1382,38 @@ def func_p2g(
 
     The velocity is the affine particle-in-cell (APIC) one, gravity included. A node touched by a non-free particle is
     fixed. The gather sums the particles of a node in a fixed order, which a scatter of atomic adds would vary from run
-    to run. A GPU spreads the particles of a node over the lanes of a warp and sums them by shuffles, and a CPU thread
-    walks them all itself."""
-    if qd.static(gs.backend == gs.cpu):
-        func_p2g_cpu(f, dt, gravity, particles, grid, particles_info, mpm_info)
-    else:
-        func_p2g_gpu(f, dt, gravity, particles, grid, particles_info, mpm_info)
+    to run: its gather lanes stride them (see gather_lanes), and lane 0 publishes their sum."""
+    n_lanes = qd.static(gather_lanes())
+    qd.loop_config(name="mpm_p2g", block_dim=128)
+    for t in range(grid.n_blocks[()] * BLOCK_CELLS * n_lanes):
+        lane = gather_lane()
+        node = t // n_lanes
+        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        n = block * 4 + local_offset(node % BLOCK_CELLS)
+        x_n = n.cast(gs.qd_float) * mpm_info.dx[()]
+        mass = gs.qd_float(0.0)
+        momentum = qd.Vector.zero(gs.qd_float, 3)
+        is_fixed = 0
+        for a in qd.static(range(8)):
+            o = node_offset(a)
+            c = n - o
+            lo, hi = cell_segment(env, c, lane, grid)
+            for i_chunk_ in range((hi - lo + n_lanes - 1) // n_lanes):
+                s = lo + i_chunk_ * n_lanes + lane
+                if s < hi:
+                    m, m_v, is_free = apic_node_contribution(
+                        f, s, o, dt, c, x_n, gravity, particles, grid, particles_info, mpm_info
+                    )
+                    mass += m
+                    momentum += m_v
+                    if not is_free:
+                        is_fixed = 1
+        mass = lanes_sum(mass)
+        for d in qd.static(range(3)):
+            momentum[d] = lanes_sum(momentum[d])
+        is_fixed = lanes_max(is_fixed)
+        if lane == 0:
+            publish_node_mass_velocity(node, mass, momentum, is_fixed, grid)
 
 
 @qd.func
@@ -1396,99 +1454,6 @@ def publish_node_mass_velocity(node: int, mass: float, mom: qd.types.vector(3), 
     if mass > 0.0 and fixed == 0:
         v = mom / mass
     grid.node_v[node] = v
-
-
-@qd.func(requires_top_level=True)
-def func_p2g_cpu(
-    f: int,
-    dt: float,
-    gravity: qd.template(),
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    particles_info: MpmParticlesInfo,
-    mpm_info: MpmInfo,
-):
-    """func_p2g by one thread per node, the threads splitting the nodes, each walking the particles of the 8 cells
-    around its node in order."""
-    qd.loop_config(name="mpm_p2g_cpu")
-    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        n = block * 4 + local_offset(node % BLOCK_CELLS)
-        x_n = n.cast(gs.qd_float) * mpm_info.dx[()]
-        mass = gs.qd_float(0.0)
-        momentum = qd.Vector.zero(gs.qd_float, 3)
-        is_fixed = 0
-        for a in qd.static(range(8)):
-            o = node_offset(a)
-            c = n - o
-            block_slot = func_lookup_hash(pack_block(env, block_of(c)), grid.hash)
-            if block_slot >= 0:
-                cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
-                for s in range(grid.cell_seg_start[cell_slot], grid.cell_seg_end[cell_slot]):
-                    m, m_v, is_free = apic_node_contribution(
-                        f, s, o, dt, c, x_n, gravity, particles, grid, particles_info, mpm_info
-                    )
-                    mass += m
-                    momentum += m_v
-                    if not is_free:
-                        is_fixed = 1
-        publish_node_mass_velocity(node, mass, momentum, is_fixed, grid)
-
-
-@qd.func(requires_top_level=True)
-def func_p2g_gpu(
-    f: int,
-    dt: float,
-    gravity: qd.template(),
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    particles_info: MpmParticlesInfo,
-    mpm_info: MpmInfo,
-):
-    """func_p2g by one warp per node.
-
-    Lane 0 resolves the particle range of each of the 8 cells around the node and broadcasts it. The lanes stride the
-    range and a butterfly reduces the warp."""
-    qd.loop_config(name="mpm_p2g", block_dim=128)
-    for t in range(grid.n_blocks[()] * BLOCK_CELLS * _WARP):
-        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
-        node = t // _WARP
-        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        n = block * 4 + local_offset(node % BLOCK_CELLS)
-        x_n = n.cast(gs.qd_float) * mpm_info.dx[()]
-
-        mass = gs.qd_float(0.0)
-        momentum = qd.Vector.zero(gs.qd_float, 3)
-        is_fixed = 0
-        for a in qd.static(range(8)):
-            o = node_offset(a)
-            c = n - o
-            lo = 0
-            hi = 0
-            if lane == 0:
-                block_slot = func_lookup_hash(pack_block(env, block_of(c)), grid.hash)
-                if block_slot >= 0:
-                    cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
-                    lo = grid.cell_seg_start[cell_slot]
-                    hi = grid.cell_seg_end[cell_slot]
-            lo = qd.simt.subgroup.shuffle(lo, qd.u32(0))
-            hi = qd.simt.subgroup.shuffle(hi, qd.u32(0))
-            for i_chunk_ in range((hi - lo + _WARP - 1) // _WARP):
-                s = lo + i_chunk_ * _WARP + lane
-                if s < hi:
-                    m, m_v, is_free = apic_node_contribution(
-                        f, s, o, dt, c, x_n, gravity, particles, grid, particles_info, mpm_info
-                    )
-                    mass += m
-                    momentum += m_v
-                    if not is_free:
-                        is_fixed = 1
-        mass = warp_sum(mass)
-        for d in qd.static(range(3)):
-            momentum[d] = warp_sum(momentum[d])
-        is_fixed = warp_max(is_fixed)
-        if lane == 0:
-            publish_node_mass_velocity(node, mass, momentum, is_fixed, grid)
 
 
 @qd.func(requires_top_level=True)
@@ -2224,12 +2189,28 @@ def func_gradient_gather(
 ):
     """Gather the gradient b_rhs = m (u - dt v_free) + sum_p (G_p grad w + w g_spring_p) of every node.
 
-    The gradient is zero on fixed nodes. The particles of a node are summed in a fixed order, by the lanes of a
-    warp on a GPU and by one thread on a CPU (see func_p2g)."""
-    if qd.static(gs.backend == gs.cpu):
-        func_gradient_gather_cpu(f, dt, particles, grid, newton, linear, rows, mpm_info)
-    else:
-        func_gradient_gather_gpu(f, dt, particles, grid, newton, linear, rows, mpm_info)
+    The gradient is zero on fixed nodes. The particles of a node are summed in a fixed order by its gather lanes (see
+    func_p2g)."""
+    n_lanes = qd.static(gather_lanes())
+    qd.loop_config(name="mpm_gradient_gather", block_dim=128)
+    for t in range(grid.n_blocks[()] * BLOCK_CELLS * n_lanes):
+        lane = gather_lane()
+        node = t // n_lanes
+        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        n = block * 4 + local_offset(node % BLOCK_CELLS)
+        grad = qd.Vector.zero(gs.qd_float, 3)
+        for a in qd.static(range(8)):
+            o = node_offset(a)
+            c = n - o
+            lo, hi = cell_segment(env, c, lane, grid)
+            for i_chunk_ in range((hi - lo + n_lanes - 1) // n_lanes):
+                s = lo + i_chunk_ * n_lanes + lane
+                if s < hi:
+                    grad = add_particle_node_gradient(f, s, o, grad, c, particles, grid, newton, mpm_info)
+        for d in qd.static(range(3)):
+            grad[d] = lanes_sum(grad[d])
+        if lane == 0:
+            publish_node_gradient(node, grad, dt, grid, newton, linear, rows)
 
 
 @qd.func
@@ -2272,78 +2253,6 @@ def publish_node_gradient(
         value = grad + grid.node_mass[node] * (u - dt * grid.node_v_free[node])
     for d in qd.static(range(3)):
         linear.b_rhs[3 * (rows.row_start[()] + node) + d] = value[d]
-
-
-@qd.func(requires_top_level=True)
-def func_gradient_gather_cpu(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    linear: NewtonLinearScratch,
-    rows: LinearBlock,
-    mpm_info: MpmInfo,
-):
-    """func_gradient_gather by one thread per node, the threads splitting the nodes, each walking the particles of the 8
-    cells around its node in order."""
-    qd.loop_config(name="mpm_gradient_gather_cpu")
-    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        n = block * 4 + local_offset(node % BLOCK_CELLS)
-        grad = qd.Vector.zero(gs.qd_float, 3)
-        for a in qd.static(range(8)):
-            o = node_offset(a)
-            c = n - o
-            block_slot = func_lookup_hash(pack_block(env, block_of(c)), grid.hash)
-            if block_slot >= 0:
-                cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
-                for s in range(grid.cell_seg_start[cell_slot], grid.cell_seg_end[cell_slot]):
-                    grad = add_particle_node_gradient(f, s, o, grad, c, particles, grid, newton, mpm_info)
-        publish_node_gradient(node, grad, dt, grid, newton, linear, rows)
-
-
-@qd.func(requires_top_level=True)
-def func_gradient_gather_gpu(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    linear: NewtonLinearScratch,
-    rows: LinearBlock,
-    mpm_info: MpmInfo,
-):
-    """func_gradient_gather by one warp per node (see func_p2g_gpu)."""
-    qd.loop_config(name="mpm_gradient_gather", block_dim=128)
-    for t in range(grid.n_blocks[()] * BLOCK_CELLS * _WARP):
-        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
-        node = t // _WARP
-        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        n = block * 4 + local_offset(node % BLOCK_CELLS)
-
-        grad = qd.Vector.zero(gs.qd_float, 3)
-        for a in qd.static(range(8)):
-            o = node_offset(a)
-            c = n - o
-            lo = 0
-            hi = 0
-            if lane == 0:
-                block_slot = func_lookup_hash(pack_block(env, block_of(c)), grid.hash)
-                if block_slot >= 0:
-                    cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
-                    lo = grid.cell_seg_start[cell_slot]
-                    hi = grid.cell_seg_end[cell_slot]
-            lo = qd.simt.subgroup.shuffle(lo, qd.u32(0))
-            hi = qd.simt.subgroup.shuffle(hi, qd.u32(0))
-            for i_chunk_ in range((hi - lo + _WARP - 1) // _WARP):
-                s = lo + i_chunk_ * _WARP + lane
-                if s < hi:
-                    grad = add_particle_node_gradient(f, s, o, grad, c, particles, grid, newton, mpm_info)
-        for d in qd.static(range(3)):
-            grad[d] = warp_sum(grad[d])
-        if lane == 0:
-            publish_node_gradient(node, grad, dt, grid, newton, linear, rows)
 
 
 @qd.func(requires_top_level=True)
@@ -2794,25 +2703,18 @@ def func_contribute_newton_max_disp(
     """Reduce into the Newton control of every environment the largest |du| component that its particles see through
     sum_a w_a du_a.
 
-    A GPU takes the maximum of each run of one environment in a warp, then one atomic max per run, and a CPU backend one
-    atomic max per particle. The maximum is taken over the particles rather than the nodes: a node reached by a sliver
-    of a particle stencil carries a vanishing mass and Hessian diagonal, so the preconditioned conjugate gradient (PCG)
-    leaves its du loose while it moves no particle."""
-    if qd.static(gs.backend == gs.cpu):
-        qd.loop_config(name="mpm_contribute_newton_max_disp_cpu")
-        for s in range(grid.n_valid[()]):
-            _, _, env, _ = particle_of_sorted(s, grid, mpm_info)
-            qd.atomic_max(control.max_disp[env], particle_max_disp(f, s, particles, grid, newton, mpm_info))
-    else:
-        qd.loop_config(name="mpm_contribute_newton_max_disp", block_dim=REDUCE_BLOCK_DIM)
-        for s in range(grid.n_valid_reduce_blocks[()] * REDUCE_BLOCK_DIM):
-            disp = gs.qd_float(0.0)
-            env = gs.qd_int(-1)
-            if s < grid.n_valid[()]:
-                _, _, env_, _ = particle_of_sorted(s, grid, mpm_info)
-                env = env_
-                disp = particle_max_disp(f, s, particles, grid, newton, mpm_info)
-            warp_max_by_key(disp, env, control.max_disp)
+    The particles are sorted by environment (see max_by_key). The maximum is taken over the particles rather than the
+    nodes: a node reached by a sliver of a particle stencil carries a vanishing mass and Hessian diagonal, so the
+    preconditioned conjugate gradient (PCG) leaves its du loose while it moves no particle."""
+    qd.loop_config(name="mpm_contribute_newton_max_disp", block_dim=REDUCE_BLOCK)
+    for s in range(grid.n_valid_chunks[()] * _WARP):
+        disp = gs.qd_float(0.0)
+        env = gs.qd_int(-1)
+        if s < grid.n_valid[()]:
+            _, _, env_, _ = particle_of_sorted(s, grid, mpm_info)
+            env = env_
+            disp = particle_max_disp(f, s, particles, grid, newton, mpm_info)
+        max_by_key(disp, env, control.max_disp)
 
 
 @qd.func(requires_top_level=True)
@@ -2891,26 +2793,16 @@ def func_elastic_energy(
     mpm_info: MpmInfo,
 ):
     """Add V dt^2 psi(F_trial) and the constraint spring energy of the sorted particles into the entry of their
-    environment in `energies`.
-
-    A GPU sums each run of one environment in a warp and adds one atomic per run, and a CPU adds one atomic per
-    particle."""
-    if qd.static(gs.backend == gs.cpu):
-        qd.loop_config(name="mpm_elastic_energy_cpu")
-        for s in range(grid.n_valid[()]):
-            _, _, env, _ = particle_of_sorted(s, grid, mpm_info)
+    environment in `energies`, the particles being sorted by environment (see add_by_key)."""
+    qd.loop_config(name="mpm_elastic_energy", block_dim=REDUCE_BLOCK)
+    for s in range(grid.n_valid_chunks[()] * _WARP):
+        energy = gs.qd_float(0.0)
+        env = gs.qd_int(-1)
+        if s < grid.n_valid[()]:
+            _, _, env_, _ = particle_of_sorted(s, grid, mpm_info)
+            env = env_
             energy = particle_energy(f, s, dt, particles, grid, newton, particles_info, materials, mpm_info)
-            qd.atomic_add(energies[env], energy)
-    else:
-        qd.loop_config(name="mpm_elastic_energy", block_dim=REDUCE_BLOCK_DIM)
-        for s in range(grid.n_valid_reduce_blocks[()] * REDUCE_BLOCK_DIM):
-            energy = gs.qd_float(0.0)
-            env = gs.qd_int(-1)
-            if s < grid.n_valid[()]:
-                _, _, env_, _ = particle_of_sorted(s, grid, mpm_info)
-                env = env_
-                energy = particle_energy(f, s, dt, particles, grid, newton, particles_info, materials, mpm_info)
-            warp_add_by_key(energy, env, energies)
+        add_by_key(energy, env, energies)
 
 
 @qd.func
@@ -2945,22 +2837,11 @@ def particle_energy(
 @qd.func(requires_top_level=True)
 def func_kinetic_energy(dt: float, grid: MpmGridScratch, newton: MpmNewtonScratch, energies: qd.template()):
     """Add 1/2 m |u - dt v_free|^2 of the free nodes into the entry of their environment in `energies`, reduced as in
-    func_elastic_energy."""
-    if qd.static(gs.backend == gs.cpu):
-        qd.loop_config(name="mpm_kinetic_energy_cpu")
-        for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-            env, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-            qd.atomic_add(energies[env], node_kinetic_energy(node, dt, grid, newton))
-    else:
-        qd.loop_config(name="mpm_kinetic_energy", block_dim=REDUCE_BLOCK_DIM)
-        for node in range(grid.n_node_reduce_blocks[()] * REDUCE_BLOCK_DIM):
-            energy = gs.qd_float(0.0)
-            env = gs.qd_int(-1)
-            if node < grid.n_blocks[()] * BLOCK_CELLS:
-                env_, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-                env = env_
-                energy = node_kinetic_energy(node, dt, grid, newton)
-            warp_add_by_key(energy, env, energies)
+    func_elastic_energy. The nodes of a block, of one environment, fill whole warps."""
+    qd.loop_config(name="mpm_kinetic_energy", block_dim=REDUCE_BLOCK)
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        env, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        add_by_key(node_kinetic_energy(node, dt, grid, newton), env, energies)
 
 
 @qd.func

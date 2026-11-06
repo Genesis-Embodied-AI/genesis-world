@@ -5,7 +5,7 @@ from genesis.utils.data import Data, DataKind, Size, field
 from genesis.utils.misc import get_gpu_resident_blocks, qd_debug_asserts, qd_isfinite
 
 from .bcoo_matrix import BCOOMatrixScratch, func_read_bcoo
-from .fsr_reduce import head_segmented_reduce_add, warp_add_by_key
+from .fsr_reduce import add_by_key, head_segmented_reduce_add
 
 # Threads of a block of the preconditioned conjugate gradient (PCG) launches
 PCG_BLOCK = 256
@@ -120,8 +120,7 @@ def _func_dot_into_cpu(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, p
                 j_b = i_b
                 value = gs.qd_float(0.0)
             if pcg_scalars.is_converged[i_b] == 0:
-                for d in qd.static(range(3)):
-                    value += pcg_workspace.r[3 * i_r + d] * pcg_workspace.z[3 * i_r + d]
+                value += _row_vector(pcg_workspace.r, i_r).dot(_row_vector(pcg_workspace.z, i_r))
         if j_b >= 0:
             qd.atomic_add(out[j_b], value)
 
@@ -141,9 +140,8 @@ def _func_dot_into_gpu(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, p
                 j_b = pcg_workspace.row_env[i_r]
                 if pcg_scalars.is_converged[j_b] == 0:
                     i_b = j_b
-                    for d in qd.static(range(3)):
-                        value += pcg_workspace.r[3 * i_r + d] * pcg_workspace.z[3 * i_r + d]
-            warp_add_by_key(value, i_b, out)
+                    value = _row_vector(pcg_workspace.r, i_r).dot(_row_vector(pcg_workspace.z, i_r))
+            add_by_key(value, i_b, out)
 
 
 @qd.func(requires_top_level=True)
@@ -208,6 +206,29 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.tem
         _func_linear_pcg_spmv_gpu(pcg_workspace, pcg_scalars, matrix)
 
 
+@qd.func
+def _row_vector(values: qd.template(), i_r: int):
+    return qd.Vector([values[3 * i_r + d] for d in qd.static(range(3))], dt=gs.qd_float)
+
+
+@qd.func
+def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix: BCOOMatrixScratch):
+    """Product B p_c of a stored upper block of row `i_r` for its row, its energy form, and off the diagonal the mirrored
+    product B^T p_r added to Ap of its column."""
+    i_c = matrix.bcoo_col[i_nz]
+    block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
+    p_col = _row_vector(pcg_workspace.p, i_c)
+    product = block @ p_col
+    energy = p_col.dot(product)
+    if i_r != i_c:
+        p_row = _row_vector(pcg_workspace.p, i_r)
+        product_mirrored = block.transpose() @ p_row
+        for d in qd.static(range(3)):
+            qd.atomic_add(pcg_workspace.ap[3 * i_c + d], product_mirrored[d])
+        energy = 2.0 * p_row.dot(product)
+    return product, energy
+
+
 @qd.func(requires_top_level=True)
 def _func_linear_pcg_spmv_cpu(
     pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch
@@ -221,7 +242,7 @@ def _func_linear_pcg_spmv_cpu(
         row_sum = qd.Vector.zero(gs.qd_float, 3)
         j_r = gs.qd_int(-1)
         for i_nz in range(i_chunk * size, qd.min(i_chunk * size + size, nnz)):
-            i_r, i_c, block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)
+            i_r = matrix.bcoo_row[i_nz]
             i_b = pcg_workspace.row_env[i_r]
             if i_b != j_b:
                 if j_b >= 0:
@@ -235,17 +256,9 @@ def _func_linear_pcg_spmv_cpu(
                             qd.atomic_add(pcg_workspace.ap[3 * j_r + d], row_sum[d])
                     j_r = i_r
                     row_sum = qd.Vector.zero(gs.qd_float, 3)
-                p_col = qd.Vector([pcg_workspace.p[3 * i_c + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                product = block @ p_col
+                product, energy = _spmv_entry(i_nz, i_r, pcg_workspace, matrix)
                 row_sum += product
-                if i_r != i_c:
-                    p_row = qd.Vector([pcg_workspace.p[3 * i_r + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                    product_mirrored = block.transpose() @ p_row
-                    for d in qd.static(range(3)):
-                        qd.atomic_add(pcg_workspace.ap[3 * i_c + d], product_mirrored[d])
-                    energy_sum += 2.0 * p_row.dot(product)
-                else:
-                    energy_sum += p_col.dot(product)
+                energy_sum += energy
         if j_r >= 0:
             for d in qd.static(range(3)):
                 qd.atomic_add(pcg_workspace.ap[3 * j_r + d], row_sum[d])
@@ -271,24 +284,12 @@ def _func_linear_pcg_spmv_gpu(
                 energy = gs.qd_float(0.0)
                 product = qd.Vector.zero(gs.qd_float, 3)
                 if i_nz < nnz:
-                    j_r, i_c, block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)
+                    j_r = matrix.bcoo_row[i_nz]
                     j_b = pcg_workspace.row_env[j_r]
                     if pcg_scalars.is_converged[j_b] == 0:
                         i_r = j_r
                         i_b = j_b
-                        p_col = qd.Vector([pcg_workspace.p[3 * i_c + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                        product = block @ p_col
-                        if i_r != i_c:
-                            p_row = qd.Vector(
-                                [pcg_workspace.p[3 * i_r + d] for d in qd.static(range(3))],
-                                dt=gs.qd_float,
-                            )
-                            product_mirrored = block.transpose() @ p_row
-                            for d in qd.static(range(3)):
-                                qd.atomic_add(pcg_workspace.ap[3 * i_c + d], product_mirrored[d])
-                            energy = 2.0 * p_row.dot(product)
-                        else:
-                            energy = p_col.dot(product)
+                        product, energy = _spmv_entry(i_nz, i_r, pcg_workspace, matrix)
                 i_r_prev = qd.simt.subgroup.shuffle(i_r, qd.u32(qd.max(i_lane - 1, 0)))
                 i_r_next = qd.simt.subgroup.shuffle(i_r, qd.u32(qd.min(i_lane + 1, 31)))
                 is_head = i_lane == 0 or i_r != i_r_prev
@@ -299,7 +300,7 @@ def _func_linear_pcg_spmv_gpu(
                 if i_r >= 0 and is_head:
                     for d in qd.static(range(3)):
                         qd.atomic_add(pcg_workspace.ap[3 * i_r + d], row_sum[d])
-                warp_add_by_key(energy, i_b, pcg_scalars.p_dot_ap)
+                add_by_key(energy, i_b, pcg_scalars.p_dot_ap)
 
 
 @qd.func(requires_top_level=True)

@@ -8,11 +8,9 @@ capacity in blocks. Growing a capacity builds a struct again and swaps it on the
 """
 
 import numpy as np
-
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSumScratch, dynamic_exclusive_sum_sizes
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSortScratch, dynamic_radix_sort_sizes
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHashScratch, open_addressing_hash_sizes
@@ -23,6 +21,9 @@ from .newton_linear import PAIRS
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
 BLOCK_CELLS = BLOCK_DIM**3
+
+# Threads of a block of the reductions by environment, to which the sorted particles are padded
+REDUCE_BLOCK = 256
 
 # Every assembled elastic task emits the upper triangle of the 8 x 8 node stencil of its cell
 STENCIL_BLOCKS = 36
@@ -133,7 +134,7 @@ class MpmErrno(Data, kind=DataKind.STATE, shape=(ENVS,)):
     errno: qd.Tensor = field(int)
 
 
-def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:
+def _padded(length: int, multiple: int = REDUCE_BLOCK) -> int:
     return max(((max(length, 1) + multiple - 1) // multiple) * multiple, multiple)
 
 
@@ -151,11 +152,9 @@ class MpmGridScratch(Data, kind=DataKind.SCRATCH):
     n_sort_keys: qd.Tensor = field(int, ndarray=True)
     n_valid: qd.Tensor = field(int, ndarray=True)
     n_valid_chunks: qd.Tensor = field(int, ndarray=True)
-    n_valid_reduce_blocks: qd.Tensor = field(int, ndarray=True)
     n_particle_blocks: qd.Tensor = field(int, ndarray=True)
     n_neighbor_keys: qd.Tensor = field(int, ndarray=True)
     n_blocks: qd.Tensor = field(int, ndarray=True)
-    n_node_reduce_blocks: qd.Tensor = field(int, ndarray=True)
     n_active_cells: qd.Tensor = field(int, ndarray=True)
     n_tasks: qd.Tensor = field(int, ndarray=True)
     has_grid_overflow: qd.Tensor = field(int, ndarray=True)
@@ -275,11 +274,9 @@ def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
         grid.n_sort_keys,
         grid.n_valid,
         grid.n_valid_chunks,
-        grid.n_valid_reduce_blocks,
         grid.n_particle_blocks,
         grid.n_neighbor_keys,
         grid.n_blocks,
-        grid.n_node_reduce_blocks,
         grid.n_active_cells,
         grid.n_tasks,
         grid.has_grid_overflow,
