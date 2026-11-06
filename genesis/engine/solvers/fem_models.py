@@ -1,8 +1,5 @@
 """Constitutive models of the finite element method (FEM) solver, bound from the material and the solver options."""
 
-from dataclasses import asdict, dataclass
-from typing import ClassVar
-
 import quadrants as qd
 
 import genesis as gs
@@ -16,9 +13,14 @@ class FEMModel:
 
     The explicit solver compiles the stress of every model into its static loop over models, even one no element
     executes, so the stress of this model returns zero rather than raise, which quadrants cannot compile.
+
+    Parameters
+    ----------
+    model : str | None
+        The constitutive model its entity solver options choose, compiled in. None for a Cloth material.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model: str | None) -> None:
         self.is_hessian_invariant = False
         self.is_hessian_computed = False
 
@@ -54,8 +56,8 @@ class FEMElasticModel(FEMModel):
     it once and reuse it at every step.
     """
 
-    def __init__(self, model: str) -> None:
-        super().__init__()
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
         self.is_hessian_invariant = model == "linear"
         # The rotation of each element under the linear corotated model, allocated once the element count is known
         self._R = None
@@ -177,12 +179,11 @@ class FEMElasticModel(FEMModel):
 class FEMMuscleModel(FEMElasticModel):
     """The model of a Muscle material: its elastic model plus an active stress along the fiber direction.
 
-    The active stress scales with the Young's modulus of the material.
+    The active stress scales with the Young's modulus of the material, recovered from the Lame parameters.
     """
 
-    def __init__(self, model: str, stiffness: float) -> None:
+    def __init__(self, model: str | None) -> None:
         super().__init__(model)
-        self.stiffness = stiffness
         self._update_stress_without_actuation = self.update_stress
         self.update_stress = self._update_stress_with_actuation
 
@@ -192,49 +193,11 @@ class FEMMuscleModel(FEMElasticModel):
 
         l = (F @ m_dir).norm(1e-12)
         mmT = m_dir.outer_product(m_dir)
-        stress += self.stiffness * (actu / l) * F @ mmT
+        youngs_modulus = mu * (3 * lam + 2 * mu) / (lam + mu)
+        stress += youngs_modulus * (actu / l) * F @ mmT
 
         return stress
 
 
-@dataclass(frozen=True)
-class FEMModelKey:
-    """The parameters of the model of an entity, equal for the entities sharing one compiled model.
-
-    Each subclass holds the constructor parameters of its model class, which keys of another subclass never equal.
-    """
-
-    model_cls: ClassVar[type[FEMModel]]
-
-
-@dataclass(frozen=True)
-class FEMClothModelKey(FEMModelKey):
-    model_cls: ClassVar[type[FEMModel]] = FEMModel
-
-
-@dataclass(frozen=True)
-class FEMElasticModelKey(FEMModelKey):
-    model_cls: ClassVar[type[FEMModel]] = FEMElasticModel
-    model: str
-
-
-@dataclass(frozen=True)
-class FEMMuscleModelKey(FEMModelKey):
-    model_cls: ClassVar[type[FEMModel]] = FEMMuscleModel
-    model: str
-    stiffness: float
-
-
-def get_fem_model_key(options: "gs.entities.FEM") -> FEMModelKey:
-    """Return what decides the model of an entity, so that the entities sharing it share one compiled model."""
-    material, model = options.material, options.solver_options.model
-    if isinstance(material, Cloth):
-        return FEMClothModelKey()
-    if isinstance(material, Muscle):
-        return FEMMuscleModelKey(model, material.youngs_modulus)
-    return FEMElasticModelKey(model)
-
-
-def build_fem_model(key: FEMModelKey) -> FEMModel:
-    """Bind the model that a key returned by 'get_fem_model_key' names."""
-    return key.model_cls(**asdict(key))
+# The model class of each material, which compiles one model per constitutive model (see 'FEMModel')
+FEM_MODEL_CLS_BY_MATERIAL = {Cloth: FEMModel, Elastic: FEMElasticModel, Muscle: FEMMuscleModel}

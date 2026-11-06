@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
-from genesis.engine.solvers.fem_models import FEMModel, FEMModelKey, build_fem_model, get_fem_model_key
+from genesis.engine.solvers.fem_models import FEM_MODEL_CLS_BY_MATERIAL, FEMModel
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.options.materials import Cloth
@@ -51,9 +51,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = float(1e4)
 
-        # The constitutive models of the entities, one per distinct key (see 'get_fem_model_key'), dispatched statically
+        # The constitutive models of the entities, dispatched statically, one per material class and model (see
+        # 'FEMModel')
         self._models: list[FEMModel] = []
-        self._models_key: list[FEMModelKey] = []
+        self._models_key: list[tuple[type, str | None]] = []
 
         # boundary
         self.setup_boundary()
@@ -385,9 +386,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
         from genesis.engine.couplers import IPCCoupler
 
-        # The IPC coupler simulates the elements itself, otherwise each solver supports some of the models alone
-        model = options.solver_options.model
-        if not isinstance(material, Cloth) and not isinstance(self._sim.coupler, IPCCoupler):
+        # The IPC coupler simulates the elements itself, otherwise each solver supports some of the models alone. A Cloth
+        # material has no constitutive model of its own.
+        model = None if isinstance(material, Cloth) else options.solver_options.model
+        if not isinstance(self._sim.coupler, IPCCoupler):
             if self._use_implicit_solver and model == gs.fem_model.stable_neohookean:
                 gs.raise_exception(
                     "Model 'stable_neohookean' requires the explicit solver ('use_implicit_solver=False')."
@@ -397,7 +399,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     "Model 'linear_corotated' requires the implicit solver ('use_implicit_solver=True')."
                 )
         # The model of a new key is registered once the entity is accepted, so a refused entity leaves the solver as it was
-        model_key = get_fem_model_key(options)
+        model_key = (type(material), model)
         is_new_model = model_key not in self._models_key
         model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
@@ -429,7 +431,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         if is_new_model:
             self._models_key.append(model_key)
-            self._models.append(build_fem_model(model_key))
+            self._models.append(FEM_MODEL_CLS_BY_MATERIAL[type(material)](model))
         self._entities.append(entity)
         return entity
 

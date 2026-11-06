@@ -1,36 +1,40 @@
 """Constitutive models of the material point method (MPM) solver, bound from the material and the solver options."""
 
-import math
-from dataclasses import asdict, dataclass
-from typing import ClassVar
-
 import quadrants as qd
 
 import genesis as gs
 from genesis.options.materials import Elastic, ElastoPlastic, Liquid, Muscle, Sand, Snow
-from genesis.utils.element import compute_lame_parameters
 
 
 @qd.data_oriented
 class MPMModel:
-    """The elastic model shared by every MPM material, under the Lame parameters of the material.
+    """The elastic model shared by every MPM material, under the parameters each particle holds.
 
     'needs_svd' states whether the model reads the singular value decomposition of the deformation gradient, which the
     solver skips when no model of the scene reads it. 'default_Jp' is the plastic volume ratio a particle starts from.
+    Each particle holds the Lame parameters and the yield parameters of its material, the latter zero for a law that
+    does not yield (see 'MPMEntity._add_particles_to_solver').
+
+    Parameters
+    ----------
+    model : str | None
+        The variant of the law, compiled in: the stress model of an Elastic or a Muscle material, and the yield
+        criterion of an ElastoPlastic one. None for the other materials.
     """
 
-    def __init__(self, youngs_modulus: float, poisson_ratio: float) -> None:
-        self.mu, self.lam = compute_lame_parameters(youngs_modulus, poisson_ratio)
+    def __init__(self, model: str | None) -> None:
         self.needs_svd = True
         self.default_Jp = 1.0
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         raise NotImplementedError
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        return self._compute_corotated_stress(U, V, F_new, J, self.mu, self.lam)
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
+        return self._compute_corotated_stress(U, V, F_new, J, mu, lam)
 
     @qd.func
     def _compute_corotated_stress(self, U, V, F, J, mu, lam):
@@ -41,23 +45,23 @@ class MPMModel:
 class MPMElasticModel(MPMModel):
     """The stress of an Elastic material, under the stress model its entity solver options choose."""
 
-    def __init__(self, youngs_modulus: float, poisson_ratio: float, model: str) -> None:
-        super().__init__(youngs_modulus, poisson_ratio)
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
         # The 'corotation' model keeps the stress of the base model, which reads U @ V.T from the decomposition of F_tmp
-        if model == "neohookean":
+        if model == gs.mpm_model.neohookean:
             self.update_stress = self._update_stress_neohookean
             # The Neo-Hookean stress only reads F_tmp and J = det(F_tmp)
             self.needs_svd = False
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         return F_tmp, S, Jp
 
     @qd.func
-    def _update_stress_neohookean(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = self.mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (
-            self.lam * qd.log(J) - self.mu
-        )
+    def _update_stress_neohookean(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
+        stress = mu * (F_tmp @ F_tmp.transpose()) + qd.Matrix.identity(gs.qd_float, 3) * (lam * qd.log(J) - mu)
         return stress
 
 
@@ -65,21 +69,21 @@ class MPMElasticModel(MPMModel):
 class MPMMuscleModel(MPMElasticModel):
     """The model of a Muscle material: its elastic model plus an active stress along the fiber direction.
 
-    The active stress scales with the Young's modulus of the material.
+    The active stress scales with the Young's modulus of the material, recovered from the Lame parameters.
     """
 
-    def __init__(self, youngs_modulus: float, poisson_ratio: float, model: str) -> None:
-        super().__init__(youngs_modulus, poisson_ratio, model)
-        self.stiffness = youngs_modulus
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
         self._update_stress_without_actuation = self.update_stress
         self.update_stress = self._update_stress_with_actuation
 
     @qd.func
-    def _update_stress_with_actuation(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        stress = self._update_stress_without_actuation(U, S, V, F_tmp, F_new, J, Jp, actu, m_dir)
+    def _update_stress_with_actuation(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
+        stress = self._update_stress_without_actuation(U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam)
 
+        youngs_modulus = mu * (3 * lam + 2 * mu) / (lam + mu)
         AAt = m_dir.outer_product(m_dir)
-        stress += self.stiffness * actu * F_tmp @ AAt @ F_tmp.transpose()
+        stress += youngs_modulus * actu * F_tmp @ AAt @ F_tmp.transpose()
 
         return stress
 
@@ -88,23 +92,14 @@ class MPMMuscleModel(MPMElasticModel):
 class MPMElastoPlasticModel(MPMModel):
     """The model of an ElastoPlastic material, yielding under its yield criterion."""
 
-    def __init__(
-        self,
-        youngs_modulus: float,
-        poisson_ratio: float,
-        yield_criterion: str,
-        yield_stress: float,
-        critical_compression: float,
-        critical_stretch: float,
-    ) -> None:
-        super().__init__(youngs_modulus, poisson_ratio)
-        self.use_von_mises = yield_criterion == "von_mises"
-        self.yield_stress = yield_stress
-        self.critical_compression = critical_compression
-        self.critical_stretch = critical_stretch
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
+        self.use_von_mises = model == gs.yield_criterion.von_mises
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.use_von_mises):
@@ -113,7 +108,7 @@ class MPMElastoPlasticModel(MPMModel):
             epsilon = qd.Vector([qd.log(S_new[0, 0]), qd.log(S_new[1, 1]), qd.log(S_new[2, 2])])
             epsilon_hat = epsilon - (epsilon.sum() / 3)
             epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
-            delta_gamma = epsilon_hat_norm - self.yield_stress / (2 * self.mu)
+            delta_gamma = epsilon_hat_norm - yield_stress / (2 * mu)
 
             if delta_gamma > 0:
                 epsilon -= (delta_gamma / epsilon_hat_norm) * epsilon_hat
@@ -127,7 +122,7 @@ class MPMElastoPlasticModel(MPMModel):
         else:
             S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
             for d in qd.static(range(3)):
-                S_new[d, d] = min(max(S[d, d], 1 - self.critical_compression), 1 + self.critical_stretch)
+                S_new[d, d] = min(max(S[d, d], 1 - critical_compression), 1 + critical_stretch)
             F_new = U @ S_new @ V.transpose()
 
         Jp_new = Jp
@@ -140,50 +135,42 @@ class MPMLiquidModel(MPMModel):
 
     The bulk modulus is the first Lame parameter, the shear modulus being zero. A viscous liquid takes the shear modulus
     viscosity / substep_dt, applied to the deformation of one substep. It resists the strain rate as a viscosity would,
-    and its volumetric part also stiffens the liquid against compression, more so at a finer substep.
+    and its volumetric part also stiffens the liquid against compression, more so at a finer substep. An inviscid
+    liquid leaves the decomposition of the deformation gradient unread, and a viscous one reads it (see
+    'MPMSolver.build'). The particles of a liquid hold these moduli (see 'MPMEntity._add_particles_to_solver').
     """
 
-    def __init__(
-        self,
-        youngs_modulus: float,
-        poisson_ratio: float,
-        bulk_modulus: float | None,
-        viscosity: float | None,
-        substep_dt: float,
-    ) -> None:
-        # The bulk modulus defaults to the first Lame parameter of the Young's modulus and the Poisson ratio
-        super().__init__(youngs_modulus, poisson_ratio)
-        if bulk_modulus is not None:
-            self.lam = bulk_modulus
-        self.mu = 0.0 if viscosity is None else viscosity / substep_dt
-        # The term 2 * mu * (F_tmp - U @ V.T) @ F_tmp.T is the only reader of the decomposition, and vanishes with mu
-        self.needs_svd = self.mu > 0.0
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
+        self.needs_svd = False
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         F_new = qd.Matrix.identity(gs.qd_float, 3) * qd.pow(J, 1.0 / 3.0)
         S_new = S
         Jp_new = Jp
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
         # The viscosity resists the deformation of the substep, which F_tmp holds before its reset to a volume change
-        return self._compute_corotated_stress(U, V, F_tmp, J, self.mu, self.lam)
+        return self._compute_corotated_stress(U, V, F_tmp, J, mu, lam)
 
 
 @qd.data_oriented
 class MPMSandModel(MPMModel):
     """The model of a Sand material, yielding under the Drucker-Prager criterion of its internal friction angle."""
 
-    def __init__(self, youngs_modulus: float, poisson_ratio: float, friction_angle: float) -> None:
-        super().__init__(youngs_modulus, poisson_ratio)
+    def __init__(self, model: str | None) -> None:
+        super().__init__(model)
         self.default_Jp = 0.0
-        sin_phi = math.sin(math.radians(friction_angle))
-        self.alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
 
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         epsilon = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(3)):
@@ -198,7 +185,7 @@ class MPMSandModel(MPMModel):
             Jp_new = tr
         else:
             Jp_new = 0.0
-            delta_gamma = epsilon_hat_norm + (3 * self.lam + 2 * self.mu) / (2 * self.mu) * tr * self.alpha
+            delta_gamma = epsilon_hat_norm + (3 * lam + 2 * mu) / (2 * mu) * tr * friction_alpha
             for i in qd.static(range(3)):
                 S_new[i, i] = qd.exp(epsilon[i] - max(0, delta_gamma) / epsilon_hat_norm * epsilon_hat[i])
 
@@ -206,14 +193,14 @@ class MPMSandModel(MPMModel):
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
         log_S_sum = gs.qd_float(0.0)
         center = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i in qd.static(range(3)):
             log_S_sum += qd.log(S[i, i])
-            center[i, i] = 2.0 * self.mu * qd.log(S[i, i]) * (1 / S[i, i])
+            center[i, i] = 2.0 * mu * qd.log(S[i, i]) * (1 / S[i, i])
         for i in qd.static(range(3)):
-            center[i, i] += self.lam * log_S_sum * (1 / S[i, i])
+            center[i, i] += lam * log_S_sum * (1 / S[i, i])
         stress = U @ center @ V.transpose() @ F_new.transpose()
         return stress
 
@@ -222,116 +209,31 @@ class MPMSandModel(MPMModel):
 class MPMSnowModel(MPMModel):
     """The model of a Snow material, clamping its principal stretches and hardening as it compacts."""
 
-    def __init__(
-        self, youngs_modulus: float, poisson_ratio: float, critical_compression: float, critical_stretch: float
-    ) -> None:
-        super().__init__(youngs_modulus, poisson_ratio)
-        self.critical_compression = critical_compression
-        self.critical_stretch = critical_stretch
-
     @qd.func
-    def update_F_S_Jp(self, J, F_tmp, U, S, V, Jp):
+    def update_F_S_Jp(
+        self, J, F_tmp, U, S, V, Jp, mu, lam, yield_stress, critical_compression, critical_stretch, friction_alpha
+    ):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = Jp
         for d in qd.static(range(3)):
-            S_new[d, d] = min(max(S[d, d], 1 - self.critical_compression), 1 + self.critical_stretch)
+            S_new[d, d] = min(max(S[d, d], 1 - critical_compression), 1 + critical_stretch)
             Jp_new *= S[d, d] / S_new[d, d]
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
     @qd.func
-    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
+    def update_stress(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir, mu, lam):
         # The hardening coefficient stiffens the snow as it compacts
         h = qd.exp(10 * (1.0 - Jp))
-        return self._compute_corotated_stress(U, V, F_new, J, self.mu * h, self.lam * h)
+        return self._compute_corotated_stress(U, V, F_new, J, mu * h, lam * h)
 
 
-@dataclass(frozen=True)
-class MPMModelKey:
-    """The parameters of the model of an entity, equal for the entities sharing one compiled model.
-
-    Each subclass holds the constructor parameters of its model class, which keys of another subclass never equal.
-    """
-
-    model_cls: ClassVar[type[MPMModel]]
-    youngs_modulus: float
-    poisson_ratio: float
-
-
-@dataclass(frozen=True)
-class MPMElasticModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMElasticModel
-    model: str
-
-
-@dataclass(frozen=True)
-class MPMMuscleModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMMuscleModel
-    model: str
-
-
-@dataclass(frozen=True)
-class MPMElastoPlasticModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMElastoPlasticModel
-    yield_criterion: str
-    yield_stress: float
-    critical_compression: float
-    critical_stretch: float
-
-
-@dataclass(frozen=True)
-class MPMLiquidModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMLiquidModel
-    bulk_modulus: float | None
-    viscosity: float | None
-
-
-@dataclass(frozen=True)
-class MPMSandModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMSandModel
-    friction_angle: float
-
-
-@dataclass(frozen=True)
-class MPMSnowModelKey(MPMModelKey):
-    model_cls: ClassVar[type[MPMModel]] = MPMSnowModel
-    critical_compression: float
-    critical_stretch: float
-
-
-def get_mpm_model_key(options: "gs.entities.MPM") -> MPMModelKey:
-    """Return what decides the model of an entity, so that the entities sharing it share one compiled model.
-
-    The key holds the parameters of the model of the material, the defaults of the solver filled in (see
-    'gs.entities.MPM.material_params').
-    """
-    material, params = options.material, options.material_params
-    youngs_modulus, poisson_ratio = params.youngs_modulus, params.poisson_ratio
-    if isinstance(material, Elastic):
-        return MPMElasticModelKey(youngs_modulus, poisson_ratio, params.model)
-    if isinstance(material, Muscle):
-        return MPMMuscleModelKey(youngs_modulus, poisson_ratio, params.model)
-    if isinstance(material, ElastoPlastic):
-        return MPMElastoPlasticModelKey(
-            youngs_modulus,
-            poisson_ratio,
-            material.yield_criterion,
-            material.yield_stress,
-            material.critical_compression,
-            material.critical_stretch,
-        )
-    if isinstance(material, Liquid):
-        return MPMLiquidModelKey(youngs_modulus, poisson_ratio, material.bulk_modulus, material.viscosity)
-    if isinstance(material, Sand):
-        return MPMSandModelKey(youngs_modulus, poisson_ratio, material.friction_angle)
-    return MPMSnowModelKey(youngs_modulus, poisson_ratio, material.critical_compression, material.critical_stretch)
-
-
-def build_mpm_model(key: MPMModelKey, substep_dt: float) -> MPMModel:
-    """Bind the model that a key returned by 'get_mpm_model_key' names.
-
-    A viscous Liquid needs the substep of the solver (see 'MPMLiquidModel').
-    """
-    if isinstance(key, MPMLiquidModelKey):
-        return MPMLiquidModel(**asdict(key), substep_dt=substep_dt)
-    return key.model_cls(**asdict(key))
+# The model class of each material, which compiles one model per variant (see 'MPMModel')
+MPM_MODEL_CLS_BY_MATERIAL = {
+    Elastic: MPMElasticModel,
+    Muscle: MPMMuscleModel,
+    ElastoPlastic: MPMElastoPlasticModel,
+    Liquid: MPMLiquidModel,
+    Sand: MPMSandModel,
+    Snow: MPMSnowModel,
+}

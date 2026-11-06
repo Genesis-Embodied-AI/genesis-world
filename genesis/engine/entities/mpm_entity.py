@@ -1,4 +1,5 @@
 import functools
+import math
 
 import torch
 
@@ -6,7 +7,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
-from genesis.options.materials import Liquid, Muscle, Sand, Snow
+from genesis.options.materials import ElastoPlastic, Liquid, Muscle, Sand, Snow
+from genesis.utils.element import compute_lame_parameters
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
@@ -96,6 +98,24 @@ class MPMEntity(ParticleEntity):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
+        # The parameters of the constitutive model, a liquid taking its bulk modulus as the first Lame parameter and
+        # viscosity / substep_dt as the shear modulus (see 'MPMLiquidModel')
+        material, material_params = self._material, self._options.material_params
+        mu, lam = compute_lame_parameters(material_params.youngs_modulus, material_params.poisson_ratio)
+        yield_stress = critical_compression = critical_stretch = friction_alpha = 0.0
+        if isinstance(material, Liquid):
+            if material.bulk_modulus is not None:
+                lam = material.bulk_modulus
+            mu = 0.0 if material.viscosity is None else material.viscosity / self._solver.substep_dt
+        elif isinstance(material, ElastoPlastic):
+            yield_stress = material.yield_stress
+            critical_compression, critical_stretch = material.critical_compression, material.critical_stretch
+        elif isinstance(material, Snow):
+            critical_compression, critical_stretch = material.critical_compression, material.critical_stretch
+        elif isinstance(material, Sand):
+            sin_phi = math.sin(math.radians(material.friction_angle))
+            friction_alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
+
         self._solver.add_particles(
             self._sim.cur_substep_local,
             self.active,
@@ -104,6 +124,12 @@ class MPMEntity(ParticleEntity):
             self._model_idx,
             self._solver._models[self._model_idx].default_Jp,
             self._material.density,
+            mu,
+            lam,
+            yield_stress,
+            critical_compression,
+            critical_stretch,
+            friction_alpha,
             self._particles,
         )
 
