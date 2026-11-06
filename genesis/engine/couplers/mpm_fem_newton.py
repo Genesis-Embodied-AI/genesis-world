@@ -12,7 +12,7 @@ import quadrants as qd
 from genesis.engine.numerics.bcoo_matrix import sort_bcoo
 from genesis.engine.solvers.fem_newton import FemNewtonParticipant
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import MIN_SLOTS, grown_capacity, retire_scratch
+from genesis.engine.solvers.newton_linear import MIN_SLOTS, grown_capacity, retire_scratch
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.utils.data import DataItem, iter_data
 from genesis.utils.misc import qd_to_numpy

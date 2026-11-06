@@ -4,8 +4,9 @@ The PBD particles enter the joint solve with their inertia alone. PBD projects i
 the solve, so its particles hold their start position `ipos` and the end position `pos` of the projection. The joint
 solve takes the end positions as unknowns, starting at the projection x~, with the inertia energy 1/2 m |x - x~|^2 around
 it in the dt^2-scaled units of the material point method (MPM) energy. PBD's constraints stay with PBD, which projects
-them again the next substep, so the coupling is strong in the contact and staggered in the PBD constraints. After the
-solve, a PBD particle takes the velocity of its displacement over the substep.
+them again the next substep, so the coupling is strong in the contact and staggered in the PBD constraints. The
+particles own their rows of the linear system of the solve (see newton_linear.py), preconditioned by their diagonal
+blocks. An attached particle is an eliminated row (see newton_linear.py and is_moving). After the solve, a PBD particle takes the velocity of its displacement over the substep.
 """
 
 import numpy as np
@@ -14,17 +15,28 @@ import quadrants as qd
 
 import genesis as gs
 
-from .newton_contact import SRC_ITERATE
-from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
+from genesis.utils.data import iter_data
+
+from .newton_linear import (
+    BlockJacobiScratch,
+    LinearBlock,
+    NewtonLinearScratch,
+    block_jacobi_visit,
+    build_block_jacobi,
+    build_linear_block,
+    func_block_jacobi_apply,
+    func_block_jacobi_invert,
+    func_block_jacobi_reset,
+    row_vector,
+    write_block,
+)
+from .newton_solver import NewtonDevice, NewtonHost
 
 
 @qd.data_oriented
 class PbdNewtonData:
-    """The PBD rows of the joint solve, per reordered PBD particle and environment, indexed [i_q, i_b].
-
-    The vectors are the projection x~ of PBD's own substep, the gradient, the preconditioned conjugate gradient (PCG)
-    residual, preconditioned residual, direction, operator image and solution, and the line-search start. `diag_inv`
-    holds the 3 x 3 diagonal block of every particle, then its inverse.
+    """The PBD state of the joint solve, per reordered PBD particle and environment, indexed [i_q, i_b]: the
+    projection x~ of PBD's own substep and the line-search start.
 
     `pos_begin` and `vel_begin` hold the position and velocity of every PBD particle at the start of the substep,
     indexed [i_p, i_b] like PBD's own particles, which the particles of a failed environment return to."""
@@ -37,14 +49,7 @@ class PbdNewtonData:
         self.pos_begin = qd.ndarray(gs.qd_vec3, shape=shape)
         self.vel_begin = qd.ndarray(gs.qd_vec3, shape=shape)
         self.target = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.grad = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.r = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.z = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.p = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.ap = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.sol = qd.ndarray(gs.qd_vec3, shape=shape)
         self.x_prev = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.diag_inv = qd.ndarray(gs.qd_mat3, shape=shape)
 
 
 # ================================================ Layer 0: access ================================================
@@ -67,130 +72,45 @@ def func_pbd_begin(pbd_data: qd.template()):
         pbd_data.target[i_q, i_b] = pbd_data.pbd.particles_reordered[i_q, i_b].pos
 
 
+@qd.func
+def pbd_row(i_q: int, i_b: int, pbd: qd.template()):
+    """Row of the linear system of a PBD particle."""
+    return pbd.linear_block.row_start[()] + i_b * pbd.n_vertex_particles + i_q
+
+
 @qd.func(requires_top_level=True)
-def func_pbd_gradient(pbd_data: qd.template()):
-    """The gradient m (x - x~) of the inertia and its diagonal block m I, before the contacts add theirs."""
-    qd.loop_config(name="mpm_pbd_gradient")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
+def func_pbd_assemble(pbd: qd.template(), linear: NewtonLinearScratch, rows: LinearBlock):
+    """Write the gradient m (x - x~) of the inertia of every particle and its block m I, I on an attached particle."""
+    qd.loop_config(name="mpm_pbd_assemble")
+    for i_q, i_b in qd.ndrange(pbd.pbd_data.pbd._n_particles, pbd.pbd_data.pbd._B):
         grad = qd.Vector.zero(gs.qd_float, 3)
         m = gs.qd_float(1.0)
-        if is_moving(i_q, i_b, pbd_data.pbd):
-            m = pbd_data.pbd.particles_info_reordered[i_q, i_b].mass
-            grad = m * (pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.target[i_q, i_b])
-        pbd_data.grad[i_q, i_b] = grad
-        pbd_data.diag_inv[i_q, i_b] = m * qd.Matrix.identity(gs.qd_float, 3)
+        if is_moving(i_q, i_b, pbd):
+            m = pbd.particles_info_reordered[i_q, i_b].mass
+            grad = m * (pbd.particles_reordered[i_q, i_b].pos - pbd.pbd_data.target[i_q, i_b])
+        row = pbd_row(i_q, i_b, pbd)
+        i_t = rows.triplet_start[()] + row - rows.row_start[()]
+        write_block(i_t, row, row, m * qd.Matrix.identity(gs.qd_float, 3), linear)
+        for d in qd.static(range(3)):
+            linear.b_rhs[3 * row + d] = grad[d]
+        linear.pcg.row_env[row] = i_b
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_factor(pbd_data: qd.template()):
-    """The inverse of every particle's diagonal block, once the contacts added theirs."""
-    qd.loop_config(name="mpm_pbd_factor")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        pbd_data.diag_inv[i_q, i_b] = pbd_data.diag_inv[i_q, i_b].inverse()
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pcg_init(pbd_data: qd.template(), pcg_scalars: qd.template(), is_adjoint: qd.template()):
-    """The PBD part of the preconditioned conjugate gradient (PCG) start from 0: r = grad, solution and Ap cleared.
-
-    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
-    qd.loop_config(name="mpm_pbd_pcg_init")
-    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
-        pbd_data.r[i_q, i_b] = pbd_data.grad[i_q, i_b]
-        is_kept = False
-        if qd.static(is_adjoint):
-            is_kept = pcg_scalars.is_converged[i_b] != 0
-        if not is_kept:
-            pbd_data.sol[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_precondition(pbd_data: qd.template()):
-    """z = M^-1 r by the inverse diagonal blocks, with z = 0 for an attached particle so that it keeps its position."""
-    qd.loop_config(name="mpm_pbd_precondition")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        z = qd.Vector.zero(gs.qd_float, 3)
-        if is_moving(i_q, i_b, pbd_data.pbd):
-            z = pbd_data.diag_inv[i_q, i_b] @ pbd_data.r[i_q, i_b]
-        pbd_data.z[i_q, i_b] = z
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pcg_init_direction(pbd_data: qd.template(), pcg_scalars: qd.template()):
-    """Set the first search direction p = z over the PBD rows, and add r . z to rz."""
-    qd.loop_config(name="mpm_pbd_pcg_init_direction")
-    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
-        pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b]
-        qd.atomic_add(pcg_scalars.rz[i_b], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_matvec(pbd_data: qd.template()):
-    """Ap = m p over the PBD rows, before the contacts add their term."""
-    qd.loop_config(name="mpm_pbd_matvec")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        m = gs.qd_float(0.0)
-        if is_moving(i_q, i_b, pbd_data.pbd):
-            m = pbd_data.pbd.particles_info_reordered[i_q, i_b].mass
-        pbd_data.ap[i_q, i_b] = m * pbd_data.p[i_q, i_b]
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_matvec_dot(pbd_data: qd.template(), pcg_scalars: qd.template()):
-    """Add p . Ap over the PBD rows to p . Ap, once Ap holds the whole joint operator."""
-    qd.loop_config(name="mpm_pbd_matvec_dot")
-    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], pbd_data.p[i_q, i_b].dot(pbd_data.ap[i_q, i_b]))
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pcg_update_xr(pbd_data: qd.template(), pcg_scalars: qd.template()):
-    """Update the solution and the residual over the PBD rows, x += alpha p and r -= alpha Ap."""
-    qd.loop_config(name="mpm_pbd_pcg_update_xr")
-    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
-        if pcg_scalars.is_converged[i_b] == 0:
-            alpha = pcg_scalars.alpha[i_b]
-            pbd_data.sol[i_q, i_b] += alpha * pbd_data.p[i_q, i_b]
-            pbd_data.r[i_q, i_b] -= alpha * pbd_data.ap[i_q, i_b]
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pcg_dot_rz(pbd_data: qd.template(), pcg_scalars: qd.template()):
-    """Add r . z over the PBD rows to rz_new."""
-    qd.loop_config(name="mpm_pbd_pcg_dot_rz")
-    for i_q, i_b in qd.ndrange(pbd_data.r.shape[0], pbd_data.r.shape[1]):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[i_b], pbd_data.r[i_q, i_b].dot(pbd_data.z[i_q, i_b]))
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pcg_direction(pbd_data: qd.template(), pcg_scalars: qd.template()):
-    """Update the search direction p = z + beta p over the PBD rows, and clear Ap."""
-    qd.loop_config(name="mpm_pbd_pcg_direction")
-    for i_q, i_b in qd.ndrange(pbd_data.p.shape[0], pbd_data.p.shape[1]):
-        pbd_data.ap[i_q, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        if pcg_scalars.is_converged[i_b] == 0:
-            pbd_data.p[i_q, i_b] = pbd_data.z[i_q, i_b] + pcg_scalars.beta[i_b] * pbd_data.p[i_q, i_b]
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_start_line_search(pbd_data: qd.template(), control: qd.template()):
-    """The line-search start point, and the largest component of the step -x into the Newton measure."""
+def func_pbd_start_line_search(pbd: qd.template(), control: qd.template()):
+    """The line-search start point, and the largest component of the step into the Newton measure."""
     qd.loop_config(name="mpm_pbd_start_line_search")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        pbd_data.x_prev[i_q, i_b] = pbd_data.pbd.particles_reordered[i_q, i_b].pos
-        qd.atomic_max(control.max_disp[i_b], qd.abs(pbd_data.sol[i_q, i_b]).max())
+    for i_q, i_b in qd.ndrange(pbd.pbd_data.pbd._n_particles, pbd.pbd_data.pbd._B):
+        pbd.pbd_data.x_prev[i_q, i_b] = pbd.particles_reordered[i_q, i_b].pos
+        qd.atomic_max(control.max_disp[i_b], qd.abs(row_vector(pbd_row(i_q, i_b, pbd), pbd.linear.solution)).max())
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_step_forward(pbd_data: qd.template(), control: qd.template()):
+def func_pbd_step_forward(pbd: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_step_forward")
-    for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
-        if is_moving(i_q, i_b, pbd_data.pbd):
-            step = control.alpha[i_b] * pbd_data.sol[i_q, i_b]
-            pbd_data.pbd.particles_reordered[i_q, i_b].pos = pbd_data.x_prev[i_q, i_b] - step
+    for i_q, i_b in qd.ndrange(pbd.pbd_data.pbd._n_particles, pbd.pbd_data.pbd._B):
+        step = control.alpha[i_b] * row_vector(pbd_row(i_q, i_b, pbd), pbd.linear.solution)
+        pbd.particles_reordered[i_q, i_b].pos = pbd.pbd_data.x_prev[i_q, i_b] - step
 
 
 @qd.func(requires_top_level=True)
@@ -237,6 +157,9 @@ class PbdNewtonParticipant(NewtonDevice):
     are properties of the solver in `pbd_data`, so that the walk over the data of the NewtonSolver (see
     iter_data_oriented) stops at the solver, which owns them."""
 
+    # The rows of a particle are its own
+    n_vertex_rows = 1
+
     def __init__(self, pbd, n_envs: int):
         self.pbd_data = PbdNewtonData(pbd, n_envs)
         # The particles of every environment are contact vertices (see newton_contact.py)
@@ -245,6 +168,16 @@ class PbdNewtonParticipant(NewtonDevice):
         self.vertex_count = qd.ndarray(gs.qd_int, shape=())
         self.vertex_count.fill(n_envs * pbd.n_particles)
         self.n_vertex_particles = max(pbd.n_particles, 1)
+        # The linear system of the solve, bound by the NewtonSolver, and the rows of the particles in it
+        self.linear: NewtonLinearScratch | None = None
+        self.max_linear_rows = n_envs * self.n_vertex_particles
+        self.linear_block: LinearBlock = build_linear_block(self.max_linear_rows, self.max_linear_rows)
+        self.jacobi: BlockJacobiScratch = build_block_jacobi(self.max_linear_rows)
+
+    @property
+    def data(self):
+        yield from iter_data(self, "linear_block")
+        yield from iter_data(self, "jacobi")
 
     @property
     def n_particles(self):
@@ -267,56 +200,32 @@ class PbdNewtonParticipant(NewtonDevice):
         return self.pbd_data.pbd.particles_info_reordered
 
     @qd.func(requires_top_level=True)
-    def func_assemble(self, f: int):
-        func_pbd_gradient(self.pbd_data)
+    def func_assemble(self, f: int, is_exact: qd.template()):
+        func_pbd_assemble(self, self.linear, self.linear_block)
 
     @qd.func(requires_top_level=True)
     def func_factor_begin(self):
-        pass
+        func_block_jacobi_reset(self.linear_block.n_rows[()], self.jacobi)
+
+    @qd.func
+    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
+        block_jacobi_visit(i_r, i_c, H, self.jacobi)
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
-        func_pbd_factor(self.pbd_data)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
-        func_pbd_pcg_init(self.pbd_data, pcg_scalars, is_adjoint)
+        func_block_jacobi_invert(self.linear_block.n_rows[()], self.jacobi)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
-        func_pbd_precondition(self.pbd_data)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, pcg_scalars: qd.template()):
-        func_pbd_pcg_init_direction(self.pbd_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_matvec(self, pcg_scalars: qd.template()):
-        func_pbd_matvec(self.pbd_data)
-
-    @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, pcg_scalars: qd.template()):
-        func_pbd_matvec_dot(self.pbd_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, pcg_scalars: qd.template()):
-        func_pbd_pcg_update_xr(self.pbd_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, pcg_scalars: qd.template()):
-        func_pbd_pcg_dot_rz(self.pbd_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, pcg_scalars: qd.template()):
-        func_pbd_pcg_direction(self.pbd_data, pcg_scalars)
+        func_block_jacobi_apply(self.linear_block, self.linear, self.jacobi)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
-        func_pbd_start_line_search(self.pbd_data, control)
+        func_pbd_start_line_search(self, control)
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
-        func_pbd_step_forward(self.pbd_data, control)
+        func_pbd_step_forward(self, control)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
@@ -324,48 +233,18 @@ class PbdNewtonParticipant(NewtonDevice):
 
     # ------------------------------------------- vertex map -------------------------------------------
 
-    @qd.func(requires_top_level=True)
-    def func_vertex_begin(self, f: int, src: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_vertex_end(self, dst: qd.template()):
-        pass
-
     @qd.func
-    def func_vertex_env(self, i_v: int):
-        return i_v // self.n_vertex_particles
-
-    @qd.func
-    def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
+    def func_vertex_value(self, f: int, i_v: int):
         i_b = i_v // self.n_vertex_particles
         i_q = i_v - i_b * self.n_vertex_particles
-        value = qd.Vector.zero(gs.qd_float, 3)
-        if qd.static(src == SRC_ITERATE):
-            value = self.particles_reordered[i_q, i_b].pos - self.particles_reordered[i_q, i_b].ipos
-        else:
-            value = self.pbd_data.p[i_q, i_b]
-        return value
+        return self.particles_reordered[i_q, i_b].pos - self.particles_reordered[i_q, i_b].ipos
 
     @qd.func
-    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
+    def func_vertex_rows(self, i_v: int):
         i_b = i_v // self.n_vertex_particles
-        i_q = i_v - i_b * self.n_vertex_particles
-        qd.atomic_add(self.pbd_data.grad[i_q, i_b], y)
-
-    @qd.func
-    def func_vertex_add_product(
-        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
-    ):
-        i_b = i_v // self.n_vertex_particles
-        i_q = i_v - i_b * self.n_vertex_particles
-        qd.atomic_add(self.pbd_data.ap[i_q, i_b], y)
-
-    @qd.func
-    def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
-        i_b = i_v // self.n_vertex_particles
-        i_q = i_v - i_b * self.n_vertex_particles
-        qd.atomic_add(self.pbd_data.diag_inv[i_q, i_b], H)
+        rows = qd.Vector([self.linear_block.row_start[()] + i_v], dt=gs.qd_int)
+        weights = qd.Vector([gs.qd_float(is_moving(i_v - i_b * self.n_vertex_particles, i_b, self))], dt=gs.qd_float)
+        return 1, rows, weights
 
 
 @qd.kernel
@@ -399,9 +278,6 @@ class PbdNewtonHost(NewtonHost):
 
     def newton_prepare(self, f):
         kernel_pbd_begin(self._device.pbd_data)
-
-    def newton_assemble(self, f, is_exact=False):
-        kernel_assemble_participant(f, self._device)
 
     def newton_finish(self, f, control):
         kernel_pbd_finish(self._device.pbd_data, control)

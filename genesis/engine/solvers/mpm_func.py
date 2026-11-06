@@ -1,7 +1,7 @@
 """Layer-0 mathematics and Layer-1 stages of the implicit material point method (MPM) solver.
 
 Every function here is a '@qd.func'. Layer-0 functions map values to values. Layer-1 functions take the solver data
-(particle data, `MpmGridScratch`, `MpmNewtonScratch`, `MpmLinearScratch`, `NewtonControl`, `MpmMaterialTable`) and the
+(particle data, `MpmGridScratch`, `MpmNewtonScratch`, `MpmBrickScratch`, `NewtonControl`, `MpmMaterialTable`) and the
 scene values of `MpmInfo`. Those marked 'requires_top_level' are the stages that a graph kernel or a kernel of the
 solver calls. Per substep, the grid node displacement u minimizes the incremental potential
 
@@ -24,12 +24,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.numerics.bcoo_matrix import (
-    func_add_triplet,
-    func_read_bcoo,
-    func_report_triplet_demand,
-    func_write_triplet,
-)
+from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_write_triplet
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
 from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add, warp_add_by_key, warp_max_by_key
 from genesis.engine.numerics.open_addressing_hash import (
@@ -43,6 +38,7 @@ from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
 
 from .mpm_data import (
+    MpmBrickScratch,
     BLOCK_CELLS,
     BRICK_DIM,
     BRICK_INVERT_WARPS,
@@ -54,7 +50,6 @@ from .mpm_data import (
     STENCIL_BLOCKS,
     MpmGridScratch,
     MpmInfo,
-    MpmLinearScratch,
     MpmMaterialTable,
     MpmNewtonScratch,
     MpmParticles,
@@ -63,6 +58,7 @@ from .mpm_data import (
     MpmWallPairs,
 )
 from .newton_contact import append_pair, write_doublet, write_triplet
+from .newton_linear import LinearBlock, NewtonLinearScratch, discard_block
 
 # Biased signed range of block coordinates packed into 14 bits per axis
 COORD_BIAS = 8192
@@ -1512,13 +1508,40 @@ def func_apply_force_fields(t: float, dt: float, grid: MpmGridScratch, force_fie
 
 
 @qd.func(requires_top_level=True)
-def func_gather_node_diag(grid: MpmGridScratch, linear: MpmLinearScratch):
-    """Diagonal block of every node of the reduced Hessian, assembled before any contact row exists."""
-    qd.loop_config(name="mpm_gather_node_diag")
-    for entry in range(linear.matrix.bcoo_nnz[()]):
-        row, col, block = func_read_bcoo(entry, linear.matrix, block_rows=3, block_cols=3)
-        if row == col:
-            grid.node_diag[row] = block
+def func_node_diag(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    mpm_info: MpmInfo,
+):
+    """Diagonal block of every node of the physical Hessian (kinetic and elastic, see func_assemble)."""
+    qd.loop_config(name="mpm_kinetic_node_diag")
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        grid.node_diag[node] = kinetic_block(node, grid)
+    qd.loop_config(name="mpm_elastic_node_diag")
+    for s in range(grid.n_valid[()]):
+        terms = particle_stencil_terms(
+            f, s, mpm_info.substep_dt[()], particles, grid, newton, particles_info, materials, mpm_info, False
+        )
+        for a in qd.static(range(8)):
+            grid.node_diag[terms[0][a]] += stencil_pair_block(
+                a,
+                a,
+                terms[1],
+                terms[2],
+                terms[3],
+                terms[4],
+                terms[5],
+                terms[6],
+                terms[7],
+                terms[8],
+                terms[9],
+                terms[10],
+                terms[11],
+            )
 
 
 @qd.func(requires_top_level=True)
@@ -1526,20 +1549,20 @@ def func_contact_invweight(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    linear: MpmLinearScratch,
+    newton: MpmNewtonScratch,
     particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
     """Compute the inverse weight matrix of every valid particle of the first environment for its contact rows.
 
-    It comes from the physical Hessian (kinetic and elastic) at u = 0 that the matrix holds, assembled in the
-    configuration of frame `f`. It is W = sum_a w_a^2 H_aa^-1 over the stencil nodes of the particle, whose n^T W n
+    It comes from the physical Hessian (kinetic and elastic) at u = 0 in the configuration of frame `f`. It is W = sum_a w_a^2 H_aa^-1 over the stencil nodes of the particle, whose n^T W n
     along the normal n of a row is the block-diagonal approximation of the Delassus diagonal J H^-1 J^T, in the frame of
     the rest configuration (see contact_invweight). It plays the part of the inverse weight of a rigid link, so that a
     row pushes the material the particle is embedded in rather than the particle mass alone. Like it, it is a model
     constant of the rest configuration (see MPMSolver._init_contact_invweight): the stiffness of a row depends on the
     state through its normal and the rotation of the material alone."""
-    func_gather_node_diag(grid, linear)
+    func_node_diag(f, particles, grid, newton, particles_info, materials, mpm_info)
     qd.loop_config(name="mpm_contact_invweight")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
@@ -1818,25 +1841,6 @@ def add_particle_node_vector(slots, w: qd.types.vector(8), y: qd.types.vector(3)
 
 
 @qd.func
-def add_particle_brick_blocks(slots, w: qd.types.vector(8), H: qd.types.matrix(3, 3), linear: MpmLinearScratch):
-    """Add the blocks w_a w_b H of a contact Hessian H on a particle to the packed storage of the bricks, for every node
-    pair of its stencil sharing a brick (see func_gather_brick)."""
-    pair_a = qd.Vector(_STENCIL_PAIR_A, dt=gs.qd_int)
-    pair_b = qd.Vector(_STENCIL_PAIR_B, dt=gs.qd_int)
-    for pair in range(STENCIL_BLOCKS):
-        a = pair_a[pair]
-        b = pair_b[pair]
-        node_lo = qd.min(slots[a], slots[b])
-        node_hi = qd.max(slots[a], slots[b])
-        brick = brick_of(node_lo)
-        if brick_of(node_hi) == brick:
-            base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(node_lo), brick_node(node_hi))) * 9
-            block = (w[a] * w[b]) * H
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                qd.atomic_add(linear.brick[base + 3 * i + j], block[i, j])
-
-
-@qd.func
 def wall_normal(axis: int, sign: float):
     """Inward normal sign e_axis of a wall pair."""
     return sign * qd.Vector([gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float)
@@ -1911,45 +1915,39 @@ def func_newton_reset(grid: MpmGridScratch, newton: MpmNewtonScratch):
 
 
 @qd.func(requires_top_level=True)
-def func_report_extent(grid: MpmGridScratch, linear: MpmLinearScratch):
-    """Report the live rows and triplet demand: one kinetic diagonal per node and STENCIL_BLOCKS per elastic task."""
+def func_report_extent(grid: MpmGridScratch, rows: LinearBlock):
+    """Report the rows of the nodes and their triplets: one kinetic diagonal per node and STENCIL_BLOCKS per elastic
+    task."""
     for _ in range(1):
         n_nodes = grid.n_blocks[()] * BLOCK_CELLS
-        linear.pcg.n_rows[()] = n_nodes
-        func_report_triplet_demand(n_nodes + STENCIL_BLOCKS * grid.n_tasks[()], linear.matrix)
+        rows.n_rows[()] = n_nodes
+        rows.n_triplets[()] = n_nodes + STENCIL_BLOCKS * grid.n_tasks[()]
 
 
-@qd.func(requires_top_level=True)
-def func_check_loop_capacity(grid: MpmGridScratch, linear: MpmLinearScratch, mpm_info: MpmInfo):
-    """Check that the storage of the matrix holds the triplets of the assemblies of the Newton loop.
-
-    These assemblies write the storage that the assembly before the loop grew for the grid of the substep, and nothing
-    grows it inside the graph. An overflow there drops triplets, which fails the assertion in debug mode and otherwise
-    raises INVALID_MPM_GRID for every environment. Runs after func_report_extent."""
-    for _ in range(1):
-        is_overflow = linear.matrix.has_triplet_overflow[()] != 0 or grid.has_grid_overflow[()] != 0
-        if qd.static(qd_debug_asserts()):
-            assert not is_overflow, "MPM Newton loop: the triplet demand %d exceeds the storage of %d triplets" % (
-                linear.matrix.triplet_demand[()],
-                linear.matrix.triplet_row.shape[0],
-            )
-        if is_overflow:
-            flag_all_envs_error(grid, mpm_info, ErrorCode.INVALID_MPM_GRID)
-
-
-@qd.func(requires_top_level=True)
-def func_kinetic_assemble(grid: MpmGridScratch, linear: MpmLinearScratch):
-    """Write the diagonal block of every node, m I, or I on a fixed or massless node.
+@qd.func
+def kinetic_block(node: int, grid: MpmGridScratch):
+    """Kinetic diagonal block of a node, m I, or I on a fixed or massless node.
 
     A fixed node also gets a zero gradient and no stencil coupling, so its row is the identity and it stays put.
     """
+    mass = grid.node_mass[node]
+    scale = gs.qd_float(1.0)
+    if mass > 0.0 and grid.node_fixed[node] == 0:
+        scale = mass
+    return scale * qd.Matrix.identity(gs.qd_float, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_kinetic_assemble(grid: MpmGridScratch, linear: NewtonLinearScratch, rows: LinearBlock):
+    """Write the kinetic diagonal block and the environment of the row of every node."""
     qd.loop_config(name="mpm_kinetic_assemble")
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-        mass = grid.node_mass[node]
-        diagonal = qd.Matrix.identity(gs.qd_float, 3)
-        if mass > 0.0 and grid.node_fixed[node] == 0:
-            diagonal = mass * qd.Matrix.identity(gs.qd_float, 3)
-        func_write_triplet(node, node, node, diagonal, linear.matrix, is_symmetric=True)
+        row = rows.row_start[()] + node
+        func_write_triplet(
+            rows.triplet_start[()] + node, row, row, kinetic_block(node, grid), linear.matrix, is_symmetric=True
+        )
+        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        linear.pcg.row_env[row] = env
 
 
 @qd.func(requires_top_level=True)
@@ -1959,7 +1957,8 @@ def func_elastic_assemble(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
@@ -1970,7 +1969,7 @@ def func_elastic_assemble(
     The particles of a task share the 8-node stencil of their cell, and the task writes each of the 36 upper-triangular
     stencil blocks once, summed over its particles. Every particle also stages V dt^2 P(F_trial) F^T and the gradient of
     its constraint spring for the gradient gather. The spring acts on the trial displacement sum_a w_a u_a, so its
-    Hessian h I enters block (a, b) as w_a w_b h I. The blocks of fixed nodes are dropped from the stencil. The
+    Hessian h I enters block (a, b) as w_a w_b h I. The blocks on fixed nodes, eliminated rows, are discarded. The
     elastic blocks are projected to symmetric positive definite (SPD), or exact with `is_exact`, which only an adjoint
     solve at the converged displacement takes.
 
@@ -1978,9 +1977,13 @@ def func_elastic_assemble(
     lanes to share a cell over, the thread of a task adds the blocks of its particles in order (see func_cell_flags).
     """
     if qd.static(gs.backend == gs.cpu):
-        func_elastic_assemble_cpu(f, dt, particles, grid, newton, linear, particles_info, materials, mpm_info, is_exact)
+        func_elastic_assemble_cpu(
+            f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact
+        )
     else:
-        func_elastic_assemble_gpu(f, dt, particles, grid, newton, linear, particles_info, materials, mpm_info, is_exact)
+        func_elastic_assemble_gpu(
+            f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact
+        )
 
 
 @qd.func
@@ -2065,7 +2068,8 @@ def func_elastic_assemble_cpu(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
@@ -2081,7 +2085,7 @@ def func_elastic_assemble_cpu(
     for s in range(grid.n_valid[()]):
         if grid.task_flags[s] != 0:
             i_task = grid.task_ranks[s]
-            base = grid.n_blocks[()] * BLOCK_CELLS + STENCIL_BLOCKS * i_task
+            base = rows.triplet_start[()] + grid.n_blocks[()] * BLOCK_CELLS + STENCIL_BLOCKS * i_task
             # The task ranks equal the cell ranks, so the particles of the task end at the start of the next cell
             for t in range(s, grid.cell_starts[i_task + 1]):
                 slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_spring = (
@@ -2107,10 +2111,15 @@ def func_elastic_assemble_cpu(
                         w,
                         hess_spring,
                     )
-                    if t == s:
-                        func_write_triplet(base + pair, slots[a], slots[b], block, linear.matrix, is_symmetric=True)
+                    row_a = rows.row_start[()] + slots[a]
+                    row_b = rows.row_start[()] + slots[b]
+                    if movable[a] * movable[b] == 0.0:
+                        if t == s:
+                            discard_block(base + pair, linear)
+                    elif t == s:
+                        func_write_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
                     else:
-                        func_add_triplet(base + pair, slots[a], slots[b], block, linear.matrix, is_symmetric=True)
+                        func_add_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
 
 
 @qd.func(requires_top_level=True)
@@ -2120,7 +2129,8 @@ def func_elastic_assemble_gpu(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
@@ -2187,14 +2197,18 @@ def func_elastic_assemble_gpu(
             for i, j in qd.static(qd.ndrange(3, 3)):
                 task_block[i, j] = head_segmented_reduce_add(block[i, j], is_tail)
             if is_valid and is_head != 0:
-                func_write_triplet(
-                    n_nodes + STENCIL_BLOCKS * task + pair,
-                    slots[a],
-                    slots[b],
-                    task_block,
-                    linear.matrix,
-                    is_symmetric=True,
-                )
+                i_t = rows.triplet_start[()] + n_nodes + STENCIL_BLOCKS * task + pair
+                if movable[a] * movable[b] == 0.0:
+                    discard_block(i_t, linear)
+                else:
+                    func_write_triplet(
+                        i_t,
+                        rows.row_start[()] + slots[a],
+                        rows.row_start[()] + slots[b],
+                        task_block,
+                        linear.matrix,
+                        is_symmetric=True,
+                    )
 
 
 @qd.func(requires_top_level=True)
@@ -2204,7 +2218,8 @@ def func_gradient_gather(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     mpm_info: MpmInfo,
 ):
     """Gather the gradient b_rhs = m (u - dt v_free) + sum_p (G_p grad w + w g_spring_p) of every node.
@@ -2212,9 +2227,9 @@ def func_gradient_gather(
     The gradient is zero on fixed nodes. The particles of a node are summed in a fixed order, by the lanes of a
     warp on a GPU and by one thread on a CPU (see func_p2g)."""
     if qd.static(gs.backend == gs.cpu):
-        func_gradient_gather_cpu(f, dt, particles, grid, newton, linear, mpm_info)
+        func_gradient_gather_cpu(f, dt, particles, grid, newton, linear, rows, mpm_info)
     else:
-        func_gradient_gather_gpu(f, dt, particles, grid, newton, linear, mpm_info)
+        func_gradient_gather_gpu(f, dt, particles, grid, newton, linear, rows, mpm_info)
 
 
 @qd.func
@@ -2248,14 +2263,15 @@ def publish_node_gradient(
     dt: float,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
 ):
     value = qd.Vector.zero(gs.qd_float, 3)
     if grid.node_fixed[node] == 0:
         u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
         value = grad + grid.node_mass[node] * (u - dt * grid.node_v_free[node])
     for d in qd.static(range(3)):
-        linear.b_rhs[3 * node + d] = value[d]
+        linear.b_rhs[3 * (rows.row_start[()] + node) + d] = value[d]
 
 
 @qd.func(requires_top_level=True)
@@ -2265,7 +2281,8 @@ def func_gradient_gather_cpu(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     mpm_info: MpmInfo,
 ):
     """func_gradient_gather by one thread per node, the threads splitting the nodes, each walking the particles of the 8
@@ -2283,7 +2300,7 @@ def func_gradient_gather_cpu(
                 cell_slot = block_slot * BLOCK_CELLS + cell_local(c)
                 for s in range(grid.cell_seg_start[cell_slot], grid.cell_seg_end[cell_slot]):
                     grad = add_particle_node_gradient(f, s, o, grad, c, particles, grid, newton, mpm_info)
-        publish_node_gradient(node, grad, dt, grid, newton, linear)
+        publish_node_gradient(node, grad, dt, grid, newton, linear, rows)
 
 
 @qd.func(requires_top_level=True)
@@ -2293,7 +2310,8 @@ def func_gradient_gather_gpu(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     mpm_info: MpmInfo,
 ):
     """func_gradient_gather by one warp per node (see func_p2g_gpu)."""
@@ -2325,7 +2343,7 @@ def func_gradient_gather_gpu(
         for d in qd.static(range(3)):
             grad[d] = warp_sum(grad[d])
         if lane == 0:
-            publish_node_gradient(node, grad, dt, grid, newton, linear)
+            publish_node_gradient(node, grad, dt, grid, newton, linear, rows)
 
 
 @qd.func(requires_top_level=True)
@@ -2335,37 +2353,37 @@ def func_assemble(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
     is_exact: qd.template() = False,
 ):
-    func_kinetic_assemble(grid, linear)
-    func_elastic_assemble(f, dt, particles, grid, newton, linear, particles_info, materials, mpm_info, is_exact)
-    func_gradient_gather(f, dt, particles, grid, newton, linear, mpm_info)
+    """Write the gradient and Hessian of the nodes into their rows and triplets of the linear system."""
+    func_kinetic_assemble(grid, linear, rows)
+    func_elastic_assemble(f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact)
+    func_gradient_gather(f, dt, particles, grid, newton, linear, rows, mpm_info)
 
 
 @qd.func(requires_top_level=True)
-def func_reset_brick(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_reset_brick(grid: MpmGridScratch, bricks: MpmBrickScratch):
     qd.loop_config(name="mpm_brick_reset")
     for k in range(grid.n_blocks[()] * BRICKS_PER_BLOCK * BRICK_SCALARS):
-        linear.brick[k] = 0.0
+        bricks.brick[k] = 0.0
 
 
-@qd.func(requires_top_level=True)
-def func_gather_brick(linear: MpmLinearScratch):
-    """Store every reduced upper-triangular block whose row and column nodes share a brick into its packed storage.
+@qd.func
+def brick_visit(row: int, col: int, block: qd.types.matrix(3, 3), bricks: MpmBrickScratch):
+    """Store a reduced upper-triangular block of node rows `row` and `col` into the packed storage of their brick if they
+    share one.
 
     Blocks coupling two bricks are dropped (block-diagonal Schwarz restriction)."""
-    qd.loop_config(name="mpm_brick_visit")
-    for entry in range(linear.matrix.bcoo_nnz[()]):
-        row, col, block = func_read_bcoo(entry, linear.matrix, block_rows=3, block_cols=3)
-        brick = brick_of(row)
-        if brick_of(col) == brick:
-            base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(row), brick_node(col))) * 9
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                linear.brick[base + 3 * i + j] = block[i, j]
+    brick = brick_of(row)
+    if brick_of(col) == brick:
+        base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(row), brick_node(col))) * 9
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            bricks.brick[base + 3 * i + j] = block[i, j]
 
 
 @qd.func
@@ -2397,7 +2415,7 @@ def invert_node_block(D):
 
 
 @qd.func(requires_top_level=True)
-def func_invert_brick(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_invert_brick(grid: MpmGridScratch, bricks: MpmBrickScratch):
     """Invert every brick's 48 x 48 matrix in place and record which of its nodes are coupled inside the brick.
 
     The sweep of a pivot reads the pivot column that every entry depends on. A GPU spreads the entries of a brick over
@@ -2405,18 +2423,18 @@ def func_invert_brick(grid: MpmGridScratch, linear: MpmLinearScratch):
     (see func_invert_brick_gpu). The CPU backend has neither, and a CPU thread sweeps a whole brick on its packed
     storage, the column kept in scratch."""
     if qd.static(gs.backend == gs.cpu):
-        func_invert_brick_cpu(grid, linear)
+        func_invert_brick_cpu(grid, bricks)
     else:
-        func_invert_brick_gpu(grid, linear)
+        func_invert_brick_gpu(grid, bricks)
 
 
 @qd.func(requires_top_level=True)
-def func_invert_brick_cpu(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_invert_brick_cpu(grid: MpmGridScratch, bricks: MpmBrickScratch):
     """func_invert_brick_gpu by one thread per brick, in place on the packed storage of its upper triangle.
 
     Only the entries between coupled nodes are equilibrated and swept: a decoupled node has no entry with another one,
     so the sweep of a coupled pivot leaves the coupled entries as the full sweep does. The equilibration and the
-    snapshot of the pivot column live in `linear.brick_scratch`."""
+    snapshot of the pivot column live in `bricks.brick_scratch`."""
     qd.loop_config(name="mpm_brick_invert_cpu")
     for brick in range(grid.n_blocks[()] * BRICKS_PER_BLOCK):
         base = brick * BRICK_SCALARS
@@ -2427,66 +2445,66 @@ def func_invert_brick_cpu(grid: MpmGridScratch, linear: MpmLinearScratch):
             for b in range(a + 1, BRICK_NODES):
                 block_base = base + brick_sym_index(a, b) * 9
                 for k in qd.static(range(9)):
-                    if qd.abs(linear.brick[block_base + k]) > 0.0:
+                    if qd.abs(bricks.brick[block_base + k]) > 0.0:
                         bits |= (1 << a) | (1 << b)
-        linear.brick_mask[brick] = bits
+        bricks.brick_mask[brick] = bits
 
         if bits != 0:
             for r in range(BRICK_DIM):
                 if (bits & (1 << (r // 3))) != 0:
-                    diagonal = linear.brick[brick_entry_index(base, r, r)]
-                    linear.brick_scratch[scale_start + r] = 1.0 / qd.sqrt(diagonal if diagonal > 0.0 else 1.0)
+                    diagonal = bricks.brick[brick_entry_index(base, r, r)]
+                    bricks.brick_scratch[scale_start + r] = 1.0 / qd.sqrt(diagonal if diagonal > 0.0 else 1.0)
             for r in range(BRICK_DIM):
                 if (bits & (1 << (r // 3))) != 0:
                     for c in range(r, BRICK_DIM):
                         if (bits & (1 << (c // 3))) != 0:
                             index = brick_entry_index(base, r, c)
-                            x = linear.brick[index]
+                            x = bricks.brick[index]
                             if r == c and qd.abs(x) <= 0.0:
                                 x = 1.0
-                            x *= linear.brick_scratch[scale_start + r] * linear.brick_scratch[scale_start + c]
+                            x *= bricks.brick_scratch[scale_start + r] * bricks.brick_scratch[scale_start + c]
                             if r == c:
                                 x += _BRICK_REGULARIZATION
-                            linear.brick[index] = x
+                            bricks.brick[index] = x
 
             is_broken = 0
             for k in range(BRICK_DIM):
                 if (bits & (1 << (k // 3))) != 0:
                     for r in range(BRICK_DIM):
                         if (bits & (1 << (r // 3))) != 0:
-                            linear.brick_scratch[column_start + r] = linear.brick[brick_entry_index(base, r, k)]
-                    d = linear.brick_scratch[column_start + k]
+                            bricks.brick_scratch[column_start + r] = bricks.brick[brick_entry_index(base, r, k)]
+                    d = bricks.brick_scratch[column_start + k]
                     inv_d = 1.0 / d
                     if not (d > 0.0 and qd_isfinite(d)):
                         is_broken = 1
                     for r in range(BRICK_DIM):
                         if (bits & (1 << (r // 3))) != 0:
-                            a_rk = linear.brick_scratch[column_start + r]
+                            a_rk = bricks.brick_scratch[column_start + r]
                             for c in range(r, BRICK_DIM):
                                 if (bits & (1 << (c // 3))) != 0:
                                     index = brick_entry_index(base, r, c)
-                                    qc = linear.brick_scratch[column_start + c] * inv_d
-                                    value = linear.brick[index] - a_rk * qc
+                                    qc = bricks.brick_scratch[column_start + c] * inv_d
+                                    value = bricks.brick[index] - a_rk * qc
                                     if r == k:
                                         value = -inv_d if c == k else qc
                                     elif c == k:
                                         value = a_rk * inv_d
-                                    linear.brick[index] = value
+                                    bricks.brick[index] = value
 
             for r in range(BRICK_DIM):
                 if (bits & (1 << (r // 3))) != 0:
                     for c in range(r, BRICK_DIM):
                         if (bits & (1 << (c // 3))) != 0:
                             index = brick_entry_index(base, r, c)
-                            value = -linear.brick[index]
+                            value = -bricks.brick[index]
                             if is_broken != 0:
                                 value = 1.0 if r == c else 0.0
-                            value *= linear.brick_scratch[scale_start + r] * linear.brick_scratch[scale_start + c]
-                            linear.brick[index] = value
+                            value *= bricks.brick_scratch[scale_start + r] * bricks.brick_scratch[scale_start + c]
+                            bricks.brick[index] = value
                             # A diagonal node block is stored whole: mirror its lower entry
                             if r // 3 == c // 3 and r != c:
                                 block_base = base + brick_sym_index(r // 3, r // 3) * 9
-                                linear.brick[block_base + (c % 3) * 3 + r % 3] = value
+                                bricks.brick[block_base + (c % 3) * 3 + r % 3] = value
 
         # Decoupled nodes: their inverse is the inverse of their own block
         for a in range(BRICK_NODES):
@@ -2494,14 +2512,14 @@ def func_invert_brick_cpu(grid: MpmGridScratch, linear: MpmLinearScratch):
                 block_base = base + brick_sym_index(a, a) * 9
                 D = qd.Matrix.zero(gs.qd_float, 3, 3)
                 for i, j in qd.static(qd.ndrange(3, 3)):
-                    D[i, j] = linear.brick[block_base + 3 * i + j]
+                    D[i, j] = bricks.brick[block_base + 3 * i + j]
                 D_inv = invert_node_block(D)
                 for i, j in qd.static(qd.ndrange(3, 3)):
-                    linear.brick[block_base + 3 * i + j] = D_inv[i, j]
+                    bricks.brick[block_base + 3 * i + j] = D_inv[i, j]
 
 
 @qd.func(requires_top_level=True)
-def func_invert_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_invert_brick_gpu(grid: MpmGridScratch, bricks: MpmBrickScratch):
     """Invert every brick's 48 x 48 matrix in place by the symmetric sweep operator (Goodnight 1979), one warp per
     brick, and record which of its nodes are coupled inside the brick.
 
@@ -2545,7 +2563,7 @@ def func_invert_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
         for s in qd.static(range(_BRICK_SLOTS)):
             is_valid, r, c = brick_slot_entry(is_diag_lane, P0, Q0, s)
             if is_valid:
-                x[s] = linear.brick[base + brick_sym_index(r // 3, c // 3) * 9 + (r % 3) * 3 + c % 3]
+                x[s] = bricks.brick[base + brick_sym_index(r // 3, c // 3) * 9 + (r % 3) * 3 + c % 3]
                 if r // 3 != c // 3 and qd.abs(x[s]) > 0.0:
                     bits |= (1 << (r // 3)) | (1 << (c // 3))
                 if r == c:
@@ -2553,7 +2571,7 @@ def func_invert_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
         for level in qd.static(range(5)):
             bits |= qd.simt.subgroup.shuffle_xor(bits, qd.u32(1 << level))
         if lane == 0:
-            linear.brick_mask[brick] = bits
+            bricks.brick_mask[brick] = bits
 
         if bits != 0:
             if lane < BRICK_NODES and (bits & (1 << lane)) != 0:
@@ -2649,36 +2667,36 @@ def func_invert_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
                         value = qd.select(r == c, gs.qd_float(1.0), gs.qd_float(0.0))
                     value *= sh_scale[i_warp * BRICK_DIM + r] * sh_scale[i_warp * BRICK_DIM + c]
                     block_base = base + brick_sym_index(r // 3, c // 3) * 9
-                    linear.brick[block_base + (r % 3) * 3 + c % 3] = value
+                    bricks.brick[block_base + (r % 3) * 3 + c % 3] = value
                     if r // 3 == c // 3 and r != c:
-                        linear.brick[block_base + (c % 3) * 3 + r % 3] = value
+                        bricks.brick[block_base + (c % 3) * 3 + r % 3] = value
 
         # Decoupled nodes: no in-brick block joins them to another node, so their inverse is that of their own block
         if lane < BRICK_NODES and (bits & (1 << lane)) == 0:
             block_base = base + brick_sym_index(lane, lane) * 9
             D = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i, j in qd.static(qd.ndrange(3, 3)):
-                D[i, j] = linear.brick[block_base + 3 * i + j]
+                D[i, j] = bricks.brick[block_base + 3 * i + j]
             D_inv = invert_node_block(D)
             for i, j in qd.static(qd.ndrange(3, 3)):
-                linear.brick[block_base + 3 * i + j] = D_inv[i, j]
+                bricks.brick[block_base + 3 * i + j] = D_inv[i, j]
         qd.simt.subgroup.sync()
 
 
 @qd.func(requires_top_level=True)
-def func_apply_brick(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_apply_brick(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     """Apply the brick preconditioner z = M^-1 r over the material point method (MPM) rows, one thread per row.
 
     M is the block diagonal of the bricks. A GPU stages the r of a brick in block-shared memory once for its 48 rows
     (see func_apply_brick_gpu). The CPU backend has no shared memory, and its rows read r directly."""
     if qd.static(gs.backend == gs.cpu):
-        func_apply_brick_cpu(grid, linear)
+        func_apply_brick_cpu(grid, bricks, linear, rows)
     else:
-        func_apply_brick_gpu(grid, linear)
+        func_apply_brick_gpu(grid, bricks, linear, rows)
 
 
 @qd.func(requires_top_level=True)
-def func_apply_brick_cpu(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_apply_brick_cpu(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     """func_apply_brick_gpu reading r from the rows directly, without the shared copy of the brick's r."""
     qd.loop_config(name="mpm_brick_apply_cpu")
     for t in range(grid.n_blocks[()] * BRICKS_PER_BLOCK * BRICK_DIM):
@@ -2687,30 +2705,30 @@ def func_apply_brick_cpu(grid: MpmGridScratch, linear: MpmLinearScratch):
         a = i // 3
         p = i % 3
         base = brick * BRICK_SCALARS
-        bits = linear.brick_mask[brick]
+        bits = bricks.brick_mask[brick]
         z_entry = gs.qd_float(0.0)
         if (bits & (1 << a)) != 0:
             for b in range(BRICK_NODES):
                 if (bits & (1 << b)) != 0:
                     block_base = base + brick_sym_index(qd.min(a, b), qd.max(a, b)) * 9
-                    row_b = 3 * brick_slot(brick, b)
+                    row_b = 3 * (rows.row_start[()] + brick_slot(brick, b))
                     for q in qd.static(range(3)):
                         m = gs.qd_float(0.0)
                         if a <= b:
-                            m = linear.brick[block_base + p * 3 + q]
+                            m = bricks.brick[block_base + p * 3 + q]
                         else:
-                            m = linear.brick[block_base + q * 3 + p]
+                            m = bricks.brick[block_base + q * 3 + p]
                         z_entry += m * linear.pcg.r[row_b + q]
         else:
             block_base = base + brick_sym_index(a, a) * 9
-            row_a = 3 * brick_slot(brick, a)
+            row_a = 3 * (rows.row_start[()] + brick_slot(brick, a))
             for q in qd.static(range(3)):
-                z_entry += linear.brick[block_base + p * 3 + q] * linear.pcg.r[row_a + q]
-        linear.pcg.z[3 * brick_slot(brick, a) + p] = z_entry
+                z_entry += bricks.brick[block_base + p * 3 + q] * linear.pcg.r[row_a + q]
+        linear.pcg.z[3 * (rows.row_start[()] + brick_slot(brick, a)) + p] = z_entry
 
 
 @qd.func(requires_top_level=True)
-def func_apply_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
+def func_apply_brick_gpu(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     """func_apply_brick by 48 threads per brick, one per row.
 
     A block of 96 threads serves two bricks, since a block size must be a multiple of the warp size. A coupled row uses
@@ -2725,12 +2743,12 @@ def func_apply_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
         a = i // 3
         p = i % 3
         sh_r = qd.simt.block.SharedArray((2 * BRICK_DIM,), gs.qd_float)
-        s = brick_slot(brick, a)
+        s = rows.row_start[()] + brick_slot(brick, a)
         sh_r[thread] = linear.pcg.r[3 * s + p]
         qd.simt.block.sync()
 
         base = brick * BRICK_SCALARS
-        bits = linear.brick_mask[brick]
+        bits = bricks.brick_mask[brick]
         z_entry = gs.qd_float(0.0)
         if (bits & (1 << a)) != 0:
             for b in range(BRICK_NODES):
@@ -2739,22 +2757,22 @@ def func_apply_brick_gpu(grid: MpmGridScratch, linear: MpmLinearScratch):
                     for q in qd.static(range(3)):
                         m = gs.qd_float(0.0)
                         if a <= b:
-                            m = linear.brick[block_base + p * 3 + q]
+                            m = bricks.brick[block_base + p * 3 + q]
                         else:
-                            m = linear.brick[block_base + q * 3 + p]
+                            m = bricks.brick[block_base + q * 3 + p]
                         z_entry += m * sh_r[local * BRICK_DIM + b * 3 + q]
         else:
             block_base = base + brick_sym_index(a, a) * 9
             for q in qd.static(range(3)):
-                z_entry += linear.brick[block_base + p * 3 + q] * sh_r[local * BRICK_DIM + a * 3 + q]
+                z_entry += bricks.brick[block_base + p * 3 + q] * sh_r[local * BRICK_DIM + a * 3 + q]
         linear.pcg.z[3 * s + p] = z_entry
 
 
 @qd.func(requires_top_level=True)
-def func_negate_du(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch):
+def func_negate_du(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     qd.loop_config(name="mpm_negate_du")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.du[i] = -linear.solution[i]
+        newton.du[i] = -linear.solution[3 * rows.row_start[()] + i]
 
 
 @qd.func(requires_top_level=True)
@@ -2852,20 +2870,12 @@ def particle_max_disp(
 
 
 @qd.func(requires_top_level=True)
-def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch, control: qd.template()):
+def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, control: qd.template()):
     """Move the nodes of every environment to the trial point of its line-search step."""
     qd.loop_config(name="mpm_step_forward")
     for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.u[i] = newton.u_temp[i] + control.alpha[linear.pcg.row_env[i // 3]] * newton.du[i]
-
-
-@qd.func(requires_top_level=True)
-def func_node_envs(grid: MpmGridScratch, linear: MpmLinearScratch):
-    """Write the environment of every node row of the linear system, which the reductions of its solve key on."""
-    qd.loop_config(name="mpm_node_envs")
-    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
-        env, _ = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        linear.pcg.row_env[node] = env
+        env, block = unpack_block(grid.block_coords[i // (3 * BLOCK_CELLS)])
+        newton.u[i] = newton.u_temp[i] + control.alpha[env] * newton.du[i]
 
 
 @qd.func(requires_top_level=True)

@@ -3,18 +3,13 @@
 A contact vertex is a point whose displacement over the substep is linear in the unknowns of one participant: a
 material point method (MPM) particle, a finite element method (FEM) vertex, a position based dynamics (PBD) particle or
 a contact point on a Rigid link. The device owning a set of vertices is their vertex map, and every vertex has a global
-index, its map's `vertex_offset` plus its index in the map. A vertex map provides, as qd.func methods:
+index, its map's `vertex_offset` plus its index in the map, below its `vertex_count`.
 
-- `func_vertex_begin(f, src)`, run before the vertices of a stage are read, and `func_vertex_end(dst)`, after they
-  are written, both top-level stages;
-- `func_vertex_env(i_v)`, the environment of a vertex;
-- `func_vertex_value(f, i_v, src)`, the displacement of a vertex at the current iterate (SRC_ITERATE) or its share of
-  the direction of the conjugate gradient (SRC_DIRECTION);
-- `func_vertex_add_gradient(f, i_v, y)`, which adds a vertex vector to the gradient of the unknowns,
-  `func_vertex_add_product(f, i_v, y, p, pcg_scalars)`, which adds it to their operator image (`p` being the value of
-  the direction at the vertex), and `func_vertex_visit_diag(f, i_v, H)`, which adds a diagonal block to their
-  preconditioner;
-- `vertex_offset` and `vertex_count`, scalar ndarrays.
+A participant that owns rows of the linear system of the solve (see newton_linear.py) maps its vertices onto them: it
+provides `func_vertex_value(f, i_v)`, the displacement of a vertex at the current iterate, and `func_vertex_rows(i_v)`,
+the rows it moves and their weights, at most its `n_vertex_rows`. The row of an unknown its owner eliminates has a zero
+weight, so that no contact reaches it (see newton_linear.py). The contact points on Rigid links, whose dofs solve
+their own rows, have a map of their own (see MpmRigidContact), which reads and writes them through the links.
 
 A pair kind holds the contact pairs of one kind that its owner builds before the Newton solve of a substep, which stay
 fixed over the solve. Every pair writes the gradient and the Hessian of its energy over the vertices it involves into
@@ -22,14 +17,14 @@ the vertex-space matrices of `NewtonContactScratch`: doublets (vertex, 3-vector)
 vertex, column vertex, 3 x 3 block), `n_doublets` and `n_triplets` of them per pair at fixed slots. A pair kind
 provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f, control, is_trial)`.
 
-The keys of the slots are sorted once per substep and their values reduced at every assembly, so that the stages of the
-solve apply the contacts one block coordinate (BCOO) entry per thread, through the vertex maps: the gradient, the
-operator product, the diagonal blocks of the preconditioners and the line-search energy.
+The keys of the slots are sorted once per substep and their values reduced at every assembly. A reduced entry between
+vertices of the linear system expands into the blocks of their rows, which join the matrix (as CGQ distributes its
+contacts), and its doublets into the right-hand side. An entry on a Rigid contact point stays in vertex space: the
+product of the conjugate gradient, the diagonal blocks of Rigid's preconditioner and the gradient of Rigid go through
+its map, one thread per entry.
 """
 
 from collections.abc import Iterator
-
-import numpy as np
 
 import quadrants as qd
 
@@ -42,54 +37,57 @@ from genesis.engine.numerics.bcoo_matrix import (
     func_report_triplet_demand,
     func_write_triplet,
     init_bcoo_matrix,
+    kernel_reduce_bcoo,
     sort_bcoo,
 )
-from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data, iter_state_arrays
-from genesis.utils.misc import qd_destroy_data, qd_to_numpy
+from genesis.engine.numerics.dynamic_exclusive_sum import (
+    DynamicExclusiveSumScratch,
+    dynamic_exclusive_sum_sizes,
+    func_dynamic_exclusive_sum,
+)
+from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
+from genesis.utils.misc import qd_to_numpy
 
+from .newton_linear import (
+    MIN_SLOTS,
+    NewtonLinearScratch,
+    build_linear_block,
+    discard_block,
+    grown_capacity,
+    retire_scratch,
+    row_vector,
+    write_block,
+)
 from .newton_solver import NewtonDevice, participant_group
 
-# What the vertex maps read in a stage: the displacement at the current iterate, or the direction of the conjugate
-# gradient
+# What a Rigid contact point reads in a stage: its displacement at the current iterate, or the direction of the
+# conjugate gradient
 SRC_ITERATE = 0
 SRC_DIRECTION = 1
-# What the vertex maps write in a stage: the gradient, or the operator image of the direction
+# What a Rigid contact point writes in a stage: the gradient, or the operator image of the direction
 DST_GRADIENT = 0
 DST_PRODUCT = 1
+# Rows a contact vertex moves at most, the 8 nodes of the stencil of an MPM particle
+MAX_VERTEX_ROWS = 8
 
 PAIR_KINDS = Size("pair_kinds")
-# Capacity of the pairs of a pair kind
-PAIRS = Size("pairs")
-# Smallest capacity of the vertex-space matrices in slots and of a pair kind in pairs
-MIN_SLOTS = 64
-# Slack a capacity gets when it grows on overflow: the new capacity is the demand times this factor
-CAPACITY_GROW_FACTOR = 1.2
+HESSIAN_ENTRIES = Size("hessian_entries")
 # The global vertex index is a 32-bit row or column of the vertex-space matrices
 MAX_VERTICES = 2**31 - 1
 
 
 class NewtonContactScratch(Data, kind=DataKind.SCRATCH):
-    """Vertex-space gradient (doublets) and Hessian (upper triangular triplets) of the contact pairs, with the offsets
-    of the slots of every pair kind in them, then their totals."""
+    """Vertex-space gradient (doublets) and Hessian (upper triangular triplets) of the contact pairs, the offsets of
+    the slots of every pair kind in them, then their totals, and the first triplet of the linear system of every reduced
+    Hessian entry, then their total."""
 
     gradient: BCOOMatrixScratch
     hessian: BCOOMatrixScratch
     doublet_offsets: qd.Tensor = field(int, shape=(PAIR_KINDS + 1,), ndarray=True)
     triplet_offsets: qd.Tensor = field(int, shape=(PAIR_KINDS + 1,), ndarray=True)
-
-
-def retire_scratch(scratch: Data, retired: list) -> None:
-    """Free the arrays of a struct that a larger one replaces, and keep the struct referenced in `retired`."""
-    # FIXME: quadrants#1074 - the launch of a kernel is cached under the identity of its struct arguments, and the
-    # entry outlives the struct, so a new struct taking the identity of a dead one would run on its arrays
-    for _, array in iter_state_arrays(scratch):
-        qd_destroy_data(array)
-    retired.append(scratch)
-
-
-def grown_capacity(demand: int) -> int:
-    """Capacity of a struct grown to a demand, with the slack of CAPACITY_GROW_FACTOR."""
-    return int(np.ceil(demand * CAPACITY_GROW_FACTOR))
+    entry_blocks: qd.Tensor = field(int, shape=(HESSIAN_ENTRIES,), ndarray=True)
+    entry_starts: qd.Tensor = field(int, shape=(HESSIAN_ENTRIES,), ndarray=True)
+    entry_scan: DynamicExclusiveSumScratch
 
 
 def build_newton_contact(n_kinds: int, max_doublets: int, max_triplets: int) -> NewtonContactScratch:
@@ -97,8 +95,10 @@ def build_newton_contact(n_kinds: int, max_doublets: int, max_triplets: int) -> 
     scratch = NewtonContactScratch(
         sizes={
             PAIR_KINDS: n_kinds,
+            HESSIAN_ENTRIES: max_triplets,
             NewtonContactScratch.gradient: bcoo_matrix_sizes(max_doublets, block_shape=(3, 1)),
             NewtonContactScratch.hessian: bcoo_matrix_sizes(max_triplets, block_shape=(3, 3)),
+            NewtonContactScratch.entry_scan: dynamic_exclusive_sum_sizes(max_triplets),
         }
     )
     init_bcoo_matrix(scratch.gradient, n_triplets=0)
@@ -135,25 +135,43 @@ def write_triplet(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), contac
 
 
 @qd.func
-def vertex_env(i_vg: int, contact: qd.template()):
-    """Environment of the contact vertex of global index `i_vg`."""
-    i_b = gs.qd_int(0)
-    for vertex_map in qd.static(contact.vertex_maps):
+def vertex_rows(i_vg: int, contact: qd.template()):
+    """Rows of the linear system that contact vertex `i_vg` moves, their weights and their count, zero for a Rigid
+    contact point."""
+    n_rows = gs.qd_int(0)
+    rows = qd.Vector.zero(gs.qd_int, MAX_VERTEX_ROWS)
+    weights = qd.Vector.zero(gs.qd_float, MAX_VERTEX_ROWS)
+    for vertex_map in qd.static(contact.linear_maps):
         i_v = i_vg - vertex_map.vertex_offset[()]
         if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
-            i_b = vertex_map.func_vertex_env(i_v)
-    return i_b
+            n_map, rows_map, weights_map = vertex_map.func_vertex_rows(i_v)
+            n_rows = n_map
+            for a in qd.static(range(vertex_map.n_vertex_rows)):
+                rows[a] = rows_map[a]
+                weights[a] = weights_map[a]
+    return n_rows, rows, weights
 
 
 @qd.func
-def vertex_value(f: int, i_vg: int, contact: qd.template(), src: qd.template()):
-    """Value of the contact vertex of global index `i_vg` (see func_vertex_value)."""
-    value = qd.Vector.zero(gs.qd_float, 3)
-    for vertex_map in qd.static(contact.vertex_maps):
-        i_v = i_vg - vertex_map.vertex_offset[()]
-        if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
-            value = vertex_map.func_vertex_value(f, i_v, src)
-    return value
+def is_rigid_vertex(i_vg: int, contact: qd.template()):
+    is_rigid = False
+    if qd.static(contact.has_rigid_map):
+        is_rigid = contact.rigid_map.vertex_offset[()] <= i_vg
+    return is_rigid
+
+
+@qd.func
+def entry_block_count(i_r: int, i_c: int, contact: qd.template()):
+    """Blocks of the linear system a reduced Hessian entry expands into, the upper triangle of a diagonal one, and
+    none on a Rigid contact point."""
+    n_blocks = gs.qd_int(0)
+    if not is_rigid_vertex(i_c, contact):
+        n_r, rows_r, weights_r = vertex_rows(i_r, contact)
+        n_c, rows_c, weights_c = vertex_rows(i_c, contact)
+        n_blocks = n_r * n_c
+        if i_r == i_c:
+            n_blocks = n_r * (n_r + 1) // 2
+    return n_blocks
 
 
 # ============================================== Layer 1: stages ==============================================
@@ -166,12 +184,11 @@ def func_contact_layout(contact: qd.template()):
         n_doublets = gs.qd_int(0)
         n_triplets = gs.qd_int(0)
         for i_kind in qd.static(range(len(contact.pair_kinds))):
-            pair_kind = contact.pair_kinds[i_kind]
             contact.matrices.doublet_offsets[i_kind] = n_doublets
             contact.matrices.triplet_offsets[i_kind] = n_triplets
-            n_pairs = pair_kind.func_pair_count()
-            n_doublets += qd.static(pair_kind.n_doublets) * n_pairs
-            n_triplets += qd.static(pair_kind.n_triplets) * n_pairs
+            n_pairs = contact.pair_kinds[i_kind].func_pair_count()
+            n_doublets += qd.static(contact.pair_kinds[i_kind].n_doublets) * n_pairs
+            n_triplets += qd.static(contact.pair_kinds[i_kind].n_triplets) * n_pairs
         contact.matrices.doublet_offsets[qd.static(len(contact.pair_kinds))] = n_doublets
         contact.matrices.triplet_offsets[qd.static(len(contact.pair_kinds))] = n_triplets
         func_report_triplet_demand(n_doublets, contact.matrices.gradient)
@@ -181,99 +198,158 @@ def func_contact_layout(contact: qd.template()):
 @qd.func(requires_top_level=True)
 def func_contact_terms(f: int, contact: qd.template()):
     """Write the doublets and triplets of every pair at the current iterate."""
-    for vertex_map in qd.static(contact.vertex_maps):
-        vertex_map.func_vertex_begin(f, SRC_ITERATE)
+    if qd.static(contact.has_rigid_map):
+        contact.rigid_map.func_vertex_begin(f, SRC_ITERATE)
     for i_kind in qd.static(range(len(contact.pair_kinds))):
         contact.pair_kinds[i_kind].func_pair_terms(f, i_kind, contact)
 
 
 @qd.func(requires_top_level=True)
-def func_contact_assemble(f: int, contact: qd.template()):
-    """Add the gradient of the contacts at the current iterate to the gradients of the participants.
+def func_contact_entry_layout(contact: qd.template()):
+    """Number the blocks of the linear system of every reduced Hessian entry, and report their count in the share of
+    the contacts (see entry_block_count). The entries hold over the substep."""
+    qd.loop_config(name="newton_contact_entry_blocks")
+    for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
+        i_r, i_c, H = func_read_bcoo(i_nz, contact.matrices.hessian, block_rows=3, block_cols=3)
+        contact.matrices.entry_blocks[i_nz] = entry_block_count(i_r, i_c, contact)
+    func_dynamic_exclusive_sum(
+        contact.matrices.entry_blocks,
+        contact.matrices.entry_starts,
+        contact.matrices.hessian.bcoo_nnz,
+        contact.matrices.entry_scan,
+    )
+    for _ in range(1):
+        n_entries = contact.matrices.hessian.bcoo_nnz[()]
+        n_blocks = gs.qd_int(0)
+        if n_entries > 0:
+            n_blocks = contact.matrices.entry_starts[n_entries - 1] + contact.matrices.entry_blocks[n_entries - 1]
+        contact.linear_block.n_triplets[()] = n_blocks
 
-    Runs once every participant assembled its own gradient. The Hessian is reduced too, which the preconditioner and
-    the operator product read until the next assembly."""
+
+@qd.func(requires_top_level=True)
+def func_contact_assemble(f: int, contact: qd.template(), linear: NewtonLinearScratch):
+    """Add the gradient and the Hessian of the contacts at the current iterate to the linear system and to Rigid.
+
+    Runs once every participant assembled its own share. A doublet adds w_a g to every row a of its vertex. A Hessian
+    entry (r, c) between vertices of the linear system writes the blocks w_a w_b H of their rows a and b into the
+    triplets of the contacts, discarding those of zero weight. A doublet on a Rigid contact point goes to its link."""
     func_contact_terms(f, contact)
     func_reduce_bcoo(contact.matrices.gradient, block_scalars=3)
     func_reduce_bcoo(contact.matrices.hessian, block_scalars=9)
     qd.loop_config(name="newton_contact_gradient")
     for i_nz in range(contact.matrices.gradient.bcoo_nnz[()]):
-        i_vg, _, block = func_read_bcoo(i_nz, contact.matrices.gradient, block_rows=3, block_cols=1)
+        i_vg, i_zero, block = func_read_bcoo(i_nz, contact.matrices.gradient, block_rows=3, block_cols=1)
         g = qd.Vector([block[0, 0], block[1, 0], block[2, 0]], dt=gs.qd_float)
-        for vertex_map in qd.static(contact.vertex_maps):
-            i_v = i_vg - vertex_map.vertex_offset[()]
-            if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
-                vertex_map.func_vertex_add_gradient(f, i_v, g)
-    for vertex_map in qd.static(contact.vertex_maps):
-        vertex_map.func_vertex_end(DST_GRADIENT)
-
-
-@qd.func(requires_top_level=True)
-def func_contact_visit_diag(f: int, contact: qd.template()):
-    """Add the diagonal blocks of the contact Hessian to the preconditioners of the participants, between the start
-    and the end of their factorization."""
-    qd.loop_config(name="newton_contact_visit_diag")
+        if is_rigid_vertex(i_vg, contact):
+            if qd.static(contact.has_rigid_map):
+                contact.rigid_map.func_vertex_add_force(f, i_vg - contact.rigid_map.vertex_offset[()], g)
+        else:
+            n_rows, rows, weights = vertex_rows(i_vg, contact)
+            for a in range(n_rows):
+                for d in qd.static(range(3)):
+                    qd.atomic_add(linear.b_rhs[3 * rows[a] + d], weights[a] * g[d])
+    if qd.static(contact.has_rigid_map):
+        contact.rigid_map.func_vertex_end(DST_GRADIENT)
+    qd.loop_config(name="newton_contact_blocks")
     for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
         i_r, i_c, H = func_read_bcoo(i_nz, contact.matrices.hessian, block_rows=3, block_cols=3)
-        if i_r == i_c:
-            for vertex_map in qd.static(contact.vertex_maps):
-                i_v = i_r - vertex_map.vertex_offset[()]
-                if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
-                    vertex_map.func_vertex_visit_diag(f, i_v, H)
+        if not is_rigid_vertex(i_c, contact):
+            n_r, rows_r, weights_r = vertex_rows(i_r, contact)
+            n_c, rows_c, weights_c = vertex_rows(i_c, contact)
+            i_t = contact.linear_block.triplet_start[()] + contact.matrices.entry_starts[i_nz]
+            for a in range(n_r):
+                b_start = 0
+                if i_r == i_c:
+                    b_start = a
+                for b in range(b_start, n_c):
+                    weight = weights_r[a] * weights_c[b]
+                    if weight == 0.0:
+                        discard_block(i_t, linear)
+                    else:
+                        block = weight * H
+                        # Two vertices on one row: the block and its transpose land on the diagonal of the row
+                        if i_r != i_c and rows_r[a] == rows_c[b]:
+                            block += block.transpose()
+                        write_block(i_t, rows_r[a], rows_c[b], block, linear)
+                    i_t += 1
 
 
 @qd.func(requires_top_level=True)
-def func_contact_product(f: int, pcg_scalars: qd.template(), contact: qd.template()):
-    """Add the product of the contact Hessian with the direction of the conjugate gradient to the operator images of
-    the participants, once they set the product of their own operators.
+def func_contact_visit_rigid(f: int, contact: qd.template()):
+    """Add the diagonal blocks of the contacts on the Rigid contact points to Rigid's preconditioner, between the start
+    and the end of its factorization."""
+    qd.loop_config(name="newton_contact_visit_rigid")
+    for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
+        i_r, i_c, H = func_read_bcoo(i_nz, contact.matrices.hessian, block_rows=3, block_cols=3)
+        if i_r == i_c and is_rigid_vertex(i_r, contact):
+            contact.rigid_map.func_vertex_visit_diag(f, i_r - contact.rigid_map.vertex_offset[()], H)
+
+
+@qd.func(requires_top_level=True)
+def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLinearScratch, pcg_scalars: qd.template()):
+    """Add the product of the contact entries on a Rigid contact point with the direction of the conjugate gradient,
+    once the matrix and Rigid set the products of their own.
 
     One thread per stored block B of rows (r, c): it adds B p_c to the image of r and, off the diagonal, B^T p_r to the
-    image of c. The environments that converged are skipped."""
-    for vertex_map in qd.static(contact.vertex_maps):
-        vertex_map.func_vertex_begin(f, SRC_DIRECTION)
-    qd.loop_config(name="newton_contact_product")
+    image of c, the rows of the linear system adding their p . Ap. The environments that converged are skipped."""
+    contact.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
+    qd.loop_config(name="newton_contact_rigid_product")
     for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
         i_r, i_c, B = func_read_bcoo(i_nz, contact.matrices.hessian, block_rows=3, block_cols=3)
-        i_b = vertex_env(i_r, contact)
-        if pcg_scalars.is_converged[i_b] == 0:
-            p_r = qd.Vector.zero(gs.qd_float, 3)
-            p_c = qd.Vector.zero(gs.qd_float, 3)
+        # The Rigid contact points come last, so an entry on one has it as its column
+        i_b = gs.qd_int(0)
+        is_running = False
+        if is_rigid_vertex(i_c, contact):
+            i_b = contact.rigid_map.func_vertex_env(i_c - contact.rigid_map.vertex_offset[()])
+            is_running = pcg_scalars.is_converged[i_b] == 0
+        if is_running:
+            p_ends = qd.Matrix.zero(gs.qd_float, 2, 3)
             # The two ends go through one inlined dispatch
             for i_end in range(2):
                 i_vg = i_r
                 if i_end == 1:
                     i_vg = i_c
-                p = vertex_value(f, i_vg, contact, SRC_DIRECTION)
-                if i_end == 0:
-                    p_r = p
+                p = qd.Vector.zero(gs.qd_float, 3)
+                if is_rigid_vertex(i_vg, contact):
+                    p = contact.rigid_map.func_vertex_value(
+                        f, i_vg - contact.rigid_map.vertex_offset[()], SRC_DIRECTION
+                    )
                 else:
-                    p_c = p
-            y_r = B @ p_c
-            y_c = B.transpose() @ p_r
+                    n_rows, rows, weights = vertex_rows(i_vg, contact)
+                    for a in range(n_rows):
+                        p += weights[a] * row_vector(rows[a], linear.pcg.p)
+                for d in qd.static(range(3)):
+                    p_ends[i_end, d] = p[d]
+            p_r = qd.Vector([p_ends[0, d] for d in qd.static(range(3))], dt=gs.qd_float)
+            p_c = qd.Vector([p_ends[1, d] for d in qd.static(range(3))], dt=gs.qd_float)
             n_ends = 2
             if i_r == i_c:
                 n_ends = 1
             for i_end in range(n_ends):
                 i_vg = i_r
-                y = y_r
+                y = B @ p_c
                 p = p_r
                 if i_end == 1:
                     i_vg = i_c
-                    y = y_c
+                    y = B.transpose() @ p_r
                     p = p_c
-                for vertex_map in qd.static(contact.vertex_maps):
-                    i_v = i_vg - vertex_map.vertex_offset[()]
-                    if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
-                        vertex_map.func_vertex_add_product(f, i_v, y, p, pcg_scalars)
-    for vertex_map in qd.static(contact.vertex_maps):
-        vertex_map.func_vertex_end(DST_PRODUCT)
+                if is_rigid_vertex(i_vg, contact):
+                    contact.rigid_map.func_vertex_add_force(f, i_vg - contact.rigid_map.vertex_offset[()], y)
+                else:
+                    n_rows, rows, weights = vertex_rows(i_vg, contact)
+                    for a in range(n_rows):
+                        for d in qd.static(range(3)):
+                            qd.atomic_add(linear.pcg.ap[3 * rows[a] + d], weights[a] * y[d])
+                    # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
+                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p.dot(y))
+    contact.rigid_map.func_vertex_end(DST_PRODUCT)
 
 
 @qd.func(requires_top_level=True)
 def func_contact_energy(f: int, control: qd.template(), contact: qd.template(), is_trial: qd.template()):
     """Add the energy of every pair at the current iterate to the start or trial energy of its environment."""
-    for vertex_map in qd.static(contact.vertex_maps):
-        vertex_map.func_vertex_begin(f, SRC_ITERATE)
+    if qd.static(contact.has_rigid_map):
+        contact.rigid_map.func_vertex_begin(f, SRC_ITERATE)
     for pair_kind in qd.static(contact.pair_kinds):
         pair_kind.func_pair_energy(f, control, is_trial)
 
@@ -289,8 +365,8 @@ def kernel_contact_terms(f: int, contact: qd.template()):
 
 
 @qd.kernel
-def kernel_contact_assemble(f: int, contact: qd.template()):
-    func_contact_assemble(f, contact)
+def kernel_contact_entry_layout(contact: qd.template()):
+    func_contact_entry_layout(contact)
 
 
 # ============================================== Layer 2: device ==============================================
@@ -298,29 +374,36 @@ def kernel_contact_assemble(f: int, contact: qd.template()):
 
 @qd.data_oriented
 class NewtonContact(NewtonDevice):
-    """The contacts of the joint Newton solve, over the vertices of `vertex_maps` and the pairs of `pair_kinds`.
+    """The contacts of the joint Newton solve, over the vertices of `linear_maps` and `rigid_map` and the pairs of
+    `pair_kinds`.
 
     Every pair kind is built by its owner before the solve. `prepare` lays the slots out once they all are, grows the
-    vertex-space matrices to them and sorts their keys, which hold over the substep. The stages of the solve are
-    `func_contact_assemble`, `func_contact_visit_diag`, `func_contact_product` and `func_contact_energy`."""
+    vertex-space matrices to them, sorts their keys, which hold over the substep, and numbers the blocks their reduced
+    entries add to the linear system, the share of the contacts `linear_block`. The stages of the solve are
+    `func_contact_assemble`, `func_contact_visit_rigid`, `func_contact_rigid_product` and `func_contact_energy`."""
 
-    def __init__(self, vertex_maps: list, pair_kinds: list):
-        self.vertex_maps = participant_group("NewtonContactVertexMaps", vertex_maps)
+    def __init__(self, linear_maps: list, rigid_map, pair_kinds: list):
+        self.linear_maps = participant_group("NewtonContactLinearMaps", linear_maps)
+        self.rigid_map = rigid_map
+        self.has_rigid_map = rigid_map is not None
         self.pair_kinds = participant_group("NewtonContactPairKinds", pair_kinds)
         self.matrices = build_newton_contact(len(pair_kinds), MIN_SLOTS, MIN_SLOTS)
+        self.linear_block = build_linear_block(n_rows=0, n_triplets=0)
         self._scratches_replaced = []
         self.lay_out_vertices()
 
     @property
     def data(self) -> Iterator[DataItem]:
         yield from iter_data(self, "matrices")
+        yield from iter_data(self, "linear_block")
 
     def lay_out_vertices(self) -> None:
         """Set the offset of every vertex map, in order, from the vertex counts of those before it.
 
-        A vertex map whose count changes at runtime comes last, so that its growth moves no other offset."""
+        The map of the Rigid contact points comes last, its count growing with the pairs, so that its growth moves no
+        other offset."""
         offset = 0
-        for vertex_map in self.vertex_maps:
+        for vertex_map in [*self.linear_maps, *([] if self.rigid_map is None else [self.rigid_map])]:
             vertex_map.vertex_offset.fill(offset)
             offset += int(qd_to_numpy(vertex_map.vertex_count))
         if offset > MAX_VERTICES:
@@ -331,7 +414,7 @@ class NewtonContact(NewtonDevice):
 
     def prepare(self, f: int) -> None:
         """Lay out, size and sort the vertex-space matrices for the pairs of the substep, once every pair kind is
-        built."""
+        built, and number the blocks of their reduced entries in the linear system."""
         kernel_contact_layout(self)
         matrices = (self.matrices.gradient, self.matrices.hessian)
         if any(int(qd_to_numpy(matrix.has_triplet_overflow)) for matrix in matrices):
@@ -345,18 +428,21 @@ class NewtonContact(NewtonDevice):
         kernel_contact_terms(f, self)
         sort_bcoo(self.matrices.gradient)
         sort_bcoo(self.matrices.hessian)
+        # The reduced entries of the substep, whose blocks in the linear system are numbered once
+        kernel_reduce_bcoo(self.matrices.hessian, block_scalars=9)
+        kernel_contact_entry_layout(self)
 
     @qd.func(requires_top_level=True)
-    def func_contact_assemble(self, f: int):
-        func_contact_assemble(f, self)
+    def func_contact_assemble(self, f: int, linear: NewtonLinearScratch):
+        func_contact_assemble(f, self, linear)
 
     @qd.func(requires_top_level=True)
-    def func_contact_visit_diag(self, f: int):
-        func_contact_visit_diag(f, self)
+    def func_contact_visit_rigid(self, f: int):
+        func_contact_visit_rigid(f, self)
 
     @qd.func(requires_top_level=True)
-    def func_contact_product(self, f: int, pcg_scalars: qd.template()):
-        func_contact_product(f, pcg_scalars, self)
+    def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: qd.template()):
+        func_contact_rigid_product(f, self, linear, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_contact_energy(self, control: qd.template(), f: int, is_trial: qd.template()):

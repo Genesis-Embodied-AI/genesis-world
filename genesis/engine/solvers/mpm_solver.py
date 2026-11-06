@@ -11,17 +11,8 @@ import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
-from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, sort_reduce_bcoo
 from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
 from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
-from genesis.engine.numerics.linear_pcg import (
-    func_init_linear_pcg_direction,
-    func_init_linear_pcg_residual,
-    func_linear_pcg_direction,
-    func_linear_pcg_dot_rz,
-    func_linear_pcg_spmv,
-    func_linear_pcg_update_xr,
-)
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
@@ -40,12 +31,13 @@ from genesis.utils.misc import (
 
 from . import mpm_adjoint_func, mpm_func
 from .mpm_data import (
+    BLOCK_CELLS,
     MIN_BLOCKS,
+    MpmBrickScratch,
     MpmErrno,
     MpmForceFields,
     MpmGridScratch,
     MpmInfo,
-    MpmLinearScratch,
     MpmMaterialTable,
     MpmNewtonScratch,
     MpmParticles,
@@ -53,13 +45,20 @@ from .mpm_data import (
     MpmParticlesNG,
     MpmWallPairs,
     build_mpm_grid,
-    build_mpm_linear,
+    build_mpm_bricks,
     build_mpm_newton,
     build_wall_pairs,
-    initial_capacities,
-    triplet_capacity,
+    initial_block_capacity,
 )
-from .newton_contact import CAPACITY_GROW_FACTOR, MIN_SLOTS, SRC_ITERATE, grown_capacity, retire_scratch
+from .newton_linear import (
+    CAPACITY_GROW_FACTOR,
+    MIN_SLOTS,
+    LinearBlock,
+    NewtonLinearScratch,
+    build_linear_block,
+    grown_capacity,
+    retire_scratch,
+)
 from .newton_solver import NewtonDevice
 from .particle_solver import ParticleSolver
 
@@ -98,10 +97,10 @@ def material_table_column(material):
 class MpmNewtonParticipant(NewtonDevice):
     """Grid displacement as a participant of the NewtonSolver.
 
-    Its share of the operator is a block coordinate (BCOO) matrix, preconditioned by bricks, and it owns the vectors of
-    the preconditioned conjugate gradient over its rows (`linear.pcg`).
+    It owns the rows of the grid nodes in the linear system of the solve, `linear`, from the start row and triplet of
+    `linear_block` on (see newton_linear.py): it assembles them, and preconditions them by bricks.
 
-    It is the one holder of the grid, the Newton state and the linear system, which grow by building a struct again and
+    It is the one holder of the grid, the Newton state and the bricks, which grow by building a struct again and
     swapping it here (see `replace_scratch`), so that every reader goes through the participant.
 
     It is also the vertex map of the sorted particles in the contacts of the solve (see newton_contact.py): a particle
@@ -112,6 +111,8 @@ class MpmNewtonParticipant(NewtonDevice):
     # A wall pair writes the gradient and the Hessian of its row on its particle alone
     n_doublets = 1
     n_triplets = 1
+    # The rows of a particle are those of the 8 nodes of its stencil
+    n_vertex_rows = 8
 
     def __init__(
         self,
@@ -120,7 +121,7 @@ class MpmNewtonParticipant(NewtonDevice):
         materials: MpmMaterialTable,
         grid: MpmGridScratch,
         newton: MpmNewtonScratch,
-        linear: MpmLinearScratch,
+        bricks: MpmBrickScratch,
         wall_pairs: MpmWallPairs,
         mpm_info: MpmInfo,
         n_sort: int,
@@ -130,9 +131,12 @@ class MpmNewtonParticipant(NewtonDevice):
         self.materials = materials
         self.grid = grid
         self.newton = newton
-        self.linear = linear
+        self.bricks = bricks
         self.wall_pairs = wall_pairs
         self.mpm_info = mpm_info
+        # The linear system of the solve, bound by the NewtonSolver
+        self.linear: NewtonLinearScratch | None = None
+        self.linear_block: LinearBlock = build_linear_block(0, 0)
         self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
         self.vertex_offset.fill(0)
         self.vertex_count = qd.ndarray(gs.qd_int, shape=())
@@ -144,38 +148,34 @@ class MpmNewtonParticipant(NewtonDevice):
         retire_scratch(self.wall_pairs, self._scratches_replaced)
         self.wall_pairs = wall_pairs
 
-    def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch) -> None:
-        """Swap the grid, the Newton state and the linear system, and free the arrays of those replaced.
+    def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, bricks: MpmBrickScratch) -> None:
+        """Swap the grid, the Newton state and the bricks, and free the arrays of those replaced (see retire_scratch).
 
-        The error flags of a replaced grid belong to the solver, whose new grid binds them again. A replaced struct
-        stays referenced, so that no later struct takes its identity.
+        The error flags of a replaced grid belong to the solver, whose new grid binds them again.
         """
-        # FIXME: quadrants#1074 - the launch of a kernel is cached under the identity of its struct arguments, and the
-        # entry outlives the struct, so a new struct taking the identity of a dead one runs on the arrays of that one.
-        # The replaced structs stay in memory, a few Python objects per growth.
-        for scratch_old, scratch in zip((self.grid, self.newton, self.linear), (grid, newton, linear)):
+        for scratch_old, scratch in zip((self.grid, self.newton, self.bricks), (grid, newton, bricks)):
             if scratch_old is not scratch:
                 for path, array in iter_state_arrays(scratch_old):
                     if path[0] != "errors":
                         qd_destroy_data(array)
                 self._scratches_replaced.append(scratch_old)
-        self.grid, self.newton, self.linear = grid, newton, linear
+        self.grid, self.newton, self.bricks = grid, newton, bricks
+
+    @property
+    def max_linear_rows(self) -> int:
+        """Rows of the nodes of the grid at its capacity."""
+        return self.grid.block_coords.shape[0] * BLOCK_CELLS
 
     @property
     def data(self) -> Iterator[DataItem]:
         yield from iter_data(self, "grid")
         yield from iter_data(self, "newton")
-        yield from iter_data(self, "linear")
+        yield from iter_data(self, "bricks")
+        yield from iter_data(self, "linear_block")
         yield from iter_data(self, "wall_pairs")
 
     @qd.func(requires_top_level=True)
-    def func_assemble(self, f: int):
-        """Assemble the Newton system at the current iterate, inside a graph that needs no storage growth.
-
-        See kernel_newton_loop in newton_solver.py."""
-        mpm_func.func_report_extent(self.grid, self.linear)
-        mpm_func.func_node_envs(self.grid, self.linear)
-        mpm_func.func_check_loop_capacity(self.grid, self.linear, self.mpm_info)
+    def func_assemble(self, f: int, is_exact: qd.template()):
         mpm_func.func_assemble(
             f,
             self.mpm_info.substep_dt[()],
@@ -183,57 +183,32 @@ class MpmNewtonParticipant(NewtonDevice):
             self.grid,
             self.newton,
             self.linear,
+            self.linear_block,
             self.particles_info,
             self.materials,
             self.mpm_info,
+            is_exact,
         )
-        func_sort_reduce_bcoo(self.linear.matrix, block_scalars=9)
 
     @qd.func(requires_top_level=True)
     def func_factor_begin(self):
-        mpm_func.func_reset_brick(self.grid, self.linear)
-        mpm_func.func_gather_brick(self.linear)
+        mpm_func.func_reset_brick(self.grid, self.bricks)
+
+    @qd.func
+    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
+        mpm_func.brick_visit(i_r, i_c, H, self.bricks)
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
-        mpm_func.func_invert_brick(self.grid, self.linear)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
-        func_init_linear_pcg_residual(self.linear.b_rhs, self.linear.solution, self.linear.pcg, pcg_scalars, is_adjoint)
+        mpm_func.func_invert_brick(self.grid, self.bricks)
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
-        mpm_func.func_apply_brick(self.grid, self.linear)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, pcg_scalars: qd.template()):
-        func_init_linear_pcg_direction(self.linear.pcg, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_matvec(self, pcg_scalars: qd.template()):
-        func_linear_pcg_spmv(self.linear.pcg, pcg_scalars, self.linear.matrix)
-
-    @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, pcg_scalars: qd.template()):
-        # The product of the matrix added p.Ap in energy form, and the contacts add theirs (see func_vertex_add_product)
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, pcg_scalars: qd.template()):
-        func_linear_pcg_update_xr(self.linear.solution, self.linear.pcg, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, pcg_scalars: qd.template()):
-        func_linear_pcg_dot_rz(self.linear.pcg, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, pcg_scalars: qd.template()):
-        func_linear_pcg_direction(self.linear.pcg, pcg_scalars)
+        mpm_func.func_apply_brick(self.grid, self.bricks, self.linear, self.linear_block)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
-        mpm_func.func_negate_du(self.grid, self.newton, self.linear)
+        mpm_func.func_negate_du(self.grid, self.newton, self.linear, self.linear_block)
         mpm_func.func_record_start_point(self.grid, self.newton)
         mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.mpm_info)
         mpm_func.func_cap_inversion_step(
@@ -242,7 +217,7 @@ class MpmNewtonParticipant(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
-        mpm_func.func_step_forward(self.grid, self.newton, self.linear, control)
+        mpm_func.func_step_forward(self.grid, self.newton, control)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
@@ -261,47 +236,15 @@ class MpmNewtonParticipant(NewtonDevice):
 
     # ------------------------------------------- vertex map -------------------------------------------
 
-    @qd.func(requires_top_level=True)
-    def func_vertex_begin(self, f: int, src: qd.template()):
-        pass
-
-    @qd.func(requires_top_level=True)
-    def func_vertex_end(self, dst: qd.template()):
-        pass
-
     @qd.func
-    def func_vertex_env(self, i_v: int):
-        i_p, i_b, env, cell = mpm_func.particle_of_sorted(i_v, self.grid, self.mpm_info)
-        return i_b
-
-    @qd.func
-    def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
+    def func_vertex_value(self, f: int, i_v: int):
         env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
-        value = qd.Vector.zero(gs.qd_float, 3)
-        if qd.static(src == SRC_ITERATE):
-            value = mpm_func.particle_node_sum(slots, w, self.newton.u)
-        else:
-            value = mpm_func.particle_node_sum(slots, w, self.linear.pcg.p)
-        return value
+        return mpm_func.particle_node_sum(slots, w, self.newton.u)
 
     @qd.func
-    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
+    def func_vertex_rows(self, i_v: int):
         env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
-        mpm_func.add_particle_node_vector(slots, w, y, self.linear.b_rhs)
-
-    @qd.func
-    def func_vertex_add_product(
-        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
-    ):
-        # The product of the MPM matrix adds p.Ap itself (see func_matvec_dot), and so does that of the contacts
-        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
-        mpm_func.add_particle_node_vector(slots, w, y, self.linear.pcg.ap)
-        qd.atomic_add(pcg_scalars.p_dot_ap[env], p.dot(y))
-
-    @qd.func
-    def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
-        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
-        mpm_func.add_particle_brick_blocks(slots, w, H, self.linear)
+        return 8, self.linear_block.row_start[()] + slots, w
 
     # ------------------------------------------- wall pairs -------------------------------------------
 
@@ -441,7 +384,6 @@ class MPMSolver(ParticleSolver):
         The first substep sizes it to the particles, and later substeps grow it when the grid or matrix overflows."""
         n_sort = self._B * self._n_particles
         max_blocks = MIN_BLOCKS
-        max_triplets = triplet_capacity(max_blocks, MIN_BLOCKS)
         self._is_mpm_sized = False
         materials = {material.idx: material for material in self._materials}
         n_materials = len(materials)
@@ -481,7 +423,7 @@ class MPMSolver(ParticleSolver):
             self.mpm_materials,
             grid,
             build_mpm_newton(n_sort, max_blocks),
-            build_mpm_linear(max_blocks, max_triplets),
+            build_mpm_bricks(max_blocks),
             build_wall_pairs(MIN_SLOTS),
             self.mpm_info,
             n_sort,
@@ -640,8 +582,9 @@ class MPMSolver(ParticleSolver):
             force_fields=self._mpm_force_fields,
             mpm_info=mpm_info,
         )
-        self._assemble(f)
-        kernel_contact_invweight(f, self.particles, participant.grid, participant.linear, self.particles_info, mpm_info)
+        kernel_contact_invweight(
+            f, self.particles, participant.grid, participant.newton, self.particles_info, self.mpm_materials, mpm_info
+        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -712,9 +655,9 @@ class MPMSolver(ParticleSolver):
     def substep_pre_coupling(self, f):
         pass
 
-    def _resize_blocks(self, max_blocks, max_triplets):
-        """Build the grid, the Newton state and the linear system again for new capacities of node blocks and triplets,
-        and swap them on the participant.
+    def _resize_blocks(self, max_blocks):
+        """Build the grid, the Newton state and the bricks again for a new capacity of node blocks, and swap them on the
+        participant.
 
         The grid carries no state across substeps and the growth happens before any consumer reads it, so nothing is
         copied. The new grid binds the error flags of the solver, found in the namespace of the solver.
@@ -723,14 +666,12 @@ class MPMSolver(ParticleSolver):
         with namespace(self._namespace):
             grid = build_mpm_grid(n_sort, max_blocks)
         self._newton_participant.replace_scratch(
-            grid, build_mpm_newton(n_sort, max_blocks), build_mpm_linear(max_blocks, max_triplets)
+            grid, build_mpm_newton(n_sort, max_blocks), build_mpm_bricks(max_blocks)
         )
 
     def _size_to_particles(self, f):
         positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
-        max_blocks, max_triplets = initial_capacities(positions, self._inv_dx)
-        triplets_current = self._newton_participant.linear.matrix.triplet_row.shape[0]
-        self._resize_blocks(max_blocks, max(max_triplets, triplets_current))
+        self._resize_blocks(initial_block_capacity(positions, self._inv_dx))
         self._is_mpm_sized = True
 
     def _grow_grid(self):
@@ -738,18 +679,7 @@ class MPMSolver(ParticleSolver):
         grid = participant.grid
         demand = max(int(qd_to_numpy(grid.grid_demand)), int(qd_to_numpy(grid.n_particle_blocks)))
         max_blocks = max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), grid.block_coords.shape[0] + 1)
-        self._resize_blocks(max_blocks, participant.linear.matrix.triplet_row.shape[0])
-
-    def _grow_triplets(self):
-        participant = self._newton_participant
-        matrix = participant.linear.matrix
-        demand = int(qd_to_numpy(matrix.triplet_demand))
-        max_triplets = max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), matrix.triplet_row.shape[0] + 1)
-        participant.replace_scratch(
-            participant.grid,
-            participant.newton,
-            build_mpm_linear(participant.grid.block_coords.shape[0], max_triplets),
-        )
+        self._resize_blocks(max_blocks)
 
     def substep_post_coupling(self, f):
         """Finish the substep with the check of the particle positions.
@@ -758,26 +688,6 @@ class MPMSolver(ParticleSolver):
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim.cur_substep_global + 1) % self._substeps == 0:
             self._kernel_flag_non_finite_pos(f + 1)
-
-    def _assemble(self, f, is_exact=False):
-        participant = self._newton_participant
-        has_overflow = True
-        while has_overflow:
-            kernel_assemble(
-                f,
-                self.particles,
-                participant.grid,
-                participant.newton,
-                participant.linear,
-                self.particles_info,
-                self.mpm_materials,
-                self.mpm_info,
-                is_exact,
-            )
-            has_overflow = bool(int(qd_to_numpy(participant.linear.matrix.has_triplet_overflow)))
-            if has_overflow:
-                self._grow_triplets()
-        sort_reduce_bcoo(participant.linear.matrix, block_scalars=9)
 
     # ------------------------------------------------------------------------------------
     # --------------------------- Newton solver participant ------------------------------
@@ -819,9 +729,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_force_fields,
             mpm_info,
         )
-        # The physical Hessian at u = 0 sizes the triplet storage for the substep's fixed grid topology, which every
-        # assembly of the Newton loop shares
-        self._assemble(f)
+        kernel_report_extent(participant.grid, participant.linear_block)
         kernel_wall_pairs(f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info)
         n_pairs = int(qd_to_numpy(participant.wall_pairs.n_pairs))
         if n_pairs > participant.wall_pairs.s.shape[0]:
@@ -829,9 +737,6 @@ class MPMSolver(ParticleSolver):
             kernel_wall_pairs(
                 f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info
             )
-
-    def newton_assemble(self, f, is_exact=False):
-        self._assemble(f, is_exact)
 
     def newton_finish(self, f, control):
         """Transfer the solved grid displacement back to the particles, those of an environment whose solve stopped on
@@ -878,6 +783,7 @@ class MPMSolver(ParticleSolver):
                 participant.grid,
                 participant.newton,
                 participant.linear,
+                participant.linear_block,
                 self._sim.rigid_solver.dyn_state.links,
                 self.mpm_info,
                 self.particle_constraints,
@@ -891,6 +797,7 @@ class MPMSolver(ParticleSolver):
             participant.grid,
             participant.newton,
             participant.linear,
+            participant.linear_block,
             participant.wall_pairs,
             self.particles_info,
             self.mpm_materials,
@@ -901,7 +808,7 @@ class MPMSolver(ParticleSolver):
     def newton_adjoint_rhs(self, f):
         """Stage the adjoint of u* left by the reverse of the grid-to-particle transfer as the right-hand side."""
         participant = self._newton_participant
-        kernel_adjoint_rhs(participant.grid, participant.newton, participant.linear)
+        kernel_adjoint_rhs(participant.grid, participant.newton, participant.linear, participant.linear_block)
 
     def newton_adjoint_finish(self, f):
         pass
@@ -1579,12 +1486,15 @@ def kernel_constraint_adjoint(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     links_state: LinksState,
     mpm_info: MpmInfo,
     constraints: qd.template(),
 ):
-    mpm_adjoint_func.func_constraint_adjoint(f, particles, grid, newton, linear, links_state, mpm_info, constraints)
+    mpm_adjoint_func.func_constraint_adjoint(
+        f, particles, grid, newton, linear, rows, links_state, mpm_info, constraints
+    )
 
 
 @qd.kernel
@@ -1592,29 +1502,17 @@ def kernel_contact_invweight(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    linear: MpmLinearScratch,
-    particles_info: MpmParticlesInfo,
-    mpm_info: MpmInfo,
-):
-    mpm_func.func_contact_invweight(f, particles, grid, linear, particles_info, mpm_info)
-
-
-@qd.kernel
-def kernel_assemble(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
-    is_exact: qd.template(),
 ):
-    dt = mpm_info.substep_dt[()]
-    mpm_func.func_report_extent(grid, linear)
-    mpm_func.func_node_envs(grid, linear)
-    mpm_func.func_assemble(f, dt, particles, grid, newton, linear, particles_info, materials, mpm_info, is_exact)
+    mpm_func.func_contact_invweight(f, particles, grid, newton, particles_info, materials, mpm_info)
+
+
+@qd.kernel
+def kernel_report_extent(grid: MpmGridScratch, rows: LinearBlock):
+    mpm_func.func_report_extent(grid, rows)
 
 
 @qd.kernel
@@ -1652,8 +1550,8 @@ def kernel_adjoint_g2p(
 
 
 @qd.kernel
-def kernel_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch):
-    mpm_adjoint_func.func_adjoint_rhs(grid, newton, linear)
+def kernel_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: NewtonLinearScratch, rows: LinearBlock):
+    mpm_adjoint_func.func_adjoint_rhs(grid, newton, linear, rows)
 
 
 @qd.kernel
@@ -1665,7 +1563,8 @@ def kernel_adjoint_pullback(
     particles_ng: MpmParticlesNG,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     wall_pairs: MpmWallPairs,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
@@ -1678,11 +1577,11 @@ def kernel_adjoint_pullback(
     and the adjoint of frame `f + 1` is cleared after it (see mpm_adjoint_func). `t` is the time at which the forward
     substep evaluated the force fields."""
     dt = mpm_info.substep_dt[()]
-    mpm_adjoint_func.func_adjoint_nodes(t, dt, grid, newton, linear, force_fields, mpm_info)
+    mpm_adjoint_func.func_adjoint_nodes(t, dt, grid, newton, linear, rows, force_fields, mpm_info)
     mpm_adjoint_func.func_adjoint_particles(
-        f, dt, gravity, particles, grid, newton, linear, particles_info, materials, mpm_info
+        f, dt, gravity, particles, grid, newton, linear, rows, particles_info, materials, mpm_info
     )
     mpm_adjoint_func.func_wall_contact_adjoint(
-        f, dt, particles, grid, newton, linear, wall_pairs, particles_info, mpm_info
+        f, dt, particles, grid, newton, linear, rows, wall_pairs, particles_info, mpm_info
     )
     mpm_adjoint_func.func_adjoint_consume(f, particles, particles_ng, mpm_info)

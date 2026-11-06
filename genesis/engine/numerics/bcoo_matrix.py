@@ -155,6 +155,17 @@ def func_add_triplet(
 
 
 @qd.func
+def func_discard_triplet(i_t: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
+    """Discard a triplet slot: a zero block at (0, 0), which the reduction merges away, so that no later pass tells the
+    discarded slots apart. A triplet past the capacity is dropped as `func_write_triplet` drops it."""
+    if i_t < matrix.triplet_row.shape[0]:
+        matrix.triplet_row[i_t] = 0
+        matrix.triplet_col[i_t] = 0
+        for k in qd.static(range(block_rows * block_cols)):
+            matrix.triplet_val[i_t * (block_rows * block_cols) + k] = 0.0
+
+
+@qd.func
 def func_read_bcoo(i_nz: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
     """Return one reduced block coordinate (BCOO) entry as (row, column, block)."""
     block = qd.Matrix.zero(gs.qd_float, block_rows, block_cols)

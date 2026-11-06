@@ -1,9 +1,9 @@
 """Data of the implicit material point method (MPM) solver.
 
 The particle state keeps the layout of the solver's public fields. This module holds the data the implicit step adds:
-the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the linear
-system the Newton solve assembles. The grid, Newton and linear-system structs are built at a capacity in blocks and
-triplets. Growing a capacity builds a struct again and swaps it on the participant of the Newton solve that holds it
+the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the brick
+preconditioner of its rows of the linear system of the Newton solve. The grid, Newton and brick structs are built at a
+capacity in blocks. Growing a capacity builds a struct again and swaps it on the participant of the Newton solve that holds it
 (see MpmNewtonParticipant).
 """
 
@@ -12,15 +12,13 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.bcoo_matrix import BCOOMatrixScratch, bcoo_matrix_sizes, init_bcoo_matrix
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSumScratch, dynamic_exclusive_sum_sizes
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSortScratch, dynamic_radix_sort_sizes
-from genesis.engine.numerics.linear_pcg import PCG_ROWS, PCGWorkspaceScratch
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHashScratch, open_addressing_hash_sizes
 from genesis.utils.data import ENVS, Data, DataKind, Size, field, requires
 
-from .newton_contact import PAIRS
+from .newton_linear import PAIRS
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
@@ -242,16 +240,10 @@ class MpmWallPairs(Data, kind=DataKind.SCRATCH):
     t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
 
 
-class MpmLinearScratch(Data, kind=DataKind.SCRATCH):
-    """Block-sparse Newton matrix over 3x3 node blocks, its right-hand side, solution, preconditioner and conjugate
-    gradient state."""
+class MpmBrickScratch(Data, kind=DataKind.SCRATCH):
+    """Brick preconditioner of the node rows of the linear system: per brick, its packed 48 x 48 matrix and then
+    inverse, and the mask of its nodes coupled to another node of the brick."""
 
-    matrix: BCOOMatrixScratch
-    pcg: PCGWorkspaceScratch
-    b_rhs: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
-    solution: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
-    # Brick preconditioner: per brick, its packed 48 x 48 matrix and then inverse, and the mask of its nodes coupled to
-    # another node of the brick
     brick: qd.Tensor = field(float, shape=(BRICKS * BRICK_SCALARS,), ndarray=True)
     brick_mask: qd.Tensor = field(int, shape=(BRICKS,), ndarray=True)
     # The serial inversion of a CPU backend: per brick, the equilibration of its rows and the pivot column
@@ -308,25 +300,15 @@ def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
     return newton
 
 
-def build_mpm_linear(max_blocks: int, max_triplets: int) -> MpmLinearScratch:
-    """Build the linear system of a capacity of blocks and triplets, with no live row and no live triplet.
+def build_mpm_bricks(max_blocks: int) -> MpmBrickScratch:
+    """Build the brick preconditioner of a capacity of blocks.
 
-    `max_blocks` is the capacity in blocks and `max_triplets` the capacity in triplets.
+    `max_blocks` is the capacity in blocks.
     """
-    max_nodes = max_blocks * BLOCK_CELLS
-    n_bricks = max(max_nodes // BRICK_NODES, 1)
-    linear = MpmLinearScratch(
-        sizes={
-            BLOCKS: max_blocks,
-            BRICK_SCRATCH: n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1,
-            MpmLinearScratch.matrix: bcoo_matrix_sizes(max_triplets, block_shape=(3, 3)),
-            MpmLinearScratch.pcg: {PCG_ROWS: max_nodes},
-        }
+    n_bricks = max(max_blocks * BLOCK_CELLS // BRICK_NODES, 1)
+    return MpmBrickScratch(
+        sizes={BLOCKS: max_blocks, BRICK_SCRATCH: n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1}
     )
-    init_bcoo_matrix(linear.matrix, n_triplets=0)
-    linear.pcg.n_rows.fill(0)
-    linear.pcg.row_env.fill(0)
-    return linear
 
 
 def build_wall_pairs(max_pairs: int) -> MpmWallPairs:
@@ -348,28 +330,19 @@ class MpmForceFields:
 MIN_BLOCKS = 64
 
 
-def triplet_capacity(max_blocks: int, n_tasks: int) -> int:
-    """Count the triplets of one kinetic diagonal per node and STENCIL_BLOCKS per elastic task."""
-    return max_blocks * BLOCK_CELLS + STENCIL_BLOCKS * n_tasks
-
-
-def initial_capacities(positions: np.ndarray, inv_dx: float) -> tuple[int, int]:
-    """Compute the block and triplet capacities from the particle positions, at twice the initial demand.
+def initial_block_capacity(positions: np.ndarray, inv_dx: float) -> int:
+    """Compute the block capacity from the particle positions, at twice the initial demand.
 
     `positions` has shape (n_envs, n_particles, 3). The blocks are those of the particles and their positive-octant
-    neighbours. The elastic tasks are bounded by the active cells plus one per 32 particles.
+    neighbours.
     """
     n_envs, n_particles = positions.shape[:2]
-    n_sort = n_envs * n_particles
     cells = np.floor(positions * inv_dx).astype(np.int64)
     env = np.broadcast_to(np.arange(n_envs, dtype=np.int64)[:, None, None], (n_envs, n_particles, 1))
     env_cells = np.concatenate((env, cells), axis=-1).reshape(-1, 4)
-    n_active_cells = len(np.unique(env_cells, axis=0))
     particle_blocks = np.unique(
         np.concatenate((env_cells[:, :1], np.floor_divide(env_cells[:, 1:], BLOCK_DIM)), axis=1), axis=0
     )
     offsets = np.array([[0, (o >> 2) & 1, (o >> 1) & 1, o & 1] for o in range(8)], dtype=np.int64)
     n_active_blocks = len(np.unique((particle_blocks[:, None, :] + offsets[None]).reshape(-1, 4), axis=0))
-    max_blocks = max(2 * n_active_blocks, MIN_BLOCKS)
-    n_tasks = min(max(2 * (n_active_cells + n_sort // 32), MIN_BLOCKS), n_sort + n_sort // 32 + 1)
-    return max_blocks, triplet_capacity(max_blocks, n_tasks)
+    return max(2 * n_active_blocks, MIN_BLOCKS)

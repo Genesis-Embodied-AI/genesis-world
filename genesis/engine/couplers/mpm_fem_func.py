@@ -18,7 +18,8 @@ import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
 from genesis.engine.solvers.mpm_data import MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
 from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted, pyramid_terms
-from genesis.engine.solvers.newton_contact import PAIRS, SRC_ITERATE, append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.utils.data import Data, DataKind, field
 
 from .contact_candidates import (
@@ -365,9 +366,9 @@ def fem_pair_terms(f: int, i_pair: int, mpm: qd.template(), fem: qd.template(), 
     """Energy, gradient and Hessian of the rows of a pair in its relative displacement at the current iterate, with
     the vertices and weights of the pair (see fem_pair_vertices)."""
     verts, weights, i_fv = fem_pair_vertices(i_pair, mpm, fem, pairs)
-    r = mpm.func_vertex_value(f, pairs.s[i_pair], SRC_ITERATE)
+    r = mpm.func_vertex_value(f, pairs.s[i_pair])
     for k in range(3):
-        r += weights[k + 1] * fem.func_vertex_value(f, i_fv[k], SRC_ITERATE)
+        r += weights[k + 1] * fem.func_vertex_value(f, i_fv[k])
     D = pairs.D[i_pair]
     t = pairs.t[i_pair]
     energy, g, H = pyramid_terms(

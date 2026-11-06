@@ -26,16 +26,8 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_terms,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import (
-    MIN_SLOTS,
-    PAIRS,
-    SRC_ITERATE,
-    append_pair,
-    grown_capacity,
-    retire_scratch,
-    write_doublet,
-    write_triplet,
-)
+from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
@@ -245,7 +237,7 @@ def pbd_pair_terms(f: int, i_pair: int, mpm: qd.template(), pbd: qd.template(), 
     """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its PBD
     particle at the current iterate, with the contact vertices of both."""
     i_vq = contact.pbd_pairs.i_b[i_pair] * pbd.n_vertex_particles + contact.pbd_pairs.particle[i_pair]
-    r = mpm.func_vertex_value(f, contact.pbd_pairs.s[i_pair], SRC_ITERATE) - pbd.func_vertex_value(f, i_vq, SRC_ITERATE)
+    r = mpm.func_vertex_value(f, contact.pbd_pairs.s[i_pair]) - pbd.func_vertex_value(f, i_vq)
     D = contact.pbd_pairs.D[i_pair]
     t = contact.pbd_pairs.t[i_pair]
     energy, g, H = pyramid_terms(

@@ -14,14 +14,8 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.numerics.bcoo_matrix import sort_bcoo
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import (
-    DST_GRADIENT,
-    MAX_VERTICES,
-    MIN_SLOTS,
-    SRC_ITERATE,
-    grown_capacity,
-    retire_scratch,
-)
+from genesis.engine.solvers.newton_contact import DST_GRADIENT, MAX_VERTICES, SRC_ITERATE
+from genesis.engine.solvers.newton_linear import MIN_SLOTS, grown_capacity, retire_scratch
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
@@ -152,16 +146,6 @@ class MpmRigidContact(NewtonDevice):
         )
 
     @qd.func
-    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
-        self.func_vertex_add_force(f, i_v, y)
-
-    @qd.func
-    def func_vertex_add_product(
-        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
-    ):
-        self.func_vertex_add_force(f, i_v, y)
-
-    @qd.func
     def func_vertex_add_force(self, f: int, i_v: int, y: qd.types.vector(3)):
         """Add the spatial force (y, r x y) of a vector on a contact point to its link, which func_vertex_end maps to
         the dofs."""
@@ -251,6 +235,7 @@ def kernel_rigid_contact_adjoint(f: int, contact: qd.template()):
         contact.mpm.grid,
         contact.mpm.newton,
         contact.mpm.linear,
+        contact.mpm.linear_block,
         contact.rigid_pairs,
         contact.rigid.rigid_data,
         contact.rigid.dyn_state.geoms,

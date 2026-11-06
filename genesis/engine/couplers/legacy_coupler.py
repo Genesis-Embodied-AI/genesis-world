@@ -162,19 +162,20 @@ class LegacyCoupler(RBC):
         rigid, fem, pbd = self.rigid_solver, self.fem_solver, self.pbd_solver
         n_envs = self.sim._B
         mpm_host, mpm_participant = mpm.build_newton_participant()
-        participants = [(mpm_host, mpm_participant)]
+        # The participants owning rows of the linear system of the solve, whose vertices are contact vertices in the
+        # same order. The contact points of the Rigid links come last, since their count grows with the pairs (see
+        # NewtonContact.lay_out_vertices).
+        owners = [(mpm_host, mpm_participant)]
+        rigid_member = None
         couplings = []
         host_only_devices = []
-        # The particles are the first contact vertices and their walls the first pairs. The contact points of the
-        # Rigid links come last, since their count grows with the pairs (see NewtonContact.lay_out_vertices).
-        vertex_maps = [mpm_participant]
         pair_kinds = [mpm_participant]
         rigid_contact = None
         if self._mpm_rigid:
             # Without Rigid dofs, the participant holds the Rigid data the pairs read, and the solve leaves Rigid's own
             rigid_host, rigid_participant = rigid.build_newton_participant(is_member=self._mpm_rigid_dofs)
             if self._mpm_rigid_dofs:
-                participants.append((rigid_host, rigid_participant))
+                rigid_member = (rigid_host, rigid_participant)
             else:
                 host_only_devices.append(rigid_participant)
             query = RigidGeomQuery(rigid_participant, n_envs)
@@ -183,29 +184,26 @@ class LegacyCoupler(RBC):
             pair_kinds.append(rigid_contact)
         if self._mpm_fem:
             fem_host, fem_participant = fem.build_newton_participant()
-            participants.append((fem_host, fem_participant))
+            owners.append((fem_host, fem_participant))
             query = FemTriangleQuery(fem_participant, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs)
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((MpmFemContactHost(contact), contact))
-            vertex_maps.append(fem_participant)
             pair_kinds.append(contact)
         if self._mpm_pbd:
             pbd_contact = PbdContactParams(mpm.dx)
             pbd_host, pbd_participant = pbd.build_newton_participant()
-            participants.append((pbd_host, pbd_participant))
+            owners.append((pbd_host, pbd_participant))
             query = PbdParticleQuery(pbd_participant, mpm_participant.mpm_info, pbd_contact, n_envs)
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((MpmPbdContactHost(contact), contact))
-            vertex_maps.append(pbd_participant)
             pair_kinds.append(contact)
             pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
-        if self._mpm_rigid_dofs:
-            vertex_maps.append(rigid_contact)
         if self._mpm_sph:
             self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.mpm_info, n_envs)
             self.sph_solver.set_boundary(self._sph_boundary)
-        contact_system = NewtonContact(vertex_maps, pair_kinds)
-        self.sim.newton_solver.register(participants, couplings, contact_system, host_only_devices)
+        rigid_map = rigid_contact if self._mpm_rigid_dofs else None
+        contact_system = NewtonContact([device for _, device in owners], rigid_map, pair_kinds)
+        self.sim.newton_solver.register(owners, rigid_member, couplings, contact_system, host_only_devices)
 
     def reset(self, envs_idx=None) -> None:
         if self._rigid_sph:

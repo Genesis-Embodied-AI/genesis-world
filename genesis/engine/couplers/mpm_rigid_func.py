@@ -15,8 +15,6 @@ spatial force (y, r x y). A Rigid without dofs gives contact points of no displa
 particles alone.
 """
 
-import numpy as np
-
 import quadrants as qd
 
 import genesis as gs
@@ -33,8 +31,8 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_dirs,
     pyramid_terms,
 )
-from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import PAIRS, SRC_ITERATE, append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_contact import SRC_ITERATE, append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
@@ -383,7 +381,7 @@ def func_build_rigid_pairs(
 def rigid_pair_terms(f: int, i_pair: int, mpm: qd.template(), contact: qd.template()):
     """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its contact
     point at the current iterate, which a Rigid without dofs leaves at rest."""
-    r = mpm.func_vertex_value(f, contact.rigid_pairs.s[i_pair], SRC_ITERATE)
+    r = mpm.func_vertex_value(f, contact.rigid_pairs.s[i_pair])
     if qd.static(contact.has_rigid_dofs):
         r -= contact.func_vertex_value(f, i_pair, SRC_ITERATE)
     return pyramid_terms(

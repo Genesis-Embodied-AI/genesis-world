@@ -12,7 +12,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
+from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import DataItem, StaticConfig, iter_data
 
@@ -88,7 +88,7 @@ class RigidNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_assemble(self, f: int):
+    def func_assemble(self, f: int, is_exact: qd.template()):
         self.func_evaluate(f)
         newton_func.func_rigid_gradient(
             self.rigid_data, self.dyn_state, self.constraint_state, self.newton_info, self.config
@@ -210,9 +210,6 @@ class RigidNewtonHost(NewtonHost):
 
     def newton_prepare(self, f):
         kernel_rigid_begin(self._device)
-
-    def newton_assemble(self, f, is_exact=False):
-        kernel_assemble_participant(f, self._device)
 
     def newton_finish(self, f, control):
         kernel_rigid_write_back(f, self._device)

@@ -25,11 +25,11 @@ from genesis.engine.solvers.mpm_data import (
     PYRAMID_ROWS,
     MpmGridScratch,
     MpmInfo,
-    MpmLinearScratch,
     MpmNewtonScratch,
     MpmParticles,
     MpmParticlesInfo,
 )
+from genesis.engine.solvers.newton_linear import LinearBlock, NewtonLinearScratch
 from genesis.engine.solvers.mpm_func import particle_of_sorted, pyramid_dirs, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
@@ -176,7 +176,8 @@ def func_rigid_contact_adjoint(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    linear: MpmLinearScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
     pairs: MpmRigidPairs,
     rigid_data: RigidNewtonScratch,
     geoms_state: GeomsState,
@@ -212,7 +213,7 @@ def func_rigid_contact_adjoint(
             lam_p = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * slots[a]
+                row = 3 * (rows.row_start[()] + slots[a])
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
@@ -247,7 +248,7 @@ def func_rigid_contact_adjoint(
             x_bar = -Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * slots[a]
+                row = 3 * (rows.row_start[()] + slots[a])
                 lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
                 grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
