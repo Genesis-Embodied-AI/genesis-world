@@ -55,7 +55,6 @@ from .newton_linear import (
     discard_block,
     grown_capacity,
     retire_scratch,
-    row_vector,
     write_block,
 )
 from .newton_solver import NewtonDevice, participant_group
@@ -246,8 +245,7 @@ def func_contact_assemble(f: int, contact: qd.template(), linear: NewtonLinearSc
         else:
             n_rows, rows, weights = vertex_rows(i_vg, contact)
             for a in range(n_rows):
-                for d in qd.static(range(3)):
-                    qd.atomic_add(linear.b_rhs[3 * rows[a] + d], weights[a] * g[d])
+                qd.atomic_add(linear.b_rhs[rows[a]], weights[a] * g)
     if qd.static(contact.has_rigid_map):
         contact.rigid_map.func_vertex_end(DST_GRADIENT)
     qd.loop_config(name="newton_contact_blocks")
@@ -317,7 +315,7 @@ def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLin
                 else:
                     n_rows, rows, weights = vertex_rows(i_vg, contact)
                     for a in range(n_rows):
-                        p += weights[a] * row_vector(rows[a], linear.pcg.p)
+                        p += weights[a] * linear.pcg.p[rows[a]]
                 for d in qd.static(range(3)):
                     p_ends[i_end, d] = p[d]
             p_r = qd.Vector([p_ends[0, d] for d in qd.static(range(3))], dt=gs.qd_float)
@@ -338,8 +336,7 @@ def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLin
                 else:
                     n_rows, rows, weights = vertex_rows(i_vg, contact)
                     for a in range(n_rows):
-                        for d in qd.static(range(3)):
-                            qd.atomic_add(linear.pcg.ap[3 * rows[a] + d], weights[a] * y[d])
+                        qd.atomic_add(linear.pcg.ap[rows[a]], weights[a] * y)
                     # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
                     qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p.dot(y))
     contact.rigid_map.func_vertex_end(DST_PRODUCT)

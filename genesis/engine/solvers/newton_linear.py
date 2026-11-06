@@ -61,8 +61,8 @@ class NewtonLinearScratch(Data, kind=DataKind.SCRATCH):
 
     matrix: BCOOMatrixScratch
     pcg: PCGWorkspaceScratch
-    b_rhs: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
-    solution: qd.Tensor = field(float, shape=(3 * PCG_ROWS,), ndarray=True)
+    b_rhs: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
+    solution: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
 
 
 def build_newton_linear(max_rows: int, max_triplets: int) -> NewtonLinearScratch:
@@ -175,11 +175,8 @@ def func_block_jacobi_apply(block: LinearBlock, linear: NewtonLinearScratch, jac
     """z = M^-1 r over the rows of an owner, M^-1 being its inverted diagonal blocks."""
     qd.loop_config(name="newton_block_jacobi_apply")
     for i_r in range(block.n_rows[()]):
-        row = 3 * (block.row_start[()] + i_r)
-        r = qd.Vector([linear.pcg.r[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        z = jacobi.blocks[i_r] @ r
-        for d in qd.static(range(3)):
-            linear.pcg.z[row + d] = z[d]
+        row = block.row_start[()] + i_r
+        linear.pcg.z[row] = jacobi.blocks[i_r] @ linear.pcg.r[row]
 
 
 @qd.func
@@ -192,9 +189,3 @@ def write_block(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), linear: 
 def discard_block(i_t: int, linear: NewtonLinearScratch):
     """Discard triplet slot `i_t`, that of a block on an eliminated row (see the module docstring)."""
     func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)
-
-
-@qd.func
-def row_vector(i_r: int, values: qd.template()):
-    """The 3-vector of block row `i_r` of a vector of the linear system."""
-    return qd.Vector([values[3 * i_r + d] for d in qd.static(range(3))], dt=gs.qd_float)

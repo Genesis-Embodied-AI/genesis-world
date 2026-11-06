@@ -201,9 +201,9 @@ class MpmGridScratch(Data, kind=DataKind.SCRATCH):
 class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     """Newton state of the grid displacement `u` and the per-particle staging of the assembly."""
 
-    u: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
-    u_temp: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
-    du: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
+    u: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    u_temp: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    du: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
     # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
     # gathers to the particles
     adj_mom: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)

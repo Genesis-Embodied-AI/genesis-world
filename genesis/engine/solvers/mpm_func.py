@@ -702,7 +702,7 @@ def isotropic_projected_modes(
         eigenvalues, Q = qd.sym_eig(S, gs.qd_float)
         S = qd.Matrix.zero(gs.qd_float, 3, 3)
         for k in qd.static(range(3)):
-            eigenvector = qd.Vector([Q[d, k] for d in qd.static(range(3))], dt=gs.qd_float)
+            eigenvector = Q[:, k]
             S += qd.max(eigenvalues[k], 0.0) * eigenvector.outer_product(eigenvector)
         twist, flip = isotropic_pair_eigenvalues(sigma, g, A)
     return S, 0.5 * (flip + twist), 0.5 * (flip - twist)
@@ -1085,8 +1085,8 @@ def trial_deformation(
     w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
     grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
     for a in qd.static(range(8)):
-        u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        grad_u += u_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+        u_a = newton.u[slots[a]]
+        grad_u += u_a.outer_product(grad_w[a, :])
     F = particles.F[f, i_p, i_b]
     return (qd.Matrix.identity(gs.qd_float, 3) + grad_u) @ F, grad_w, F
 
@@ -1628,7 +1628,7 @@ def func_build_wall_pairs(
             for d in qd.static(range(3)):
                 vel = signs[d] * v_p[d]
                 if gaps[d] < contact_band_width(-vel, dt, mpm_info):
-                    n_rest = qd.Vector([rotation_t[e, d] for e in qd.static(range(3))])
+                    n_rest = rotation_t[:, d]
                     invweight = n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
                     D, t = band_row(sol_params, gaps[d], vel, invweight, dt)
                     i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
@@ -1671,9 +1671,9 @@ def func_g2p_advect(
             vel = qd.Vector.zero(gs.qd_float, 3)
             C = qd.Matrix.zero(gs.qd_float, 3, 3)
             for a in qd.static(range(8)):
-                v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
+                v_a = newton.u[slots[a]] / dt
                 vel += w[a] * v_a
-                C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+                C += v_a.outer_product(grad_w[a, :])
             particles.pos[f + 1, i_p, i_b] = pos + dt * vel
             particles.vel[f + 1, i_p, i_b] = vel
             particles.C[f + 1, i_p, i_b] = C
@@ -1766,7 +1766,7 @@ def particle_trial_disp(
     w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
     dx = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
-        dx += w[a] * qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        dx += w[a] * newton.u[slots[a]]
     return dx, w
 
 
@@ -1793,7 +1793,7 @@ def particle_node_sum(slots, w: qd.types.vector(8), nodes: qd.template()):
     """Sum of the node vectors of a stencil, weighted by its weights."""
     value = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
-        value += w[a] * qd.Vector([nodes[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        value += w[a] * nodes[slots[a]]
     return value
 
 
@@ -1801,8 +1801,7 @@ def particle_node_sum(slots, w: qd.types.vector(8), nodes: qd.template()):
 def add_particle_node_vector(slots, w: qd.types.vector(8), y: qd.types.vector(3), nodes: qd.template()):
     """Add w_a y to the vector of every node a of a stencil."""
     for a in qd.static(range(8)):
-        for d in qd.static(range(3)):
-            qd.atomic_add(nodes[3 * slots[a] + d], w[a] * y[d])
+        qd.atomic_add(nodes[slots[a]], w[a] * y)
 
 
 @qd.func
@@ -1873,10 +1872,10 @@ def func_stage_particle_pos(
 def func_newton_reset(grid: MpmGridScratch, newton: MpmNewtonScratch):
     """Reset the Newton state to u = 0, the configuration at the start of the substep, which is free of penetration."""
     qd.loop_config(name="mpm_newton_reset")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.u[i] = 0.0
-        newton.u_temp[i] = 0.0
-        newton.du[i] = 0.0
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        newton.u[node] = qd.Vector.zero(gs.qd_float, 3)
+        newton.u_temp[node] = qd.Vector.zero(gs.qd_float, 3)
+        newton.du[node] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -1989,7 +1988,7 @@ def particle_stencil_terms(
     r_frame = qd.Matrix.zero(gs.qd_float, 8, 3)
     VtFt = V.transpose() @ F.transpose()
     for a in qd.static(range(8)):
-        r_a = VtFt @ qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
+        r_a = VtFt @ grad_w[a, :]
         for d in qd.static(range(3)):
             r_frame[a, d] = r_a[d]
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
@@ -2249,10 +2248,9 @@ def publish_node_gradient(
 ):
     value = qd.Vector.zero(gs.qd_float, 3)
     if grid.node_fixed[node] == 0:
-        u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        u = newton.u[node]
         value = grad + grid.node_mass[node] * (u - dt * grid.node_v_free[node])
-    for d in qd.static(range(3)):
-        linear.b_rhs[3 * (rows.row_start[()] + node) + d] = value[d]
+    linear.b_rhs[rows.row_start[()] + node] = value
 
 
 @qd.func(requires_top_level=True)
@@ -2620,20 +2618,20 @@ def func_apply_brick_cpu(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: 
             for b in range(BRICK_NODES):
                 if (bits & (1 << b)) != 0:
                     block_base = base + brick_sym_index(qd.min(a, b), qd.max(a, b)) * 9
-                    row_b = 3 * (rows.row_start[()] + brick_slot(brick, b))
+                    row_b = rows.row_start[()] + brick_slot(brick, b)
                     for q in qd.static(range(3)):
                         m = gs.qd_float(0.0)
                         if a <= b:
                             m = bricks.brick[block_base + p * 3 + q]
                         else:
                             m = bricks.brick[block_base + q * 3 + p]
-                        z_entry += m * linear.pcg.r[row_b + q]
+                        z_entry += m * linear.pcg.r[row_b][q]
         else:
             block_base = base + brick_sym_index(a, a) * 9
-            row_a = 3 * (rows.row_start[()] + brick_slot(brick, a))
+            row_a = rows.row_start[()] + brick_slot(brick, a)
             for q in qd.static(range(3)):
-                z_entry += bricks.brick[block_base + p * 3 + q] * linear.pcg.r[row_a + q]
-        linear.pcg.z[3 * (rows.row_start[()] + brick_slot(brick, a)) + p] = z_entry
+                z_entry += bricks.brick[block_base + p * 3 + q] * linear.pcg.r[row_a][q]
+        linear.pcg.z[rows.row_start[()] + brick_slot(brick, a)][p] = z_entry
 
 
 @qd.func(requires_top_level=True)
@@ -2653,7 +2651,7 @@ def func_apply_brick_gpu(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: 
         p = i % 3
         sh_r = qd.simt.block.SharedArray((2 * BRICK_DIM,), gs.qd_float)
         s = rows.row_start[()] + brick_slot(brick, a)
-        sh_r[thread] = linear.pcg.r[3 * s + p]
+        sh_r[thread] = linear.pcg.r[s][p]
         qd.simt.block.sync()
 
         base = brick * BRICK_SCALARS
@@ -2674,21 +2672,21 @@ def func_apply_brick_gpu(grid: MpmGridScratch, bricks: MpmBrickScratch, linear: 
             block_base = base + brick_sym_index(a, a) * 9
             for q in qd.static(range(3)):
                 z_entry += bricks.brick[block_base + p * 3 + q] * sh_r[local * BRICK_DIM + a * 3 + q]
-        linear.pcg.z[3 * s + p] = z_entry
+        linear.pcg.z[s][p] = z_entry
 
 
 @qd.func(requires_top_level=True)
 def func_negate_du(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     qd.loop_config(name="mpm_negate_du")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.du[i] = -linear.solution[3 * rows.row_start[()] + i]
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        newton.du[node] = -linear.solution[rows.row_start[()] + node]
 
 
 @qd.func(requires_top_level=True)
 def func_record_start_point(grid: MpmGridScratch, newton: MpmNewtonScratch):
     qd.loop_config(name="mpm_record_start_point")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.u_temp[i] = newton.u[i]
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        newton.u_temp[node] = newton.u[node]
 
 
 @qd.func(requires_top_level=True)
@@ -2745,8 +2743,8 @@ def func_cap_inversion_step(
             F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
             grad_du = qd.Matrix.zero(gs.qd_float, 3, 3)
             for a in qd.static(range(8)):
-                du_a = qd.Vector([newton.du[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                grad_du += du_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+                du_a = newton.du[slots[a]]
+                grad_du += du_a.outer_product(grad_w[a, :])
             c0, c1, c2, c3 = det_cubic(F_trial, grad_du @ F)
             if c0 > 0.0:
                 root = cubic_first_root(c0, c1, c2, c3, t_max)
@@ -2764,7 +2762,7 @@ def particle_max_disp(
     w, _ = q1_stencil(particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
     ddx = qd.Vector.zero(gs.qd_float, 3)
     for a in qd.static(range(8)):
-        ddx += w[a] * qd.Vector([newton.du[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        ddx += w[a] * newton.du[slots[a]]
     disp = gs.qd_float(0.0)
     for d in qd.static(range(3)):
         disp = qd.max(disp, qd.abs(ddx[d]))
@@ -2775,9 +2773,9 @@ def particle_max_disp(
 def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, control: qd.template()):
     """Move the nodes of every environment to the trial point of its line-search step."""
     qd.loop_config(name="mpm_step_forward")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        env, block = unpack_block(grid.block_coords[i // (3 * BLOCK_CELLS)])
-        newton.u[i] = newton.u_temp[i] + control.alpha[env] * newton.du[i]
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
+        newton.u[node] = newton.u_temp[node] + control.alpha[env] * newton.du[node]
 
 
 @qd.func(requires_top_level=True)
@@ -2849,7 +2847,7 @@ def node_kinetic_energy(node: int, dt: float, grid: MpmGridScratch, newton: MpmN
     """1/2 m |u - dt v_free|^2 of a node, zero for a fixed node."""
     energy = gs.qd_float(0.0)
     if grid.node_fixed[node] == 0:
-        u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+        u = newton.u[node]
         energy = 0.5 * grid.node_mass[node] * (u - dt * grid.node_v_free[node]).norm_sqr()
     return energy
 

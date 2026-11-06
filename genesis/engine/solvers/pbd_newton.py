@@ -27,7 +27,6 @@ from .newton_linear import (
     func_block_jacobi_apply,
     func_block_jacobi_invert,
     func_block_jacobi_reset,
-    row_vector,
     write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
@@ -91,8 +90,7 @@ def func_pbd_assemble(pbd: qd.template(), linear: NewtonLinearScratch, rows: Lin
         row = pbd_row(i_q, i_b, pbd)
         i_t = rows.triplet_start[()] + row - rows.row_start[()]
         write_block(i_t, row, row, m * qd.Matrix.identity(gs.qd_float, 3), linear)
-        for d in qd.static(range(3)):
-            linear.b_rhs[3 * row + d] = grad[d]
+        linear.b_rhs[row] = grad
         linear.pcg.row_env[row] = i_b
 
 
@@ -102,14 +100,14 @@ def func_pbd_start_line_search(pbd: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_start_line_search")
     for i_q, i_b in qd.ndrange(pbd.pbd_data.pbd._n_particles, pbd.pbd_data.pbd._B):
         pbd.pbd_data.x_prev[i_q, i_b] = pbd.particles_reordered[i_q, i_b].pos
-        qd.atomic_max(control.max_disp[i_b], qd.abs(row_vector(pbd_row(i_q, i_b, pbd), pbd.linear.solution)).max())
+        qd.atomic_max(control.max_disp[i_b], qd.abs(pbd.linear.solution[pbd_row(i_q, i_b, pbd)]).max())
 
 
 @qd.func(requires_top_level=True)
 def func_pbd_step_forward(pbd: qd.template(), control: qd.template()):
     qd.loop_config(name="mpm_pbd_step_forward")
     for i_q, i_b in qd.ndrange(pbd.pbd_data.pbd._n_particles, pbd.pbd_data.pbd._B):
-        step = control.alpha[i_b] * row_vector(pbd_row(i_q, i_b, pbd), pbd.linear.solution)
+        step = control.alpha[i_b] * pbd.linear.solution[pbd_row(i_q, i_b, pbd)]
         pbd.particles_reordered[i_q, i_b].pos = pbd.pbd_data.x_prev[i_q, i_b] - step
 
 

@@ -194,9 +194,9 @@ def func_wall_contact_adjoint(
         Delta = qd.Vector.zero(gs.qd_float, 3)
         delta = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
-            Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-            row = 3 * (rows.row_start[()] + slots[a])
-            delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+            Delta += w[a] * newton.u[slots[a]]
+            row = rows.row_start[()] + slots[a]
+            delta += w[a] * linear.solution[row]
         D = pairs.D[i_pair]
         J = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
         c = J.dot(Delta) - pairs.t[i_pair]
@@ -220,10 +220,10 @@ def func_wall_contact_adjoint(
             v_bar = vel_bar * J
             R_bar = (2.0 * invweight_bar) * J.outer_product(W @ n_rest)
             for a in qd.static(range(8)):
-                u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (rows.row_start[()] + slots[a])
-                lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
+                u_a = newton.u[slots[a]]
+                row = rows.row_start[()] + slots[a]
+                lam_a = linear.solution[row]
+                grad_w_a = grad_w[a, :]
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
             particles.pos.grad[f, i_p, i_b] += x_bar
             particles.vel.grad[f, i_p, i_b] += v_bar
@@ -260,17 +260,17 @@ def func_constraint_adjoint(
             Delta = qd.Vector.zero(gs.qd_float, 3)
             delta = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
-                Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (rows.row_start[()] + slots[a])
-                delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                Delta += w[a] * newton.u[slots[a]]
+                row = rows.row_start[()] + slots[a]
+                delta += w[a] * linear.solution[row]
             damping = newton.constraint_damping[s]
             g = spring * (x_p + Delta - newton.constraint_target[s]) + damping * Delta
             x_bar = -spring * delta
             for a in qd.static(range(8)):
-                u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (rows.row_start[()] + slots[a])
-                lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
+                u_a = newton.u[slots[a]]
+                row = rows.row_start[()] + slots[a]
+                lam_a = linear.solution[row]
+                grad_w_a = grad_w[a, :]
                 x_bar -= (lam_a.dot(g) + (spring + damping) * u_a.dot(delta)) * grad_w_a
             particles.pos.grad[f, i_p, i_b] += x_bar
             i_l = constraints[i_p, i_b].link_idx
@@ -287,8 +287,8 @@ def func_adjoint_reset_u_bar(grid: MpmGridScratch, newton: MpmNewtonScratch):
     """Clear the adjoint of u*, which the reverse of the grid-to-particle transfer (G2P) accumulates into `newton.du`
     (free once the forward solve is over)."""
     qd.loop_config(name="mpm_adjoint_reset_u_bar")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        newton.du[i] = 0.0
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        newton.du[node] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -316,8 +316,8 @@ def func_adjoint_g2p(
         w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
         C = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
-            v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
-            C += v_a.outer_product(qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float))
+            v_a = newton.u[slots[a]] / dt
+            C += v_a.outer_product(grad_w[a, :])
         F = particles.F[f, i_p, i_b]
         slot = particles_info.material_idx[i_p]
         F_trial = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
@@ -338,11 +338,10 @@ def func_adjoint_g2p(
 
         x_bar = x_bar_next
         for a in qd.static(range(8)):
-            v_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float) / dt
-            grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
+            v_a = newton.u[slots[a]] / dt
+            grad_w_a = grad_w[a, :]
             u_bar = (w[a] * v_bar + C_bar @ grad_w_a) / dt
-            for d in qd.static(range(3)):
-                qd.atomic_add(newton.du[3 * slots[a] + d], u_bar[d])
+            qd.atomic_add(newton.du[slots[a]], u_bar)
             x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(fx, mpm_info.inv_dx[()], a) @ (
                 C_bar.transpose() @ v_a
             )
@@ -358,11 +357,11 @@ def func_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: New
     """Set the right-hand side of the adjoint solve to the adjoint of u*, zero on the fixed nodes, whose rows of
     the Newton matrix are the identity."""
     qd.loop_config(name="mpm_adjoint_rhs")
-    for i in range(3 * grid.n_blocks[()] * BLOCK_CELLS):
-        value = newton.du[i]
-        if grid.node_fixed[i // 3] != 0:
-            value = 0.0
-        linear.b_rhs[3 * rows.row_start[()] + i] = value
+    for node in range(grid.n_blocks[()] * BLOCK_CELLS):
+        value = newton.du[node]
+        if grid.node_fixed[node] != 0:
+            value = qd.Vector.zero(gs.qd_float, 3)
+        linear.b_rhs[rows.row_start[()] + node] = value
 
 
 @qd.func(requires_top_level=True)
@@ -390,8 +389,8 @@ def func_adjoint_nodes(
         mass_bar = gs.qd_float(0.0)
         mom_bar = qd.Vector.zero(gs.qd_float, 3)
         if mass > 0.0 and grid.node_fixed[node] == 0:
-            lam = qd.Vector([linear.solution[3 * (rows.row_start[()] + node) + d] for d in qd.static(range(3))])
-            u = qd.Vector([newton.u[3 * node + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            lam = linear.solution[rows.row_start[()] + node]
+            u = newton.u[node]
             v = grid.node_v[node]
             v_free = grid.node_v_free[node]
             v_free_bar = (mass * dt) * lam
@@ -441,9 +440,9 @@ def func_adjoint_particles(
         Lambda = qd.Matrix.zero(gs.qd_float, 3, 3)
         grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
-            grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
-            lam_a = qd.Vector([linear.solution[3 * (rows.row_start[()] + slots[a]) + d] for d in qd.static(range(3))])
-            u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            grad_w_a = grad_w[a, :]
+            lam_a = linear.solution[rows.row_start[()] + slots[a]]
+            u_a = newton.u[slots[a]]
             Lambda += lam_a.outer_product(grad_w_a)
             grad_u += u_a.outer_product(grad_w_a)
         F_increment = qd.Matrix.identity(gs.qd_float, 3) + grad_u
@@ -475,8 +474,8 @@ def func_adjoint_particles(
         actu_bar = -scale * dactive_stiffness * F_trial_m.dot(Lambda_F_m)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
-            lam_a = qd.Vector([linear.solution[3 * (rows.row_start[()] + slots[a]) + d] for d in qd.static(range(3))])
-            u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            lam_a = linear.solution[rows.row_start[()] + slots[a]]
+            u_a = newton.u[slots[a]]
             H_a = q1_weight_hessian(fx, mpm_info.inv_dx[()], a)
             x_bar -= scale * (H_a @ (F @ (Q.transpose() @ u_a + P.transpose() @ lam_a)))
 
@@ -487,7 +486,7 @@ def func_adjoint_particles(
         v_bar = qd.Vector.zero(gs.qd_float, 3)
         C_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
         for a in qd.static(range(8)):
-            grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
+            grad_w_a = grad_w[a, :]
             x_a = (cell + node_offset(a)).cast(gs.qd_float) * mpm_info.dx[()]
             mom_bar = newton.adj_mom[slots[a]]
             mass_bar = newton.adj_mass[slots[a]]

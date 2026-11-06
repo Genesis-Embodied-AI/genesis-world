@@ -212,9 +212,9 @@ def func_rigid_contact_adjoint(
             dxp = qd.Vector.zero(gs.qd_float, 3)
             lam_p = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(8)):
-                u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (rows.row_start[()] + slots[a])
-                lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
+                u_a = newton.u[slots[a]]
+                row = rows.row_start[()] + slots[a]
+                lam_a = linear.solution[row]
                 dxp += w[a] * u_a
                 lam_p += w[a] * lam_a
             r = x_p - links_state.root_COM[i_l, i_b]
@@ -247,10 +247,10 @@ def func_rigid_contact_adjoint(
             # Delta and delta through the weights, the arm and the chain
             x_bar = -Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
             for a in qd.static(range(8)):
-                u_a = qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * (rows.row_start[()] + slots[a])
-                lam_a = qd.Vector([linear.solution[row + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                grad_w_a = qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
+                u_a = newton.u[slots[a]]
+                row = rows.row_start[()] + slots[a]
+                lam_a = linear.solution[row]
+                grad_w_a = grad_w[a, :]
                 x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
             com_bar = Delta_bar.cross(V_ang) + delta_bar.cross(L_ang)
             r_cross_Delta_bar = r.cross(Delta_bar)
@@ -298,7 +298,7 @@ def func_rigid_contact_adjoint(
                     d = d2
                 sign = qd.static(2 * (i % 2) - 1)
                 J = normal + (sign * friction) * d
-                J_bar_i = qd.Vector([J_bar[i, e] for e in qd.static(range(3))], dt=gs.qd_float)
+                J_bar_i = J_bar[i, :]
                 # t = t_soft + dt J . v_r
                 J_bar_i += dt * t_bar[i] * v_r
                 v_r_bar += dt * t_bar[i] * J

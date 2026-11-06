@@ -28,7 +28,6 @@ from .newton_linear import (
     func_block_jacobi_apply,
     func_block_jacobi_invert,
     func_block_jacobi_reset,
-    row_vector,
     write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
@@ -71,8 +70,7 @@ def func_fem_assemble(f: int, dt: float, fem: qd.template(), linear: NewtonLinea
             mass = dt_sq * fem.elements_v_info[i_v].mass_over_dt2 * (1.0 + fem.damping_alpha_dt)
             g = -dt_sq * fem.elements_v_energy[i_b, i_v].force
         write_block(rows.triplet_start[()] + i_r, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), linear)
-        for d in qd.static(range(3)):
-            linear.b_rhs[3 * row + d] = g[d]
+        linear.b_rhs[row] = g
         linear.pcg.row_env[row] = i_b
     qd.loop_config(name="mpm_fem_assemble_elements")
     for i_b, i_e in qd.ndrange(fem.n_envs, fem.n_elements):
@@ -96,7 +94,7 @@ def func_fem_assemble(f: int, dt: float, fem: qd.template(), linear: NewtonLinea
 @qd.func
 def fem_solution(i_b: int, i_v: int, fem: qd.template()):
     """The solution of the linear system on a vertex, minus its Newton direction."""
-    return row_vector(fem.linear_block.row_start[()] + i_b * fem.n_vertices + i_v, fem.linear.solution)
+    return fem.linear.solution[fem.linear_block.row_start[()] + i_b * fem.n_vertices + i_v]
 
 
 @qd.func(requires_top_level=True)
