@@ -27,6 +27,24 @@ from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array, get_own_annotations
 
 
+def eoa(tensor):
+    """Return the axes of a loop over a data index then the environment that follow the memory order of tensor.
+
+    On CPU, the axes are (1, 0), visiting the environments in the outer loop, when the environment, the last index of
+    tensor, is outermost in its memory, so that each thread runs over the contiguous memory of its own environments.
+    They are None otherwise, the order of the indices. Evaluated in `qd.static` on a kernel argument, whose memory order
+    the kernel cache key holds.
+    """
+    # FIXME: quadrants#934 - a kernel reads the axis permutation of an ndarray argument through the private _qd_layout
+    # alone, its public layout() being the storage order of the elements.
+    # FIXME: quadrants#1082 - a struct-for over a field ignores serialize on GPU, so loops over a whole tensor run over
+    # its shape along these axes instead of a struct-for over the tensor itself, which would follow its memory order.
+    layout = tensor.layout if isinstance(tensor, qd.Field) else tensor._qd_layout
+    return (1, 0) if gs.backend == gs.cpu and layout is not None and layout[0] == len(layout) - 1 else None
+
+
+# FIXME: quadrants#1081 - qd.ndarray takes no memory layout, so the ndarrays are allocated through the qd.tensor wrapper
+# like the fields, which stores them at the permuted shape.
 def V(*args, **kwargs):
     return qd.tensor(*args, backend=qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD, **kwargs)
 
@@ -378,9 +396,9 @@ class Data:
     constant to its value, either one also keyed by a field (see FieldRef) for the arrays of that field alone.
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
     `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
-    environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
-    placeholder no kernel reads. Each required struct is bound to the one of its type built in the entered namespace or
-    its nearest ancestor holding one (see Namespace).
+    environment dimension comes first in memory (by default on CPU alone), the order the dimensions are stored in, and
+    whether the array is a 0-d placeholder no kernel reads. Each required struct is bound to the one of its type built
+    in the entered namespace or its nearest ancestor holding one (see Namespace).
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -767,13 +785,16 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         except TypeError as err:
             raise TypeError(f"{struct_name}.{'.'.join(leaf.path)}: {err}") from None
         axes.append(dim)
-    layout = properties.get("layout")
-    if properties.get("env_first") is not None:
-        i_env = next((i for i, dim in enumerate(axes) if dim is ENVS or dim is WORKERS), None)
+    layout, env_first = properties.get("layout"), properties.get("env_first")
+    i_env = next((i for i, dim in enumerate(axes) if dim is ENVS or dim is WORKERS), None)
+    # A CPU thread runs a contiguous range of environments, which the environment-first order keeps apart in memory
+    if env_first is None and layout is None and i_env is not None and gs.backend == gs.cpu:
+        env_first = True
+    if env_first is not None:
         if i_env is None:
             raise TypeError(f"'env_first' selects {'.'.join(leaf.path)}, which spans no environment dimension.")
         order = [i for i in range(len(axes)) if i != i_env]
-        order = [i_env, *order] if properties["env_first"] else [*order, i_env]
+        order = [i_env, *order] if env_first else [*order, i_env]
         layout = tuple(order) if order != list(range(len(axes))) else None
     # A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal
     # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.

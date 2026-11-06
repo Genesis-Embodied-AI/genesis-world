@@ -154,9 +154,9 @@ TILE_CLASSES = Size("tile_classes")
 # The rows of the constraint state and of the islands the cooperative kernels read, one env per block, which they
 # read from consecutive addresses once stored environment-first
 COOPERATIVE_ROWS = "cooperative_rows"
-# The Jacobian rows, which the cooperative kernels and serialized execution read whole for one env (see jac)
+# The Jacobian rows, read whole for one env by the cooperative kernels, CPU threads and serialized execution (see jac)
 JACOBIAN_ROWS = "jacobian_rows"
-# The rows serialized execution reads env by env, in the outermost loop of every constraint kernel
+# The rows CPU threads and serialized execution read env by env, in the outermost loop of every constraint kernel
 SERIAL_ROWS = "serial_rows"
 NEWTON = "newton"
 CONE_INCREMENTAL = "cone_incremental"
@@ -1460,8 +1460,8 @@ class RigidSimStaticConfig(StaticConfig):
     # resolution in the rigid solver.
     enable_cooperative_noslip: bool = False
     # Whether the arrays labeled COOPERATIVE_ROWS are stored environment-first, under the cooperative constraint
-    # kernels or serialized execution. Loops whose order follows the memory order key on it, and the choice of the
-    # cooperative algorithms on enable_cooperative_constraint_kernels.
+    # kernels, on CPU or under serialized execution. Loops whose order follows the memory order key on it, and the
+    # choice of the cooperative algorithms on enable_cooperative_constraint_kernels.
     constraint_layout_batch_first: bool = False
     # Whether the Newton system is Jacobi-equilibrated (see nt_jacobi in ConstraintState)
     enable_jacobi_equilibration: bool = False

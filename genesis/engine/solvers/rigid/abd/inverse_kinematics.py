@@ -12,6 +12,7 @@ import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
 from genesis.utils.array_class import DynInfo, DynState, IKScratchFK, IKState, IKTargets, RigidInfo
+from genesis.utils.data import eoa
 from genesis.utils.misc import qd_isfinite
 
 
@@ -772,7 +773,7 @@ def kernel_forward_kinematics_query(
     indices index it directly.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
+    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         qpos_cache[qs_idx[i_q_], envs_idx[i_b_]] = rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]]
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
 
@@ -787,14 +788,14 @@ def kernel_forward_kinematics_query(
         )
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
+    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.pos))):
         for i in qd.static(range(3)):
             links_pos[i_b_, i_l_, i] = dyn_state.links.pos[links_idx[i_l_], envs_idx[i_b_]][i]
         for i in qd.static(range(4)):
             links_quat[i_b_, i_l_, i] = dyn_state.links.quat[links_idx[i_l_], envs_idx[i_b_]][i]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
+    for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(rigid_info.qpos))):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos_cache[qs_idx[i_q_], envs_idx[i_b_]]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)

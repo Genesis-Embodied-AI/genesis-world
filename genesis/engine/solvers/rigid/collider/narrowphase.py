@@ -23,6 +23,7 @@ from genesis.utils.array_class import (
     MPRState,
     RigidInfo,
 )
+from genesis.utils.data import eoa
 
 from . import capsule_contact, diff_gjk, gjk, mpr
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
@@ -4735,9 +4736,10 @@ def func_fill_diff_contact_input_plane(
     (box vertex / sphere center / capsule nearest endpoint) as v - radius * normal, stored in the convex geom's local
     frame. PLANE is the smallest GEOM_TYPE so it is always geom_a after the canonical type-ordered swap.
     """
-    _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], _B):
+    for i_c, i_b in qd.ndrange(
+        *collider_state.contact_data.pos.shape, axes=qd.static(eoa(collider_state.diff_contact_input.geom_a))
+    ):
         if i_c < collider_state.n_contacts[i_b]:
             i_ga = collider_state.contact_data.geom_a[i_c, i_b]
             i_gb = collider_state.contact_data.geom_b[i_c, i_b]

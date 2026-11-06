@@ -11,6 +11,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.array_class import DynInfo, DynState, RigidInfo
+from genesis.utils.data import eoa
 
 
 @qd.func
@@ -248,7 +249,9 @@ def kernel_manual_forward_kinematics_bw(
     # Leaf to root: a child's grad on its parent lands before the parent's own iteration consumes it, so each root walks
     # its span descending, static links and trees together (see func_update_kinematics_root in forward_kinematics.py)
     qd.loop_config(name="manual_fk_only_bw", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1], axes=qd.static(eoa(dyn_state.links.pos))
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         i_l_end = rigid_info.links_root_end[i_l_root]
         for i_l_ in range(i_l_end - i_l_root):
@@ -415,7 +418,9 @@ def kernel_manual_forward_velocity_bw(
     qd.loop_config(
         name="manual_forward_velocity_bw", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+    for i_r, i_b in qd.ndrange(
+        rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1], axes=qd.static(eoa(dyn_state.links.pos))
+    ):
         i_l_root = rigid_info.roots_link_idx[i_r]
         i_l_end = rigid_info.links_root_end[i_l_root]
         for i_l_ in range(i_l_end - i_l_root):
@@ -450,7 +455,11 @@ def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, ri
     cross-block mass entries are structural zeros whose grads must stay zero.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.force.shape[1]):
+    for i_t, i_b in qd.ndrange(
+        rigid_info.trees_root_idx.shape[0],
+        dyn_state.dofs.force.shape[1],
+        axes=qd.static(eoa(dyn_state.dofs.acc_smooth_bw)),
+    ):
         blocks_dof_start = rigid_info.trees_dof_start[i_t]
         blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
 

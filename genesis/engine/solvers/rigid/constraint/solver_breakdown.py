@@ -4,7 +4,9 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
+from genesis.utils.data import eoa
 from genesis.utils.misc import qd_to_torch
+
 from . import linesearch
 from . import solver
 
@@ -87,14 +89,14 @@ def _func_update_constraint_forces(constraint_state: ConstraintState, rigid_conf
     # prev_active. Pyramidal threads only write their own row, so they snapshot inline in the body (no extra pass).
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction):
         qd.loop_config(name="snapshot_prev_active", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_c, i_b in qd.ndrange(len_constraints, _B):
+        for i_c, i_b in qd.ndrange(len_constraints, _B, axes=qd.static(eoa(constraint_state.prev_active))):
             if i_c < constraint_state.n_constraints[i_b] and constraint_state.improved[i_b]:
                 constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
 
     # A row of an island standing still keeps its values and shows no flip to the incremental factor, see
     # func_update_constraint_batch.
     qd.loop_config(name="update_constraint_forces", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
+    for i_c, i_b in qd.ndrange(len_constraints, _B, axes=qd.static(eoa(constraint_state.active))):
         if i_c < constraint_state.n_constraints[i_b] and constraint_state.improved[i_b]:
             _func_update_constraint_forces_row(i_c, i_b, constraint_state, rigid_config)
 
@@ -140,11 +142,11 @@ def _func_update_qfrc_constraint_per_dof(
     qfrc_constraint write coalesces under the flipped DOF-vec layout.
     """
     n_dofs = constraint_state.qfrc_constraint.shape[0]
-    _B = constraint_state.grad.shape[1]
 
     qd.loop_config(name="update_constraint_qfrc", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(
-        n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
+        *constraint_state.qfrc_constraint.shape,
+        axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None),
     ):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
             # A dof of an island standing still keeps its value, see func_update_constraint_batch. A single-island
