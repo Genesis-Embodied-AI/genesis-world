@@ -1,0 +1,28 @@
+examples/sensors/lidar_teleop.py
+  s_30743dd4e1d4b2::t_165e588db3ed52 29-35,110
+genesis/options/sensors/options.py
+  s_30743dd4e1d4b2::t_919e44f4659f29 2,629-641,656-657,663-670
+  s_30743dd4e1d4b2::t_f54497d20467fe 671
+genesis/engine/sensors/raycaster.py
+  s_30743dd4e1d4b2::t_f9439b1ea1afe3 16,498-502,546-552,592-606,665-673,715-716,726,733
+genesis/utils/raycast_qd.py
+  s_30743dd4e1d4b2::t_814a688079f387 44,48,53,62-64,80,116-121,672,676,681,820,831,864,868,873,880,884,889
+tests/sensors/test_raycaster.py
+  s_30743dd4e1d4b2::t_b1fd8ce81f8cd4 8,605-609,611-613,615-618,620-621,623-625,627-628,630-667,669-674,676-679,681-697
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4c262586387946df4e6fb7f1e13f53a7e9dd44fc",
+  "prompts": {},
+  "sessions": {
+    "s_30743dd4e1d4b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcbc5529-4957-4e0d-8c5f-2573abbad53d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
