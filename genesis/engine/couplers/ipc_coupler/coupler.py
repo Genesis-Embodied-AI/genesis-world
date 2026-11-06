@@ -11,6 +11,7 @@ import numpy as np
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.materials.FEM.cloth import Cloth
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
@@ -315,8 +316,11 @@ class IPCCoupler(RBC):
 
         # Add rigid geoms and articulated entities to IPC based on per-entity coupling types
         if self.rigid_solver.is_active:
-            self._add_rigid_geoms_to_ipc()
-            self._add_articulation_entities_to_ipc()
+            links_pos, links_quat, _, _, joints_xanchor, joints_xaxis = compute_forward_kinematics(
+                self.rigid_solver.entities, n_envs=self.sim._B
+            )
+            self._add_rigid_geoms_to_ipc(links_pos, links_quat)
+            self._add_articulation_entities_to_ipc(joints_xanchor, joints_xaxis)
 
         # Register all per-entity contact pair models with per-material friction
         self._register_contact_pairs()
@@ -396,8 +400,12 @@ class IPCCoupler(RBC):
                 # ---- Create IPC object and geometry slot ----
                 fem_obj.geometries().create(mesh)
 
-    def _add_rigid_geoms_to_ipc(self) -> None:
-        """Add rigid geoms to the IPC scene as ABD objects, merging geoms by link."""
+    def _add_rigid_geoms_to_ipc(self, links_pos: np.ndarray, links_quat: np.ndarray) -> None:
+        """Add rigid geoms to the IPC scene as ABD objects, merging geoms by link.
+
+        'links_pos' and 'links_quat' are the poses of the rigid links in the neutral configuration, one row per
+        environment.
+        """
         assert gs.logger is not None
 
         gs.logger.debug(f"Registered entity coupling types: {set(self._coup_type_by_entity.values())}")
@@ -430,9 +438,6 @@ class IPCCoupler(RBC):
                 gs.logger.debug(f"Fixed-merge: link {link.idx} ({link.name}) -> {target_link.idx} ({target_link.name})")
 
         # ========== Process each environment ==========
-        links_pos = qd_to_numpy(self.rigid_solver.dyn_state.links.pos, transpose=True)
-        links_quat = qd_to_numpy(self.rigid_solver.dyn_state.links.quat, transpose=True)
-
         for env_idx in range(self.sim._B):
             for target_link, source_links in target_groups.items():
                 entity = target_link.entity
@@ -576,11 +581,12 @@ class IPCCoupler(RBC):
                 # ---- Store slot mappings ----
                 self._abd_slots_by_link.setdefault(target_link, []).append(abd_geom_slot)
 
-    def _add_articulation_entities_to_ipc(self) -> None:
+    def _add_articulation_entities_to_ipc(self, joints_xanchor: np.ndarray, joints_xaxis: np.ndarray) -> None:
         """
         Add articulated robot entities to IPC using ExternalArticulationConstraint.
 
-        This enables joint-level coupling between Genesis and IPC.
+        This enables joint-level coupling between Genesis and IPC. 'joints_xanchor' and 'joints_xaxis' are the world
+        anchors and axes of the rigid joints in the neutral configuration, one row per environment.
         """
         assert gs.logger is not None
 
@@ -589,9 +595,6 @@ class IPCCoupler(RBC):
 
         self._ipc_eac = ExternalArticulationConstraint()
         self._ipc_constitution_tabular.insert(self._ipc_eac)
-
-        joints_xaxis = qd_to_numpy(self.rigid_solver.dyn_state.joints.xaxis, transpose=True)
-        joints_xanchor = qd_to_numpy(self.rigid_solver.dyn_state.joints.xanchor, transpose=True)
 
         # Process each rigid entity with external_articulation coupling type
         for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):

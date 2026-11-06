@@ -321,6 +321,17 @@ class KinematicVariantDescription:
     default_armature: float | None = None
 
 
+def _balanced_variant_mapping(n_variants, B):
+    """Map N variants to B environments using balanced block assignment."""
+    if B >= n_variants:
+        base = B // n_variants
+        extra = B % n_variants
+        sizes = np.r_[np.full(extra, base + 1), np.full(n_variants - extra, base)]
+        return np.repeat(np.arange(n_variants), sizes)
+    else:
+        return np.arange(B)
+
+
 @dataclass
 class KinematicAttachmentDescription:
     """Where an entity hangs: the entity its base link was attached to, and the link of it that carries it.
