@@ -246,6 +246,9 @@ class RigidLinkDescription(KinematicLinkDescription):
     the geometry estimate otherwise. A link the world carries holds what the asset states and None where it states
     nothing, until an attach sets it moving or the build resolves it. The inverse weight holds the asset value, zeros
     for a link the world carries, or the sentinel '-1.0', which the solver's refresh completes at build.
+
+    'contact_exclusions' names the links of the entity this one never collides with, whatever the collision bitmasks of
+    their geoms.
     """
 
     inertial_pos: np.ndarray | None
@@ -254,6 +257,7 @@ class RigidLinkDescription(KinematicLinkDescription):
     mass: float | None
     invweight: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    contact_exclusions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -287,7 +291,7 @@ class RigidVariantLinkDescription(KinematicVariantLinkDescription):
     """What one variant gives one simulated link: the geoms it adds, and the inertial resolved for them.
 
     A variant stands for the same asset loaded on its own, so its inertial resolves from its own file and its own
-    geometry.
+    geometry, and the links its geoms never collide with are those its own file excludes (see 'RigidLinkDescription').
     """
 
     mass: float
@@ -295,6 +299,7 @@ class RigidVariantLinkDescription(KinematicVariantLinkDescription):
     inertial_quat: np.ndarray
     inertia: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    contact_exclusions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -552,6 +557,14 @@ class KinematicEntityDescription(EntityDescription):
                                 f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
                                 f"variant has {v_j_info['n_dofs']}."
                             )
+
+                # The links a variant excludes from collision are named as the primary names them, links being matched
+                # by their place in the shared kinematic topology
+                v_links_name = [v_l_info["name"] for v_l_info in v_l_infos]
+                for v_l_info in v_l_infos:
+                    v_l_info["contact_exclusions"] = [
+                        self.links[v_links_name.index(name)].name for name in v_l_info.get("contact_exclusions", ())
+                    ]
 
                 # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred
                 # to '_align_free_roots' (where the resolved per-variant composite inertia is known); here
@@ -1627,6 +1640,7 @@ class RigidEntityDescription(KinematicEntityDescription):
             inertial_quat=inertial.quat,
             inertia=inertial.inertia,
             geoms=self._describe_geoms(cg_infos),
+            contact_exclusions=[] if v_l_info is None else v_l_info.get("contact_exclusions", []),
         )
 
     def _load_scene(self, morph, resolution: Resolution):
@@ -1805,6 +1819,7 @@ class RigidEntityDescription(KinematicEntityDescription):
             mass=inertial.mass,
             invweight=invweight,
             geoms=self._describe_geoms(cg_infos),
+            contact_exclusions=l_info.get("contact_exclusions", []),
         )
 
 

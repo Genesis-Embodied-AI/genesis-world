@@ -7,6 +7,7 @@ terrain), and contact management.
 """
 
 from collections.abc import Iterator
+from itertools import product
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -528,6 +529,25 @@ class Collider:
             link_max = np.maximum(link_a, link_b)
             is_weld = np.array([(link_min[i], link_max[i]) in weld_pairs for i in range(len(row))], dtype=bool)
             valid &= ~is_weld
+
+        # Link pairs that the description of their entity excludes from collision. Each variant of a heterogeneous
+        # entity states its own, which apply to the geoms it gives those links (see 'RigidVariantLinkDescription').
+        excluded_geom_pairs = []
+        for entity in self._solver.entities:
+            variants_links_desc = [entity.desc.links, *[variant.links for variant in entity.desc.variants[1:]]]
+            for i_variant, links_desc in enumerate(variants_links_desc):
+                for link, l_desc in zip(entity.links, links_desc):
+                    for name in l_desc.contact_exclusions:
+                        links_geoms_range = [
+                            (link_.geom_start, link_.geom_end)
+                            if link_._variant_geom_ranges is None
+                            else link_._variant_geom_ranges[i_variant]
+                            for link_ in (link, entity.get_link(name))
+                        ]
+                        for i_ga, i_gb in product(*[range(*geoms_range) for geoms_range in links_geoms_range]):
+                            excluded_geom_pairs.append(min(i_ga, i_gb) * n_geoms + max(i_ga, i_gb))
+        if excluded_geom_pairs:
+            valid &= ~np.isin(row * n_geoms + col, excluded_geom_pairs)
 
         # Heterogeneous variants that no environment carries together never collide, and keeping their pairs would
         # grow the pair count quadratically with the pool size. An entity dispatches the same variant to all of its

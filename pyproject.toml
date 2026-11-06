@@ -66,9 +66,6 @@ dependencies = [
     "coacd>=1.0.12",
     # Ray casting used in mesh to height field conversion
     "rtree",
-    # Constraint Satisfaction Solver.
-    # Used to compute contype and conaffinity bitmasks from complete list of excluded collision pairs.
-    "z3-solver",
     # Used for loading raytracing special texture images used by LuisaRender
     "OpenEXR",
     # Native batch renderer specifically designed for Genesis

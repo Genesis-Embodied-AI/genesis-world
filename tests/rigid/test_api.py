@@ -907,9 +907,8 @@ def test_normalized_quat(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_inertial_property_setters(
-    sliding_ball_pair, free_bodies_in_one_model, implicit_inertial_origin_chain, show_viewer, tol
-):
+@pytest.mark.parametrize("model_name", ["free_bodies_in_one_model"])
+def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertial_origin_chain, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -943,12 +942,12 @@ def test_inertial_property_setters(
     )
     free_bodies = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=free_bodies_in_one_model,
+            file=xml_path,
         ),
     )
     unaligned = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=free_bodies_in_one_model,
+            file=xml_path,
             pos=(0.0, 10.0, 8.0),
             align=False,
         ),

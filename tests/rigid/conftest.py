@@ -800,14 +800,28 @@ def sliding_ball_pair():
 
 @pytest.fixture(scope="session")
 def free_bodies_in_one_model():
-    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks."""
+    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks. Every
+    geom states its collision bitmasks, and the first body reaches into the second through a massless geom, the pair
+    of bodies being excluded from collision."""
     mjcf = ET.Element("mujoco")
     worldbody = ET.SubElement(mjcf, "worldbody")
     for i_body, mass in enumerate((1.0, 3.0)):
         body = ET.SubElement(worldbody, "body", name=f"free_{i_body}", pos=f"{i_body} 4.0 0.4")
         ET.SubElement(body, "freejoint")
-        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass))
-    return ET.tostring(mjcf, encoding="unicode")
+        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass), contype="3", conaffinity="5")
+    ET.SubElement(
+        worldbody[0],
+        "geom",
+        type="box",
+        size="0.05 0.05 0.05",
+        pos="0.95 0.0 0.0",
+        mass="0",
+        contype="3",
+        conaffinity="5",
+    )
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "exclude", body1="free_0", body2="free_1")
+    return mjcf
 
 
 @pytest.fixture(scope="session")

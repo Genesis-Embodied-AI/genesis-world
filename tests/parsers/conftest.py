@@ -1637,8 +1637,9 @@ def collision_approximation_usd(asset_tmp_path):
 
 @pytest.fixture(scope="session")
 def collision_filtering_usd(asset_tmp_path):
-    """Two rigid bodies with in-model collision filtering: one via FilteredPairsAPI between its two
-    collision cubes, one via CollisionGroups (A filters B, plus an ungrouped collider)."""
+    """Two articulations whose child links overlap their base link, with in-model collision filtering: one via
+    FilteredPairsAPI between its two links, one via CollisionGroups (A filters B). Two child links of the latter carry
+    a second collider reaching into the base, only one of their two colliders being in group B."""
     usd_file = str(asset_tmp_path / "collision_filtering.usda")
     stage = Usd.Stage.CreateNew(usd_file)
     UsdGeom.SetStageUpAxis(stage, "Z")
@@ -1647,29 +1648,54 @@ def collision_filtering_usd(asset_tmp_path):
     root_prim = stage.DefinePrim("/root", "Xform")
     stage.SetDefaultPrim(root_prim)
 
-    pair_body = stage.DefinePrim("/root/pair_body", "Xform")
-    UsdPhysics.RigidBodyAPI.Apply(pair_body)
-    for name, x in (("col_a", 0.0), ("col_b", 0.3)):
-        cube = UsdGeom.Cube.Define(stage, f"/root/pair_body/{name}")
-        cube.GetSizeAttr().Set(0.2)
-        cube.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, 0.1))
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    # Each link states its name, its position in the base frame, and the position of its second collider if any, which
+    # reaches 1 cm deep into the base as the first collider of the links beside it does.
+    for body_name, body_pos_y, links_spec in (
+        ("pair_body", 0.0, (("col_a", (0.0, 0.0), None), ("col_b", (0.19, 0.0), None))),
+        (
+            "group_body",
+            1.0,
+            (
+                ("col_c", (0.0, 0.0), None),
+                ("col_d", (0.19, 0.0), None),
+                ("col_e", (-0.19, 0.0), (0.05, 0.0)),
+                ("col_f", (0.0, 0.21), (0.0, -0.07)),
+            ),
+        ),
+    ):
+        base_path = f"/root/{body_name}/{links_spec[0][0]}"
+        for link_name, link_pos, extra_pos in links_spec:
+            link = UsdGeom.Xform.Define(stage, f"/root/{body_name}/{link_name}")
+            link.AddTranslateOp().Set(Gf.Vec3d(link_pos[0], body_pos_y + link_pos[1], 0.1))
+            UsdPhysics.RigidBodyAPI.Apply(link.GetPrim())
+            cube = UsdGeom.Cube.Define(stage, f"{link.GetPath()}/collider")
+            cube.GetSizeAttr().Set(0.2)
+            UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            if extra_pos is not None:
+                cube = UsdGeom.Cube.Define(stage, f"{link.GetPath()}/collider_extra")
+                cube.GetSizeAttr().Set(0.1)
+                cube.AddTranslateOp().Set(Gf.Vec3d(*extra_pos, 0.0))
+                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            if link_name != links_spec[0][0]:
+                joint = UsdPhysics.RevoluteJoint.Define(stage, f"/root/{body_name}/{link_name}_joint")
+                joint.CreateBody0Rel().SetTargets([base_path])
+                joint.CreateBody1Rel().SetTargets([link.GetPath()])
+                joint.CreateAxisAttr().Set("Z")
+                joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*link_pos, 0.0))
+                joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath("/root/pair_body/col_a")).CreateFilteredPairsRel().AddTarget(
         "/root/pair_body/col_b"
     )
 
-    group_body = stage.DefinePrim("/root/group_body", "Xform")
-    UsdPhysics.RigidBodyAPI.Apply(group_body)
-    UsdGeom.Xform(group_body).AddTranslateOp().Set(Gf.Vec3d(0.0, 1.0, 0.0))
-    for name, x in (("col_c", 0.0), ("col_d", 0.3), ("col_e", 0.6)):
-        cube = UsdGeom.Cube.Define(stage, f"/root/group_body/{name}")
-        cube.GetSizeAttr().Set(0.2)
-        cube.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, 0.1))
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     group_a = UsdPhysics.CollisionGroup.Define(stage, "/root/collision_groups/A")
     group_b = UsdPhysics.CollisionGroup.Define(stage, "/root/collision_groups/B")
     group_a.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget("/root/group_body/col_c")
-    group_b.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget("/root/group_body/col_d")
+    for collider_path in (
+        "/root/group_body/col_d",
+        "/root/group_body/col_e/collider_extra",
+        "/root/group_body/col_f/collider",
+    ):
+        group_b.GetCollidersCollectionAPI().CreateIncludesRel().AddTarget(collider_path)
     group_a.CreateFilteredGroupsRel().AddTarget("/root/collision_groups/B")
 
     stage.Save()

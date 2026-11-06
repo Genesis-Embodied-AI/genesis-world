@@ -539,40 +539,32 @@ def test_collision_approximations(usd_scene, collision_approximation_usd):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("model_name", ["collision_filtering_usd"])
-def test_collision_filtering_masks(usd_scene):
-    assert len(usd_scene.entities) == 2
-    entities = {entity.links[0].name: entity for entity in usd_scene.entities}
-
-    # Masks synthesized from in-model filtering only apply within the entity, so collision against
-    # other entities (e.g. a ground plane) is preserved.
-    for entity in usd_scene.entities:
-        assert entity.is_local_collision_mask
-        for geom in entity.geoms:
-            assert geom.contype or geom.conaffinity
-
-    col_a, col_b = entities["/root/pair_body"].geoms
-    assert ((col_a.contype & col_b.conaffinity) | (col_b.contype & col_a.conaffinity)) == 0
-
-    col_c, col_d, col_e = entities["/root/group_body"].geoms
-    assert ((col_c.contype & col_d.conaffinity) | (col_d.contype & col_c.conaffinity)) == 0
-    assert ((col_c.contype & col_e.conaffinity) | (col_e.contype & col_c.conaffinity)) != 0
-    assert ((col_d.contype & col_e.conaffinity) | (col_e.contype & col_d.conaffinity)) != 0
-
-
-@pytest.mark.required
-def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, show_viewer):
+def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_neutral_collision=True,
+            enable_adjacent_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 1.0),
+            camera_lookat=(0.0, 0.5, 0.0),
+        ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    entities = scene.add_stage(
-        morph=gs.morphs.USD(
-            file=collision_filtering_usd,
-            pos=(0.0, 0.0, 0.05),
-        ),
-    )
+    plane = scene.add_entity(gs.morphs.Plane())
+    with caplog.at_level("WARNING"):
+        entities = scene.add_stage(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.05),
+            ),
+        )
     scene.build()
+
+    # The link pairs whose colliders are filtered in part alone are reported together, once
+    partial_records = [record.getMessage() for record in caplog.records if "but not all of them" in record.getMessage()]
+    assert len(partial_records) == 1
+    assert "col_e" in partial_records[0] and "col_f" in partial_records[0]
 
     for _ in range(50):
         scene.step()
@@ -581,6 +573,19 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
     for entity in entities:
         aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
         assert -5e-4 < aabb_min[-1] < 0.0
+
+    # Every link rests on the ground. Among the links overlapping their base, those whose colliders are all filtered
+    # against it never collide with it, and those filtered in part alone keep colliding.
+    links_idx = {link.name: link.idx for entity in entities for link in entity.links}
+    contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+    contact_link_pairs = {frozenset(link_pair) for link_pair in zip(contacts["link_a"], contacts["link_b"])}
+    assert contact_link_pairs == {
+        *[frozenset((plane.base_link_idx, i_l)) for i_l in links_idx.values()],
+        *[
+            frozenset((links_idx["/root/group_body/col_c"], links_idx[f"/root/group_body/{link_name}"]))
+            for link_name in ("col_e", "col_f")
+        ],
+    }
 
 
 @pytest.mark.required
