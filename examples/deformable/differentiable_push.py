@@ -54,32 +54,38 @@ def main():
         ),
     )
     obj1 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.05),
+                upper=(0.4, 0.3, 0.15),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.9, 0.9, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
+                youngs_modulus=3e5,
+            ),
         ),
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.05),
-            upper=(0.4, 0.3, 0.15),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.9, 0.9, 1.0),
-        ),
-        vis_mode="particle",
     )
     obj2 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.entities.MPM(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                pos=(0.4, 0.55, 0.056),
+                scale=0.07,
+                euler=(90.0, 0.0, 90.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
+                youngs_modulus=3e5,
+            ),
         ),
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            pos=(0.4, 0.55, 0.056),
-            scale=0.07,
-            euler=(90.0, 0.0, 90.0),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
-        ),
-        vis_mode="particle",
     )
 
     cam_0 = scene.add_camera(

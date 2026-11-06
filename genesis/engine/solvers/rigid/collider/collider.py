@@ -456,17 +456,17 @@ class Collider:
         ipc_only_link_idxs = set()
         if isinstance(self._solver.sim.coupler, IPCCoupler):
             for entity in self._solver._entities:
-                if not entity.material.needs_coup:
+                # The coupling the IPC coupler applies to the entity (see 'RigidEntity.coup_type'). An entity coupled whole
+                # under a default coupling type keeps its rigid contacts, so that an entity outside the coupling still
+                # collides with it, such as a box resting on a ground plane coupled by default.
+                coup_type = entity.coup_type
+                is_default_coupling = entity.options.solver_options.coup_type is None
+                if coup_type is None or (is_default_coupling and len(entity.coup_links) == entity.n_links):
                     continue
-                mode = entity.material.coup_type
-                if mode is None:
-                    continue
-                if mode == "ipc_only":
+                if coup_type == gs.coup_type.ipc_only:
                     ipc_only_link_idxs.update(l.idx for l in entity.links)
-                link_filter_names = entity.material.coup_links
-                if mode == "two_way_soft_constraint" and link_filter_names is not None:
-                    for name in link_filter_names:
-                        ipc_delegated_link_idxs.add(entity.get_link(name=name).idx)
+                if coup_type == gs.coup_type.two_way_soft_constraint:
+                    ipc_delegated_link_idxs.update(l.idx for l in entity.coup_links)
                 else:
                     ipc_delegated_link_idxs.update(l.idx for l in entity.links)
 

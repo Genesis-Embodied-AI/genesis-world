@@ -617,11 +617,13 @@ def test_per_solver_gravity():
             )
         )
         scene.add_entity(
-            gs.morphs.Sphere(
-                pos=(0.0, 0.0, 0.5),
-                radius=0.1,
+            options=gs.entities.MPM(
+                morph=gs.morphs.Sphere(
+                    pos=(0.0, 0.0, 0.5),
+                    radius=0.1,
+                ),
+                material=gs.materials.Liquid(),
             ),
-            material=gs.materials.MPM.Liquid(),
         )
         scene.build(n_envs=2)
 

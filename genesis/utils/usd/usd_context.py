@@ -165,7 +165,8 @@ class UsdContext:
         self._is_cross_entity_filtering_warned = False
         self._material_parsed = False
         self._bake_material_paths: dict[str, str] = {}  # material_id -> bake_material_path
-        self._prim_material_bindings: dict[str, str] = {}  # prim_path -> material_path
+        self._prim_material_bindings: dict[str, str] = {}  # prim_path -> material_id
+        self._material_paths: dict[str, str] = {}  # material_id -> material prim path
         self._xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         self._is_yup = UsdGeom.GetStageUpAxis(self._stage) == "Y"
         self._meter_scale = UsdGeom.GetStageMetersPerUnit(self._stage)
@@ -299,6 +300,9 @@ class UsdContext:
     def apply_surface(self, geom_prim: Usd.Prim, surface: gs.surfaces.Surface):
         """
         Apply material properties from USD to a Genesis surface object.
+
+        Returns the surface, the name of its UV set, the prim path of the bound material ("" for none) and whether its
+        baking succeeded.
         """
         geom_path = str(geom_prim.GetPath())
         applied_surface = surface.model_copy()
@@ -314,11 +318,12 @@ class UsdContext:
                     gs.logger.warning(f"Material for '{geom_path}' could not be loaded. Using default material.")
             else:
                 bake_success = None
+            material_path = self._material_paths.get(surface_id, "")
         else:
-            uv_name, surface_id = "st", None
+            uv_name, material_path = "st", ""
             bake_success = None
 
-        return applied_surface, uv_name, surface_id, bake_success
+        return applied_surface, uv_name, material_path, bake_success
 
     def find_all_rigid_entities(self) -> list[Usd.Prim]:
         """
@@ -361,6 +366,7 @@ class UsdContext:
                     if self._need_bake and not material_dict:
                         self._bake_material_paths[material_id] = str(material_prim.GetPath())
                 self._prim_material_bindings[geom_path] = material_id
+                self._material_paths[material_id] = str(material_prim.GetPath())
             else:
                 if bound_prim.IsA(UsdGeom.Gprim):
                     gprim = UsdGeom.Gprim(bound_prim)

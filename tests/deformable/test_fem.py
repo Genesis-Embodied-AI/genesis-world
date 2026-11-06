@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -21,14 +22,16 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
 
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            minratio=1.5,
-            verbose=1,
-            maxvolume=0.01,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                minratio=1.5,
+                verbose=1,
+                maxvolume=0.01,
+            ),
+            material=gs.materials.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
     scene.build()
 
@@ -99,11 +102,13 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     # simulation elements. The GLB asset holds 2 sub-meshes (bag and channel) with distinct materials.
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     scene.build(n_envs=n_envs)
 
@@ -130,23 +135,27 @@ def test_maxvolume(box_obj_path, show_viewer):
 
     # Mesh without any maximum-element-volume constraint
     fem1 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            verbose=1,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                verbose=1,
+            ),
+            material=gs.materials.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     # Mesh with maximum element volume limited to 0.01
     fem2 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            maxvolume=0.01,
-            verbose=1,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                maxvolume=0.01,
+                verbose=1,
+            ),
+            material=gs.materials.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     assert len(fem1.elems) < len(fem2.elems), (
@@ -162,19 +171,23 @@ def test_offset_pos(box_obj_path, show_viewer):
 
     scene = gs.Scene(show_viewer=show_viewer)
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
-            offset_pos=OFFSET_POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+                offset_pos=OFFSET_POS,
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     box_no_offset = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build()
 
@@ -193,11 +206,13 @@ def test_halt_on_nan(show_viewer):
         show_viewer=show_viewer,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.05,
-            pos=(0.0, 0.0, 0.3),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.0, 0.0, 0.3),
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build(n_envs=2)
 
@@ -261,23 +276,45 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         show_FPS=False,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.4, -0.1, 0.10),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=SPHERE_RHO,
-            model=material_model,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.4, -0.1, 0.10),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.Elastic(
+                density=SPHERE_RHO,
+                youngs_modulus=1e5,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model=material_model,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
-            pos=BOX_POS,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
+                pos=BOX_POS,
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
+    with pytest.raises(gs.GenesisException, match="requires the explicit solver"):
+        scene.add_entity(
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(),
+                material=gs.materials.Elastic(),
+                solver_options=gs.options.FEMEntitySolverOptions(model="stable_neohookean"),
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="requires the implicit solver"):
+        gs.Scene().add_entity(
+            options=gs.entities.FEM(
+                morph=gs.morphs.Sphere(),
+                material=gs.materials.Elastic(),
+                solver_options=gs.options.FEMEntitySolverOptions(model="linear_corotated"),
+            )
+        )
 
     # Build the scene
     scene.build()
@@ -355,27 +392,35 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     )
     # Place the tested entity after another FEM entity so its local and solver indices differ.
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     anchor = scene.add_entity(
@@ -481,6 +526,108 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
 
 @pytest.mark.required
+def test_vertex_options_fix_vertices(show_viewer, tol):
+    N_STEPS = 10
+
+    scene = gs.Scene(
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.25, -1.5, 1.2),
+            camera_lookat=(0.25, 0.0, 0.6),
+        ),
+        show_viewer=show_viewer,
+    )
+    # Vertex options fix the vertices they select at their initial positions. A box selects in the frame of the morph,
+    # which the rotation of the morph turns into a side face of the entity.
+    fixed_vertex_options = gs.options.Vertex(
+        solver_options=gs.options.FEMVertexSolverOptions(
+            is_fixed=True,
+        ),
+    )
+    rotated_box = scene.add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.6),
+                size=(0.2, 0.2, 0.2),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e4,
+            ),
+            vertices={
+                gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1)): fixed_vertex_options,
+            },
+        ),
+    )
+    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
+    # top face. The ordinals come from the same box added to a scene that is not built.
+    probe_box = gs.Scene().add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.Elastic(),
+        ),
+    )
+    probe_verts_pos = tensor_to_array(probe_box.init_positions)
+    top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > 0.1 - 1e-6)
+    top_face_selection = gs.VertexIndex.at(top_verts_idx[:2])
+    for corner_pos in probe_verts_pos[top_verts_idx[2:]]:
+        top_face_selection = top_face_selection | gs.VertexIndex.closest_to(pos=corner_pos, max_distance=1e-3)
+    hanging_box = scene.add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.6),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e4,
+            ),
+            vertices={
+                top_face_selection: fixed_vertex_options,
+            },
+        ),
+    )
+
+    with pytest.raises(gs.GenesisException, match="vertices"):
+        gs.entities.FEM(
+            morph=gs.morphs.Sphere(),
+            material=gs.materials.Cloth(),
+            vertices={gs.VertexIndex.at(0): gs.options.Vertex()},
+        )
+    with pytest.raises(gs.GenesisException, match="enable_vertex_constraints"):
+        gs.Scene(
+            fem_options=gs.options.FEMOptions(use_implicit_solver=True, enable_vertex_constraints=False)
+        ).add_entity(options=rotated_box.options)
+    for vertex_index, match in (
+        (gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
+        (gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
+        (gs.VertexIndex.at(probe_verts_pos.shape[0]), "no valid vertex"),
+    ):
+        with pytest.raises(gs.GenesisException, match=match):
+            gs.Scene().add_entity(
+                options=hanging_box.options.model_copy(update={"vertices": {vertex_index: fixed_vertex_options}})
+            )
+
+    scene.build(n_envs=2)
+    for _ in range(N_STEPS):
+        scene.step()
+
+    # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
+    # face sags under gravity
+    for box in (rotated_box, hanging_box):
+        init_verts_pos = tensor_to_array(box.init_positions)
+        morph_verts_pos = (init_verts_pos - box.options.morph.pos) @ gu.quat_to_R(np.array(box.options.morph.quat))
+        verts_pos = tensor_to_array(box.get_state().pos)
+        is_fixed = morph_verts_pos[:, 2] > morph_verts_pos[:, 2].max() - 1e-3
+        assert_allclose(verts_pos[:, is_fixed], init_verts_pos[is_fixed], tol=tol)
+        is_opposite = morph_verts_pos[:, 2] < morph_verts_pos[:, 2].min() + 1e-3
+        assert (init_verts_pos[is_opposite, 2] - verts_pos[:, is_opposite, 2] > 1e-2).all()
+
+
+@pytest.mark.required
 @pytest.mark.xfail(raises=AssertionError, reason="Constraint dynamics inconsistent with analytical formula")
 @pytest.mark.parametrize("precision", ["64"])
 def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
@@ -507,15 +654,18 @@ def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
         show_FPS=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(
-            rho=1.0 / BOX_SIZE**3,  # Unit mass
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 1, 1, 0.5),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 1, 1, 0.5),
+            ),
+            material=gs.materials.Elastic(
+                # Unit mass
+                density=1.0 / BOX_SIZE**3,
+            ),
         ),
     )
     scene.build()
@@ -562,27 +712,35 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         show_FPS=False,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.Elastic(
+                friction=1.0,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="meshes/cube8.obj")
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/meshes/cube8.obj",
-            pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
-            scale=BOX_SIZE,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e4,
-            rho=50.0,
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/meshes/cube8.obj",
+                pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
+                scale=BOX_SIZE,
+            ),
+            material=gs.materials.Elastic(
+                density=50.0,
+                friction=1.0,
+                youngs_modulus=1e4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build()
@@ -635,24 +793,31 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
         show_FPS=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     anchor = scene.add_entity(

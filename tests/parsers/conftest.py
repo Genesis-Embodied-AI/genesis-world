@@ -36,6 +36,24 @@ def mesh_path(mesh_file):
 
 
 @pytest.fixture
+def lamp_urdf(asset_tmp_path):
+    # A visual of a single object, and a visual whose asset has no material, which the URDF material names
+    bulb_path = os.path.join(get_assets_dir(), "xml/thin_cube.obj")
+    shade_path = asset_tmp_path / "shade.glb"
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(shade_path)
+    robot = ET.Element("robot", name="lamp")
+    link = ET.SubElement(robot, "link", name="lamp")
+    for mesh_path in (bulb_path, shade_path):
+        visual = ET.SubElement(link, "visual")
+        ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(mesh_path))
+    material = ET.SubElement(visual, "material", name="steel")
+    ET.SubElement(material, "color", rgba="0.5 0.5 0.5 1.0")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.05 0.05 0.05")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture
 def mesh_urdf(mesh_path):
     """URDF content wrapping the mesh as the visual geometry of a one-link robot."""
     robot = ET.Element("robot", name="model")

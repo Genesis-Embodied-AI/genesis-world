@@ -203,10 +203,14 @@ def parse_urdf(morph, surface):
                 geom_type = gs.GEOM_TYPE.MESH
                 geom_data = None
 
-                # One asset may contain multiple meshes (.obj, .glb, ...)
+                # One asset may contain multiple meshes (.obj, .glb, ...), each geom of a visual named after the object
+                # of the file it comes from
                 mesh_path = urdfpy.utils.get_filename(parent_dir, geometry.filename)
                 tmeshes = geometry.meshes
                 metadatas = [{"mesh_path": mesh_path} for _ in tmeshes]
+                if not geom_is_col:
+                    for tmesh, metadata in zip(tmeshes, metadatas):
+                        metadata["name"] = tmesh.metadata.get("name", "")
                 if mesh_path.lower().endswith(GLTF_FORMATS):
                     meshes = gltf_utils.parse_mesh_glb(
                         mesh_path, group_by_material=False, scale=None, is_mesh_zup=True, surface=surface
@@ -258,6 +262,12 @@ def parse_urdf(morph, surface):
                     isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals)
                     and hash(tmesh.visual.material) == hash(trimesh.visual.material.empty_material())
                 )
+                # The material of a mesh asset tells apart the meshes of one visual, which a single URDF material spans
+                if not geom_is_col and not metadata.get("material_name"):
+                    if has_asset_material and isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals):
+                        metadata["material_name"] = tmesh.visual.material.name or ""
+                    elif geom_prop.material is not None:
+                        metadata["material_name"] = geom_prop.material.name or ""
                 if geom_is_col:
                     geom_surface = gs.surfaces.Collision()
                 elif (

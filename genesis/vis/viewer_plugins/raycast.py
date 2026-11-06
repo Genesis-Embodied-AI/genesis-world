@@ -47,10 +47,10 @@ class Raycaster:
     scene : Scene
         Scene whose geometry the rays are cast against.
     use_visual_geom : bool, optional
-        Cast against the visual meshes of both the rigid and the kinematic solver, restricted to the entities opting
-        in through `material.use_visual_raycasting` - the same opt-in the raycaster sensors use, so the two describe
-        the same pickable geometry. `RayHit.geom` is then a `RigidVisGeom`. See `RaycasterViewerPlugin` for the
-        tradeoff this carries for the user. Default is False.
+        Cast against the visual meshes of both the rigid and the kinematic solver, restricted to the links opting in
+        through the `use_visual_raycasting` option of their entity or their own - the same opt-in the raycaster
+        sensors use, so the two describe the same pickable geometry. `RayHit.geom` is then a `RigidVisGeom`. See
+        `RaycasterViewerPlugin` for the tradeoff this carries for the user. Default is False.
     """
 
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
@@ -85,9 +85,7 @@ class Raycaster:
             self.targets.append(RaycastTarget(solver, bvh.state, bvh.config, result, vfaces_mask))
 
         if not self.targets:
-            what = (
-                "visual mesh opting in through material.use_visual_raycasting" if use_visual_geom else "collision face"
-            )
+            what = "visual mesh opting in through use_visual_raycasting" if use_visual_geom else "collision face"
             gs.logger.warning(f"Scene holds no {what}, viewer raycasting will not work.")
             return
 
@@ -208,8 +206,8 @@ class RaycasterViewerPlugin(ViewerPlugin):
         Cast against the visual meshes rather than the collision meshes, so picking follows what is drawn on screen and
         reaches entities carrying visual geometry alone. The cost is re-scanning every visual triangle on each step,
         several times the price of the collision meshes on detailed geometry, and the geometry reported back is the
-        visual one, which the physics ignores. Only entities whose material sets use_visual_raycasting=True are visible
-        to the cast. Default is False.
+        visual one, which the physics ignores. Only the links whose options, or those of their entity, set
+        use_visual_raycasting=True are visible to the cast. Default is False.
     """
 
     def __init__(self, use_visual_geom: bool = False) -> None:

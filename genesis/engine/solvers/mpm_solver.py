@@ -10,10 +10,11 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
-from genesis.engine.materials import MPM
+from genesis.engine.solvers.mpm_models import MPM_MODEL_CLS_BY_MATERIAL, MPMModel
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
+from genesis.options.materials import ElastoPlastic, Liquid
 from genesis.options.solvers import MPMOptions
 from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import ArrayItem, DataKind, opt_in
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class MPMSolver(ParticleSolver):
-    material_cls = MPM.Base
     has_frames = True
 
     # ------------------------------------------------------------------------------------
@@ -70,11 +70,10 @@ class MPMSolver(ParticleSolver):
                 "boundaries via 'lower_bound' / 'upper_bound'."
             )
 
-        # materials
-        self._materials = list()
-        self._materials_idx = list()
-        self._materials_update_F_S_Jp = list()
-        self._materials_update_stress = list()
+        # The constitutive models of the entities, dispatched statically, one per model class and variant (see
+        # 'MPMModel')
+        self._models: list[MPMModel] = []
+        self._models_key: list[tuple[type[MPMModel], str | None]] = []
 
         # boundary
         self.setup_boundary()
@@ -108,6 +107,13 @@ class MPMSolver(ParticleSolver):
         struct_particle_info = qd.types.struct(
             material_idx=gs.qd_int,
             mass=gs.qd_float,
+            # The parameters of the constitutive model (see 'MPMEntity._add_particles_to_solver')
+            mu=gs.qd_float,
+            lam=gs.qd_float,
+            yield_stress=gs.qd_float,
+            critical_compression=gs.qd_float,
+            critical_stretch=gs.qd_float,
+            friction_alpha=gs.qd_float,
             default_Jp=gs.qd_float,
             free=gs.qd_bool,
             # for muscle
@@ -229,7 +235,16 @@ class MPMSolver(ParticleSolver):
         # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
         # p2g via qd.static. Forced True under requires_grad so the backward path stays exactly as upstream.
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
-        self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
+        self.needs_svd = (
+            self._sim.requires_grad
+            or any(model.needs_svd for model in self._models)
+            or any(
+                isinstance(entity.material, Liquid)
+                and entity.material.viscosity is not None
+                and entity.material.viscosity > 0.0
+                for entity in self._entities
+            )
+        )
 
         if self.is_active:
             if self._enable_CPIC and self._sim.requires_grad:
@@ -264,9 +279,16 @@ class MPMSolver(ParticleSolver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "MPMEntity":
-        self.add_material(material)
+        # The model of a new key is registered once the entity is accepted (see 'FEMSolver.add_entity')
+        model = material.yield_criterion if isinstance(material, ElastoPlastic) else options.material_params.model
+        model_cls = next(
+            cls for material_cls, cls in MPM_MODEL_CLS_BY_MATERIAL.items() if isinstance(material, material_cls)
+        )
+        model_key = (model_cls, model)
+        is_new_model = model_key not in self._models_key
+        model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
         # create entity
         entity = MPMEntity(
@@ -277,27 +299,19 @@ class MPMSolver(ParticleSolver):
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
+            model_idx=model_idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            options=options,
         )
+        if is_new_model:
+            self._models_key.append(model_key)
+            self._models.append(model_cls(model))
         self._entities.append(entity)
 
         return entity
-
-    def add_material(self, material):
-        # Register material update methods if and only if the provided material is not already registered
-        for material_i in self._materials:
-            if material == material_i:
-                material.idx = material_i.idx
-                break
-        else:
-            material.idx = len(self._materials_idx)
-            self._materials_idx.append(material.idx)
-            self._materials_update_F_S_Jp.append(material.update_F_S_Jp)
-            self._materials_update_stress.append(material.update_stress)
-        self._materials.append(material)
 
     @qd.func
     def stencil_range(self):
@@ -393,15 +407,21 @@ class MPMSolver(ParticleSolver):
                 F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 Jp_new = gs.qd_float(1.0)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        F_new, S_new, Jp_new = self._materials_update_F_S_Jp[material_idx](
+                for model_idx in qd.static(range(len(self._models))):
+                    if self.particles_info[i_p].material_idx == model_idx:
+                        F_new, S_new, Jp_new = self._models[model_idx].update_F_S_Jp(
                             J=J,
                             F_tmp=self.particles[f, i_p, i_b].F_tmp,
                             U=self.particles[f, i_p, i_b].U,
                             S=self.particles[f, i_p, i_b].S,
                             V=self.particles[f, i_p, i_b].V,
                             Jp=self.particles[f, i_p, i_b].Jp,
+                            mu=self.particles_info[i_p].mu,
+                            lam=self.particles_info[i_p].lam,
+                            yield_stress=self.particles_info[i_p].yield_stress,
+                            critical_compression=self.particles_info[i_p].critical_compression,
+                            critical_stretch=self.particles_info[i_p].critical_stretch,
+                            friction_alpha=self.particles_info[i_p].friction_alpha,
                         )
                 self.particles[f + 1, i_p, i_b].F = F_new
                 self.particles[f + 1, i_p, i_b].Jp = Jp_new
@@ -417,9 +437,9 @@ class MPMSolver(ParticleSolver):
                 # to identity).
                 # 2. Jp is only used by Snow material, and it uses Jp from the previous frame, not the updated one.
                 stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        stress = self._materials_update_stress[material_idx](
+                for model_idx in qd.static(range(len(self._models))):
+                    if self.particles_info[i_p].material_idx == model_idx:
+                        stress = self._models[model_idx].update_stress(
                             U=self.particles[f, i_p, i_b].U,
                             S=S_new,
                             V=self.particles[f, i_p, i_b].V,
@@ -429,6 +449,8 @@ class MPMSolver(ParticleSolver):
                             Jp=self.particles[f, i_p, i_b].Jp,
                             actu=self.particles[f, i_p, i_b].actu,
                             m_dir=self.particles_info[i_p].muscle_direction,
+                            mu=self.particles_info[i_p].mu,
+                            lam=self.particles_info[i_p].lam,
                         )
                 stress = (-self.substep_dt * self._particle_volume * 4 * self._inv_dx * self._inv_dx) * stress
                 affine = stress + self.particles_info[i_p].mass * self.particles[f, i_p, i_b].C
@@ -572,7 +594,7 @@ class MPMSolver(ParticleSolver):
                 self.compute_F_tmp_and_svd(f)
             else:
                 # All registered materials ignore U/V/S; skip SVD entirely (e.g. scenes of only non-viscous Liquid
-                # and/or neohooken Elastic).
+                # and/or neohookean Elastic).
                 self.compute_F_tmp_only(f)
         self.p2g(
             f,
@@ -766,6 +788,12 @@ class MPMSolver(ParticleSolver):
         material_idx: qd.i32,
         mat_default_Jp: qd.f32,
         mat_rho: qd.f32,
+        mat_mu: qd.f32,
+        mat_lam: qd.f32,
+        mat_yield_stress: qd.f32,
+        mat_critical_compression: qd.f32,
+        mat_critical_stretch: qd.f32,
+        mat_friction_alpha: qd.f32,
         pos: qd.types.ndarray(),  # shape [n_particles, 3]
     ):
         for i_p_ in range(n_particles):
@@ -774,6 +802,12 @@ class MPMSolver(ParticleSolver):
             self.particles_info[i_p].material_idx = material_idx
             self.particles_info[i_p].default_Jp = mat_default_Jp
             self.particles_info[i_p].mass = self._particle_volume * mat_rho
+            self.particles_info[i_p].mu = mat_mu
+            self.particles_info[i_p].lam = mat_lam
+            self.particles_info[i_p].yield_stress = mat_yield_stress
+            self.particles_info[i_p].critical_compression = mat_critical_compression
+            self.particles_info[i_p].critical_stretch = mat_critical_stretch
+            self.particles_info[i_p].friction_alpha = mat_friction_alpha
             self.particles_info[i_p].free = True
             self.particles_info[i_p].muscle_group = 0
             self.particles_info[i_p].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)

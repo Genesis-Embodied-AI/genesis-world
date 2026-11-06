@@ -97,9 +97,11 @@ def test_parse_nodegraph(usd_file):
 def test_usdz_packaged_texture_resolution(usdz_packaged_texture_usd):
     scene_file, texture_image = usdz_packaged_texture_usd
     usd_scene = build_usd_scene(scene_file, scale=1.0, vis_mode="visual", fixed=True)
-    texture = usd_scene.entities[0].vgeoms[0].vmesh.surface.diffuse_texture
-    assert isinstance(texture, gs.textures.ImageTexture)
-    assert_equal(texture.image_array, texture_image)
+    vgeom = usd_scene.entities[0].vgeoms[0]
+    assert isinstance(vgeom.vmesh.surface.diffuse_texture, gs.textures.ImageTexture)
+    assert_equal(vgeom.vmesh.surface.diffuse_texture.image_array, texture_image)
+    # A visual geom selection matches the material by its path in the stage, the package referencing it included
+    assert vgeom.metadata["material_name"] == "/world/asset/material"
 
 
 @pytest.mark.slow  # ~400s
@@ -572,7 +574,28 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
             pos=(0.0, 0.0, 0.05),
         ),
     )
+    ghosts = scene.add_stage(
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.USD(
+                file=collision_filtering_usd,
+                pos=(0.0, 0.0, 0.5),
+            ),
+        ),
+    )
+    with pytest.raises(gs.GenesisException, match="no link options"):
+        scene.add_stage(
+            options=gs.entities.Rigid(
+                morph=gs.morphs.USD(file=collision_filtering_usd), links={"base": gs.options.Link()}
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="no link options"):
+        scene.add_stage(
+            options=gs.entities.Kinematic(
+                morph=gs.morphs.USD(file=collision_filtering_usd), vgeoms={gs.VGeomIndex.named("*"): gs.options.VGeom()}
+            )
+        )
     scene.build()
+    ghosts_pos = [tensor_to_array(ghost.get_pos()) for ghost in ghosts]
 
     for _ in range(50):
         scene.step()
@@ -581,6 +604,10 @@ def test_filtered_entity_still_collides_with_ground(collision_filtering_usd, sho
     for entity in entities:
         aabb_min, _aabb_max = tensor_to_array(entity.get_AABB())
         assert -5e-4 < aabb_min[-1] < 0.0
+    # The same stage constructed from kinematic options keeps its pose, neither falling nor colliding
+    assert len(ghosts) == len(entities)
+    for ghost, pos in zip(ghosts, ghosts_pos):
+        assert_allclose(ghost.get_pos(), pos, tol=gs.EPS)
 
 
 @pytest.mark.required

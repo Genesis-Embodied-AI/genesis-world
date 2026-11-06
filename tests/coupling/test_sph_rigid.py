@@ -39,12 +39,11 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
         morph=gs.morphs.Plane(),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.25),
-            size=(0.5, 0.5, 0.5),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.25),
+                size=(0.5, 0.5, 0.5),
+            ),
         ),
     )
     light_ball = scene.add_entity(
@@ -123,12 +122,11 @@ def test_coupling_force_wakes_hibernated_link(n_envs, show_viewer):
         morph=gs.morphs.Plane(),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.35, 0.0, 0.15),
-            size=(0.3, 0.4, 0.3),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(-0.35, 0.0, 0.15),
+                size=(0.3, 0.4, 0.3),
+            ),
         ),
     )
     ball = scene.add_entity(

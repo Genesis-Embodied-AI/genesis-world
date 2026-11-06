@@ -42,23 +42,20 @@ def test_rigid_mpm_muscle(show_viewer):
         morph=gs.morphs.Plane(),
     )
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_link_arm.urdf",
-            pos=(0.45, 0.45, 0.2),
-            euler=(0.0, 0.0, 0.0),
-            scale=0.2,
-            fixed=True,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(
-                gravity_compensation=1.0,
+        options=gs.entities.Hybrid(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(0.45, 0.45, 0.2),
+                euler=(0.0, 0.0, 0.0),
+                scale=0.2,
+                fixed=True,
             ),
-            material_soft=gs.materials.MPM.Muscle(
-                E=1e4,
-                nu=0.45,
-                rho=1000.0,
-                model="neohooken",
+            material_soft=gs.materials.Muscle(
+                density=1000.0,
+                youngs_modulus=1e4,
+                poisson_ratio=0.45,
             ),
+            gravity_compensation=1.0,
             damping=1000.0,
             thickness=0.05,
         ),
@@ -132,14 +129,16 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_sand = scene.add_entity(
-        material=gs.materials.MPM.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
-            size=(0.3, 0.3, 0.3),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.3, 1.0),
-            vis_mode="particle",
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.3, 0.3, 0.3),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.3, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.Liquid(),
         ),
     )
 
@@ -170,17 +169,22 @@ def test_mesh_mpm_build(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.15,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
-            material_soft=gs.materials.MPM.Muscle(),
+    hybrid = scene.add_entity(
+        options=gs.entities.Hybrid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.15,
+            ),
+            material_soft=gs.materials.Muscle(),
         ),
     )
     scene.build()
+
+    # The skin holds one muscle group per link of the skeleton, each actuated on its own
+    muscle_group = hybrid.part_soft.get_muscle_group()
+    hybrid.part_soft.set_actuation(torch.arange(1, hybrid.part_rigid.n_links + 1, dtype=gs.tc_float, device=gs.device))
+    scene.step()
+    assert_allclose(hybrid.part_soft.get_particles_actu(), muscle_group + 1, tol=gs.EPS)
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup
@@ -225,49 +229,59 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=0.6,
-            pos=(0.0, 0.8, 0.3),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.entities.PBD(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=0.6,
+                pos=(0.0, 0.8, 0.3),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(),
         ),
     )
     water = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.15, 0.22),
-            size=(0.25, 0.25, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.15, 0.22),
+                size=(0.25, 0.25, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+            ),
         ),
     )
     mpm_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.6, 0, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=200,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.6, 0, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+            ),
+            material=gs.materials.Elastic(
+                density=200,
+                youngs_modulus=3e5,
+            ),
         ),
     )
     entity_fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.8, 0.8, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=3.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.8, 0.8, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=3.0e4,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -323,11 +337,13 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
-            size=(0.05, 0.05, 0.05),
+        options=gs.entities.MPM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.1),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(),
         ),
-        material=gs.materials.MPM.Elastic(),
     )
     # FIXME: Building should raise when the scene cannot meet the accuracy of the simulation. The explicit time step
     # must stay under about h / c, with h the smallest element size, c = sqrt((lambda + 2 * mu) / rho) the wave speed,
@@ -335,12 +351,14 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
     # stay under the tolerance. Meanwhile, single precision takes a softer material.
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.5),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e6 if precision == "64" else 1e5,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e6 if precision == "64" else 1e5,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -353,19 +371,20 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
 
 
 @pytest.mark.parametrize(
-    "n_envs, material_type",
+    "n_envs, options_cls, material_type",
     [
-        pytest.param(0, gs.materials.SPH.Liquid, marks=pytest.mark.required),
-        (1, gs.materials.SPH.Liquid),
-        (2, gs.materials.SPH.Liquid),
-        pytest.param(2, gs.materials.PBD.Liquid, marks=pytest.mark.required),
-        pytest.param(2, gs.materials.MPM.Liquid, marks=pytest.mark.required),
-        (2, gs.materials.MPM.Sand),
-        (2, gs.materials.MPM.Snow),
-        (2, gs.materials.MPM.Elastic),  # This makes little sense but nothing prevents doing this
+        pytest.param(0, gs.entities.SPH, gs.materials.Liquid, marks=pytest.mark.required),
+        (1, gs.entities.SPH, gs.materials.Liquid),
+        (2, gs.entities.SPH, gs.materials.Liquid),
+        pytest.param(2, gs.entities.PBD, gs.materials.Liquid, marks=pytest.mark.required),
+        pytest.param(2, gs.entities.MPM, gs.materials.Liquid, marks=pytest.mark.required),
+        (2, gs.entities.MPM, gs.materials.Sand),
+        (2, gs.entities.MPM, gs.materials.Snow),
+        # This makes little sense but nothing prevents doing this
+        (2, gs.entities.MPM, gs.materials.Elastic),
     ],
 )
-def test_fluid_emitter(n_envs, material_type, show_viewer):
+def test_fluid_emitter(n_envs, options_cls, material_type, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -402,12 +421,18 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         ),
     )
     emitter = scene.add_emitter(
-        material=material_type(),
-        max_particles=5000,
-        surface=gs.surfaces.Glass(
-            color=(0.7, 0.85, 1.0, 0.7),
+        options_cls(
+            surface=gs.surfaces.Glass(
+                color=(0.7, 0.85, 1.0, 0.7),
+            ),
+            material=material_type(),
         ),
+        max_particles=5000,
     )
+    with pytest.raises(gs.GenesisException, match="emitter sets the morph"):
+        scene.add_emitter(options_cls(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=material_type()))
+    with pytest.raises(gs.GenesisException, match="requires a morph"):
+        scene.add_entity(options=options_cls(material=material_type()))
     scene.build(n_envs=n_envs)
 
     emitter.emit_omni()
@@ -516,14 +541,18 @@ def test_sap_fem_vs_robot(show_viewer):
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="cross.xml")

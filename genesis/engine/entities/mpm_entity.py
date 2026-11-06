@@ -1,4 +1,5 @@
 import functools
+import math
 
 import torch
 
@@ -6,6 +7,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
+from genesis.options.materials import ElastoPlastic, Liquid, Muscle, Sand, Snow
+from genesis.utils.element import compute_lame_parameters
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
@@ -14,8 +17,8 @@ from .particle_entity import ParticleEntity, assert_active
 def assert_muscle(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        if not isinstance(self.material, gs.materials.MPM.Muscle):
-            gs.raise_exception("This method is only supported by entities with 'MPM.Muscle' material.")
+        if not isinstance(self.material, Muscle):
+            gs.raise_exception("This method is only supported by entities with a 'Muscle' material.")
         return method(self, *args, **kwargs)
 
     return wrapper
@@ -42,6 +45,8 @@ class MPMEntity(ParticleEntity):
         Particle size for discretization.
     idx : int
         Unique index of the entity.
+    model_idx : int
+        Index of the constitutive model of the entity in the solver.
     particle_start : int
         Starting particle index.
     vvert_start : int
@@ -59,14 +64,15 @@ class MPMEntity(ParticleEntity):
         surface,
         particle_size,
         idx,
+        model_idx,
         particle_start,
         vvert_start,
         vface_start,
         name: str | None = None,
+        *,
+        options,
     ):
-        need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
+        need_skinning = not isinstance(material, (Liquid, Sand, Snow))
         super().__init__(
             scene,
             solver,
@@ -80,22 +86,50 @@ class MPMEntity(ParticleEntity):
             vface_start,
             need_skinning=need_skinning,
             name=name,
+            options=options,
         )
+        self._model_idx = model_idx
+        # The number of muscle groups, which the hybrid entity owning this one as its skin sets to its number of links
+        self._n_groups = options.solver_options.n_groups
 
     def _add_to_solver(self):
         super()._add_to_solver()
-        if isinstance(self.material, gs.materials.MPM.Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
+        if isinstance(self.material, Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
+        # The parameters of the constitutive model, a liquid taking its bulk modulus as the first Lame parameter and
+        # viscosity / substep_dt as the shear modulus (see 'MPMLiquidModel')
+        material, material_params = self._material, self._options.material_params
+        mu, lam = compute_lame_parameters(material_params.youngs_modulus, material_params.poisson_ratio)
+        yield_stress = critical_compression = critical_stretch = friction_alpha = 0.0
+        if isinstance(material, Liquid):
+            if material.bulk_modulus is not None:
+                lam = material.bulk_modulus
+            mu = 0.0 if material.viscosity is None else material.viscosity / self._solver.substep_dt
+        elif isinstance(material, ElastoPlastic):
+            yield_stress = material.yield_stress
+            critical_compression, critical_stretch = material.critical_compression, material.critical_stretch
+        elif isinstance(material, Snow):
+            critical_compression, critical_stretch = material.critical_compression, material.critical_stretch
+        elif isinstance(material, Sand):
+            sin_phi = math.sin(math.radians(material.friction_angle))
+            friction_alpha = math.sqrt(2 / 3) * 2 * sin_phi / (3 - sin_phi)
+
         self._solver.add_particles(
             self._sim.cur_substep_local,
             self.active,
             self._particle_start,
             self._n_particles,
-            self._material.idx,
-            self._material._default_Jp,
-            self._material.rho,
+            self._model_idx,
+            self._solver._models[self._model_idx].default_Jp,
+            self._material.density,
+            mu,
+            lam,
+            yield_stress,
+            critical_compression,
+            critical_stretch,
+            friction_alpha,
             self._particles,
         )
 
@@ -158,7 +192,7 @@ class MPMEntity(ParticleEntity):
         particles_idx = self._get_global_idx(
             particles_idx_local, self._n_particles, self._particle_start, unsafe=True, batched_idx=True
         )
-        self._solver.set_particles_actu(actus, particles_idx, envs_idx, n_groups=self.material.n_groups)
+        self._solver.set_particles_actu(actus, particles_idx, envs_idx, n_groups=self._n_groups)
 
     def get_particles_actu(self, envs_idx=None):
         particles_idx = self._get_global_idx(None, self._n_particles, self._particle_start, unsafe=True)

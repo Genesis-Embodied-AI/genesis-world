@@ -967,8 +967,8 @@ class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
     geoms_sdf_val: qd.Tensor = field(float)
     geoms_sdf_grad: qd.Tensor = field(
         (float, 3),
-        oversize_hint="Consider setting a larger 'sdf_cell_size', or a smaller 'sdf_max_res', in 'gs.materials.Rigid' "
-        "options.",
+        oversize_hint="Consider setting a larger 'sdf_cell_size', or a smaller 'sdf_max_res', in "
+        "'gs.options.RigidEntitySolverOptions'.",
     )
     geoms_sdf_closest_vert: qd.Tensor = field(int)
     geoms_sdf_coarse_val: qd.Tensor = field(float, shape=(SDF_COARSE_CELLS,))

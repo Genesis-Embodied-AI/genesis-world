@@ -518,14 +518,15 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
     metadata = {}
 
     # Store geom name in metadata
-    name_start = mj.name_geomadr[i_g]
-    metadata["name"] = mj.names[name_start : mj.names.find(b"\x00", name_start)].decode("utf-8")
+    metadata["name"] = mj_geom.name
 
     mj_mat_id = int(mj_geom.matid[0])
     is_2d_texture = False
     has_explicit_texcoords = False
     if mj_mat_id >= 0:
         mj_mat = mj.mat(mj_mat_id)
+        # Visual geom selections match the MJCF material a geom names (see 'gs.VGeomIndex.with_material')
+        metadata["material_name"] = mj_mat.name
         tex_id_RGB = mj_mat.texid[mujoco.mjtTextureRole.mjTEXROLE_RGB]
         tex_id_RGBA = mj_mat.texid[mujoco.mjtTextureRole.mjTEXROLE_RGBA]
         tex_id = tex_id_RGB if tex_id_RGB >= 0 else tex_id_RGBA

@@ -276,8 +276,9 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     #   - cam_kin -> KinematicEntity sphere. When use_visual_raycasting=True the depth camera reads the entity's
     #     visual mesh (including set_vverts overrides, which survive step() until set_vverts(None) hands control
     #     back to FK). When False the kinematic entity is completely ignored by the raycaster.
-    #   - cam_rigid -> RigidEntity whose visual mesh (sphere radius 0.2) is intentionally different from its collision
-    #     mesh (capsule radius 0.05). With use_visual_raycasting=True the depth must match the visual sphere.
+    #   - cam_rigid -> RigidEntity whose visual meshes are intentionally different from its collision mesh (capsule
+    #     radius 0.05): a sphere of radius 0.3 on its root link, and one of radius 0.2 on a child link welded to it.
+    #     Only the child sets use_visual_raycasting=True, so the depth must match the smaller sphere.
     urdf_path = tmp_path / "vis_diff.urdf"
     urdf_path.write_text(
         textwrap.dedent(
@@ -287,7 +288,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
                     <visual>
                         <origin rpy="0 0 0" xyz="0 0 0"/>
                         <geometry>
-                            <sphere radius="0.2"/>
+                            <sphere radius="0.3"/>
                         </geometry>
                     </visual>
                     <collision>
@@ -297,6 +298,18 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
                         </geometry>
                     </collision>
                 </link>
+                <link name="child">
+                    <visual>
+                        <origin rpy="0 0 0" xyz="0 0 0"/>
+                        <geometry>
+                            <sphere radius="0.2"/>
+                        </geometry>
+                    </visual>
+                </link>
+                <joint name="weld" type="fixed">
+                    <parent link="root"/>
+                    <child link="child"/>
+                </joint>
             </robot>
             """
         )
@@ -322,13 +335,18 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=str(urdf_path),
-            pos=(0.0, 0.0, 1.5),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=str(urdf_path),
+                pos=(0.0, 0.0, 1.5),
+                fixed=True,
+                merge_fixed_links=False,
+            ),
+            links={
+                "child": gs.options.Link(
+                    use_visual_raycasting=True,
+                ),
+            },
         ),
     )
     cam_kin = scene.add_sensor(

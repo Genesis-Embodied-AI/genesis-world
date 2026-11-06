@@ -5,8 +5,14 @@ import genesis as gs
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
-@pytest.mark.parametrize("muscle_material", [gs.materials.MPM.Muscle, gs.materials.FEM.Muscle])
-def test_muscle(n_envs, muscle_material, show_viewer):
+@pytest.mark.parametrize(
+    "options_cls, solver_options_cls",
+    [
+        (gs.entities.MPM, gs.options.MPMEntitySolverOptions),
+        (gs.entities.FEM, gs.options.FEMEntitySolverOptions),
+    ],
+)
+def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=5e-4,
@@ -32,24 +38,28 @@ def test_muscle(n_envs, muscle_material, show_viewer):
     # The tetrahedralization is refined, surface included, so that every muscle group spans many tetrahedra. Its
     # well-shaped tetrahedra keep the explicit FEM integration stable at the substep MPM needs.
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.05),
-            size=(0.1, 0.5, 0.1),
-            nobisect=False,
-            maxvolume=2e-5,
-        ),
-        material=muscle_material(
-            E=5e5,
-            nu=0.45,
-            rho=10000.0,
-            n_groups=4,
+        options=options_cls(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.05),
+                size=(0.1, 0.5, 0.1),
+                nobisect=False,
+                maxvolume=2e-5,
+            ),
+            material=gs.materials.Muscle(
+                density=10000.0,
+                youngs_modulus=5e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=solver_options_cls(
+                n_groups=4,
+            ),
         ),
     )
     scene.build(n_envs=n_envs)
 
-    if isinstance(box.material, gs.materials.MPM.Muscle):
+    if isinstance(box.options, gs.entities.MPM):
         pos = box.get_state().pos[0]
-    else:  # isinstance(box.material, gs.materials.FEM.Muscle):
+    else:
         pos = box.get_state().pos[0, box.get_el2v()].mean(1)
 
     # Four groups: upper or lower part of the body, fore or hind part

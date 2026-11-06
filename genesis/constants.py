@@ -1,5 +1,7 @@
 import enum
 
+from pydantic_core import core_schema
+
 URDF_FORMAT = ".urdf"
 XACRO_FORMAT = ".xacro"
 MJCF_FORMAT = ".xml"
@@ -20,6 +22,23 @@ class IntEnum(enum.IntEnum):
 
     def __format__(self, format_spec):
         return f"<{self.name}: {self.value}>"
+
+
+class StrEnum(enum.StrEnum):
+    """Named choice that options and public functions also accept spelled as its value."""
+
+    def __repr__(self):
+        return f"<gs.{self.__class__.__name__}.{self.name}: '{self.value}'>"
+
+    @classmethod
+    def _missing_(cls, value):
+        choices = ", ".join(f"'{member.value}'" for member in cls)
+        raise ValueError(f"Input should be one of {choices}")
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source, handler):
+        # Options validate in strict mode, which accepts members alone. Converting first also accepts their values.
+        return core_schema.no_info_before_validator_function(cls, handler(source))
 
 
 # geom type in rigid solver
@@ -201,3 +220,35 @@ class PARA_LEVEL(IntEnum):
     NEVER = 0  # when using cpu
     PARTIAL = 1  # when using gpu for non-batched scene
     ALL = 2  # when using gpu for batched scene
+
+
+# how particles fill the volume of a morph
+class particle_sampler(StrEnum):
+    pbs = enum.auto()
+    random = enum.auto()
+    regular = enum.auto()
+
+
+# stress model of an FEM material
+class fem_model(StrEnum):
+    linear = enum.auto()
+    stable_neohookean = enum.auto()
+    linear_corotated = enum.auto()
+
+
+# stress model of an MPM material
+class mpm_model(StrEnum):
+    corotation = enum.auto()
+    neohookean = enum.auto()
+
+
+class yield_criterion(StrEnum):
+    von_mises = enum.auto()
+    stretch_clamp = enum.auto()
+
+
+# how the IPC coupler couples a rigid entity
+class coup_type(StrEnum):
+    two_way_soft_constraint = enum.auto()
+    external_articulation = enum.auto()
+    ipc_only = enum.auto()

@@ -297,6 +297,101 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, color, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("mesh_file", ["meshes/stirrer.obj"])
+def test_obj_visual_geom_selection(mesh_path, mesh_urdf, lamp_urdf):
+    scene = gs.Scene()
+    # The objects of an OBJ file stay apart as visual geoms named after them, whether the file is a mesh or the visual
+    # of a URDF link
+    green_surface = gs.surfaces.Default(
+        color=(0.0, 1.0, 0.0),
+    )
+    objects_mesh = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file=mesh_path,
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.named("mesh1"): gs.options.VGeom(
+                    surface=green_surface,
+                ),
+            },
+        ),
+    )
+    objects_urdf = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=mesh_urdf,
+                fixed=True,
+            ),
+            links={
+                "base": gs.options.Link(
+                    vgeoms={
+                        gs.VGeomIndex.named("mesh1"): gs.options.VGeom(
+                            surface=green_surface,
+                        ),
+                    },
+                ),
+            },
+        ),
+    )
+    # The visual geom of an OBJ file of a single object is named after it, and a URDF material selects the visual geom
+    # whose asset has no material
+    lamp = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=lamp_urdf,
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.named("Cube"): gs.options.VGeom(
+                    surface=green_surface,
+                ),
+                gs.VGeomIndex.with_material("steel"): gs.options.VGeom(
+                    surface=gs.surfaces.Default(
+                        color=(0.0, 0.0, 1.0),
+                    ),
+                ),
+            },
+        ),
+    )
+    # An OBJ material selects the visual geom it is assigned to by its name in the material library
+    boat = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/boat/boat.obj",
+                scale=0.1,
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.with_material("material_2"): gs.options.VGeom(
+                    surface=gs.surfaces.Default(
+                        color=(0.0, 0.0, 1.0),
+                    ),
+                ),
+            },
+        ),
+    )
+
+    for entity in (objects_mesh, objects_urdf):
+        vgeoms_name = sorted(vgeom.metadata["name"] for vgeom in entity.vgeoms)
+        assert vgeoms_name == ["mesh0", "mesh1", "mesh2"]
+        for vgeom in entity.vgeoms:
+            is_green = np.allclose(vgeom.surface.get_rgba().color[:3], (0.0, 1.0, 0.0), atol=gs.EPS)
+            assert is_green == (vgeom.metadata["name"] == "mesh1")
+    lamp_vgeoms_color = [vgeom.surface.get_rgba().color[:3] for vgeom in lamp.vgeoms]
+    assert_allclose(lamp_vgeoms_color, ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), tol=gs.EPS)
+    assert sorted(vgeom.metadata["material_name"] for vgeom in boat.vgeoms) == [
+        "material_0",
+        "material_1",
+        "material_2",
+    ]
+    for vgeom in boat.vgeoms:
+        is_selected = vgeom.metadata["material_name"] == "material_2"
+        assert isinstance(vgeom.surface.get_rgba(), gs.textures.ColorTexture) == is_selected
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
 @pytest.mark.parametrize(
     "glb_file",
@@ -933,23 +1028,25 @@ def test_surface_reconstruction(show_viewer):
     )
     # The liquids of each backend are placed symmetrically with respect to the camera, so that they look the same
     liquids = []
-    for material, recon_backend, pos_y in (
-        (gs.materials.SPH.Liquid(), "splashsurf", -0.2),
-        (gs.materials.PBD.Liquid(), "splashsurf", 0.2),
-        (gs.materials.SPH.Liquid(), "levelset", -0.6),
-        (gs.materials.PBD.Liquid(), "levelset", 0.6),
+    for options_cls, recon_backend, pos_y in (
+        (gs.entities.SPH, "splashsurf", -0.2),
+        (gs.entities.PBD, "splashsurf", 0.2),
+        (gs.entities.SPH, "levelset", -0.6),
+        (gs.entities.PBD, "levelset", 0.6),
     ):
         liquids.append(
             scene.add_entity(
-                material=material,
-                morph=gs.morphs.Box(
-                    pos=(0.0, pos_y, 0.2),
-                    size=(0.25, 0.25, 0.4),
-                ),
-                surface=gs.surfaces.Default(
-                    color=(0.2, 0.6, 1.0, 1.0),
-                    vis_mode="recon",
-                    recon_backend=recon_backend,
+                options=options_cls(
+                    morph=gs.morphs.Box(
+                        pos=(0.0, pos_y, 0.2),
+                        size=(0.25, 0.25, 0.4),
+                    ),
+                    surface=gs.surfaces.Default(
+                        color=(0.2, 0.6, 1.0, 1.0),
+                        vis_mode="recon",
+                        recon_backend=recon_backend,
+                    ),
+                    material=gs.materials.Liquid(),
                 ),
             )
         )

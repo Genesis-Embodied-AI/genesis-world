@@ -16,7 +16,7 @@ from uipc import builtin
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.misc import tensor_to_array, geometric_mean, harmonic_mean
+from genesis.utils.misc import geometric_mean, harmonic_mean, tensor_to_array
 
 from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
@@ -67,21 +67,23 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 1.5),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 1.5),
+                euler=(0, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(
+                density=200,
+                youngs_modulus=1e5,
+                poisson_ratio=0.499,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
         ),
     )
 
@@ -100,18 +102,22 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.5, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.3,
-            rho=1000.0,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.5, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.3,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -144,7 +150,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     # Get initial state
     p_0 = {obj: get_ipc_positions(scene, **obj_kwargs, envs_idx=envs_idx) for obj, obj_kwargs in objs_kwargs.items()}
-    v_0 = {obj: np.zeros_like(p_0[obj]) for obj in objs_kwargs.keys()}
+    v_0 = {obj: np.zeros_like(p_0[obj]) for obj in objs_kwargs}
 
     # Run simulation and validate dynamics equations at each step
     p_prev, v_prev = p_0.copy(), v_0.copy()
@@ -175,7 +181,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
             assert_allclose(v_i, expected_v, atol=1e-3)
             assert_allclose(p_i, expected_p, tol=TOL_SINGLE)
 
-    for obj in objs_kwargs.keys():
+    for obj in objs_kwargs:
         # Validate centroid consistency
         ipc_centroid = p_prev[obj].mean(axis=-2)
         gs_centroid = obj.get_state().pos.mean(axis=-2)
@@ -383,16 +389,20 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
         ),
     )
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=5e4,
-            nu=0.35,
-            rho=1000.0,
-            friction_mu=0.49,
-            contact_resistance=25.0,
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.49,
+                youngs_modulus=5e4,
+                poisson_ratio=0.35,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                contact_resistance=25.0,
+            ),
         ),
     )
 
@@ -411,11 +421,11 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
                     elem = coupler._ipc_ground_contacts[entity]
                 else:
                     elem = coupler._ipc_abd_contacts[entity]
-                friction = entity.material.coup_friction
+                friction = entity.options.solver_options.coup_friction
             else:
                 elem = coupler._ipc_fem_contacts[entity]
-                friction = entity.material.friction_mu
-            resistance = entity.material.contact_resistance or coupler.options.contact_resistance
+                friction = entity.material.friction
+            resistance = entity.options.solver_options.contact_resistance or coupler.options.contact_resistance
             elems_idx.append(elem.id())
             frictions.append(friction)
             resistances.append(resistance)
@@ -463,21 +473,23 @@ def test_objects_colliding(n_envs, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 0.2),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 0.2),
+                euler=(90, 0, 0),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(
+                density=200,
+                youngs_modulus=1e5,
+                poisson_ratio=0.499,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
         ),
     )
 
@@ -497,19 +509,23 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e3,
-            nu=0.3,
-            rho=1000.0,
-            friction_mu=0.3,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.25, 0.0, 0.1),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.3,
+                youngs_modulus=1.0e3,
+                poisson_ratio=0.3,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -526,7 +542,7 @@ def test_objects_colliding(n_envs, show_viewer):
             (sphere, "fem", scene.sim.fem_solver.entities.index(sphere)),
         )
     }
-    p_history = {obj: [] for obj in objs_kwargs.keys()}
+    p_history = {obj: [] for obj in objs_kwargs}
     for _i in range(NUM_STEPS):
         scene.step()
 
@@ -535,7 +551,7 @@ def test_objects_colliding(n_envs, show_viewer):
             p_history[obj].append(p_i)
 
     cloth_p_history = np.stack(p_history[cloth], axis=-3)
-    for obj in objs_kwargs.keys():
+    for obj in objs_kwargs:
         obj_p_history = np.stack(p_history[obj], axis=-3)
 
         # Make sure that all vertices are laying on the ground
@@ -583,16 +599,20 @@ def test_momentum_conservation(n_envs, show_viewer):
     )
 
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.0,
-            model="stable_neohookean",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                friction=0.0,
+                youngs_modulus=1.0e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
+            ),
         ),
     )
 
@@ -629,7 +649,7 @@ def test_momentum_conservation(n_envs, show_viewer):
 
     # Read actual FEM mass from IPC geometry (mesh mass != analytical sphere mass due to tet discretization).
     blob_radius = blob.morph.radius
-    blob_rho = blob.material.rho
+    blob_rho = blob.material.density
     blob_analytical_mass = (4.0 / 3.0) * np.pi * blob_radius**3 * blob_rho
     (fem_raw_geo,) = find_ipc_geometries(scene, solver_type="fem", idx=fem_entity_idx, env_idx=0)
     fem_mass_density = fem_raw_geo.meta().find(builtin.mass_density).view().item()

@@ -17,7 +17,7 @@ import typing
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
-from enum import IntEnum
+from enum import Enum
 from functools import lru_cache, partial
 from typing import Callable, NamedTuple
 
@@ -233,7 +233,7 @@ def _has_declared_fields(expect) -> bool:
 
 def _layout(cls: type) -> list[str] | dict[str, int]:
     """What one class is made of: the value of every member where it enumerates, its field names otherwise."""
-    if issubclass(cls, IntEnum):
+    if issubclass(cls, Enum):
         return {member.name: member.value for member in cls}
     return sorted(_declared_fields(cls))
 
@@ -266,7 +266,7 @@ def declared_schema(expect: dict) -> dict:
             if not isinstance(declared, type) or declared in seen:
                 continue
             seen.add(declared)
-            if issubclass(declared, IntEnum):
+            if issubclass(declared, Enum):
                 layout[declared.__name__] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
@@ -359,7 +359,7 @@ def _export_value(value, expect, exported: "Exported"):
         return _export_any(value, exported)
     if isinstance(value, np.generic):
         return value.item()
-    if isinstance(value, IntEnum):
+    if isinstance(value, Enum):
         exported.classes.add(type(value))
         return value.name
     codec = _class_codec(type(value))
@@ -381,7 +381,10 @@ def _export_value(value, expect, exported: "Exported"):
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set)}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -451,7 +454,7 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
     expect = _unwrap_annotation(expect)
     if expect is typing.Any or expect is object:
         return _load_any(raw, loaded)
-    if isinstance(expect, type) and issubclass(expect, IntEnum):
+    if isinstance(expect, type) and issubclass(expect, Enum):
         return expect[raw]
     if isinstance(raw, dict) and "@class" in raw:
         cls = _classes_by_name(expect).get(raw["@class"])
@@ -493,7 +496,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)

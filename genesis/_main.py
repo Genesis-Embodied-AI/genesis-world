@@ -43,7 +43,6 @@ def launch(
         entities = []
         if filename is not None:
             filename_lower = filename.lower()
-            material = gs.materials.Rigid()
             # Morphs load collision geometry by default, so the overlay's collision vis-mode has something to show; the
             # -c flag only selects which representation is displayed first.
             surface = gs.surfaces.Default(vis_mode="visual" if not collision else "collision")
@@ -51,38 +50,19 @@ def launch(
             if filename_lower.endswith(USD_FORMATS):
                 morph = gs.morphs.USD(file=filename, scale=scale)
                 entities = scene.add_stage(morph=morph, vis_mode=surface.vis_mode)
-            elif filename_lower.endswith((URDF_FORMAT, XACRO_FORMAT)):
-                morph_cls = gs.morphs.URDF
-                entities = [
-                    scene.add_entity(
-                        morph_cls(file=filename, scale=scale),
-                        material=material,
-                        surface=surface,
-                    )
-                ]
-            elif filename_lower.endswith(MJCF_FORMAT):
-                morph_cls = gs.morphs.MJCF
-                entities = [
-                    scene.add_entity(
-                        morph_cls(file=filename, scale=scale),
-                        material=material,
-                        surface=surface,
-                    )
-                ]
-            elif filename_lower.endswith(MESH_FORMATS):
-                morph_cls = gs.morphs.Mesh
-                entities = [
-                    scene.add_entity(
-                        morph_cls(file=filename, scale=scale),
-                        material=material,
-                        surface=surface,
-                    )
-                ]
             else:
-                gs.raise_exception(
-                    f"Unsupported file format for 'gs launch'. Expected {URDF_FORMAT}, {XACRO_FORMAT}, "
-                    f"{MJCF_FORMAT}, {MESH_FORMATS}, {USD_FORMATS}, or {SCENE_FORMAT}."
-                )
+                if filename_lower.endswith((URDF_FORMAT, XACRO_FORMAT)):
+                    morph_cls = gs.morphs.URDF
+                elif filename_lower.endswith(MJCF_FORMAT):
+                    morph_cls = gs.morphs.MJCF
+                elif filename_lower.endswith(MESH_FORMATS):
+                    morph_cls = gs.morphs.Mesh
+                else:
+                    gs.raise_exception(
+                        f"Unsupported file format for 'gs launch'. Expected {URDF_FORMAT}, {XACRO_FORMAT}, "
+                        f"{MJCF_FORMAT}, {MESH_FORMATS}, {USD_FORMATS}, or {SCENE_FORMAT}."
+                    )
+                entities = [scene.add_entity(morph_cls(file=filename, scale=scale), surface=surface)]
 
     scene.build()
 

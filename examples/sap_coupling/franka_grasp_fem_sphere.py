@@ -52,15 +52,19 @@ def main():
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.02,
-            pos=(0.65, 0.0, 0.02),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                radius=0.02,
+                pos=(0.65, 0.0, 0.02),
+            ),
+            material=gs.materials.Elastic(
+                friction=1.0,
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
 
