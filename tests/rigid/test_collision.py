@@ -1940,12 +1940,21 @@ def test_filter_neutral_self_collisions(show_viewer):
 
 
 @pytest.mark.required
-def test_contype_conaffinity(show_viewer, tol):
+@pytest.mark.parametrize("model_name", ["free_bodies_in_one_model"])
+def test_contype_conaffinity(xml_path, show_viewer, tol):
     GRAVITY = (0.0, 0.0, -10.0)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=GRAVITY,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_neutral_collision=True,
+            enable_adjacent_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -3.0, 2.5),
+            camera_lookat=(0.5, 2.0, 0.5),
         ),
         show_viewer=show_viewer,
     )
@@ -2001,10 +2010,49 @@ def test_contype_conaffinity(show_viewer, tol):
         ),
         visualize_contact=True,
     )
-    scene.build()
+    free_bodies = scene.add_entity(
+        gs.morphs.MJCF(
+            file=xml_path,
+        ),
+    )
+    # Each variant of a heterogeneous entity excludes its own body pairs: the same bodies hinged on a world whose geom
+    # reaches into the first body, each variant excluding a different one of the two overlapping body pairs
+    VARIANTS_EXCLUDED_BODIES = (("free_0", "free_1"), ("world", "free_0"))
+    hinged_mjcfs = []
+    for excluded_bodies in VARIANTS_EXCLUDED_BODIES:
+        mjcf = ET.parse(xml_path).getroot()
+        for joint in mjcf.iter("freejoint"):
+            joint.tag = "joint"
+            joint.attrib |= dict(type="hinge", axis="0 0 1")
+        geom_attrib = dict(type="box", size="0.05 0.05 0.05", pos="0.05 4.0 0.4", contype="3", conaffinity="5")
+        ET.SubElement(mjcf.find("worldbody"), "geom", **geom_attrib)
+        mjcf.find("contact/exclude").attrib |= dict(zip(("body1", "body2"), excluded_bodies))
+        hinged_mjcfs.append(ET.tostring(mjcf, encoding="unicode"))
+    hinged_bodies = scene.add_entity(
+        morph=[gs.morphs.MJCF(file=hinged_mjcf, pos=(0.0, 2.0, 0.0)) for hinged_mjcf in hinged_mjcfs],
+    )
+    scene.build(n_envs=2)
+    variants_excluded_links = [
+        frozenset([hinged_bodies.get_link(name).idx for name in excluded_bodies])
+        for excluded_bodies in VARIANTS_EXCLUDED_BODIES
+    ]
 
+    # The bitmasks of an MJCF are kept as authored, and the body pairs it excludes never collide
+    assert_equal([(geom.contype, geom.conaffinity) for geom in free_bodies.geoms], [(3, 5)] * 3)
     for _ in range(80):
         scene.step()
+        assert not tensor_to_array(free_bodies.get_contacts(with_entity=free_bodies)["valid_mask"]).any()
+        # Every environment carries one variant: its own excluded pair never collides, the other one does
+        contacts = hinged_bodies.get_contacts(with_entity=hinged_bodies)
+        links_a, links_b, is_valid = [tensor_to_array(contacts[key]) for key in ("link_a", "link_b", "valid_mask")]
+        for i_env, (excluded_links, colliding_links) in enumerate(
+            (variants_excluded_links, variants_excluded_links[::-1])
+        ):
+            contact_link_pairs = {
+                frozenset(link_pair)
+                for link_pair in zip(links_a[i_env, is_valid[i_env]], links_b[i_env, is_valid[i_env]])
+            }
+            assert excluded_links not in contact_link_pairs and colliding_links in contact_link_pairs
 
     assert_allclose(box1.get_pos(), (0.0, 0.0, 0.25), atol=5e-4)
     assert_allclose(box2.get_pos(), (0.0, 0.0, 0.75), atol=2e-3)

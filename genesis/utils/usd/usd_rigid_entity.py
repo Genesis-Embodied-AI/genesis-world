@@ -715,11 +715,10 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
             g_info = {**g_info, "vmesh": mesh, "contype": 0, "conaffinity": 0}
             link_g_infos.append(g_info)
 
-    # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to this entity's collision geoms.
-    cg_infos = [g for link_g_infos in links_g_infos for g in link_g_infos if g.get("contype") or g.get("conaffinity")]
-    apply_collision_filtering(context, cg_infos)
-
     l_infos, links_j_infos = _parse_links(context, links, link_joints, morph)
+
+    # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to the links of this entity
+    apply_collision_filtering(context, l_infos, links_g_infos)
 
     # A density authored on the link's MassAPI overrides any per-geom physics-material density (USD
     # precedence); the per-geom densities then drive the rigid build's link inertial estimate wherever
