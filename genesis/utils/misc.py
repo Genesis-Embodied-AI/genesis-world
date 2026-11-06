@@ -57,7 +57,7 @@ class redirect_libc_stderr:
     Context-manager that temporarily redirects C / C++ std::cerr (i.e. the C `stderr` file descriptor 2) to a given
     Python file-like object's fd.
 
-    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT >= VS2015).
+    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT ≥ VS2015).
     """
 
     def __init__(self, fd):
@@ -390,21 +390,6 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
                     kept_sizes_idx_next[j] = kept_sizes_idx[i] + [j]
         total_drops, kept_sizes_idx = total_drops_next, kept_sizes_idx_next
     return tuple(tile_sizes[j] for j in kept_sizes_idx[-1])
-
-
-def get_gpu_resident_blocks(block_size: int, registers_per_thread: int) -> int:
-    """Return the number of blocks without shared memory that the active GPU keeps resident at once.
-
-    This is the grid of a grid-stride launch. Each block holds block_size threads of registers_per_thread registers
-    each, and the count is bounded by the threads and the registers of a compute unit. The CPU backend, and a GPU
-    without a torch.cuda device whose compute units torch cannot query, get 64 blocks.
-    """
-    if gs.backend == gs.cpu or not torch.cuda.is_available():
-        return 64
-    device_property = torch.cuda.get_device_properties(torch.cuda.current_device())
-    blocks_from_threads = max(device_property.max_threads_per_multi_processor // block_size, 1)
-    blocks_from_registers = max(device_property.regs_per_multiprocessor // (registers_per_thread * block_size), 1)
-    return device_property.multi_processor_count * min(blocks_from_threads, blocks_from_registers)
 
 
 def get_entry_point_name():

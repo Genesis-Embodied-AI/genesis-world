@@ -4,6 +4,12 @@ import genesis as gs
 
 
 @qd.func
+def warp_padded(n):
+    """`n` rounded up to whole warps, the extent of a loop whose every warp takes part in the reductions by key."""
+    return (n + 31) // 32 * 32
+
+
+@qd.func
 def head_segmented_reduce_add(value, tail_flag, is_max: qd.template() = False):
     """Sum, or with `is_max` the maximum, of the values of the run of lanes of every head lane of a warp, a run ending
     at its lane of `tail_flag`."""
@@ -34,17 +40,23 @@ def _key_runs(key):
 
 
 @qd.func
-def add_by_key(value, key, out: qd.template()):
+def add_by_key(value, key, out: qd.template(), n_components: qd.template() = 0):
     """Add the value of an entry into the entry of its key in `out`, an entry of key -1 adding nothing.
 
     On a GPU, the lanes of a warp hold consecutive entries sorted by key, every lane of the warp takes part, and each
-    run of one key adds its sum by one atomic. A CPU has no lanes, and every entry adds alone."""
+    run of one key adds its sum by one atomic, a `value` of `n_components` components being reduced component by
+    component. A CPU has no lanes, and every entry adds alone."""
     if qd.static(gs.backend == gs.cpu):
         if key >= 0:
             qd.atomic_add(out[key], value)
     else:
         is_head, is_tail = _key_runs(key)
-        total = head_segmented_reduce_add(value, is_tail)
+        total = value
+        if qd.static(n_components > 0):
+            for d in qd.static(range(n_components)):
+                total[d] = head_segmented_reduce_add(value[d], is_tail)
+        else:
+            total = head_segmented_reduce_add(value, is_tail)
         if key >= 0 and is_head:
             qd.atomic_add(out[key], total)
 
