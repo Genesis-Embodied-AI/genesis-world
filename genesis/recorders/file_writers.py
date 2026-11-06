@@ -89,6 +89,7 @@ class VideoFileWriter(BaseFileWriter):
 class CSVFileWriter(BaseFileWriter):
     def _initialize_writer(self):
         self.wrote_data = False
+        self._field_widths = {}
         self.file_handle = open(self._get_filename(), "w", encoding="utf-8", newline="")
         self.csv_writer = csv.writer(self.file_handle)
 
@@ -105,9 +106,18 @@ class CSVFileWriter(BaseFileWriter):
     def process(self, data, cur_time):
         row_data = [cur_time]
         if isinstance(data, dict):
-            for value in data.values():
-                row_data.extend(self._sanitize_to_list(value))
+            if not self.wrote_data:
+                self._field_widths = {key: len(self._sanitize_to_list(value)) for key, value in data.items()}
+            elif data.keys() != self._field_widths.keys():
+                gs.raise_exception("CSV field names changed after writing the header.")
+            for key, width in self._field_widths.items():
+                values = self._sanitize_to_list(data[key])
+                if len(values) != width:
+                    gs.raise_exception(f"CSV field '{key}' changed width after writing the header.")
+                row_data.extend(values)
         else:
+            if self._field_widths:
+                gs.raise_exception("Expected the dictionary fields used to write the CSV header.")
             row_data.extend(self._sanitize_to_list(data))
 
         if not self.wrote_data:  # write header

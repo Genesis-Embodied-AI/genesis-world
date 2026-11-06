@@ -7,6 +7,7 @@ import pytest
 import av
 
 import genesis as gs
+from genesis.recorders.file_writers import CSVFileWriter
 from genesis.utils.image_exporter import as_grayscale_image
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
@@ -192,6 +193,28 @@ def test_plotter(tmp_path, monkeypatch, mpl_agg_backend, png_snapshot):
 
     # Intentionally do not stop the recording to test the destructor
     # scene.stop_recording()
+
+
+@pytest.mark.required
+def test_csv_dictionary_fields_stay_aligned(tmp_path):
+    path = tmp_path / "sensors.csv"
+    writer = CSVFileWriter(None, gs.recorders.CSVFile(filename=path), lambda: None)
+    writer._initialize_writer()
+    try:
+        writer.process({"left": 1, "right": [2, 3]}, 0)
+        writer.process({"right": [20, 30], "left": 10}, 1)
+        with pytest.raises(gs.GenesisException, match="field names"):
+            writer.process({"left": 4, "other": [5, 6]}, 2)
+        with pytest.raises(gs.GenesisException, match="changed width"):
+            writer.process({"left": [4, 5], "right": 6}, 2)
+    finally:
+        writer.cleanup()
+    with open(path, newline="") as file:
+        assert list(csv.reader(file)) == [
+            ["timestamp", "left", "right_0", "right_1"],
+            ["0", "1", "2", "3"],
+            ["1", "10", "20", "30"],
+        ]
 
 
 @pytest.mark.required
