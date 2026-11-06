@@ -1,19 +1,11 @@
 """Adjoint of the contact rows between the material point method (MPM) and Rigid in the joint Newton solve.
 
-The rows (see mpm_rigid_func) reverse by hand in the implicit-function pullback, as Rigid reverses the assembly of its
-own contact rows.
-
-The joint solve minimizes E(y, theta) over y = (u, x). Its backward pass solves H lambda = y_bar and pulls back
-theta_bar = -d/dtheta [lambda^T grad_y E] at the solution, with y and lambda held. The contact rows' share of lambda^T
-grad_y E is Phi = sum g . delta over the pairs, g = sum_k D_k c_k J_k over the active rows of the pair,
-c_k = J_k . Delta - t_k, with Delta = sum_a w_a u_a - dr(x) the displacement of the particle relative to its contact
-point and delta the same map of lambda. Phi depends on theta through the weights and the arm of the particle, the cdofs
-of its link, and the row coefficients J, D and t, which `func_build_rigid_pairs` derives from the particle state, the
-pose of the geom and the velocity of the link.
-
-The friction, the impedance parameters and the inverse weight matrix of the particle are model constants (see
-func_contact_invweight).
-"""
+The backward pass of the joint solve pulls back theta_bar = -d/dtheta [lambda^T grad_y E] at the solution. The share
+of the rows is Phi = sum g . delta over the pairs, g = sum_k D_k c_k J_k over the active rows, c_k = J_k . Delta - t_k,
+with Delta the displacement of the particle relative to its contact point and delta the same map of lambda. Phi
+depends on theta through the weights and the arm of the particle, the cdofs of its link, and the row coefficients that
+`MpmRigidContact.build_pair` derives from the particle state, the pose of the geom and the velocity of the link. The
+friction, the impedance parameters and the inverse weight matrix of the particle are model constants."""
 
 import quadrants as qd
 
@@ -251,7 +243,7 @@ def func_rigid_contact_adjoint(
                     dofs_state.cdof_ang.grad[i_d, i_b] += -(x_d * r_cross_Delta_bar + lam_d * r_cross_delta_bar)
                 i_a = links_info.parent_idx[I_a]
 
-            # The row coefficients, replayed as func_build_rigid_pairs built them
+            # The row coefficients, replayed as MpmRigidContact.build_pair built them
             i_g = pairs.geom[i_pair]
             phi = pairs.phi[i_pair]
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l

@@ -144,8 +144,7 @@ class LegacyCoupler(RBC):
         from genesis.engine.solvers.newton_contact import NewtonContact
 
         from .contact_candidates import CouplingPairsHost
-        from .mpm_fem_func import FemContactParams, FemTriangleQuery
-        from .mpm_fem_newton import MpmFemContact
+        from .mpm_fem_func import FemContactParams, FemTriangleQuery, MpmFemContact
         from .mpm_pbd_func import MpmParticleObstacles, MpmPbdContact, PbdContactParams, PbdParticleQuery
         from .mpm_rigid_func import RigidGeomQuery
         from .mpm_rigid_newton import MpmRigidContact, MpmRigidContactHost

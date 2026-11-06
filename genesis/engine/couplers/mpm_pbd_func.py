@@ -10,30 +10,16 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
-from genesis.engine.solvers.mpm_data import MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
-from genesis.engine.solvers.mpm_func import (
-    EMPTY_BOX_HALF,
-    contact_band_width,
-    contact_invweight,
-    particle_of_sorted,
-    pyramid_terms,
-)
+from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
+from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
+from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, contact_band_width, contact_invweight, particle_of_sorted
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import Data, DataKind, field
 
-from .contact_candidates import (
-    ContactCandidates,
-    CouplingPairs,
-    func_report_candidates,
-    func_reset_candidates,
-    func_select_nearest,
-    set_candidate_score,
-)
+from .contact_candidates import CouplingPairs
 
 # Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
 # OBSTACLE_REACH contact distances of its start or predicted position
@@ -42,26 +28,20 @@ OBSTACLE_REACH = 1.5
 
 
 class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest PBD particle (see func_build_pbd_pairs).
+    """The pairs of the particles with their nearest PBD particle (see MpmPbdContact.func_build_pairs).
 
-    A pair holds its sorted particle `s`, its environment `i_b`, its PBD particle `particle` in PBD's reordered layout
-    and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal`. `n_pairs` counts the pairs
-    asked for, above the capacity on overflow."""
+    A pair holds its sorted particle `s`, its environment `i_b`, its PBD particle `particle` in PBD's reordered layout,
+    and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with friction coefficient
+    `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     i_b: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     particle: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     normal: qd.Tensor = field((float, 3), shape=(PAIRS,), ndarray=True)
-    D: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-
-
-def build_pbd_pairs(max_pairs: int) -> MpmPbdPairs:
-    """Build the MPM-PBD pairs of a capacity, with no pair."""
-    pairs = MpmPbdPairs(sizes={PAIRS: max_pairs})
-    pairs.n_pairs.fill(0)
-    return pairs
+    friction: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    D: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
+    t: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
 
 
 # ============================================== Layer 1: broad phase ==============================================
@@ -118,158 +98,6 @@ def kernel_fit_pbd_leaves(query: qd.template()):
         else:
             query.leaves.aabbs_min[i_b, i_q] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
             query.leaves.aabbs_max[i_b, i_q] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-
-
-@qd.func(requires_top_level=True)
-def func_query_pbd_particles(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Record the PBD particles of every valid particle as candidates: the particle's box spans its band at its own
-    speed, and the PBD leaves span the sweep, radius and thickness, so together they cover the band of the relative
-    velocity."""
-    func_reset_candidates(candidates)
-    qd.loop_config(name="mpm_query_pbd_particles")
-    for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-        x_p = particles.pos[f, i_p, i_b]
-        reach = contact_band_width(particles.vel[f, i_p, i_b].norm(), dt, mpm_info)
-        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, candidates.results, func_no_filter, query)
-
-
-@qd.func(requires_top_level=True)
-def func_score_pbd_particles(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Score every candidate PBD particle by the gap of the particle to its sphere at the substep start, its distance
-    minus the PBD radius and the contact thickness. A PBD particle at the position of the particle gives no normal and
-    is rejected."""
-    func_report_candidates(candidates)
-    qd.loop_config(name="mpm_score_pbd_particles")
-    for i_cand in range(candidates.order.n_triplets[()]):
-        triplet = candidates.results.triplets[i_cand]
-        i_b = triplet[0]
-        i_q = triplet[1]
-        s = triplet[2]
-        i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-        dist = (particles.pos[f, i_p, i_b] - query.pbd.particles_reordered[i_q, i_b].ipos).norm()
-        score = qd.math.inf
-        if dist > gs.EPS:
-            score = dist - qd.static(query.radius) - query.contact.thickness[()]
-        set_candidate_score(i_cand, s, score, 0.0, candidates)
-
-
-# ============================================== Layer 1: contact pairs ==============================================
-
-
-@qd.func(requires_top_level=True)
-def func_build_pbd_pairs(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    pairs: MpmPbdPairs,
-    pbd: qd.template(),
-    query: qd.template(),
-    candidates: ContactCandidates,
-    particles_info: MpmParticlesInfo,
-    mpm_info: MpmInfo,
-):
-    """Build the pair of every valid particle with its nearest PBD particle, within its contact range or short of it by
-    less than `contact_band_width`, once the candidates are sorted by particle.
-
-    Every row J = n +- mu d of the pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of
-    target -phi and stiffness `query.contact.stiffness` times its effective mass, the inverse of the inverse weights of
-    the two particles."""
-    func_select_nearest(0.0, candidates)
-    for _ in range(1):
-        pairs.n_pairs[()] = 0
-    qd.loop_config(name="mpm_build_pbd_pairs")
-    for i_seg in range(candidates.order.bcoo_nnz[()]):
-        i_cand = candidates.best_candidate[i_seg]
-        if i_cand < candidates.secondary.shape[0]:
-            triplet = candidates.results.triplets[i_cand]
-            i_b = triplet[0]
-            i_q = triplet[1]
-            s = triplet[2]
-            phi = candidates.order.triplet_val[i_cand]
-            i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-            d = particles.pos[f, i_p, i_b] - pbd.particles_reordered[i_q, i_b].ipos
-            normal = d / d.norm()
-            v_rel = particles.vel[f, i_p, i_b] - pbd.particles_reordered[i_q, i_b].vel
-            if phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info):
-                i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
-                if i_pair >= 0:
-                    invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info)
-                    if is_moving(i_q, i_b, pbd):
-                        invweight += 1.0 / pbd.particles_info_reordered[i_q, i_b].mass
-                    pairs.s[i_pair] = s
-                    pairs.i_b[i_pair] = i_b
-                    pairs.particle[i_pair] = i_q
-                    pairs.normal[i_pair] = normal
-                    pairs.D[i_pair] = query.contact.stiffness[()] / invweight
-                    pairs.t[i_pair] = -phi
-
-
-@qd.func
-def pbd_pair_terms(f: int, i_pair: int, mpm: qd.template(), pbd: qd.template(), contact: qd.template()):
-    """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its PBD
-    particle at the current iterate, with the contact vertices of both."""
-    i_vq = contact.pairs.i_b[i_pair] * pbd.n_vertex_particles + contact.pairs.particle[i_pair]
-    r = mpm.func_vertex_value(f, contact.pairs.s[i_pair]) - pbd.func_vertex_value(f, i_vq)
-    D = contact.pairs.D[i_pair]
-    t = contact.pairs.t[i_pair]
-    energy, g, H = pyramid_terms(
-        contact.pairs.normal[i_pair],
-        contact.query.contact.friction[()],
-        qd.Vector([D, D, D, D]),
-        qd.Vector([t, t, t, t]),
-        r,
-    )
-    return energy, g, H, mpm.vertex_offset[()] + contact.pairs.s[i_pair], pbd.vertex_offset[()] + i_vq
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pair_terms(
-    f: int,
-    i_d0: int,
-    i_t0: int,
-    mpm: qd.template(),
-    pbd: qd.template(),
-    contact: qd.template(),
-    newton_contact: qd.template(),
-):
-    """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
-    triplet slot `i_t0` on: on both particles, and the block between them."""
-    qd.loop_config(name="mpm_pbd_pair_terms")
-    for i_pair in range(contact.pairs.n_pairs[()]):
-        _, g, H, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
-        write_doublet(i_d0 + 2 * i_pair, i_vp, g, newton_contact)
-        write_doublet(i_d0 + 2 * i_pair + 1, i_vq, -g, newton_contact)
-        write_triplet(i_t0 + 3 * i_pair, i_vp, i_vp, H, newton_contact)
-        write_triplet(i_t0 + 3 * i_pair + 1, i_vp, i_vq, -H, newton_contact)
-        write_triplet(i_t0 + 3 * i_pair + 2, i_vq, i_vq, H, newton_contact)
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_pair_energy(
-    f: int, mpm: qd.template(), pbd: qd.template(), contact: qd.template(), energies: qd.template()
-):
-    """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
-    qd.loop_config(name="mpm_pbd_pair_energy")
-    for i_pair in range(contact.pairs.n_pairs[()]):
-        energy, grad, hess, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
-        qd.atomic_add(energies[contact.pairs.i_b[i_pair]], energy)
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -448,12 +276,11 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
 @qd.data_oriented
 class MpmPbdContact(CouplingPairs):
     """Pair kind of the contacts between the material point method (MPM) and position based dynamics (PBD), the pair of
-    a particle and its nearest PBD particle. A pair writes 2 doublets on its particle and its PBD particle, and the 3
-    upper blocks between them."""
+    a particle and its nearest PBD particle, over the particle and the PBD particle."""
 
     n_doublets = 2
     n_triplets = 3
-    build_pairs = staticmethod(build_pbd_pairs)
+    pairs_type = MpmPbdPairs
 
     def __init__(self, mpm: MpmNewtonParticipant, pbd: PbdNewtonParticipant, query: PbdParticleQuery):
         self.pbd = pbd
@@ -463,49 +290,44 @@ class MpmPbdContact(CouplingPairs):
     def build_query(self, f: int) -> None:
         self.query.build()
 
-    @qd.func(requires_top_level=True)
-    def func_query(self, f: int):
-        func_query_pbd_particles(
-            f,
-            self.mpm.mpm_info.substep_dt[()],
-            self.mpm.particles,
-            self.mpm.grid,
-            self.query,
-            self.candidates,
-            self.mpm.mpm_info,
+    @qd.func
+    def candidate_score(self, f: int, i_b: int, i_q: int, s: int):
+        """Gap of sorted particle `s` to the sphere of PBD particle i_q at the substep start, its distance minus the PBD
+        radius and the contact thickness, infinite for a PBD particle at the position of the particle."""
+        i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
+        dist = (self.mpm.particles.pos[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].ipos).norm()
+        score = qd.math.inf
+        if dist > gs.EPS:
+            score = dist - qd.static(self.query.radius) - self.query.contact.thickness[()]
+        return score, 0.0
+
+    @qd.func
+    def build_pair(self, f: int, i_b: int, i_q: int, s: int, phi: float):
+        """Pair sorted particle `s` with PBD particle i_q at gap phi if it lies within its contact range or short of it
+        by less than `contact_band_width`.
+
+        Every row J = n +- mu d of the pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of
+        target -phi and stiffness `query.contact.stiffness` times its effective mass, the inverse of the inverse
+        weights of the two particles."""
+        i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
+        d = self.mpm.particles.pos[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].ipos
+        normal = d / d.norm()
+        v_rel = self.mpm.particles.vel[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].vel
+        if phi < contact_band_width(-normal.dot(v_rel), self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info):
+            invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info)
+            if is_moving(i_q, i_b, self.pbd):
+                invweight += 1.0 / self.pbd.particles_info_reordered[i_q, i_b].mass
+            D = qd.Vector([self.query.contact.stiffness[()] / invweight] * PYRAMID_ROWS)
+            i_pair = self.add_pair(s, i_b, normal, self.query.contact.friction[()], D, qd.Vector([-phi] * PYRAMID_ROWS))
+            if i_pair >= 0:
+                self.pairs.particle[i_pair] = i_q
+
+    @qd.func
+    def pair_vertices(self, f: int, i_pair: int):
+        """The particle and the PBD particle of a pair, of weights 1 and -1, with their relative displacement."""
+        i_vq = self.pairs.i_b[i_pair] * self.pbd.n_vertex_particles + self.pairs.particle[i_pair]
+        r = self.mpm.func_vertex_value(f, self.pairs.s[i_pair]) - self.pbd.func_vertex_value(f, i_vq)
+        verts = qd.Vector(
+            [self.mpm.vertex_offset[()] + self.pairs.s[i_pair], self.pbd.vertex_offset[()] + i_vq], dt=gs.qd_int
         )
-
-    @qd.func(requires_top_level=True)
-    def func_score(self, f: int):
-        func_score_pbd_particles(f, self.mpm.particles, self.mpm.grid, self.query, self.candidates, self.mpm.mpm_info)
-
-    @qd.func(requires_top_level=True)
-    def func_build_pairs(self, f: int):
-        func_build_pbd_pairs(
-            f,
-            self.mpm.mpm_info.substep_dt[()],
-            self.mpm.particles,
-            self.mpm.grid,
-            self.pairs,
-            self.pbd,
-            self.query,
-            self.candidates,
-            self.mpm.particles_info,
-            self.mpm.mpm_info,
-        )
-
-    @qd.func(requires_top_level=True)
-    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
-        func_pbd_pair_terms(
-            f,
-            contact.matrices.doublet_offsets[i_kind],
-            contact.matrices.triplet_offsets[i_kind],
-            self.mpm,
-            self.pbd,
-            self,
-            contact,
-        )
-
-    @qd.func(requires_top_level=True)
-    def func_pair_energy(self, f: int, energies: qd.template()):
-        func_pbd_pair_energy(f, self.mpm, self.pbd, self, energies)
+        return verts, qd.Vector([1.0, -1.0], dt=gs.qd_float), r

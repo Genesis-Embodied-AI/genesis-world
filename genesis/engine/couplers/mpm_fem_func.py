@@ -11,36 +11,28 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
-from genesis.engine.solvers.mpm_data import MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
-from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted, pyramid_terms
-from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
+from genesis.engine.bvh import build_bvh, get_bvh_data
+from genesis.engine.solvers.fem_newton import FemNewtonParticipant
+from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
+from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted
+from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.utils.data import Data, DataKind, field
 
-from .contact_candidates import (
-    ContactCandidates,
-    func_report_candidates,
-    func_reset_candidates,
-    func_select_nearest,
-    set_candidate_score,
-)
+from .contact_candidates import CouplingPairs
 
 # Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
 MIN_FRICTION = 1e-2
 # Distances to two triangles within this fraction of the grid spacing are those to a closest point they share
 TIE_DIST_RATIO = 1e-6
-# The upper blocks (k, l), k <= l, between the particle (0) and the triangle vertices (1 to 3) of a pair
-_PAIR_K = tuple(k for k in range(4) for l in range(k, 4))
-_PAIR_L = tuple(l for k in range(4) for l in range(k, 4))
 
 
 class MpmFemPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest FEM surface triangle (see func_build_fem_pairs).
+    """The pairs of the particles with their nearest FEM surface triangle (see MpmFemContact.build_pair).
 
     A pair holds its sorted particle `s`, its environment `i_b`, its triangle `tri`, the barycentric coordinates `bary`
-    of the closest point, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal`.
-    `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    of the closest point, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with
+    friction coefficient `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -49,15 +41,8 @@ class MpmFemPairs(Data, kind=DataKind.SCRATCH):
     bary: qd.Tensor = field((float, 3), shape=(PAIRS,), ndarray=True)
     normal: qd.Tensor = field((float, 3), shape=(PAIRS,), ndarray=True)
     friction: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    D: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-
-
-def build_fem_pairs(max_pairs: int) -> MpmFemPairs:
-    """Build the MPM-FEM pairs of a capacity, with no pair."""
-    pairs = MpmFemPairs(sizes={PAIRS: max_pairs})
-    pairs.n_pairs.fill(0)
-    return pairs
+    D: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
+    t: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
 
 
 # =============================================== Layer 0: geometry ===============================================
@@ -183,29 +168,6 @@ def kernel_fit_triangle_leaves(f: int, query: qd.template()):
         query.leaves.aabbs_max[i_b, i_s] = hi + margin
 
 
-@qd.func(requires_top_level=True)
-def func_query_triangles(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Record the triangles of every valid particle as candidates.
-
-    The particle's box spans its band at its own speed, and the grown triangle boxes span the thickness and the vertex
-    motion, so together they cover the band of the relative velocity."""
-    func_reset_candidates(candidates)
-    qd.loop_config(name="mpm_query_triangles")
-    for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-        x_p = particles.pos[f, i_p, i_b]
-        reach = contact_band_width(particles.vel[f, i_p, i_b].norm(), dt, mpm_info)
-        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, candidates.results, func_no_filter, query)
-
-
 @qd.func
 def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vector(3), fem: qd.template()):
     """The closest point of a FEM surface triangle to the position `x` of sorted particle `s`, at frame `f`.
@@ -234,153 +196,84 @@ def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vecto
     return is_valid, dist, align, side * dist, bary, normal
 
 
-@qd.func(requires_top_level=True)
-def func_score_triangles(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    fem: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Score every candidate triangle by its unsigned distance to the particle, the ties broken by the alignment of its
-    normal (see triangle_closest_point), as the sign of the distance to a triangle sharing the closest edge or vertex
-    may be wrong on a closed surface."""
-    func_report_candidates(candidates)
-    qd.loop_config(name="mpm_score_triangles")
-    for i_cand in range(candidates.order.n_triplets[()]):
-        triplet = candidates.results.triplets[i_cand]
-        i_b = triplet[0]
-        i_s = triplet[1]
-        s = triplet[2]
-        i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-        is_valid, dist, align, phi, bary, normal = triangle_closest_point(
-            f, s, i_b, i_s, particles.pos[f, i_p, i_b], fem
-        )
+# ============================================== Layer 2: pair kind ===============================================
+
+
+@qd.data_oriented
+class MpmFemContact(CouplingPairs):
+    """Pair kind of the contacts between the material point method (MPM) and the finite element method (FEM), the pair
+    of a particle and its nearest surface triangle, over the particle and the vertices of the triangle."""
+
+    n_doublets = 4
+    n_triplets = 10
+    pairs_type = MpmFemPairs
+    tie_ratio = TIE_DIST_RATIO
+
+    def __init__(self, mpm: MpmNewtonParticipant, fem: FemNewtonParticipant, query: FemTriangleQuery):
+        self.fem = fem
+        self.query = query
+        super().__init__(mpm)
+
+    def build_query(self, f: int) -> None:
+        self.query.build(f)
+
+    @qd.func
+    def candidate_score(self, f: int, i_b: int, i_s: int, s: int):
+        """Unsigned distance of sorted particle `s` to triangle i_s, infinite for a triangle that cannot hold the
+        particle, and the alignment of the normal of the triangle, which breaks the ties (see triangle_closest_point)
+        since the sign of the distance to a triangle sharing the closest edge or vertex may be wrong on a closed
+        surface."""
+        i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
+        x_p = self.mpm.particles.pos[f, i_p, i_b]
+        is_valid, dist, align, signed_dist, bary, normal = triangle_closest_point(f, s, i_b, i_s, x_p, self.fem)
         score = qd.math.inf
         if is_valid:
             score = dist
-        set_candidate_score(i_cand, s, score, align, candidates)
+        return score, align
 
+    @qd.func
+    def build_pair(self, f: int, i_b: int, i_s: int, s: int, dist: float):
+        """Pair sorted particle `s` with its nearest FEM surface triangle i_s if it lies within its contact range or
+        short of it by less than `contact_band_width`.
 
-# ============================================== Layer 1: contact pairs ==============================================
+        The gap phi is the signed distance minus `query.contact.thickness`, and every row J = n +- mu d of the friction
+        pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of target -phi and stiffness
+        `query.contact.stiffness` times its effective mass, the inverse of the inverse weights of the particle and of
+        the triangle point. The friction coefficient is the element's, at least MIN_FRICTION."""
+        i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
+        x_p = self.mpm.particles.pos[f, i_p, i_b]
+        is_valid, dist, align, signed_dist, bary, normal = triangle_closest_point(f, s, i_b, i_s, x_p, self.fem)
+        phi = signed_dist - self.query.contact.thickness[()]
+        v_q = qd.Vector.zero(gs.qd_float, 3)
+        inv_mass = gs.qd_float(0.0)
+        for k in qd.static(range(3)):
+            i_v = self.fem.surface[i_s].tri2v[k]
+            v_q += bary[k] * self.fem.elements_v[f, i_v, i_b].vel
+            inv_mass += bary[k] * bary[k] / self.fem.elements_v_info[i_v].mass
+        v_rel = self.mpm.particles.vel[f, i_p, i_b] - v_q
+        if phi < contact_band_width(-normal.dot(v_rel), self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info):
+            invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info) + inv_mass
+            i_e = self.fem.surface[i_s].tri2el
+            friction = qd.max(self.fem.elements_i[i_e].friction_mu, MIN_FRICTION)
+            D = qd.Vector([self.query.contact.stiffness[()] / invweight] * PYRAMID_ROWS)
+            i_pair = self.add_pair(s, i_b, normal, friction, D, qd.Vector([-phi] * PYRAMID_ROWS))
+            if i_pair >= 0:
+                self.pairs.tri[i_pair] = i_s
+                self.pairs.bary[i_pair] = bary
 
-
-@qd.func(requires_top_level=True)
-def func_build_fem_pairs(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    pairs: MpmFemPairs,
-    fem: qd.template(),
-    query: qd.template(),
-    candidates: ContactCandidates,
-    particles_info: MpmParticlesInfo,
-    mpm_info: MpmInfo,
-):
-    """Build the pair of every valid particle with its nearest FEM surface triangle, within its contact range or short
-    of it by less than `contact_band_width`, once the candidates are sorted by particle.
-
-    The gap phi is the signed distance minus `query.contact.thickness`, and every row J = n +- mu d of the friction
-    pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of target -phi and stiffness
-    `query.contact.stiffness` times its effective mass, the inverse of the inverse weights of the particle and of the
-    triangle point. The friction coefficient is the element's, at least MIN_FRICTION."""
-    func_select_nearest(TIE_DIST_RATIO * mpm_info.dx[()], candidates)
-    for _ in range(1):
-        pairs.n_pairs[()] = 0
-    qd.loop_config(name="mpm_build_fem_pairs")
-    for i_seg in range(candidates.order.bcoo_nnz[()]):
-        i_cand = candidates.best_candidate[i_seg]
-        if i_cand < candidates.secondary.shape[0]:
-            triplet = candidates.results.triplets[i_cand]
-            i_b = triplet[0]
-            i_s = triplet[1]
-            s = triplet[2]
-            i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-            x_p = particles.pos[f, i_p, i_b]
-            v_p = particles.vel[f, i_p, i_b]
-            is_valid, dist, align, signed_dist, bary, normal = triangle_closest_point(f, s, i_b, i_s, x_p, fem)
-            phi = signed_dist - query.contact.thickness[()]
-            v_q = qd.Vector.zero(gs.qd_float, 3)
-            inv_mass = gs.qd_float(0.0)
-            for k in qd.static(range(3)):
-                i_v = fem.surface[i_s].tri2v[k]
-                v_q += bary[k] * fem.elements_v[f, i_v, i_b].vel
-                inv_mass += bary[k] * bary[k] / fem.elements_v_info[i_v].mass
-            if phi < contact_band_width(-normal.dot(v_p - v_q), dt, mpm_info):
-                i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
-                if i_pair >= 0:
-                    i_e = fem.surface[i_s].tri2el
-                    invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info) + inv_mass
-                    pairs.s[i_pair] = s
-                    pairs.i_b[i_pair] = i_b
-                    pairs.tri[i_pair] = i_s
-                    pairs.bary[i_pair] = bary
-                    pairs.normal[i_pair] = normal
-                    pairs.friction[i_pair] = qd.max(fem.elements_i[i_e].friction_mu, MIN_FRICTION)
-                    pairs.D[i_pair] = query.contact.stiffness[()] / invweight
-                    pairs.t[i_pair] = -phi
-
-
-@qd.func
-def fem_pair_vertices(i_pair: int, mpm: qd.template(), fem: qd.template(), pairs: MpmFemPairs):
-    """Contact vertices of a pair, the particle then the vertices of the triangle, with their weights in the relative
-    displacement r = dx_p - sum_k b_k dx_k, and the index of the triangle vertices in the FEM vertex map."""
-    i_b = pairs.i_b[i_pair]
-    bary = pairs.bary[i_pair]
-    tri2v = fem.surface[pairs.tri[i_pair]].tri2v
-    i_fv = qd.Vector([i_b * fem.n_vertices + tri2v[k] for k in qd.static(range(3))], dt=gs.qd_int)
-    verts = qd.Vector(
-        [mpm.vertex_offset[()] + pairs.s[i_pair]] + [fem.vertex_offset[()] + i_fv[k] for k in qd.static(range(3))],
-        dt=gs.qd_int,
-    )
-    weights = qd.Vector([1.0, -bary[0], -bary[1], -bary[2]], dt=gs.qd_float)
-    return verts, weights, i_fv
-
-
-@qd.func
-def fem_pair_terms(f: int, i_pair: int, mpm: qd.template(), fem: qd.template(), pairs: MpmFemPairs):
-    """Energy, gradient and Hessian of the rows of a pair in its relative displacement at the current iterate, with
-    the vertices and weights of the pair (see fem_pair_vertices)."""
-    verts, weights, i_fv = fem_pair_vertices(i_pair, mpm, fem, pairs)
-    r = mpm.func_vertex_value(f, pairs.s[i_pair])
-    for k in range(3):
-        r += weights[k + 1] * fem.func_vertex_value(f, i_fv[k])
-    D = pairs.D[i_pair]
-    t = pairs.t[i_pair]
-    energy, g, H = pyramid_terms(
-        pairs.normal[i_pair], pairs.friction[i_pair], qd.Vector([D, D, D, D]), qd.Vector([t, t, t, t]), r
-    )
-    return energy, g, H, verts, weights
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pair_terms(
-    f: int, i_d0: int, i_t0: int, mpm: qd.template(), fem: qd.template(), pairs: MpmFemPairs, contact: qd.template()
-):
-    """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
-    triplet slot `i_t0` on: 4 doublets on the particle and the triangle vertices, and the 10 upper blocks between
-    them."""
-    pair_k = qd.Vector(_PAIR_K, dt=gs.qd_int)
-    pair_l = qd.Vector(_PAIR_L, dt=gs.qd_int)
-    qd.loop_config(name="mpm_fem_pair_terms")
-    for i_pair in range(pairs.n_pairs[()]):
-        _, g, H, verts, weights = fem_pair_terms(f, i_pair, mpm, fem, pairs)
-        for k in range(4):
-            write_doublet(i_d0 + 4 * i_pair + k, verts[k], weights[k] * g, contact)
-        for i_block in range(10):
-            k = pair_k[i_block]
-            k_col = pair_l[i_block]
-            write_triplet(
-                i_t0 + 10 * i_pair + i_block, verts[k], verts[k_col], (weights[k] * weights[k_col]) * H, contact
-            )
-
-
-@qd.func(requires_top_level=True)
-def func_fem_pair_energy(f: int, mpm: qd.template(), fem: qd.template(), pairs: MpmFemPairs, energies: qd.template()):
-    """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
-    qd.loop_config(name="mpm_fem_pair_energy")
-    for i_pair in range(pairs.n_pairs[()]):
-        energy, grad, hess, verts, weights = fem_pair_terms(f, i_pair, mpm, fem, pairs)
-        qd.atomic_add(energies[pairs.i_b[i_pair]], energy)
+    @qd.func
+    def pair_vertices(self, f: int, i_pair: int):
+        """The particle then the vertices of the triangle of a pair, of weights 1 and -b_k in the relative displacement
+        r = dx_p - sum_k b_k dx_k, with r at the current iterate."""
+        i_b = self.pairs.i_b[i_pair]
+        bary = self.pairs.bary[i_pair]
+        i_s = self.pairs.tri[i_pair]
+        tri2v = self.fem.surface[i_s].tri2v
+        i_fv = qd.Vector([i_b * self.fem.n_vertices + tri2v[k] for k in qd.static(range(3))], dt=gs.qd_int)
+        i_vp = self.mpm.vertex_offset[()] + self.pairs.s[i_pair]
+        verts = qd.Vector([i_vp] + [self.fem.vertex_offset[()] + i_fv[k] for k in qd.static(range(3))], dt=gs.qd_int)
+        weights = qd.Vector([1.0, -bary[0], -bary[1], -bary[2]], dt=gs.qd_float)
+        r = self.mpm.func_vertex_value(f, self.pairs.s[i_pair])
+        for k in range(3):
+            r += weights[k + 1] * self.fem.func_vertex_value(f, i_fv[k])
+        return verts, weights, r

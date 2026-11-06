@@ -11,46 +11,18 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
-from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
-from genesis.engine.solvers.mpm_func import (
-    cofactor,
-    EMPTY_BOX_HALF,
-    band_row,
-    contact_band_width,
-    contact_invweight,
-    particle_of_sorted,
-    pyramid_dirs,
-    pyramid_terms,
-)
-from genesis.engine.solvers.newton_contact import SRC_ITERATE, append_pair, write_doublet, write_triplet
+from genesis.engine.bvh import build_bvh, get_bvh_data
+from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmInfo
+from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, cofactor
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
-from genesis.utils.array_class import (
-    ConstraintState,
-    DynState,
-    GeomsInfo,
-    GeomsState,
-    LinksInfo,
-    LinksState,
-    RigidInfo,
-    SDFInfo,
-)
+from genesis.utils.array_class import GeomsInfo, GeomsState, RigidInfo, SDFInfo
 from genesis.utils.data import Data, DataKind, field
-
-from .contact_candidates import (
-    ContactCandidates,
-    func_report_candidates,
-    func_reset_candidates,
-    func_select_nearest,
-    set_candidate_score,
-)
 
 
 class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest coupled Rigid geom (see func_build_rigid_pairs).
+    """The pairs of the particles with their nearest coupled Rigid geom (see MpmRigidContact.build_pair).
 
     A pair holds its sorted particle `s`, its environment `i_b`, its geom `geom` and link `link`, the gap `phi` at the
     substep start, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with
@@ -68,21 +40,16 @@ class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
     t: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
 
 
-def build_rigid_pairs(max_pairs: int) -> MpmRigidPairs:
-    """Build the MPM-Rigid pairs of a capacity, with no pair."""
-    pairs = MpmRigidPairs(sizes={PAIRS: max_pairs})
-    pairs.n_pairs.fill(0)
-    return pairs
-
-
 # ============================================ Layer 0: spatial algebra =============================================
 
 
 @qd.func
-def particle_arm(f: int, i_p: int, i_b: int, i_l: int, particles: MpmParticles, links_state: LinksState):
-    """Arm of a particle from the root center of mass (COM) of its contact link, the reference point of the link's
-    spatial vectors."""
-    return particles.pos[f, i_p, i_b] - links_state.root_COM[i_l, i_b]
+def link_point_jacobian(r: qd.types.vector(3)):
+    """Map P = [I, -[r]x] of the spatial displacement of a link to the displacement of its point at arm r."""
+    return qd.Matrix(
+        [[1.0, 0.0, 0.0, 0.0, r[2], -r[1]], [0.0, 1.0, 0.0, -r[2], 0.0, r[0]], [0.0, 0.0, 1.0, r[1], -r[0], 0.0]],
+        dt=gs.qd_float,
+    )
 
 
 # =============================================== Layer 0: geom distance ===============================================
@@ -164,8 +131,8 @@ def geom_normal(
 class RigidGeomQuery:
     """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment.
 
-    The tree comes from genesis.engine.bvh. The query also holds the Rigid data its narrow phase reads, from the Rigid
-    participant `rigid`."""
+    The tree comes from genesis.engine.bvh. The query also holds the Rigid data that the fit of its leaves reads, from
+    the Rigid participant `rigid`."""
 
     def __init__(self, rigid: RigidNewtonParticipant, n_envs: int):
         self.n_coupled = len(rigid.coupled_geoms_idx)
@@ -181,7 +148,6 @@ class RigidGeomQuery:
         self.links_state = rigid.dyn_state.links
         self.links_info = rigid.dyn_info.links
         self.batch_links_info = rigid.config.rigid_batch_links_info
-        self.sdf_info = rigid.sdf_info
 
     def build(self, mpm_info):
         """Fit the leaf boxes to the geoms of the substep and build the trees."""
@@ -190,12 +156,12 @@ class RigidGeomQuery:
             build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
 
 
-@qd.func(requires_top_level=True)
-def func_fit_geom_leaves(dt: float, query: qd.template()):
+@qd.kernel
+def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
     """Fit the leaf box of every coupled geom: the world box of its posed initial box, grown by its contact margin and
     by twice the distance its points may travel over the substep. A geom that an environment does not carry gets an
     empty box with a finite center."""
-    qd.loop_config(name="mpm_fit_geom_leaves")
+    dt = mpm_info.substep_dt[()]
     for i_b, i_a in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         i_g = query.coupled_geoms[i_a]
         i_l = query.geoms_info.link_idx[i_g]
@@ -221,263 +187,3 @@ def func_fit_geom_leaves(dt: float, query: qd.template()):
         else:
             query.leaves.aabbs_min[i_b, i_a] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
             query.leaves.aabbs_max[i_b, i_a] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-
-
-@qd.kernel
-def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
-    func_fit_geom_leaves(mpm_info.substep_dt[()], query)
-
-
-@qd.func(requires_top_level=True)
-def func_query_geoms(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Record the coupled geoms whose grown box meets the band of every valid particle as candidates: the two grown
-    boxes together cover the band of the relative velocity."""
-    func_reset_candidates(candidates)
-    qd.loop_config(name="mpm_query_geoms")
-    for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-        x_p = particles.pos[f, i_p, i_b]
-        reach = mpm_info.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
-        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, candidates.results, func_no_filter, query)
-
-
-@qd.func(requires_top_level=True)
-def func_score_geoms(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    mpm_info: MpmInfo,
-):
-    """Score every candidate geom by the gap of the particle to its contact range, its signed distance minus its
-    contact margin `coup_softness`."""
-    func_report_candidates(candidates)
-    qd.loop_config(name="mpm_score_geoms")
-    for i_cand in range(candidates.order.n_triplets[()]):
-        triplet = candidates.results.triplets[i_cand]
-        i_b = triplet[0]
-        i_g = query.coupled_geoms[triplet[1]]
-        s = triplet[2]
-        i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-        x_p = particles.pos[f, i_p, i_b]
-        phi = geom_sdf(i_g, i_b, x_p, query.geoms_state, query.geoms_info, query.sdf_info)
-        set_candidate_score(i_cand, s, phi - query.geoms_info.coup_softness[i_g], 0.0, candidates)
-
-
-# =============================================== Layer 1: contact pairs ===============================================
-
-
-@qd.func(requires_top_level=True)
-def func_build_rigid_pairs(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    pairs: MpmRigidPairs,
-    geoms_state: GeomsState,
-    links_state: LinksState,
-    query: qd.template(),
-    candidates: ContactCandidates,
-    particles_info: MpmParticlesInfo,
-    geoms_info: GeomsInfo,
-    links_info: LinksInfo,
-    rigid_info: RigidInfo,
-    sdf_info: SDFInfo,
-    mpm_info: MpmInfo,
-    config: qd.template(),
-):
-    """Build the pair of every valid particle with its nearest coupled geom within its soft range, once the candidates
-    are sorted by particle.
-
-    The geom's `coup_softness` is a contact margin, so that the resting penetration of the soft row is taken up outside
-    the geom. As in Rigid's contact assembly, the friction coefficient is `max(friction * friction_ratio, 0.01)`, the
-    time constant is floored at twice the substep, and every pyramid row `normal + mu d_k` gets Rigid's regularization
-    `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`. The row target `dt J.v_p + dt^2 aref` is on the
-    displacement of the particle relative to the motion of its contact point beyond the link's start velocity (see
-    band_row)."""
-    func_select_nearest(0.0, candidates)
-    for _ in range(1):
-        pairs.n_pairs[()] = 0
-    qd.loop_config(name="mpm_build_rigid_pairs")
-    for i_seg in range(candidates.order.bcoo_nnz[()]):
-        i_cand = candidates.best_candidate[i_seg]
-        if i_cand < candidates.secondary.shape[0]:
-            triplet = candidates.results.triplets[i_cand]
-            i_b = triplet[0]
-            i_g = query.coupled_geoms[triplet[1]]
-            s = triplet[2]
-            phi = candidates.order.triplet_val[i_cand]
-            i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
-            x_p = particles.pos[f, i_p, i_b]
-            i_l = geoms_info.link_idx[i_g]
-            v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
-            v_rel = particles.vel[f, i_p, i_b] - v_r
-            # The relative speed bounds the normal approach speed, which needs the normal
-            if phi < contact_band_width(v_rel.norm(), dt, mpm_info):
-                normal = geom_normal(i_g, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, config)
-                if phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info):
-                    i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
-                    if i_pair >= 0:
-                        I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
-                        friction = qd.max(geoms_info.friction[i_g] * geoms_state.friction_ratio[i_g, i_b], 1e-2)
-                        friction_sq_reg = friction * friction / rigid_info.impratio[None]
-                        invweight = (
-                            contact_invweight(f, i_p, i_b, normal, particles, particles_info)
-                            + links_info.invweight[I_l][0]
-                        )
-                        diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
-                        sol_params = geoms_info.sol_params[i_g]
-                        sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
-                        dirs = pyramid_dirs(normal, friction)
-                        D = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
-                        t = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
-                        for i in qd.static(range(PYRAMID_ROWS)):
-                            J = dirs[i, :]
-                            D_i, t_i = band_row(sol_params, phi, J.dot(v_rel), diag_coef, dt)
-                            D[i] = D_i
-                            t[i] = t_i + dt * J.dot(v_r)
-                        pairs.s[i_pair] = s
-                        pairs.i_b[i_pair] = i_b
-                        pairs.geom[i_pair] = i_g
-                        pairs.link[i_pair] = i_l
-                        pairs.phi[i_pair] = phi
-                        pairs.normal[i_pair] = normal
-                        pairs.friction[i_pair] = friction
-                        pairs.D[i_pair] = D
-                        pairs.t[i_pair] = t
-
-
-@qd.func
-def rigid_pair_terms(f: int, i_pair: int, mpm: qd.template(), contact: qd.template()):
-    """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its contact
-    point at the current iterate, which a Rigid without dofs leaves at rest."""
-    r = mpm.func_vertex_value(f, contact.pairs.s[i_pair])
-    if qd.static(contact.has_rigid_dofs):
-        r -= contact.func_vertex_value(f, i_pair, SRC_ITERATE)
-    return pyramid_terms(
-        contact.pairs.normal[i_pair],
-        contact.pairs.friction[i_pair],
-        contact.pairs.D[i_pair],
-        contact.pairs.t[i_pair],
-        r,
-    )
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pair_terms(
-    f: int, i_d0: int, i_t0: int, mpm: qd.template(), contact: qd.template(), newton_contact: qd.template()
-):
-    """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
-    triplet slot `i_t0` on: on the particle, and with Rigid dofs on the contact point and the block between them."""
-    qd.loop_config(name="mpm_rigid_pair_terms")
-    for i_pair in range(contact.pairs.n_pairs[()]):
-        _, g, H = rigid_pair_terms(f, i_pair, mpm, contact)
-        i_vp = mpm.vertex_offset[()] + contact.pairs.s[i_pair]
-        if qd.static(contact.has_rigid_dofs):
-            i_vc = contact.vertex_offset[()] + i_pair
-            write_doublet(i_d0 + 2 * i_pair, i_vp, g, newton_contact)
-            write_doublet(i_d0 + 2 * i_pair + 1, i_vc, -g, newton_contact)
-            write_triplet(i_t0 + 3 * i_pair, i_vp, i_vp, H, newton_contact)
-            write_triplet(i_t0 + 3 * i_pair + 1, i_vp, i_vc, -H, newton_contact)
-            write_triplet(i_t0 + 3 * i_pair + 2, i_vc, i_vc, H, newton_contact)
-        else:
-            write_doublet(i_d0 + i_pair, i_vp, g, newton_contact)
-            write_triplet(i_t0 + i_pair, i_vp, i_vp, H, newton_contact)
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pair_energy(f: int, mpm: qd.template(), contact: qd.template(), energies: qd.template()):
-    """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
-    qd.loop_config(name="mpm_rigid_pair_energy")
-    for i_pair in range(contact.pairs.n_pairs[()]):
-        energy, grad, hess = rigid_pair_terms(f, i_pair, mpm, contact)
-        qd.atomic_add(energies[contact.pairs.i_b[i_pair]], energy)
-
-
-# ============================================ Layer 1: contact points ============================================
-
-
-@qd.func
-def contact_point_arm(
-    f: int,
-    i_pair: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    pairs: MpmRigidPairs,
-    links_state: LinksState,
-    mpm_info: MpmInfo,
-):
-    """Link, environment and arm of the contact point of a pair, at the position of its particle at the substep
-    start."""
-    i_p, i_b_sorted, env, cell = particle_of_sorted(pairs.s[i_pair], grid, mpm_info)
-    i_l = pairs.link[i_pair]
-    i_b = pairs.i_b[i_pair]
-    return i_l, i_b, particle_arm(f, i_p, i_b, i_l, particles, links_state)
-
-
-@qd.func
-def link_point_jacobian(r: qd.types.vector(3)):
-    """Map P = [I, -[r]x] of the spatial displacement of a link to the displacement of its point at arm r."""
-    return qd.Matrix(
-        [[1.0, 0.0, 0.0, 0.0, r[2], -r[1]], [0.0, 1.0, 0.0, -r[2], 0.0, r[0]], [0.0, 0.0, 1.0, r[1], -r[0], 0.0]],
-        dt=gs.qd_float,
-    )
-
-
-# ============================================ Layer 1: reaction on Rigid ============================================
-
-
-@qd.func(requires_top_level=True)
-def func_mpm_reaction(
-    f: int,
-    mpm: qd.template(),
-    contact: qd.template(),
-    rigid_data: RigidNewtonScratch,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    config: qd.template(),
-):
-    """Apply the force of the MPM pairs on Rigid at the converged solve, after func_rigid_write_back.
-
-    qfrc_constraint becomes M qacc - qf_smooth, so that dofs.force is M qacc as after Rigid's own solve, and the spatial
-    force of the rows on each link stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force) for
-    func_add_mpm_contact_force. A link pushed by the rows is marked constrained, which keeps it out of the midpoint
-    integration of free links (see func_midpoint_eligible)."""
-    contact.func_vertex_begin(f, SRC_ITERATE)
-    qd.loop_config(name="mpm_reaction_pairs")
-    for i_pair in range(contact.pairs.n_pairs[()]):
-        energy, g, hess = rigid_pair_terms(f, i_pair, mpm, contact)
-        if g.norm_sqr() > 0.0:
-            i_l, i_b, r = contact_point_arm(
-                f, i_pair, mpm.particles, mpm.grid, contact.pairs, dyn_state.links, mpm.mpm_info
-            )
-            qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
-            qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(g))
-            dyn_state.links.is_constrained[i_l, i_b] = True
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_reaction_qfrc")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        constraint_state.qfrc_constraint[i_d, i_b] = rigid_data.Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b]
-
-
-@qd.func(requires_top_level=True)
-def func_add_mpm_contact_force(rigid_data: RigidNewtonScratch, links_state: LinksState, mpm_info: MpmInfo):
-    """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
-    contact forces were written by the post-solve stage of its substep."""
-    n_links = rigid_data.link_force_vel.shape[0]
-    n_envs = rigid_data.link_force_vel.shape[1]
-    dt = mpm_info.substep_dt[()]
-    qd.loop_config(name="mpm_add_contact_force")
-    for i_l, i_b in qd.ndrange(n_links, n_envs):
-        force = rigid_data.link_force_vel[i_l, i_b]
-        links_state.contact_force[i_l, i_b] = links_state.contact_force[i_l, i_b] + force / (dt * dt)
