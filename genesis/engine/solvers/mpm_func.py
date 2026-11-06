@@ -1756,18 +1756,54 @@ def func_elastic_assemble(
 ):
     """Assemble the elastic and contact Hessian blocks and the gradient factors of every task.
 
-    The particles of a task share the 8-node stencil of their cell, and the task writes the 36 upper-triangular stencil
-    blocks, summed over its particles, by the lanes of a warp on a GPU (a segmented reduction over a 32-particle chunk)
-    and in order by one thread on a CPU (a whole cell, see func_cell_flags). The blocks on fixed nodes are discarded.
-    The elastic blocks are projected to symmetric positive definite (SPD), or exact with `is_exact`."""
-    if qd.static(gs.backend == gs.cpu):
-        func_elastic_assemble_cpu(
-            f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact
-        )
-    else:
-        func_elastic_assemble_gpu(
-            f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact
-        )
+    The particles of a task share the 8-node stencil of their cell, and the head of the task writes its 36
+    upper-triangular stencil blocks, summed over its particles: on a GPU, by a head-segmented warp reduction over a
+    32-particle chunk, and on a CPU, where a task is a whole cell (see func_cell_flags), by adding its particles in
+    order. The blocks on fixed nodes are discarded. The elastic blocks are projected to symmetric positive definite
+    (SPD), or exact with `is_exact`."""
+    is_lanes = qd.static(gather_lanes() > 1)
+    pair_a = qd.Vector(_STENCIL_PAIR_A, dt=gs.qd_int)
+    pair_b = qd.Vector(_STENCIL_PAIR_B, dt=gs.qd_int)
+    qd.loop_config(name="mpm_elastic_assemble", block_dim=128)
+    for s in range(grid.n_valid_chunks[()] * _WARP):
+        n_valid = grid.n_valid[()]
+        is_valid = s < n_valid
+        # A lane past the particles takes the terms of the last one and zeroes its blocks, every lane of the warp taking
+        # part in the reductions
+        s_c = qd.min(s, n_valid - 1)
+        is_head = is_valid and grid.task_flags[s_c] != 0
+        task = grid.task_ranks[s_c] + grid.task_flags[s_c] - 1
+        base = rows.triplet_start[()] + grid.n_blocks[()] * BLOCK_CELLS + STENCIL_BLOCKS * task
+        end = s_c + 1
+        is_tail = 0
+        if qd.static(is_lanes):
+            if gather_lane() == _WARP - 1 or s >= n_valid - 1:
+                is_tail = 1
+            elif grid.task_flags[s + 1] != 0:
+                is_tail = 1
+        else:
+            end = grid.cell_starts[task + 1] if is_head else s_c
+        for t in range(s_c, end):
+            slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
+                f, t, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
+            )
+            for pair in range(STENCIL_BLOCKS):
+                a = pair_a[pair]
+                b = pair_b[pair]
+                block = gs.qd_float(is_valid) * stencil_pair_block(a, b, r_frame, U, S_block, alp, bet, iso)
+                if qd.static(is_lanes):
+                    for i, j in qd.static(qd.ndrange(3, 3)):
+                        block[i, j] = head_segmented_reduce_add(block[i, j], is_tail)
+                if is_head:
+                    row_a = rows.row_start[()] + slots[a]
+                    row_b = rows.row_start[()] + slots[b]
+                    if movable[a] * movable[b] == 0.0:
+                        if t == s_c:
+                            discard_block(base + pair, linear)
+                    elif t == s_c:
+                        func_write_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
+                    else:
+                        func_add_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
 
 
 @qd.func
@@ -1831,113 +1867,6 @@ def stencil_pair_block(
     r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
     block = U @ isotropic_pair_block(r_a, r_b, S_block, alp, bet) @ U.transpose()
     return block + (iso[a, 0] * iso[b, 0] + iso[a, 1] * iso[b, 1]) * qd.Matrix.identity(gs.qd_float, 3)
-
-
-@qd.func(requires_top_level=True)
-def func_elastic_assemble_cpu(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    linear: NewtonLinearScratch,
-    rows: LinearBlock,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
-    is_exact: qd.template(),
-):
-    """func_elastic_assemble by one thread per task, a whole cell (see func_cell_flags).
-
-    The threads split the tasks. The first particle of a task writes its 36 blocks, and each later one adds its own to
-    them in order."""
-    pair_a = qd.Vector(_STENCIL_PAIR_A, dt=gs.qd_int)
-    pair_b = qd.Vector(_STENCIL_PAIR_B, dt=gs.qd_int)
-    qd.loop_config(name="mpm_elastic_assemble_cpu")
-    for s in range(grid.n_valid[()]):
-        if grid.task_flags[s] != 0:
-            i_task = grid.task_ranks[s]
-            base = rows.triplet_start[()] + grid.n_blocks[()] * BLOCK_CELLS + STENCIL_BLOCKS * i_task
-            # The task ranks equal the cell ranks, so the particles of the task end at the start of the next cell
-            for t in range(s, grid.cell_starts[i_task + 1]):
-                slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
-                    f, t, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
-                )
-                for pair in range(STENCIL_BLOCKS):
-                    a = pair_a[pair]
-                    b = pair_b[pair]
-                    block = stencil_pair_block(a, b, r_frame, U, S_block, alp, bet, iso)
-                    row_a = rows.row_start[()] + slots[a]
-                    row_b = rows.row_start[()] + slots[b]
-                    if movable[a] * movable[b] == 0.0:
-                        if t == s:
-                            discard_block(base + pair, linear)
-                    elif t == s:
-                        func_write_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
-                    else:
-                        func_add_triplet(base + pair, row_a, row_b, block, linear.matrix, is_symmetric=True)
-
-
-@qd.func(requires_top_level=True)
-def func_elastic_assemble_gpu(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    linear: NewtonLinearScratch,
-    rows: LinearBlock,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
-    is_exact: qd.template(),
-):
-    """func_elastic_assemble by one warp per 32 sorted particles: a head-segmented warp reduction sums each block over
-    the task, and the head lane of the task writes it."""
-    qd.loop_config(name="mpm_elastic_assemble", block_dim=128)
-    for s in range(grid.n_valid_chunks[()] * _WARP):
-        lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
-        n_valid = grid.n_valid[()]
-        is_valid = s < n_valid
-        # A lane past the particles takes the terms of the last one and zeroes its blocks, every lane of the warp taking
-        # part in the reductions
-        slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
-            f, qd.min(s, n_valid - 1), dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
-        )
-        is_head = 0
-        is_tail = 0
-        task = 0
-        if is_valid:
-            is_head = grid.task_flags[s]
-            task = grid.task_ranks[s] + grid.task_flags[s] - 1
-            if lane == _WARP - 1 or s == n_valid - 1:
-                is_tail = 1
-            elif grid.task_flags[s + 1] != 0:
-                is_tail = 1
-
-        n_nodes = grid.n_blocks[()] * BLOCK_CELLS
-        pair_a = qd.Vector(_STENCIL_PAIR_A, dt=gs.qd_int)
-        pair_b = qd.Vector(_STENCIL_PAIR_B, dt=gs.qd_int)
-        for pair in range(STENCIL_BLOCKS):
-            a = pair_a[pair]
-            b = pair_b[pair]
-            block = gs.qd_float(is_valid) * stencil_pair_block(a, b, r_frame, U, S_block, alp, bet, iso)
-            task_block = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                task_block[i, j] = head_segmented_reduce_add(block[i, j], is_tail)
-            if is_valid and is_head != 0:
-                i_t = rows.triplet_start[()] + n_nodes + STENCIL_BLOCKS * task + pair
-                if movable[a] * movable[b] == 0.0:
-                    discard_block(i_t, linear)
-                else:
-                    func_write_triplet(
-                        i_t,
-                        rows.row_start[()] + slots[a],
-                        rows.row_start[()] + slots[b],
-                        task_block,
-                        linear.matrix,
-                        is_symmetric=True,
-                    )
 
 
 @qd.func(requires_top_level=True)
