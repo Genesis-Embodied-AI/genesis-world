@@ -92,13 +92,6 @@ class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
 
 @qd.func(requires_top_level=True)
 def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), is_new: qd.template()):
-    """Add the dot product of r and z over the live rows of every running environment to its rz, or to its rz_new with
-    `is_new`.
-
-    As in every reduction of the rows, a graphics processing unit (GPU) sums the products of each run of one
-    environment in a warp by shuffles and adds one atomic per run, and a central processing unit (CPU) sums each of
-    _CPU_CHUNKS contiguous chunks in one thread and adds one atomic per environment of the chunk.
-    """
     if qd.static(gs.backend == gs.cpu):
         if qd.static(is_new):
             _func_dot_into_cpu(pcg_scalars.rz_new, pcg_workspace, pcg_scalars)
@@ -219,11 +212,6 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.tem
 def _func_linear_pcg_spmv_cpu(
     pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch
 ):
-    """Run func_linear_pcg_spmv over contiguous chunks of the row-sorted entries, one thread per chunk.
-
-    The products of a row accumulate in the thread and add once to Ap where the row ends, the mirrored products of the
-    lower triangle add per entry, and p.Ap adds once per environment of the chunk.
-    """
     qd.loop_config(name="pcg_spmv_pap_cpu")
     for i_chunk in range(_CPU_CHUNKS):
         nnz = matrix.bcoo_nnz[()]

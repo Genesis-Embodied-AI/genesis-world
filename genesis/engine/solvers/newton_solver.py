@@ -447,7 +447,6 @@ class NewtonSolver(Solver):
         self._check_failures()
 
     def _check_line_search(self, f):
-        """Raise at once on a solve whose line search found no lower energy, in strict mode."""
         control = self.control
         failed = qd_to_numpy(control.failed)
         for i_b in np.flatnonzero(failed == NEWTON_FAILED_LINE_SEARCH):
@@ -496,12 +495,6 @@ class NewtonSolver(Solver):
         solve()
 
     def _solve_adjoint(self, f):
-        """Solve the adjoint system of substep `f` on the Hessian at its solution by the conjugate gradient of the
-        forward solve, and hand the solution to every participant and coupling.
-
-        The Hessian is exact or projected to positive definite, as `adjoint_hessian` selects. With 'auto', an environment
-        whose solve met a direction of non-positive curvature on the exact Hessian runs again on the projected one, the
-        other environments keeping their solution of the exact one."""
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
         pcg_scalars = self.pcg_scalars
@@ -531,15 +524,12 @@ class NewtonSolver(Solver):
             host.newton_adjoint_finish(f)
 
     def _stage_adjoint(self, f, is_exact):
-        """Assemble the Newton system of every participant at the solution of substep `f`, the Hessian exact with
-        `is_exact`, then stage the right-hand side of the adjoint solve in place of the gradient."""
         self._assemble(f, is_exact)
         for host in self._hosts:
             host.newton_adjoint_rhs(f)
 
     def _pcg_adjoint(self, f, check_curvature=False):
-        """Solve the staged adjoint system H lambda = b by the conjugate gradient of the forward solve, at the tighter
-        tolerance of the adjoint, over the environments of `is_env_adjoint` (see PCGScalars).
+        """Solve the staged adjoint system by the conjugate gradient, over the environments of `is_env_adjoint`.
 
         With `check_curvature`, meant for a Hessian without positive definite projection, returns for every environment
         whether its solve met a direction of non-positive curvature."""
@@ -575,7 +565,6 @@ class NewtonSolver(Solver):
             host.newton_after(f)
 
     def _assemble(self, f, is_exact=False):
-        """Assemble the Newton system of every participant from the host, then the share of the couplings."""
         for host in self._participant_hosts:
             host.newton_assemble(f, is_exact)
         if self._has_coupling_devices:
@@ -598,7 +587,6 @@ class NewtonSolver(Solver):
                 break
 
     def _newton_loop_launches(self, f):
-        """Drive the Newton iterations from the host, the conjugate gradient iterations of each running as one graph."""
         control = self.control
         participants = self._participants
         while True:

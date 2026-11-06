@@ -96,8 +96,6 @@ class LegacyCoupler(RBC):
         self.reset(envs_idx=self.sim.scene._envs_idx)
 
     def _resolve_mpm_couplings(self) -> None:
-        """Decide which solvers the implicit MPM solver couples with, each pair behind its own option, and check that
-        each coupled solver supports it."""
         mpm, rigid, fem = self.mpm_solver, self.rigid_solver, self.fem_solver
         options = self.options
         if mpm.is_active and rigid.is_active and options.rigid_mpm:
@@ -134,13 +132,12 @@ class LegacyCoupler(RBC):
         self._mpm_sph = mpm.is_active and self.sph_solver.is_active and options.mpm_sph
 
     def _build_mpm_couplings(self) -> None:
-        """Build the couplings of the implicit MPM solver, and register into the Newton solver the participants of the
-        implicit solve of every substep and the couplings between them, which activates it whenever MPM is in the scene.
+        """Build the couplings of the implicit MPM solver and register them with their participants in Newton.
 
-        MPM joins first, then the solvers it couples with implicitly, each owning the data of its own unknowns. The
-        substep of such a solver stops before its own solve, which the joint solve takes over. The MPM particles are
-        also boundary particles of the SPH fluid (see mpm_sph_func) and obstacles of the PBD particles, both staggered
-        with the solve."""
+        Registering activates the implicit solve of every substep whenever MPM is in the scene. MPM joins first, then
+        the solvers it couples with implicitly, each owning the data of its own unknowns. The substep of such a solver
+        stops before its own solve, which the joint solve takes over. The MPM particles are also boundary particles of
+        the SPH fluid (see mpm_sph_func) and obstacles of the PBD particles, both staggered with the solve."""
         # Imported here to avoid a circular dependency: the couplings with MPM import the solvers, whose entities import
         # the couplers
         from .mpm_fem_func import FemContactParams, FemTriangleQuery, MpmFemContactScratch

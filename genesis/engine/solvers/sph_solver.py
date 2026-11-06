@@ -775,7 +775,6 @@ class SPHSolver(ParticleSolver):
             self._advance_velocity(f)
 
     def _advance_velocity(self, f):
-        """Velocity update of one SPH integration step, on the particles reordered by the spatial hash."""
         self._kernel_reorder_particles(f)
         if self._has_boundary:
             self._boundary.gather()

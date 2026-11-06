@@ -16,7 +16,6 @@ MPM_FD_EPS = 1e-6
 
 
 def _step_mpm(scene, cells=None):
-    """Step the scene, first adding the grid cell of every MPM particle to `cells` if given."""
     if cells is not None:
         solver = scene.sim.mpm_solver
         pos = torch.cat([entity.get_particles_pos() for entity in solver.entities], dim=-2)
@@ -25,7 +24,6 @@ def _step_mpm(scene, cells=None):
 
 
 def _assert_same_cells(cells, cells_ref):
-    """Check that no MPM particle sits in another grid cell than in the unperturbed rollout at the start of a step."""
     for step, (cell, cell_ref) in enumerate(zip(cells, cells_ref)):
         n_moved = int((cell != cell_ref).any(dim=-1).sum())
         assert n_moved == 0, f"The perturbation moves {n_moved} MPM particles to another cell at step {step}"

@@ -460,7 +460,6 @@ class MPMSolver(ParticleSolver):
                 torch.mps.synchronize()
 
     def _check_supported(self):
-        """Raise for the configurations the implicit solver does not handle yet."""
         if self._B > mpm_func.MAX_KEY_ENVS:
             gs.raise_exception(f"The implicit MPM solver supports {mpm_func.MAX_KEY_ENVS} environments at most.")
         cells = np.concatenate([self._lower_bound, self._upper_bound]) * self._grid_density
@@ -589,7 +588,6 @@ class MPMSolver(ParticleSolver):
     @no_grad
     @qd.kernel
     def _kernel_flag_non_finite_pos(self, f: int):
-        """Flag INVALID_VELOCITY_NAN for every env with a particle whose position in the given frame is not finite."""
         for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
                 self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
@@ -658,10 +656,6 @@ class MPMSolver(ParticleSolver):
             self._kernel_flag_non_finite_pos(f + 1)
 
     def _assemble(self, f, is_exact=False):
-        """Assemble the Newton system, growing the triplet storage until it holds the assembly.
-
-        The elastic Hessian is projected to symmetric positive definite, or exact with `is_exact` (see
-        func_elastic_assemble)."""
         participant = self._newton_participant
         has_overflow = True
         while has_overflow:

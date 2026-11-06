@@ -352,10 +352,6 @@ def _func_cpu_pass(
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    """Run one stable counting-sort pass of the keys on one of their digits, over CPU_CHUNKS chunks.
-
-    The digit is the byte of rank `i_pass`, counted from the least significant one.
-    """
     qd.loop_config(name="drs_cpu_histogram")
     for i_chunk in range(CPU_CHUNKS):
         for i_digit in range(_RADIX_DIGITS):
@@ -392,10 +388,6 @@ def _func_cpu_sort(
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    """Run every pass of func_dynamic_radix_sort on a central processing unit (CPU) backend, unrolled.
-
-    The passes alternate between the two halves.
-    """
     for i_pass in qd.static(range(radix_passes(key_bits))):
         if qd.static(i_pass % 2 == 0):
             _func_cpu_pass(i_pass, keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)

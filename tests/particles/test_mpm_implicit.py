@@ -102,8 +102,6 @@ def _signed_singular_values(F):
 
 
 def _reference_penalty(sigma, mu, lam):
-    """Compute the compression penalty k / 2 |min(sigma - s, 0)|^2 of the fixed corotated and Stable Neo-Hookean
-    energies."""
     k = EXTENSION_STIFFNESS * mu * (3.0 * lam + 2.0 * mu) / (lam + mu)
     d = np.minimum(sigma - EXTENSION_SIGMA_MIN, 0.0)
     return 0.5 * k * d @ d

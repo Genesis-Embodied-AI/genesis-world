@@ -524,7 +524,6 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     @qd.kernel
     def _kernel_count_constraints(self):
-        """The number of stretch, bending and volume constraints of every particle."""
         for i_p in range(self._n_particles):
             self.constraint_counts[i_p] = qd.Vector.zero(gs.qd_float, 3)
         for i_e in range(self._n_edges):
@@ -546,7 +545,6 @@ class PBDSolver(ParticleSolver):
 
     @qd.kernel
     def _kernel_reset_lambda(self):
-        """Clear the extended position based dynamics (XPBD) Lagrange multipliers at the start of a substep."""
         for i_e, i_b in qd.ndrange(self._n_edges, self._B):
             self.edges_lambda[i_e, i_b] = 0.0
         for i_ie, i_b in qd.ndrange(self._n_inner_edges, self._B):
@@ -619,7 +617,6 @@ class PBDSolver(ParticleSolver):
 
     @qd.func
     def _func_within_budget(self, budget: qd.template()):
-        """Whether the current iteration of the constraint loop is within the iteration budget of a constraint kind."""
         return self._loop_iter[()] < budget
 
     @qd.func(requires_top_level=True)
@@ -840,9 +837,7 @@ class PBDSolver(ParticleSolver):
     @qd.func
     def _func_solve_collision_start(self, i, j, i_b):
         """The non-penetration of two particles at their start positions, as a correction of the first, for the
-        pre-stabilization.
-
-        The correction moves particle i away from particle j."""
+        pre-stabilization."""
         cur_dist = (self.particles_reordered[i, i_b].ipos - self.particles_reordered[j, i_b].ipos).norm(gs.EPS)
         rest_dist = (
             self.particles_info_reordered[i, i_b].pos_rest - self.particles_info_reordered[j, i_b].pos_rest
@@ -931,10 +926,6 @@ class PBDSolver(ParticleSolver):
 
     @qd.func
     def _func_insert_collision_neighbor(self, i_p, i_b, j, dist):
-        """Keep a particle among the nearest `COLLISION_NEIGHBORS` collision candidates of another, replacing the
-        farthest one once they are full.
-
-        The candidate is particle j at distance dist of particle i_p in environment i_b."""
         n = self.collision_nbr_count[i_p, i_b]
         if n < COLLISION_NEIGHBORS:
             self.collision_nbrs[i_p, i_b, n] = j
@@ -985,7 +976,6 @@ class PBDSolver(ParticleSolver):
 
     @qd.func(requires_top_level=True)
     def _func_solve_density(self, f):
-        """One iteration of the density constraints of the liquid particles, within their iteration budget."""
         for _ in qd.static(range(1)):
             # ---Calculate lambdas---
             for i_p, i_b in qd.ndrange(self._n_particles, self._B):
@@ -1180,11 +1170,6 @@ class PBDSolver(ParticleSolver):
 
     @qd.kernel(graph=True)
     def _kernel_constraint_loop(self, f: qd.i32):
-        """The constraint iterations of a substep as one graph.
-
-        Every iteration solves the topology constraints, every kind as its own group within its own iteration budget,
-        then the density constraints and the contact group. The loop runs `solver_iterations` iterations, or stops once
-        the largest correction of an iteration falls below `position_tolerance`."""
         self._loop_iter[()] = 0
         self._is_loop_running[()] = 1
         while qd.graph.do_while(self._is_loop_running):

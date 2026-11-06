@@ -1496,7 +1496,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.constraint_solver.resolve()
 
     def _func_constraint_assemble(self):
-        """Assemble the constraint rows of a substep, which its constraint solve resolves."""
         if not self._disable_constraint:
             self.constraint_solver.add_equality_constraints()
 
