@@ -1,7 +1,6 @@
 import os
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, Executor
-from functools import partial
 
 import torch
 import numpy as np
@@ -129,10 +128,13 @@ class FrameImageExporter:
 
         # Loop over single camera data asynchronously
         with ThreadPoolExecutor() as executor:
+            writes = []
             for i_cam, frame_data in zip(
                 cameras_idx, zip(*(e if e is not None else (None,) * num_cameras for e in frames_data))
             ):
-                self.export_frame_single_camera(i_step, i_cam, *frame_data, executor=executor)
+                writes.extend(self.export_frame_single_camera(i_step, i_cam, *frame_data, executor=executor))
+            for write in writes:
+                write.result()
 
     def export_frame_single_camera(
         self,
@@ -167,7 +169,7 @@ class FrameImageExporter:
             Compression level when exporting images as PNG. Default to 3.
         executor: Executor, optional
             Executor to which I/O bounded jobs (saving to PNG) will be submitted. A local executor will be instantiated
-            if none is provided.
+            if none is provided. With a caller-owned executor, the returned futures report write failures.
         """
         # Postpone import of OpenCV at runtime to reduce hard system dependencies
         import cv2
@@ -178,13 +180,23 @@ class FrameImageExporter:
         # Early return if nothing to do
         if all(e is None for e in frame_data):
             gs.logger.debug("No images to export.")
-            return
+            return [] if executor is not None else None
 
         # Instantiate a new executor if none is provided
-        is_local_executor = False
         if executor is None:
-            is_local_executor = True
-            executor = ThreadPoolExecutor()
+            with ThreadPoolExecutor() as pool:
+                writes = self.export_frame_single_camera(
+                    i_step, i_cam, rgb, depth, segmentation, normal, compress_level=compress_level, executor=pool
+                )
+                for write in writes:
+                    write.result()
+            return
+
+        def write_image(path, data, params):
+            if not cv2.imwrite(path, data, params=params):
+                raise OSError(f"Failed to write frame to '{path}'.")
+
+        writes = []
 
         # Loop over each image type
         exported_types = []
@@ -226,16 +238,14 @@ class FrameImageExporter:
             cv2_params = [cv2.IMWRITE_PNG_COMPRESSION, compress_level] if compress_level is not None else None
             for i_env, img_data in enumerate(imgs_data):
                 frame_path = os.path.join(self.export_dir, f"{img_type}_cam{i_cam}_env{i_env}_{i_step:03d}.png")
-                executor.submit(partial(cv2.imwrite, params=cv2_params), frame_path, img_data)
+                writes.append(executor.submit(write_image, frame_path, img_data, cv2_params))
             exported_types.append((len(imgs_data), img_type.name.lower()))
 
         if exported_types:
             types_str = ", ".join(f"{num} {type}" for num, type in exported_types)
             gs.logger.info(
-                f"Exported ~<{sum(num for num, _ in exported_types)} frame(s) ({types_str})>~ "
+                f"Queued ~<{sum(num for num, _ in exported_types)} frame(s) ({types_str})>~ "
                 f"from camera ~<{i_cam}>~ at step ~<{i_step}>~ to ~<{self.export_dir}>~"
             )
 
-        # Shutdown executor if necessary
-        if is_local_executor:
-            executor.shutdown(wait=True)
+        return writes

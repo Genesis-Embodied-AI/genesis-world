@@ -1132,6 +1132,20 @@ def test_as_grayscale_image(tmp_path):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("all_cameras", [False, True])
+def test_frame_export_propagates_write_failures(tmp_path, all_cameras):
+    output_dir = tmp_path / "frames"
+    exporter = FrameImageExporter(output_dir)
+    output_dir.rmdir()
+    rgb = np.zeros((3, 4, 3), dtype=np.uint8)
+    with pytest.raises(OSError, match="RGB_cam0_env0_001.png"):
+        if all_cameras:
+            exporter.export_frame_all_cameras(1, rgb=[rgb])
+        else:
+            exporter.export_frame_single_camera(1, 0, rgb=rgb)
+
+
+@pytest.mark.required
 def test_running_mean():
     # A window mean covers the latest samples alone once there are enough, and an exponential mean starts from the first
     window_mean = RunningMean(window=3)
