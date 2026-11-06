@@ -146,6 +146,14 @@ def func_link_force_to_dofs(
                 i_a = links_info.parent_idx[I_a]
 
 
+@qd.func(requires_top_level=True)
+def func_clear_link_stiffness(rigid_data: RigidNewtonScratch):
+    """Clear the contact stiffness of every link, before the contacts add theirs to the preconditioner."""
+    qd.loop_config(name="mpm_rigid_link_K_clear")
+    for i_l, i_b in qd.ndrange(rigid_data.link_K.shape[0], rigid_data.link_K.shape[1]):
+        rigid_data.link_K[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
+
+
 # ============================================== Layer 1: Rigid block ===============================================
 
 

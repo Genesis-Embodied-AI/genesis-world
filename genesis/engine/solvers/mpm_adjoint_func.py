@@ -12,9 +12,9 @@ the `.grad` of the particle arrays, clears it, and adds the adjoint of frame f i
    differential of the first Piola-Kirchhoff stress,
 4. the reverse of the particle-to-grid transfer (P2G) from the adjoint of the node momentum and mass.
 
-The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the adjoint
-solve through the Hessian and the pullback through their weights and coefficients (see func_wall_contact_adjoint), as
-the rows of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs enter it through the particle
+The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall pairs enter the
+adjoint solve through the Hessian and the pullback through their weights and coefficients (see
+func_wall_contact_adjoint), as the pairs of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs enter it through the particle
 position and the pose of their links (see func_constraint_adjoint). The return maps of G2P reverse by hand (see
 return_map_vjp), and the snow hardening reverses through the Lame parameters read by the energy.
 """
@@ -27,7 +27,6 @@ from genesis.utils.array_class import LinksState
 
 from .mpm_data import (
     BLOCK_CELLS,
-    CONTACT_ROWS,
     MpmGridScratch,
     MpmInfo,
     MpmLinearScratch,
@@ -36,6 +35,7 @@ from .mpm_data import (
     MpmParticles,
     MpmParticlesInfo,
     MpmParticlesNG,
+    MpmWallPairs,
 )
 from .mpm_func import (
     LIQUID_J_MIN,
@@ -56,6 +56,7 @@ from .mpm_func import (
     stencil_node_slots,
     trial_deformation,
     unpack_block,
+    wall_normal,
 )
 
 
@@ -171,66 +172,53 @@ def func_wall_contact_adjoint(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
+    pairs: MpmWallPairs,
     particles_info: MpmParticlesInfo,
     mpm_info: MpmInfo,
 ):
-    """Pull the wall rows of every valid particle (see func_build_wall_rows) back into the adjoint of the particles.
+    """Pull the wall pairs (see func_build_wall_pairs) back into the adjoint of the particles.
 
-    The adjoints add to frame f. A row k on the trial displacement Delta = sum_a w_a u_a, of normal J = +-e_d, adds D c
-    J . delta to lambda^T grad_u E when active, with c = J . Delta - t and delta = sum_a w_a lambda_a. Its pullback is
-    that of the Rigid rows (see func_rigid_contact_adjoint) with a fixed wall in place of the link: through the weights,
-    and through the coefficients via the gap, the velocity along the normal and the inverse weight of the particle."""
+    The adjoints add to frame f. The row of a pair on the trial displacement Delta = sum_a w_a u_a, of inward normal J,
+    adds D c J . delta to lambda^T grad_u E when active, with c = J . Delta - t and delta = sum_a w_a lambda_a. Its
+    pullback is that of the Rigid rows (see func_rigid_contact_adjoint) with a fixed wall in place of the link: through
+    the weights, and through the coefficients via the gap, the velocity along the normal and the inverse weight of the
+    particle."""
     qd.loop_config(name="mpm_wall_contact_adjoint")
-    for s in range(grid.n_valid[()]):
+    for i_pair in range(pairs.n_pairs[()]):
+        s = pairs.s[i_pair]
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-        has_row = False
-        for d in qd.static(range(3)):
-            has_row = has_row or newton.contact_D[CONTACT_ROWS * s + d] > 0.0
-        if has_row:
-            slots = stencil_node_slots(env, cell, grid)
-            x_p = particles.pos[f, i_p, i_b]
-            v_p = particles.vel[f, i_p, i_b]
-            w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
-            Delta = qd.Vector.zero(gs.qd_float, 3)
-            delta = qd.Vector.zero(gs.qd_float, 3)
-            for a in qd.static(range(8)):
-                Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
-                row = 3 * slots[a]
-                delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+        slots = stencil_node_slots(env, cell, grid)
+        x_p = particles.pos[f, i_p, i_b]
+        v_p = particles.vel[f, i_p, i_b]
+        w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
+        Delta = qd.Vector.zero(gs.qd_float, 3)
+        delta = qd.Vector.zero(gs.qd_float, 3)
+        for a in qd.static(range(8)):
+            Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
+            row = 3 * slots[a]
+            delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+        D = pairs.D[i_pair]
+        J = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
+        c = J.dot(Delta) - pairs.t[i_pair]
+        if D > 0.0 and c < 0.0:
+            a_k = J.dot(delta)
+            Delta_bar = -D * a_k * J
+            delta_bar = -D * c * J
+            # The row as func_build_wall_pairs built it: the gap to the wall along J, whose gradient in x_p is J
+            phi = J.dot(x_p - mpm_info.wall_lower[()])
+            if pairs.sign[i_pair] < 0.0:
+                phi = J.dot(x_p - mpm_info.wall_upper[()])
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()
             W = particles_info.contact_invweight[i_p]
-            sol_params = mpm_info.wall_sol_params[()]
-            x_bar = qd.Vector.zero(gs.qd_float, 3)
-            v_bar = qd.Vector.zero(gs.qd_float, 3)
-            R_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
-            Delta_bar = qd.Vector.zero(gs.qd_float, 3)
-            delta_bar = qd.Vector.zero(gs.qd_float, 3)
-            for d in qd.static(range(3)):
-                k = CONTACT_ROWS * s + d
-                D = newton.contact_D[k]
-                J = newton.contact_dir[k]
-                c = J.dot(Delta) - newton.contact_t[k]
-                if D > 0.0 and c < 0.0:
-                    a_k = J.dot(delta)
-                    Delta_bar -= D * a_k * J
-                    delta_bar -= D * c * J
-                    # The row as func_build_wall_rows built it
-                    phi = x_p[d] - mpm_info.wall_lower[()][d]
-                    sign = gs.qd_float(1.0)
-                    if mpm_info.wall_upper[()][d] - x_p[d] < phi:
-                        phi = mpm_info.wall_upper[()][d] - x_p[d]
-                        sign = -1.0
-                    n = qd.Vector.zero(gs.qd_float, 3)
-                    n[d] = sign
-                    n_rest = R.transpose() @ n
-                    invweight = n_rest.dot(W @ n_rest)
-                    phi_bar, vel_bar, invweight_bar = band_row_bw(
-                        sol_params, phi, sign * v_p[d], invweight, dt, -c * a_k, D * a_k
-                    )
-                    x_bar[d] += sign * phi_bar
-                    v_bar[d] += sign * vel_bar
-                    R_bar += (2.0 * invweight_bar) * n.outer_product(W @ n_rest)
+            n_rest = R.transpose() @ J
+            invweight = n_rest.dot(W @ n_rest)
+            phi_bar, vel_bar, invweight_bar = band_row_bw(
+                mpm_info.wall_sol_params[()], phi, J.dot(v_p), invweight, dt, -c * a_k, D * a_k
+            )
+            x_bar = phi_bar * J
+            v_bar = vel_bar * J
+            R_bar = (2.0 * invweight_bar) * J.outer_product(W @ n_rest)
             for a in qd.static(range(8)):
                 u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
                 row = 3 * slots[a]

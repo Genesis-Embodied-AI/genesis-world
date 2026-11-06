@@ -5,11 +5,11 @@ own contact rows.
 
 The joint solve minimizes E(y, theta) over y = (u, x). Its backward pass solves H lambda = y_bar and pulls back
 theta_bar = -d/dtheta [lambda^T grad_y E] at the solution, with y and lambda held. The contact rows' share of lambda^T
-grad_y E is Phi = sum_s g_s . delta_s over the particles with Rigid rows, g_s = sum_k D_k c_k J_k over the active rows
-of particle s, c_k = J_k . Delta_s - t_k, with Delta_s = sum_a w_a u_a - dr(x) the displacement of the particle relative
-to its contact point and delta_s the same map of lambda. Phi depends on theta through the weights and the arm of the
-particle, the cdofs of its link, and the row coefficients J, D and t, which `func_build_rigid_rows` derives from the
-particle state, the pose of the geom and the velocity of the link.
+grad_y E is Phi = sum g . delta over the pairs, g = sum_k D_k c_k J_k over the active rows of the pair,
+c_k = J_k . Delta - t_k, with Delta = sum_a w_a u_a - dr(x) the displacement of the particle relative to its contact
+point and delta the same map of lambda. Phi depends on theta through the weights and the arm of the particle, the cdofs
+of its link, and the row coefficients J, D and t, which `func_build_rigid_pairs` derives from the particle state, the
+pose of the geom and the velocity of the link.
 
 The friction, the impedance parameters and the inverse weight matrix of the particle are model constants (see
 func_contact_invweight).
@@ -22,9 +22,7 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.mpm_adjoint_func import band_row_bw, polar_rotation_bw
 from genesis.engine.solvers.mpm_data import (
-    CONTACT_ROWS,
     PYRAMID_ROWS,
-    WALL_ROWS,
     MpmGridScratch,
     MpmInfo,
     MpmLinearScratch,
@@ -32,12 +30,12 @@ from genesis.engine.solvers.mpm_data import (
     MpmParticles,
     MpmParticlesInfo,
 )
-from genesis.engine.solvers.mpm_func import particle_of_sorted, q1_stencil, stencil_node_slots
+from genesis.engine.solvers.mpm_func import particle_of_sorted, pyramid_dirs, q1_stencil, stencil_node_slots
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 
-from .mpm_rigid_func import MpmRigidContactScratch, geom_normal
+from .mpm_rigid_func import MpmRigidPairs, geom_normal
 
 # ============================================== Layer 0: reverses ===============================================
 
@@ -179,7 +177,7 @@ def func_rigid_contact_adjoint(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
-    rows: MpmRigidContactScratch,
+    pairs: MpmRigidPairs,
     rigid_data: RigidNewtonScratch,
     geoms_state: GeomsState,
     links_state: LinksState,
@@ -192,7 +190,7 @@ def func_rigid_contact_adjoint(
     mpm_info: MpmInfo,
     config: qd.template(),
 ):
-    """Pull the Rigid contact rows of every particle back into the adjoints of the particles and of Rigid's state.
+    """Pull the MPM-Rigid pairs back into the adjoints of the particles and of Rigid's state.
 
     The adjoints add to frame f of the particles, from the joint solution (u*, x*) and the adjoint lambda =
     (`linear.solution`, `rigid_data.sol`). With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k,
@@ -202,10 +200,10 @@ def func_rigid_contact_adjoint(
     velocity at the particle."""
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
-    for s in range(grid.n_valid[()]):
-        i_l = rows.link[s]
+    for i_pair in range(pairs.n_pairs[()]):
+        i_l = pairs.link[i_pair]
         if i_l >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
+            i_p, i_b, env, cell = particle_of_sorted(pairs.s[i_pair], grid, mpm_info)
             slots = stencil_node_slots(env, cell, grid)
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
@@ -230,11 +228,11 @@ def func_rigid_contact_adjoint(
             J_bar = qd.Matrix.zero(gs.qd_float, PYRAMID_ROWS, 3)
             Delta_bar = qd.Vector.zero(gs.qd_float, 3)
             delta_bar = qd.Vector.zero(gs.qd_float, 3)
+            dirs = pyramid_dirs(pairs.normal[i_pair], pairs.friction[i_pair])
             for i in qd.static(range(PYRAMID_ROWS)):
-                k = CONTACT_ROWS * s + WALL_ROWS + i
-                D = newton.contact_D[k]
-                J = newton.contact_dir[k]
-                c = J.dot(Delta) - newton.contact_t[k]
+                D = pairs.D[i_pair][i]
+                J = dirs[i, :]
+                c = J.dot(Delta) - pairs.t[i_pair][i]
                 if D > 0.0 and c < 0.0:
                     a_k = J.dot(delta)
                     D_bar[i] = -c * a_k
@@ -266,9 +264,9 @@ def func_rigid_contact_adjoint(
                     dofs_state.cdof_ang.grad[i_d, i_b] += -(x_d * r_cross_Delta_bar + lam_d * r_cross_delta_bar)
                 i_a = links_info.parent_idx[I_a]
 
-            # The row coefficients, replayed as func_build_rigid_rows built them
-            i_g = newton.query_idx[s]
-            phi = newton.query_phi[s]
+            # The row coefficients, replayed as func_build_rigid_pairs built them
+            i_g = pairs.geom[i_pair]
+            phi = pairs.phi[i_pair]
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
             v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
             v_rel = v_p - v_r

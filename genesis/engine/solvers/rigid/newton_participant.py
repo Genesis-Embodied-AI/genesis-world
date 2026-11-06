@@ -95,6 +95,10 @@ class RigidNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
+    def func_factor_begin(self):
+        newton_func.func_clear_link_stiffness(self.rigid_data)
+
+    @qd.func(requires_top_level=True)
     def func_factor(self):
         newton_func.func_rigid_factor(
             self.rigid_data,

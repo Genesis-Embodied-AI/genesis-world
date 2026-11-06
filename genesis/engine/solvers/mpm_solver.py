@@ -40,7 +40,6 @@ from genesis.utils.misc import (
 
 from . import mpm_adjoint_func, mpm_func
 from .mpm_data import (
-    CAPACITY_GROW_FACTOR,
     MIN_BLOCKS,
     MpmErrno,
     MpmForceFields,
@@ -52,12 +51,15 @@ from .mpm_data import (
     MpmParticles,
     MpmParticlesInfo,
     MpmParticlesNG,
+    MpmWallPairs,
     build_mpm_grid,
     build_mpm_linear,
     build_mpm_newton,
+    build_wall_pairs,
     initial_capacities,
     triplet_capacity,
 )
+from .newton_contact import CAPACITY_GROW_FACTOR, MIN_SLOTS, SRC_ITERATE, grown_capacity, retire_scratch
 from .newton_solver import NewtonDevice
 from .particle_solver import ParticleSolver
 
@@ -101,7 +103,15 @@ class MpmNewtonParticipant(NewtonDevice):
 
     It is the one holder of the grid, the Newton state and the linear system, which grow by building a struct again and
     swapping it here (see `replace_scratch`), so that every reader goes through the participant.
+
+    It is also the vertex map of the sorted particles in the contacts of the solve (see newton_contact.py): a particle
+    is a contact vertex of displacement sum_a w_a u_a over the movable nodes of its stencil. And it is the pair kind of
+    the contacts of the particles with the domain walls, `wall_pairs`.
     """
+
+    # A wall pair writes the gradient and the Hessian of its row on its particle alone
+    n_doublets = 1
+    n_triplets = 1
 
     def __init__(
         self,
@@ -111,7 +121,9 @@ class MpmNewtonParticipant(NewtonDevice):
         grid: MpmGridScratch,
         newton: MpmNewtonScratch,
         linear: MpmLinearScratch,
+        wall_pairs: MpmWallPairs,
         mpm_info: MpmInfo,
+        n_sort: int,
     ):
         self.particles = particles
         self.particles_info = particles_info
@@ -119,8 +131,18 @@ class MpmNewtonParticipant(NewtonDevice):
         self.grid = grid
         self.newton = newton
         self.linear = linear
+        self.wall_pairs = wall_pairs
         self.mpm_info = mpm_info
+        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_offset.fill(0)
+        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_count.fill(n_sort)
         self._scratches_replaced = []
+
+    def replace_wall_pairs(self, wall_pairs: MpmWallPairs) -> None:
+        """Swap the wall pairs, and free the arrays of those replaced (see retire_scratch)."""
+        retire_scratch(self.wall_pairs, self._scratches_replaced)
+        self.wall_pairs = wall_pairs
 
     def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, linear: MpmLinearScratch) -> None:
         """Swap the grid, the Newton state and the linear system, and free the arrays of those replaced.
@@ -144,6 +166,7 @@ class MpmNewtonParticipant(NewtonDevice):
         yield from iter_data(self, "grid")
         yield from iter_data(self, "newton")
         yield from iter_data(self, "linear")
+        yield from iter_data(self, "wall_pairs")
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int):
@@ -167,9 +190,12 @@ class MpmNewtonParticipant(NewtonDevice):
         func_sort_reduce_bcoo(self.linear.matrix, block_scalars=9)
 
     @qd.func(requires_top_level=True)
-    def func_factor(self):
+    def func_factor_begin(self):
         mpm_func.func_reset_brick(self.grid, self.linear)
         mpm_func.func_gather_brick(self.linear)
+
+    @qd.func(requires_top_level=True)
+    def func_factor(self):
         mpm_func.func_invert_brick(self.grid, self.linear)
 
     @qd.func(requires_top_level=True)
@@ -190,7 +216,7 @@ class MpmNewtonParticipant(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_matvec_dot(self, pcg_scalars: qd.template()):
-        # The product of the matrix added p.Ap in energy form, and the contact rows add their cross terms to it
+        # The product of the matrix added p.Ap in energy form, and the contacts add theirs (see func_vertex_add_product)
         pass
 
     @qd.func(requires_top_level=True)
@@ -232,6 +258,82 @@ class MpmNewtonParticipant(NewtonDevice):
             self.mpm_info,
             is_trial,
         )
+
+    # ------------------------------------------- vertex map -------------------------------------------
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_begin(self, f: int, src: qd.template()):
+        pass
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_end(self, dst: qd.template()):
+        pass
+
+    @qd.func
+    def func_vertex_env(self, i_v: int):
+        i_p, i_b, env, cell = mpm_func.particle_of_sorted(i_v, self.grid, self.mpm_info)
+        return i_b
+
+    @qd.func
+    def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        value = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(src == SRC_ITERATE):
+            value = mpm_func.particle_node_sum(slots, w, self.newton.u)
+        else:
+            value = mpm_func.particle_node_sum(slots, w, self.linear.pcg.p)
+        return value
+
+    @qd.func
+    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        mpm_func.add_particle_node_vector(slots, w, y, self.linear.b_rhs)
+
+    @qd.func
+    def func_vertex_add_product(
+        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
+    ):
+        # The product of the MPM matrix adds p.Ap itself (see func_matvec_dot), and so does that of the contacts
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        mpm_func.add_particle_node_vector(slots, w, y, self.linear.pcg.ap)
+        qd.atomic_add(pcg_scalars.p_dot_ap[env], p.dot(y))
+
+    @qd.func
+    def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        mpm_func.add_particle_brick_blocks(slots, w, H, self.linear)
+
+    # ------------------------------------------- wall pairs -------------------------------------------
+
+    @qd.func
+    def func_pair_count(self):
+        return self.wall_pairs.n_pairs[()]
+
+    @qd.func(requires_top_level=True)
+    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
+        mpm_func.func_wall_pair_terms(
+            f,
+            contact.matrices.doublet_offsets[i_kind],
+            contact.matrices.triplet_offsets[i_kind],
+            self.vertex_offset[()],
+            self.particles,
+            self.grid,
+            self.newton,
+            self.wall_pairs,
+            self.mpm_info,
+            contact,
+        )
+
+    @qd.func(requires_top_level=True)
+    def func_pair_energy(self, f: int, control: qd.template(), is_trial: qd.template()):
+        if qd.static(is_trial):
+            mpm_func.func_wall_pair_energy(
+                f, self.particles, self.grid, self.newton, self.wall_pairs, control.energy_trial, self.mpm_info
+            )
+        else:
+            mpm_func.func_wall_pair_energy(
+                f, self.particles, self.grid, self.newton, self.wall_pairs, control.energy_start, self.mpm_info
+            )
 
 
 @qd.data_oriented
@@ -380,7 +482,9 @@ class MPMSolver(ParticleSolver):
             grid,
             build_mpm_newton(n_sort, max_blocks),
             build_mpm_linear(max_blocks, max_triplets),
+            build_wall_pairs(MIN_SLOTS),
             self.mpm_info,
+            n_sort,
         )
         self._mpm_force_fields = MpmForceFields(self._ffs)
 
@@ -686,7 +790,7 @@ class MPMSolver(ParticleSolver):
         """Run the substep up to the Newton solve.
 
         The stages are the grid, the particle-to-grid transfer with the force fields, the physical Hessian at u = 0 and
-        the wall rows. The couplings with MPM build their contact rows after them."""
+        the wall pairs. The couplings with MPM build their contact pairs after them."""
         if not self._is_mpm_sized:
             self._size_to_particles(f)
         rigid = self._sim.rigid_solver
@@ -718,7 +822,13 @@ class MPMSolver(ParticleSolver):
         # The physical Hessian at u = 0 sizes the triplet storage for the substep's fixed grid topology, which every
         # assembly of the Newton loop shares
         self._assemble(f)
-        kernel_wall_rows(f, self.particles, participant.grid, participant.newton, self.particles_info, mpm_info)
+        kernel_wall_pairs(f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info)
+        n_pairs = int(qd_to_numpy(participant.wall_pairs.n_pairs))
+        if n_pairs > participant.wall_pairs.s.shape[0]:
+            participant.replace_wall_pairs(build_wall_pairs(grown_capacity(n_pairs)))
+            kernel_wall_pairs(
+                f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info
+            )
 
     def newton_assemble(self, f, is_exact=False):
         self._assemble(f, is_exact)
@@ -781,6 +891,7 @@ class MPMSolver(ParticleSolver):
             participant.grid,
             participant.newton,
             participant.linear,
+            participant.wall_pairs,
             self.particles_info,
             self.mpm_materials,
             self._mpm_force_fields,
@@ -1428,26 +1539,26 @@ def kernel_predict(
     force_fields: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Transfer the particles to the grid with the force fields, and reset the contact rows and the Newton state."""
+    """Transfer the particles to the grid with the force fields, and reset the Newton state."""
     dt = mpm_info.substep_dt[()]
     mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, mpm_info)
     mpm_func.func_apply_force_fields(t, dt, grid, force_fields, mpm_info)
-    mpm_func.func_reset_contact_rows(grid, newton)
+    mpm_func.func_stage_particle_pos(f, particles, grid, newton, mpm_info)
     mpm_func.func_newton_reset(grid, newton)
 
 
 @qd.kernel
-def kernel_wall_rows(
+def kernel_wall_pairs(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
+    pairs: MpmWallPairs,
     particles_info: MpmParticlesInfo,
     mpm_info: MpmInfo,
 ):
-    """Build the wall rows of the substep."""
+    """Build the wall pairs of the substep."""
     dt = mpm_info.substep_dt[()]
-    mpm_func.func_build_wall_rows(f, dt, particles, grid, newton, particles_info, mpm_info)
+    mpm_func.func_build_wall_pairs(f, dt, particles, grid, pairs, particles_info, mpm_info)
 
 
 @qd.kernel
@@ -1555,6 +1666,7 @@ def kernel_adjoint_pullback(
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     linear: MpmLinearScratch,
+    wall_pairs: MpmWallPairs,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     force_fields: qd.template(),
@@ -1562,7 +1674,7 @@ def kernel_adjoint_pullback(
 ):
     """Pull the adjoint solution back into the start frame of a substep, then clear the adjoint of its end frame.
 
-    The pullback includes the share of the wall rows and the reverse of the particle-to-grid transfer into frame `f`,
+    The pullback includes the share of the wall pairs and the reverse of the particle-to-grid transfer into frame `f`,
     and the adjoint of frame `f + 1` is cleared after it (see mpm_adjoint_func). `t` is the time at which the forward
     substep evaluated the force fields."""
     dt = mpm_info.substep_dt[()]
@@ -1570,5 +1682,7 @@ def kernel_adjoint_pullback(
     mpm_adjoint_func.func_adjoint_particles(
         f, dt, gravity, particles, grid, newton, linear, particles_info, materials, mpm_info
     )
-    mpm_adjoint_func.func_wall_contact_adjoint(f, dt, particles, grid, newton, linear, particles_info, mpm_info)
+    mpm_adjoint_func.func_wall_contact_adjoint(
+        f, dt, particles, grid, newton, linear, wall_pairs, particles_info, mpm_info
+    )
     mpm_adjoint_func.func_adjoint_consume(f, particles, particles_ng, mpm_info)

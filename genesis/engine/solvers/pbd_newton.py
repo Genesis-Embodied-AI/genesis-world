@@ -14,6 +14,7 @@ import quadrants as qd
 
 import genesis as gs
 
+from .newton_contact import SRC_ITERATE
 from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 
 
@@ -68,7 +69,7 @@ def func_pbd_begin(pbd_data: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pbd_gradient(pbd_data: qd.template()):
-    """The gradient m (x - x~) of the inertia and its diagonal block m I, before the contact rows add theirs."""
+    """The gradient m (x - x~) of the inertia and its diagonal block m I, before the contacts add theirs."""
     qd.loop_config(name="mpm_pbd_gradient")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         grad = qd.Vector.zero(gs.qd_float, 3)
@@ -82,7 +83,7 @@ def func_pbd_gradient(pbd_data: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pbd_factor(pbd_data: qd.template()):
-    """The inverse of every particle's diagonal block, once the contact rows added theirs."""
+    """The inverse of every particle's diagonal block, once the contacts added theirs."""
     qd.loop_config(name="mpm_pbd_factor")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         pbd_data.diag_inv[i_q, i_b] = pbd_data.diag_inv[i_q, i_b].inverse()
@@ -126,7 +127,7 @@ def func_pbd_pcg_init_direction(pbd_data: qd.template(), pcg_scalars: qd.templat
 
 @qd.func(requires_top_level=True)
 def func_pbd_matvec(pbd_data: qd.template()):
-    """Ap = m p over the PBD rows, before the contact rows add their term."""
+    """Ap = m p over the PBD rows, before the contacts add their term."""
     qd.loop_config(name="mpm_pbd_matvec")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         m = gs.qd_float(0.0)
@@ -238,6 +239,12 @@ class PbdNewtonParticipant(NewtonDevice):
 
     def __init__(self, pbd, n_envs: int):
         self.pbd_data = PbdNewtonData(pbd, n_envs)
+        # The particles of every environment are contact vertices (see newton_contact.py)
+        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_offset.fill(0)
+        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_count.fill(n_envs * pbd.n_particles)
+        self.n_vertex_particles = max(pbd.n_particles, 1)
 
     @property
     def n_particles(self):
@@ -262,6 +269,10 @@ class PbdNewtonParticipant(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int):
         func_pbd_gradient(self.pbd_data)
+
+    @qd.func(requires_top_level=True)
+    def func_factor_begin(self):
+        pass
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
@@ -310,6 +321,51 @@ class PbdNewtonParticipant(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         func_pbd_energy(self.pbd_data, control, is_trial)
+
+    # ------------------------------------------- vertex map -------------------------------------------
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_begin(self, f: int, src: qd.template()):
+        pass
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_end(self, dst: qd.template()):
+        pass
+
+    @qd.func
+    def func_vertex_env(self, i_v: int):
+        return i_v // self.n_vertex_particles
+
+    @qd.func
+    def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
+        i_b = i_v // self.n_vertex_particles
+        i_q = i_v - i_b * self.n_vertex_particles
+        value = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(src == SRC_ITERATE):
+            value = self.particles_reordered[i_q, i_b].pos - self.particles_reordered[i_q, i_b].ipos
+        else:
+            value = self.pbd_data.p[i_q, i_b]
+        return value
+
+    @qd.func
+    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
+        i_b = i_v // self.n_vertex_particles
+        i_q = i_v - i_b * self.n_vertex_particles
+        qd.atomic_add(self.pbd_data.grad[i_q, i_b], y)
+
+    @qd.func
+    def func_vertex_add_product(
+        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
+    ):
+        i_b = i_v // self.n_vertex_particles
+        i_q = i_v - i_b * self.n_vertex_particles
+        qd.atomic_add(self.pbd_data.ap[i_q, i_b], y)
+
+    @qd.func
+    def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
+        i_b = i_v // self.n_vertex_particles
+        i_q = i_v - i_b * self.n_vertex_particles
+        qd.atomic_add(self.pbd_data.diag_inv[i_q, i_b], H)
 
 
 @qd.kernel

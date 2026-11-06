@@ -20,6 +20,8 @@ from genesis.engine.numerics.linear_pcg import PCG_ROWS, PCGWorkspaceScratch
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHashScratch, open_addressing_hash_sizes
 from genesis.utils.data import ENVS, Data, DataKind, Size, field, requires
 
+from .newton_contact import PAIRS
+
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
 BLOCK_DIM = 4
 BLOCK_CELLS = BLOCK_DIM**3
@@ -37,10 +39,8 @@ BRICK_DIM = BRICK_NODES * 3
 # Bricks inverted per thread block of the inversion, one warp each
 BRICK_INVERT_WARPS = 4
 
-# Soft contact rows of a particle: one domain-wall row per axis, then the pyramid rows of its deepest Rigid contact
-WALL_ROWS = 3
+# Rows of the friction pyramid of a contact pair: n +- mu d1 and n +- mu d2 (see pyramid_dirs)
 PYRAMID_ROWS = 4
-CONTACT_ROWS = WALL_ROWS + PYRAMID_ROWS
 
 # Sizes of the data of the implicit step that grows: the sorted particle keys, the blocks of the grid and its particle
 # blocks, the nodes of the blocks, the keys of the neighbor blocks of the particle blocks, and the bricks of the nodes
@@ -56,8 +56,6 @@ BRICK_SCRATCH = Size("brick_scratch")
 # Sizes of the particle data: the frames of the substep window and the particles
 FRAMES = Size("frames")
 PARTICLES = Size("particles")
-# Size of the data of the sorted particles that a coupling owns, the sort capacity n_envs * n_particles
-SORTED_PARTICLES = Size("sorted_particles")
 # Sizes of the material table: the materials and the parameters of each
 MATERIALS = Size("materials")
 MATERIAL_PARAMS = Size("material_params")
@@ -204,8 +202,7 @@ class MpmGridScratch(Data, kind=DataKind.SCRATCH):
 
 
 class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
-    """Newton state of the grid displacement `u`, the per-particle staging of the assembly, and the soft contact rows
-    of the particles."""
+    """Newton state of the grid displacement `u` and the per-particle staging of the assembly."""
 
     u: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
     u_temp: qd.Tensor = field(float, shape=(3 * NODES,), ndarray=True)
@@ -216,37 +213,33 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     adj_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
     # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
     g_p: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
-    # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
-    g_contact: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # Per sorted particle: its position at the substep start, which the contact stages read for its stencil inside
+    # the graph of the conjugate gradient
+    # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, as the particle positions do
+    particle_pos: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    # Per sorted particle: the gradient of its constraint spring with respect to its trial displacement sum_a w_a u_a
+    g_spring: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
     # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
     # build them only once a constraint exists.
     constraint_spring: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
     constraint_damping: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
     constraint_target: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    # Soft contact rows, CONTACT_ROWS per sorted particle at CONTACT_ROWS s + r, on its trial displacement dx =
-    # sum_a w_a u_a: direction J, stiffness D (zero where there is no row) and target t of the row term
-    # 1/2 D min(0, J.dx - t)^2. The pyramid rows act on dx - dr instead, with dr the displacement over the substep of
-    # their contact point, which the coupling owning them writes (zero by default)
-    contact_dir: qd.Tensor = field((float, 3), shape=(CONTACT_ROWS * SORT,), ndarray=True)
-    contact_D: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
-    contact_t: qd.Tensor = field(float, shape=(CONTACT_ROWS * SORT,), ndarray=True)
-    contact_point_disp: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    # Whether a coupling built the pyramid rows of the particle, which the couplings building after it leave alone
-    # (see func_build_pbd_rows)
-    has_pyramid_rows: qd.Tensor = field(bool, shape=(SORT,), ndarray=True)
-    # Nearest obstacle of each sorted particle during a bounding volume hierarchy query: its gap, its index, and, for a
-    # triangle, the distance to it and the alignment of its normal with the direction to the particle (which together
-    # pick the triangle), the barycentric coordinates of the closest point and the contact normal. The query point and
-    # the frame at which the obstacles are read sit alongside, for the filter measuring the gaps.
-    query_phi: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
-    query_idx: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    query_dist: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
-    query_align: qd.Tensor = field(float, shape=(SORT,), ndarray=True)
-    query_bary: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    query_normal: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    query_pos: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
-    query_frame: qd.Tensor = field(int, ndarray=True)
+
+
+class MpmWallPairs(Data, kind=DataKind.SCRATCH):
+    """The contact pairs of the particles with the domain walls, one per particle and axis within the band of the
+    nearer wall of the axis (see func_build_wall_pairs).
+
+    A pair is a soft row on the trial displacement of sorted particle `s` along the inward normal `sign` e_axis, of
+    stiffness `D` and target `t`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+
+    n_pairs: qd.Tensor = field(int, ndarray=True)
+    s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    axis: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    sign: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    D: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
 
 
 class MpmLinearScratch(Data, kind=DataKind.SCRATCH):
@@ -336,6 +329,13 @@ def build_mpm_linear(max_blocks: int, max_triplets: int) -> MpmLinearScratch:
     return linear
 
 
+def build_wall_pairs(max_pairs: int) -> MpmWallPairs:
+    """Build the wall pairs of a capacity, with no pair."""
+    pairs = MpmWallPairs(sizes={PAIRS: max_pairs})
+    pairs.n_pairs.fill(0)
+    return pairs
+
+
 @qd.data_oriented
 class MpmForceFields:
     """The force fields acting on the material point method (MPM) grid, read with a static loop over the list."""
@@ -344,8 +344,6 @@ class MpmForceFields:
         self.force_fields = list(force_fields)
 
 
-# Slack a capacity gets when it grows on overflow: the new capacity is the demand times this factor
-CAPACITY_GROW_FACTOR = 1.2
 # Smallest block capacity, and the capacity before the first substep sizes the data to the particles
 MIN_BLOCKS = 64
 

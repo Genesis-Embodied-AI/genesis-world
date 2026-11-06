@@ -16,6 +16,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.utils.data import StaticConfig
 
+from .newton_contact import SRC_ITERATE
 from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 
 
@@ -24,7 +25,7 @@ from .newton_solver import NewtonDevice, NewtonHost, kernel_assemble_participant
 
 @qd.func(requires_top_level=True)
 def func_fem_factor(fem: qd.template()):
-    """FEM's preconditioner, the inverse of every vertex's diagonal block, once the contact rows added theirs."""
+    """FEM's preconditioner, the inverse of every vertex's diagonal block, once the contacts added theirs."""
     qd.loop_config(name="mpm_fem_factor")
     for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
         fem.pcg_state_v[i_b, i_v].prec = fem.pcg_state_v[i_b, i_v].diag3x3.inverse()
@@ -51,7 +52,7 @@ def func_fem_pcg_init(dt: float, fem: qd.template(), pcg_scalars: qd.template(),
 def func_fem_precondition(dt: float, fem: qd.template()):
     """z = M^-1 r by FEM's inverse 3x3 diagonal blocks, scaled to the joint energy.
 
-    A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contact rows leave it in
+    A vertex FEM holds at its target gets z = 0, so that its direction stays 0 and the contacts leave it in
     place."""
     qd.loop_config(name="mpm_fem_precondition")
     for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
@@ -73,7 +74,7 @@ def func_fem_pcg_init_direction(fem: qd.template(), pcg_scalars: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_fem_matvec(dt: float, fem: qd.template()):
-    """Ap = dt^2 H p over the FEM vertices with FEM's own operator, before the FEM rows add their term."""
+    """Ap = dt^2 H p over the FEM vertices with FEM's own operator, before the contacts add their term."""
     fem.solver.compute_Ap()
     qd.loop_config(name="mpm_fem_matvec_scale")
     for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
@@ -193,6 +194,11 @@ class FemNewtonParticipant(NewtonDevice):
         self.solver = fem
         self.n_envs = n_envs
         self.n_vertices = fem.n_vertices
+        # The vertices of every environment are contact vertices (see newton_contact.py)
+        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_offset.fill(0)
+        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_count.fill(n_envs * fem.n_vertices)
         self.n_elements = fem.n_elements
         self.n_surfaces = fem.n_surfaces
         self.config = FemNewtonConfig(
@@ -256,6 +262,10 @@ class FemNewtonParticipant(NewtonDevice):
         self.solver.func_accumulate_vertex_force_preconditioner(f)
 
     @qd.func(requires_top_level=True)
+    def func_factor_begin(self):
+        pass
+
+    @qd.func(requires_top_level=True)
     def func_factor(self):
         func_fem_factor(self)
 
@@ -302,6 +312,53 @@ class FemNewtonParticipant(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
         func_fem_energy(f, self.substep_dt, self, control, is_trial)
+
+    # ------------------------------------------- vertex map -------------------------------------------
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_begin(self, f: int, src: qd.template()):
+        pass
+
+    @qd.func(requires_top_level=True)
+    def func_vertex_end(self, dst: qd.template()):
+        pass
+
+    @qd.func
+    def func_vertex_env(self, i_v: int):
+        return i_v // self.n_vertices
+
+    @qd.func
+    def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
+        i_b = i_v // self.n_vertices
+        i_fv = i_v - i_b * self.n_vertices
+        value = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(src == SRC_ITERATE):
+            value = self.elements_v[f + 1, i_fv, i_b].pos - self.elements_v[f, i_fv, i_b].pos
+        else:
+            value = self.pcg_state_v[i_b, i_fv].p
+        return value
+
+    @qd.func
+    def func_vertex_add_gradient(self, f: int, i_v: int, y: qd.types.vector(3)):
+        # FEM's force is minus its gradient over dt^2 (see func_fem_pcg_init)
+        i_b = i_v // self.n_vertices
+        i_fv = i_v - i_b * self.n_vertices
+        qd.atomic_add(self.elements_v_energy[i_b, i_fv].force, -y / (self.substep_dt * self.substep_dt))
+
+    @qd.func
+    def func_vertex_add_product(
+        self, f: int, i_v: int, y: qd.types.vector(3), p: qd.types.vector(3), pcg_scalars: qd.template()
+    ):
+        i_b = i_v // self.n_vertices
+        i_fv = i_v - i_b * self.n_vertices
+        qd.atomic_add(self.pcg_state_v[i_b, i_fv].Ap, y)
+
+    @qd.func
+    def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
+        # The diagonal blocks of FEM's preconditioner are in the units of its own system, the joint ones over dt^2
+        i_b = i_v // self.n_vertices
+        i_fv = i_v - i_b * self.n_vertices
+        self.pcg_state_v[i_b, i_fv].diag3x3 += H / (self.substep_dt * self.substep_dt)
 
 
 @qd.kernel

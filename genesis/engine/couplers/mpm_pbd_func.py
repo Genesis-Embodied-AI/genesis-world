@@ -1,11 +1,11 @@
-"""Stages of the contact rows of the implicit material point method (MPM) with position based dynamics (PBD), the
-coupling of the joint Newton solve over the grid displacement and the PBD particle positions (see pbd_newton.py for the
-PBD unknown and its stages). PBD's own constraints stay with PBD, so the coupling is strong in the contact and staggered
-in the constraints.
+"""Contact pairs of the implicit material point method (MPM) with position based dynamics (PBD) in the joint Newton
+solve over the grid displacement and the PBD particle positions (see pbd_newton.py for the PBD unknown and its stages).
+PBD's own constraints stay with PBD, so the coupling is strong in the contact and staggered in the constraints.
 
-An MPM particle gets penalty rows against the nearest PBD particle, a sphere of the PBD radius plus a contact thickness.
-The rows act on the particle displacement relative to the PBD particle's displacement over the substep, and solve the
-contact by the masses on both sides, so that a heavy block holds a light cloth and the cloth barely moves the block.
+An MPM particle gets a pair of penalty rows against its nearest PBD particle, a sphere of the PBD radius plus a contact
+thickness. The rows act on the particle displacement relative to the PBD particle's displacement over the substep, and
+solve the contact by the masses on both sides, so that a heavy block holds a light cloth and the cloth barely moves the
+block. The pairs are contact pairs of the Newton solve (see newton_contact.py), over the two particles.
 """
 
 from collections.abc import Iterator
@@ -15,34 +15,41 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_data import (
-    CONTACT_ROWS,
-    PYRAMID_ROWS,
-    SORTED_PARTICLES,
-    WALL_ROWS,
-    MpmGridScratch,
-    MpmInfo,
-    MpmLinearScratch,
-    MpmNewtonScratch,
-    MpmParticles,
-    MpmParticlesInfo,
-)
+from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
+from genesis.engine.numerics.bcoo_matrix import sort_bcoo
+from genesis.engine.solvers.mpm_data import MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
 from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
     contact_band_width,
-    contact_cross_matvec,
     contact_invweight,
     particle_of_sorted,
-    pyramid_dirs,
-    pyramid_row_terms,
+    pyramid_terms,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
+from genesis.engine.solvers.newton_contact import (
+    MIN_SLOTS,
+    PAIRS,
+    SRC_ITERATE,
+    append_pair,
+    grown_capacity,
+    retire_scratch,
+    write_doublet,
+    write_triplet,
+)
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
+from genesis.utils.misc import qd_to_numpy
+
+from .contact_candidates import (
+    ContactCandidates,
+    build_contact_candidates,
+    func_report_candidates,
+    func_reset_candidates,
+    func_select_nearest,
+    set_candidate_score,
+)
 
 # Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
 # OBSTACLE_REACH contact distances of its start or predicted position
@@ -50,13 +57,27 @@ OBSTACLE_NEIGHBORS = 32
 OBSTACLE_REACH = 1.5
 
 
-class MpmPbdContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
-    """Position based dynamics (PBD) side of the pyramid rows of every sorted particle."""
+class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
+    """The pairs of the particles with their nearest PBD particle (see func_build_pbd_pairs).
 
-    # The PBD particle of the particle's pyramid rows, in PBD's reordered layout, -1 if PBD gave it none
-    particle: qd.Tensor = field(int, ndarray=True)
-    # The Hessian of those rows on the displacement of the PBD particle
-    h: qd.Tensor = field((float, (3, 3)), ndarray=True)
+    A pair holds its sorted particle `s`, its environment `i_b`, its PBD particle `particle` in PBD's reordered layout,
+    and the rows of its friction pyramid around `normal`, of stiffness `D` and target `t` each. `n_pairs` counts the
+    pairs asked for, above the capacity on overflow."""
+
+    n_pairs: qd.Tensor = field(int, ndarray=True)
+    s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    i_b: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    particle: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    normal: qd.Tensor = field((float, 3), shape=(PAIRS,), ndarray=True)
+    D: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+
+
+def build_pbd_pairs(max_pairs: int) -> MpmPbdPairs:
+    """Build the MPM-PBD pairs of a capacity, with no pair."""
+    pairs = MpmPbdPairs(sizes={PAIRS: max_pairs})
+    pairs.n_pairs.fill(0)
+    return pairs
 
 
 # ============================================== Layer 1: broad phase ==============================================
@@ -64,7 +85,7 @@ class MpmPbdContactScratch(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,
 
 @qd.data_oriented
 class PbdContactParams:
-    """Scene values of the MPM-PBD contact rows, which the PBD obstacles share, as device scalars.
+    """Scene values of the MPM-PBD contact pairs, which the PBD obstacles share, as device scalars.
 
     A PBD particle is a sphere of its radius plus the thickness `thickness`, in metres, half a grid cell of MPM. A row
     takes the penalty stiffness `stiffness` in units of its effective mass, the inverse of its inverse weight, and the
@@ -82,25 +103,17 @@ class PbdContactParams:
 @qd.data_oriented
 class PbdParticleQuery:
     """The linear bounding volume hierarchy (LBVH) over the position based dynamics (PBD) particles of every
-    environment, in PBD's reordered layout (see genesis.engine.bvh).
+    environment, in PBD's reordered layout (see genesis.engine.bvh), with the PBD participant, the values of the
+    material point method (MPM) kernels `mpm_info` and the values of the contact pairs `contact`."""
 
-    It also holds the data the filter of its queries reads: the PBD participant, the values of the material point
-    method (MPM) kernels `mpm_info`, the values of the contact rows `contact`, and the query point and nearest PBD
-    particle of each sorted MPM particle in `newton`."""
-
-    def __init__(
-        self, pbd: PbdNewtonParticipant, mpm: MpmNewtonParticipant, mpm_info, contact: PbdContactParams, n_envs
-    ):
+    def __init__(self, pbd: PbdNewtonParticipant, mpm_info, contact: PbdContactParams, n_envs):
         self.pbd = pbd
-        self.mpm = mpm
         self.mpm_info = mpm_info
         self.contact = contact
         self.radius = pbd.particle_radius
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
-        # Every query keeps its nearest PBD particle in `newton` and records no pair
-        self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self):
         """Fit the leaf boxes to the PBD particles' sweeps over the substep and build the trees."""
@@ -126,152 +139,156 @@ def kernel_fit_pbd_leaves(query: qd.template()):
             query.leaves.aabbs_max[i_b, i_q] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
 
 
-@qd.func
-def func_nearest_pbd_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) -> bool:
-    """The narrow phase of a box query of a sorted MPM particle, which keeps the PBD particle of the smallest gap at the
-    substep start.
-
-    The query is that of sorted MPM particle i_q in environment i_t, against PBD particle i_a. The gap is the distance
-    minus the PBD radius and the contact thickness. The filter keeps it in `newton.query_phi`, the PBD particle in
-    `newton.query_idx` and the normal from it to the MPM particle in `newton.query_normal`, and records no pair."""
-    d = query.mpm.newton.query_pos[i_q] - query.pbd.particles_reordered[i_a, i_t].ipos
-    dist = d.norm()
-    phi = dist - qd.static(query.radius) - query.contact.thickness[()]
-    if phi < query.mpm.newton.query_phi[i_q] and dist > gs.EPS:
-        query.mpm.newton.query_phi[i_q] = phi
-        query.mpm.newton.query_idx[i_q] = i_a
-        query.mpm.newton.query_normal[i_q] = d / dist
-    return True
-
-
-# ============================================== Layer 1: contact rows ==============================================
-
-
 @qd.func(requires_top_level=True)
-def func_build_pbd_rows(
+def func_query_pbd_particles(
     f: int,
     dt: float,
     particles: MpmParticles,
     grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    rows: MpmPbdContactScratch,
+    query: qd.template(),
+    candidates: ContactCandidates,
+    mpm_info: MpmInfo,
+):
+    """Record the PBD particles of every valid particle as candidates: the particle's box spans its band at its own
+    speed, and the PBD leaves span the sweep, radius and thickness, so together they cover the band of the relative
+    velocity."""
+    func_reset_candidates(candidates)
+    qd.loop_config(name="mpm_query_pbd_particles")
+    for s in range(grid.n_valid[()]):
+        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
+        x_p = particles.pos[f, i_p, i_b]
+        reach = contact_band_width(particles.vel[f, i_p, i_b].norm(), dt, mpm_info)
+        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, candidates.results, func_no_filter, query)
+
+
+@qd.func(requires_top_level=True)
+def func_score_pbd_particles(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    query: qd.template(),
+    candidates: ContactCandidates,
+    mpm_info: MpmInfo,
+):
+    """Score every candidate PBD particle by the gap of the particle to its sphere at the substep start, its distance
+    minus the PBD radius and the contact thickness. A PBD particle at the position of the particle gives no normal and
+    is rejected."""
+    func_report_candidates(candidates)
+    qd.loop_config(name="mpm_score_pbd_particles")
+    for i_cand in range(candidates.order.n_triplets[()]):
+        triplet = candidates.results.triplets[i_cand]
+        i_b = triplet[0]
+        i_q = triplet[1]
+        s = triplet[2]
+        i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
+        dist = (particles.pos[f, i_p, i_b] - query.pbd.particles_reordered[i_q, i_b].ipos).norm()
+        score = qd.math.inf
+        if dist > gs.EPS:
+            score = dist - qd.static(query.radius) - query.contact.thickness[()]
+        set_candidate_score(i_cand, s, score, 0.0, candidates)
+
+
+# ============================================== Layer 1: contact pairs ==============================================
+
+
+@qd.func(requires_top_level=True)
+def func_build_pbd_pairs(
+    f: int,
+    dt: float,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    pairs: MpmPbdPairs,
     pbd: qd.template(),
     query: qd.template(),
+    candidates: ContactCandidates,
     particles_info: MpmParticlesInfo,
     mpm_info: MpmInfo,
 ):
-    """Pyramid penalty rows of every valid particle without Rigid or finite element method (FEM) rows against the
-    nearest position based dynamics (PBD) particle within its contact range or short of it by less than
-    `contact_band_width`.
+    """Build the pair of every valid particle with its nearest position based dynamics (PBD) particle, within its
+    contact range or short of it by less than `contact_band_width`, once the candidates are sorted by particle.
 
-    A particle that got rows is marked in `newton.has_pyramid_rows` and its PBD particle is in `rows.particle`, which
-    holds -1 for the others. The rows go to the particles that the Rigid and FEM rows left free, which relies on the
-    Rigid and FEM row builders of the substep running before this one.
-
-    A box query of the PBD trees finds the nearest PBD particle: the particle's box spans its band at its own speed, and
-    the PBD leaves span the sweep, radius and thickness, so together they cover the band of the relative velocity. Every
-    row of the pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the relative
+    Every row of the pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the relative
     displacement r. Its target is -phi and its stiffness `query.contact.stiffness` times the row's effective mass, the
     inverse of the particle's inverse weight (see func_contact_invweight) plus that of the PBD particle."""
-    friction = query.contact.friction[()]
-    qd.loop_config(name="mpm_build_pbd_rows")
-    for s in range(grid.n_valid[()]):
-        rows.particle[s] = -1
-        if not newton.has_pyramid_rows[s]:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            x_p = particles.pos[f, i_p, i_b]
-            v_p = particles.vel[f, i_p, i_b]
-            newton.query_pos[s] = x_p
-            newton.query_phi[s] = float("inf")
-            newton.query_idx[s] = -1
-            reach = contact_band_width(v_p.norm(), dt, mpm_info)
-            func_bvh_query_aabb(
-                i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_pbd_filter, query
-            )
-            i_q = newton.query_idx[s]
-            if i_q >= 0:
-                phi = newton.query_phi[s]
-                normal = newton.query_normal[s]
-                v_rel = v_p - pbd.particles_reordered[i_q, i_b].vel
-                if phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info):
+    func_select_nearest(0.0, candidates)
+    for _ in range(1):
+        pairs.n_pairs[()] = 0
+    qd.loop_config(name="mpm_build_pbd_pairs")
+    for i_seg in range(candidates.order.bcoo_nnz[()]):
+        i_cand = candidates.best_candidate[i_seg]
+        if i_cand < candidates.secondary.shape[0]:
+            triplet = candidates.results.triplets[i_cand]
+            i_b = triplet[0]
+            i_q = triplet[1]
+            s = triplet[2]
+            phi = candidates.order.triplet_val[i_cand]
+            i_p, i_b_sorted, env, cell = particle_of_sorted(s, grid, mpm_info)
+            d = particles.pos[f, i_p, i_b] - pbd.particles_reordered[i_q, i_b].ipos
+            normal = d / d.norm()
+            v_rel = particles.vel[f, i_p, i_b] - pbd.particles_reordered[i_q, i_b].vel
+            if phi < contact_band_width(-normal.dot(v_rel), dt, mpm_info):
+                i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
+                if i_pair >= 0:
                     invweight = contact_invweight(f, i_p, i_b, normal, particles, particles_info)
                     if is_moving(i_q, i_b, pbd):
                         invweight += 1.0 / pbd.particles_info_reordered[i_q, i_b].mass
-                    D = query.contact.stiffness[()] / invweight
-                    dirs = pyramid_dirs(normal, friction)
-                    for i in qd.static(range(PYRAMID_ROWS)):
-                        k = CONTACT_ROWS * s + WALL_ROWS + i
-                        newton.contact_dir[k] = dirs[i, :]
-                        newton.contact_D[k] = D
-                        newton.contact_t[k] = -phi
-                    rows.particle[s] = i_q
-                    newton.has_pyramid_rows[s] = True
+                    pairs.s[i_pair] = s
+                    pairs.i_b[i_pair] = i_b
+                    pairs.particle[i_pair] = i_q
+                    pairs.normal[i_pair] = normal
+                    pairs.D[i_pair] = query.contact.stiffness[()] / invweight
+                    pairs.t[i_pair] = -phi
+
+
+@qd.func
+def pbd_pair_terms(f: int, i_pair: int, mpm: qd.template(), pbd: qd.template(), contact: qd.template()):
+    """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its PBD
+    particle at the current iterate, with the contact vertices of both."""
+    i_vq = contact.pbd_pairs.i_b[i_pair] * pbd.n_vertex_particles + contact.pbd_pairs.particle[i_pair]
+    r = mpm.func_vertex_value(f, contact.pbd_pairs.s[i_pair], SRC_ITERATE) - pbd.func_vertex_value(f, i_vq, SRC_ITERATE)
+    D = contact.pbd_pairs.D[i_pair]
+    t = contact.pbd_pairs.t[i_pair]
+    energy, g, H = pyramid_terms(
+        contact.pbd_pairs.normal[i_pair],
+        contact.query.contact.friction[()],
+        qd.Vector([D, D, D, D]),
+        qd.Vector([t, t, t, t]),
+        r,
+    )
+    return energy, g, H, mpm.vertex_offset[()] + contact.pbd_pairs.s[i_pair], pbd.vertex_offset[()] + i_vq
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_point_disp(
-    grid: MpmGridScratch, newton: MpmNewtonScratch, rows: MpmPbdContactScratch, pbd: qd.template(), mpm_info: MpmInfo
-):
-    """Displacement over the substep of the PBD particle of every particle with PBD rows, at the current iterate."""
-    qd.loop_config(name="mpm_pbd_point_disp")
-    for s in range(grid.n_valid[()]):
-        i_q = rows.particle[s]
-        if i_q >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            newton.contact_point_disp[s] = (
-                pbd.particles_reordered[i_q, i_b].pos - pbd.particles_reordered[i_q, i_b].ipos
-            )
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_contact_gradient(
+def func_pbd_pair_terms(
     f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    rows: MpmPbdContactScratch,
-    pbd_data: qd.template(),
-    mpm_info: MpmInfo,
+    i_d0: int,
+    i_t0: int,
+    mpm: qd.template(),
+    pbd: qd.template(),
+    contact: qd.template(),
+    newton_contact: qd.template(),
 ):
-    """Add the share of the position based dynamics (PBD) rows to the PBD gradient and diagonal blocks.
-
-    It runs after the inertia terms and after the material point method (MPM) assembly, at the same iterate. The
-    gradient g and Hessian H of the rows of each particle come from `pyramid_row_terms`, and H stays in `rows.h` for
-    the matvec. The PBD particle takes -g and H."""
-    qd.loop_config(name="mpm_pbd_contact_gradient")
-    for s in range(grid.n_valid[()]):
-        i_q = rows.particle[s]
-        if i_q >= 0:
-            i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-            _, g, H = pyramid_row_terms(f, s, particles, grid, newton, mpm_info)
-            rows.h[s] = H
-            qd.atomic_add(pbd_data.grad[i_q, i_b], -g)
-            qd.atomic_add(pbd_data.diag_inv[i_q, i_b], H)
+    """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
+    triplet slot `i_t0` on: on both particles, and the block between them."""
+    qd.loop_config(name="mpm_pbd_pair_terms")
+    for i_pair in range(contact.pbd_pairs.n_pairs[()]):
+        _, g, H, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
+        write_doublet(i_d0 + 2 * i_pair, i_vp, g, newton_contact)
+        write_doublet(i_d0 + 2 * i_pair + 1, i_vq, -g, newton_contact)
+        write_triplet(i_t0 + 3 * i_pair, i_vp, i_vp, H, newton_contact)
+        write_triplet(i_t0 + 3 * i_pair + 1, i_vp, i_vq, -H, newton_contact)
+        write_triplet(i_t0 + 3 * i_pair + 2, i_vq, i_vq, H, newton_contact)
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_contact_matvec(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    linear: MpmLinearScratch,
-    rows: MpmPbdContactScratch,
-    pbd_data: qd.template(),
-    pcg_scalars: qd.template(),
-    mpm_info: MpmInfo,
+def func_pbd_pair_energy(
+    f: int, mpm: qd.template(), pbd: qd.template(), contact: qd.template(), energies: qd.template()
 ):
-    """The PBD rows' share of the joint operator, after the own operators of MPM and PBD set their Ap.
-
-    The PBD particle of a particle moves by its direction dq = p_q. The rows add their cross term on the MPM rows (see
-    contact_cross_matvec), and h to Ap_q."""
-    qd.loop_config(name="mpm_pbd_contact_matvec")
-    for s in range(grid.n_valid[()]):
-        i_q = rows.particle[s]
-        i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
-        if i_q >= 0 and pcg_scalars.is_converged[i_b] == 0:
-            dq = pbd_data.p[i_q, i_b]
-            h = contact_cross_matvec(f, s, rows.h[s], dq, particles, grid, linear, pcg_scalars, mpm_info)
-            qd.atomic_add(pbd_data.ap[i_q, i_b], h)
+    """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
+    qd.loop_config(name="mpm_pbd_pair_energy")
+    for i_pair in range(contact.pbd_pairs.n_pairs[()]):
+        energy, grad, hess, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
+        qd.atomic_add(energies[contact.pbd_pairs.i_b[i_pair]], energy)
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -455,81 +472,115 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
                 func_obstacle_contact_filter(i_b, i_a, i_q, obstacles)
 
 
-# ============================================== Layer 2: contact stages ===============================================
+# ============================================== Layer 2: pair kind ===============================================
 
 
 @qd.data_oriented
 class MpmPbdContact(NewtonDevice):
-    """Device stages of the contact rows between the material point method (MPM) and position based dynamics (PBD).
+    """Pair kind of the contacts between the material point method (MPM) and position based dynamics (PBD).
 
-    They add their share of the PBD gradient, their cross terms in both blocks of the operator, and the PBD particle
-    displacement at every iterate. `pbd_rows` holds the PBD side of the rows of the sorted particles."""
+    `pairs` holds the pairs of the substep, which `candidates` selects from the box queries of `query`. A pair writes 2
+    doublets on its particle and its PBD particle, and the 3 upper blocks between them."""
 
-    def __init__(
-        self,
-        mpm: MpmNewtonParticipant,
-        pbd: PbdNewtonParticipant,
-        query: PbdParticleQuery,
-        pbd_rows: MpmPbdContactScratch,
-    ):
+    n_doublets = 2
+    n_triplets = 3
+
+    def __init__(self, mpm: MpmNewtonParticipant, pbd: PbdNewtonParticipant, query: PbdParticleQuery):
         self.mpm = mpm
         self.pbd = pbd
         self.query = query
-        self.pbd_rows = pbd_rows
+        self.pbd_candidates = build_contact_candidates(MIN_SLOTS)
+        self.pbd_pairs = build_pbd_pairs(MIN_SLOTS)
+        # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
+        self.scratches_replaced = []
 
     @property
     def data(self) -> Iterator[DataItem]:
-        """Yield the rows of the sorted particles on the position based dynamics (PBD) side, rebuilt every substep."""
-        yield from iter_data(self, "pbd_rows")
+        """Yield the candidates and the pairs, rebuilt every substep."""
+        yield from iter_data(self, "pbd_candidates")
+        yield from iter_data(self, "pbd_pairs")
+
+    @qd.func
+    def func_pair_count(self):
+        return self.pbd_pairs.n_pairs[()]
 
     @qd.func(requires_top_level=True)
-    def func_contact_gradient(self, f: int):
-        func_pbd_contact_gradient(
-            f, self.mpm.particles, self.mpm.grid, self.mpm.newton, self.pbd_rows, self.pbd.pbd_data, self.mpm.mpm_info
-        )
-
-    @qd.func(requires_top_level=True)
-    def func_contact_matvec(self, f: int, pcg_scalars: qd.template()):
-        func_pbd_contact_matvec(
+    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
+        func_pbd_pair_terms(
             f,
-            self.mpm.particles,
-            self.mpm.grid,
-            self.mpm.linear,
-            self.pbd_rows,
-            self.pbd.pbd_data,
-            pcg_scalars,
-            self.mpm.mpm_info,
+            contact.matrices.doublet_offsets[i_kind],
+            contact.matrices.triplet_offsets[i_kind],
+            self.mpm,
+            self.pbd,
+            self,
+            contact,
         )
 
     @qd.func(requires_top_level=True)
-    def func_after_step(self, f: int):
-        func_pbd_point_disp(self.mpm.grid, self.mpm.newton, self.pbd_rows, self.pbd, self.mpm.mpm_info)
+    def func_pair_energy(self, f: int, control: qd.template(), is_trial: qd.template()):
+        if qd.static(is_trial):
+            func_pbd_pair_energy(f, self.mpm, self.pbd, self, control.energy_trial)
+        else:
+            func_pbd_pair_energy(f, self.mpm, self.pbd, self, control.energy_start)
 
 
 @qd.kernel
-def kernel_pbd_rows(f: int, contact: qd.template()):
-    func_build_pbd_rows(
+def kernel_query_pbd_particles(f: int, contact: qd.template()):
+    func_query_pbd_particles(
         f,
         contact.mpm.mpm_info.substep_dt[()],
         contact.mpm.particles,
         contact.mpm.grid,
-        contact.mpm.newton,
-        contact.pbd_rows,
+        contact.query,
+        contact.pbd_candidates,
+        contact.mpm.mpm_info,
+    )
+
+
+@qd.kernel
+def kernel_score_pbd_particles(f: int, contact: qd.template()):
+    func_score_pbd_particles(
+        f, contact.mpm.particles, contact.mpm.grid, contact.query, contact.pbd_candidates, contact.mpm.mpm_info
+    )
+
+
+@qd.kernel
+def kernel_build_pbd_pairs(f: int, contact: qd.template()):
+    func_build_pbd_pairs(
+        f,
+        contact.mpm.mpm_info.substep_dt[()],
+        contact.mpm.particles,
+        contact.mpm.grid,
+        contact.pbd_pairs,
         contact.pbd,
         contact.query,
+        contact.pbd_candidates,
         contact.mpm.particles_info,
         contact.mpm.mpm_info,
     )
-    contact.func_after_step(f)
 
 
 class MpmPbdContactHost(NewtonHost):
-    """Host stages of the MPM-PBD contact rows before the joint solve: the PBD trees, then the rows and the PBD particle
-    displacement at the start point."""
+    """Host stages of the MPM-PBD contact pairs before the joint solve: the PBD trees, the candidates of every particle,
+    and the pairs of the nearest PBD particles, each grown on overflow."""
 
     def __init__(self, device: MpmPbdContact):
         self._device = device
 
     def newton_prepare(self, f):
-        self._device.query.build()
-        kernel_pbd_rows(f, self._device)
+        device = self._device
+        device.query.build()
+        kernel_query_pbd_particles(f, device)
+        n_candidates = int(qd_to_numpy(device.pbd_candidates.results.count)[0])
+        if n_candidates > device.pbd_candidates.secondary.shape[0]:
+            retire_scratch(device.pbd_candidates, device.scratches_replaced)
+            device.pbd_candidates = build_contact_candidates(grown_capacity(n_candidates))
+            kernel_query_pbd_particles(f, device)
+        kernel_score_pbd_particles(f, device)
+        sort_bcoo(device.pbd_candidates.order)
+        kernel_build_pbd_pairs(f, device)
+        n_pairs = int(qd_to_numpy(device.pbd_pairs.n_pairs))
+        if n_pairs > device.pbd_pairs.s.shape[0]:
+            retire_scratch(device.pbd_pairs, device.scratches_replaced)
+            device.pbd_pairs = build_pbd_pairs(grown_capacity(n_pairs))
+            kernel_build_pbd_pairs(f, device)

@@ -1,18 +1,18 @@
 """Global Newton solver of the implicit solvers that couple strongly.
 
-One Newton solve per substep minimizes the sum of the participants' incremental potentials and of the couplings
-between them. The linear system of every Newton iteration is solved by one preconditioned conjugate gradient (PCG) over
-the rows of all participants, preconditioned block-diagonally by each participant over its own rows, and the line
-search runs on the total energy.
+One Newton solve per substep minimizes the sum of the participants' incremental potentials and of their contacts. The
+linear system of every Newton iteration is solved by one preconditioned conjugate gradient (PCG) over the rows of all
+participants, preconditioned block-diagonally by each participant over its own rows, and the line search runs on the
+total energy.
 
 Every participant runs the same stages. It owns its unknowns, its energy, its share of the gradient and of the operator,
 the PCG vectors over its own rows and a preconditioner over them, and adds its share of r . z and p . Ap into the
 scalars of the solve, which the Newton solver owns (see PCGScalars) and from which it takes the steps and the
-convergence decision between the stages of the participants. A coupling owns only the knowledge of both sides and adds
-its cross terms to their gradients and operators.
+convergence decision between the stages of the participants. The contacts, of the participants with each other and with
+the walls, are a sparse matrix over contact vertices that the Newton solver owns as well (see newton_contact.py).
 
-The participants enter the kernels as one template argument, `NewtonParticipants`, which holds the participants and the
-couplings in @qd.data_oriented NamedTuples that the composed stages iterate with qd.static.
+The participants enter the kernels as one template argument, `NewtonParticipants`, which holds the participants in a
+@qd.data_oriented NamedTuple that the composed stages iterate with qd.static, and the contacts.
 """
 
 import collections
@@ -62,16 +62,17 @@ DEFAULT_ADJOINT_PCG_TOL = {64: 1e-24, 32: 1e-12}
 
 @qd.data_oriented
 class NewtonParticipants:
-    """Participants of a Newton solve and the couplings between them, gathered into one kernel argument.
+    """Participants of a Newton solve and their contacts, gathered into one kernel argument.
 
-    `members` and `couplings` are @qd.data_oriented NamedTuples (see `participant_group`) of their device objects. They
-    stay members of this object: a tuple passed as the kernel argument itself cannot be weakly referenced, so the kernel
-    would re-derive its specialization on every launch.
+    `members` is a @qd.data_oriented NamedTuple (see `participant_group`) of their device objects and `contact` the
+    NewtonContact of the solve, or None. They stay members of this object: a tuple passed as the kernel argument itself
+    cannot be weakly referenced, so the kernel would re-derive its specialization on every launch.
     """
 
-    def __init__(self, members, couplings):
+    def __init__(self, members, contact):
         self.members = members
-        self.couplings = couplings
+        self.contact = contact
+        self.has_contact = contact is not None
 
 
 class NewtonDevice:
@@ -145,30 +146,33 @@ class NewtonHost:
 
 @qd.func(requires_top_level=True)
 def func_assemble(f: int, participants: qd.template()):
-    """Assemble the Newton system of every participant at the current iterate, then the share of the couplings."""
+    """Assemble the Newton system of every participant at the current iterate, then add the gradient of the
+    contacts."""
     for member in qd.static(participants.members):
         member.func_assemble(f)
-    func_contact_gradient(f, participants)
-
-
-@qd.func(requires_top_level=True)
-def func_contact_gradient(f: int, participants: qd.template()):
-    """Add the share of the couplings to the gradients and preconditioners of both sides, once they all assembled."""
-    for coupling in qd.static(participants.couplings):
-        coupling.func_contact_gradient(f)
+    if qd.static(participants.has_contact):
+        participants.contact.func_contact_assemble(f)
 
 
 @qd.func(requires_top_level=True)
 def func_pcg_start(
-    newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template(), is_adjoint: qd.template()
+    f: int,
+    newton_control: qd.template(),
+    pcg_scalars: qd.template(),
+    participants: qd.template(),
+    is_adjoint: qd.template(),
 ):
     """Build the preconditioner of every participant and start the preconditioned conjugate gradient from 0.
 
-    The start sets r = -grad, z = M^-1 r and p = z over the rows of every participant, then the convergence threshold
-    from the r . z they all added. The environments whose Newton solve stopped take no part, except in an adjoint
-    solve."""
+    Every participant gathers its own diagonal blocks, the contacts add theirs, and every participant factors them. The
+    start sets r = -grad, z = M^-1 r and p = z over the rows of every participant, then the convergence threshold from
+    the r . z they all added. The environments whose Newton solve stopped take no part, except in an adjoint solve."""
     func_pcg_select_envs(pcg_scalars, newton_control, is_adjoint)
     func_pcg_reset(pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_factor_begin()
+    if qd.static(participants.has_contact):
+        participants.contact.func_contact_visit_diag(f)
     for member in qd.static(participants.members):
         member.func_factor()
         member.func_pcg_init(pcg_scalars, is_adjoint)
@@ -181,13 +185,13 @@ def func_pcg_start(
 def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.template()):
     """Run one preconditioned conjugate gradient iteration over the rows of every participant.
 
-    The couplings add their cross terms once every participant set the product of its own operator. The step alpha and
-    the direction factor beta, with the convergence decision, are taken once every participant added its p . Ap and its
+    The contacts add their product once every participant set the product of its own operator. The step alpha and the
+    direction factor beta, with the convergence decision, are taken once every participant added its p . Ap and its
     r . z (see PCGScalars)."""
     for member in qd.static(participants.members):
         member.func_matvec(pcg_scalars)
-    for coupling in qd.static(participants.couplings):
-        coupling.func_contact_matvec(f, pcg_scalars)
+    if qd.static(participants.has_contact):
+        participants.contact.func_contact_product(f, pcg_scalars)
     for member in qd.static(participants.members):
         member.func_matvec_dot(pcg_scalars)
     func_pcg_step(pcg_scalars)
@@ -215,19 +219,20 @@ def func_start_line_search(f: int, newton_control: qd.template(), participants: 
 
 @qd.func(requires_top_level=True)
 def func_step_forward(f: int, newton_control: qd.template(), participants: qd.template()):
-    """Move every participant to the trial point of the line-search step and update what the couplings derive of it."""
+    """Move every participant to the trial point of the line-search step."""
     for member in qd.static(participants.members):
         member.func_step_forward(newton_control, f)
-    for coupling in qd.static(participants.couplings):
-        coupling.func_after_step(f)
 
 
 @qd.func(requires_top_level=True)
 def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
-    """Evaluate the total energy at the start or trial point, which every participant adds its own to."""
+    """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs
+    to."""
     func_reset_energy(newton_control, is_trial)
     for member in qd.static(participants.members):
         member.func_energy(newton_control, f, is_trial)
+    if qd.static(participants.has_contact):
+        participants.contact.func_contact_energy(newton_control, f, is_trial)
 
 
 # ================================================== kernels ==================================================
@@ -240,15 +245,19 @@ def kernel_assemble_participant(f: int, participant: qd.template()):
 
 
 @qd.kernel
-def kernel_contact_gradient(f: int, participants: qd.template()):
-    func_contact_gradient(f, participants)
+def kernel_contact_assemble(f: int, participants: qd.template()):
+    participants.contact.func_contact_assemble(f)
 
 
 @qd.kernel
 def kernel_pcg_start(
-    newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template(), is_adjoint: qd.template()
+    f: int,
+    newton_control: qd.template(),
+    pcg_scalars: qd.template(),
+    participants: qd.template(),
+    is_adjoint: qd.template(),
 ):
-    func_pcg_start(newton_control, pcg_scalars, participants, is_adjoint)
+    func_pcg_start(f, newton_control, pcg_scalars, participants, is_adjoint)
 
 
 @qd.kernel(graph=True)
@@ -301,12 +310,12 @@ def kernel_newton_loop(f: int, newton_control: qd.template(), pcg_scalars: qd.te
     """Run the Newton iterations of a substep as one graph, after the evaluation of the start energy.
 
     The assembly of every participant must need no storage growth inside the loop. The MPM triplet demand depends on the
-    grid topology alone, which is fixed over the substep, so the storage sized before the loop holds every assembly in
-    it.
+    grid topology alone, and the contact pairs are fixed, over the substep, so the storage sized before the loop holds
+    every assembly in it.
     """
     while qd.graph.do_while(newton_control.is_newton_running):
         func_assemble(f, participants)
-        func_pcg_start(newton_control, pcg_scalars, participants, False)
+        func_pcg_start(f, newton_control, pcg_scalars, participants, False)
         while qd.graph.do_while(pcg_scalars.is_running):
             func_pcg_iteration(f, pcg_scalars, participants)
         func_start_line_search(f, newton_control, participants)
@@ -328,7 +337,8 @@ class NewtonSolver(Solver):
     post-coupling phase.
 
     The coupler registers every participant and coupling of the scene (see LegacyCoupler), each as a host object (see
-    NewtonHost), whose methods run the host-side stages around the solve, and a device object for the composed kernels.
+    NewtonHost), whose methods run the host-side stages around the solve, and a device object, with the contacts of the
+    solve (see NewtonContact).
     """
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "NewtonOptions"):
@@ -341,19 +351,19 @@ class NewtonSolver(Solver):
         self._participant_hosts = []
         self._coupling_hosts = []
         self._participants = None
+        self._contact = None
         self._host_only_devices = ()
         self._devices = []
         self._is_loop_graph = options.graph == "newton"
-        self._has_coupling_devices = False
         self._has_warned_adjoint_projection = False
 
-    def register(self, participants, couplings, host_only_devices=()):
+    def register(self, participants, couplings, contact, host_only_devices=()):
         """Register the participants of the Newton solve and the couplings between them, each as a pair of its host
-        object and its device object, which activates the solver.
+        object and its device object, and the contacts of the solve, which activates the solver.
 
-        A coupling acting on one participant alone, whose cross terms vanish, gives None as its device object and runs
-        its host stages only. `host_only_devices` lists the device objects of these couplings, whose arrays the solver
-        frees with its own (see `data`)."""
+        The device of a coupling is a pair kind of `contact` (see NewtonContact). `host_only_devices` lists the devices
+        that the solve reads without being participants of it, whose arrays the solver frees with its own (see
+        `data`)."""
         options = self._options
         self.control = NewtonControl(
             gs.qd_float,
@@ -364,10 +374,9 @@ class NewtonSolver(Solver):
             self._sim._B,
         )
         self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol, self._sim._B)
-        coupling_devices = [device for _, device in couplings if device is not None]
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, which those of the participants
         # besides MPM do in a scene tracking gradients
-        if self._is_loop_graph and self._requires_grad and (len(participants) > 1 or coupling_devices):
+        if self._is_loop_graph and self._requires_grad and (len(participants) > 1 or couplings):
             gs.raise_exception(
                 "NewtonOptions(graph='newton') does not support a differentiable scene coupling MPM with another "
                 "solver."
@@ -378,14 +387,16 @@ class NewtonSolver(Solver):
         self._participant_hosts = [host for host, _ in participants]
         self._coupling_hosts = [host for host, _ in couplings]
         self._participants = NewtonParticipants(
-            participant_group("NewtonMembers", [device for _, device in participants]),
-            participant_group("NewtonCouplings", coupling_devices),
+            participant_group("NewtonMembers", [device for _, device in participants]), contact
         )
-        self._has_coupling_devices = bool(coupling_devices)
+        self._contact = contact
         self._host_only_devices = tuple(host_only_devices)
         self._devices.clear()
         self._devices.extend(device for _, device in participants)
-        self._devices.extend((*coupling_devices, *host_only_devices))
+        self._devices.extend(device for _, device in couplings)
+        self._devices.extend(host_only_devices)
+        if contact is not None:
+            self._devices.append(contact)
 
     @property
     def is_active(self):
@@ -414,8 +425,9 @@ class NewtonSolver(Solver):
 
     @property
     def _is_joint(self):
-        """Whether the device stages of the solve span several participants."""
-        return len(self._participant_hosts) > 1 or self._has_coupling_devices
+        """Whether the device stages of the solve read the data of another solver than MPM, a participant or the partner
+        of a coupling."""
+        return len(self._participant_hosts) > 1 or bool(self._coupling_hosts)
 
     def begin(self, f):
         """Run the host stages that precede the pre-coupling phase of the solvers in substep `f`."""
@@ -549,6 +561,8 @@ class NewtonSolver(Solver):
 
         for host in self._hosts:
             host.newton_prepare(f)
+        if self._contact is not None:
+            self._contact.prepare(f)
         kernel_reset_newton_control(control)
         kernel_energy(f, control, participants, is_trial=False)
 
@@ -567,15 +581,15 @@ class NewtonSolver(Solver):
     def _assemble(self, f, is_exact=False):
         for host in self._participant_hosts:
             host.newton_assemble(f, is_exact)
-        if self._has_coupling_devices:
-            kernel_contact_gradient(f, self._participants)
+        if self._contact is not None:
+            kernel_contact_assemble(f, self._participants)
 
     def _pcg(self, f, is_adjoint=False):
         """Run the conjugate gradient iterations of a substep from its staged right-hand side, as one graph, over the
         environments whose Newton solve runs, or every environment with `is_adjoint`."""
         participants = self._participants
         pcg_scalars = self.pcg_scalars
-        kernel_pcg_start(self.control, pcg_scalars, participants, is_adjoint)
+        kernel_pcg_start(f, self.control, pcg_scalars, participants, is_adjoint)
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one,
         # with a device read each, when other participants take part in a scene tracking gradients
         if not (self._requires_grad and self._is_joint):
