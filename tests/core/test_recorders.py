@@ -8,6 +8,7 @@ import av
 
 import genesis as gs
 from genesis.utils.image_exporter import as_grayscale_image
+from genesis.utils.video_encoder import VideoEncoder
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 
@@ -28,6 +29,21 @@ def mpl_agg_backend():
 
     # Restore original backend
     plt.switch_backend(mpl_backend)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("is_threaded", [False, True])
+def test_video_encoder_rejects_resized_frame(tmp_path, is_threaded):
+    path = tmp_path / "fixed_size.mp4"
+    encoder = VideoEncoder(str(path), 30, codec="libx264", is_threaded=is_threaded)
+    try:
+        encoder.write(np.full((32, 32), 255, dtype=np.uint8))
+        with pytest.raises(gs.GenesisException, match="Expected video frame shape"):
+            encoder.write(np.zeros((16, 32), dtype=np.uint8))
+    finally:
+        encoder.close()
+    with av.open(path) as container:
+        assert len(list(container.decode(video=0))) == 1
 
 
 @pytest.mark.required

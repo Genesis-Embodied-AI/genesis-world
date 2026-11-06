@@ -131,6 +131,7 @@ class VideoEncoder:
         self._frame = None
         self._buffer = None
         self._row_bytes = 0
+        self._frame_shape = None
 
         self._queue = queue.Queue(maxsize=ENCODER_QUEUE_SIZE) if is_threaded else None
         self._thread = None
@@ -226,6 +227,11 @@ class VideoEncoder:
         if frame.ndim != 2 + is_color or not np.issubdtype(frame.dtype, np.integer):
             gs.raise_exception("Frames must be either grayscale [H, W] or color [H, W, RGB] of integer type.")
 
+        if self._frame_shape is None:
+            self._frame_shape = frame.shape
+        elif frame.shape != self._frame_shape:
+            gs.raise_exception(f"Expected video frame shape {self._frame_shape}, got {frame.shape}.")
+
         if self._is_threaded:
             if self._thread is None:
                 self._is_encoding_over = False
@@ -275,6 +281,8 @@ class VideoEncoder:
             self._stream = None
             self._frame = None
             self._buffer = None
+
+        self._frame_shape = None
 
         if is_encoding_lost:
             gs.raise_exception(f'Video encoding failed for "{self._filename}". See the error reported above.')
