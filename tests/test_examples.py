@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
+
+from .conftest import SKIP_NO_GPU
 
 
 EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
@@ -20,6 +23,8 @@ EXAMPLE_DEPENDENCIES = {
     "single_franka_batch_render.py": ["gs_madrona"],
     "demo.py": ["LuisaRenderPy"],
 }
+# Examples running on a CUDA GPU alone, which the CPU fallback of 'gs.gpu' cannot stand in for
+CUDA_SCRIPT_NAMES = {"single_franka_batch_render.py"}
 
 TIMEOUT = 600
 
@@ -53,6 +58,9 @@ def test_example(file: Path):
 
     for module_name in module_deps:
         pytest.importorskip(module_name, reason=f"Python module '{module_name}' not installed.")
+    # A ROCm build of torch reports its AMD GPUs through the CUDA API too
+    if file.name in CUDA_SCRIPT_NAMES and not (torch.cuda.is_available() and torch.version.cuda is not None):
+        pytest.skip(SKIP_NO_GPU)
 
     # Disable keyboard control and monitoring when running the unit tests
     env = os.environ.copy()
