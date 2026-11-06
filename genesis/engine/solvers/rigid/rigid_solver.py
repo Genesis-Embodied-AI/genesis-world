@@ -37,6 +37,7 @@ from genesis.utils.misc import (
     get_gpu_core_count,
     get_gpu_shared_tile_sizes,
     indices_to_mask,
+    qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
     qd_zero_grad,
@@ -231,6 +232,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._integrator = options.integrator
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
+        # Whether the next constraint solve starts from the solution of the substep it replays (see 'load_replay_seed')
+        self._is_solve_seeded = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
         # The differentiable solve keeps every body in its iteration trace, so hibernation stays off there (see the
@@ -1328,7 +1331,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_copy_next_to_curr_clear_coupling(
                 self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
             )
-            if not self._enable_mujoco_compatibility:
+            # Without another solver to read it within the step, the cartesian space a substep leaves is read by the
+            # queries between steps alone, since the replay of the next substep recomputes it from its checkpoint: the
+            # reverse of any other would run on a zero adjoint
+            is_read = f == self.sim.substeps - 1 or len(self.sim.active_solvers) > 1
+            if not self._enable_mujoco_compatibility and is_read:
                 self._update_forward_kinematics(envs_idx)
         elif isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
             # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
@@ -1428,7 +1435,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if not self._disable_constraint:
             self.constraint_solver.add_inequality_constraints()
-            self.constraint_solver.resolve()
+            self.constraint_solver.resolve(n_iterations=0 if self._is_solve_seeded else None)
+            self._is_solve_seeded = False
 
     def _constraint_force_grad(self):
         """
@@ -1617,6 +1625,23 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # One flush for the zeroing batch; see qd_zero_grad in misc.py.
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
+
+    def save_replay_seed(self) -> torch.Tensor | None:
+        # The constraint solve leaves its solution as the warm start of the next one (see kernel_resolve_post)
+        if self._disable_constraint:
+            return None
+        return qd_to_torch(self.constraint_solver.constraint_state.qacc_ws, copy=True)
+
+    def load_replay_seed(self, seed: torch.Tensor | None) -> None:
+        # The replay starts every env from the solution the step returned and runs no iteration, so that it returns it
+        # again, the Hessian of the replay being factored there: the backward pass of the solve is the derivative of its
+        # optimality conditions at the solution the step returned, whether the solve converged or not
+        if seed is not None:
+            constraint_state = self.constraint_solver.constraint_state
+            qd_from_torch(constraint_state.qacc_ws, seed)
+            # The flags of a differentiable scene live in a field, which has no zero-copy view of its integers on GPU
+            constraint_state.is_warmstart.fill(True)
+            self._is_solve_seeded = True
 
     def substep_post_coupling(self, f):
         from genesis.engine.couplers import SAPCoupler, IPCCoupler

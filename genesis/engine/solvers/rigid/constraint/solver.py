@@ -362,8 +362,13 @@ class ConstraintSolver:
             self._collider.collider_config,
         )
 
-    def resolve(self):
-        """Solve the constraint forces, then update the accelerations and the contact forces from them."""
+    def resolve(self, n_iterations: int | None = None):
+        """
+        Solve the constraint forces, then update the accelerations and the contact forces from them.
+
+        `n_iterations` overrides the iterations of the solve, None for those of the options. With 0, the solution is the
+        acceleration the solve starts from, at which it factors the Hessian.
+        """
         # func_solve_init is launched by each dispatch entrypoint (func_solve_body_monolith / func_solve_decomposed),
         # not here: only the entrypoint statically knows its arm, which determines whether the init factor/gradient is
         # done (monolith) or skipped (decomposed re-factors in-loop).
@@ -373,7 +378,7 @@ class ConstraintSolver:
             self._solver.dyn_info,
             self._solver.rigid_info,
             self._solver.rigid_config,
-            self._n_iterations,
+            self._n_iterations if n_iterations is None else n_iterations,
         )
         kernel_resolve_post(
             self._solver.dyn_state,
@@ -5911,6 +5916,8 @@ def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, 
     # dispatch) is what lets each arm declare its own init behavior - the dispatcher may run a different arm on the next
     # step during autotuning.
     func_solve_init(dyn_state, constraint_state, rigid_info, rigid_config, write_L=True)
+    if _n_iterations <= 0:
+        return
     _kernel_solve_monolith(dyn_state, constraint_state, rigid_info, rigid_config)
 
 
