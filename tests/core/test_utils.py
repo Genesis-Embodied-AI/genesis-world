@@ -1,4 +1,6 @@
 import math
+import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -30,6 +32,12 @@ from ..utils.collision import display_collision_pairs, get_genuine_interpenetrat
 
 
 TOL = 1e-7
+
+RET_SUCCESS = 42
+
+FILE_PATH = pathlib.Path(__file__)
+MODULE_ROOT_DIR = FILE_PATH.parents[2]
+MODULE = ".".join((FILE_PATH.parents[1].name, FILE_PATH.parent.name, FILE_PATH.stem))
 
 
 @pytest.fixture
@@ -1156,6 +1164,32 @@ def test_logger_prints_once_with_root_logging(backend):
     assert (proc.stdout + proc.stderr).count("Genesis warning") == 1
 
 
+def _redirect_libc_stderr_child(args: list[str]):
+    """Child process: init genesis, then spawn a process."""
+    gs.init(backend=gs.cpu, logging_level="info")
+    print(subprocess.check_output([sys.executable, "-c", "print(42)"], text=True), end="")
+    sys.exit(RET_SUCCESS)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_redirect_libc_stderr(backend):
+    cmd_line = [sys.executable, "-m", MODULE, _redirect_libc_stderr_child.__name__]
+    # Quadrants warns on its native logger that 'default_fp' overrides this environment variable
+    env = dict(os.environ)
+    env["QD_DEFAULT_FP"] = "32"
+    proc = subprocess.run(cmd_line, capture_output=True, text=True, encoding="utf-8", env=env, cwd=MODULE_ROOT_DIR)
+    assert proc.returncode == RET_SUCCESS, proc.stdout + proc.stderr
+    assert "42" in proc.stdout.splitlines()
+    # FIXME: quadrants#1075 - On Windows, the native logger of Quadrants writes to the standard error handle that it keeps
+    # from its creation, so redirecting descriptor 2 does not collect its messages.
+    if sys.platform == "win32":
+        pytest.xfail("quadrants#1075")
+    qd_warning = "Environment variable QD_DEFAULT_FP=32 overridden"
+    assert proc.stdout.count(qd_warning) == 1
+    assert qd_warning not in proc.stderr
+
+
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [None])
 def test_logger_raw_theme_plain_text(capsys):
@@ -1209,3 +1243,7 @@ def test_warn_once_with_empty_message(clear_seen_fixture):
             warn_once("")
             warn_once("")
             mock_warning.assert_called_once_with("")
+
+
+if __name__ == "__main__":
+    globals()[sys.argv[1]](sys.argv[2:])
