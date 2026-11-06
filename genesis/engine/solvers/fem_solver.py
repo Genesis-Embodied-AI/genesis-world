@@ -51,10 +51,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = float(1e4)
 
-        # The constitutive models of the entities, dispatched statically, one per material class and model (see
+        # The constitutive models of the entities, dispatched statically, one per model class and model (see
         # 'FEMModel')
         self._models: list[FEMModel] = []
-        self._models_key: list[tuple[type, str | None]] = []
+        self._models_key: list[tuple[type[FEMModel], str | None]] = []
 
         # boundary
         self.setup_boundary()
@@ -399,7 +399,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     "Model 'linear_corotated' requires the implicit solver ('use_implicit_solver=True')."
                 )
         # The model of a new key is registered once the entity is accepted, so a refused entity leaves the solver as it was
-        model_key = (type(material), model)
+        model_cls = next(
+            cls for material_cls, cls in FEM_MODEL_CLS_BY_MATERIAL.items() if isinstance(material, material_cls)
+        )
+        model_key = (model_cls, model)
         is_new_model = model_key not in self._models_key
         model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
@@ -431,7 +434,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         if is_new_model:
             self._models_key.append(model_key)
-            self._models.append(FEM_MODEL_CLS_BY_MATERIAL[type(material)](model))
+            self._models.append(model_cls(model))
         self._entities.append(entity)
         return entity
 

@@ -70,10 +70,10 @@ class MPMSolver(ParticleSolver):
                 "boundaries via 'lower_bound' / 'upper_bound'."
             )
 
-        # The constitutive models of the entities, dispatched statically, one per material class and variant (see
+        # The constitutive models of the entities, dispatched statically, one per model class and variant (see
         # 'MPMModel')
         self._models: list[MPMModel] = []
-        self._models_key: list[tuple[type, str | None]] = []
+        self._models_key: list[tuple[type[MPMModel], str | None]] = []
 
         # boundary
         self.setup_boundary()
@@ -283,7 +283,10 @@ class MPMSolver(ParticleSolver):
     ) -> "MPMEntity":
         # The model of a new key is registered once the entity is accepted (see 'FEMSolver.add_entity')
         model = material.yield_criterion if isinstance(material, ElastoPlastic) else options.material_params.model
-        model_key = (type(material), model)
+        model_cls = next(
+            cls for material_cls, cls in MPM_MODEL_CLS_BY_MATERIAL.items() if isinstance(material, material_cls)
+        )
+        model_key = (model_cls, model)
         is_new_model = model_key not in self._models_key
         model_idx = len(self._models_key) if is_new_model else self._models_key.index(model_key)
 
@@ -305,7 +308,7 @@ class MPMSolver(ParticleSolver):
         )
         if is_new_model:
             self._models_key.append(model_key)
-            self._models.append(MPM_MODEL_CLS_BY_MATERIAL[type(material)](model))
+            self._models.append(model_cls(model))
         self._entities.append(entity)
 
         return entity
