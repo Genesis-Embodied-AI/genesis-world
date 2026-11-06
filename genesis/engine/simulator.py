@@ -24,7 +24,6 @@ from .solvers import (
     MPMSolver,
     PBDSolver,
     RigidSolver,
-    SFSolver,
     SPHSolver,
 )
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
@@ -108,7 +107,6 @@ class Simulator(RBC):
         self.sph_solver = SPHSolver(self.scene, self, options.sph)
         self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
         self.fem_solver = FEMSolver(self.scene, self, options.fem)
-        self.sf_solver = SFSolver(self.scene, self, options.sf)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -118,7 +116,6 @@ class Simulator(RBC):
                 self.sph_solver,
                 self.pbd_solver,
                 self.fem_solver,
-                self.sf_solver,
             ]
         )
 
@@ -255,9 +252,6 @@ class Simulator(RBC):
                 gs.raise_exception(
                     f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
                 )
-
-        if self.n_envs > 0 and self.sf_solver.is_active:
-            gs.raise_exception("Batching is not supported for SF solver as of now.")
 
         # hybrid
         for entity in self._entities:

@@ -36,7 +36,6 @@ from genesis.options import (
     ProfilingOptions,
     RigidOptions,
     SceneOptions,
-    SFOptions,
     SimOptions,
     SPHOptions,
     ViewerOptions,
@@ -156,8 +155,6 @@ class Scene(RBC):
         The options configuring the sph_solver (``scene.sim.SPHSolver``).
     fem_options : gs.options.FEMOptions
         The options configuring the fem_solver (``scene.sim.FEMSolver``).
-    sf_options : gs.options.SFOptions
-        The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
     coupler_options : gs.options.CouplerOptions
@@ -185,7 +182,6 @@ class Scene(RBC):
         mpm_options: MPMOptions | None = None,
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
-        sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
@@ -206,7 +202,6 @@ class Scene(RBC):
             mpm_options,
             sph_options,
             fem_options,
-            sf_options,
             pbd_options,
             coupler_options,
             vis_options,
@@ -226,7 +221,6 @@ class Scene(RBC):
                 mpm=mpm_options,
                 sph=sph_options,
                 fem=fem_options,
-                sf=sf_options,
                 pbd=pbd_options,
                 coupler=coupler_options,
                 vis=vis_options,
@@ -420,15 +414,6 @@ class Scene(RBC):
                 surface.vis_mode = "particle"
 
             if surface.vis_mode not in ("particle", "recon"):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
-                )
-
-        elif isinstance(material, gs.materials.SF.Smoke):
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle",):
                 gs.raise_exception(
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
