@@ -243,6 +243,38 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         for np_out, tc_out in zip(np_outs, tc_outs):
             assert_allclose(np_out, tc_out, tol=tol)
 
+    # Homogeneous transforms with missing components, allocated or written into a reused buffer
+    trans = np.random.randn(*batch_shape, 3).clip(-1.0, 1.0).astype(gs.np_float)
+    quat = gu.xyz_to_quat(np.random.randn(*batch_shape, 3).clip(-1.0, 1.0).astype(gs.np_float))
+    R = gu.quat_to_R(quat)
+    T_R = np.zeros((*batch_shape, 4, 4), dtype=gs.np_float)
+    T_R[..., :3, :3] = R
+    T_R[..., 3, 3] = 1.0
+    T_trans_R = T_R.copy()
+    T_trans_R[..., :3, 3] = trans
+    T_trans = np.broadcast_to(np.eye(4, dtype=gs.np_float), T_R.shape).copy()
+    T_trans[..., :3, 3] = trans
+    for convert in (lambda x: x, partial(torch.as_tensor, device=gs.device)):
+        trans_, quat_, R_ = [convert(value) for value in (trans, quat, R)]
+        for func, args, T_true in (
+            (gu.trans_R_to_T, (trans_, R_), T_trans_R),
+            (gu.R_to_T, (R_,), T_R),
+            (gu.trans_to_T, (trans_,), T_trans),
+        ):
+            for out in (None, convert(np.full((*batch_shape, 4, 4), np.nan, dtype=gs.np_float))):
+                T = func(*args, out=out)
+                assert out is None or T is out
+                assert_allclose(T, T_true, tol=tol)
+        for args, T_true in (((trans_, quat_), T_trans_R), ((None, quat_), T_R), ((trans_, None), T_trans)):
+            assert_allclose(gu.trans_quat_to_T(*args), T_true, tol=tol)
+
+        # Inputs of mixed precisions give a transform of the higher one
+        for trans_mixed, R_mixed in ((trans.astype(np.float16), R), (trans, R.astype(np.float16))):
+            T = gu.trans_R_to_T(convert(trans_mixed), convert(R_mixed))
+            assert tensor_to_array(T).dtype == gs.np_float
+            T_true = gu.trans_R_to_T(trans_mixed.astype(gs.np_float), R_mixed.astype(gs.np_float))
+            assert_allclose(T, T_true, tol=tol)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])

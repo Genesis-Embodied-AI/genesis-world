@@ -1263,28 +1263,29 @@ def R_to_xyz(R, rpy=False, degrees=False):
 
 
 def trans_R_to_T(trans=None, R=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, R) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, R) if e is not None)
+    args = tuple(e for e in (trans, R) if e is not None)
+    is_torch = all(isinstance(e, torch.Tensor) for e in args)
+    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in args)
 
     T = out
     B = () if trans is None and R is None else R.shape[:-2] if trans is None else trans.shape[:-1]
-    dtype = R.dtype if trans is None else trans.dtype
     if is_torch:
         if T is None:
-            device = R.device if trans is None else trans.device
-            T = torch.zeros((*B, 4, 4), dtype=dtype, device=device)
+            dtype = args[0].dtype if len(args) == 1 else torch.promote_types(trans.dtype, R.dtype)
+            T = torch.empty((*B, 4, 4), dtype=dtype, device=args[0].device)
     elif is_numpy:
         if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
+            T = np.empty((*B, 4, 4), dtype=np.result_type(*args))
     else:
         gs.raise_exception(f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(R)=}")
     if B:
         assert T.shape == (*B, 4, 4)
 
+    T[..., 3, :3] = 0.0
     T[..., 3, 3] = 1.0
-    if trans is not None:
-        T[..., :3, 3] = trans
+    T[..., :3, 3] = 0.0 if trans is None else trans
     if R is None:
+        T[..., :3, :3] = 0.0
         if is_torch:
             torch.diagonal(T, dim1=-2, dim2=-1).fill_(1.0)
         else:
@@ -1303,34 +1304,8 @@ def trans_to_T(trans, *, out=None):
     return trans_R_to_T(trans, None, out=out)
 
 
-def trans_quat_to_T(trans=None, quat=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, quat) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, quat) if e is not None)
-
-    T = out
-    B = () if trans is None and quat is None else quat.shape[:-2] if trans is None else trans.shape[:-1]
-    if is_torch:
-        if T is None:
-            T = torch.zeros((*B, 4, 4), dtype=trans.dtype, device=trans.device)
-    elif is_numpy:
-        dtype = np.result_type(trans, quat)
-        trans, quat = trans.astype(dtype), quat.astype(dtype)
-        if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
-    else:
-        gs.raise_exception(
-            f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(quat)=}"
-        )
-    if B:
-        assert T.shape == (*B, 4, 4)
-
-    T[..., 3, 3] = 1.0
-    if trans is not None:
-        T[..., :3, 3] = trans
-    if quat is not None:
-        quat_to_R(quat, out=T[..., :3, :3])
-
-    return T
+def trans_quat_to_T(trans=None, quat=None):
+    return trans_R_to_T(trans, None if quat is None else quat_to_R(quat))
 
 
 def T_to_trans(T):
