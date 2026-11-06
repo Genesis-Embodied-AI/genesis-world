@@ -292,7 +292,7 @@ def test_geom_quadrants_inverse(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-def test_geom_quadrants_identity(batch_shape):
+def test_geom_quadrants_identity(batch_shape, tol):
     import quadrants as qd
 
     for qd_funcs, shape_args, funcs_args in (
@@ -318,6 +318,17 @@ def test_geom_quadrants_identity(batch_shape):
 
         np.testing.assert_allclose(qd_args[0].to_numpy(), qd_args[-1].to_numpy(), atol=1e2 * gs.EPS)
 
+    # Rotation angles beyond pi, whose sine is negative
+    qd_rotvec = qd.Vector.field(3, dtype=gs.qd_float, shape=batch_shape)
+    qd_R = qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape)
+    axis = np.random.randn(*batch_shape, 3)
+    angle = np.random.uniform(0.0, 2.0 * math.pi, (*batch_shape, 1))
+    rotvec = axis / np.linalg.norm(axis, axis=-1, keepdims=True) * angle
+    qd_rotvec.from_numpy(rotvec.astype(gs.np_float))
+    _qd_kernel_wrapper(gu.qd_rotvec_to_R, 1, 1, gs.EPS)(qd_rotvec, qd_R)
+    R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+    assert_allclose(qd_R.to_numpy(), R_true, tol=tol)
+
     qd_A, qd_U, qd_S, qd_V = [qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape) for _ in range(4)]
     # Rotations of noisy identities, from nearly repeated to well separated singular values
     rotation, _ = np.linalg.qr(np.random.randn(*batch_shape, 3, 3))
@@ -334,7 +345,7 @@ def test_geom_quadrants_identity(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-def test_geom_tensor_identity(batch_shape):
+def test_geom_tensor_identity(batch_shape, tol):
     for py_funcs, shape_args in (
         ((gu.R_to_rot6d, gu.rot6d_to_R), ([3, 3], [6])),
         ((gu.R_to_quat, gu.quat_to_R), ([3, 3], [4])),
@@ -357,6 +368,68 @@ def test_geom_tensor_identity(batch_shape):
 
         np.testing.assert_allclose(np_args[0], np_args[-1], atol=1e2 * gs.EPS)
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
+
+    # Directions near -z in every quadrant, with transverse components and norms spanning several decades
+    transverse = 10.0 ** np.random.uniform(-30.0, -1.0, (*batch_shape, 1)) * np.random.randn(*batch_shape, 2)
+    unit = np.concatenate((transverse, -np.sqrt(1.0 - np.sum(transverse**2, axis=-1, keepdims=True))), axis=-1)
+    directions = (10.0 ** np.random.uniform(-3.0, 5.0, (*batch_shape, 1)) * unit).astype(gs.np_float)
+    axis = np.cross([0.0, 0.0, 1.0], unit)
+    transverse_norm = np.linalg.norm(axis, axis=-1, keepdims=True)
+    rotvec = axis / transverse_norm * np.arctan2(transverse_norm, unit[..., 2:])
+    R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+    quat = gu.z_to_quat(directions)
+    assert_allclose(gu.quat_to_R(quat), R_true, tol=tol)
+    assert_allclose(np.linalg.norm(quat, axis=-1), 1.0, tol=tol)
+    assert_allclose(gu.z_to_R(directions), R_true, tol=tol)
+
+    # Poles, directions on both sides of the zero-norm threshold, and the exact antipode
+    directions = np.array(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 0.0],
+            [0.5 * gs.EPS, 0.5 * gs.EPS, 0.0],
+            [0.75 * gs.EPS, 0.75 * gs.EPS, 0.0],
+            [gs.EPS, 0.0, 0.0],
+            [0.0, 0.0, -gs.EPS],
+        ],
+        dtype=gs.np_float,
+    )
+    quat_true = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [math.sqrt(0.5), -0.5, 0.5, 0.0],
+        [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+    quat = gu.z_to_quat(directions)
+    assert_allclose(quat, quat_true, tol=tol)
+    assert_allclose(gu.z_to_R(directions), gu.quat_to_R(quat), tol=tol)
+
+    for value in (np.nan, np.inf, -np.inf):
+        directions = np.array(
+            [
+                [value, 0.0, -1.0],
+                [0.0, value, -1.0],
+                [0.0, 0.0, value],
+            ],
+            dtype=gs.np_float,
+        )
+        assert_equal(np.isnan(gu.z_to_quat(directions)), True)
+        assert_equal(np.isnan(gu.z_to_R(directions)), True)
+
+    # Rotation angles of both signs and beyond pi, whose sine is negative
+    axis = np.random.randn(*batch_shape, 3)
+    theta = np.random.uniform(-2.0 * math.pi, 2.0 * math.pi, batch_shape)
+    rotvec = axis / np.linalg.norm(axis, axis=-1, keepdims=True) * theta[..., None]
+    R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+    assert_allclose(gu.axis_angle_to_R(axis.astype(gs.np_float), theta.astype(gs.np_float)), R_true, tol=tol)
+    assert_allclose(gu.rotvec_to_R(rotvec.astype(gs.np_float)), R_true, tol=tol)
+    assert_allclose(gu.rotvec_to_R(np.zeros(3, dtype=gs.np_float)), np.eye(3), tol=tol)
+    R_true = Rotation.from_rotvec([0.0, 0.0, -3.0]).as_matrix()
+    assert_allclose(gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), -3), R_true, tol=tol)
 
 
 @pytest.mark.required
