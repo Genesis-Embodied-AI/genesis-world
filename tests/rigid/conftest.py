@@ -745,6 +745,94 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
+    asset = ET.SubElement(mjcf, "asset")
+    ET.SubElement(
+        asset, "mesh", name="duck", file=os.path.join(get_assets_dir(), "meshes", "duck.obj"), scale="0.1 0.1 0.1"
+    )
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for i_b, (name, attrib) in enumerate(
+        (
+            ("on_geom", dict(density="250")),
+            ("on_class", {"class": "water"}),
+            ("on_default", dict(density="1000")),
+        )
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos=f"{i_b} 0.0 1.0")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
+
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="4.0 0.0 1.0")
+    ET.SubElement(mixed, "freejoint")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+    # A visual geom stays out of the recomputed inertia
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="5.0 0.0 1.0")
+    ET.SubElement(fused, "freejoint")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
+
+    weighed = ET.SubElement(worldbody, "body", name="weighed", pos="3.0 0.0 1.0")
+    ET.SubElement(weighed, "freejoint")
+    ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
+    ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    # Geoms stating different masses keep them apart, which places the center of mass off center
+    weighed_pair = ET.SubElement(worldbody, "body", name="weighed_pair", pos="-2.0 0.0 1.0")
+    ET.SubElement(weighed_pair, "freejoint")
+    ET.SubElement(weighed_pair, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="1")
+    ET.SubElement(weighed_pair, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="9")
+
+    # A stated mass survives the processing of an open mesh into its collision geometry
+    weighed_mesh = ET.SubElement(worldbody, "body", name="weighed_mesh", pos="-1.0 0.0 1.0")
+    ET.SubElement(weighed_mesh, "freejoint")
+    ET.SubElement(weighed_mesh, "geom", type="mesh", mesh="duck", mass="5")
+
+    unstated = ET.SubElement(worldbody, "body", name="unstated", pos="6.0 0.0 1.0")
+    ET.SubElement(unstated, "freejoint")
+    ET.SubElement(unstated, "geom", type="box", size="0.1 0.1 0.1")
+    # A zero-density geom is a massless marker carried by a link with nonzero inertia. The two share one frame, so the
+    # center of mass of the marker lies inside its own geometry.
+    weightless = ET.SubElement(unstated, "body", name="weightless")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")
@@ -849,20 +937,6 @@ def degenerate_inertials():
         ET.SubElement(joint, "parent", link=parent)
         ET.SubElement(joint, "child", link=name)
     return ET.tostring(urdf, encoding="unicode")
-
-
-@pytest.fixture(scope="session")
-def zero_density_marker_mjcf():
-    """Generate an MJCF with a free body holding a jointless child body whose geom has a zero density. The two bodies
-    share one frame, so the center of mass of the child lies inside its own geometry."""
-    mjcf = ET.Element("mujoco", model="zero_density_marker")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    hull = ET.SubElement(worldbody, "body", name="hull", pos="0.0 -2.0 0.5")
-    ET.SubElement(hull, "freejoint")
-    ET.SubElement(hull, "geom", type="box", size="0.1 0.1 0.1")
-    marker = ET.SubElement(hull, "body", name="marker")
-    ET.SubElement(marker, "geom", type="sphere", size="0.05", density="0")
-    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
