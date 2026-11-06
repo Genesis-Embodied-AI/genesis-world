@@ -1,7 +1,14 @@
+import argparse
+
 import genesis as gs
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-s", "--steps", type=int, default=10, help="Number of simulation steps")
+    args = parser.parse_args()
+
     gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
@@ -23,6 +30,7 @@ def main():
                 {"pos": (0.0, 0.0, 10.0), "radius": 3.0, "color": (15.0, 15.0, 15.0)},
             ],
         ),
+        show_viewer=args.vis,
     )
 
     # floor
@@ -150,14 +158,13 @@ def main():
         pos=(8.5, 0.0, 1.5),
         lookat=(3.0, 0.0, 0.7),
         fov=60,
-        GUI=True,
+        GUI=args.vis,
         spp=512,
     )
     scene.build()
     scene.reset()
-    horizon = 10
 
-    for i in range(horizon):
+    for i in range(args.steps):
         scene.step()
         cam_0.render()
 

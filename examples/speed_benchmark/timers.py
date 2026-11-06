@@ -4,7 +4,6 @@ from contextlib import nullcontext
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-import plotext as plt
 import torch
 
 import genesis as gs
@@ -22,6 +21,14 @@ def main():
     )
     parser.add_argument("--profiling", action="store_true", help="Enable the Genesis profiler")
     args = parser.parse_args()
+
+    # The unit tests run a few steps alone, which leaves nothing to plot
+    is_plotting = "PYTEST_VERSION" not in os.environ
+    if is_plotting:
+        try:
+            import plotext as plt
+        except ImportError as e:
+            raise ImportError("Please install 'plotext'.") from e
 
     # The benchmark measures per-environment timings across 128 environments, which needs a GPU.
     gs.init(backend=gs.gpu, precision="32", performance_mode=True, seed=0, logging_level="warning")
@@ -49,7 +56,7 @@ def main():
         ),
         vis_mode="collision",
     )
-    scene.build(n_envs=128)
+    scene.build(n_envs=128 if "PYTEST_VERSION" not in os.environ else 2)
 
     ctrl_pos_0 = torch.tensor(
         [0.0, 0.0, 0.0, 0.0, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5],
@@ -80,7 +87,7 @@ def main():
         if args.profiling
         else nullcontext()
     ):
-        for step in range(500):
+        for step in range(500 if "PYTEST_VERSION" not in os.environ else 5):
             scene.step()
             noise = (args.mode > 0) * torch.rand(
                 (*((scene.n_envs,) if (args.mode > 1) else ()), robot.n_dofs - 6),
@@ -94,7 +101,7 @@ def main():
                 stats[0] = timers
                 stats[1] = stats[1] * (step / (step + 1)) + timers / (step + 1)
                 stats[2] = stats[2] * (step / (step + 1)) + timers.sort(descending=False).values / (step + 1)
-                if (step + 1) % 500 == 0:
+                if is_plotting and (step + 1) % 500 == 0:
                     plt.clf()
                     plt.plot_size(260, 25)
                     plt.subplots(1, 3)
