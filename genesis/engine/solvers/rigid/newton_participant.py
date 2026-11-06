@@ -14,6 +14,7 @@ import genesis as gs
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.constraint.solver import func_hessian_and_cholesky_factor_direct
 from genesis.grad.bridge import no_grad
+from genesis.utils.array_class import ConstraintState
 from genesis.utils.data import DataItem, StaticConfig, iter_data
 
 from . import newton_func
@@ -106,7 +107,7 @@ class RigidNewtonParticipant(NewtonDevice):
 
     @qd.func
     def func_add_island_hessian(
-        self, i_b: int, i_island: int, constraint_state: qd.template(), rigid_config: qd.template()
+        self, i_b: int, i_island: int, constraint_state: ConstraintState, rigid_config: qd.template()
     ):
         newton_func.func_add_link_stiffness_island(
             i_b,
