@@ -390,6 +390,17 @@ def test_slerp(batch_shape, tol):
         lerp = gu.slerp(convert(q0[0]), q1_batch, convert(ratio))
         assert_allclose(lerp_from_one_true.reshape((*batch_shape, 4)), lerp, tol=tol)
 
+    # Coincident orientations of both signs, whose spherical interpolation is singular
+    q0 = torch.tensor(q0 / np.linalg.norm(q0, axis=-1, keepdims=True), dtype=gs.tc_float, device=gs.device)
+    sign = torch.where(torch.rand((numel, 1), dtype=gs.tc_float, device=gs.device) < 0.5, -1.0, 1.0)
+    t = torch.rand(numel, dtype=gs.tc_float, device=gs.device)
+    assert_allclose(gu.slerp(q0, sign * q0, t), q0, tol=tol)
+    jac0, jac1, jac_t = torch.func.vmap(torch.func.jacrev(gu.slerp, argnums=(0, 1, 2)))(q0, sign * q0, t)
+    tangent_projection = torch.eye(4, dtype=gs.tc_float, device=gs.device) - q0[:, :, None] * q0[:, None, :]
+    assert_allclose(jac0, (1.0 - t[:, None, None]) * tangent_projection, tol=tol)
+    assert_allclose(jac1, sign[..., None] * t[:, None, None] * tangent_projection, tol=tol)
+    assert_allclose(jac_t, 0.0, tol=tol)
+
 
 @pytest.mark.required
 def test_geom_torch_inside_enclosing_torch_compile(tol):
