@@ -18,7 +18,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.array_class import (
     ColliderInfo,
@@ -570,13 +571,13 @@ class Collider:
             # carrying its variant. The pair filter above leaves only variants that some environment carries, and every
             # same-root pair left belongs to a single variant of one entity, so the first environment carrying a geom
             # carries the other geom of its pair as well.
+            _, _, geoms_pos, geoms_quat, _, _ = compute_forward_kinematics(
+                self._solver.entities, n_envs=self._solver._B
+            )
             for i_g in self_root_geom_idxs:
                 geom = geoms[i_g]
                 i_b = geom.active_envs_idx[0] if geom.active_envs_idx is not None else 0
-                env_idx = i_b if self._solver.n_envs > 0 else None
-                geom_pos = tensor_to_array(geom.get_pos(env_idx, relative=False).reshape((3,)))
-                geom_quat = tensor_to_array(geom.get_quat(env_idx, relative=False).reshape((4,)))
-                verts = gu.transform_by_trans_quat(geom.init_verts, geom_pos, geom_quat)
+                verts = gu.transform_by_trans_quat(geom.init_verts, geoms_pos[i_b, i_g], geoms_quat[i_b, i_g])
                 centroid = verts.mean(axis=0, keepdims=True)
                 verts = centroid + (1.0 - 1e-3) * (verts - centroid)
                 geoms_verts[i_g] = verts

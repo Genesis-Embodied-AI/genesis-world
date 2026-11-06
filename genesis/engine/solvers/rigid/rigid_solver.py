@@ -10,6 +10,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
+from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
 from genesis.engine.materials import Rigid
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
@@ -45,7 +46,6 @@ from genesis.utils.misc import (
 from ..base_solver import GravityMixin, TimeBasedMixin
 from ..kinematic_solver import (
     KinematicSolver,
-    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,

@@ -8,6 +8,8 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
+from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
@@ -68,17 +70,6 @@ if TYPE_CHECKING:
 
 
 TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE = 1e-3
-
-
-def _balanced_variant_mapping(n_variants, B):
-    """Map N variants to B environments using balanced block assignment."""
-    if B >= n_variants:
-        base = B // n_variants
-        extra = B % n_variants
-        sizes = np.r_[np.full(extra, base + 1), np.full(n_variants - extra, base)]
-        return np.repeat(np.arange(n_variants), sizes)
-    else:
-        return np.arange(B)
 
 
 def _select_links_offset(offset, links_idx, envs_idx):
@@ -653,11 +644,8 @@ class KinematicSolver(Solver):
             for entity in self.entities:
                 if not entity._desc.variants:
                     continue
-                n_variants = len(entity._desc.variants)
-                variant_idx = _balanced_variant_mapping(n_variants, self._B)
-                q_s, q_e = entity.q_start, entity.q_start + entity.n_qs
-                for i_b in range(self._B):
-                    init_qpos[q_s:q_e, i_b] = entity._desc.variants[variant_idx[i_b]].init_qpos
+                _, _, variants_qpos0, envs_variant_idx = get_variants_kinematics(entity, n_envs=self._B)
+                init_qpos[entity.q_start : entity.q_end] = np.array(variants_qpos0)[envs_variant_idx].T
 
             self.qpos0.from_numpy(init_qpos)
             dofs_limit = np.broadcast_to(
@@ -706,8 +694,7 @@ class KinematicSolver(Solver):
         dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _ in dofs_fields]
 
         for entity in entities:
-            variants_links = [entity._desc.links, *(variant.links for variant in entity._desc.variants[1:])]
-            envs_variant_idx = _balanced_variant_mapping(len(variants_links), self._B)
+            variants_links, variants_j_descs, _, envs_variant_idx = get_variants_kinematics(entity, n_envs=self._B)
             links_slice = slice(entity.link_start, entity.link_end)
             variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
             variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
@@ -717,9 +704,7 @@ class KinematicSolver(Solver):
             # A file morph drops its joints without degrees of freedom, so a fixed one may leave the entity without any
             if entity.n_joints == 0:
                 continue
-            variants_joints = [
-                [asdict(j_desc) for l_desc in links for j_desc in l_desc.joints] for links in variants_links
-            ]
+            variants_joints = [[asdict(j_desc) for j_desc in j_descs] for j_descs in variants_j_descs]
             joints_slice = slice(entity.joint_start, entity.joint_end)
             variants_joints_pos = np.stack([[j_fields["pos"] for j_fields in joints] for joints in variants_joints])
             joints_pos[joints_slice] = variants_joints_pos[envs_variant_idx].swapaxes(0, 1)
