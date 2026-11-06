@@ -1684,10 +1684,12 @@ class BVHStaticConfig(StaticConfig):
     sort_kind: int
     # BVH_FIT_KIND
     fit_kind: int
+    # SORT_MAX_CHUNKS of genesis.engine.bvh capped by the CPU threads of quadrants
+    sort_max_chunks: int
 
 
 # Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree, the slots of its
-# device-wide radix sort, the chunks of its per-tree radix sort and the lanes of its extent reduction
+# device-wide radix sort, the rows of chunk histograms of its host radix sort and the lanes of its extent reduction.
 BVH_TREES = Size("bvh_trees")
 BVH_LEAVES = Size("bvh_leaves")
 SORT_SLOTS = Size("sort_slots")
@@ -1730,8 +1732,8 @@ class BVHState(Data, kind=DataKind.SCRATCH):
     leaves_keys: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
     keys_scratch: qd.Tensor = field(qd.u64, shape=(BVH_TREES * BVH_LEAVES,))
     sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
-    sort_hist: qd.Tensor = field(int, shape=(BVH_TREES, SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
-    n_keys: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT)
+    sort_hist: qd.Tensor = field(int, shape=(SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
+    n_keys: qd.Tensor = field(int, shape=())
     nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
     nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
     fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)

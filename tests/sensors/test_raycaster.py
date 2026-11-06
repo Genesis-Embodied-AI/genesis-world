@@ -560,6 +560,9 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
     assert static_bvh.n_trees == 1
     assert visual_bvh.n_trees == 1
     assert_allclose(lidar.read().distances[..., 0, 0], 0.8, tol=5e-3)
+    # A regroup at runtime keeps the BVH sets allocated at build, which the compiled kernels are specialized for
+    static_bvh_state = static_bvh.bvh_state
+    visual_bvh_state = visual_bvh.bvh_state
 
     if n_envs > 0:
         # A per-env set_pos on the fixed box diverges the envs: the static subset must regroup to one tree per
@@ -570,6 +573,7 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
         scene.step()
         assert static_bvh.n_trees == n_envs
         assert visual_bvh.n_trees == 1
+        assert static_bvh.bvh_state is static_bvh_state
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 2.8, 1.8), tol=5e-3)
 
         # A per-env set_pos on the visual box splits the visual BVH into one tree per distinct geometry - two here,
@@ -579,6 +583,7 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
         )
         scene.step()
         assert visual_bvh.n_trees == 2
+        assert visual_bvh.bvh_state is visual_bvh_state
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 1.3, 1.8), tol=5e-3)
 
         # Diverge the movable box per env (off the ray corridor), then restore the static box to identical poses:
