@@ -238,41 +238,6 @@ def test_envs_solve_apart(precision, show_viewer):
 
 
 @pytest.mark.required
-# fp32 cannot resolve the Newton tolerance the comparison of two batches needs
-@pytest.mark.precision("64")
-def test_halt_on_nan(precision, show_viewer):
-    scene, block = _falling_block(2, show_viewer)
-    scene.step()
-    pos_init = block.get_particles_pos()
-
-    # A velocity that is not finite in the second environment fails its Newton solve alone: its particles keep their
-    # state, and the first environment steps on as it does without it
-    vel = block.get_particles_vel()
-    vel[1, 0] = float("nan")
-    block.set_particles_vel(vel)
-    scene.step()
-    assert_equal(scene.get_error_envs_mask(), (False, True))
-    pos = block.get_particles_pos()
-    assert_equal(pos[1], pos_init[1])
-    assert pos[0].isfinite().all()
-    reference_scene, reference_block = _falling_block(0, show_viewer)
-    for _ in range(2):
-        reference_scene.step()
-    assert_allclose(pos[0], reference_block.get_particles_pos(), tol=1e-12)
-
-    # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
-    with pytest.raises(gs.GenesisException, match="Newton solve produced non-finite values"):
-        for _ in range(1 if gs.backend == gs.cpu else 2):
-            scene.step()
-
-    # Resetting the scene clears the error, so the simulation proceeds
-    scene.reset()
-    scene.step()
-    assert block.get_particles_pos().isfinite().all()
-    assert not scene.get_error_envs_mask().any()
-
-
-@pytest.mark.required
 @pytest.mark.precision("64")
 def test_halt_on_nan_freezes_participants(precision, show_viewer):
     scene = gs.Scene(
@@ -290,6 +255,11 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=1e-2,
+        ),
+        # Converged far below the rounding the order of the sums of the reductions leaves, so that a solve does not
+        # stop an iteration apart from the same solve of the other run
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=1e-10,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, -1.0, 0.7),
@@ -338,6 +308,7 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
         rigid_box.set_dofs_velocity((0.1, 0.0, 0.0), dofs_idx_local=slice(0, 3))
         fem_box.set_velocity((0.1, 0.0, 0.0))
         cloth.set_velocity((0.1, 0.0, 0.0))
+        block.set_velocity((0.1, 0.0, 0.0))
         states = []
         for i_step in range(2):
             scene.step()
@@ -353,6 +324,7 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
                         fem_box.get_state().vel,
                         cloth.get_particles_pos(),
                         cloth.get_particles_vel(),
+                        block.get_particles_pos(),
                     )
                 )
             )
@@ -363,12 +335,19 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
         states_by_run.append(states)
         if is_nan_injected:
             assert_equal(scene.get_error_envs_mask(), (False, True))
+            # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
+            with pytest.raises(gs.GenesisException, match="Newton solve produced non-finite values"):
+                for _ in range(1 if gs.backend == gs.cpu else 2):
+                    scene.step()
+    # The reset before the second run clears the error, so that the simulation proceeds
+    assert not scene.get_error_envs_mask().any()
     states_nan, states_clean = states_by_run
     for state_init, state_end in zip(*states_nan):
         assert_allclose(state_end[1], state_init[1], tol=1e-12)
     for state_nan, state_clean in zip(states_nan[1], states_clean[1]):
         assert_allclose(state_nan[0], state_clean[0], tol=1e-11)
-    for i_pos in (0, 4, 6):
+    assert all(state.isfinite().all() for state in states_clean[-1])
+    for i_pos in (0, 4, 6, 8):
         assert (states_nan[1][i_pos][0, ..., 0] - states_nan[0][i_pos][0, ..., 0] > 5e-4).all()
 
     # The snapshots PBD keeps of its substep start are freed with the scene, as the other data of the solve
@@ -382,6 +361,8 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
 
 
 @pytest.mark.required
+# A CPU run on a single thread sums in a fixed order, which the comparison of the two growths needs
+@pytest.mark.cpu_threads(1)
 @pytest.mark.parametrize(("has_plane", "has_rigid_dofs"), [(True, True), (True, False), (False, False)])
 def test_destroy_frees_data(has_plane, has_rigid_dofs, show_viewer):
     scene = gs.Scene(
@@ -420,14 +401,34 @@ def test_destroy_frees_data(has_plane, has_rigid_dofs, show_viewer):
             ),
         )
     scene.build(n_envs=2)
+    data_by_name = {item.name: item.array for item in scene.sim.newton_solver.data}
     arrays_built = [
         weakref.ref(item.array._unwrap())
         for item in scene.sim.newton_solver.data
         if item.name.startswith(("grid.", "newton.", "linear.")) and ".errors." not in item.name
     ]
-    mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
-    for _ in range(3):
-        scene.step()
+    capacities = [(data_by_name["grid.block_coords"].shape[0], data_by_name["linear.matrix.triplet_row"].shape[0])]
+    # The first run spreads the particles of a scene sized to their start, which grows its storage. The second run, from
+    # the same state, finds the capacity the first one grew to, which no longer grows: no run can be compared with a
+    # full capacity from a build of its own, since a capacity only grows
+    states = []
+    for _ in range(2):
+        scene.reset()
+        mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
+        for _ in range(3):
+            scene.step()
+        states.append((mpm_box.get_particles_pos().clone(), mpm_box.get_particles_vel().clone()))
+        data_by_name = {item.name: item.array for item in scene.sim.newton_solver.data}
+        capacities.append(
+            (data_by_name["grid.block_coords"].shape[0], data_by_name["linear.matrix.triplet_row"].shape[0])
+        )
+    assert capacities[1][0] > capacities[0][0] and capacities[1][1] > capacities[0][1]
+    assert capacities[2] == capacities[1]
+    # The growth keeps the state: the run that grows ends where the run on the grown capacity does. Only a CPU run on a
+    # single thread sums in a fixed order, so that the two runs agree bitwise.
+    if gs.backend == gs.cpu:
+        assert_equal(states[0][0], states[1][0])
+        assert_equal(states[0][1], states[1][1])
 
     # The data of the implicit step and of the joint Newton solve with Rigid, which kernels compiled for the scene keep
     # referencing, are freed with the scene, including the Rigid data read by the contact of a Rigid without dofs
@@ -462,69 +463,6 @@ def test_destroy_frees_data(has_plane, has_rigid_dofs, show_viewer):
 
     scene.destroy()
     assert all(array.arr is None for array in ndarrays)
-
-
-@pytest.mark.required
-@pytest.mark.precision("64")
-@pytest.mark.cpu_threads(1)
-@pytest.mark.parametrize("backend", [gs.cpu])
-@pytest.mark.parametrize("has_rigid_dofs", [True, False])
-def test_grow_grid_and_matrix_matches_full_capacity(has_rigid_dofs, show_viewer):
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-        ),
-        mpm_options=gs.options.MPMOptions(
-            lower_bound=(-0.3, -0.3, -0.1),
-            upper_bound=(0.3, 0.3, 0.4),
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.9, -0.9, 0.6),
-            camera_lookat=(0.0, 0.0, 0.15),
-            camera_fov=40,
-        ),
-        show_viewer=show_viewer,
-    )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-    mpm_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.05),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="regular",
-        ),
-    )
-    if has_rigid_dofs:
-        scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.0, 0.0, 0.15),
-                size=(0.05, 0.05, 0.05),
-            ),
-        )
-    scene.build(n_envs=2)
-
-    # The first run spreads the particles of a scene sized to their start, which grows its storage. The second run, from
-    # the same state, finds the capacity the first one grew to, which no longer grows: no run can be compared with a
-    # full capacity from a build of its own, since a capacity only grows
-    arrays = {item.name: item.array for item in scene.sim.newton_solver.data}
-    capacities = [(arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0])]
-    states = []
-    for _ in range(2):
-        scene.reset()
-        mpm_box.set_position(mpm_box.get_particles_pos() * 3.0)
-        for _ in range(3):
-            scene.step()
-        states.append((mpm_box.get_particles_pos().clone(), mpm_box.get_particles_vel().clone()))
-        arrays = {item.name: item.array for item in scene.sim.newton_solver.data}
-        capacities.append((arrays["grid.block_coords"].shape[0], arrays["linear.matrix.triplet_row"].shape[0]))
-
-    assert capacities[1][0] > capacities[0][0] and capacities[1][1] > capacities[0][1]
-    assert capacities[2] == capacities[1]
-    assert_equal(states[0][0], states[1][0])
-    assert_equal(states[0][1], states[1][1])
 
 
 @pytest.mark.required
