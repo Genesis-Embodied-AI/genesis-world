@@ -348,19 +348,7 @@ def _pcg_block_system(off_diagonal_scales, check_curvature, pcg_scalars=None, x_
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_linear_pcg_solves_spd_block_system():
-    # A dominant diagonal makes the matrix symmetric positive definite (SPD), which the curvature check accepts
-    (dense,), b, x, pcg_scalars = _pcg_block_system(off_diagonal_scales=(0.1,), check_curvature=True)
-    assert np.all(np.linalg.eigvalsh(dense) > 0)
-    assert_allclose(x, np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
-    assert 0 < int(qd_to_numpy(pcg_scalars.iter_remaining)) < int(qd_to_numpy(pcg_scalars.max_iter))
-    assert_equal(qd_to_numpy(pcg_scalars.has_breakdown), 0)
-
-
-@pytest.mark.required
-@pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_linear_pcg_flags_non_positive_curvature():
+def test_linear_pcg_solves_spd_block_system_and_flags_non_positive_curvature():
     # Off-diagonal blocks large enough to make the matrix of the second environment indefinite, its symmetric positive
     # definite (SPD) diagonal keeping the preconditioner SPD. The first environment solves as it does alone.
     (dense_spd, dense_indefinite), b, x, pcg_scalars = _pcg_block_system(
@@ -371,6 +359,7 @@ def test_linear_pcg_flags_non_positive_curvature():
     assert_equal(qd_to_numpy(pcg_scalars.has_breakdown), (0, 1))
     n_env_dofs = dense_spd.shape[0]
     assert_allclose(x[:n_env_dofs], np.linalg.solve(dense_spd, b[:n_env_dofs]), rtol=1e-7, atol=1e-8)
+    assert 0 < int(qd_to_numpy(pcg_scalars.iter_remaining)) < int(qd_to_numpy(pcg_scalars.max_iter))
 
     # The retry of the adjoint solve over the broken environment alone, on a matrix made SPD, leaves the solution of the
     # other environment as it was. This covers the keep guard of func_init_linear_pcg_residual, which the solutions of
