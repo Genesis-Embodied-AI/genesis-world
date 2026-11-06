@@ -1,0 +1,24 @@
+genesis/engine/sensors/raycaster.py
+  s_30743dd4e1d4b2::t_7cc375462cd7ef 498-500,550,552,585-587,589-592
+  s_30743dd4e1d4b2::t_d6c1d0a1e60535 633-635,638,654-656,659-665
+tests/sensors/test_raycaster.py
+  s_30743dd4e1d4b2::t_8d09f9f863f21e 610,664,677-679,689
+genesis/options/sensors/options.py
+  s_30743dd4e1d4b2::t_fe75e41a1ca2c6 630-637
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67aaa9871121ae66256569c34cbfe82b8cf87dd4",
+  "prompts": {},
+  "sessions": {
+    "s_30743dd4e1d4b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcbc5529-4957-4e0d-8c5f-2573abbad53d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
