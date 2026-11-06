@@ -279,7 +279,8 @@ def init(
     # init quadrants
     qd_debug = debug and (os.environ.get("QD_DEBUG") != "0")
     # The native logger of Quadrants writes to the stderr file descriptor directly, before its Python logger is
-    # redirected to ours below, so what it prints while initializing is collected there as well
+    # redirected to ours below, so what it prints while initializing is collected there as well, except on Windows where
+    # it writes to the standard error handle of the process (see 'redirect_libc_stderr').
     with tempfile.TemporaryFile(mode="w+") as qd_errors:
         with redirect_stdout(_qd_outputs), redirect_libc_stderr(qd_errors), set_environ(qd_init_environ):
             qd.init(
