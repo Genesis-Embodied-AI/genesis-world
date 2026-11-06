@@ -325,7 +325,7 @@ def _store_array(value, exported: "Exported") -> int:
     the values out, and keeps the shape it was given: an array holding one value and no axis loads back as such.
     """
     layout = value.__array_interface__
-    key = (layout["data"][0], layout["shape"], layout["strides"], layout["typestr"])
+    key = (layout["data"][0], layout["shape"], layout["strides"], value.dtype)
     slot = exported.slots.get(key)
     if slot is None:
         slot = len(exported.values)

@@ -19,9 +19,21 @@ from genesis.engine.scene import SCENE_FORMAT, description_digest
 from genesis.ext import urdfpy
 from genesis.recorders.trajectory import CHUNK_MAGIC, TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import get_assets_dir, tensor_to_array
-from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME
+from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, export, load
 
 from ..utils.assertions import assert_allclose, assert_equal
+
+
+@pytest.mark.required
+def test_structured_array_views_round_trip(tmp_path):
+    points = np.array([(1.0, 2.0, 3.0)], dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+    channels = points.view([("r", "u4"), ("g", "u4"), ("b", "u4")])
+    path = tmp_path / "views.zip"
+
+    export(path, {"points": points, "channels": channels})
+    loaded = load(path, {"points": np.ndarray, "channels": np.ndarray})
+    np.testing.assert_array_equal(loaded["points"], points)
+    np.testing.assert_array_equal(loaded["channels"], channels)
 
 
 @pytest.fixture
