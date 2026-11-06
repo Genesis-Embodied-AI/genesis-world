@@ -110,6 +110,7 @@ def main():
     parser.add_argument(
         "-e", "--exp-name", type=str, default="single", help="Experiment name; also the log directory under logs/"
     )
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
     gs.init(backend=gs.cpu)
@@ -129,7 +130,7 @@ def main():
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        show_viewer=True,
+        show_viewer=args.vis,
     )
 
     policy = torch.nn.Sequential(
@@ -146,8 +147,10 @@ def main():
     policy.to(device=gs.device)
 
     obs = env.reset()
+    # The environment resets at the end of each episode, so the robot flips again every episode
+    n_steps = 10 * env.max_episode_length if "PYTEST_VERSION" not in os.environ else 5
     with torch.no_grad():
-        while True:
+        for _ in range(n_steps):
             actions = policy(obs)
             obs, rews, dones, infos = env.step(actions)
 
@@ -157,6 +160,6 @@ if __name__ == "__main__":
 
 """
 # evaluation
-python examples/locomotion/go2_backflip.py -e single
-python examples/locomotion/go2_backflip.py -e double
+python examples/locomotion/go2_backflip.py -e single -v
+python examples/locomotion/go2_backflip.py -e double -v
 """
