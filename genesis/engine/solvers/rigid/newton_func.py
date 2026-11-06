@@ -286,15 +286,15 @@ def func_add_link_stiffness_island(
 
     The entries couple dofs of one chain, within the skyline envelope of the block, and take the Jacobi equilibration of
     the block (see func_hessian_direct_batch)."""
-    link_start = constraint_state.island.link_slices.start[i_island, i_b]
-    for i_link in range(constraint_state.island.link_slices.n[i_island, i_b]):
-        i_l = constraint_state.island.link_id[link_start + i_link, i_b]
+    for i_l in range(rigid_data.link_K.shape[0]):
         K = rigid_data.link_K[i_l, i_b]
         if K.norm_sqr() > 0.0:
             i_a = i_l
             while i_a >= 0:
                 I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
                 for i_d1 in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
+                    if constraint_state.island.dofs_island_idx[i_d1, i_b] != i_island:
+                        continue
                     K_J1 = K @ cdof_spatial(i_d1, i_b, dofs_state)
                     pos1 = constraint_state.island.dof_local_pos[i_d1, i_b]
                     i_c = i_l
