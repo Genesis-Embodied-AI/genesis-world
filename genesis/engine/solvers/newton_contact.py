@@ -239,7 +239,7 @@ def func_contact_assemble(f: int, contact: qd.template(), linear: NewtonLinearSc
     qd.loop_config(name="newton_contact_gradient")
     for i_nz in range(contact.matrices.gradient.bcoo_nnz[()]):
         i_vg, i_zero, block = func_read_bcoo(i_nz, contact.matrices.gradient, block_rows=3, block_cols=1)
-        g = qd.Vector([block[0, 0], block[1, 0], block[2, 0]], dt=gs.qd_float)
+        g = block[:, 0]
         if is_rigid_vertex(i_vg, contact):
             if qd.static(contact.has_rigid_map):
                 contact.rigid_map.func_vertex_add_force(f, i_vg - contact.rigid_map.vertex_offset[()], g)
@@ -289,8 +289,9 @@ def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLin
     """Add the product of the contact entries on a Rigid contact point with the direction of the conjugate gradient,
     once the matrix and Rigid set the products of their own.
 
-    One thread per stored block B of rows (r, c): it adds B p_c to the image of r and, off the diagonal, B^T p_r to the
-    image of c, the rows of the linear system adding their p . Ap. The environments that converged are skipped."""
+    One thread per stored block B of vertices (r, c), the contact point c coming last of the vertices: it adds B p_c to
+    the image of r and, off the diagonal, B^T p_r to that of c, the rows of the linear system adding their p . Ap. The
+    environments that converged are skipped."""
     contact.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
     qd.loop_config(name="newton_contact_rigid_product")
     for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
@@ -302,44 +303,18 @@ def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLin
             i_b = contact.rigid_map.func_vertex_env(i_c - contact.rigid_map.vertex_offset[()])
             is_running = pcg_scalars.is_converged[i_b] == 0
         if is_running:
-            p_ends = qd.Matrix.zero(gs.qd_float, 2, 3)
-            # The two ends go through one inlined dispatch
-            for i_end in range(2):
-                i_vg = i_r
-                if i_end == 1:
-                    i_vg = i_c
-                p = qd.Vector.zero(gs.qd_float, 3)
-                if is_rigid_vertex(i_vg, contact):
-                    p = contact.rigid_map.func_vertex_value(
-                        f, i_vg - contact.rigid_map.vertex_offset[()], SRC_DIRECTION
-                    )
-                else:
-                    n_rows, rows, weights = vertex_rows(i_vg, contact)
-                    for a in range(n_rows):
-                        p += weights[a] * linear.pcg.p[rows[a]]
-                for d in qd.static(range(3)):
-                    p_ends[i_end, d] = p[d]
-            p_r = qd.Vector([p_ends[0, d] for d in qd.static(range(3))], dt=gs.qd_float)
-            p_c = qd.Vector([p_ends[1, d] for d in qd.static(range(3))], dt=gs.qd_float)
-            n_ends = 2
-            if i_r == i_c:
-                n_ends = 1
-            for i_end in range(n_ends):
-                i_vg = i_r
-                y = B @ p_c
-                p = p_r
-                if i_end == 1:
-                    i_vg = i_c
-                    y = B.transpose() @ p_r
-                    p = p_c
-                if is_rigid_vertex(i_vg, contact):
-                    contact.rigid_map.func_vertex_add_force(f, i_vg - contact.rigid_map.vertex_offset[()], y)
-                else:
-                    n_rows, rows, weights = vertex_rows(i_vg, contact)
-                    for a in range(n_rows):
-                        qd.atomic_add(linear.pcg.ap[rows[a]], weights[a] * y)
-                    # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
-                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p.dot(y))
+            i_vc = i_c - contact.rigid_map.vertex_offset[()]
+            y_c = B @ contact.rigid_map.func_vertex_value(f, i_vc, SRC_DIRECTION)
+            if i_r != i_c:
+                n_rows, rows, weights = vertex_rows(i_r, contact)
+                p_r = qd.Vector.zero(gs.qd_float, 3)
+                for a in range(n_rows):
+                    p_r += weights[a] * linear.pcg.p[rows[a]]
+                    qd.atomic_add(linear.pcg.ap[rows[a]], weights[a] * y_c)
+                # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
+                qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p_r.dot(y_c))
+                y_c = B.transpose() @ p_r
+            contact.rigid_map.func_vertex_add_force(f, i_vc, y_c)
     contact.rigid_map.func_vertex_end(DST_PRODUCT)
 
 

@@ -4,8 +4,8 @@ The Rigid unknown is x = dt^2 qacc per dof, so that a link point moves by dt v +
 primal cost (its Gauss term and constraint rows, as Rigid assembled them for the substep) times dt^4 joins the joint
 energy in the displacement units of the material point method (MPM) energy. Its gradient is dt^2 times that of Rigid,
 and its Hessian is the M + J^T D J of Rigid. One preconditioned conjugate gradient (PCG) solves the joint Newton system
-with a block diagonal preconditioner, and Rigid's block is its island Cholesky factor of M + J^T D J corrected by the
-contact stiffness of the links in contact (see func_rigid_factor). The couplings act on the links through their spatial
+with a block diagonal preconditioner, and Rigid's block is its island Cholesky factor of M + J^T D J plus the contact
+stiffness of the links in contact (see func_add_link_stiffness_island). The couplings act on the links through their spatial
 displacement and spatial force: a point at arm r from the root center of mass (COM) of its link moves by dr = V_lin +
 V_ang x r for the link's spatial displacement V = sum over the dofs of its chain of cdof x_d, and a force g on it pushes
 the dofs of that chain with the spatial force (g, r x g).
@@ -21,7 +21,6 @@ from .abd.forward_dynamics import func_solve_mass_batch
 from .constraint.island import func_group_constraints_by_island
 from .constraint.solver import (
     func_cholesky_solve_batch,
-    func_hessian_and_cholesky_factor_direct,
     func_update_constraint,
     initialize_Jaref,
     initialize_Ma,
@@ -34,11 +33,9 @@ class RigidNewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
     substep_dt: qd.Tensor = field(float, ndarray=True)
 
 
-# The dofs, the links and the links in contact of Rigid in the joint solve, and the spatial components of the latter
+# The dofs and the links of Rigid in the joint solve
 DOFS = Size("dofs")
 LINKS = Size("links")
-CONTACT_LINKS = Size("contact_links")
-CONTACT_COLS = 6 * CONTACT_LINKS
 
 
 class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
@@ -68,21 +65,9 @@ class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
     link_motion_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
     link_force_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
     link_force_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
-    # The contact stiffness the couplings put on the links, which the preconditioner takes in by the Woodbury identity
-    # on Rigid's factor A. Per link, its 6 x 6 spatial stiffness K_l. Per environment, the links in contact (at most
-    # `contact_links`, the first dimension of `contact_links` that the kernels read), the cdof map U of their chains
-    # with one column per spatial component, W = A^-1 U, and the lower-upper (LU) factor of S = I + K U^T W with its
-    # row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
+    # The 6 x 6 spatial stiffness K_l the couplings put on every link, which the preconditioner adds to Rigid's
+    # Hessian (see func_add_link_stiffness_island)
     link_K: qd.Tensor = field((float, (6, 6)), shape=(LINKS, ENVS), ndarray=True)
-    contact_links: qd.Tensor = field(int, shape=(CONTACT_LINKS, ENVS), ndarray=True)
-    n_links_in_contact: qd.Tensor = field(int, shape=(ENVS,), ndarray=True)
-    woodbury_U: qd.Tensor = field(float, shape=(DOFS, CONTACT_COLS, ENVS), ndarray=True)
-    woodbury_W: qd.Tensor = field(float, shape=(DOFS, CONTACT_COLS, ENVS), ndarray=True)
-    capacitance_LU: qd.Tensor = field(float, shape=(CONTACT_COLS, CONTACT_COLS, ENVS), ndarray=True)
-    capacitance_pivots: qd.Tensor = field(int, shape=(CONTACT_COLS, ENVS), ndarray=True)
-    woodbury_y: qd.Tensor = field(float, shape=(CONTACT_COLS, ENVS), ndarray=True)
-    solve_rhs: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
-    solve_out: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
 
 
 # ============================================ Layer 1: link kinematics =============================================
@@ -288,102 +273,57 @@ def rigid_solve(
         func_solve_mass_batch(i_b, rhs, out, dyn_state, rigid_info, rigid_config)
 
 
-@qd.func(requires_top_level=True)
-def func_rigid_factor(
+@qd.func
+def cdof_spatial(i_d: int, i_b: int, dofs_state: DofsState):
+    """Spatial motion (linear, angular) of a link per unit velocity of dof `i_d`."""
+    v = dofs_state.cdof_vel[i_d, i_b]
+    w = dofs_state.cdof_ang[i_d, i_b]
+    return qd.Vector([v[0], v[1], v[2], w[0], w[1], w[2]], dt=gs.qd_float)
+
+
+@qd.func
+def func_add_link_stiffness_island(
+    i_b: int,
+    i_island: int,
     rigid_data: RigidNewtonScratch,
-    dyn_state: DynState,
+    dofs_state: DofsState,
+    links_info: LinksInfo,
     constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Factor the preconditioner (A + U K U^T)^-1 of the Rigid block, after func_rigid_contact_gradient summed the
-    contact stiffness K_l of each link.
+    """Add the contact stiffness J_l^T K_l J_l of every link of an island to the lower triangle of its Hessian block,
+    J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see link_K).
 
-    A = M + J^T D J, and U K U^T is the MPM contact stiffness of the links in contact. Rigid's island factor of A is
-    computed at the current x, and the Woodbury identity applies on it. Per environment, U holds one column per spatial
-    component of each link in contact (the cdofs of its chain), W = A^-1 U, and S = I + K U^T W, of order 6 times the
-    number of links in contact, gets a lower-upper (LU) factorization. Without the contact stiffness, the rows of the
-    many particles on a link, far stiffer than its inertia, leave the joint preconditioned conjugate gradient (PCG)
-    stopping on a direction that barely moves the link."""
-    if qd.static(config.has_rigid_rows):
-        func_hessian_and_cholesky_factor_direct(constraint_state, rigid_info, rigid_config, compute_envelope=True)
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_contact_factor")
-    for i_b in range(n_envs):
-        n_links = 0
-        for i_l in range(rigid_data.link_K.shape[0]):
-            if rigid_data.link_K[i_l, i_b].norm_sqr() > 0.0 and n_links < rigid_data.contact_links.shape[0]:
-                rigid_data.contact_links[n_links, i_b] = i_l
-                n_links += 1
-        rigid_data.n_links_in_contact[i_b] = n_links
-        n_cols = 6 * n_links
-        for i_col in range(n_cols):
-            i_l = rigid_data.contact_links[i_col // 6, i_b]
-            component = i_col % 6
-            for i_d in range(n_dofs):
-                rigid_data.solve_rhs[i_d, i_b] = 0.0
+    The entries are those of a pair of dofs of one chain, which the mass matrix couples, hence within the skyline
+    envelope of the block, scaled by the Jacobi equilibration of the block (see func_hessian_direct_batch). Without
+    the contact stiffness, the rows of the many particles on a link, far stiffer than its inertia, leave the joint
+    preconditioned conjugate gradient (PCG) stopping on a direction that barely moves the link."""
+    link_start = constraint_state.island.link_slices.start[i_island, i_b]
+    for i_link in range(constraint_state.island.link_slices.n[i_island, i_b]):
+        i_l = constraint_state.island.link_id[link_start + i_link, i_b]
+        K = rigid_data.link_K[i_l, i_b]
+        if K.norm_sqr() > 0.0:
             i_a = i_l
             while i_a >= 0:
                 I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
-                for i_d in range(dyn_info.links.dof_start[I_a], dyn_info.links.dof_end[I_a]):
-                    value = gs.qd_float(0.0)
-                    for e in qd.static(range(3)):
-                        if component == e:
-                            value = dyn_state.dofs.cdof_vel[i_d, i_b][e]
-                        if component == 3 + e:
-                            value = dyn_state.dofs.cdof_ang[i_d, i_b][e]
-                    rigid_data.solve_rhs[i_d, i_b] = value
-                i_a = dyn_info.links.parent_idx[I_a]
-            rigid_solve(
-                i_b,
-                rigid_data.solve_rhs,
-                rigid_data.solve_out,
-                dyn_state,
-                constraint_state,
-                rigid_info,
-                rigid_config,
-                config,
-            )
-            for i_d in range(n_dofs):
-                rigid_data.woodbury_U[i_d, i_col, i_b] = rigid_data.solve_rhs[i_d, i_b]
-                rigid_data.woodbury_W[i_d, i_col, i_b] = rigid_data.solve_out[i_d, i_b]
-        # S = I + K U^T W, the rows of a link's block from its K_l and the rows of U^T W of its columns
-        for b in range(n_cols):
-            for j in range(n_links):
-                g = qd.Vector.zero(gs.qd_float, 6)
-                for k in qd.static(range(6)):
-                    value = gs.qd_float(0.0)
-                    for i_d in range(n_dofs):
-                        value += rigid_data.woodbury_U[i_d, 6 * j + k, i_b] * rigid_data.woodbury_W[i_d, b, i_b]
-                    g[k] = value
-                i_l = rigid_data.contact_links[j, i_b]
-                K_g = rigid_data.link_K[i_l, i_b] @ g
-                for i in qd.static(range(6)):
-                    value = K_g[i]
-                    if 6 * j + i == b:
-                        value += 1.0
-                    rigid_data.capacitance_LU[6 * j + i, b, i_b] = value
-        # In-place lower-upper (LU) factorization with partial pivoting. S is non-singular, K and U^T W being positive
-        # semi-definite
-        for k in range(n_cols):
-            i_max = k
-            for i in range(k + 1, n_cols):
-                if qd.abs(rigid_data.capacitance_LU[i, k, i_b]) > qd.abs(rigid_data.capacitance_LU[i_max, k, i_b]):
-                    i_max = i
-            rigid_data.capacitance_pivots[k, i_b] = i_max
-            if i_max != k:
-                for j in range(n_cols):
-                    entry = rigid_data.capacitance_LU[k, j, i_b]
-                    rigid_data.capacitance_LU[k, j, i_b] = rigid_data.capacitance_LU[i_max, j, i_b]
-                    rigid_data.capacitance_LU[i_max, j, i_b] = entry
-            for i in range(k + 1, n_cols):
-                rigid_data.capacitance_LU[i, k, i_b] /= rigid_data.capacitance_LU[k, k, i_b]
-                factor = rigid_data.capacitance_LU[i, k, i_b]
-                for j in range(k + 1, n_cols):
-                    rigid_data.capacitance_LU[i, j, i_b] -= factor * rigid_data.capacitance_LU[k, j, i_b]
+                for i_d1 in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
+                    K_J1 = K @ cdof_spatial(i_d1, i_b, dofs_state)
+                    pos1 = constraint_state.island.dof_local_pos[i_d1, i_b]
+                    i_c = i_l
+                    while i_c >= 0:
+                        I_c = [i_c, i_b] if qd.static(config.rigid_batch_links_info) else i_c
+                        for i_d2 in range(links_info.dof_start[I_c], links_info.dof_end[I_c]):
+                            # The lower triangle in the island-local order of the dofs
+                            if pos1 >= constraint_state.island.dof_local_pos[i_d2, i_b]:
+                                value = cdof_spatial(i_d2, i_b, dofs_state).dot(K_J1)
+                                if qd.static(rigid_config.enable_jacobi_equilibration):
+                                    value *= (
+                                        constraint_state.nt_jacobi[i_d1, i_b] * constraint_state.nt_jacobi[i_d2, i_b]
+                                    )
+                                constraint_state.nt_H[i_b, i_d1, i_d2] += value
+                        i_c = links_info.parent_idx[I_c]
+                i_a = links_info.parent_idx[I_a]
 
 
 @qd.func(requires_top_level=True)
@@ -395,50 +335,10 @@ def func_rigid_precondition(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Apply the preconditioner of the Rigid block with the factors of func_rigid_factor.
-
-    z = (A + U K U^T)^-1 r over the Rigid dofs: z0 = A^-1 r, then z = z0 - W S^-1 K U^T z0 by the Woodbury identity."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
+    """z = A^-1 r over the Rigid dofs, A being Rigid's Hessian plus the contact stiffness of the links in its factor."""
     qd.loop_config(name="mpm_rigid_precondition")
-    for i_b in range(n_envs):
+    for i_b in range(rigid_data.x.shape[1]):
         rigid_solve(i_b, rigid_data.r, rigid_data.z, dyn_state, constraint_state, rigid_info, rigid_config, config)
-        n_links = rigid_data.n_links_in_contact[i_b]
-        n_cols = 6 * n_links
-        for a in range(n_cols):
-            value = gs.qd_float(0.0)
-            for i_d in range(n_dofs):
-                value += rigid_data.woodbury_U[i_d, a, i_b] * rigid_data.z[i_d, i_b]
-            rigid_data.woodbury_y[a, i_b] = value
-        for j in range(n_links):
-            i_l = rigid_data.contact_links[j, i_b]
-            y = qd.Vector([rigid_data.woodbury_y[6 * j + k, i_b] for k in qd.static(range(6))], dt=gs.qd_float)
-            K_y = rigid_data.link_K[i_l, i_b] @ y
-            for i in qd.static(range(6)):
-                rigid_data.woodbury_y[6 * j + i, i_b] = K_y[i]
-        # S q = K U^T z0 by the lower-upper (LU) factor: the row pivots, then the unit lower and upper triangular solves
-        for k in range(n_cols):
-            i_p = rigid_data.capacitance_pivots[k, i_b]
-            if i_p != k:
-                entry = rigid_data.woodbury_y[k, i_b]
-                rigid_data.woodbury_y[k, i_b] = rigid_data.woodbury_y[i_p, i_b]
-                rigid_data.woodbury_y[i_p, i_b] = entry
-        for i in range(n_cols):
-            value = rigid_data.woodbury_y[i, i_b]
-            for k in range(i):
-                value -= rigid_data.capacitance_LU[i, k, i_b] * rigid_data.woodbury_y[k, i_b]
-            rigid_data.woodbury_y[i, i_b] = value
-        for i_rev in range(n_cols):
-            i = n_cols - 1 - i_rev
-            value = rigid_data.woodbury_y[i, i_b]
-            for k in range(i + 1, n_cols):
-                value -= rigid_data.capacitance_LU[i, k, i_b] * rigid_data.woodbury_y[k, i_b]
-            rigid_data.woodbury_y[i, i_b] = value / rigid_data.capacitance_LU[i, i, i_b]
-        for i_d in range(n_dofs):
-            value = gs.qd_float(0.0)
-            for b in range(n_cols):
-                value += rigid_data.woodbury_W[i_d, b, i_b] * rigid_data.woodbury_y[b, i_b]
-            rigid_data.z[i_d, i_b] -= value
 
 
 # ========================================= Layer 1: joint PCG over (u, x) ==========================================

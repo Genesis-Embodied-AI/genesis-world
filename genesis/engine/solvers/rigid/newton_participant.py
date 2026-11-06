@@ -8,19 +8,15 @@ the converged qacc back to Rigid and integrate its deferred substep (see RigidSo
 from collections.abc import Iterator
 
 import numpy as np
-
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
+from genesis.engine.solvers.rigid.constraint.solver import func_hessian_and_cholesky_factor_direct
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import DataItem, StaticConfig, iter_data
 
 from . import newton_func
-
-# Links in contact with MPM per environment whose contact stiffness the Rigid preconditioner takes in. The stiffness on
-# any further link is left to the conjugate gradient iterations.
-MAX_PRECONDITIONED_LINKS = 16
 
 
 class RigidNewtonConfig(StaticConfig):
@@ -48,7 +44,6 @@ class RigidNewtonParticipant(NewtonDevice):
                 dofs=rigid.n_dofs_,
                 links=rigid.n_links,
                 envs=n_envs,
-                contact_links=min(max(rigid.n_links, 1), MAX_PRECONDITIONED_LINKS),
             )
         )
         self.coupled_geoms_idx = np.array([geom.idx for geom in rigid.geoms if geom.needs_coup], dtype=gs.np_int)
@@ -100,13 +95,27 @@ class RigidNewtonParticipant(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
-        newton_func.func_rigid_factor(
+        # Rigid's own factor of its Hessian with the contact stiffness of the links, or its mass factor without rows
+        if qd.static(self.config.has_rigid_rows):
+            func_hessian_and_cholesky_factor_direct(
+                self.constraint_state, self.rigid_info, self.rigid_config, compute_envelope=True, extra_hessian=self
+            )
+
+    # The contact stiffness of the links joins the factor of Rigid (see func_hessian_and_cholesky_factor_direct)
+    has_extra_hessian = True
+
+    @qd.func
+    def func_add_island_hessian(
+        self, i_b: int, i_island: int, constraint_state: qd.template(), rigid_config: qd.template()
+    ):
+        newton_func.func_add_link_stiffness_island(
+            i_b,
+            i_island,
             self.rigid_data,
-            self.dyn_state,
-            self.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
+            self.dyn_state.dofs,
+            self.dyn_info.links,
+            constraint_state,
+            rigid_config,
             self.config,
         )
 

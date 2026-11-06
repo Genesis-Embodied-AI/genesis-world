@@ -96,6 +96,20 @@ def func_report_triplet_demand(count: int, matrix: BCOOMatrixScratch):
 
 
 @qd.func
+def _upper_block(i_r: int, i_c: int, block: qd.template(), is_symmetric: qd.template()):
+    """Row, column and block of a triplet as stored: mirrored into the upper triangle for symmetric storage."""
+    row = i_r
+    col = i_c
+    upper = block
+    if qd.static(is_symmetric):
+        if i_r > i_c:
+            row = i_c
+            col = i_r
+            upper = block.transpose()
+    return row, col, upper
+
+
+@qd.func
 def func_write_triplet(
     i_t: int, i_r: int, i_c: int, block: qd.template(), matrix: BCOOMatrixScratch, is_symmetric: qd.template()
 ):
@@ -104,28 +118,12 @@ def func_write_triplet(
     A triplet past the capacity is dropped: the demand report has raised the overflow flag, and the assembly runs again
     once the storage has grown.
     """
-    n_block_rows = qd.static(block.n)
-    n_block_cols = qd.static(block.m)
     if i_t < matrix.triplet_row.shape[0]:
-        if qd.static(not is_symmetric):
-            matrix.triplet_row[i_t] = i_r
-            matrix.triplet_col[i_t] = i_c
-            for k in qd.static(range(n_block_rows)):
-                for j in qd.static(range(n_block_cols)):
-                    matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] = block[k, j]
-        else:
-            if i_r <= i_c:
-                matrix.triplet_row[i_t] = i_r
-                matrix.triplet_col[i_t] = i_c
-                for k in qd.static(range(n_block_rows)):
-                    for j in qd.static(range(n_block_cols)):
-                        matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] = block[k, j]
-            else:
-                matrix.triplet_row[i_t] = i_c
-                matrix.triplet_col[i_t] = i_r
-                for k in qd.static(range(n_block_rows)):
-                    for j in qd.static(range(n_block_cols)):
-                        matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] = block[j, k]
+        row, col, upper = _upper_block(i_r, i_c, block, is_symmetric)
+        matrix.triplet_row[i_t] = row
+        matrix.triplet_col[i_t] = col
+        for k, j in qd.static(qd.ndrange(block.n, block.m)):
+            matrix.triplet_val[i_t * (block.n * block.m) + k * block.m + j] = upper[k, j]
 
 
 @qd.func
@@ -136,22 +134,10 @@ def func_add_triplet(
 
     The block is mirrored as `func_write_triplet` mirrors it, and a triplet past the capacity is dropped.
     """
-    n_block_rows = qd.static(block.n)
-    n_block_cols = qd.static(block.m)
     if i_t < matrix.triplet_row.shape[0]:
-        if qd.static(not is_symmetric):
-            for k in qd.static(range(n_block_rows)):
-                for j in qd.static(range(n_block_cols)):
-                    matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] += block[k, j]
-        else:
-            if i_r <= i_c:
-                for k in qd.static(range(n_block_rows)):
-                    for j in qd.static(range(n_block_cols)):
-                        matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] += block[k, j]
-            else:
-                for k in qd.static(range(n_block_rows)):
-                    for j in qd.static(range(n_block_cols)):
-                        matrix.triplet_val[i_t * (n_block_rows * n_block_cols) + k * n_block_cols + j] += block[j, k]
+        row, col, upper = _upper_block(i_r, i_c, block, is_symmetric)
+        for k, j in qd.static(qd.ndrange(block.n, block.m)):
+            matrix.triplet_val[i_t * (block.n * block.m) + k * block.m + j] += upper[k, j]
 
 
 @qd.func
