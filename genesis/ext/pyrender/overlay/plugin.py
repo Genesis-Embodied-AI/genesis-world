@@ -91,9 +91,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         except ImportError:
             gs.raise_exception(
                 "ImGuiOverlayPlugin requires the optional 'imgui-bundle' dependency. Install Genesis with the "
-                "'render' extras (pip install 'genesis-world[render]'). Pre-built wheels are not published for every "
-                "Python/OS combination (e.g. Python 3.10, Linux aarch64); on those platforms install manually via "
-                "'pip install imgui-bundle', which builds from source and requires CMake."
+                "'render' extras (pip install 'genesis-world[render]')."
             )
 
         super().__init__()

@@ -47,11 +47,11 @@ dependencies = [
     # Optional `trimesh` dependency for loading `.dae` mesh files
     "pycollada",
     # Used for parsing `.glb` mesh files
-    "pygltflib==1.16.0",
+    "pygltflib",
     # Used for decoding Draco-compressed `.glb` mesh files
     "DracoPy",
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
-    "tetgen==0.8.2",
+    "tetgen",
     # Used for some advanced mesh processing such as `skeletonization`
     # * 0.8.0 is the first release with native binaries for each platform, Linux ARM included.
     "PyGEL3D>=0.8.0",
@@ -68,8 +68,7 @@ dependencies = [
     "rtree",
     # Constraint Satisfaction Solver.
     # Used to compute contype and conaffinity bitmasks from complete list of excluded collision pairs.
-    # * >= 4.15.5.0 does not provide pre-compiled wheels on Linux
-    "z3-solver<4.15.5.0",
+    "z3-solver",
     # Used for loading raytracing special texture images used by LuisaRender
     "OpenEXR",
     # Native batch renderer specifically designed for Genesis
@@ -82,16 +81,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
     # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
     "pytest<9.2.0",
     "pytest-xdist",
     "pytest-forked",
     "pytest-timeout",
     "pytest-print",
-    # Note that 'pytest-rerunfailures' is incompatible with 'pytest-forked'
-    # - 16.0 is causing pytest-xdist to crash in case of failure or skipped tests
-    # "pytest-rerunfailures!=16.0",
     # GPU queries for the test infrastructure (tests/gpu_info.py); non-macOS so the CUDA device check runs on
     # Linux and Windows. AMD's 'amdsmi' ships with ROCm, not PyPI, so the AMD backend is import-gated instead.
     "nvidia-ml-py; platform_system != 'Darwin'",
@@ -137,13 +132,12 @@ docs = [
 ]
 render = [
     "pybind11[global]",
-    # Pre-compiled wheels are only published for cp38-cp312 on macOS (universal2), Linux x86_64, and Windows.
-    "open3d; python_version < '3.13' and platform_machine != 'aarch64'",
+    "open3d",
     "imgui-bundle",
 ]
 usd = [
     # Used for parsing `.usd` mesh files
-    "usd-core==25.11",
+    "usd-core",
     # Used to serialize concurrent omni-kit bake operations (concurrent bootstrapping causes segfaults)
     "filelock",
 ]
@@ -161,14 +155,6 @@ genesis = [
     "ext/pyrender/fonts/*",
     "ext/pyrender/shaders/*",
 ]
-
-[tool.black]
-line-length = 120
-force-exclude = '''
-/(
-    genesis/ext
-)/
-'''
 
 [tool.ruff]
 line-length = 120
