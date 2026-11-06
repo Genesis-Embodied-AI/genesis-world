@@ -10,6 +10,7 @@ import trimesh
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.mesh import Mesh
+from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 
@@ -60,7 +61,12 @@ class RigidGeom(RBC):
         self._verts_state_start: int = verts_state_start
 
         self._coup_softness: float = self._material.coup_softness
-        self._coup_friction: float = self._material.coup_friction
+        # An unset coupling friction is the sliding friction resolved on the description, which suits solid contact.
+        # The legacy coupler applies it to particles, fluids included, where a sliding coefficient is meaningless.
+        coup_friction = self._material.coup_friction
+        if coup_friction is None:
+            coup_friction = 0.1 if isinstance(self._solver.sim.coupler.options, LegacyCouplerOptions) else desc.friction
+        self._coup_friction: float = coup_friction
         self._coup_restitution: float = self._material.coup_restitution
 
         # For heterogeneous simulation: which environments this geom is active in (None = all envs)
