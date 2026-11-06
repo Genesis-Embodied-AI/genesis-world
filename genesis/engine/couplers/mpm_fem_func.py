@@ -1,13 +1,9 @@
 """Contact pairs of the material point method (MPM) with the implicit finite element method (FEM) in the joint Newton
-solve over the grid displacement and the FEM vertex positions (see fem_newton.py for the FEM unknown and its stages).
+solve (see fem_newton.py for the FEM unknown and its stages).
 
 An MPM particle gets a pair of penalty rows against its nearest FEM surface triangle, at its signed distance minus a
-contact thickness: the triangles have no volume of their own, and a coarse surface would otherwise let the material slip
-between its vertices. Penetration is allowed, in proportion to the contact force over the penalty stiffness. The rows
-act on the particle displacement relative to the displacement of its closest point, the barycentric combination of the
-triangle's vertex displacements over the whole substep. The pairs are contact pairs of the Newton solve (see
-newton_contact.py), over the particle and the three vertices of the triangle.
-"""
+contact thickness, on its displacement relative to that of its closest point, the barycentric combination of the
+triangle's vertex displacements. The pairs are contact pairs of the Newton solve (see newton_contact.py)."""
 
 import numpy as np
 
@@ -42,10 +38,9 @@ _PAIR_L = tuple(l for k in range(4) for l in range(k, 4))
 class MpmFemPairs(Data, kind=DataKind.SCRATCH):
     """The pairs of the particles with their nearest FEM surface triangle (see func_build_fem_pairs).
 
-    A pair holds its sorted particle `s`, its environment `i_b`, its triangle `tri` and the barycentric coordinates
-    `bary` of the closest point, and the rows of its friction pyramid around `normal` with friction coefficient
-    `friction`, of stiffness `D` and target `t` each. `n_pairs` counts the pairs asked for, above the capacity on
-    overflow."""
+    A pair holds its sorted particle `s`, its environment `i_b`, its triangle `tri`, the barycentric coordinates `bary`
+    of the closest point, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal`.
+    `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -137,11 +132,8 @@ def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.tem
 
 @qd.data_oriented
 class FemContactParams:
-    """Scene values of the MPM-FEM contact pairs, as device scalars.
-
-    The FEM surface takes the thickness `thickness`, in metres, half a grid cell of MPM: a triangle has no volume of its
-    own. A row takes the penalty stiffness `stiffness` in units of its effective mass, the inverse of its inverse
-    weight: the row energy is 1/2 stiffness m_eff c^2 in the joint dt^2-scaled units."""
+    """Scene values of the MPM-FEM contact pairs, as device scalars: the surface thickness `thickness` in metres, and
+    the penalty stiffness `stiffness` of a row in units of its effective mass, the inverse of its inverse weight."""
 
     def __init__(self, dx: float) -> None:
         self.thickness = qd.ndarray(gs.qd_float, shape=())
@@ -172,11 +164,8 @@ class FemTriangleQuery:
 
 @qd.kernel
 def kernel_fit_triangle_leaves(f: int, query: qd.template()):
-    """The box of every surface triangle over the element behind it, so that a particle that penetrated the surface
-    element still finds the triangle.
-
-    The box grows by the contact thickness and by twice the distance the fastest vertex of the element travels over the
-    substep."""
+    """The box of every surface triangle over the element behind it, so that a particle that penetrated the element
+    still finds the triangle, grown by the contact thickness and twice the substep travel of its fastest vertex."""
     dt = query.mpm_info.substep_dt[()]
     thickness = query.contact.thickness[()]
     for i_b, i_s in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
@@ -222,13 +211,9 @@ def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vecto
     """The closest point of a FEM surface triangle to the position `x` of sorted particle `s`, at frame `f`.
 
     Returns whether the triangle may hold the particle, its unsigned distance, the alignment of its normal with the
-    direction to the particle, the signed distance outward along its normal, the barycentric coordinates of the closest
-    point, and the contact normal, the direction from the closest point to a particle outside.
-
-    A particle behind the plane of a triangle is inside the entity only if it lies in the element behind the triangle,
-    whose box the leaf of the triangle spans. Behind any other found triangle, the particle may lie far outside the
-    entity, where the grown box of that triangle reaches it and the box of its nearest triangle misses it, so the
-    triangle is rejected. Penetration deeper than the surface elements gives no pair."""
+    direction to the particle, the signed distance along its normal, the barycentric coordinates of the closest point
+    and the contact normal. A particle behind the plane of a triangle is kept only if it lies in the box of the element
+    behind the triangle, so that penetration deeper than the surface elements gives no pair."""
     tri2v = fem.surface[i_s].tri2v
     a = fem.elements_v[f, tri2v[0], i_b].pos
     b = fem.elements_v[f, tri2v[1], i_b].pos
@@ -258,12 +243,9 @@ def func_score_triangles(
     candidates: ContactCandidates,
     mpm_info: MpmInfo,
 ):
-    """Score every candidate triangle by its unsigned distance to the particle and break the ties by the alignment of
-    its normal (see triangle_closest_point).
-
-    Among the triangles whose closest point is shared on an edge or a vertex, the one whose normal is most aligned with
-    the direction to the particle is kept. The sign of the distance to the other ones may be wrong on a closed surface,
-    as for the bottom edge of a side face of a box seen from below its bottom face."""
+    """Score every candidate triangle by its unsigned distance to the particle, the ties broken by the alignment of its
+    normal (see triangle_closest_point), as the sign of the distance to a triangle sharing the closest edge or vertex
+    may be wrong on a closed surface."""
     func_report_candidates(candidates)
     qd.loop_config(name="mpm_score_triangles")
     for i_cand in range(candidates.order.n_triplets[()]):
@@ -300,14 +282,10 @@ def func_build_fem_pairs(
     """Build the pair of every valid particle with its nearest FEM surface triangle, within its contact range or short
     of it by less than `contact_band_width`, once the candidates are sorted by particle.
 
-    The gap phi is the signed distance to the triangle, outward along its normal, minus `query.contact.thickness`.
-    Every row of the friction pyramid J = n +- mu d is a penalty on the gap at the end of the substep, phi + J.r for the
-    relative displacement r. Its target is -phi and its stiffness `query.contact.stiffness` times the row's
-    effective mass, the inverse of the particle's inverse weight (see func_contact_invweight) plus that of the triangle
-    point, sum_k b_k^2 / m_k. The row energy depends on the end positions alone, so the rows add no energy, as a
-    reference acceleration from the start gap would. The next substep builds its pairs anew and drops the tangential
-    part of a pyramid row, which makes it a dissipative friction bounded by the cone. The friction coefficient is the
-    element's, at least MIN_FRICTION."""
+    The gap phi is the signed distance minus `query.contact.thickness`, and every row J = n +- mu d of the friction
+    pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of target -phi and stiffness
+    `query.contact.stiffness` times its effective mass, the inverse of the inverse weights of the particle and of the
+    triangle point. The friction coefficient is the element's, at least MIN_FRICTION."""
     func_select_nearest(TIE_DIST_RATIO * mpm_info.dx[()], candidates)
     for _ in range(1):
         pairs.n_pairs[()] = 0

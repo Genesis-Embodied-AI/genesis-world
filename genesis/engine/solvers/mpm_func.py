@@ -1,24 +1,14 @@
 """Layer-0 mathematics and Layer-1 stages of the implicit material point method (MPM) solver.
 
-Every function here is a '@qd.func'. Layer-0 functions map values to values. Layer-1 functions take the solver data
-(particle data, `MpmGridScratch`, `MpmNewtonScratch`, `MpmBrickScratch`, `NewtonControl`, `MpmMaterialTable`) and the
-scene values of `MpmInfo`. Those marked 'requires_top_level' are the stages that a graph kernel or a kernel of the
-solver calls. Per substep, the grid node displacement u minimizes the incremental potential
+Layer-0 functions map values to values. Layer-1 functions take the solver data and the scene values of `MpmInfo`, and
+those marked 'requires_top_level' are the stages that the kernels call. Per substep, the grid node displacement u
+minimizes the incremental potential
 
     E(u) = sum_a 1/2 m_a |u_a - dt v_a|^2 + dt^2 sum_p V_p psi(F_trial_p),   F_trial_p = (I + sum_a u_a grad w_a^T) F_p
 
-with trilinear (Q1) shape functions and affine particle-in-cell (APIC) transfers. The block-sparse hash grid is rebuilt
-every substep.
-
-The stages that combine the values of several particles or nodes (the gathers of the particle-to-grid (P2G) transfer and
-of the gradient, the assembly of the stencil blocks, the brick inversion, the reductions of the energy and of the
-displacement update) have one implementation per backend, `_gpu` and `_cpu`, a dispatcher picking one at compile time.
-On a graphics processing unit (GPU) they map a node, a 32-particle chunk or a brick to a warp, whose lanes combine
-their values by shuffles and ballots, and a reduction to a block. The central processing unit (CPU) backend of
-Quadrants has none of these operations and runs a few dozen threads: each thread takes a whole node, cell or brick and
-walks it serially, in the same fixed order, which needs neither lanes nor atomics. The stages that map each particle or
-node on its own are the same for both backends.
-"""
+with trilinear (Q1) shape functions and affine particle-in-cell (APIC) transfers, on a block-sparse hash grid rebuilt
+every substep. The stages that combine the values of several particles or nodes map them to the lanes of a warp on a GPU
+and to one thread on a CPU, which walks them serially in the same fixed order."""
 
 import quadrants as qd
 
@@ -333,18 +323,8 @@ def compression_penalty(sigma: qd.types.vector(3), mu: float, lam: float):
     """Compression penalty of the fixed corotated and Stable Neo-Hookean energies, with its gradient and Hessian.
 
     The penalty is k / 2 |d|^2 with d = min(sigma - s, 0), s = EXTENSION_SIGMA_MIN and k = EXTENSION_STIFFNESS times the
-    Young's modulus of the Lame parameters `mu` and `lam`. Its gradient is k d and its diagonal Hessian is k where
-    sigma_i < s.
-
-    In the material point method (MPM) a particle pushes its nodes by its Kirchhoff stress,
-    tau_i = sigma_i dpsi/dsigma_i, which vanishes as the particle collapses whenever dpsi/dsigma stays bounded, as it
-    does for both energies. A crushed particle then exerts no restoring force, its stiffness vanishing too, and the
-    material stays crushed. The penalty is the stiffness term of the C1 extension of Stomakhin et al. 2012 (Sec. 4.1),
-    with their s and k. Their extension also replaces the energy below s by its Taylor polynomial at s, which an energy
-    undefined across inversion needs. Both energies here are defined there, and keeping them whole keeps the sum bounded
-    below. The Taylor polynomial of the fixed corotated energy is unbounded below under a large stretch of another axis,
-    which raises the curvature that the polynomial drops.
-    """
+    Young's modulus of `mu` and `lam` (the stiffness term of the extension of Stomakhin et al. 2012, Sec. 4.1). It gives
+    a crushed particle the restoring force that its Kirchhoff stress sigma dpsi/dsigma, vanishing with sigma, lacks."""
     s = gs.qd_float(EXTENSION_SIGMA_MIN)
     young_modulus = gs.qd_float(0.0)
     if lam + mu > 0.0:
@@ -370,11 +350,8 @@ def stable_neohookean_parameters(mu: float, lam: float):
 def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float):
     """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy.
 
-    psi = mu |l|^2 + lam / 2 (sum l)^2 with l_i = log(sigma_i), continued below HENCKY_SIGMA_MIN by its tangent line
-    log(s) + (sigma_i - s) / s, which keeps the energy C1 and defined for inverted states (sigma_i <= 0). With the
-    principal Kirchhoff stress tau = 2 mu l + lam (sum l) 1: g_i = tau_i l'_i and
-    A = diag(l') (2 mu I + lam 11^T) diag(l') + diag(tau l''), l'' = -1 / sigma^2 above s and 0 below.
-    """
+    psi = mu |l|^2 + lam / 2 (sum l)^2 with l_i = log(sigma_i), continued below HENCKY_SIGMA_MIN by its tangent line,
+    which keeps it C1 and defined for inverted states."""
     s = qd.static(HENCKY_SIGMA_MIN)
     l = qd.Vector.zero(gs.qd_float, 3)
     dl = qd.Vector.zero(gs.qd_float, 3)
@@ -398,16 +375,9 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
     """Energy density, gradient and Hessian of the Stable Neo-Hookean energy (Smith et al. 2018, Eq. 14) in the signed
     singular values, defined for inverted states.
 
-    psi = mu_s / 2 (I_C - 3) + lam_s / 2 (J - alpha)^2 - mu_s / 2 log(I_C + 1), shifted to vanish at rest, with
-    I_C = |sigma|^2. Without the regularized origin barrier log(I_C + 1), a particle crushed to F = 0 sits in a stable
-    basin, its forces vanishing and its Hessian mu I (Sec. 3.3), which a collapsed material never leaves.
-    alpha = 1 + mu_s / lam_s - mu_s / (4 lam_s) keeps the rest state stress-free, and mu_s = 4/3 mu and
-    lam_s = lam + 5/6 mu give the small-strain response of the Lame parameters mu and lam (Sec. 3.4).
-
-    The barrier only makes F = 0 meta-stable: the Kirchhoff stress of a uniformly crushed particle still vanishes as the
-    cube of its size, which leaves a crushed material point method (MPM) material without a restoring force. With
-    `is_penalized`, the compression penalty adds one (see compression_penalty).
-    """
+    psi = mu_s / 2 (I_C - 3) + lam_s / 2 (J - alpha)^2 - mu_s / 2 log(I_C + 1) - psi_rest, with I_C = |sigma|^2 and the
+    parameters of stable_neohookean_parameters. With `is_penalized`, the compression penalty adds the restoring force of
+    a crushed particle (see compression_penalty)."""
     mu_s, lam_s, alpha, rest = stable_neohookean_parameters(mu, lam)
     J = sigma[0] * sigma[1] * sigma[2]
     cof = cofactor(sigma)
@@ -430,11 +400,8 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
 def liquid_volume_terms(J: float, lam: float, band: float):
     """Volume term of the liquid energy density and its first and second derivatives in J.
 
-    The term lam / 4 (J^2 - 1 - 2 ln J), of bulk modulus lam, acts under compression alone. Within `band` below J = 1,
-    the quintic in x = 1 - J with zero value, slope and curvature at x = 0 that meets the log form with its value, slope
-    and curvature at x = band takes its place, so that the term is C2 at J = 1: its stiffness rises from zero over the
-    band instead of jumping to lam, which every particle of a liquid near rest crosses back and forth, and which would
-    otherwise take the Newton model away from the energy at every iteration."""
+    The term lam / 4 (J^2 - 1 - 2 ln J) acts under compression alone. Within `band` below J = 1, a quintic in 1 - J that
+    meets it with its value, slope and curvature takes its place, so that the term is C2 at J = 1."""
     psi = gs.qd_float(0.0)
     dpsi = gs.qd_float(0.0)
     d2psi = gs.qd_float(0.0)
@@ -463,13 +430,8 @@ def liquid_volume_terms(J: float, lam: float, band: float):
 def liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band: float):
     """Energy density, gradient and Hessian of the liquid in the signed singular values.
 
-    The volume term is one-sided (see liquid_volume_terms): it acts under compression (J < 1) and vanishes under
-    expansion. Under expansion, the curvature of a two-sided term along the shear of a particle is negative, which the
-    positive definite projection drops, so that a free surface spreading on few particles leaves the Newton system
-    almost flat along directions on which that energy rises steeply. Its log term walls off J = 0, so it is defined for
-    J > 0 alone, which the line search keeps for every trial state (see func_cap_inversion_step). The fixed corotated
-    shear term mu |sigma - 1|^2 models viscosity, with mu zero for an inviscid liquid.
-    """
+    The one-sided volume term (see liquid_volume_terms) is defined for J > 0, which the line search keeps (see
+    func_cap_inversion_step), and the shear term mu |sigma - 1|^2 models viscosity."""
     cof = cofactor(sigma)
     psi_volume, dpsi, d2psi = liquid_volume_terms(sigma[0] * sigma[1] * sigma[2], lam, band)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + psi_volume
@@ -575,10 +537,8 @@ def isotropic_pair_eigenvalues(sigma: qd.types.vector(3), g: qd.types.vector(3),
 def isotropic_pair_eigenvalues_exact(sigma: qd.types.vector(3), g: qd.types.vector(3), A: qd.types.matrix(3, 3)):
     """Twist and flip eigenvalues of an isotropic energy for the axis pairs (0,1), (0,2), (1,2).
 
-    The twist is (g_i + g_j) / (sigma_i + sigma_j) and the flip (g_i - g_j) / (sigma_i - sigma_j) (Smith et al. 2019).
-    The flip takes its limit A_ii - A_ij on equal singular values. The twist denominator, which an inverted state can
-    bring to zero, is kept at least 1e-6 in magnitude.
-    """
+    The twist is (g_i + g_j) / (sigma_i + sigma_j), its denominator kept at least 1e-6 in magnitude, and the flip (g_i -
+    g_j) / (sigma_i - sigma_j), A_ii - A_ij on equal singular values (Smith et al. 2019)."""
     eps = gs.qd_float(1e-6)
     twist = qd.Vector.zero(gs.qd_float, 3)
     flip = qd.Vector.zero(gs.qd_float, 3)
@@ -605,13 +565,11 @@ def isotropic_first_piola_differential(
     A: qd.types.matrix(3, 3),
     dF: qd.types.matrix(3, 3),
 ):
-    """Unprojected differential of the first Piola-Kirchhoff stress of an isotropic energy for a deformation increment.
+    """Unprojected differential dP = (dP/dF) : dF of the first Piola-Kirchhoff stress of an isotropic energy at F = U
+    diag(sigma) V^T, with `g` and `A` its principal gradient and Hessian.
 
-    It is dP = (dP/dF) : dF at F = U diag(sigma) V^T, with `g` and `A` the principal gradient and Hessian. In the
-    singular frame dF_hat = U^T dF V, the diagonal moves by A dF_hat_ii and each axis pair (i, j) by the unprojected
-    flip/twist block dP_hat_ij = alp dF_hat_ij + bet dF_hat_ji, with alp = (flip + twist) / 2 and
-    bet = (flip - twist) / 2. This is the operator whose projection `isotropic_pair_block` assembles.
-    """
+    In the singular frame, the diagonal moves by A diag(U^T dF V) and each axis pair by its flip and twist block (see
+    isotropic_projected_modes)."""
     dF_hat = U.transpose() @ dF @ V
     twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
     dP_hat = diagonal(A @ qd.Vector([dF_hat[0, 0], dF_hat[1, 1], dF_hat[2, 2]], dt=gs.qd_float))
@@ -631,11 +589,8 @@ def isotropic_projected_modes(
     """Symmetric positive definite (SPD) projection of the principal Hessian of an isotropic energy, as a scaling block
     and per-pair modes.
 
-    Returns the clamped scaling block S = sum_k max(l_k, 0) a_k a_k^T of sym(A), with (l_k, a_k) the eigenpairs of
-    sym(A), and per axis pair (0,1), (0,2), (1,2) the flip/twist combinations alp = (flip + twist) / 2 and
-    bet = (flip - twist) / 2 of the clamped flip and twist eigenvalues. With `is_exact`, sym(A) and the eigenvalues stay
-    unclamped, which yields the Hessian itself.
-    """
+    Returns sym(A) with its negative eigenvalues clamped, and per axis pair alp = (flip + twist) / 2 and bet = (flip -
+    twist) / 2 of the clamped eigenvalues, all unclamped with `is_exact`."""
     S = 0.5 * (A + A.transpose())
     twist = qd.Vector.zero(gs.qd_float, 3)
     flip = qd.Vector.zero(gs.qd_float, 3)
@@ -827,9 +782,7 @@ def fibre_terms(
     """Energy density, first Piola-Kirchhoff stress and Hessian curvature of the muscle fibre term of a particle.
 
     The term is 1/2 k a |F_trial m|^2, with k a the active stiffness (see active_fibre_stiffness) and m the fibre
-    direction. Its stress is k a (F_trial m) m^T and its Hessian k a (m m^T) (x) I, of curvature k a >= 0, so that the
-    term is convex. All three vanish for a material without fibre stiffness.
-    """
+    direction, of stress k a (F_trial m) m^T and convex Hessian k a (m m^T) (x) I."""
     ka, _ = active_fibre_stiffness(slot, actu, materials, mpm_info)
     Fm = F_trial @ m
     return 0.5 * ka * Fm.dot(Fm), ka * Fm.outer_product(m), ka
@@ -841,10 +794,9 @@ def return_map_principal(
 ):
     """Principal values of a plastic return map that acts on the singular values, with the derivatives of its reverse.
 
-    The map `kind` (see return_map) takes the singular values `sigma` of the deformation gradient and the plastic state
-    `Jp` to the principal values h of the returned deformation gradient U diag(h) V^T and the returned state Jp_new.
-    Returns h, Jp_new, whether the map changes the deformation gradient, and dh/dsigma, dh/dJp, dJp_new/dsigma and
-    dJp_new/dJp, which return_map leaves unused and return_map_vjp takes."""
+    Returns the principal values h of the returned deformation gradient U diag(h) V^T and the returned plastic state of
+    the map `kind` (see return_map) at the singular values `sigma` and the plastic state `Jp`, whether the map changes
+    the deformation gradient, and dh/dsigma, dh/dJp, dJp_new/dsigma and dJp_new/dJp for return_map_vjp."""
     h = sigma
     Jp_new = Jp
     is_changed = True
@@ -923,9 +875,7 @@ def return_map(
 
     The map `kind` is von Mises in log strain or the singular-value clamp (ElastoPlastic), the clamp with the volume
     ratio it removes accumulated in Jp (Snow), Drucker-Prager with the log volume correction in Jp (Sand), or the
-    dilation projection to a volume ratio in [LIQUID_J_MIN, 1] (Liquid). Every map but the liquid's acts on the singular
-    values (see return_map_principal).
-    """
+    projection to a volume ratio in [LIQUID_J_MIN, 1] (Liquid)."""
     F_new = F
     Jp_new = Jp
     if kind == PLASTIC_LIQUID:
@@ -1223,10 +1173,8 @@ def func_reset_cell_segs(grid: MpmGridScratch):
 def func_fill_cell_segs(grid: MpmGridScratch):
     """Fill the dense table from cell slot to the range of its sorted particles.
 
-    Past an overflow, the blocks beyond the capacity are missing from the grid until it grows and builds again.
-    Otherwise the grid holds the block of every particle cell: a missing one fails the assertion in debug mode, or else
-    raises INVALID_MPM_GRID and leaves its cell out.
-    """
+    Past an overflow, the blocks beyond the capacity are missing until the grid grows. Otherwise a missing block fails
+    the assertion in debug mode, or else raises INVALID_MPM_GRID and leaves its cell out."""
     qd.loop_config(name="mpm_fill_cell_segs")
     for r in range(grid.n_active_cells[()]):
         start = grid.cell_starts[r]
@@ -1404,12 +1352,10 @@ def func_contact_invweight(
 ):
     """Compute the inverse weight matrix of every valid particle of the first environment for its contact rows.
 
-    It comes from the physical Hessian (kinetic and elastic) at u = 0 in the configuration of frame `f`. It is W = sum_a w_a^2 H_aa^-1 over the stencil nodes of the particle, whose n^T W n
-    along the normal n of a row is the block-diagonal approximation of the Delassus diagonal J H^-1 J^T, in the frame of
-    the rest configuration (see contact_invweight). It plays the part of the inverse weight of a rigid link, so that a
-    row pushes the material the particle is embedded in rather than the particle mass alone. Like it, it is a model
-    constant of the rest configuration (see MPMSolver._init_contact_invweight): the stiffness of a row depends on the
-    state through its normal and the rotation of the material alone."""
+    It is W = sum_a w_a^2 H_aa^-1 over the stencil nodes of the particle, H being the physical Hessian (kinetic and
+    elastic) at u = 0 in the configuration of frame `f`: n^T W n approximates the Delassus diagonal of a row of normal n
+    (see contact_invweight). Like the inverse weight of a rigid link, it is a model constant of the rest
+    configuration."""
     func_node_diag(f, particles, grid, newton, particles_info, materials, mpm_info)
     qd.loop_config(name="mpm_contact_invweight")
     for s in range(grid.n_valid[()]):
@@ -1452,11 +1398,8 @@ def band_row(sol_params: qd.types.vector(7), phi: float, vel: float, diag_coef: 
     """Stiffness D and target t of a soft row on the displacement relative to the obstacle.
 
     `phi` is the signed gap and `vel` the normal relative velocity, positive when separating. Within the contact range
-    (phi <= 0), the row is the soft constraint of Rigid (`soft_row`). Short of it (phi > 0), the row lets the particle
-    close the gap freely and resists past it with the stiffness of the edge of the range: t = -phi, so that the row
-    energy is zero until the gap closes. Its reference acceleration would pull towards the obstacle there, so it is left
-    out, and the next substep takes the row over with it once the particle is in range.
-    """
+    (phi <= 0), the row is the soft constraint of Rigid (`soft_row`). Short of it, the row lets the particle close the
+    gap freely, t = -phi, with the stiffness of the edge of the range."""
     # The edge of the range is phi = 0 at rest, chosen at runtime so that `soft_row` is inlined once
     phi_row = gs.qd_float(0.0)
     vel_row = gs.qd_float(0.0)
@@ -1481,10 +1424,8 @@ def func_build_wall_pairs(
 ):
     """Build the frictionless domain-wall pairs of every valid particle.
 
-    A particle beyond a wall plane `mpm_info.wall_lower` / `wall_upper`, or short of the nearer one of an axis by less
-    than `contact_band_width`, gets a pair of one soft row along the inward wall normal by `band_row`, with Rigid's
-    impedance of `mpm_info.wall_sol_params` and the particle's inverse weight (see func_contact_invweight).
-    """
+    A particle beyond a wall plane, or short of the nearer one of an axis by less than `contact_band_width`, gets a pair
+    of one soft row along the inward wall normal (see band_row), with the impedance `mpm_info.wall_sol_params`."""
     for _ in range(1):
         pairs.n_pairs[()] = 0
     qd.loop_config(name="mpm_build_wall_pairs")
@@ -1535,10 +1476,8 @@ def func_g2p_advect(
     """Advance every particle to the next frame: grid-to-particle (G2P) transfer, advection, deformation gradient update
     and plastic return map.
 
-    The velocity is the particle-in-cell (PIC) one and the velocity gradient the affine particle-in-cell (APIC) one.
-    Valid particles run in sorted order for locality, and inactive ones carry their state over unchanged, as do the
-    particles of an environment set in `frozen`, whose Newton solve stopped on a non-finite measure.
-    """
+    The velocity is the particle-in-cell (PIC) one and the velocity gradient the affine particle-in-cell (APIC) one. The
+    inactive particles and those of an environment set in `frozen` carry their state over unchanged."""
     qd.loop_config(name="mpm_g2p_advect")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
@@ -1605,10 +1544,9 @@ def func_build_constraint_rows(
 ):
     """Build the spring of every constrained particle as a term of the incremental potential on its trial displacement.
 
-    The term is 1/2 dt^2 k |x + Delta - T|^2 + 1/2 dt c |Delta|^2 on the trial displacement Delta: the backward Euler
-    step of the spring force -k (x' - T) and of the critically damped drag c = 2 sqrt(k m) on its velocity Delta / dt,
-    unconditionally stable whatever k. T is the target at the start of the substep, placed by the pose of its link for
-    an attached particle. The spring acts on the particle alone: the link feels no reaction."""
+    The term is 1/2 dt^2 k |x + Delta - T|^2 + 1/2 dt c |Delta|^2: the backward Euler step of the spring force and of
+    its critical damping c = 2 sqrt(k m), T being the target of the substep start, placed by the pose of its link for an
+    attached particle. The link feels no reaction."""
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_build_constraint_rows")
     for s in range(grid.n_valid[()]):
@@ -1818,16 +1756,10 @@ def func_elastic_assemble(
 ):
     """Assemble the elastic and contact Hessian blocks and the gradient factors of every task.
 
-    The particles of a task share the 8-node stencil of their cell, and the task writes each of the 36 upper-triangular
-    stencil blocks once, summed over its particles. Every particle also stages V dt^2 P(F_trial) F^T and the gradient of
-    its constraint spring for the gradient gather. The spring acts on the trial displacement sum_a w_a u_a, so its
-    Hessian h I enters block (a, b) as w_a w_b h I. The blocks on fixed nodes, eliminated rows, are discarded. The
-    elastic blocks are projected to symmetric positive definite (SPD), or exact with `is_exact`, which only an adjoint
-    solve at the converged displacement takes.
-
-    On a GPU, the warp of a task sums each block over the task by a segmented shuffle reduction. On a CPU, which has no
-    lanes to share a cell over, the thread of a task adds the blocks of its particles in order (see func_cell_flags).
-    """
+    The particles of a task share the 8-node stencil of their cell, and the task writes the 36 upper-triangular stencil
+    blocks, summed over its particles, by the lanes of a warp on a GPU (a segmented reduction over a 32-particle chunk)
+    and in order by one thread on a CPU (a whole cell, see func_cell_flags). The blocks on fixed nodes are discarded.
+    The elastic blocks are projected to symmetric positive definite (SPD), or exact with `is_exact`."""
     if qd.static(gs.backend == gs.cpu):
         func_elastic_assemble_cpu(
             f, dt, particles, grid, newton, linear, rows, particles_info, materials, mpm_info, is_exact
@@ -1854,12 +1786,10 @@ def particle_stencil_terms(
     """Terms of the stencil blocks of a sorted particle (see stencil_pair_block), after staging its gradient factor and
     the gradient of its constraint spring for the gradient gather.
 
-    Returns the node slots of the stencil and whether every node moves, the stencil vectors r_a = V^T F^T grad w_a of
-    the moving nodes in the V frame (the rows of `r_frame`), the rotation U and the projected modes of the elastic
-    energy times V dt^2 (see isotropic_projected_modes), and the weights of the isotropic terms of every moving node
-    (the rows of `iso`): sqrt(V dt^2 k_fibre) r_a . V^T m for the fibre term in u, F_trial m moving by
-    (grad w_a . F m) u_a, and sqrt(h) w_a for the constraint spring, which acts on the trial displacement sum_a w_a u_a
-    with Hessian h I."""
+    Returns the node slots of the stencil, whether each node moves, the stencil vectors r_a = V^T F^T grad w_a of the
+    moving nodes (rows of `r_frame`), the rotation U, the projected modes times V dt^2, and per moving node the weights
+    of the isotropic terms (rows of `iso`): sqrt(V dt^2 k_fibre) r_a . V^T m for the fibre and sqrt(h) w_a for the
+    spring."""
     i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
     slots = stencil_node_slots(env, cell, grid)
     movable = qd.Vector([gs.qd_float(grid.node_fixed[slots[a]] == 0) for a in qd.static(range(8))], dt=gs.qd_float)
@@ -2117,10 +2047,8 @@ def func_reset_brick(grid: MpmGridScratch, bricks: MpmBrickScratch):
 
 @qd.func
 def brick_visit(row: int, col: int, block: qd.types.matrix(3, 3), bricks: MpmBrickScratch):
-    """Store a reduced upper-triangular block of node rows `row` and `col` into the packed storage of their brick if they
-    share one.
-
-    Blocks coupling two bricks are dropped (block-diagonal Schwarz restriction)."""
+    """Store an upper-triangular block of node rows `row` and `col` into the packed storage of their brick if they share
+    one, dropping the blocks that couple two bricks (block-diagonal Schwarz restriction)."""
     brick = brick_of(row)
     if brick_of(col) == brick:
         base = (brick * BRICK_SYM_BLOCKS + brick_sym_index(brick_node(row), brick_node(col))) * 9
@@ -2130,16 +2058,10 @@ def brick_visit(row: int, col: int, block: qd.types.matrix(3, 3), bricks: MpmBri
 
 @qd.func
 def invert_node_block(D):
-    """Invert the 3 x 3 block of a node coupled to no other node of its brick, equilibrated to a unit diagonal as the
-    coupled nodes are.
+    """Invert the 3 x 3 block of a node coupled to no other node of its brick, equilibrated to a unit diagonal.
 
-    `qd.Matrix.inverse` divides the adjugate by the determinant, which overflows to inf, and then to nan in the products
-    of the preconditioner, as soon as the determinant underflows to zero. A node reached by a sliver of a particle
-    stencil has a block of about m I with a vanishing mass m: in single precision with fast math, its determinant m^3
-    flushes to zero from m below about 2e-13, while its inverse 1 / m is representable down to m of about 3e-39. The
-    equilibration to a unit diagonal keeps the determinant near one. A diagonal entry that is not positive is left
-    unscaled, and a block whose equilibrated determinant is not positive, such as the block of no particle, takes the
-    identity, which leaves its rows unpreconditioned."""
+    The equilibration keeps the determinant near one where that of a node of vanishing mass would flush to zero in
+    single precision. A block whose equilibrated determinant is not positive takes the identity."""
     d = qd.Vector([D[0, 0], D[1, 1], D[2, 2]], dt=gs.qd_float)
     scale = qd.select(d > 0.0, 1.0 / qd.sqrt(qd.select(d > 0.0, d, 1.0)), 1.0)
     scaling = scale.outer_product(scale)
@@ -2152,12 +2074,8 @@ def invert_node_block(D):
 
 @qd.func(requires_top_level=True)
 def func_invert_brick(grid: MpmGridScratch, bricks: MpmBrickScratch):
-    """Invert every brick's 48 x 48 matrix in place and record which of its nodes are coupled inside the brick.
-
-    The sweep of a pivot reads the pivot column that every entry depends on. A GPU spreads the entries of a brick over
-    the registers of a warp, shares the pivot column and row through per-warp shared memory and steps the lanes together
-    (see func_invert_brick_gpu). The CPU backend has neither, and a CPU thread sweeps a whole brick on its packed
-    storage, the column kept in scratch."""
+    """Invert every brick's 48 x 48 matrix in place and record which of its nodes are coupled inside the brick, one warp
+    per brick on a GPU and one thread per brick on a CPU."""
     if qd.static(gs.backend == gs.cpu):
         func_invert_brick_cpu(grid, bricks)
     else:
@@ -2259,13 +2177,10 @@ def func_invert_brick_gpu(grid: MpmGridScratch, bricks: MpmBrickScratch):
     """Invert every brick's 48 x 48 matrix in place by the symmetric sweep operator (Goodnight 1979), one warp per
     brick, and record which of its nodes are coupled inside the brick.
 
-    Sweeping pivot k maps a_kk -> -1/a_kk, a_ik -> a_ik / a_kk, a_ij -> a_ij - a_ik a_kj / a_kk, and sweeping every
-    pivot of a symmetric positive definite (SPD) matrix yields -A^-1. The 1176 upper entries live in registers as 6 x 6
-    tiles of the 8 x 8 tile grid: lanes 0-27 own the 28 off-diagonal tiles, lanes 28-31 two diagonal tiles each. The
-    pivot column and row go through double-buffered per-warp shared memory. The matrix is equilibrated to a unit
-    diagonal and shifted by _BRICK_REGULARIZATION. Only the coupled nodes are swept, and the inverse of a decoupled node
-    is the inverse of its own 3 x 3 block. A non-positive or non-finite pivot falls back to the Jacobi inverse.
-    """
+    The 1176 upper entries live in registers as 6 x 6 tiles, lanes 0-27 owning the off-diagonal tiles and lanes 28-31
+    two diagonal tiles each, the pivot column and row going through per-warp shared memory. The matrix is equilibrated
+    to a unit diagonal and shifted by _BRICK_REGULARIZATION. Only the coupled nodes are swept, a decoupled node taking
+    the inverse of its own block, and a non-positive or non-finite pivot falls back to the Jacobi inverse."""
     qd.loop_config(name="mpm_brick_invert", block_dim=_WARP * BRICK_INVERT_WARPS)
     for t in range(grid.n_blocks[()] * BRICKS_PER_BLOCK * _WARP):
         lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
@@ -2527,12 +2442,10 @@ def func_contribute_newton_max_disp(
     control: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Reduce into the Newton control of every environment the largest |du| component that its particles see through
-    sum_a w_a du_a.
+    """Reduce into the Newton control of every environment the largest |du| component of its particles, sum_a w_a du_a.
 
-    The particles are sorted by environment (see max_by_key). The maximum is taken over the particles rather than the
-    nodes: a node reached by a sliver of a particle stencil carries a vanishing mass and Hessian diagonal, so the
-    preconditioned conjugate gradient (PCG) leaves its du loose while it moves no particle."""
+    The particles rather than the nodes count: a node reached by a sliver of a stencil keeps a loose du, which moves no
+    particle."""
     qd.loop_config(name="mpm_contribute_newton_max_disp", block_dim=REDUCE_BLOCK)
     for s in range(grid.n_valid_chunks[()] * _WARP):
         disp = gs.qd_float(0.0)
@@ -2555,13 +2468,11 @@ def func_cap_inversion_step(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Cap the start step of the line search below the first zero volume of a liquid particle along the Newton direction.
+    """Cap the start step of the line search below the first zero volume of a liquid particle along the Newton
+    direction.
 
-    Along the step u + alpha du, the trial deformation (I + grad u + alpha grad du) F of a particle is affine in alpha,
-    so its determinant is a cubic in alpha, whose first root takes INVERSION_STEP_SLACK times its value as the bound of
-    the step. The liquid energy is defined for a positive volume ratio alone, which its log term only walls off along
-    the continuous path, so that a discrete trial step could otherwise jump across a zero volume. Runs after the start
-    point is recorded, with u at the start point."""
+    The volume ratio of a particle along u + alpha du is a cubic in alpha, whose first root times INVERSION_STEP_SLACK
+    bounds the step. Runs after the start point is recorded."""
     t_max = 1.0 / INVERSION_STEP_SLACK
     qd.loop_config(name="mpm_cap_inversion_step")
     for s in range(grid.n_valid[()]):

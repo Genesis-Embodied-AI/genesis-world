@@ -18,20 +18,14 @@ _SPMV_REGISTERS = 64
 
 @qd.data_oriented
 class PCGScalars:
-    """Device-resident scalars of one preconditioned conjugate gradient (PCG) solve over the rows of several owners.
+    """Device-resident scalars of the preconditioned conjugate gradient (PCG) solves of the environments of a batch.
 
-    Every environment of the batch runs its own solve over its rows: every owner of rows adds its share of r . z and
-    p . Ap into the scalars of the environment of each row. Between the stages of the owners, the solver running the
-    iterations takes the step alpha (see func_pcg_step) and the direction factor beta with the convergence decision
-    (see func_pcg_decide) of every environment, which every owner then reads. The iterations run while any environment
-    has not converged (`is_running`), within one budget for the batch.
-
-    A solve runs `max_iter` iterations at most, and an environment converges once its r . z falls to `tol_rate` times
-    its start value. An environment left out by `env_active` (see func_pcg_reset) starts converged. An adjoint solve
-    takes the environments of `is_env_adjoint` (see func_pcg_select_envs). With `is_curvature_checked` set, it flags in
-    `has_breakdown` the environments whose operator is indefinite, which a solve on a matrix without symmetric positive
-    definite (SPD) projection checks for.
-    """
+    Every owner of rows adds its share of r . z and p . Ap into the scalars of the environment of each row, and reads
+    the step alpha (see func_pcg_step) and the direction factor beta (see func_pcg_decide). The iterations run while any
+    environment runs (`is_running`), `max_iter` at most, an environment converging once its r . z falls to `tol_rate`
+    times its start value. An environment left out by `env_active` starts converged, and an adjoint solve takes those of
+    `is_env_adjoint`. With `is_curvature_checked`, `has_breakdown` flags the environments whose operator is
+    indefinite."""
 
     def __init__(self, value_type, max_iter: int, tol_rate: float, n_envs: int = 1) -> None:
         self.value_type = value_type
@@ -69,18 +63,9 @@ PCG_ROWS = Size("pcg_rows")
 
 
 class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
-    """Vectors of a preconditioned conjugate gradient (PCG) over the 3x3 block rows of one owner.
-
-    The vectors hold one 3-vector per block row. The owner runs each of its stages over its live block rows `n_rows`, by grid-striding loops on a resident grid, and
-    reads and adds into the scalars of the solve (see PCGScalars). `row_env` holds the environment of every block row,
-    which the owner writes, its rows sorted by environment.
-
-    The reductions (the dots, the SpMV with p.Ap) have one implementation per backend, both reducing by the environment
-    of the rows. On a GPU, they combine the values of each run of one environment in a warp by a segmented shuffle tree
-    and add one atomic per run. The CPU backend of Quadrants lacks lanes: it runs a few dozen threads, each of which
-    reduces a contiguous chunk of the rows serially and adds once per environment it meets. The elementwise loops are
-    the same for both.
-    """
+    """Vectors of a preconditioned conjugate gradient (PCG), one 3-vector per block row, and `row_env`, the environment
+    of every block row, the rows sorted by environment. The reductions add by the environment of the rows (see
+    add_by_key)."""
 
     r: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
     z: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
@@ -152,12 +137,9 @@ def func_init_linear_pcg_residual(
     pcg_scalars: qd.template(),
     is_adjoint: qd.template(),
 ):
-    """Start a solve of the linear system from a zero solution, with the right-hand side as the residual.
-
-    The solve of A x = b starts from x = 0 with r = b and Ap = 0. With `is_adjoint`, an environment left out by
-    `env_active` keeps its solution, which an earlier adjoint solve left. Next, the owner applies its preconditioner
-    (z = M^-1 r) and calls func_init_linear_pcg_direction to set the first direction.
-    """
+    """Start a solve of A x = b from x = 0, with r = b and Ap = 0. With `is_adjoint`, an environment left out by
+    `env_active` keeps the solution of an earlier adjoint solve. The preconditioner and func_init_linear_pcg_direction
+    follow."""
     n_blocks = qd.static(get_gpu_resident_blocks(PCG_BLOCK, _STREAM_REGISTERS))
     qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
     for i_th in range(n_blocks * PCG_BLOCK):
@@ -190,15 +172,10 @@ def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scala
 def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch):
     """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form.
 
-    The energy form sums w p_r^T B p_c over the stored upper blocks (w = 1 on the diagonal, 2 off it, for the mirrored
-    lower block), so every term is local to one entry and needs no separate dot. An owner whose operator has a term
-    beyond the matrix adds it to Ap and p.Ap before the step of the solve (see func_pcg_step).
-
-    The products of one row are summed before they reach Ap, which spares an atomic per entry. A GPU sums the runs of a
-    row inside a warp by a segmented shuffle reduction. A CPU thread sums them along its chunk of the row-sorted
-    entries, which a row leaves only at the chunk ends (see PCGWorkspace). p.Ap adds into the environment of each row,
-    and the entries of an environment that converged are skipped.
-    """
+    The energy form sums w p_r^T B p_c over the stored upper blocks (w = 1 on the diagonal, 2 off it), so every term is
+    local to one entry. The products of one row are summed before they reach Ap (see add_by_key), and the entries of an
+    environment that converged are skipped. An owner whose operator has a term beyond the matrix adds it before
+    func_pcg_step."""
     if qd.static(gs.backend == gs.cpu):
         _func_linear_pcg_spmv_cpu(pcg_workspace, pcg_scalars, matrix)
     else:
@@ -207,8 +184,8 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.tem
 
 @qd.func
 def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix: BCOOMatrixScratch):
-    """Product B p_c of a stored upper block of row `i_r` for its row, its energy form, and off the diagonal the mirrored
-    product B^T p_r added to Ap of its column."""
+    """Product B p_c of a stored upper block of row `i_r` for its row and its energy form, the mirrored product B^T p_r
+    of an off-diagonal block being added to Ap of its column."""
     i_c = matrix.bcoo_col[i_nz]
     block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
     p_col = pcg_workspace.p[i_c]
@@ -374,11 +351,8 @@ def func_pcg_arm(pcg_scalars: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pcg_step(pcg_scalars: qd.template()):
-    """Take the step alpha = rz / p.Ap of every running environment once every owner added its p.Ap, and zero rz_new
-    for the dots that follow.
-
-    With is_curvature_checked set, a non-positive p.Ap along a non-zero direction flags has_breakdown of its environment.
-    """
+    """Take the step alpha = rz / p.Ap of every running environment once every owner added its p.Ap, and zero rz_new.
+    With is_curvature_checked set, a non-positive p.Ap along a non-zero direction flags has_breakdown."""
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
             rz = pcg_scalars.rz[i_b]
@@ -391,14 +365,11 @@ def func_pcg_step(pcg_scalars: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pcg_decide(pcg_scalars: qd.template()):
-    """Take beta = rz_new / rz and the convergence decision of every running environment once every owner added its
-    r . z, then roll rz over.
+    """Take beta = rz_new / rz and the convergence decision of every running environment once every owner added its r .
+    z, then roll rz over and zero p.Ap.
 
-    An environment converges once its |rz_new| falls to its threshold, and the iterations stop once every environment
-    converged or at the end of the budget. An rz_new that is not finite fails the assertion in debug mode and otherwise
-    stops the environment unconverged, its Newton solve judging the non-finite solution. p.Ap is zeroed for the product
-    of the next iteration.
-    """
+    A non-finite rz_new fails the assertion in debug mode, or else stops the environment unconverged, its Newton solve
+    judging the non-finite solution."""
     for _ in range(1):
         pcg_scalars.iter_remaining[()] -= 1
         pcg_scalars.is_running[()] = 0

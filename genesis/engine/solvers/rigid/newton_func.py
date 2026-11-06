@@ -1,15 +1,11 @@
 """Stages of Rigid's dofs as a participant of the NewtonSolver, in the joint solve with the solvers coupled with Rigid.
 
 The Rigid unknown is x = dt^2 qacc per dof, so that a link point moves by dt v + J_pt x over the substep. Rigid's convex
-primal cost (its Gauss term and constraint rows, as Rigid assembled them for the substep) times dt^4 joins the joint
-energy in the displacement units of the material point method (MPM) energy. Its gradient is dt^2 times that of Rigid,
-and its Hessian is the M + J^T D J of Rigid. One preconditioned conjugate gradient (PCG) solves the joint Newton system
-with a block diagonal preconditioner, and Rigid's block is its island Cholesky factor of M + J^T D J plus the contact
-stiffness of the links in contact (see func_add_link_stiffness_island). The couplings act on the links through their spatial
-displacement and spatial force: a point at arm r from the root center of mass (COM) of its link moves by dr = V_lin +
-V_ang x r for the link's spatial displacement V = sum over the dofs of its chain of cdof x_d, and a force g on it pushes
-the dofs of that chain with the spatial force (g, r x g).
-"""
+primal cost times dt^4 joins the joint energy, with gradient dt^2 times that of Rigid and Hessian M + J^T D J. Rigid's
+block of the preconditioner is its island Cholesky factor of that Hessian plus the contact stiffness of its links (see
+func_add_link_stiffness_island). A point at arm r from the root center of mass (COM) of its link moves by V_lin + V_ang
+x r for the link's spatial displacement V = sum over its chain of cdof x_d, and a force g on it pushes the chain with
+the spatial force (g, r x g)."""
 
 import quadrants as qd
 
@@ -41,13 +37,9 @@ LINKS = Size("links")
 class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
     """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors.
 
-    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the displacement
-    units of the material point method (MPM) energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`,
-    `p`, `ap` and `sol` are the Rigid rows of the conjugate gradient residual, preconditioned residual, direction,
-    operator image and solution. Per link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof
-    vector and `link_force_vel` / `link_force_ang` accumulate a spatial force, about the root center of mass, for the
-    couplings acting on the links.
-    """
+    `qacc`, `Ma` and `cost` hold Rigid's evaluation of x = dt^2 qacc, and `r`, `z`, `p`, `ap` and `sol` its rows of the
+    conjugate gradient. Per link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof vector
+    and `link_force_vel` / `link_force_ang` accumulate a spatial force, about the root center of mass."""
 
     x: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     x_temp: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
@@ -185,10 +177,7 @@ def func_rigid_evaluate(
     config: qd.template(),
 ):
     """Evaluate Rigid's cost of qacc = x / dt^2 into `rigid_data.cost`, with its row activity, forces and
-    qfrc_constraint.
-
-    The cost comes from Rigid's own update of its constraint state, and reduces to the Gauss term in a scene without
-    Rigid constraint rows."""
+    qfrc_constraint, by Rigid's own update of its constraint state."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])
@@ -295,10 +284,8 @@ def func_add_link_stiffness_island(
     """Add the contact stiffness J_l^T K_l J_l of every link of an island to the lower triangle of its Hessian block,
     J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see link_K).
 
-    The entries are those of a pair of dofs of one chain, which the mass matrix couples, hence within the skyline
-    envelope of the block, scaled by the Jacobi equilibration of the block (see func_hessian_direct_batch). Without
-    the contact stiffness, the rows of the many particles on a link, far stiffer than its inertia, leave the joint
-    preconditioned conjugate gradient (PCG) stopping on a direction that barely moves the link."""
+    The entries couple dofs of one chain, within the skyline envelope of the block, and take the Jacobi equilibration of
+    the block (see func_hessian_direct_batch)."""
     link_start = constraint_state.island.link_slices.start[i_island, i_b]
     for i_link in range(constraint_state.island.link_slices.n[i_island, i_b]):
         i_l = constraint_state.island.link_id[link_start + i_link, i_b]

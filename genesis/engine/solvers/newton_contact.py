@@ -1,29 +1,19 @@
 """Contacts of the joint Newton solve as a sparse matrix over contact vertices.
 
-A contact vertex is a point whose displacement over the substep is linear in the unknowns of one participant: a
-material point method (MPM) particle, a finite element method (FEM) vertex, a position based dynamics (PBD) particle or
-a contact point on a Rigid link. The device owning a set of vertices is their vertex map, and every vertex has a global
-index, its map's `vertex_offset` plus its index in the map, below its `vertex_count`.
+A contact vertex is a point whose displacement over the substep is linear in the unknowns of one participant, with a
+global index: the `vertex_offset` of its vertex map plus its index in the map. A participant owning rows of the linear
+system (see newton_linear.py) maps its vertices onto them by `func_vertex_value(f, i_v)` and `func_vertex_rows(i_v)`,
+the rows a vertex moves and their weights, zero on an eliminated row. The contact points on Rigid links have a map of
+their own (see MpmRigidContact).
 
-A participant that owns rows of the linear system of the solve (see newton_linear.py) maps its vertices onto them: it
-provides `func_vertex_value(f, i_v)`, the displacement of a vertex at the current iterate, and `func_vertex_rows(i_v)`,
-the rows it moves and their weights, at most its `n_vertex_rows`. The row of an unknown its owner eliminates has a zero
-weight, so that no contact reaches it (see newton_linear.py). The contact points on Rigid links, whose dofs solve
-their own rows, have a map of their own (see MpmRigidContact), which reads and writes them through the links.
-
-A pair kind holds the contact pairs of one kind that its owner builds before the Newton solve of a substep, which stay
-fixed over the solve. Every pair writes the gradient and the Hessian of its energy over the vertices it involves into
-the vertex-space matrices of `NewtonContactScratch`: doublets (vertex, 3-vector) and upper triangular triplets (row
-vertex, column vertex, 3 x 3 block), `n_doublets` and `n_triplets` of them per pair at fixed slots. A pair kind
-provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f, energies)`, which adds
-the energy of every pair into the entry of its environment in `energies`.
+A pair kind holds the pairs of one kind, built before the Newton solve and fixed over it, each writing the gradient and
+the Hessian of its energy into fixed slots of the vertex-space doublets and upper triangular triplets of
+`NewtonContactScratch`. It provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f,
+energies)`.
 
 The keys of the slots are sorted once per substep and their values reduced at every assembly. A reduced entry between
-vertices of the linear system expands into the blocks of their rows, which join the matrix (as CGQ distributes its
-contacts), and its doublets into the right-hand side. An entry on a Rigid contact point stays in vertex space: the
-product of the conjugate gradient, the diagonal blocks of Rigid's preconditioner and the gradient of Rigid go through
-its map, one thread per entry.
-"""
+vertices of the linear system expands into the blocks of their rows, and one on a Rigid contact point stays in vertex
+space, reaching Rigid through its map."""
 
 from collections.abc import Iterator
 
@@ -228,11 +218,9 @@ def func_contact_entry_layout(contact: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_contact_assemble(f: int, contact: qd.template(), linear: NewtonLinearScratch):
-    """Add the gradient and the Hessian of the contacts at the current iterate to the linear system and to Rigid.
-
-    Runs once every participant assembled its own share. A doublet adds w_a g to every row a of its vertex. A Hessian
-    entry (r, c) between vertices of the linear system writes the blocks w_a w_b H of their rows a and b into the
-    triplets of the contacts, discarding those of zero weight. A doublet on a Rigid contact point goes to its link."""
+    """Add the gradient and the Hessian of the contacts at the current iterate to the linear system and to Rigid, once
+    every participant assembled its own share: a doublet adds w_a g to every row a of its vertex, and a Hessian entry
+    between vertices of the linear system writes the blocks w_a w_b H of their rows, discarding those of zero weight."""
     func_contact_terms(f, contact)
     func_reduce_bcoo(contact.matrices.gradient, block_scalars=3)
     func_reduce_bcoo(contact.matrices.hessian, block_scalars=9)
@@ -286,12 +274,9 @@ def func_contact_visit_rigid(f: int, contact: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLinearScratch, pcg_scalars: qd.template()):
-    """Add the product of the contact entries on a Rigid contact point with the direction of the conjugate gradient,
-    once the matrix and Rigid set the products of their own.
-
-    One thread per stored block B of vertices (r, c), the contact point c coming last of the vertices: it adds B p_c to
-    the image of r and, off the diagonal, B^T p_r to that of c, the rows of the linear system adding their p . Ap. The
-    environments that converged are skipped."""
+    """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction: B p_c to
+    the image of r and, off the diagonal, B^T p_r to that of the contact point c, skipping the converged
+    environments."""
     contact.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
     qd.loop_config(name="newton_contact_rigid_product")
     for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
@@ -350,10 +335,8 @@ class NewtonContact(NewtonDevice):
     """The contacts of the joint Newton solve, over the vertices of `linear_maps` and `rigid_map` and the pairs of
     `pair_kinds`.
 
-    Every pair kind is built by its owner before the solve. `prepare` lays the slots out once they all are, grows the
-    vertex-space matrices to them, sorts their keys, which hold over the substep, and numbers the blocks their reduced
-    entries add to the linear system, the share of the contacts `linear_block`. The stages of the solve are
-    `func_contact_assemble`, `func_contact_visit_rigid`, `func_contact_rigid_product` and `func_contact_energy`."""
+    Once the pairs are built, `prepare` lays the slots out, grows the vertex-space matrices, sorts their keys and
+    numbers the blocks that the reduced entries add to the linear system (`linear_block`)."""
 
     def __init__(self, linear_maps: list, rigid_map, pair_kinds: list):
         self.linear_maps = participant_group("NewtonContactLinearMaps", linear_maps)

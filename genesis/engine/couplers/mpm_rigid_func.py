@@ -1,19 +1,10 @@
-"""Contact pairs between the implicit material point method (MPM) and Rigid in the joint Newton solve over the grid
-displacement and the Rigid dofs.
+"""Contact pairs between the implicit material point method (MPM) and Rigid in the joint Newton solve.
 
-Rigid geoms enter the MPM energy as soft contact rows with Rigid's own contact model: the deepest geom of a particle
-within its soft range gives a pair of the pyramid rows of its friction cone, with the geom's friction and solref /
-solimp impedance, and the summed inverse weight of the link and of the particle in the implicit system (the material it
-is embedded in, see `func_contact_invweight`). A row acts on the displacement of the particle relative to its contact
-point on the link.
-
-The Rigid unknown and its stages are those of the Rigid participant (see rigid/newton_func.py). The contact point of
-a pair is a contact vertex of the Newton solve (see newton_contact.py), whose vertex map is the coupling: a particle at
-arm r from the root center of mass (COM) of its link moves by dr = V_lin + V_ang x r for the link's spatial displacement
-V = sum over the dofs of its chain of cdof x_d, and a vector y on the point pushes the dofs of that chain with the
-spatial force (y, r x y). A Rigid without dofs gives contact points of no displacement, and its pairs act on the
-particles alone.
-"""
+The deepest Rigid geom of a particle within its soft range gives a pair of the pyramid rows of its friction cone, with
+Rigid's own contact model (the geom's friction and solref / solimp impedance, the summed inverse weights of the link and
+the particle). A row acts on the displacement of the particle relative to its contact point on the link, a contact
+vertex of the Newton solve (see newton_contact.py) that moves with the link (see rigid/newton_func.py). A Rigid without
+dofs gives contact points of no displacement."""
 
 import quadrants as qd
 
@@ -61,10 +52,9 @@ from .contact_candidates import (
 class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
     """The pairs of the particles with their nearest coupled Rigid geom (see func_build_rigid_pairs).
 
-    A pair holds its sorted particle `s`, its environment `i_b`, its geom `geom` and the link `link` of the geom, the
-    gap `phi` of the particle to the contact range of the geom at the substep start, and the rows of its friction
-    pyramid around `normal` with friction coefficient `friction`, row i of stiffness `D[i]` and target `t[i]`. `n_pairs`
-    counts the pairs asked for, above the capacity on overflow."""
+    A pair holds its sorted particle `s`, its environment `i_b`, its geom `geom` and link `link`, the gap `phi` at the
+    substep start, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with
+    friction coefficient `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -102,11 +92,8 @@ def particle_arm(f: int, i_p: int, i_b: int, i_l: int, particles: MpmParticles, 
 def geom_sdf_grid(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, sdf_info: SDFInfo):
     """Continuous signed distance and its gradient in the mesh frame of a geom with a signed distance field (SDF) grid.
 
-    Inside the grid, it returns the trilinear interpolant of the node distances and its analytic gradient, consistent
-    with each other. Outside, it returns the value at the point clamped onto the grid plus the distance to it, an upper
-    bound of the distance that joins the interpolant on the grid boundary. Rigid's own query returns there a value above
-    every in-grid one, meant for comparisons only, which a contact range reaching past the grid would see as a jump.
-    """
+    Inside the grid, the trilinear interpolant and its analytic gradient. Outside, the value at the point clamped onto
+    the grid plus the distance to it, which joins the interpolant on the grid boundary."""
     pos_mesh = gu.qd_inv_transform_by_trans_quat(x, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b])
     pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_g])
     sdf_res = sdf_info.geoms_info.sdf_res[i_g]
@@ -205,12 +192,9 @@ class RigidGeomQuery:
 
 @qd.func(requires_top_level=True)
 def func_fit_geom_leaves(dt: float, query: qd.template()):
-    """Fit the leaf box of every coupled geom, grown by its contact margin and the distance its points may travel.
-
-    The box is the world box of the posed initial box of the geom (as `func_update_geom_aabbs` fits it, a stage Rigid
-    skips when collisions are disabled), grown by the contact margin of the geom and by twice the distance its points
-    may travel over the substep, bounded by the link velocity at the box center and the spin over its radius. A geom
-    that an environment does not carry gets an empty box with a finite center, for the Morton code."""
+    """Fit the leaf box of every coupled geom: the world box of its posed initial box, grown by its contact margin and
+    by twice the distance its points may travel over the substep. A geom that an environment does not carry gets an
+    empty box with a finite center."""
     qd.loop_config(name="mpm_fit_geom_leaves")
     for i_b, i_a in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         i_g = query.coupled_geoms[i_a]
@@ -314,14 +298,12 @@ def func_build_rigid_pairs(
     """Build the pair of every valid particle with its nearest coupled geom within its soft range, once the candidates
     are sorted by particle.
 
-    The geom's `coup_softness` is a contact margin: a row starts at that distance from the surface, and its constraint
-    position is the signed distance minus the margin, so the resting penetration of the soft row is taken up outside
+    The geom's `coup_softness` is a contact margin, so that the resting penetration of the soft row is taken up outside
     the geom. As in Rigid's contact assembly, the friction coefficient is `max(friction * friction_ratio, 0.01)`, the
-    time constant is floored at twice the substep, and every row `normal + mu d_k` of the pyramid gets
-    `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`, with `mu_reg^2 = mu^2 / impratio`. The row target `dt J.v_p + dt^2 aref`
-    is on the displacement of the particle relative to the motion J_pt x of its contact point beyond the link's velocity
-    at the substep start. The nearest geom gives a pair, by `band_row`, to a particle within its range or short of it
-    by less than `contact_band_width`."""
+    time constant is floored at twice the substep, and every pyramid row `normal + mu d_k` gets Rigid's regularization
+    `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`. The row target `dt J.v_p + dt^2 aref` is on the
+    displacement of the particle relative to the motion of its contact point beyond the link's start velocity (see
+    band_row)."""
     func_select_nearest(0.0, candidates)
     for _ in range(1):
         pairs.n_pairs[()] = 0
@@ -466,14 +448,10 @@ def func_mpm_reaction(
 ):
     """Apply the force of the MPM pairs on Rigid at the converged solve, after func_rigid_write_back.
 
-    qfrc_constraint becomes M qacc - qf_smooth, Rigid's own and the MPM rows' generalized force together, so that
-    Rigid's dofs.force is M qacc of the converged qacc as after its own solve. The rows' spatial force on each link
-    stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force) for func_add_mpm_contact_force: the contact
-    force of a link is not recoverable from the generalized force of a chain.
-
-    A link pushed by the rows is marked constrained, as Rigid's assembly marks the links of its own contacts, since the
-    midpoint integration of a free link (see func_midpoint_eligible) replaces qacc by the solution of the unconstrained
-    equation of motion."""
+    qfrc_constraint becomes M qacc - qf_smooth, so that dofs.force is M qacc as after Rigid's own solve, and the spatial
+    force of the rows on each link stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force) for
+    func_add_mpm_contact_force. A link pushed by the rows is marked constrained, which keeps it out of the midpoint
+    integration of free links (see func_midpoint_eligible)."""
     contact.func_vertex_begin(f, SRC_ITERATE)
     qd.loop_config(name="mpm_reaction_pairs")
     for i_pair in range(contact.pairs.n_pairs[()]):
