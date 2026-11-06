@@ -37,6 +37,9 @@ def main():
         show_viewer=args.vis,
     )
 
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
     franka = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",

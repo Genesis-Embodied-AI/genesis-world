@@ -249,6 +249,9 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
         show_FPS=False,
     )
 
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
     franka = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",

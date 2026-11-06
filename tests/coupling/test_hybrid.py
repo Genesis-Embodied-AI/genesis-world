@@ -420,8 +420,20 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
-    BOX_POS = (0.0, 0.0, 0.1)
+    PLANES_HEIGHT = (0.1, 0.3)
     BOX_HALFHEIGHT = 0.1
+
+    # The ground is a single fixed plane facing up, and any other ground is refused
+    for ground_morphs in (
+        (gs.morphs.Terrain(),),
+        (gs.morphs.Plane(normal=(0.0, 0.6, 0.8)),),
+        (gs.morphs.Plane(), gs.morphs.Plane(pos=(0.0, 0.0, 1.0))),
+    ):
+        scene = gs.Scene(coupler_options=gs.options.SAPCouplerOptions(), show_viewer=False)
+        for morph in ground_morphs:
+            scene.add_entity(morph)
+        with pytest.raises(gs.GenesisException, match="single fixed plane facing up"):
+            scene.build()
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -437,15 +449,16 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    plane = scene.add_entity(
+    scene.add_entity(
         gs.morphs.Plane(
-            collision=False,
+            pos=(0.0, 0.0, PLANES_HEIGHT[0]),
+            batch_fixed_verts=True,
         ),
     )
     box = scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.5, 0.5, 2 * BOX_HALFHEIGHT),
-            pos=(0.0, 0.0, BOX_HALFHEIGHT),
+            pos=(0.0, 0.0, PLANES_HEIGHT[0] + BOX_HALFHEIGHT),
         ),
         material=gs.materials.Rigid(),
     )
@@ -453,19 +466,25 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
     robot_1 = scene.add_entity(
         gs.morphs.MJCF(
             file=f"{asset_path}/heavy_three_joint_link.xml",
-            pos=(-0.2, -0.26, 0.0),
+            pos=(-0.2, -0.26, PLANES_HEIGHT[0]),
             scale=0.3,
         ),
     )
     robot_2 = scene.add_entity(
         gs.morphs.MJCF(
             file=f"{asset_path}/heavy_three_joint_link.xml",
-            pos=(0.17, -0.26, 0.1),
+            pos=(0.17, -0.26, PLANES_HEIGHT[0] + 0.1),
             euler=(0.0, 0.0, 90.0),
             scale=0.3,
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
+
+    # The second environment holds the whole scene higher, its ground plane included
+    for entity in scene.entities:
+        entity_pos = entity.get_pos(envs_idx=[1])
+        entity_pos[..., 2] += PLANES_HEIGHT[1] - PLANES_HEIGHT[0]
+        entity.set_pos(entity_pos, envs_idx=[1])
 
     # Run simulation
     for _ in range(80):
@@ -475,21 +494,24 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
     for entity in scene.entities:
         assert_allclose(entity.get_links_vel(), 0.0, atol=0.03)
 
-    # The box should stay at its initial position
-    assert_allclose(box.get_pos(), (0.0, 0.0, BOX_HALFHEIGHT), atol=2e-3)
+    # The box should stay at its initial position, resting on the ground plane of each environment
+    box_pos = tensor_to_array(box.get_pos())
+    assert_allclose(box_pos[..., :2], 0.0, atol=2e-3)
+    assert_allclose(box_pos[..., 2] - PLANES_HEIGHT, BOX_HALFHEIGHT, atol=2e-3)
 
     # The box, and both robots should be laying on top of each other
-    robot_1_min_corner, robot_1_max_corner = robot_1.get_AABB()
-    robot_2_min_corner, robot_2_max_corner = robot_2.get_AABB()
-    assert (robot_1_min_corner[:2] > -0.4).all() and (robot_2_min_corner[:2] > -0.4).all()
-    assert (robot_1_min_corner[:2] < 0.4).all() and (robot_2_min_corner[:2] < 0.4).all()
-    assert robot_1_max_corner[2] > 2 * BOX_HALFHEIGHT
-    assert robot_2_max_corner[2] > robot_1_max_corner[2] + 0.05
+    robot_1_aabb = tensor_to_array(robot_1.get_AABB())
+    robot_2_aabb = tensor_to_array(robot_2.get_AABB())
+    assert (robot_1_aabb[..., 0, :2] > -0.4).all() and (robot_2_aabb[..., 0, :2] > -0.4).all()
+    assert (robot_1_aabb[..., 0, :2] < 0.4).all() and (robot_2_aabb[..., 0, :2] < 0.4).all()
+    assert (robot_1_aabb[..., 1, 2] - PLANES_HEIGHT > 2 * BOX_HALFHEIGHT).all()
+    assert (robot_2_aabb[..., 1, 2] > robot_1_aabb[..., 1, 2] + 0.05).all()
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 def test_sap_fem_vs_robot(show_viewer):
+    PLANE_HEIGHT = 0.1
     SPHERE_RADIUS = 0.2
 
     scene = gs.Scene(
@@ -510,14 +532,14 @@ def test_sap_fem_vs_robot(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    plane = scene.add_entity(
+    scene.add_entity(
         gs.morphs.Plane(
-            collision=False,
+            pos=(0.0, 0.0, PLANE_HEIGHT),
         ),
     )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
+            pos=(0.0, 0.0, PLANE_HEIGHT + SPHERE_RADIUS),
             radius=SPHERE_RADIUS,
         ),
         material=gs.materials.FEM.Elastic(
@@ -530,7 +552,7 @@ def test_sap_fem_vs_robot(show_viewer):
     robot = scene.add_entity(
         gs.morphs.MJCF(
             file=f"{asset_path}/cross.xml",
-            pos=(0.0, 0.0, 2 * SPHERE_RADIUS + 0.04),
+            pos=(0.0, 0.0, PLANE_HEIGHT + 2 * SPHERE_RADIUS + 0.04),
             scale=0.5,
         ),
     )
@@ -540,16 +562,17 @@ def test_sap_fem_vs_robot(show_viewer):
     for _ in range(50):
         scene.step()
 
-    # Check that the sphere did not move, and the slightly squished
+    # Check that the sphere did not move, and is slightly squished on top of the ground plane
     state = sphere.get_state()
     center = state.pos.mean(axis=(0, 1))
     assert_allclose(center[:2], 0.0, tol=0.01)
-    assert center[2] < SPHERE_RADIUS - 0.02
+    assert center[2] < PLANE_HEIGHT + SPHERE_RADIUS - 0.02
+    assert_allclose(state.pos[..., 2].min(), PLANE_HEIGHT, atol=1e-3)
 
     # Check that the ant is laying on top of the sphere
     robot_pos = robot.get_pos()
     assert_allclose(robot_pos[:2], 0.0, tol=0.03)
-    assert robot_pos[2] > (2 * SPHERE_RADIUS + 0.04) - 0.05
+    assert robot_pos[2] > (PLANE_HEIGHT + 2 * SPHERE_RADIUS + 0.04) - 0.05
 
     # Check that the legs of the ants are resting on the sphere
     assert_allclose(robot.get_qpos()[-4:].abs(), 1.0, tol=0.1)

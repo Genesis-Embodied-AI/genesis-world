@@ -8,7 +8,6 @@ import igl
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
@@ -34,7 +33,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         super().__init__(scene, sim, options)
 
         # options
-        self._floor_height = options.floor_height
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
         self._n_newton_iterations = options.n_newton_iterations
@@ -58,14 +56,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._mats_compute_energy_gradient_hessian = list()
         self._mats_compute_energy = list()
 
-        # boundary
-        self.setup_boundary()
-
         # lazy initialization
         self._constraints_initialized = False
-
-    def setup_boundary(self):
-        self.boundary = FloorBoundary(height=self._floor_height)
 
     def init_batch_fields(self):
         self.batch_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
@@ -1476,10 +1468,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def floor_height(self):
-        return self._floor_height
 
     @property
     def damping(self):

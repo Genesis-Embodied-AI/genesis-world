@@ -646,20 +646,6 @@ class LegacyCoupler(RBC):
 
                         self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
 
-        # The boundary condition runs once per surface vertex: the reverse pass of an overwrite of the velocity of a
-        # vertex by each of the surface triangles sharing it would race on its adjoint
-        for i_sv, i_b in qd.ndrange(self.fem_solver.surface_vertices.shape[0], self.fem_solver._B):
-            i_v = self.fem_solver.surface_vertices[i_sv]
-            _, self.fem_solver.elements_v[f + 1, i_v, i_b].vel = self.fem_solver.boundary.impose_pos_vel(
-                self.fem_solver.elements_v[f, i_v, i_b].pos, self.fem_solver.elements_v[f + 1, i_v, i_b].vel
-            )
-
-    def fem_hydroelastic(self, f: qd.i32):
-        # Floor contact
-
-        # collision detection
-        self.fem_solver.floor_hydroelastic_detection(f)
-
     @qd.kernel
     def sph_rigid(
         self,

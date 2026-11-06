@@ -274,6 +274,44 @@ class SAPCoupler(RBC):
             if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
                 gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
 
+        # The floor contacts model a horizontal floor at the current height of the rigid ground plane of each
+        # environment, whose orientation is checked at build only, and every other contact leaves that plane out. A
+        # scene without one has no floor contact.
+        self._ground_geom_idx = -1
+        ground_geoms = [
+            geom for geom in self.rigid_solver.geoms if geom.type in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
+        ]
+        if ground_geoms:
+            ground_geom, *other_ground_geoms = ground_geoms
+            ground_quat = self.rigid_solver.get_geoms_quat(ground_geom.idx)[..., 0, :]
+            ground_normal = gu.transform_by_quat(ground_quat.new_tensor(ground_geom.data[:3]), ground_quat)
+            if (
+                other_ground_geoms
+                or ground_geom.type == gs.GEOM_TYPE.TERRAIN
+                or not ground_geom.is_fixed
+                or not (ground_normal[..., 2] > 1.0 - gs.EPS).all()
+            ):
+                gs.raise_exception(
+                    "SAPCoupler supports a single fixed plane facing up in every environment as ground, got "
+                    f"{[(type(geom.entity.morph).__name__, geom.type) for geom in ground_geoms]}."
+                )
+            self._ground_geom_idx = ground_geom.idx
+        else:
+            self._fem_floor_contact_type = FEMFloorContactType.NONE
+            self._rigid_floor_contact_type = RigidFloorContactType.NONE
+
+        # The rigid triangles touching FEM leave the ground plane out (see '_ground_geom_idx' above)
+        rigid_tri_faces_idx = [
+            i_f
+            for geom in self.rigid_solver.geoms
+            if geom.idx != self._ground_geom_idx
+            for i_f in range(geom.face_start, geom.face_end)
+        ]
+        self._enable_rigid_fem_contact &= len(rigid_tri_faces_idx) > 0
+        if self._enable_rigid_fem_contact:
+            self.rigid_tri_faces_idx = qd.field(gs.qd_int, shape=(len(rigid_tri_faces_idx),))
+            self.rigid_tri_faces_idx.from_numpy(np.array(rigid_tri_faces_idx, dtype=gs.np_int))
+
         init_tet_tables = False
 
         if self.fem_solver.is_active:
@@ -307,6 +345,13 @@ class SAPCoupler(RBC):
             self._init_fem_fields()
 
         if self.rigid_solver.is_active:
+            # A ground plane alone leaves no rigid volume to put in contact
+            rigid_collision_geoms_idx = [
+                geom.idx for geom in self.rigid_solver.geoms if geom.contype or geom.conaffinity
+            ]
+            if rigid_collision_geoms_idx == [self._ground_geom_idx]:
+                self._rigid_floor_contact_type = RigidFloorContactType.NONE
+                self._rigid_rigid_contact_type = RigidRigidContactType.NONE
             if (
                 self._rigid_floor_contact_type == RigidFloorContactType.TET
                 or self._rigid_rigid_contact_type == RigidRigidContactType.TET
@@ -367,8 +412,9 @@ class SAPCoupler(RBC):
         offset = 0
         for geom in self.rigid_solver.geoms:
             if geom.contype or geom.conaffinity:
-                if geom.type == gs.GEOM_TYPE.PLANE:
-                    gs.raise_exception("Primitive plane not supported as user-specified collision geometries.")
+                # The rigid volumes leave the ground plane out (see '_ground_geom_idx' in 'build')
+                if geom.idx == self._ground_geom_idx:
+                    continue
                 volume = geom.trimesh.volume
                 tet_cfg = {"nobisect": False, "maxvolume": volume / 100}
                 mesh_verts, mesh_elems = eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg)
@@ -480,13 +526,13 @@ class SAPCoupler(RBC):
             ),
         )
 
-        n_faces = self.rigid_solver.n_faces
+        n_rigid_tris = self.rigid_tri_faces_idx.shape[0] if self._enable_rigid_fem_contact else 0
         self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(
-            self.sim._B, n_faces, is_active=self._enable_rigid_fem_contact
+            self.sim._B, n_rigid_tris, is_active=self._enable_rigid_fem_contact
         )
         if self._enable_rigid_fem_contact:
-            max_n_query_results_per_face = max(n_faces, n_tets) * MAX_N_QUERY_RESULT_PER_AABB // n_faces
-            max_results = min(n_faces * max_n_query_results_per_face * self.sim._B, 0x7FFFFFFF)
+            max_n_query_results_per_tri = max(n_rigid_tris, n_tets) * MAX_N_QUERY_RESULT_PER_AABB // n_rigid_tris
+            max_results = min(n_rigid_tris * max_n_query_results_per_tri * self.sim._B, 0x7FFFFFFF)
         else:
             max_results = 0
         # The surface tets of each environment queried against the rigid triangle tree of that environment
@@ -651,6 +697,7 @@ class SAPCoupler(RBC):
             verts_info=self.rigid_solver.dyn_info.verts,
             free_verts_state=self.rigid_solver.dyn_state.free_verts,
             fixed_verts_state=self.rigid_solver.dyn_state.fixed_verts,
+            geoms_state=self.rigid_solver.dyn_state.geoms,
             geoms_info=self.rigid_solver.dyn_info.geoms,
             dofs_state=self.rigid_solver.dyn_state.dofs,
             links_state=self.rigid_solver.dyn_state.links,
@@ -699,6 +746,7 @@ class SAPCoupler(RBC):
         verts_info: VertsInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -717,6 +765,7 @@ class SAPCoupler(RBC):
                 faces_info=faces_info,
                 free_verts_state=free_verts_state,
                 fixed_verts_state=fixed_verts_state,
+                geoms_state=geoms_state,
                 geoms_info=geoms_info,
                 contact_queries_state=contact_queries_state,
             )
@@ -819,7 +868,8 @@ class SAPCoupler(RBC):
     def compute_rigid_tri_aabb(
         self, faces_info: FacesInfo, free_verts_state: VertsState, fixed_verts_state: VertsState, verts_info: VertsInfo
     ):
-        for i_b, i_f in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_faces):
+        for i_b, i_t in qd.ndrange(self.rigid_solver._B, self.rigid_tri_faces_idx.shape[0]):
+            i_f = self.rigid_tri_faces_idx[i_t]
             tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i in qd.static(range(3)):
                 i_v = faces_info.verts_idx[i_f][i]
@@ -830,8 +880,8 @@ class SAPCoupler(RBC):
                     tri_vertices[:, i] = free_verts_state.pos[i_fv, i_b]
             pos_v0, pos_v1, pos_v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
 
-            self.rigid_tri_bvh_state.leaves.aabbs_min[i_b, i_f] = qd.min(pos_v0, pos_v1, pos_v2)
-            self.rigid_tri_bvh_state.leaves.aabbs_max[i_b, i_f] = qd.max(pos_v0, pos_v1, pos_v2)
+            self.rigid_tri_bvh_state.leaves.aabbs_min[i_b, i_t] = qd.min(pos_v0, pos_v1, pos_v2)
+            self.rigid_tri_bvh_state.leaves.aabbs_max[i_b, i_t] = qd.max(pos_v0, pos_v1, pos_v2)
 
     @qd.kernel
     def compute_rigid_tet_aabb(self):
@@ -2569,6 +2619,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -2577,12 +2628,13 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         self.n_contact_candidates[None] = 0
         # TODO Check surface element only instead of all elements
         for i_b, i_e in qd.ndrange(self.fem_solver._B, self.fem_solver.n_elements):
+            ground_pos = geoms_state.pos[self.coupler._ground_geom_idx, i_b]
             intersection_code = qd.int32(0)
             distance = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
                 i_v = self.fem_solver.elements_i[i_e].el2v[i]
                 pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
-                distance[i] = pos_v.z - self.fem_solver.floor_height
+                distance[i] = pos_v.z - ground_pos.z
                 if distance[i] > 0.0:
                     intersection_code |= 1 << i
 
@@ -2968,6 +3020,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -3107,6 +3160,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -3117,7 +3171,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         for i_b, i_sv in qd.ndrange(self.fem_solver._B, self.fem_solver.n_surface_vertices):
             i_v = self.fem_solver.surface_vertices[i_sv]
             pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
-            distance = pos_v.z - self.fem_solver.floor_height
+            distance = pos_v.z - geoms_state.pos[self.coupler._ground_geom_idx, i_b].z
             if distance > 0.0:
                 continue
             i_p = qd.atomic_add(self.n_contact_pairs[None], 1)
@@ -3178,7 +3232,6 @@ class RigidFloorVertContactHandler(RigidContactHandler):
         super().__init__(simulator)
         self.name = "RigidFloorVertContactHandler"
         self.rigid_solver = self.sim.rigid_solver
-        self.floor_height = self.sim.fem_solver.floor_height
         self.contact_pair_type = qd.types.struct(
             batch_idx=gs.qd_int,  # batch index
             link_idx=gs.qd_int,  # index of the link
@@ -3200,6 +3253,7 @@ class RigidFloorVertContactHandler(RigidContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -3213,7 +3267,7 @@ class RigidFloorVertContactHandler(RigidContactHandler):
                 continue
             i_fv = verts_info.verts_state_idx[i_v]
             pos_v = free_verts_state.pos[i_fv, i_b]
-            distance = pos_v.z - self.floor_height
+            distance = pos_v.z - geoms_state.pos[self.coupler._ground_geom_idx, i_b].z
             if distance > 0.0:
                 continue
             i_g = verts_info.geom_idx[i_v]
@@ -3237,7 +3291,6 @@ class RigidFloorTetContactHandler(RigidContactHandler):
         super().__init__(simulator)
         self.name = "RigidFloorTetContactHandler"
         self.rigid_solver = self.sim.rigid_solver
-        self.floor_height = self.sim.fem_solver.floor_height
         self.eps = eps
         self.contact_candidate_type = qd.types.struct(
             batch_idx=gs.qd_int,  # batch index
@@ -3270,6 +3323,7 @@ class RigidFloorTetContactHandler(RigidContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -3283,12 +3337,13 @@ class RigidFloorTetContactHandler(RigidContactHandler):
             i_l = geoms_info.link_idx[i_g]
             if links_info.is_fixed[i_l]:
                 continue
+            ground_pos = geoms_state.pos[self.coupler._ground_geom_idx, i_b]
             intersection_code = qd.int32(0)
             distance = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
                 i_v = self.coupler.rigid_volume_elems[i_e][i]
                 pos_v = self.coupler.rigid_volume_verts[i_b, i_v]
-                distance[i] = pos_v.z - self.floor_height
+                distance[i] = pos_v.z - ground_pos.z
                 if distance[i] > 0.0:
                     intersection_code |= 1 << i
 
@@ -3436,7 +3491,8 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         overflow = False
         result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
-            i_b, i_a, i_sq = query_results.triplets[i_r]
+            i_b, i_t, i_sq = query_results.triplets[i_r]
+            i_a = self.coupler.rigid_tri_faces_idx[i_t]
             i_q = self.fem_solver.surface_elements[i_sq]
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
@@ -3613,6 +3669,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
@@ -3978,6 +4035,7 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         faces_info: FacesInfo,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
+        geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         contact_queries_state: SAPContactQueriesState,
     ):
