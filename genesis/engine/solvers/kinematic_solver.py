@@ -1481,7 +1481,7 @@ class KinematicSolver(Solver):
                 member_t = qd_to_torch(member, copy=False)
                 member_t[:n_links, envs_idx] = data
             init_qpos_t = qd_to_torch(targets.init_qpos, copy=False)
-            init_qpos_t[envs_idx, :n_qs] = init_qpos
+            init_qpos_t[:n_qs, envs_idx] = init_qpos.T
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:

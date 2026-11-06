@@ -401,7 +401,7 @@ class Collider:
                 contact_slots=1 if self._solver._options.enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
-            env_first={ColliderState.contact_sort_key: True, "pruning": True},
+            env_first={(ColliderState.contact_sort_key, ColliderState.diff_contact_input): True, "pruning": True},
             unused=dict(
                 box_box=not config.box_box_detection,
                 contact_cache=not self.collider_config.has_non_box_plane_convex_convex,

@@ -28,10 +28,6 @@ from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array, get_own_annotations
 
 
-# FIXME: quadrants#936 - a vector or matrix tensor takes no layout, so those read environment by environment are
-# allocated and indexed with the environment first instead of last, against the convention of every other tensor.
-# FIXME: quadrants#935 - indexing a laid-out tensor by a list or tuple skips its axis permutation, so laid-out tensors
-# are indexed by plain subscripts alone.
 def V(*args, **kwargs):
     return qd.tensor(*args, backend=qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD, **kwargs)
 
@@ -173,6 +169,9 @@ class SizeExpr(_SizeArithmetic):
 
 # The environments, the last axis of every per-environment array in canonical order
 ENVS = Size("envs")
+# The workers of a detection scratch: one per environment, or one per thread of a pass draining a queue of pairs. They
+# stand for the environments in the memory order of the arrays (see 'env_first' in Data).
+WORKERS = Size("workers")
 
 
 class FieldRef:
@@ -808,10 +807,10 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         axes.append(dim)
     layout = properties.get("layout")
     if properties.get("env_first") is not None:
-        if ENVS not in axes:
+        i_env = next((i for i, dim in enumerate(axes) if dim is ENVS or dim is WORKERS), None)
+        if i_env is None:
             raise TypeError(f"'env_first' selects {'.'.join(leaf.path)}, which spans no environment dimension.")
-        order = [i for i, dim in enumerate(axes) if dim != ENVS]
-        i_env = axes.index(ENVS)
+        order = [i for i in range(len(axes)) if i != i_env]
         order = [i_env, *order] if properties["env_first"] else [*order, i_env]
         layout = tuple(order) if order != list(range(len(axes))) else None
     # A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal

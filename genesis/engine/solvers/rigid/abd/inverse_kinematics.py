@@ -408,7 +408,7 @@ def func_inverse_kinematics(
         # Seed the working configuration from the requested initial guess or the live solver configuration.
         for i_q in range(n_qs):
             if custom_init_qpos:
-                fk.qpos[i_q, i_b] = targets.init_qpos[i_b, i_q]
+                fk.qpos[i_q, i_b] = targets.init_qpos[i_q, i_b]
             else:
                 fk.qpos[i_q, i_b] = rigid_info.qpos[i_q + q_offset, i_b]
 
@@ -744,7 +744,7 @@ def kernel_set_ik_targets(
     for i_c in range(envs_idx.shape[0]):
         targets.envs_idx[i_c] = envs_idx[i_c]
         for i_q in range(init_qpos.shape[1]):
-            targets.init_qpos[envs_idx[i_c], i_q] = init_qpos[i_c, i_q]
+            targets.init_qpos[i_q, envs_idx[i_c]] = init_qpos[i_c, i_q]
     for k in qd.static(range(3)):
         targets.pos_mask[k] = pos_mask[k]
         targets.rot_mask[k] = rot_mask[k]
