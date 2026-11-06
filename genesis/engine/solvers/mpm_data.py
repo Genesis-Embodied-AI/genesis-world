@@ -1,11 +1,8 @@
-"""Data of the implicit material point method (MPM) solver.
+"""Data of the implicit material point method (MPM) solver: the material table, the sparse grid rebuilt every substep,
+the Newton state over the grid displacement, and the brick preconditioner of its rows of the linear system.
 
-The particle state keeps the layout of the solver's public fields. This module holds the data the implicit step adds:
-the material table, the sparse grid rebuilt every substep, the Newton state over the grid displacement, and the brick
-preconditioner of its rows of the linear system of the Newton solve. The grid, Newton and brick structs are built at a
-capacity in blocks. Growing a capacity builds a struct again and swaps it on the participant of the Newton solve that holds it
-(see MpmNewtonParticipant).
-"""
+The grid, Newton and brick structs are built at a capacity in blocks, which grows by building them again and swapping
+them on the participant of the Newton solve (see MpmNewtonParticipant)."""
 
 import numpy as np
 import quadrants as qd
@@ -61,10 +58,8 @@ MATERIAL_PARAMS = Size("material_params")
 
 
 class MpmInfo(Data, kind=DataKind.CONSTANT, shape=()):
-    """Scene values of the implicit material point method (MPM) kernels, as device scalars.
-
-    A scene of another size or resolution runs the kernels compiled for the previous one.
-    """
+    """Scene values of the implicit material point method (MPM) kernels, as device scalars, so that a scene of another
+    size or resolution runs the kernels compiled for the previous one."""
 
     n_envs: qd.Tensor = field(int, ndarray=True)
     n_particles: qd.Tensor = field(int, ndarray=True)
@@ -125,11 +120,8 @@ class MpmMaterialTable(Data, kind=DataKind.CONSTANT):
 
 
 class MpmErrno(Data, kind=DataKind.STATE, shape=(ENVS,)):
-    """Error flags of the implicit material point method (MPM) solver per environment.
-
-    The kernels building and reading the grid raise them instead of indexing out of bounds (see
-    mpm_func.flag_env_error).
-    """
+    """Error flags of the implicit material point method (MPM) solver per environment, which the kernels building and
+    reading the grid raise instead of indexing out of bounds (see mpm_func.flag_env_error)."""
 
     errno: qd.Tensor = field(int)
 
@@ -141,11 +133,9 @@ def _padded(length: int, multiple: int = REDUCE_BLOCK) -> int:
 class MpmGridScratch(Data, kind=DataKind.SCRATCH):
     """Block-sparse grid rebuilt from the particles every substep.
 
-    Particles are sorted by (environment, block, cell). Every particle block activates its positive-octant neighbour
-    blocks as node storage. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is
-    `block_slot * BLOCK_CELLS + local index`. The capacities in blocks and in sorted particles are the sizes of the
-    arrays (see build_mpm_grid).
-    """
+    Particles are sorted by (environment, block, cell), every particle block activating its positive-octant neighbour
+    blocks. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is `block_slot *
+    BLOCK_CELLS + local index`."""
 
     errors: MpmErrno = requires()
     # Number of particle keys sorted, n_envs * n_particles
@@ -225,11 +215,9 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
 
 
 class MpmWallPairs(Data, kind=DataKind.SCRATCH):
-    """The contact pairs of the particles with the domain walls, one per particle and axis within the band of the
-    nearer wall of the axis (see func_build_wall_pairs).
-
-    A pair is a soft row on the trial displacement of sorted particle `s` along the inward normal `sign` e_axis, of
-    stiffness `D` and target `t`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    """The contact pairs of the particles with the domain walls (see func_build_wall_pairs): a soft row on the trial
+    displacement of sorted particle `s` along the inward normal `sign` e_axis, of stiffness `D` and target `t`.
+    `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -250,11 +238,8 @@ class MpmBrickScratch(Data, kind=DataKind.SCRATCH):
 
 
 def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
-    """Build the grid of a capacity of sorted particles and blocks, with every counter at zero.
-
-    `n_sort` is the number of sorted particles and `max_blocks` the capacity in blocks. The error flags of the solver
-    must be built in the entered namespace (see `requires`).
-    """
+    """Build the grid of `n_sort` sorted particles and `max_blocks` blocks, with every counter at zero, the error flags
+    of the solver being bound from the entered namespace (see `requires`)."""
     n_sort_padded = _padded(n_sort)
     n_neighbors = 8 * max_blocks
     grid = MpmGridScratch(
@@ -287,10 +272,8 @@ def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
 
 
 def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
-    """Build the Newton state of a capacity of sorted particles and blocks, with the particle constraints at zero.
-
-    `n_sort` is the number of sorted particles and `max_blocks` the capacity in blocks.
-    """
+    """Build the Newton state of `n_sort` sorted particles and `max_blocks` blocks, with the particle constraints at
+    zero."""
     newton = MpmNewtonScratch(sizes={SORT: _padded(n_sort), BLOCKS: max_blocks})
     for constraint in (newton.constraint_spring, newton.constraint_damping, newton.constraint_target):
         constraint.fill(0.0)
@@ -298,10 +281,7 @@ def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
 
 
 def build_mpm_bricks(max_blocks: int) -> MpmBrickScratch:
-    """Build the brick preconditioner of a capacity of blocks.
-
-    `max_blocks` is the capacity in blocks.
-    """
+    """Build the brick preconditioner of `max_blocks` blocks."""
     n_bricks = max(max_blocks * BLOCK_CELLS // BRICK_NODES, 1)
     return MpmBrickScratch(
         sizes={BLOCKS: max_blocks, BRICK_SCRATCH: n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1}
@@ -328,11 +308,8 @@ MIN_BLOCKS = 64
 
 
 def initial_block_capacity(positions: np.ndarray, inv_dx: float) -> int:
-    """Compute the block capacity from the particle positions, at twice the initial demand.
-
-    `positions` has shape (n_envs, n_particles, 3). The blocks are those of the particles and their positive-octant
-    neighbours.
-    """
+    """Compute the block capacity, twice the blocks of the particle positions [n_envs, n_particles, 3] and of their
+    positive-octant neighbours."""
     n_envs, n_particles = positions.shape[:2]
     cells = np.floor(positions * inv_dx).astype(np.int64)
     env = np.broadcast_to(np.arange(n_envs, dtype=np.int64)[:, None, None], (n_envs, n_particles, 1))

@@ -1,18 +1,13 @@
 """Linear system of the joint Newton solve over the rows of every participant that assembles one.
 
-The Newton solver owns one block coordinate (BCOO) matrix of 3 x 3 blocks, its right-hand side `b_rhs`, its solution
-and the vectors of its preconditioned conjugate gradient (PCG). Every participant that assembles its operator (MPM, FEM,
-PBD) owns a range of the block rows and a range of the triplets, both laid out at every assembly from the counts the
-participant reports in its `LinearBlock` (see func_linear_layout): it writes the triplets of its blocks, its gradient
-into `b_rhs` and the environment of its rows, all from its start row and start triplet. The contacts between them write
-their blocks into a range of their own (see newton_contact.py). The PCG then runs once over all the rows, and the
-preconditioner is the block diagonal of the participants: one traverse of the matrix hands every block whose row and
-column a participant owns to its visitor, between the start and the end of its factorization.
+The Newton solver owns one block coordinate (BCOO) matrix of 3 x 3 blocks, its right-hand side `b_rhs`, its solution and
+the vectors of its preconditioned conjugate gradient (PCG). Every participant that assembles its operator owns a range
+of the block rows and of the triplets, laid out at every assembly from its `LinearBlock` (see func_linear_layout), and
+the contacts own a range of their own. The preconditioner is the block diagonal of the participants, whose blocks one
+traverse of the matrix hands to their visitors.
 
-A row whose unknown an owner eliminates, such as a fixed MPM node, a constrained FEM vertex or an attached PBD particle,
-takes an identity diagonal block and a zero right-hand side, and every other block on it is discarded (see
-discard_block), as CGQ eliminates a fixed degree of freedom: the row decouples and its solution is exactly zero.
-"""
+A row whose unknown an owner eliminates takes an identity diagonal block and a zero right-hand side, and every other
+block on it is discarded (see discard_block), so that the row decouples and its solution is exactly zero."""
 
 import numpy as np
 

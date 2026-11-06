@@ -12,22 +12,16 @@ HASH_SLOTS = Size("hash_slots")
 class OpenAddressingHashScratch(Data, kind=DataKind.SCRATCH):
     """Linear-probing hash table from unique 64-bit unsigned integer (u64) keys to 32-bit integer (i32) values.
 
-    The capacity is a power of two at least twice the number of keys inserted per build (see
-    open_addressing_hash_sizes). Keys inserted in one phase are unique, so an insert is a single compare-and-swap claim
-    of the slot followed by the value write, and lookups run in later phases only. Device code reads the capacity from
-    the shape of the table, so that a table of another capacity runs the same compiled kernels. A table is empty once
-    func_reset_hash ran.
-    """
+    The capacity is a power of two at least twice the number of keys of a build (see open_addressing_hash_sizes). The
+    keys of one phase are unique, so an insert is one compare-and-swap claim of the slot, and lookups run in later
+    phases. A table is empty once func_reset_hash ran."""
 
     keys: qd.Tensor = field(qd.u64, shape=(HASH_SLOTS,), ndarray=True)
     vals: qd.Tensor = field(int, shape=(HASH_SLOTS,), ndarray=True)
 
 
 def open_addressing_hash_sizes(max_keys: int) -> dict[Size, int]:
-    """Return the sizes of a table holding a bounded number of keys.
-
-    `max_keys` is the largest number of keys inserted per build.
-    """
+    """Return the sizes of a table of at most `max_keys` keys per build."""
     return {HASH_SLOTS: 1 << max((max(2 * max_keys, 2) - 1).bit_length(), 1)}
 
 
@@ -43,11 +37,8 @@ def func_hash_slot(key: qd.u64, table: OpenAddressingHashScratch):
 
 @qd.func
 def func_insert_hash(key: qd.u64, value: int, table: OpenAddressingHashScratch):
-    """Claim a slot for a key that this phase inserts once, publish its value, and return whether it found a slot.
-
-    A full table, which the capacity rule excludes, fails the assertion in debug mode and inserts nothing otherwise, the
-    caller raising the error.
-    """
+    """Claim a slot for a key that this phase inserts once, publish its value, and return whether it found a slot, which
+    a full table fails in debug mode."""
     capacity = table.keys.shape[0]
     i_slot = func_hash_slot(key, table)
     is_inserted = False

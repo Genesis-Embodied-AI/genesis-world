@@ -18,15 +18,10 @@ RADIX_CHUNKS = Size("radix_chunks")
 class DynamicRadixSortScratch(Data, kind=DataKind.SCRATCH):
     """Pass state of a stable radix sort of keys and their permutation, with a device-side count.
 
-    The count is a device value, so one compiled launch serves any count up to the capacity the sorter was sized for.
-
     On a graphics processing unit (GPU), the sort is OneSweep (Adinets and Merrill, 2022), which ranks the keys of a
-    tile by warp ballots and block-wide shared-memory histograms, and chains the tiles by a decoupled look-back. On a
-    central processing unit (CPU) backend, each pass is a chunked counting sort instead: the digit histogram of each of
-    CPU_CHUNKS contiguous chunks in parallel, the digit-major exclusive sum of the histograms, then the stable scatter
-    of each chunk in parallel from its offsets. The CPU backend of Quadrants lacks the warp operations of OneSweep, and
-    a CPU thread ranks a whole chunk serially, which keeps the scatter stable.
-    """
+    tile by warp ballots and shared-memory histograms and chains the tiles by a decoupled look-back. On a central
+    processing unit (CPU), each pass is a counting sort over CPU_CHUNKS chunks: their digit histograms, the digit-major
+    exclusive sum of the histograms, then the stable scatter of each chunk."""
 
     bins: qd.Tensor = field(int, shape=(RADIX_PASSES, _RADIX_DIGITS), ndarray=True)
     lookback_status: qd.Tensor = field(int, shape=(RADIX_TILES, _RADIX_DIGITS), ndarray=True)
@@ -41,19 +36,13 @@ class DynamicRadixSortScratch(Data, kind=DataKind.SCRATCH):
 
 
 def radix_passes(key_bits: int) -> int:
-    """Return the number of radix passes of a sort over keys of a bit width, one per byte.
-
-    `key_bits` is the bit width of the keys, 32 or 64.
-    """
+    """Return the number of radix passes of a sort over keys of `key_bits` bits, 32 or 64, one per byte."""
     assert key_bits in (32, 64)
     return key_bits // 8
 
 
 def dynamic_radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
-    """Return the sizes of the scratch of a sort over a bounded number of keys of a bit width.
-
-    `key_bits` is the bit width of the keys, 32 or 64, and `capacity` the largest number of keys the sort covers.
-    """
+    """Return the sizes of the scratch of a sort over at most `capacity` keys of `key_bits` bits, 32 or 64."""
     return {
         RADIX_PASSES: radix_passes(key_bits),
         RADIX_TILES: max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1),
@@ -407,16 +396,9 @@ def func_dynamic_radix_sort(
 ):
     """Sort keys stably together with their permutation inside a graph kernel, the result landing in the input arrays.
 
-    The first `n[()]` entries of `keys_a` and `perm_a` are sorted, `n` being a device scalar. `keys_b` and `perm_b` are
-    the scratch halves of the double buffer. Every pass count is even, so the result always lands back in the 'a'
-    halves.
-
-    On a graphics processing unit (GPU), the OneSweep passes run in a device loop, two per iteration (a to b, then b to
-    a), with the pass index a device value. The graph holds the code of two passes whatever the key width, whereas
-    unrolling the 8 passes of a u64 key would inline 8 copies of a pass and its shared-memory tiles, and multiply the
-    compile time. A central processing unit (CPU) pass is three short loops (see _func_cpu_pass), cheap to unroll, whose
-    digit shift is a compile-time constant.
-    """
+    The first `n[()]` entries of `keys_a` and `perm_a` are sorted, `n` being a device scalar, `keys_b` and `perm_b`
+    being the scratch halves of the double buffer. On a GPU, the passes run in a device loop, two per iteration, so that
+    the graph holds the code of two passes whatever the key width."""
     if qd.static(gs.backend == gs.cpu):
         _func_cpu_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
     else:
@@ -447,9 +429,6 @@ def kernel_radix_sort(
 
 
 def dynamic_radix_sort(sorter: DynamicRadixSortScratch, keys_a, keys_b, perm_a, perm_b, n, key_bits: int) -> None:
-    """Sort keys stably together with their permutation, the result landing in the input arrays.
-
-    The first `n[()]` entries of `keys_a` and `perm_a` are sorted, `n` being a device scalar (see
-    func_dynamic_radix_sort).
-    """
+    """Sort the first `n[()]` keys of `keys_a` stably together with their permutation `perm_a` (see
+    func_dynamic_radix_sort)."""
     kernel_radix_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)

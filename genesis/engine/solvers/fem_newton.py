@@ -1,16 +1,10 @@
 """Implicit finite element method (FEM) as a participant of the NewtonSolver.
 
-The FEM unknown is the end-of-substep vertex position x, starting at the substep start. Its share of the joint energy is
-FEM's own incremental potential (inertia, elasticity and the linearized damping of its implicit solver) times dt^2, in
-the displacement units of the material point method (MPM) energy. FEM owns the rows of its vertices in the linear system
-of the solve (see newton_linear.py): it assembles the mass block of every vertex and the 10 blocks of the upper triangle
-of every element, and preconditions them by their diagonal blocks. The solution is minus the Newton direction. A
-vertex FEM holds at its target is an eliminated row (see newton_linear.py and is_free).
-
-The joint solve replaces FEM's own implicit substep (`FEMSolver.batch_solve`): FEM prepares its inertia and material
-data, the joint Newton iterations move its end-of-substep positions together with the other participants, and FEM takes
-its velocities from them and runs the rest of its coupling after the solve (see FEMSolver.build_newton_participant).
-"""
+The FEM unknown is the end-of-substep vertex position x. Its share of the joint energy is FEM's incremental potential
+(inertia, elasticity and the linearized damping of its implicit solver) times dt^2. FEM owns the rows of its vertices in
+the linear system of the solve (see newton_linear.py), the mass block of every vertex and the 10 upper blocks of every
+element, preconditioned by their diagonal blocks, a vertex held at its target being an eliminated row. The joint solve
+replaces FEM's own implicit substep (see FEMSolver.build_newton_participant)."""
 
 import quadrants as qd
 
@@ -232,10 +226,8 @@ def kernel_fem_freeze(f: int, fem: qd.template(), control: qd.template()):
 
 class FemNewtonHost(NewtonHost):
     """Host stages of FEM around the joint solve: the inertia and material data of its substep before, and its
-    velocities from the solved positions after.
-
-    Once FEM has its velocities, the host runs the part of the coupler's step on FEM that follows FEM's own solve in a
-    substep FEM solves alone (see LegacyCoupler.couple_fem)."""
+    velocities from the solved positions after, followed by the part of the coupler's step on FEM (see
+    LegacyCoupler.couple_fem)."""
 
     def __init__(self, fem_solver, device: FemNewtonParticipant):
         self._fem_solver = fem_solver

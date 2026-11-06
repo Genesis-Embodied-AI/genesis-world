@@ -1,19 +1,12 @@
 """Coupling of the implicit material point method (MPM) solver with smoothed particle hydrodynamics (SPH), the MPM
-particles acting as boundary particles of the fluid.
+particles acting as boundary particles of the fluid (Akinci et al. 2012, with the divergence-free SPH (DFSPH) boundary
+terms of Bender and Koschier 2017).
 
-The boundary follows Akinci et al. 2012 ("Versatile Rigid-Fluid Coupling for Incompressible SPH"), with the
-divergence-free SPH (DFSPH) boundary terms of Bender and Koschier 2017.
-
-An MPM particle b of volume V_b counts in the density of a fluid particle i as rho0 V_b W_ib, and a pressure that
-mirrors the fluid's pushes the fluid off it. Over one SPH integration step the fluid positions are fixed and the MPM
-particles hold their substep start, so the boundary enters every SPH stage through three sums per fluid particle,
-gathered once per step: sum_b V_b W_ib, sum_b V_b grad W_ib and sum_b V_b v_b . grad W_ib. The velocity change the
-boundary gives fluid particle i is then s_i sum_b V_b grad W_ib for a scalar s_i, which the weakly compressible SPH
-(WCSPH) equation of state or the DFSPH stiffness of every solver iteration sets. At the end of the step, every MPM
-particle takes the opposite impulse -m_i s_i V_b grad W_ib of each fluid particle, and the MPM substep adds the impulses
-to the particle velocities before its particle-to-grid transfer, so that the momentum the fluid loses to the boundary
-goes to the MPM material.
-"""
+An MPM particle b of volume V_b counts in the density of a fluid particle i as rho0 V_b W_ib. Over one SPH step the
+boundary enters every stage through three sums per fluid particle, gathered once: sum_b V_b W_ib, sum_b V_b grad W_ib
+and sum_b V_b v_b . grad W_ib. The boundary changes the velocity of fluid particle i by s_i sum_b V_b grad W_ib, s_i
+being set by the equation of state of the weakly compressible SPH (WCSPH) or the DFSPH stiffness, and every MPM particle
+takes the opposite impulse -m_i s_i V_b grad W_ib before its particle-to-grid transfer."""
 
 import quadrants as qd
 
@@ -28,9 +21,9 @@ from .mpm_pbd_func import kernel_fit_mpm_obstacle_leaves
 class MpmSphBoundary:
     """The MPM particles at the start of the substep as boundary particles of SPH (see SPHSolver.set_boundary).
 
-    It holds a linear bounding volume hierarchy (LBVH) over them for every environment (see genesis.engine.bvh), the
-    impulse every MPM particle takes at [i_p, i_b], and the boundary sums and the boundary velocity coefficient `s` of
-    every reordered SPH particle at [i_s, i_b]."""
+    It holds a linear bounding volume hierarchy (LBVH) over them for every environment, the impulse of every MPM
+    particle at [i_p, i_b], and the boundary sums and velocity coefficient `s` of every reordered SPH particle at [i_s,
+    i_b]."""
 
     def __init__(self, mpm_solver, sph, mpm_info, n_envs):
         self.mpm_particles = mpm_solver.particles
@@ -144,10 +137,7 @@ def kernel_scatter_boundary(boundary: qd.template()):
 
 @qd.kernel
 def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
-    """Add the impulses of the SPH particles to the velocity of every active MPM particle before the MPM
-    particle-to-grid transfer, and clear them.
-
-    The velocities are those of frame f."""
+    """Add the impulses of the SPH particles to the velocity of frame f of every active MPM particle, and clear them."""
     for i_p, i_b in qd.ndrange(boundary.impulse.shape[0], boundary.impulse.shape[1]):
         if boundary.mpm_particles_ng.active[f, i_p, i_b]:
             mass = boundary.mpm_particles_info.mass[i_p] / boundary.mpm_info.mass_scale[()]

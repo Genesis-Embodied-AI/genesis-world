@@ -1,10 +1,5 @@
 """The contact pairs between the material point method (MPM) and Rigid as a pair kind of the NewtonSolver (see
-newton_contact.py), on the participants of MPM and Rigid (see RigidSolver.build_newton_participant).
-
-The coupling builds the pairs of the particles with the coupled geoms every substep. With Rigid dofs, it is also the
-vertex map of their contact points, and on the geoms of a Rigid without dofs the pairs act on the particle displacement
-alone.
-"""
+newton_contact.py), on the participants of MPM and Rigid (see RigidSolver.build_newton_participant)."""
 
 import quadrants as qd
 
@@ -33,10 +28,10 @@ from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf
 @qd.data_oriented
 class MpmRigidContact(CouplingPairs):
     """Pair kind of the contacts between the material point method (MPM) and Rigid, the pair of a particle and its
-    nearest coupled geom, and with `has_rigid_dofs` the vertex map of their contact points on the links.
+    nearest coupled geom, and with `has_rigid_dofs` the vertex map of their contact points on the links of `rigid`.
 
-    `rigid` is the participant of Rigid, whose dofs the contact points move with. A Rigid without dofs gives a
-    participant that is no member of the solve, and a pair then acts on its particle alone."""
+    A Rigid without dofs gives a participant that is no member of the solve, and a pair then acts on its particle
+    alone."""
 
     pairs_type = MpmRigidPairs
 
@@ -228,10 +223,9 @@ class MpmRigidContact(CouplingPairs):
     def func_reaction(self, f: int):
         """Apply the force of the pairs on Rigid at the converged solve, after func_rigid_write_back.
 
-        qfrc_constraint becomes M qacc - qf_smooth, so that dofs.force is M qacc as after Rigid's own solve, and the
-        spatial force of the rows on each link stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force)
-        for kernel_add_mpm_contact_force. A link pushed by the rows is marked constrained, which keeps it out of the
-        midpoint integration of free links (see func_midpoint_eligible)."""
+        qfrc_constraint becomes M qacc - qf_smooth, so that dofs.force is M qacc as after Rigid's own solve, the spatial
+        force of the rows on each link stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force), and a link
+        pushed by the rows is marked constrained, which keeps it out of the midpoint integration of free links."""
         self.func_vertex_begin(f, SRC_ITERATE)
         qd.loop_config(name="mpm_reaction_pairs")
         for i_pair in range(self.pairs.n_pairs[()]):
@@ -289,11 +283,8 @@ def kernel_rigid_contact_adjoint(f: int, contact: qd.template()):
 
 
 class MpmRigidContactHost(CouplingPairsHost):
-    """Host stages of the MPM-Rigid contact pairs around the joint solve.
-
-    They build the pairs of the substep, and the backward pass pulls them back. With Rigid dofs, they also apply the
-    force of the MPM pairs on Rigid at the converged solve, and add its share to Rigid's reported contact forces once
-    Rigid wrote its own."""
+    """Host stages of the MPM-Rigid contact pairs around the joint solve: the pairs of the substep, their pullback, and
+    with Rigid dofs their force on Rigid at the converged solve and its share of Rigid's contact forces."""
 
     is_differentiable = True
 

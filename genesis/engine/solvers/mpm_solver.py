@@ -97,16 +97,11 @@ def material_table_column(material):
 class MpmNewtonParticipant(NewtonDevice):
     """Grid displacement as a participant of the NewtonSolver.
 
-    It owns the rows of the grid nodes in the linear system of the solve, `linear`, from the start row and triplet of
-    `linear_block` on (see newton_linear.py): it assembles them, and preconditions them by bricks.
-
-    It is the one holder of the grid, the Newton state and the bricks, which grow by building a struct again and
-    swapping it here (see `replace_scratch`), so that every reader goes through the participant.
-
-    It is also the vertex map of the sorted particles in the contacts of the solve (see newton_contact.py): a particle
-    is a contact vertex of displacement sum_a w_a u_a over the movable nodes of its stencil. And it is the pair kind of
-    the contacts of the particles with the domain walls, `wall_pairs`.
-    """
+    It owns the rows of the grid nodes in the linear system `linear` from `linear_block` on (see newton_linear.py),
+    which it assembles and preconditions by bricks, and it is the one holder of the grid, the Newton state and the
+    bricks (see `replace_scratch`). It is also the vertex map of the sorted particles in the contacts of the solve, a
+    particle moving by sum_a w_a u_a over the movable nodes of its stencil, and the pair kind of their domain-wall pairs
+    `wall_pairs`."""
 
     # A wall pair writes the gradient and the Hessian of its row on its particle alone
     n_doublets = 1
@@ -149,10 +144,8 @@ class MpmNewtonParticipant(NewtonDevice):
         self.wall_pairs = wall_pairs
 
     def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, bricks: MpmBrickScratch) -> None:
-        """Swap the grid, the Newton state and the bricks, and free the arrays of those replaced (see retire_scratch).
-
-        The error flags of a replaced grid belong to the solver, whose new grid binds them again.
-        """
+        """Swap the grid, the Newton state and the bricks, and free the arrays of those replaced (see retire_scratch),
+        except the error flags, which the new grid binds again."""
         for scratch_old, scratch in zip((self.grid, self.newton, self.bricks), (grid, newton, bricks)):
             if scratch_old is not scratch:
                 for path, array in iter_state_arrays(scratch_old):
@@ -278,10 +271,7 @@ class MPMSolver(ParticleSolver):
     """Implicit material point method.
 
     Every substep solves for the grid node displacement that minimizes the incremental potential of the grid inertia and
-    the particle elastic energy, on a block-sparse grid rebuilt from the particles, by a Newton method whose linear
-    systems a preconditioned conjugate gradient solves, which the Newton solver of the simulator runs (see
-    `NewtonOptions.graph`). This class owns its data and composes the stages of `mpm_func`.
-    """
+    the particle elastic energy on a block-sparse grid, in the joint Newton solve of the simulator."""
 
     material_cls = MPM.Base
     has_frames = True
@@ -425,10 +415,8 @@ class MPMSolver(ParticleSolver):
         self._mpm_force_fields = MpmForceFields(self._ffs)
 
     def build_newton_participant(self) -> tuple["MPMSolver", MpmNewtonParticipant]:
-        """Build the participant of the grid displacement in the joint Newton solve, with this solver as its host.
-
-        The grid displacement is an unknown of the Newton solve of every substep, which the coupler registers together
-        with the participants MPM couples with and the couplings between them (see LegacyCoupler)."""
+        """Build the participant of the grid displacement in the joint Newton solve, with this solver as its host (see
+        LegacyCoupler)."""
         return self, self._newton_participant
 
     def _liquid_band(self):
@@ -552,12 +540,9 @@ class MPMSolver(ParticleSolver):
             self._init_contact_invweight()
 
     def _init_contact_invweight(self):
-        """Compute the inverse weight of every particle in its contact rows (see func_contact_invweight).
-
-        The inverse weight comes from the physical Hessian of the configuration the particles are added in, before any
-        step. Like the inverse weights Rigid computes from the mass matrix of its initial configuration, it is a model
-        constant: the stiffness of a row is independent of the state, so that its gradients involve the second
-        derivatives of the energy alone. A particle inactive in that configuration keeps the inverse of its own mass."""
+        """Compute the inverse weight of every particle in its contact rows (see func_contact_invweight), a model
+        constant of the configuration the particles are added in, as Rigid's inverse weights are of its initial mass
+        matrix. A particle inactive there keeps the inverse of its own mass."""
         participant = self._newton_participant
         self._predict(0, t=0.0)
         kernel_contact_invweight(
@@ -663,11 +648,7 @@ class MPMSolver(ParticleSolver):
 
     def _resize_blocks(self, max_blocks):
         """Build the grid, the Newton state and the bricks again for a new capacity of node blocks, and swap them on the
-        participant.
-
-        The grid carries no state across substeps and the growth happens before any consumer reads it, so nothing is
-        copied. The new grid binds the error flags of the solver, found in the namespace of the solver.
-        """
+        participant, the grid carrying no state across substeps."""
         n_sort = self._B * self._n_particles
         with namespace(self._namespace):
             grid = build_mpm_grid(n_sort, max_blocks)
@@ -703,10 +684,8 @@ class MPMSolver(ParticleSolver):
         pass
 
     def newton_prepare(self, f):
-        """Run the substep up to the Newton solve.
-
-        The stages are the grid, the particle-to-grid transfer with the force fields, the physical Hessian at u = 0 and
-        the wall pairs. The couplings with MPM build their contact pairs after them."""
+        """Run the substep up to the Newton solve: the grid, the particle-to-grid transfer with the force fields, the
+        physical Hessian at u = 0 and the wall pairs."""
         participant, mpm_info = self._newton_participant, self.mpm_info
         self._predict(f, self._sim.cur_t)
         if self._constraints_initialized:
@@ -749,11 +728,9 @@ class MPMSolver(ParticleSolver):
         pass
 
     def newton_backward(self, f, solve):
-        """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func).
-
-        The stages are the reverse of the grid-to-particle transfer into the adjoint of u*, the joint adjoint solve
-        `solve` at the converged u*, then the pullback and the reverse of the particle-to-grid transfer into the adjoint
-        of frame `f`."""
+        """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func): the reverse
+        of the grid-to-particle transfer, the adjoint solve `solve`, the pullback and the reverse of the
+        particle-to-grid transfer into frame `f`."""
         participant = self._newton_participant
         kernel_adjoint_g2p(
             f,

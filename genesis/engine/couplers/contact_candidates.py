@@ -1,11 +1,9 @@
 """Nearest contact candidate of every particle of the material point method (MPM) in one coupling.
 
-The box query of a sorted particle against the tree of the partners of a coupling records every partner it meets as a
-candidate pair. The narrow phase of the coupling scores each candidate (its distance to the particle, infinite for a
-candidate it rejects) and gives it a secondary score that breaks the ties. Sorted by particle, the candidates of a
-particle form a segment, and the nearest one of every segment is kept: the smallest score, then among the candidates
-within `tie_tol` of it the largest secondary score, then the first candidate. Every stage runs one thread per candidate.
-"""
+The box query of a sorted particle records every partner of the coupling it meets as a candidate, which the narrow phase
+scores (infinite for a rejected one) with a secondary score breaking the ties. Sorted by particle, the candidates of a
+particle form a segment, of which the smallest score is kept, then among the candidates within `tie_tol` of it the
+largest secondary score, then the first candidate."""
 
 from collections.abc import Iterator
 
@@ -34,12 +32,11 @@ CANDIDATES = Size("candidates")
 
 
 class ContactCandidates(Data, kind=DataKind.SCRATCH):
-    """The candidate pairs that the box queries of the particles of a coupling find, and the nearest one of every
-    particle.
+    """The candidates that the box queries of the particles of a coupling find, and the nearest one of every particle.
 
-    `results` holds the (environment, partner, sorted particle) triplet of every candidate. `order` sorts the
-    candidates by particle, the block of a candidate being its score. `secondary` holds the secondary score of every
-    candidate, and the `best_*` arrays the best score, secondary score and candidate of every segment of a particle."""
+    `results` holds the (environment, partner, sorted particle) triplet of every candidate, `order` sorts them by
+    particle with their score as block, `secondary` holds their secondary score, and the `best_*` arrays the best score,
+    secondary score and candidate of every segment of a particle."""
 
     results: BVHQueryResults
     order: BCOOMatrixScratch
@@ -87,10 +84,8 @@ def func_report_candidates(candidates: ContactCandidates):
 
 @qd.func(requires_top_level=True)
 def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
-    """Keep the nearest candidate of every particle, once the candidates are sorted by particle (see sort_bcoo).
-
-    The segment of every particle holds its best candidate in `best_candidate`, or the capacity if every candidate of
-    the particle was rejected."""
+    """Keep in `best_candidate` the nearest candidate of every particle, or the capacity if every candidate of the
+    particle was rejected, once the candidates are sorted by particle (see sort_bcoo)."""
     # The unique entries leave the count of segments alone when there is no candidate
     for _ in range(1):
         candidates.order.bcoo_nnz[()] = 0

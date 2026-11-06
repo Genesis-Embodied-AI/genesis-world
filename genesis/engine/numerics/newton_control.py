@@ -13,21 +13,15 @@ NEWTON_FAILED_LINE_SEARCH = 3
 class NewtonControl:
     """Device-resident scalars steering a Newton solve with a backtracking line search inside one graph.
 
-    Every environment of the batch runs its own solve: the participants write its measures, the energy at its start
-    point and at its trial point and its largest displacement update, and the phases below turn them into its own loop
-    conditions, so that environments backtrack, converge and fail apart. The loops of the graph run while any
-    environment runs (`is_newton_running`, `is_line_search_running`), an environment that stopped keeping its iterate.
+    Every environment runs its own solve from the measures its participants write: the energy at its start and trial
+    points and its largest displacement update. The loops run while any environment runs (`is_newton_running`,
+    `is_line_search_running`), within `max_newton_iter` iterations of `max_ls_iter` trial steps at most, the step
+    shrinking by `ls_shrink`.
 
     `failed` says how the last solve of an environment stopped short: NEWTON_FAILED_ITERATIONS at the iteration cap,
-    NEWTON_FAILED_NON_FINITE at once on a measure that is not finite, which no further iteration can recover, or
-    NEWTON_FAILED_LINE_SEARCH in strict mode at a line search that found no lower energy. `has_failed_non_finite` latches
-    the environments stopped on a non-finite measure, which skip the solves of the rest of the step, until their reader
-    clears it, and `has_failed_iterations` latches a solve of any environment at the iteration cap.
-
-    A solve runs `max_newton_iter` iterations at most, each with `max_ls_iter` trial steps at most, the step shrinking
-    by `ls_shrink` between two trials. With `is_strict`, a line search exhausting its trials without lowering the energy
-    fails the solve instead of keeping its last trial.
-    """
+    NEWTON_FAILED_NON_FINITE at once on a measure that is not finite, or NEWTON_FAILED_LINE_SEARCH with `is_strict` at a
+    line search that found no lower energy. `has_failed_non_finite` latches the environments stopped on a non-finite
+    measure, which skip the solves of the rest of the step, and `has_failed_iterations` a solve at the iteration cap."""
 
     def __init__(
         self,
@@ -112,12 +106,10 @@ def func_reset_energy(control: qd.template(), is_trial: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_check_convergence(control: qd.template()):
-    """Judge the convergence of every running environment on its Newton direction itself, before the line search.
+    """Judge the convergence of every running environment on its Newton direction, before the line search.
 
     An environment converges once its largest displacement update falls under disp_tol. A direction or a start energy
-    that is not finite fails its solve at once: the assertion fails in debug mode, and otherwise `failed` becomes
-    NEWTON_FAILED_NON_FINITE, which skips its line search and stops its iterations.
-    """
+    that is not finite fails the assertion in debug mode, or else fails its solve with NEWTON_FAILED_NON_FINITE."""
     for i_b in range(control.failed.shape[0]):
         if control.is_env_running[i_b] != 0:
             control.is_converged[i_b] = gs.qd_int(control.max_disp[i_b] < control.disp_tol[()])
@@ -145,14 +137,11 @@ def func_init_line_search(control: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_accept_or_backtrack(control: qd.template()):
-    """Accept the trial step of every environment in its line search once its energy is at most the start energy, or
-    shrink its alpha for the next trial.
+    """Accept the trial step of every environment once its energy is at most the start energy, or shrink its alpha.
 
-    A converged direction is accepted at its first trial without the energy test. Exhausting the trials keeps the last
-    one, or in strict mode fails the solve with NEWTON_FAILED_LINE_SEARCH. The accepted trial energy is the start
-    energy of the next Newton iteration, so the participants evaluate the start energy only once per solve, before the
-    first iteration.
-    """
+    A converged direction is accepted at its first trial. Exhausting the trials keeps the last one, or with `is_strict`
+    fails the solve with NEWTON_FAILED_LINE_SEARCH. The accepted trial energy is the start energy of the next
+    iteration."""
     for _ in range(1):
         control.is_line_search_running[()] = 0
     for i_b in range(control.failed.shape[0]):

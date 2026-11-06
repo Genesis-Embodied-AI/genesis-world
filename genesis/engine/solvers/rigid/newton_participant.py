@@ -1,9 +1,5 @@
-"""Rigid's dofs as a participant of the NewtonSolver.
-
-This module binds the stage functions of `newton_func` to the data of one scene. The Rigid unknown, its share of the
-joint energy and its preconditioner are described there. The host stages start the solve from Rigid's warm start, hand
-the converged qacc back to Rigid and integrate its deferred substep (see RigidSolver.build_newton_participant).
-"""
+"""Rigid's dofs as a participant of the NewtonSolver, binding the stage functions of `newton_func` to the data of one
+scene (see RigidSolver.build_newton_participant)."""
 
 from collections.abc import Iterator
 
@@ -34,10 +30,8 @@ class RigidNewtonConfig(StaticConfig):
 
 @qd.data_oriented
 class RigidNewtonParticipant(NewtonDevice):
-    """Device stages of Rigid's dofs in the joint solve, which own the Rigid data of the solve.
-
-    It is the one place that selects the Rigid arrays the couplings read, and `coupled_geoms_idx` lists the geoms the
-    couplings act on."""
+    """Device stages of Rigid's dofs in the joint solve, which select the Rigid arrays the couplings read, the geoms
+    they act on being `coupled_geoms_idx`."""
 
     def __init__(self, rigid, n_envs: int):
         self.rigid_data = newton_func.RigidNewtonScratch(
@@ -206,11 +200,9 @@ def kernel_rigid_adjoint_finish(rigid: qd.template()):
 
 
 class RigidNewtonHost(NewtonHost):
-    """Host stages of Rigid's dofs around the joint solve.
-
-    They start from Rigid's warm start and hand back the converged qacc, from which Rigid updates its accelerations and
-    contact forces, then integrates its deferred substep once the solve is over. The backward pass is Rigid's reverse of
-    its constraint solve, whose adjoint solve is the joint one."""
+    """Host stages of Rigid's dofs around the joint solve: the warm start, the hand-back of the converged qacc and the
+    integration of the deferred substep, and in the backward pass Rigid's reverse of its constraint solve, whose adjoint
+    solve is the joint one."""
 
     is_differentiable = True
 

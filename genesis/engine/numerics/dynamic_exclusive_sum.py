@@ -15,14 +15,11 @@ SCAN_PARTIALS = Size("scan_partials")
 
 
 class DynamicExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
-    """Tile state of a decoupled look-back exclusive sum of 32-bit integer (i32) values, with a device-side count.
+    """Tile state of an exclusive sum of 32-bit integer (i32) values, with a device-side count.
 
-    On a graphics processing unit (GPU), warp and block operations scan each tile of the input, and each tile waits on
-    the status that its predecessors publish. On a central processing unit (CPU) backend, the scan runs in three phases
-    over CPU_CHUNKS contiguous chunks instead: the chunk sums in parallel, their exclusive sum, then the scan of each
-    chunk in parallel from its offset. The look-back needs warp operations and threads that progress concurrently, which
-    the CPU backend of Quadrants lacks, while the end of each parallel loop is enough to order the three phases.
-    """
+    On a graphics processing unit (GPU), warp and block operations scan each tile, which waits on the status its
+    predecessors publish (decoupled look-back). On a central processing unit (CPU), the scan runs over CPU_CHUNKS
+    chunks: the chunk sums, their exclusive sum, then the scan of each chunk from its offset."""
 
     status: qd.Tensor = field(int, shape=(SCAN_TILES,), ndarray=True)
     partial: qd.Tensor = field(int, shape=(SCAN_PARTIALS,), ndarray=True)
@@ -31,10 +28,7 @@ class DynamicExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
 
 
 def dynamic_exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
-    """Return the sizes of the scratch of a sum over a bounded number of values.
-
-    `capacity` is the largest number of values the sum covers.
-    """
+    """Return the sizes of the scratch of a sum over at most `capacity` values."""
     n_tiles = max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1)
     return {SCAN_TILES: n_tiles, SCAN_PARTIALS: max(n_tiles, CPU_CHUNKS)}
 
@@ -156,10 +150,8 @@ def _func_scan_gpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
 def func_dynamic_exclusive_sum(
     values: qd.template(), output: qd.template(), n: qd.Tensor, scanner: DynamicExclusiveSumScratch
 ):
-    """Write the exclusive prefix sum of the leading entries of an array into another array.
-
-    The sum covers the first `n[()]` entries of `values`, `n` being a device scalar, and lands in `output`.
-    """
+    """Write the exclusive prefix sum of the first `n[()]` entries of `values` into `output`, `n` being a device
+    scalar."""
     if qd.static(gs.backend == gs.cpu):
         _func_scan_cpu(values, output, n, scanner)
     else:

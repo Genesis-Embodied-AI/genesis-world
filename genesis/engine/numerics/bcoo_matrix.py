@@ -26,11 +26,9 @@ BLOCK_SCALARS = Size("block_scalars")
 class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
     """Block coordinate (BCOO) storage of a sparse matrix and its assembly workspace.
 
-    Writers append (row, column, block) triplets. `func_sort_reduce_bcoo` sorts them by (row, column) and sums the
-    duplicates into the reduced BCOO entries. A symmetric matrix stores its upper triangle only, and
-    `func_write_triplet` mirrors a lower block there. The capacity in triplets is the shape of the triplet arrays (see
-    bcoo_matrix_sizes).
-    """
+    Writers append (row, column, block) triplets, which `func_sort_reduce_bcoo` sorts by (row, column) and sums into the
+    reduced entries. A symmetric matrix stores its upper triangle only. The capacity in triplets is the shape of the
+    triplet arrays (see bcoo_matrix_sizes)."""
 
     n_triplets: qd.Tensor = field(int, ndarray=True)
     padded_triplets: qd.Tensor = field(int, ndarray=True)
@@ -55,10 +53,7 @@ class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
 
 
 def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
-    """Return the sizes of a matrix holding a bounded number of triplets of blocks of a shape.
-
-    `capacity` is the largest number of triplets and `block_shape` the shape of a block.
-    """
+    """Return the sizes of a matrix of at most `capacity` triplets of blocks of shape `block_shape`."""
     padded_capacity = max(((max(capacity, 1) + 63) // 64) * 64, 64)
     return {
         TRIPLETS: capacity,
@@ -70,10 +65,7 @@ def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
 
 
 def init_bcoo_matrix(matrix: BCOOMatrixScratch, n_triplets: int) -> None:
-    """Set the live count of a matrix just built, with no overflow and no reduced entry.
-
-    `n_triplets` is the number of live triplets.
-    """
+    """Set the count `n_triplets` of the live triplets of a matrix just built, with no overflow and no reduced entry."""
     matrix.n_triplets.fill(n_triplets)
     matrix.padded_triplets.fill(matrix.triplet_row.shape[0])
     matrix.has_triplet_overflow.fill(0)
@@ -83,11 +75,8 @@ def init_bcoo_matrix(matrix: BCOOMatrixScratch, n_triplets: int) -> None:
 
 @qd.func
 def func_report_triplet_demand(count: int, matrix: BCOOMatrixScratch):
-    """Record the triplet demand, the live triplet count capped at the capacity, and the padded extent of the sort.
-
-    A demand above the capacity raises the overflow flag, and the writers drop the triplets past the capacity (see
-    func_write_triplet).
-    """
+    """Record the triplet demand, the live triplet count capped at the capacity, and the padded extent of the sort,
+    raising the overflow flag past the capacity."""
     n_triplets = qd.min(count, matrix.triplet_row.shape[0])
     matrix.triplet_demand[()] = count
     matrix.n_triplets[()] = n_triplets
@@ -113,11 +102,8 @@ def _upper_block(i_r: int, i_c: int, block: qd.template(), is_symmetric: qd.temp
 def func_write_triplet(
     i_t: int, i_r: int, i_c: int, block: qd.template(), matrix: BCOOMatrixScratch, is_symmetric: qd.template()
 ):
-    """Write one block, mirrored into the upper triangle for symmetric storage.
-
-    A triplet past the capacity is dropped: the demand report has raised the overflow flag, and the assembly runs again
-    once the storage has grown.
-    """
+    """Write one block, mirrored into the upper triangle for symmetric storage, dropping a triplet past the capacity,
+    which the demand report has flagged."""
     if i_t < matrix.triplet_row.shape[0]:
         row, col, upper = _upper_block(i_r, i_c, block, is_symmetric)
         matrix.triplet_row[i_t] = row
@@ -130,10 +116,8 @@ def func_write_triplet(
 def func_add_triplet(
     i_t: int, i_r: int, i_c: int, block: qd.template(), matrix: BCOOMatrixScratch, is_symmetric: qd.template()
 ):
-    """Add one block to a triplet that `func_write_triplet` wrote before for the same row and column.
-
-    The block is mirrored as `func_write_triplet` mirrors it, and a triplet past the capacity is dropped.
-    """
+    """Add one block, mirrored as func_write_triplet mirrors it, to a triplet written before for the same row and
+    column."""
     if i_t < matrix.triplet_row.shape[0]:
         row, col, upper = _upper_block(i_r, i_c, block, is_symmetric)
         for k, j in qd.static(qd.ndrange(block.n, block.m)):
@@ -210,9 +194,8 @@ def func_extract_unique_bcoo_entries(matrix: BCOOMatrixScratch):
 def func_sort_bcoo(matrix: BCOOMatrixScratch):
     """Sort the live triplets by (row, column) and number the runs of equal keys, the segments of the reduced entries.
 
-    Called inside a graph kernel (see func_dynamic_radix_sort). The sort holds as long as the writers keep the rows
-    and columns of the triplets, so that `func_reduce_bcoo` can sum new values of the same triplets again.
-    """
+    The sort holds as long as the writers keep the rows and columns of the triplets, for func_reduce_bcoo to sum new
+    values again."""
     func_compose_bcoo_sort_keys(matrix)
     func_dynamic_radix_sort(
         matrix.triplet_keys,
@@ -229,10 +212,8 @@ def func_sort_bcoo(matrix: BCOOMatrixScratch):
 
 @qd.func(requires_top_level=True)
 def func_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
-    """Sum the values of the triplets sorted by `func_sort_bcoo` into the reduced block coordinate (BCOO) entries.
-
-    `block_scalars` is the number of scalars of a block.
-    """
+    """Sum the values of the triplets sorted by `func_sort_bcoo`, of `block_scalars` scalars each, into the reduced
+    block coordinate (BCOO) entries."""
     func_zero_bcoo_values(matrix, block_scalars)
     func_fsr_reduce(
         matrix.seg_ids,

@@ -43,10 +43,9 @@ from .mpm_rigid_func import MpmRigidPairs, geom_normal
 
 @qd.func
 def geom_sdf_grid_hessian(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, sdf_info: SDFInfo):
-    """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at a world point.
-
-    Inside the grid, they are those of the trilinear interpolant, whose pure second derivatives vanish. Outside, a
-    clamped component follows the distance |o| to the grid, of Hessian (I - o o^T) / |o| over the clamped components."""
+    """Gradient and Hessian, in the mesh frame, of the signed distance of `geom_sdf_grid` at a world point: those of the
+    trilinear interpolant inside the grid, and over a clamped component outside those of the distance |o| to the
+    grid."""
     pos_mesh = gu.qd_inv_transform_by_trans_quat(x, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b])
     pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_g])
     sdf_res = sdf_info.geoms_info.sdf_res[i_g]
@@ -179,14 +178,12 @@ def func_rigid_contact_adjoint(
     mpm_info: MpmInfo,
     config: qd.template(),
 ):
-    """Pull the MPM-Rigid pairs back into the adjoints of the particles and of Rigid's state.
+    """Pull the MPM-Rigid pairs back into the adjoints of frame f of the particles and of Rigid's state.
 
-    The adjoints add to frame f of the particles, from the joint solution (u*, x*) and the adjoint lambda =
-    (`linear.solution`, `rigid_data.sol`). With a_k = J_k . delta over the active rows, Phi has D_k_bar = -c_k a_k,
-    t_k_bar = D_k a_k, J_k_bar = -D_k (a_k Delta + c_k delta), Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k
-    J_k. Delta and delta move with the weights, the arm r = x_p - root_COM of the particle and the cdofs of its chain.
-    The rows move with the particle state, with the geom pose through its distance and normal, and with the link
-    velocity at the particle."""
+    With the joint solution (u*, x*), the adjoint lambda = (`linear.solution`, `rigid_data.sol`) and a_k = J_k . delta
+    over the active rows, Phi has D_k_bar = -c_k a_k, t_k_bar = D_k a_k, J_k_bar = -D_k (a_k Delta + c_k delta),
+    Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k J_k. Delta and delta move with the weights, the arm of the
+    particle and the cdofs of its chain, and the rows with the particle state, the geom pose and the link velocity."""
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for i_pair in range(pairs.n_pairs[()]):
