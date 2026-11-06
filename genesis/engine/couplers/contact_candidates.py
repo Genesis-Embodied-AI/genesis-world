@@ -7,6 +7,8 @@ particle form a segment, and the nearest one of every segment is kept: the small
 within `tie_tol` of it the largest secondary score, then the first candidate. Every stage runs one thread per candidate.
 """
 
+from collections.abc import Iterator
+
 import quadrants as qd
 
 from genesis.engine.numerics.bcoo_matrix import (
@@ -15,9 +17,13 @@ from genesis.engine.numerics.bcoo_matrix import (
     func_extract_unique_bcoo_entries,
     func_report_triplet_demand,
     init_bcoo_matrix,
+    sort_bcoo,
 )
+from genesis.engine.solvers.newton_linear import MIN_SLOTS, grown_capacity, retire_scratch
+from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.utils.array_class import QUERY_RESULTS, BVHQueryResults
-from genesis.utils.data import Data, DataKind, Size, field
+from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
+from genesis.utils.misc import qd_to_numpy
 
 CANDIDATES = Size("candidates")
 
@@ -113,3 +119,76 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
             and candidates.secondary[i_cand] >= candidates.best_secondary[i_seg]
         ):
             qd.atomic_min(candidates.best_candidate[i_seg], i_cand)
+
+
+@qd.data_oriented
+class CouplingPairs(NewtonDevice):
+    """Pair kind of the contacts of the material point method (MPM) particles with the partners of one coupling, the
+    nearest partner of every particle (see NewtonContact).
+
+    Before the Newton solve of every substep, `prepare` rebuilds the query of the partners (`build_query`), records the
+    candidates of the box query of every particle (`func_query`), scores them by the narrow phase of the coupling
+    (`func_score`), and writes the pair of the nearest one (`func_build_pairs`) into `pairs`, which `build_pairs` builds
+    at a capacity. The candidates and the pairs grow on overflow. A coupling also provides the `n_doublets`,
+    `n_triplets`, `func_pair_terms` and `func_pair_energy` of a pair kind."""
+
+    def __init__(self, mpm):
+        self.mpm = mpm
+        self.candidates = build_contact_candidates(MIN_SLOTS)
+        self.pairs = self.build_pairs(MIN_SLOTS)
+        # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
+        self.scratches_replaced = []
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "candidates")
+        yield from iter_data(self, "pairs")
+
+    @qd.func
+    def func_pair_count(self):
+        return self.pairs.n_pairs[()]
+
+    def prepare(self, f: int) -> None:
+        self.build_query(f)
+        kernel_query_candidates(f, self)
+        n_candidates = int(qd_to_numpy(self.candidates.results.count)[0])
+        if n_candidates > self.candidates.secondary.shape[0]:
+            retire_scratch(self.candidates, self.scratches_replaced)
+            self.candidates = build_contact_candidates(grown_capacity(n_candidates))
+            kernel_query_candidates(f, self)
+        kernel_score_candidates(f, self)
+        sort_bcoo(self.candidates.order)
+        kernel_build_pairs(f, self)
+        n_pairs = int(qd_to_numpy(self.pairs.n_pairs))
+        if n_pairs > self.pairs.s.shape[0]:
+            self.grow_pairs(grown_capacity(n_pairs))
+            kernel_build_pairs(f, self)
+
+    def grow_pairs(self, capacity: int) -> None:
+        retire_scratch(self.pairs, self.scratches_replaced)
+        self.pairs = self.build_pairs(capacity)
+
+
+class CouplingPairsHost(NewtonHost):
+    """Host stages of a coupling of MPM: its pairs of the substep, built before the joint solve."""
+
+    def __init__(self, device: CouplingPairs):
+        self._device = device
+
+    def newton_prepare(self, f):
+        self._device.prepare(f)
+
+
+@qd.kernel
+def kernel_query_candidates(f: int, pair_kind: qd.template()):
+    pair_kind.func_query(f)
+
+
+@qd.kernel
+def kernel_score_candidates(f: int, pair_kind: qd.template()):
+    pair_kind.func_score(f)
+
+
+@qd.kernel
+def kernel_build_pairs(f: int, pair_kind: qd.template()):
+    pair_kind.func_build_pairs(f)

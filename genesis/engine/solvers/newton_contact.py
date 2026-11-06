@@ -15,7 +15,8 @@ A pair kind holds the contact pairs of one kind that its owner builds before the
 fixed over the solve. Every pair writes the gradient and the Hessian of its energy over the vertices it involves into
 the vertex-space matrices of `NewtonContactScratch`: doublets (vertex, 3-vector) and upper triangular triplets (row
 vertex, column vertex, 3 x 3 block), `n_doublets` and `n_triplets` of them per pair at fixed slots. A pair kind
-provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f, control, is_trial)`.
+provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f, energies)`, which adds
+the energy of every pair into the entry of its environment in `energies`.
 
 The keys of the slots are sorted once per substep and their values reduced at every assembly. A reduced entry between
 vertices of the linear system expands into the blocks of their rows, which join the matrix (as CGQ distributes its
@@ -348,7 +349,10 @@ def func_contact_energy(f: int, control: qd.template(), contact: qd.template(), 
     if qd.static(contact.has_rigid_map):
         contact.rigid_map.func_vertex_begin(f, SRC_ITERATE)
     for pair_kind in qd.static(contact.pair_kinds):
-        pair_kind.func_pair_energy(f, control, is_trial)
+        if qd.static(is_trial):
+            pair_kind.func_pair_energy(f, control.energy_trial)
+        else:
+            pair_kind.func_pair_energy(f, control.energy_start)
 
 
 @qd.kernel

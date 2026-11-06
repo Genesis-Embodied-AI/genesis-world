@@ -355,9 +355,7 @@ def test_halt_on_nan_freezes_participants(precision, show_viewer):
     assert sum(name.endswith((".pos_begin", ".vel_begin")) for name in ndarrays) == 2
     # Every coupling of the scene holds its contact pairs
     names = [item.name for item in scene.sim.newton_solver.data]
-    assert all(
-        any(name.startswith(prefix) for name in names) for prefix in ("rigid_pairs.", "fem_pairs.", "pbd_pairs.")
-    )
+    assert names.count("pairs.n_pairs") == 3
     scene.destroy()
     assert all(array.arr is None for array in ndarrays.values())
 
@@ -438,8 +436,7 @@ def test_destroy_frees_data(has_plane, has_rigid_dofs, show_viewer):
     roots = {item.name.split(".")[0] for item in items}
     assert {"particles", "particles_info", "grid", "newton", "linear", "wall_pairs", "matrices", "control"} <= roots
     # The pairs of a coupling exist with the coupling alone, and the Rigid ones with any Rigid geom
-    assert any(item.name.startswith(("rigid_pairs.", "rigid_candidates.")) for item in items) == has_plane
-    assert not any(item.name.startswith(("fem_pairs.", "pbd_pairs.")) for item in items)
+    assert any(item.name.startswith(("pairs.", "candidates.")) for item in items) == has_plane
     assert any(item.name.startswith("rigid_data.") for item in items) == has_plane
     assert any(".query." in item.name for item in items) == has_plane
     assert any(item.name.startswith("newton_info.") for item in items) == has_plane

@@ -381,14 +381,14 @@ def func_build_rigid_pairs(
 def rigid_pair_terms(f: int, i_pair: int, mpm: qd.template(), contact: qd.template()):
     """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its contact
     point at the current iterate, which a Rigid without dofs leaves at rest."""
-    r = mpm.func_vertex_value(f, contact.rigid_pairs.s[i_pair])
+    r = mpm.func_vertex_value(f, contact.pairs.s[i_pair])
     if qd.static(contact.has_rigid_dofs):
         r -= contact.func_vertex_value(f, i_pair, SRC_ITERATE)
     return pyramid_terms(
-        contact.rigid_pairs.normal[i_pair],
-        contact.rigid_pairs.friction[i_pair],
-        contact.rigid_pairs.D[i_pair],
-        contact.rigid_pairs.t[i_pair],
+        contact.pairs.normal[i_pair],
+        contact.pairs.friction[i_pair],
+        contact.pairs.D[i_pair],
+        contact.pairs.t[i_pair],
         r,
     )
 
@@ -400,9 +400,9 @@ def func_rigid_pair_terms(
     """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
     triplet slot `i_t0` on: on the particle, and with Rigid dofs on the contact point and the block between them."""
     qd.loop_config(name="mpm_rigid_pair_terms")
-    for i_pair in range(contact.rigid_pairs.n_pairs[()]):
+    for i_pair in range(contact.pairs.n_pairs[()]):
         _, g, H = rigid_pair_terms(f, i_pair, mpm, contact)
-        i_vp = mpm.vertex_offset[()] + contact.rigid_pairs.s[i_pair]
+        i_vp = mpm.vertex_offset[()] + contact.pairs.s[i_pair]
         if qd.static(contact.has_rigid_dofs):
             i_vc = contact.vertex_offset[()] + i_pair
             write_doublet(i_d0 + 2 * i_pair, i_vp, g, newton_contact)
@@ -419,9 +419,9 @@ def func_rigid_pair_terms(
 def func_rigid_pair_energy(f: int, mpm: qd.template(), contact: qd.template(), energies: qd.template()):
     """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
     qd.loop_config(name="mpm_rigid_pair_energy")
-    for i_pair in range(contact.rigid_pairs.n_pairs[()]):
+    for i_pair in range(contact.pairs.n_pairs[()]):
         energy, grad, hess = rigid_pair_terms(f, i_pair, mpm, contact)
-        qd.atomic_add(energies[contact.rigid_pairs.i_b[i_pair]], energy)
+        qd.atomic_add(energies[contact.pairs.i_b[i_pair]], energy)
 
 
 # ============================================ Layer 1: contact points ============================================
@@ -482,11 +482,11 @@ def func_mpm_reaction(
     equation of motion."""
     contact.func_vertex_begin(f, SRC_ITERATE)
     qd.loop_config(name="mpm_reaction_pairs")
-    for i_pair in range(contact.rigid_pairs.n_pairs[()]):
+    for i_pair in range(contact.pairs.n_pairs[()]):
         energy, g, hess = rigid_pair_terms(f, i_pair, mpm, contact)
         if g.norm_sqr() > 0.0:
             i_l, i_b, r = contact_point_arm(
-                f, i_pair, mpm.particles, mpm.grid, contact.rigid_pairs, dyn_state.links, mpm.mpm_info
+                f, i_pair, mpm.particles, mpm.grid, contact.pairs, dyn_state.links, mpm.mpm_info
             )
             qd.atomic_add(rigid_data.link_force_vel[i_l, i_b], g)
             qd.atomic_add(rigid_data.link_force_ang[i_l, i_b], r.cross(g))

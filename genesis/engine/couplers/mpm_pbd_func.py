@@ -8,15 +8,12 @@ solve the contact by the masses on both sides, so that a heavy block holds a lig
 block. The pairs are contact pairs of the Newton solve (see newton_contact.py), over the two particles.
 """
 
-from collections.abc import Iterator
-
 import numpy as np
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
-from genesis.engine.numerics.bcoo_matrix import sort_bcoo
 from genesis.engine.solvers.mpm_data import MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
 from genesis.engine.solvers.mpm_func import (
     EMPTY_BOX_HALF,
@@ -27,16 +24,14 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
-from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
-from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
+from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
-from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
-from genesis.utils.misc import qd_to_numpy
+from genesis.utils.data import Data, DataKind, field
 
 from .contact_candidates import (
     ContactCandidates,
-    build_contact_candidates,
+    CouplingPairs,
     func_report_candidates,
     func_reset_candidates,
     func_select_nearest,
@@ -236,18 +231,18 @@ def func_build_pbd_pairs(
 def pbd_pair_terms(f: int, i_pair: int, mpm: qd.template(), pbd: qd.template(), contact: qd.template()):
     """Energy, gradient and Hessian of the rows of a pair in the displacement of its particle relative to its PBD
     particle at the current iterate, with the contact vertices of both."""
-    i_vq = contact.pbd_pairs.i_b[i_pair] * pbd.n_vertex_particles + contact.pbd_pairs.particle[i_pair]
-    r = mpm.func_vertex_value(f, contact.pbd_pairs.s[i_pair]) - pbd.func_vertex_value(f, i_vq)
-    D = contact.pbd_pairs.D[i_pair]
-    t = contact.pbd_pairs.t[i_pair]
+    i_vq = contact.pairs.i_b[i_pair] * pbd.n_vertex_particles + contact.pairs.particle[i_pair]
+    r = mpm.func_vertex_value(f, contact.pairs.s[i_pair]) - pbd.func_vertex_value(f, i_vq)
+    D = contact.pairs.D[i_pair]
+    t = contact.pairs.t[i_pair]
     energy, g, H = pyramid_terms(
-        contact.pbd_pairs.normal[i_pair],
+        contact.pairs.normal[i_pair],
         contact.query.contact.friction[()],
         qd.Vector([D, D, D, D]),
         qd.Vector([t, t, t, t]),
         r,
     )
-    return energy, g, H, mpm.vertex_offset[()] + contact.pbd_pairs.s[i_pair], pbd.vertex_offset[()] + i_vq
+    return energy, g, H, mpm.vertex_offset[()] + contact.pairs.s[i_pair], pbd.vertex_offset[()] + i_vq
 
 
 @qd.func(requires_top_level=True)
@@ -263,7 +258,7 @@ def func_pbd_pair_terms(
     """Write the gradient and Hessian of the rows of every pair at the current iterate, from doublet slot `i_d0` and
     triplet slot `i_t0` on: on both particles, and the block between them."""
     qd.loop_config(name="mpm_pbd_pair_terms")
-    for i_pair in range(contact.pbd_pairs.n_pairs[()]):
+    for i_pair in range(contact.pairs.n_pairs[()]):
         _, g, H, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
         write_doublet(i_d0 + 2 * i_pair, i_vp, g, newton_contact)
         write_doublet(i_d0 + 2 * i_pair + 1, i_vq, -g, newton_contact)
@@ -278,9 +273,9 @@ def func_pbd_pair_energy(
 ):
     """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
     qd.loop_config(name="mpm_pbd_pair_energy")
-    for i_pair in range(contact.pbd_pairs.n_pairs[()]):
+    for i_pair in range(contact.pairs.n_pairs[()]):
         energy, grad, hess, i_vp, i_vq = pbd_pair_terms(f, i_pair, mpm, pbd, contact)
-        qd.atomic_add(energies[contact.pbd_pairs.i_b[i_pair]], energy)
+        qd.atomic_add(energies[contact.pairs.i_b[i_pair]], energy)
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -468,33 +463,53 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
 
 
 @qd.data_oriented
-class MpmPbdContact(NewtonDevice):
-    """Pair kind of the contacts between the material point method (MPM) and position based dynamics (PBD).
-
-    `pairs` holds the pairs of the substep, which `candidates` selects from the box queries of `query`. A pair writes 2
-    doublets on its particle and its PBD particle, and the 3 upper blocks between them."""
+class MpmPbdContact(CouplingPairs):
+    """Pair kind of the contacts between the material point method (MPM) and position based dynamics (PBD), the pair of
+    a particle and its nearest PBD particle. A pair writes 2 doublets on its particle and its PBD particle, and the 3
+    upper blocks between them."""
 
     n_doublets = 2
     n_triplets = 3
+    build_pairs = staticmethod(build_pbd_pairs)
 
     def __init__(self, mpm: MpmNewtonParticipant, pbd: PbdNewtonParticipant, query: PbdParticleQuery):
-        self.mpm = mpm
         self.pbd = pbd
         self.query = query
-        self.pbd_candidates = build_contact_candidates(MIN_SLOTS)
-        self.pbd_pairs = build_pbd_pairs(MIN_SLOTS)
-        # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
-        self.scratches_replaced = []
+        super().__init__(mpm)
 
-    @property
-    def data(self) -> Iterator[DataItem]:
-        """Yield the candidates and the pairs, rebuilt every substep."""
-        yield from iter_data(self, "pbd_candidates")
-        yield from iter_data(self, "pbd_pairs")
+    def build_query(self, f: int) -> None:
+        self.query.build()
 
-    @qd.func
-    def func_pair_count(self):
-        return self.pbd_pairs.n_pairs[()]
+    @qd.func(requires_top_level=True)
+    def func_query(self, f: int):
+        func_query_pbd_particles(
+            f,
+            self.mpm.mpm_info.substep_dt[()],
+            self.mpm.particles,
+            self.mpm.grid,
+            self.query,
+            self.candidates,
+            self.mpm.mpm_info,
+        )
+
+    @qd.func(requires_top_level=True)
+    def func_score(self, f: int):
+        func_score_pbd_particles(f, self.mpm.particles, self.mpm.grid, self.query, self.candidates, self.mpm.mpm_info)
+
+    @qd.func(requires_top_level=True)
+    def func_build_pairs(self, f: int):
+        func_build_pbd_pairs(
+            f,
+            self.mpm.mpm_info.substep_dt[()],
+            self.mpm.particles,
+            self.mpm.grid,
+            self.pairs,
+            self.pbd,
+            self.query,
+            self.candidates,
+            self.mpm.particles_info,
+            self.mpm.mpm_info,
+        )
 
     @qd.func(requires_top_level=True)
     def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
@@ -509,70 +524,5 @@ class MpmPbdContact(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_pair_energy(self, f: int, control: qd.template(), is_trial: qd.template()):
-        if qd.static(is_trial):
-            func_pbd_pair_energy(f, self.mpm, self.pbd, self, control.energy_trial)
-        else:
-            func_pbd_pair_energy(f, self.mpm, self.pbd, self, control.energy_start)
-
-
-@qd.kernel
-def kernel_query_pbd_particles(f: int, contact: qd.template()):
-    func_query_pbd_particles(
-        f,
-        contact.mpm.mpm_info.substep_dt[()],
-        contact.mpm.particles,
-        contact.mpm.grid,
-        contact.query,
-        contact.pbd_candidates,
-        contact.mpm.mpm_info,
-    )
-
-
-@qd.kernel
-def kernel_score_pbd_particles(f: int, contact: qd.template()):
-    func_score_pbd_particles(
-        f, contact.mpm.particles, contact.mpm.grid, contact.query, contact.pbd_candidates, contact.mpm.mpm_info
-    )
-
-
-@qd.kernel
-def kernel_build_pbd_pairs(f: int, contact: qd.template()):
-    func_build_pbd_pairs(
-        f,
-        contact.mpm.mpm_info.substep_dt[()],
-        contact.mpm.particles,
-        contact.mpm.grid,
-        contact.pbd_pairs,
-        contact.pbd,
-        contact.query,
-        contact.pbd_candidates,
-        contact.mpm.particles_info,
-        contact.mpm.mpm_info,
-    )
-
-
-class MpmPbdContactHost(NewtonHost):
-    """Host stages of the MPM-PBD contact pairs before the joint solve: the PBD trees, the candidates of every particle,
-    and the pairs of the nearest PBD particles, each grown on overflow."""
-
-    def __init__(self, device: MpmPbdContact):
-        self._device = device
-
-    def newton_prepare(self, f):
-        device = self._device
-        device.query.build()
-        kernel_query_pbd_particles(f, device)
-        n_candidates = int(qd_to_numpy(device.pbd_candidates.results.count)[0])
-        if n_candidates > device.pbd_candidates.secondary.shape[0]:
-            retire_scratch(device.pbd_candidates, device.scratches_replaced)
-            device.pbd_candidates = build_contact_candidates(grown_capacity(n_candidates))
-            kernel_query_pbd_particles(f, device)
-        kernel_score_pbd_particles(f, device)
-        sort_bcoo(device.pbd_candidates.order)
-        kernel_build_pbd_pairs(f, device)
-        n_pairs = int(qd_to_numpy(device.pbd_pairs.n_pairs))
-        if n_pairs > device.pbd_pairs.s.shape[0]:
-            retire_scratch(device.pbd_pairs, device.scratches_replaced)
-            device.pbd_pairs = build_pbd_pairs(grown_capacity(n_pairs))
-            kernel_build_pbd_pairs(f, device)
+    def func_pair_energy(self, f: int, energies: qd.template()):
+        func_pbd_pair_energy(f, self.mpm, self.pbd, self, energies)

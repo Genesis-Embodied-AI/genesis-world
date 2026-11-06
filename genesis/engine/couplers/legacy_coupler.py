@@ -143,15 +143,10 @@ class LegacyCoupler(RBC):
         # the couplers
         from genesis.engine.solvers.newton_contact import NewtonContact
 
+        from .contact_candidates import CouplingPairsHost
         from .mpm_fem_func import FemContactParams, FemTriangleQuery
-        from .mpm_fem_newton import MpmFemContact, MpmFemContactHost
-        from .mpm_pbd_func import (
-            MpmParticleObstacles,
-            MpmPbdContact,
-            MpmPbdContactHost,
-            PbdContactParams,
-            PbdParticleQuery,
-        )
+        from .mpm_fem_newton import MpmFemContact
+        from .mpm_pbd_func import MpmParticleObstacles, MpmPbdContact, PbdContactParams, PbdParticleQuery
         from .mpm_rigid_func import RigidGeomQuery
         from .mpm_rigid_newton import MpmRigidContact, MpmRigidContactHost
         from .mpm_sph_func import MpmSphBoundary
@@ -187,7 +182,7 @@ class LegacyCoupler(RBC):
             owners.append((fem_host, fem_participant))
             query = FemTriangleQuery(fem_participant, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs)
             contact = MpmFemContact(mpm_participant, fem_participant, query)
-            couplings.append((MpmFemContactHost(contact), contact))
+            couplings.append((CouplingPairsHost(contact), contact))
             pair_kinds.append(contact)
         if self._mpm_pbd:
             pbd_contact = PbdContactParams(mpm.dx)
@@ -195,7 +190,7 @@ class LegacyCoupler(RBC):
             owners.append((pbd_host, pbd_participant))
             query = PbdParticleQuery(pbd_participant, mpm_participant.mpm_info, pbd_contact, n_envs)
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
-            couplings.append((MpmPbdContactHost(contact), contact))
+            couplings.append((CouplingPairsHost(contact), contact))
             pair_kinds.append(contact)
             pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
         if self._mpm_sph:

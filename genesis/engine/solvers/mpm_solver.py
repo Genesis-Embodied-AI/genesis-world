@@ -268,15 +268,10 @@ class MpmNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_pair_energy(self, f: int, control: qd.template(), is_trial: qd.template()):
-        if qd.static(is_trial):
-            mpm_func.func_wall_pair_energy(
-                f, self.particles, self.grid, self.newton, self.wall_pairs, control.energy_trial, self.mpm_info
-            )
-        else:
-            mpm_func.func_wall_pair_energy(
-                f, self.particles, self.grid, self.newton, self.wall_pairs, control.energy_start, self.mpm_info
-            )
+    def func_pair_energy(self, f: int, energies: qd.template()):
+        mpm_func.func_wall_pair_energy(
+            f, self.particles, self.grid, self.newton, self.wall_pairs, energies, self.mpm_info
+        )
 
 
 @qd.data_oriented
