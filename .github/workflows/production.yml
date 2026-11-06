@@ -274,8 +274,6 @@ jobs:
                --container-name=${CONTAINER_NAME} \
                --container-mounts=\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
-          ${HOME}/.cache/${CACHE_VERSION}/genesis:/root/.cache/genesis,\
           ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
@@ -285,15 +283,16 @@ jobs:
           # tests outgrow any size bound of the cache that Quadrants accepts.
           SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_FILE_PATH=/root/workspace/.cache/quadrants"
           SLURM_ENV_VARS="${SLURM_ENV_VARS},QD_OFFLINE_CACHE_CLEANING_POLICY=never"
+          # The caches of Genesis and uv go away with the runner too. Most of their entries are keyed on the files of the
+          # checkout, whose modification times change with every job, so a cache shared by all jobs would only pile up
+          # entries that are never reused.
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},GS_CACHE_FILE_PATH=/root/workspace/.cache/genesis,UV_NO_CACHE=1"
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
           fi
 
-          mkdir -p \
-            "${HOME}/.cache/${CACHE_VERSION}/uv" \
-            "${HOME}/.cache/${CACHE_VERSION}/genesis" \
-            "${HOME}/.cache/${CACHE_VERSION}/huggingface"
+          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
@@ -401,11 +400,12 @@ jobs:
                --container-mounts=\
           /mnt/data/artifacts:/mnt/data/artifacts,\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
           ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
+          # See the caches of the unit tests job.
+          SLURM_ENV_VARS="${SLURM_ENV_VARS},GS_CACHE_FILE_PATH=/root/workspace/.cache/genesis,UV_NO_CACHE=1"
           if ${{ inputs.quadrants_run_id != 0 }} ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
             SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
@@ -414,7 +414,7 @@ jobs:
             SLURM_ENV_VARS="${SLURM_ENV_VARS},WANDB_API_KEY"
           fi
 
-          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/uv" "${HOME}/.cache/${CACHE_VERSION}/huggingface"
+          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
