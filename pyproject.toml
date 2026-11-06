@@ -87,6 +87,9 @@ dev = [
     "pytest-forked",
     "pytest-timeout",
     "pytest-print",
+    # Note that 'pytest-rerunfailures' is incompatible with 'pytest-forked'
+    # - 16.0 is causing pytest-xdist to crash in case of failure or skipped tests
+    # "pytest-rerunfailures!=16.0",
     # GPU queries for the test infrastructure (tests/gpu_info.py); non-macOS so the CUDA device check runs on
     # Linux and Windows. AMD's 'amdsmi' ships with ROCm, not PyPI, so the AMD backend is import-gated instead.
     "nvidia-ml-py; platform_system != 'Darwin'",
