@@ -1,5 +1,6 @@
+from collections.abc import Sequence
 from itertools import chain
-from typing import Literal, Sequence
+from typing import Literal
 
 import numpy as np
 

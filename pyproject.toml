@@ -63,7 +63,7 @@ dependencies = [
     # Use by `RigidGeom.visualize_sdf` to render SDF as level 0 marching cubes
     "scikit-image",
     # Convex decomposition library
-    "coacd",
+    "coacd>=1.0.12",
     # Ray casting used in mesh to height field conversion
     "rtree",
     # Constraint Satisfaction Solver.

@@ -9,7 +9,8 @@ that the entities tag their own methods.
 import enum
 import functools
 import inspect
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 

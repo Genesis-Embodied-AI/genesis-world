@@ -1,6 +1,8 @@
-from typing import TYPE_CHECKING, Annotated, Any, Generic, NamedTuple, Sequence, TypeVar
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
 
 import numpy as np
+
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt, field_validator
 
 import genesis as gs
@@ -55,9 +57,6 @@ else:
 CrossCouplingAxisType = RotationMatrixType | UnitIntervalVec3Type | float
 
 
-SensorT = TypeVar("SensorT", bound="Sensor")
-
-
 def _check_len_match(value, expected_len: int, name: str, ref_name: str):
     if isinstance(value, Sequence) and len(value) != expected_len:
         gs.raise_exception(
@@ -66,7 +65,7 @@ def _check_len_match(value, expected_len: int, name: str, ref_name: str):
         )
 
 
-class SensorOptions(Options, Generic[SensorT]):
+class SensorOptions[SensorT: "Sensor"](Options):
     """
     Base class for all sensor options.
 
@@ -120,7 +119,7 @@ class SensorOptions(Options, Generic[SensorT]):
                 )
 
 
-class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
+class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     """
     Base options class for sensors attached to a KinematicEntity (or any subclass, including RigidEntity).
 
@@ -157,7 +156,7 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
-class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
+class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
     """
     Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
 
@@ -175,7 +174,7 @@ class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
-class RigidEntitySensorOptionsMixin(RigidSensorOptionsMixin[SensorT]):
+class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
     """
     Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors), where the attachment is mandatory:
     entity_idx must refer to an existing RigidEntity, static sensors are not allowed.
@@ -189,7 +188,7 @@ class RigidEntitySensorOptionsMixin(RigidSensorOptionsMixin[SensorT]):
             gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
 
 
-class ContactFilterOptionsMixin(RigidSensorOptionsMixin[SensorT]):
+class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
     """
     Shared options for the contact sensors whose reading can be scoped to ignore contacts with chosen counterpart
     links -- Contact, ContactForce, and the contact-driven tactile probes (ContactProbe, ContactDepthProbe,
@@ -216,7 +215,7 @@ class ContactFilterOptionsMixin(RigidSensorOptionsMixin[SensorT]):
                 )
 
 
-class SimpleSensorOptions(SensorOptions[SensorT]):
+class SimpleSensorOptions[SensorT: "Sensor"](SensorOptions[SensorT]):
     """
     Options carrying SimpleSensor's imperfection parameters.
 
@@ -243,7 +242,7 @@ class SimpleSensorOptions(SensorOptions[SensorT]):
     random_walk: FArrayType | float = 0.0
 
 
-class ProbeSensorOptionsMixin(SensorOptions[SensorT]):
+class ProbeSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     """
     Base options class for sensors that use local probe points.
 
@@ -284,7 +283,7 @@ class ProbeSensorOptionsMixin(SensorOptions[SensorT]):
                 )
 
 
-class ProbesWithNormalSensorOptionsMixin(ProbeSensorOptionsMixin[SensorT]):
+class ProbesWithNormalSensorOptionsMixin[SensorT: "Sensor"](ProbeSensorOptionsMixin[SensorT]):
     """
     Probe options for sensors that also define one normal per probe, or one shared normal.
     """

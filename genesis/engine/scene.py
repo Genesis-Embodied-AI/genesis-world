@@ -10,8 +10,9 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
+from collections.abc import Callable, Iterable
 from functools import cached_property
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -24,10 +25,9 @@ import genesis.utils.mesh as mu
 from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.force_fields import ForceField
-from genesis.engine.materials.base import EntityT, Material
+from genesis.engine.materials.base import Material
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -35,6 +35,7 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
+    SceneOptions,
     SFOptions,
     SimOptions,
     SPHOptions,
@@ -61,7 +62,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
-    from genesis.options.sensors.options import SensorOptions, SensorT
+    from genesis.options.sensors.options import SensorOptions
     from genesis.recorders import Recorder
 
 
@@ -319,7 +320,7 @@ class Scene(RBC):
     ) -> "RigidEntity": ...
 
     @overload
-    def add_entity(
+    def add_entity[EntityT: "Entity"](
         self,
         morph: Morph | Iterable[Morph],
         material: Material[EntityT] = ...,
@@ -495,7 +496,7 @@ class Scene(RBC):
 
         Returns
         -------
-        entities : List[genesis.Entity]
+        entities : list[genesis.Entity]
             The created entities.
         """
         if not isinstance(morph, gs.morphs.USD):
@@ -593,7 +594,7 @@ class Scene(RBC):
         self.visualizer.add_light(pos, dir, color, intensity, directional, castshadow, cutoff, attenuation)
 
     @gs.assert_unbuilt
-    def add_sensor(self, sensor_options: "SensorOptions[SensorT]") -> "SensorT":
+    def add_sensor[SensorT: "Sensor"](self, sensor_options: "SensorOptions[SensorT]") -> SensorT:
         """
         Add a sensor to the scene.
 
@@ -622,7 +623,7 @@ class Scene(RBC):
 
         Returns
         -------
-        dict[Type[Sensor], torch.Tensor]
+        dict[type[Sensor], torch.Tensor]
             For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)

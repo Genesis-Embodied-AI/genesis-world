@@ -12,9 +12,10 @@ that object returns the value the simulation currently uses.
 import math
 import os
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from itertools import chain
-from typing import Any, Self, Sequence, TypeVar
+from typing import Any, Self
 
 import numpy as np
 
@@ -28,11 +29,7 @@ from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
 from genesis.typing import PositiveVec3FType, PositiveVec3IType
-from genesis.utils import geom as gu
-from genesis.utils import mesh as mu
-from genesis.utils import mjcf as mju
-from genesis.utils import terrain as tu
-from genesis.utils import urdf as uu
+from genesis.utils import geom as gu, mesh as mu, mjcf as mju, terrain as tu, urdf as uu
 from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
 from genesis.utils.misc import get_assets_dir
 
@@ -333,10 +330,7 @@ class KinematicAttachmentDescription:
     link_name: str
 
 
-DescriptionT = TypeVar("DescriptionT")
-
-
-def description_from_info(cls: type[DescriptionT], info: dict) -> DescriptionT:
+def description_from_info[DescriptionT](cls: type[DescriptionT], info: dict) -> DescriptionT:
     """Build one description of class 'cls' from what a parse states, taking the fields it declares and no others.
 
     A key the class declares no field for is dropped, and a field the parse states nothing for keeps its declared

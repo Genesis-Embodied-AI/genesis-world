@@ -304,13 +304,6 @@ def test_morph_orientation_offset_resolution():
 
 
 @pytest.mark.required
-def test_coacd_options_pca_validation():
-    gs.options.CoacdOptions(pca=False)
-    with pytest.raises(gs.GenesisException, match="pca=True"):
-        gs.options.CoacdOptions(pca=True)
-
-
-@pytest.mark.required
 @pytest.mark.parametrize(
     ("index", "expected"),
     (

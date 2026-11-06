@@ -1,8 +1,9 @@
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, List, Set
+
+from pxr import Sdf, Usd, UsdPhysics
 
 import genesis as gs
-from pxr import Sdf, Usd, UsdPhysics
 
 from .usd_context import (
     UsdContext,
@@ -15,13 +16,13 @@ from .usd_context import (
 from .usd_utils import UnionFind
 
 
-def _find_common_ancestor_path(paths: List[str]) -> str:
+def _find_common_ancestor_path(paths: list[str]) -> str:
     """
     Find the common ancestor path of a list of prim paths.
 
     Parameters
     ----------
-    paths : List[str]
+    paths : list[str]
         List of prim paths.
 
     Returns
@@ -52,7 +53,7 @@ def _find_common_ancestor_path(paths: List[str]) -> str:
     return "/" + "/".join(common_components)
 
 
-def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> List[tuple[List[Usd.Prim], Set[str]]]:
+def _find_connected_components(stage: Usd.Stage, all_joints: list[Usd.Prim]) -> list[tuple[list[Usd.Prim], set[str]]]:
     """
     Find connected components in the joint graph using union-find (disjoint set) algorithm.
 
@@ -60,12 +61,12 @@ def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> 
     ----------
     stage : Usd.Stage
         The USD stage.
-    all_joints : List[Usd.Prim]
+    all_joints : list[Usd.Prim]
         List of all joint prims in the stage.
 
     Returns
     -------
-    List[tuple[List[Usd.Prim], Set[str]]]
+    list[tuple[list[Usd.Prim], set[str]]]
         List of (joints, links) tuples for each connected component.
     """
     # Union-Find data structure
@@ -73,7 +74,7 @@ def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> 
 
     # Build joint-to-links mapping and union connected links
     joint_to_links: dict[Usd.Prim, tuple[str | None, str | None]] = {}
-    all_link_paths: Set[str] = set()
+    all_link_paths: set[str] = set()
 
     for joint_prim in all_joints:
         joint = UsdPhysics.Joint(joint_prim)
@@ -98,7 +99,7 @@ def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> 
             uf.find(body1_path)  # Ensure it's in the union-find structure
 
     # Group links and joints by connected component
-    component_roots: dict[str, tuple[List[Usd.Prim], Set[str]]] = {}
+    component_roots: dict[str, tuple[list[Usd.Prim], set[str]]] = {}
 
     for link_path in all_link_paths:
         root = uf.find(link_path)
@@ -124,7 +125,7 @@ def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> 
 
 
 @contextmanager
-def parse_usd_stage(morph: gs.morphs.USD) -> Iterator[List[gs.morphs.USD]]:
+def parse_usd_stage(morph: gs.morphs.USD) -> Iterator[list[gs.morphs.USD]]:
     """
     Parse a USD stage and extract all rigid entities (articulations and rigid bodies) as separate USD morphs.
 
@@ -140,7 +141,7 @@ def parse_usd_stage(morph: gs.morphs.USD) -> Iterator[List[gs.morphs.USD]]:
 
     Yields
     ------
-    morphs: List[gs.morphs.USD]
+    morphs: list[gs.morphs.USD]
         A list of USD morphs, one for each rigid entity found in the stage. Each morph is a copy of the input stage with
         its `prim_path` set to the topmost common ancestor of all links in the component. The list is guaranteed to be
         non-empty (raises an exception if no entities are found). The stage stays open for the block, so the entities
@@ -158,8 +159,8 @@ def parse_usd_stage(morph: gs.morphs.USD) -> Iterator[List[gs.morphs.USD]]:
         # Extract links referenced by joints (only rigid bodies)
         links_referenced_by_joints = extract_links_referenced_by_joints(usd_stage, all_joints, check_rigid_body=True)
 
-        morphs: List[gs.morphs.USD] = []
-        components: List[tuple[List[Usd.Prim], Set[str]]] = []
+        morphs: list[gs.morphs.USD] = []
+        components: list[tuple[list[Usd.Prim], set[str]]] = []
         # Process connected components (articulations)
         if all_joints:
             components = _find_connected_components(usd_stage, all_joints)

@@ -1,7 +1,8 @@
 """Inertial properties of rigid links: the estimate from geometry, and how authored values complete it."""
 
+from collections.abc import Sequence
 from itertools import starmap
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 import numpy as np
 

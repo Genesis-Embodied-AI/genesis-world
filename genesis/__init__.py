@@ -6,9 +6,9 @@ import sys
 import tempfile
 import traceback
 import weakref
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from functools import partial
-from typing import Callable
 from warnings import warn
 
 # Import quadrants while collecting its output without printing directly

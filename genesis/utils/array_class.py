@@ -1410,8 +1410,8 @@ class RigidSimStaticConfig(StaticConfig):
     enable_joint_limit: bool
     box_box_detection: bool
     sparse_solve: bool
-    integrator: int
-    solver_type: int
+    integrator: gs.integrator
+    solver_type: gs.constraint_solver
     requires_grad: bool
     # -1 to let the dispatch pick, 0 or 1 to force it
     prefer_decomposed_solver: int = -1
@@ -1434,7 +1434,7 @@ class RigidSimStaticConfig(StaticConfig):
     # Lanes of the level sweep per env, a power of two dividing its blocks of 32 lanes. Four envs per block balance the
     # lanes a narrow level leaves idle against the links a wide level serializes.
     level_sweep_n_lanes_per_env: int = 8
-    broadphase_traversal: int = 0
+    broadphase_traversal: gs.broadphase_traversal = gs.broadphase_traversal.SAP
     enable_tiled_cholesky_mass_matrix: bool = False
     mass_matrix_fits_shared: bool = False
     # Register-tile width of the mass-matrix Cholesky kernels, 16 or 32 (see cholesky_tile_size_for)

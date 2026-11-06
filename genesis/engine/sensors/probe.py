@@ -1,9 +1,11 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -68,9 +70,6 @@ class ProbeSensorMetadataMixin:
     cache_col_n_channel_groups: list[int] = field(default_factory=list)
 
 
-ProbeSensorSharedMetadataT = TypeVar("ProbeSensorSharedMetadataT", bound=ProbeSensorMetadataMixin)
-
-
 def get_measured_bufs(
     shared_metadata: "ProbeSensorMetadataMixin",
     current_ground_truth_data_T: torch.Tensor,
@@ -84,7 +83,7 @@ def get_measured_bufs(
     return measured_slot, shared_metadata.measured_scratch_T
 
 
-class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
+class ProbeSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin]:
     """Shared logic for registering this sensor's probes in ``ProbeSensorMetadataMixin`` fields."""
 
     # Number of channel groups per probe in the cache layout. Used by the per-cache-col probe-index builder.
@@ -494,12 +493,9 @@ class ProbesWithNormalSensorMetadataMixin(ProbeSensorMetadataMixin):
     probe_local_normal: torch.Tensor = make_tensor_field((0, 3))
 
 
-ProbesWithNormalSensorSharedMetadataT = TypeVar(
-    "ProbesWithNormalSensorSharedMetadataT", bound=ProbesWithNormalSensorMetadataMixin
-)
-
-
-class ProbesWithNormalSensorMixin(ProbeSensorMixin[ProbesWithNormalSensorSharedMetadataT]):
+class ProbesWithNormalSensorMixin[ProbesWithNormalSensorSharedMetadataT: ProbesWithNormalSensorMetadataMixin](
+    ProbeSensorMixin[ProbesWithNormalSensorSharedMetadataT]
+):
     """Probe sensor whose probes carry a per-probe outward normal in link-local frame."""
 
     def __init__(

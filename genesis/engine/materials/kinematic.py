@@ -1,7 +1,12 @@
-from .base import EntityT, Material
+from typing import TYPE_CHECKING
+
+from .base import Material
+
+if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import Entity
 
 
-class Kinematic(Material[EntityT]):
+class Kinematic[EntityT: "Entity"](Material[EntityT]):
     """
     Visualization-only material for ghost/reference entities.
 

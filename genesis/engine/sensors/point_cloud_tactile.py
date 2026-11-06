@@ -1,10 +1,12 @@
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Final, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -580,12 +582,9 @@ class PointCloudTactileSharedMetadata(ProbeSensorMetadataMixin, RigidSensorMetad
     pc_bvh: PointCloudBVH = field(default_factory=PointCloudBVH)
 
 
-PointCloudTactileSensorMetadataMixinT = TypeVar(
-    "PointCloudTactileSensorMetadataMixinT", bound=PointCloudTactileSharedMetadata
-)
-
-
-class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetadataMixinT]):
+class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointCloudTactileSharedMetadata](
+    ProbeSensorMixin[PointCloudTactileSensorMetadataMixinT]
+):
     def __init__(self, options: "SensorOptions", idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
         self._probe_start_idx = -1

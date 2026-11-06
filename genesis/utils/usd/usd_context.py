@@ -6,13 +6,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import NamedTuple
 
-import filelock
 import numpy as np
 import torch
+
+import filelock
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import genesis as gs

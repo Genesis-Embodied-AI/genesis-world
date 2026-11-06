@@ -1,7 +1,7 @@
 import re
-from typing import Dict, List
 
 import numpy as np
+
 import trimesh
 from pxr import Usd, UsdGeom, UsdPhysics
 
@@ -39,8 +39,8 @@ def parse_prim_geoms(
     context: UsdContext,
     prim: Usd.Prim,
     link_prim: Usd.Prim,
-    links_g_infos: List[List[Dict]],
-    link_path_to_idx: Dict[str, int],
+    links_g_infos: list[list[dict]],
+    link_path_to_idx: dict[str, int],
     morph: gs.morphs.USD,
     surface: gs.surfaces.Surface,
     match_visual=False,

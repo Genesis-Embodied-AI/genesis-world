@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, Generic, NamedTuple, TypeVar, get_ar
 
 import numpy as np
 import torch
+
 from typing_extensions import TypeVar as TypeVarWithDefault
 
 import genesis as gs
@@ -596,10 +597,6 @@ class RigidSensorMetadataMixin:
     offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
 
 
-RigidSensorMetadataMixinT = TypeVar("RigidSensorMetadataMixinT", bound=RigidSensorMetadataMixin)
-KinematicSensorMetadataMixinT = TypeVar("KinematicSensorMetadataMixinT", bound=KinematicSensorMetadataMixin)
-
-
 class _LinkAttachedSensorMixin:
     """
     Common boilerplate for sensors attached to a link.
@@ -644,7 +641,7 @@ class _LinkAttachedSensorMixin:
         self._set_metadata_field(quat_offset, self._shared_metadata.offsets_quat, self._idx, 4, envs_idx)
 
 
-class RigidSensorMixin(_LinkAttachedSensorMixin, Generic[RigidSensorMetadataMixinT]):
+class RigidSensorMixin[RigidSensorMetadataMixinT: RigidSensorMetadataMixin](_LinkAttachedSensorMixin):
     """Base sensor class for sensors that are attached to a RigidEntity."""
 
     def build(self):
@@ -656,7 +653,7 @@ class RigidSensorMixin(_LinkAttachedSensorMixin, Generic[RigidSensorMetadataMixi
         self._shared_metadata.links_idx = concat_with_tensor(self._shared_metadata.links_idx, link_idx)
 
 
-class KinematicSensorMixin(_LinkAttachedSensorMixin, Generic[KinematicSensorMetadataMixinT]):
+class KinematicSensorMixin[KinematicSensorMetadataMixinT: KinematicSensorMetadataMixin](_LinkAttachedSensorMixin):
     """
     Base sensor class for sensors that may attach to entities across solvers (rigid or kinematic).
 
