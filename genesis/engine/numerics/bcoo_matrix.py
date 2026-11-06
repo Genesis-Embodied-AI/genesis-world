@@ -210,10 +210,11 @@ def func_extract_unique_bcoo_entries(matrix: BCOOMatrixScratch):
 
 
 @qd.func(requires_top_level=True)
-def func_sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
-    """Sort the live triplets by (row, column) and sum the duplicates into the reduced block coordinate (BCOO) entries.
+def func_sort_bcoo(matrix: BCOOMatrixScratch):
+    """Sort the live triplets by (row, column) and number the runs of equal keys, the segments of the reduced entries.
 
-    Called inside a graph kernel (see func_dynamic_radix_sort). `block_scalars` is the number of scalars of a block.
+    Called inside a graph kernel (see func_dynamic_radix_sort). The sort holds as long as the writers keep the rows
+    and columns of the triplets, so that `func_reduce_bcoo` can sum new values of the same triplets again.
     """
     func_compose_bcoo_sort_keys(matrix)
     func_dynamic_radix_sort(
@@ -227,6 +228,14 @@ def func_sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template(
     )
     func_mark_bcoo_segment_flags(matrix)
     func_dynamic_exclusive_sum(matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets, matrix.segment_scanner)
+
+
+@qd.func(requires_top_level=True)
+def func_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
+    """Sum the values of the triplets sorted by `func_sort_bcoo` into the reduced block coordinate (BCOO) entries.
+
+    `block_scalars` is the number of scalars of a block.
+    """
     func_zero_bcoo_values(matrix, block_scalars)
     func_fsr_reduce(
         matrix.seg_ids,
@@ -241,6 +250,14 @@ def func_sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template(
         block_scalars,
     )
     func_extract_unique_bcoo_entries(matrix)
+
+
+@qd.func(requires_top_level=True)
+def func_sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
+    """Sort the live triplets by (row, column) and sum the duplicates into the reduced block coordinate (BCOO) entries
+    (see func_sort_bcoo and func_reduce_bcoo)."""
+    func_sort_bcoo(matrix)
+    func_reduce_bcoo(matrix, block_scalars)
 
 
 @qd.kernel
@@ -255,24 +272,11 @@ def kernel_mark_bcoo_segment_flags(matrix: BCOOMatrixScratch):
 
 @qd.kernel
 def kernel_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
-    func_zero_bcoo_values(matrix, block_scalars)
-    func_fsr_reduce(
-        matrix.seg_ids,
-        matrix.triplet_perm,
-        matrix.triplet_keys,
-        matrix.triplet_val,
-        matrix.bcoo_val,
-        matrix.n_triplets,
-        matrix.padded_triplets,
-        matrix.triplet_keys.shape[0],
-        gs.qd_float,
-        block_scalars,
-    )
-    func_extract_unique_bcoo_entries(matrix)
+    func_reduce_bcoo(matrix, block_scalars)
 
 
-def sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: int) -> None:
-    """Run func_sort_reduce_bcoo as separate launches from the host, sharing the compiled sort and scan kernels."""
+def sort_bcoo(matrix: BCOOMatrixScratch) -> None:
+    """Run func_sort_bcoo as separate launches from the host, sharing the compiled sort and scan kernels."""
     kernel_compose_bcoo_sort_keys(matrix)
     dynamic_radix_sort(
         matrix.triplet_sorter,
@@ -285,4 +289,9 @@ def sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: int) -> None:
     )
     kernel_mark_bcoo_segment_flags(matrix)
     kernel_dynamic_exclusive_sum(matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets, matrix.segment_scanner)
+
+
+def sort_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: int) -> None:
+    """Run func_sort_reduce_bcoo as separate launches from the host, sharing the compiled sort and scan kernels."""
+    sort_bcoo(matrix)
     kernel_reduce_bcoo(matrix, block_scalars)
