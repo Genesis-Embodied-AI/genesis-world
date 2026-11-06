@@ -23,6 +23,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmGridScratch, MpmInfo, MpmParticles, MpmParticlesInfo
 from genesis.engine.solvers.mpm_func import (
+    cofactor,
     EMPTY_BOX_HALF,
     band_row,
     contact_band_width,
@@ -120,15 +121,11 @@ def geom_sdf_grid(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsS
         w = 1.0 - qd.abs(q - node.cast(gs.qd_float))
         sdf_val = sdf_info.geoms_sdf_val[sdf.sdf_func_ravel_cell_idx(node, i_g, sdf_res, sdf_info)]
         value += w[0] * w[1] * w[2] * sdf_val
-        grad[0] += (2 * offset[0] - 1) * w[1] * w[2] * sdf_val / cell_size[0]
-        grad[1] += w[0] * (2 * offset[1] - 1) * w[2] * sdf_val / cell_size[1]
-        grad[2] += w[0] * w[1] * (2 * offset[2] - 1) * sdf_val / cell_size[2]
-    outside = qd.Vector([(pos_sdf[d] - q[d]) * cell_size[d] for d in qd.static(range(3))], dt=gs.qd_float)
+        grad += sdf_val * (2 * offset - 1).cast(gs.qd_float) * cofactor(w) / cell_size
+    outside = (pos_sdf - q) * cell_size
     distance = outside.norm()
     if distance > 0.0:
-        for d in qd.static(range(3)):
-            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
-                grad[d] = outside[d] / distance
+        grad = qd.select((pos_sdf < 0.0) | (pos_sdf > upper), outside / distance, grad)
     return value + distance, grad
 
 
@@ -448,13 +445,10 @@ def contact_point_arm(
 @qd.func
 def link_point_jacobian(r: qd.types.vector(3)):
     """Map P = [I, -[r]x] of the spatial displacement of a link to the displacement of its point at arm r."""
-    R = gu.qd_vec_to_skew(r)
-    P = qd.Matrix.zero(gs.qd_float, 3, 6)
-    for i in qd.static(range(3)):
-        P[i, i] = 1.0
-        for j in qd.static(range(3)):
-            P[i, 3 + j] = -R[i, j]
-    return P
+    return qd.Matrix(
+        [[1.0, 0.0, 0.0, 0.0, r[2], -r[1]], [0.0, 1.0, 0.0, -r[2], 0.0, r[0]], [0.0, 0.0, 1.0, r[1], -r[0], 0.0]],
+        dt=gs.qd_float,
+    )
 
 
 # ============================================ Layer 1: reaction on Rigid ============================================

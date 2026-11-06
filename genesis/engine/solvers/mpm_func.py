@@ -151,7 +151,7 @@ def node_offset(a: qd.template()):
 @qd.func
 def block_of(cell):
     """Block coordinates of a cell or node coordinate (floor division by the block size, valid for negatives)."""
-    return qd.Vector([(cell[d] - (cell[d] & 3)) // 4 for d in qd.static(range(3))], dt=gs.qd_int)
+    return cell >> 2
 
 
 @qd.func
@@ -215,75 +215,62 @@ def flag_all_envs_error(grid: MpmGridScratch, mpm_info: MpmInfo, code: qd.templa
 
 
 @qd.func
-def q1_stencil(fx: qd.types.vector(3), inv_dx: float):
-    """Trilinear weights and weight gradients of the 8 nodes of a cell at a point inside it.
+def cofactor(v: qd.types.vector(3)):
+    """Products of the two other components of every component, the gradient of v0 v1 v2."""
+    return qd.Vector([v[1] * v[2], v[0] * v[2], v[0] * v[1]], dt=gs.qd_float)
 
-    `fx` is the offset of the point from the lower corner of the cell in cell units, in [0, 1)^3, and `inv_dx` the
-    inverse cell size.
-    """
+
+@qd.func
+def cofactor_jacobian(v: qd.types.vector(3)):
+    """Jacobian of cofactor(v), the third component off the diagonal and zero on it."""
+    return qd.Matrix([[0.0, v[2], v[1]], [v[2], 0.0, v[0]], [v[1], v[0], 0.0]], dt=gs.qd_float)
+
+
+@qd.func
+def diagonal(v: qd.types.vector(3)):
+    return qd.Matrix([[v[0], 0.0, 0.0], [0.0, v[1], 0.0], [0.0, 0.0, v[2]]], dt=gs.qd_float)
+
+
+@qd.func
+def diagonal_of(M: qd.types.matrix(3, 3)):
+    return qd.Vector([M[0, 0], M[1, 1], M[2, 2]], dt=gs.qd_float)
+
+
+@qd.func
+def q1_axes(o, fx: qd.types.vector(3), inv_dx: float):
+    """Weights and weight derivatives along the three axes of the node of offset `o` in {0, 1}^3 of a cell, at the
+    point of offset `fx` from its lower corner in cell units."""
+    o_f = o.cast(gs.qd_float)
+    return o_f * fx + (1.0 - o_f) * (1.0 - fx), (2.0 * o_f - 1.0) * inv_dx
+
+
+@qd.func
+def q1_node_weight(o, fx: qd.types.vector(3), inv_dx: float):
+    """Trilinear weight and weight gradient of the node of offset `o` in {0, 1}^3 of a cell, at the point of offset
+    `fx` from its lower corner in cell units, in [0, 1)^3, `inv_dx` being the inverse cell size."""
+    axis_w, axis_dw = q1_axes(o, fx, inv_dx)
+    return axis_w[0] * axis_w[1] * axis_w[2], axis_dw * cofactor(axis_w)
+
+
+@qd.func
+def q1_stencil(fx: qd.types.vector(3), inv_dx: float):
+    """Trilinear weights and weight gradients of the 8 nodes of a cell (see q1_node_weight), node a in row a."""
     w = qd.Vector.zero(gs.qd_float, 8)
     grad_w = qd.Matrix.zero(gs.qd_float, 8, 3)
     for a in qd.static(range(8)):
-        axis_w = qd.Vector.zero(gs.qd_float, 3)
-        axis_dw = qd.Vector.zero(gs.qd_float, 3)
+        w_a, grad_w_a = q1_node_weight(node_offset(a), fx, inv_dx)
+        w[a] = w_a
         for d in qd.static(range(3)):
-            if qd.static((a >> (2 - d)) & 1):
-                axis_w[d] = fx[d]
-                axis_dw[d] = inv_dx
-            else:
-                axis_w[d] = 1.0 - fx[d]
-                axis_dw[d] = -inv_dx
-        w[a] = axis_w[0] * axis_w[1] * axis_w[2]
-        grad_w[a, 0] = axis_dw[0] * axis_w[1] * axis_w[2]
-        grad_w[a, 1] = axis_w[0] * axis_dw[1] * axis_w[2]
-        grad_w[a, 2] = axis_w[0] * axis_w[1] * axis_dw[2]
+            grad_w[a, d] = grad_w_a[d]
     return w, grad_w
 
 
 @qd.func
 def q1_weight_hessian(fx: qd.types.vector(3), inv_dx: float, a: qd.template()):
-    """Hessian of the trilinear weight of one node of a cell with respect to the particle position (see q1_stencil).
-
-    For node `a` of the cell, entry (i, j) off the diagonal is the product of the axis derivatives along i and j and the
-    axis weight along the third axis. The diagonal is zero, the weight being linear along each axis.
-    """
-    axis_w = qd.Vector.zero(gs.qd_float, 3)
-    axis_dw = qd.Vector.zero(gs.qd_float, 3)
-    for d in qd.static(range(3)):
-        if qd.static((a >> (2 - d)) & 1):
-            axis_w[d] = fx[d]
-            axis_dw[d] = inv_dx
-        else:
-            axis_w[d] = 1.0 - fx[d]
-            axis_dw[d] = -inv_dx
-    H = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        if qd.static(i != j):
-            H[i, j] = axis_dw[i] * axis_dw[j] * axis_w[3 - i - j]
-    return H
-
-
-@qd.func
-def q1_node_weight(o, fx: qd.types.vector(3), inv_dx: float):
-    """Trilinear weight and weight gradient of one node of a cell at a point inside it (see q1_stencil).
-
-    `o` is the offset of the node in {0, 1}^3 and `fx` the offset of the point from the lower corner, in cell units.
-    """
-    axis_w = qd.Vector.zero(gs.qd_float, 3)
-    axis_dw = qd.Vector.zero(gs.qd_float, 3)
-    for d in qd.static(range(3)):
-        if o[d] != 0:
-            axis_w[d] = fx[d]
-            axis_dw[d] = inv_dx
-        else:
-            axis_w[d] = 1.0 - fx[d]
-            axis_dw[d] = -inv_dx
-    w = axis_w[0] * axis_w[1] * axis_w[2]
-    grad_w = qd.Vector(
-        [axis_dw[0] * axis_w[1] * axis_w[2], axis_w[0] * axis_dw[1] * axis_w[2], axis_w[0] * axis_w[1] * axis_dw[2]],
-        dt=gs.qd_float,
-    )
-    return w, grad_w
+    """Hessian of the trilinear weight of node `a` of a cell with respect to the particle position (see q1_stencil):
+    off the diagonal, the product of the axis derivatives along i and j and the axis weight along the third axis."""
+    axis_w, axis_dw = q1_axes(node_offset(a), fx, inv_dx)
+    return axis_dw.outer_product(axis_dw) * cofactor_jacobian(axis_w)
 
 
 # ============================================= Layer 0: gather lanes ==============================================
@@ -364,11 +351,7 @@ def compression_penalty(sigma: qd.types.vector(3), mu: float, lam: float):
         young_modulus = mu * (3.0 * lam + 2.0 * mu) / (lam + mu)
     k = EXTENSION_STIFFNESS * young_modulus
     d = qd.min(sigma - s, 0.0)
-    curvature = qd.Vector.zero(gs.qd_float, 3)
-    for i in qd.static(range(3)):
-        if sigma[i] < s:
-            curvature[i] = k
-    return 0.5 * k * d.dot(d), k * d, curvature
+    return 0.5 * k * d.dot(d), k * d, k * (sigma < s).cast(gs.qd_float)
 
 
 @qd.func
@@ -412,16 +395,10 @@ def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float):
         else:
             l[i] = qd.log(s) + (sigma[i] - s) / s
             dl[i] = 1.0 / s
-    trace = l[0] + l[1] + l[2]
-    psi = mu * l.dot(l) + 0.5 * lam * trace * trace
+    trace = l.sum()
     tau = 2.0 * mu * l + lam * trace
-    g = tau * dl
-    A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        A[i, j] = dl[i] * (2.0 * mu * (1.0 if i == j else 0.0) + lam) * dl[j]
-        if qd.static(i == j):
-            A[i, j] += tau[i] * ddl[i]
-    return psi, g, A
+    A = lam * dl.outer_product(dl) + diagonal(2.0 * mu * dl * dl + tau * ddl)
+    return mu * l.dot(l) + 0.5 * lam * trace * trace, tau * dl, A
 
 
 @qd.func
@@ -441,29 +418,19 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
     """
     mu_s, lam_s, alpha, rest = stable_neohookean_parameters(mu, lam)
     J = sigma[0] * sigma[1] * sigma[2]
-    cofactor = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
+    cof = cofactor(sigma)
     I_C = sigma.dot(sigma)
     barrier = 1.0 / (I_C + 1.0)
     psi = 0.5 * mu_s * (I_C - 3.0) + 0.5 * lam_s * (J - alpha) ** 2 - 0.5 * mu_s * qd.log(I_C + 1.0) - rest
-    g = mu_s * (1.0 - barrier) * sigma + lam_s * (J - alpha) * cofactor
-    A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        A[i, i] = (
-            mu_s * (1.0 - barrier) + 2.0 * mu_s * barrier * barrier * sigma[i] * sigma[i] + lam_s * cofactor[i] ** 2
-        )
-    for k in qd.static(range(3)):
-        i, j = qd.static(_PAIRS[k])
-        axis_other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
-        A[i, j] = 2.0 * mu_s * barrier * barrier * sigma[i] * sigma[j] + lam_s * (
-            cofactor[i] * cofactor[j] + (J - alpha) * sigma[axis_other]
-        )
-        A[j, i] = A[i, j]
+    g = mu_s * (1.0 - barrier) * sigma + lam_s * (J - alpha) * cof
+    A = mu_s * (1.0 - barrier) * qd.Matrix.identity(gs.qd_float, 3)
+    A += 2.0 * mu_s * barrier * barrier * sigma.outer_product(sigma)
+    A += lam_s * (cof.outer_product(cof) + (J - alpha) * cofactor_jacobian(sigma))
     if qd.static(is_penalized):
         penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
         psi += penalty
         g += g_penalty
-        for i in qd.static(range(3)):
-            A[i, i] += A_penalty[i]
+        A += diagonal(A_penalty)
     return psi, g, A
 
 
@@ -511,25 +478,19 @@ def liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band: flo
     J > 0 alone, which the line search keeps for every trial state (see func_cap_inversion_step). The fixed corotated
     shear term mu |sigma - 1|^2 models viscosity, with mu zero for an inviscid liquid.
     """
-    J = sigma[0] * sigma[1] * sigma[2]
-    cofactor = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
-    psi_volume, dpsi, d2psi = liquid_volume_terms(J, lam, band)
+    cof = cofactor(sigma)
+    psi_volume, dpsi, d2psi = liquid_volume_terms(sigma[0] * sigma[1] * sigma[2], lam, band)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + psi_volume
-    g = 2.0 * mu * (sigma - 1.0) + dpsi * cofactor
-    A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3) + d2psi * cofactor.outer_product(cofactor)
-    for k in qd.static(range(3)):
-        i, j = qd.static(_PAIRS[k])
-        axis_other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
-        A[i, j] += dpsi * sigma[axis_other]
-        A[j, i] += dpsi * sigma[axis_other]
+    g = 2.0 * mu * (sigma - 1.0) + dpsi * cof
+    A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3) + d2psi * cof.outer_product(cof) + dpsi * cofactor_jacobian(sigma)
     return psi, g, A
 
 
 @qd.func
 def det_cubic(F0: qd.types.matrix(3, 3), dF: qd.types.matrix(3, 3)):
     """Coefficients c0, c1, c2, c3 of det(F0 + t dF) in powers of t, by the multilinear expansion over the columns."""
-    a = [qd.Vector([F0[r, c] for r in qd.static(range(3))], dt=gs.qd_float) for c in qd.static(range(3))]
-    b = [qd.Vector([dF[r, c] for r in qd.static(range(3))], dt=gs.qd_float) for c in qd.static(range(3))]
+    a = [F0[:, c] for c in qd.static(range(3))]
+    b = [dF[:, c] for c in qd.static(range(3))]
     c0 = a[0].dot(a[1].cross(a[2]))
     c1 = b[0].dot(a[1].cross(a[2])) + a[0].dot(b[1].cross(a[2])) + a[0].dot(a[1].cross(b[2]))
     c2 = a[0].dot(b[1].cross(b[2])) + b[0].dot(a[1].cross(b[2])) + b[0].dot(b[1].cross(a[2]))
@@ -598,23 +559,16 @@ def fixed_corotated_principal(sigma: qd.types.vector(3), mu: float, lam: float, 
     `is_penalized`, the compression penalty keeps a crushed particle pushing back (see compression_penalty).
     """
     J = sigma[0] * sigma[1] * sigma[2]
-    cofactor = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
+    cof = cofactor(sigma)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + 0.5 * lam * (J - 1.0) ** 2
-    g = 2.0 * mu * (sigma - 1.0) + lam * (J - 1.0) * cofactor
-    A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        A[i, i] = 2.0 * mu + lam * cofactor[i] * cofactor[i]
-    for k in qd.static(range(3)):
-        i, j = qd.static(_PAIRS[k])
-        axis_other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
-        A[i, j] = lam * (cofactor[i] * cofactor[j] + (J - 1.0) * sigma[axis_other])
-        A[j, i] = A[i, j]
+    g = 2.0 * mu * (sigma - 1.0) + lam * (J - 1.0) * cof
+    A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3)
+    A += lam * (cof.outer_product(cof) + (J - 1.0) * cofactor_jacobian(sigma))
     if qd.static(is_penalized):
         penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
         psi += penalty
         g += g_penalty
-        for i in qd.static(range(3)):
-            A[i, i] += A_penalty[i]
+        A += diagonal(A_penalty)
     return psi, g, A
 
 
@@ -668,10 +622,7 @@ def isotropic_first_piola_differential(
     """
     dF_hat = U.transpose() @ dF @ V
     twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
-    dP_hat = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        for j in qd.static(range(3)):
-            dP_hat[i, i] += A[i, j] * dF_hat[j, j]
+    dP_hat = diagonal(A @ qd.Vector([dF_hat[0, 0], dF_hat[1, 1], dF_hat[2, 2]], dt=gs.qd_float))
     for k in qd.static(range(3)):
         i, j = qd.static(_PAIRS[k])
         alp = 0.5 * (flip[k] + twist[k])
@@ -721,9 +672,7 @@ def isotropic_pair_block(
     With the stencil vectors r_a = V^T F^T grad w_a and r_b of the two nodes, Z_ab is diag(r_a) S diag(r_b) plus the
     four-entry flip/twist update of each axis pair. The world block is U Z_ab U^T times the particle volume and dt^2.
     """
-    Z = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        Z[i, j] = r_a[i] * S[i, j] * r_b[j]
+    Z = S * r_a.outer_product(r_b)
     for k in qd.static(range(3)):
         i, j = qd.static(_PAIRS[k])
         Z[i, i] += alp[k] * r_a[j] * r_b[j]
@@ -942,19 +891,14 @@ def return_map_principal(
         is_changed = delta_gamma > 0.0
         if is_changed:
             h = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                deps = 1.0 / sigma[j] if sigma[j] > qd.static(VON_MISES_SIGMA_MIN) else 0.0
-                projector = eye[i, j] - 1.0 / 3.0
-                dlog = 1.0 / 3.0 + r * (
-                    projector / eps_hat_norm - eps_hat[i] * eps_hat[j] / (eps_hat_norm * eps_hat_norm * eps_hat_norm)
-                )
-                dh[i, j] = h[i] * dlog * deps
+            is_log = sigma > qd.static(VON_MISES_SIGMA_MIN)
+            deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
+            dlog = 1.0 / 3.0 + r * ((eye - 1.0 / 3.0) / eps_hat_norm - eps_hat.outer_product(eps_hat) / eps_hat_norm**3)
+            dh = h.outer_product(deps) * dlog
     elif kind == PLASTIC_SAND:
         lam = material_param(slot, materials, mpm_info, PARAM_LAM)
-        deps = qd.Vector.zero(gs.qd_float, 3)
-        for j in qd.static(range(3)):
-            if qd.abs(sigma[j]) > qd.static(SAND_SIGMA_MIN):
-                deps[j] = 1.0 / sigma[j]
+        is_log = qd.abs(sigma) > qd.static(SAND_SIGMA_MIN)
+        deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
         eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
         trace = eps.sum() + Jp
         eps_hat = eps - trace / 3.0
@@ -971,40 +915,29 @@ def return_map_principal(
             delta_gamma = eps_hat_norm + c * trace
             h = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
             if delta_gamma <= 0.0:
-                for j in qd.static(range(3)):
-                    dh[j, j] = h[j] * deps[j]
+                dh = diagonal(h * deps)
             else:
                 # log h = trace / 3 1 - c trace u with u = eps_hat / |eps_hat|, the differential of u being
                 # du = (I - u u^T) / |eps_hat| d_eps_hat with d_eps_hat = (I - 1 1^T / 3) d_eps - 1 / 3 d_Jp
                 u = eps_hat / eps_hat_norm
-                for i in qd.static(range(3)):
-                    for j in qd.static(range(3)):
-                        tangent = gs.qd_float(0.0)
-                        for k in qd.static(range(3)):
-                            tangent += (eye[i, k] - u[i] * u[k]) * (eye[k, j] - 1.0 / 3.0)
-                        dlog = 1.0 / 3.0 - c * u[i] - c * trace / eps_hat_norm * tangent
-                        dh[i, j] = h[i] * dlog * deps[j]
-                    tangent_Jp = gs.qd_float(0.0)
-                    for k in qd.static(range(3)):
-                        tangent_Jp += (eye[i, k] - u[i] * u[k]) * (-1.0 / 3.0)
-                    dh_dJp[i] = h[i] * (1.0 / 3.0 - c * u[i] - c * trace / eps_hat_norm * tangent_Jp)
+                tangent = eye - u.outer_product(u)
+                scale = c * trace / eps_hat_norm
+                ones = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                dlog = 1.0 / 3.0 - c * u.outer_product(ones) - scale * (tangent @ (eye - 1.0 / 3.0))
+                dh = h.outer_product(deps) * dlog
+                dh_dJp = h * (1.0 / 3.0 - c * u + scale / 3.0 * (tangent @ ones))
     else:
         lower = 1.0 - material_param(slot, materials, mpm_info, PARAM_YIELD_LOWER)
         higher = 1.0 + material_param(slot, materials, mpm_info, PARAM_YIELD_HIGHER)
         h = qd.min(qd.max(sigma, lower), higher)
-        for j in qd.static(range(3)):
-            dh[j, j] = 1.0 if sigma[j] > lower and sigma[j] < higher else 0.0
+        is_inside = (sigma > lower).cast(gs.qd_float) * (sigma < higher).cast(gs.qd_float)
+        dh = diagonal(is_inside)
         if kind == PLASTIC_SNOW:
             # Jp_new = Jp prod(sigma) / prod(h)
             h_product = h[0] * h[1] * h[2]
             dJp_new_dJp = (sigma[0] * sigma[1] * sigma[2]) / h_product
             Jp_new = Jp * dJp_new_dJp
-            for j in qd.static(range(3)):
-                others = gs.qd_float(1.0)
-                for k in qd.static(range(3)):
-                    if qd.static(k != j):
-                        others *= sigma[k]
-                dJp_new_dsigma[j] = Jp * others / h_product - Jp_new * dh[j, j] / h[j]
+            dJp_new_dsigma = Jp * cofactor(sigma) / h_product - Jp_new * is_inside / h
     return h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp
 
 
@@ -1027,7 +960,7 @@ def return_map(
         F_new = qd.pow(J, 1.0 / 3.0) * qd.Matrix.identity(gs.qd_float, 3)
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+        sigma = diagonal_of(S)
         h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
             slot, kind, sigma, Jp, materials, mpm_info
         )
@@ -1083,12 +1016,8 @@ def trial_deformation(
     its deformation gradient F."""
     fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
     w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-    grad_u = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for a in qd.static(range(8)):
-        u_a = newton.u[slots[a]]
-        grad_u += u_a.outer_product(grad_w[a, :])
     F = particles.F[f, i_p, i_b]
-    return (qd.Matrix.identity(gs.qd_float, 3) + grad_u) @ F, grad_w, F
+    return (qd.Matrix.identity(gs.qd_float, 3) + stencil_gradient(slots, grad_w, newton.u)) @ F, grad_w, F
 
 
 @qd.func
@@ -1108,11 +1037,11 @@ def particle_elastic_stress(
     diag(sigma) V^T, the principal gradient g = dpsi/dsigma and Hessian A of its elastic energy at the plastic state of
     frame `f`, and its stress P = U diag(g) V^T. The fibre term of a muscle is the caller's."""
     U, S, V = gu.qd_svd(F_trial)
-    sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+    sigma = diagonal_of(S)
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, mpm_info)
     psi, g, A = elastic_principal(slot, sigma, mu, lam, materials, mpm_info)
-    P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
+    P = U @ diagonal(g) @ V.transpose()
     return slot, U, sigma, V, g, A, P
 
 
@@ -1187,11 +1116,8 @@ def func_compose_particle_keys(
             pos = particles.pos[f, i_p, i_b]
             # Fast math lets the compiler assume that the result of an arithmetic operation is finite, which folds a
             # test of it away: only the loaded position can be tested for being finite
-            is_in_range = qd_isfinite(pos)
             x = pos * mpm_info.inv_dx[()]
-            for d in qd.static(range(3)):
-                if not (x[d] >= CELL_MIN and x[d] < CELL_END):
-                    is_in_range = False
+            is_in_range = qd_isfinite(pos) and ((x >= CELL_MIN) & (x < CELL_END)).all()
             if qd.static(qd_debug_asserts()):
                 assert is_in_range, "MPM grid: particle %d of env %d is not finite or out of the grid range" % (
                     i_p,
@@ -1488,25 +1414,11 @@ def func_node_diag(
         grid.node_diag[node] = kinetic_block(node, grid)
     qd.loop_config(name="mpm_elastic_node_diag")
     for s in range(grid.n_valid[()]):
-        terms = particle_stencil_terms(
+        slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
             f, s, mpm_info.substep_dt[()], particles, grid, newton, particles_info, materials, mpm_info, False
         )
         for a in qd.static(range(8)):
-            grid.node_diag[terms[0][a]] += stencil_pair_block(
-                a,
-                a,
-                terms[1],
-                terms[2],
-                terms[3],
-                terms[4],
-                terms[5],
-                terms[6],
-                terms[7],
-                terms[8],
-                terms[9],
-                terms[10],
-                terms[11],
-            )
+            grid.node_diag[slots[a]] += stencil_pair_block(a, a, r_frame, U, S_block, alp, bet, iso)
 
 
 @qd.func(requires_top_level=True)
@@ -1556,11 +1468,11 @@ def contact_invweight(
 
 
 @qd.func
-def contact_band_width(approach: float, dt: float, mpm_info: MpmInfo):
+def contact_band_width(approach, dt: float, mpm_info: MpmInfo):
     """Gap within which a particle gets a contact row at the substep start.
 
-    The band is twice the distance that the particle closes over the substep at normal speed `approach`, plus one cell
-    for the deformation of the entity it belongs to."""
+    The band is twice the distance that the particle closes over the substep at normal speed `approach`, a scalar or a
+    vector of speeds, plus one cell for the deformation of the entity it belongs to."""
     return 2.0 * dt * qd.max(approach, 0.0) + mpm_info.dx[()]
 
 
@@ -1611,26 +1523,22 @@ def func_build_wall_pairs(
         v_p = particles.vel[f, i_p, i_b]
         sol_params = mpm_info.wall_sol_params[()]
         # Distance to the nearer wall plane of each axis, positive inside the domain, and the sign of the inward normal
-        gaps = x_p - mpm_info.wall_lower[()]
-        signs = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
-        is_near = False
-        for d in qd.static(range(3)):
-            if mpm_info.wall_upper[()][d] - x_p[d] < gaps[d]:
-                gaps[d] = mpm_info.wall_upper[()][d] - x_p[d]
-                signs[d] = -1.0
-            if gaps[d] < contact_band_width(-signs[d] * v_p[d], dt, mpm_info):
-                is_near = True
+        gaps_upper = mpm_info.wall_upper[()] - x_p
+        is_upper = gaps_upper < x_p - mpm_info.wall_lower[()]
+        gaps = qd.select(is_upper, gaps_upper, x_p - mpm_info.wall_lower[()])
+        signs = 1.0 - 2.0 * is_upper.cast(gs.qd_float)
+        vels = signs * v_p
+        is_near = gaps < contact_band_width(-vels, dt, mpm_info)
         # The rotation of the inverse weight (see contact_invweight) is computed once per particle near a wall: along
         # the inward normal n = +-e_d, n^T R W R^T n is the quadratic form of W on column d of R^T
-        if is_near:
+        if is_near.any():
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             rotation_t = V @ U.transpose()
             for d in qd.static(range(3)):
-                vel = signs[d] * v_p[d]
-                if gaps[d] < contact_band_width(-vel, dt, mpm_info):
+                if is_near[d]:
                     n_rest = rotation_t[:, d]
                     invweight = n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
-                    D, t = band_row(sol_params, gaps[d], vel, invweight, dt)
+                    D, t = band_row(sol_params, gaps[d], vels[d], invweight, dt)
                     i_pair = append_pair(pairs.n_pairs, pairs.s.shape[0])
                     if i_pair >= 0:
                         pairs.s[i_pair] = s
@@ -1668,12 +1576,8 @@ def func_g2p_advect(
             pos = particles.pos[f, i_p, i_b]
             fx = pos * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
             w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-            vel = qd.Vector.zero(gs.qd_float, 3)
-            C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for a in qd.static(range(8)):
-                v_a = newton.u[slots[a]] / dt
-                vel += w[a] * v_a
-                C += v_a.outer_product(grad_w[a, :])
+            vel = particle_node_sum(slots, w, newton.u) / dt
+            C = stencil_gradient(slots, grad_w, newton.u) / dt
             particles.pos[f + 1, i_p, i_b] = pos + dt * vel
             particles.vel[f + 1, i_p, i_b] = vel
             particles.C[f + 1, i_p, i_b] = C
@@ -1764,10 +1668,7 @@ def particle_trial_disp(
     """Trial displacement sum_a w_a u_a of a particle, with its stencil weights."""
     fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
     w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-    dx = qd.Vector.zero(gs.qd_float, 3)
-    for a in qd.static(range(8)):
-        dx += w[a] * newton.u[slots[a]]
-    return dx, w
+    return particle_node_sum(slots, w, newton.u), w
 
 
 # ============================================ Layer 1: contact vertices ============================================
@@ -1795,6 +1696,22 @@ def particle_node_sum(slots, w: qd.types.vector(8), nodes: qd.template()):
     for a in qd.static(range(8)):
         value += w[a] * nodes[slots[a]]
     return value
+
+
+@qd.func
+def stencil_dots(slots, nodes: qd.template(), y: qd.types.vector(3)):
+    """Dot products of a vector with the node vectors of a stencil."""
+    return qd.Vector([nodes[slots[a]].dot(y) for a in qd.static(range(8))], dt=gs.qd_float)
+
+
+@qd.func
+def stencil_gradient(slots, grad_w: qd.types.matrix(8, 3), nodes: qd.template()):
+    """Gradient sum_a v_a grad w_a^T of the node vectors of a stencil, with the weight gradients in the rows of
+    `grad_w`."""
+    G = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for a in qd.static(range(8)):
+        G += nodes[slots[a]].outer_product(grad_w[a, :])
+    return G
 
 
 @qd.func
@@ -1964,12 +1881,17 @@ def particle_stencil_terms(
     is_exact: qd.template(),
 ):
     """Terms of the stencil blocks of a sorted particle (see stencil_pair_block), after staging its gradient factor and
-    the gradient of its constraint spring for the gradient gather."""
+    the gradient of its constraint spring for the gradient gather.
+
+    Returns the node slots of the stencil and whether every node moves, the stencil vectors r_a = V^T F^T grad w_a of
+    the moving nodes in the V frame (the rows of `r_frame`), the rotation U and the projected modes of the elastic
+    energy times V dt^2 (see isotropic_projected_modes), and the weights of the isotropic terms of every moving node
+    (the rows of `iso`): sqrt(V dt^2 k_fibre) r_a . V^T m for the fibre term in u, F_trial m moving by
+    (grad w_a . F m) u_a, and sqrt(h) w_a for the constraint spring, which acts on the trial displacement sum_a w_a u_a
+    with Hessian h I."""
     i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
     slots = stencil_node_slots(env, cell, grid)
-    movable = qd.Vector.zero(gs.qd_float, 8)
-    for a in qd.static(range(8)):
-        movable[a] = gs.qd_float(grid.node_fixed[slots[a]] == 0)
+    movable = qd.Vector([gs.qd_float(grid.node_fixed[slots[a]] == 0) for a in qd.static(range(8))], dt=gs.qd_float)
     F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
     slot, U, sigma, V, g, A, P = particle_elastic_stress(
         f, i_p, i_b, F_trial, particles, particles_info, materials, mpm_info
@@ -1979,50 +1901,35 @@ def particle_stencil_terms(
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(
         slot, particles.actu[f, i_p, i_b], m, F_trial, materials, mpm_info
     )
-    P += P_fibre
-    # Fibre direction in the V frame
-    fibre_frame = V.transpose() @ m
-    newton.g_p[s] = scale * P @ F.transpose()
+    newton.g_p[s] = scale * (P + P_fibre) @ F.transpose()
     S_block, alp, bet = isotropic_projected_modes(sigma, g, A, is_exact)
-    # Stencil vectors r_a = V^T F^T grad w_a in the V frame (see isotropic_pair_block)
-    r_frame = qd.Matrix.zero(gs.qd_float, 8, 3)
-    VtFt = V.transpose() @ F.transpose()
-    for a in qd.static(range(8)):
-        r_a = VtFt @ grad_w[a, :]
-        for d in qd.static(range(3)):
-            r_frame[a, d] = r_a[d]
     dx, w = particle_trial_disp(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
     energy_spring, grad_spring, hess_spring = constraint_row_terms(s, particles.pos[f, i_p, i_b], dx, newton)
     newton.g_spring[s] = grad_spring
-    return slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_spring
+    r_frame = movable.outer_product(qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)) * (grad_w @ F @ V)
+    fibre_weights = qd.sqrt(scale * fibre_curvature) * (r_frame @ (V.transpose() @ m))
+    iso = qd.Matrix.cols([fibre_weights, qd.sqrt(hess_spring) * movable * w])
+    return slots, movable, r_frame, U, scale * S_block, scale * alp, scale * bet, iso
 
 
 @qd.func
 def stencil_pair_block(
     a: int,
     b: int,
-    movable: qd.types.vector(8),
     r_frame: qd.types.matrix(8, 3),
     U: qd.types.matrix(3, 3),
     S_block: qd.types.matrix(3, 3),
     alp: qd.types.vector(3),
     bet: qd.types.vector(3),
-    fibre_curvature: float,
-    fibre_frame: qd.types.vector(3),
-    scale: float,
-    w: qd.types.vector(8),
-    hess_spring: float,
+    iso: qd.types.matrix(8, 2),
 ):
-    """Block (a, b) of the stencil of one particle from its terms (see particle_stencil_terms)."""
+    """Block (a, b) of the stencil of one particle from its terms (see particle_stencil_terms), zero on a fixed node.
+
+    The nodes `a` and `b` are runtime indices, which index the rows of a matrix entry by entry."""
     r_a = qd.Vector([r_frame[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
     r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
-    block = (scale * U) @ isotropic_pair_block(r_a, r_b, S_block, alp, bet) @ U.transpose()
-    # The fibre term in u: F_trial m moves by (grad w_a . F m) u_a, with grad w_a . F m = r_a . V^T m
-    block += (scale * fibre_curvature * r_a.dot(fibre_frame) * r_b.dot(fibre_frame)) * qd.Matrix.identity(
-        gs.qd_float, 3
-    )
-    block += (w[a] * w[b] * hess_spring) * qd.Matrix.identity(gs.qd_float, 3)
-    return (movable[a] * movable[b]) * block
+    block = U @ isotropic_pair_block(r_a, r_b, S_block, alp, bet) @ U.transpose()
+    return block + (iso[a, 0] * iso[b, 0] + iso[a, 1] * iso[b, 1]) * qd.Matrix.identity(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -2052,29 +1959,13 @@ def func_elastic_assemble_cpu(
             base = rows.triplet_start[()] + grid.n_blocks[()] * BLOCK_CELLS + STENCIL_BLOCKS * i_task
             # The task ranks equal the cell ranks, so the particles of the task end at the start of the next cell
             for t in range(s, grid.cell_starts[i_task + 1]):
-                slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_spring = (
-                    particle_stencil_terms(
-                        f, t, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
-                    )
+                slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
+                    f, t, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
                 )
                 for pair in range(STENCIL_BLOCKS):
                     a = pair_a[pair]
                     b = pair_b[pair]
-                    block = stencil_pair_block(
-                        a,
-                        b,
-                        movable,
-                        r_frame,
-                        U,
-                        S_block,
-                        alp,
-                        bet,
-                        fibre_curvature,
-                        fibre_frame,
-                        scale,
-                        w,
-                        hess_spring,
-                    )
+                    block = stencil_pair_block(a, b, r_frame, U, S_block, alp, bet, iso)
                     row_a = rows.row_start[()] + slots[a]
                     row_b = rows.row_start[()] + slots[b]
                     if movable[a] * movable[b] == 0.0:
@@ -2107,38 +1998,15 @@ def func_elastic_assemble_gpu(
         lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & (_WARP - 1)
         n_valid = grid.n_valid[()]
         is_valid = s < n_valid
-
-        slots = qd.Vector.zero(gs.qd_int, 8)
-        movable = qd.Vector.zero(gs.qd_float, 8)
-        r_frame = qd.Matrix.zero(gs.qd_float, 8, 3)
-        U = qd.Matrix.identity(gs.qd_float, 3)
-        S_block = qd.Matrix.zero(gs.qd_float, 3, 3)
-        alp = qd.Vector.zero(gs.qd_float, 3)
-        bet = qd.Vector.zero(gs.qd_float, 3)
-        fibre_curvature = gs.qd_float(0.0)
-        fibre_frame = qd.Vector.zero(gs.qd_float, 3)
-        scale = gs.qd_float(0.0)
-        w = qd.Vector.zero(gs.qd_float, 8)
-        hess_spring = gs.qd_float(0.0)
+        # A lane past the particles takes the terms of the last one and zeroes its blocks, every lane of the warp taking
+        # part in the reductions
+        slots, movable, r_frame, U, S_block, alp, bet, iso = particle_stencil_terms(
+            f, qd.min(s, n_valid - 1), dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
+        )
         is_head = 0
         is_tail = 0
         task = 0
         if is_valid:
-            terms = particle_stencil_terms(
-                f, s, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
-            )
-            slots = terms[0]
-            movable = terms[1]
-            r_frame = terms[2]
-            U = terms[3]
-            S_block = terms[4]
-            alp = terms[5]
-            bet = terms[6]
-            fibre_curvature = terms[7]
-            fibre_frame = terms[8]
-            scale = terms[9]
-            w = terms[10]
-            hess_spring = terms[11]
             is_head = grid.task_flags[s]
             task = grid.task_ranks[s] + grid.task_flags[s] - 1
             if lane == _WARP - 1 or s == n_valid - 1:
@@ -2152,11 +2020,7 @@ def func_elastic_assemble_gpu(
         for pair in range(STENCIL_BLOCKS):
             a = pair_a[pair]
             b = pair_b[pair]
-            block = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if is_valid:
-                block = stencil_pair_block(
-                    a, b, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_spring
-                )
+            block = gs.qd_float(is_valid) * stencil_pair_block(a, b, r_frame, U, S_block, alp, bet, iso)
             task_block = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i, j in qd.static(qd.ndrange(3, 3)):
                 task_block[i, j] = head_segmented_reduce_add(block[i, j], is_tail)
@@ -2305,20 +2169,14 @@ def invert_node_block(D):
     equilibration to a unit diagonal keeps the determinant near one. A diagonal entry that is not positive is left
     unscaled, and a block whose equilibrated determinant is not positive, such as the block of no particle, takes the
     identity, which leaves its rows unpreconditioned."""
-    scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
-    for i in qd.static(range(3)):
-        if D[i, i] > 0.0:
-            scale[i] = 1.0 / qd.sqrt(D[i, i])
-    S = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        S[i, j] = D[i, j] * scale[i] * scale[j]
+    d = qd.Vector([D[0, 0], D[1, 1], D[2, 2]], dt=gs.qd_float)
+    scale = qd.select(d > 0.0, 1.0 / qd.sqrt(qd.select(d > 0.0, d, 1.0)), 1.0)
+    scaling = scale.outer_product(scale)
+    S = D * scaling
     S_inv = qd.Matrix.identity(gs.qd_float, 3)
     if S.determinant() > 0.0:
         S_inv = S.inverse()
-    D_inv = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        D_inv[i, j] = S_inv[i, j] * scale[i] * scale[j]
-    return D_inv
+    return S_inv * scaling
 
 
 @qd.func(requires_top_level=True)
@@ -2741,11 +2599,7 @@ def func_cap_inversion_step(
         if materials.mat_family[slot] == FAMILY_LIQUID:
             slots = stencil_node_slots(env, cell, grid)
             F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-            grad_du = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for a in qd.static(range(8)):
-                du_a = newton.du[slots[a]]
-                grad_du += du_a.outer_product(grad_w[a, :])
-            c0, c1, c2, c3 = det_cubic(F_trial, grad_du @ F)
+            c0, c1, c2, c3 = det_cubic(F_trial, stencil_gradient(slots, grad_w, newton.du) @ F)
             if c0 > 0.0:
                 root = cubic_first_root(c0, c1, c2, c3, t_max)
                 if root <= t_max:
@@ -2760,13 +2614,7 @@ def particle_max_disp(
     i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
     slots = stencil_node_slots(env, cell, grid)
     w, _ = q1_stencil(particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
-    ddx = qd.Vector.zero(gs.qd_float, 3)
-    for a in qd.static(range(8)):
-        ddx += w[a] * newton.du[slots[a]]
-    disp = gs.qd_float(0.0)
-    for d in qd.static(range(3)):
-        disp = qd.max(disp, qd.abs(ddx[d]))
-    return disp
+    return qd.abs(particle_node_sum(slots, w, newton.du)).max()
 
 
 @qd.func(requires_top_level=True)
@@ -2822,7 +2670,7 @@ def particle_energy(
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, mpm_info)
     _, S, _ = gu.qd_svd(F_trial)
-    psi = elastic_energy(slot, qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float), mu, lam, materials, mpm_info)
+    psi = elastic_energy(slot, diagonal_of(S), mu, lam, materials, mpm_info)
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(
         slot, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_trial, materials, mpm_info
     )

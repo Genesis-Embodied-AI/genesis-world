@@ -30,7 +30,16 @@ from genesis.engine.solvers.mpm_data import (
     MpmParticlesInfo,
 )
 from genesis.engine.solvers.newton_linear import LinearBlock, NewtonLinearScratch
-from genesis.engine.solvers.mpm_func import particle_of_sorted, pyramid_dirs, q1_stencil, stencil_node_slots
+from genesis.engine.solvers.mpm_func import (
+    cofactor,
+    cofactor_jacobian,
+    particle_node_sum,
+    particle_of_sorted,
+    pyramid_dirs,
+    q1_stencil,
+    stencil_dots,
+    stencil_node_slots,
+)
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
@@ -58,33 +67,20 @@ def geom_sdf_grid_hessian(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state
     for offset in qd.grouped(qd.ndrange(2, 2, 2)):
         node = base + offset
         w = 1.0 - qd.abs(q - node.cast(gs.qd_float))
-        sign = (2 * offset - 1).cast(gs.qd_float)
         sdf_val = sdf_info.geoms_sdf_val[sdf.sdf_func_ravel_cell_idx(node, i_g, sdf_res, sdf_info)]
-        grad[0] += sign[0] * w[1] * w[2] * sdf_val / cell_size[0]
-        grad[1] += w[0] * sign[1] * w[2] * sdf_val / cell_size[1]
-        grad[2] += w[0] * w[1] * sign[2] * sdf_val / cell_size[2]
-        hess[0, 1] += sign[0] * sign[1] * w[2] * sdf_val / (cell_size[0] * cell_size[1])
-        hess[0, 2] += sign[0] * w[1] * sign[2] * sdf_val / (cell_size[0] * cell_size[2])
-        hess[1, 2] += w[0] * sign[1] * sign[2] * sdf_val / (cell_size[1] * cell_size[2])
-    hess[1, 0] = hess[0, 1]
-    hess[2, 0] = hess[0, 2]
-    hess[2, 1] = hess[1, 2]
-    outside = qd.Vector([(pos_sdf[d] - q[d]) * cell_size[d] for d in qd.static(range(3))], dt=gs.qd_float)
+        axis_dw = (2 * offset - 1).cast(gs.qd_float) / cell_size
+        grad += sdf_val * axis_dw * cofactor(w)
+        hess += sdf_val * axis_dw.outer_product(axis_dw) * cofactor_jacobian(w)
+    outside = (pos_sdf - q) * cell_size
     distance = outside.norm()
     if distance > 0.0:
         o = outside / distance
-        eye = qd.Matrix.identity(gs.qd_float, 3)
-        is_outside = qd.Vector.zero(gs.qd_int, 3)
-        for d in qd.static(range(3)):
-            if pos_sdf[d] < 0.0 or pos_sdf[d] > upper[d]:
-                is_outside[d] = 1
-                grad[d] = o[d]
-                for e in qd.static(range(3)):
-                    hess[d, e] = 0.0
-                    hess[e, d] = 0.0
-        for d, e in qd.static(qd.ndrange(3, 3)):
-            if is_outside[d] != 0 and is_outside[e] != 0:
-                hess[d, e] = (eye[d, e] - o[d] * o[e]) / distance
+        is_outside = ((pos_sdf < 0.0) | (pos_sdf > upper)).cast(gs.qd_float)
+        grad = qd.select(is_outside > 0.0, o, grad)
+        hess *= (1.0 - is_outside).outer_product(1.0 - is_outside)
+        hess += (
+            is_outside.outer_product(is_outside) * (qd.Matrix.identity(gs.qd_float, 3) - o.outer_product(o)) / distance
+        )
     return grad, hess
 
 
@@ -137,7 +133,7 @@ def geom_contact_bw(
         x_bar = gu.qd_transform_by_quat(pos_mesh_bar, geom_quat)
         pos_bar = -x_bar
         quat_inv_bar = gu.qd_transform_by_quat_grad_quat(x - geom_pos, quat_inv, pos_mesh_bar)
-        quat_bar += qd.Vector([quat_inv_bar[0], -quat_inv_bar[1], -quat_inv_bar[2], -quat_inv_bar[3]], dt=gs.qd_float)
+        quat_bar += gu.qd_inv_quat(quat_inv_bar)
     geoms_state.pos.grad[i_g, i_b] += pos_bar
     geoms_state.quat.grad[i_g, i_b] += quat_bar
     return x_bar
@@ -209,14 +205,9 @@ def func_rigid_contact_adjoint(
             x_p = particles.pos[f, i_p, i_b]
             v_p = particles.vel[f, i_p, i_b]
             w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
-            dxp = qd.Vector.zero(gs.qd_float, 3)
-            lam_p = qd.Vector.zero(gs.qd_float, 3)
-            for a in qd.static(range(8)):
-                u_a = newton.u[slots[a]]
-                row = rows.row_start[()] + slots[a]
-                lam_a = linear.solution[row]
-                dxp += w[a] * u_a
-                lam_p += w[a] * lam_a
+            rows_p = rows.row_start[()] + slots
+            dxp = particle_node_sum(slots, w, newton.u)
+            lam_p = particle_node_sum(rows_p, w, linear.solution)
             r = x_p - links_state.root_COM[i_l, i_b]
             V_lin, V_ang = link_chain_spatial(i_l, i_b, rigid_data.x, dofs_state, links_info, config)
             L_lin, L_ang = link_chain_spatial(i_l, i_b, rigid_data.sol, dofs_state, links_info, config)
@@ -245,13 +236,8 @@ def func_rigid_contact_adjoint(
                     delta_bar -= D * c * J
 
             # Delta and delta through the weights, the arm and the chain
-            x_bar = -Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
-            for a in qd.static(range(8)):
-                u_a = newton.u[slots[a]]
-                row = rows.row_start[()] + slots[a]
-                lam_a = linear.solution[row]
-                grad_w_a = grad_w[a, :]
-                x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
+            weights_bar = stencil_dots(slots, newton.u, Delta_bar) + stencil_dots(rows_p, linear.solution, delta_bar)
+            x_bar = grad_w.transpose() @ weights_bar - Delta_bar.cross(V_ang) - delta_bar.cross(L_ang)
             com_bar = Delta_bar.cross(V_ang) + delta_bar.cross(L_ang)
             r_cross_Delta_bar = r.cross(Delta_bar)
             r_cross_delta_bar = r.cross(delta_bar)
