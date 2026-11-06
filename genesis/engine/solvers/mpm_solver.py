@@ -220,19 +220,12 @@ class MpmNewtonParticipant(NewtonDevice):
         mpm_func.func_step_forward(self.grid, self.newton, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
-        mpm_func.func_energy(
-            f,
-            self.mpm_info.substep_dt[()],
-            self.particles,
-            self.grid,
-            self.newton,
-            control,
-            self.particles_info,
-            self.materials,
-            self.mpm_info,
-            is_trial,
+    def func_energy(self, f: int, energies: qd.template()):
+        dt = self.mpm_info.substep_dt[()]
+        mpm_func.func_elastic_energy(
+            f, dt, self.particles, self.grid, self.newton, energies, self.particles_info, self.materials, self.mpm_info
         )
+        mpm_func.func_kinetic_energy(dt, self.grid, self.newton, energies)
 
     # ------------------------------------------- vertex map -------------------------------------------
 
@@ -559,26 +552,38 @@ class MPMSolver(ParticleSolver):
         step. Like the inverse weights Rigid computes from the mass matrix of its initial configuration, it is a model
         constant: the stiffness of a row is independent of the state, so that its gradients involve the second
         derivatives of the energy alone. A particle inactive in that configuration keeps the inverse of its own mass."""
-        f = 0
-        participant, mpm_info = self._newton_participant, self.mpm_info
-        self._size_to_particles(f)
-        build_grid(self.particles, self.particles_ng, participant.grid, mpm_info, f)
+        participant = self._newton_participant
+        self._predict(0, t=0.0)
+        kernel_contact_invweight(
+            0,
+            self.particles,
+            participant.grid,
+            participant.newton,
+            self.particles_info,
+            self.mpm_materials,
+            self.mpm_info,
+        )
+
+    def _predict(self, f, t):
+        """Build the grid of frame `f`, grown until it holds the particles, and transfer the particles to it at time
+        `t`."""
+        if not self._is_mpm_sized:
+            self._size_to_particles(f)
+        participant = self._newton_participant
+        build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
         while int(qd_to_numpy(participant.grid.has_grid_overflow)):
             self._grow_grid()
-            build_grid(self.particles, self.particles_ng, participant.grid, mpm_info, f)
+            build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
         kernel_predict(
             f,
-            t=0.0,
-            gravity=self._gravity,
-            particles=self.particles,
-            grid=participant.grid,
-            newton=participant.newton,
-            particles_info=self.particles_info,
-            force_fields=self._mpm_force_fields,
-            mpm_info=mpm_info,
-        )
-        kernel_contact_invweight(
-            f, self.particles, participant.grid, participant.newton, self.particles_info, self.mpm_materials, mpm_info
+            t,
+            self._gravity,
+            self.particles,
+            participant.grid,
+            participant.newton,
+            self.particles_info,
+            self._mpm_force_fields,
+            self.mpm_info,
         )
 
     # ------------------------------------------------------------------------------------
@@ -696,34 +701,17 @@ class MPMSolver(ParticleSolver):
 
         The stages are the grid, the particle-to-grid transfer with the force fields, the physical Hessian at u = 0 and
         the wall pairs. The couplings with MPM build their contact pairs after them."""
-        if not self._is_mpm_sized:
-            self._size_to_particles(f)
-        rigid = self._sim.rigid_solver
         participant, mpm_info = self._newton_participant, self.mpm_info
-        build_grid(self.particles, self.particles_ng, participant.grid, mpm_info, f)
-        while int(qd_to_numpy(participant.grid.has_grid_overflow)):
-            self._grow_grid()
-            build_grid(self.particles, self.particles_ng, participant.grid, mpm_info, f)
+        self._predict(f, self._sim.cur_t)
         if self._constraints_initialized:
             kernel_constraint_rows(
                 participant.grid,
                 participant.newton,
-                rigid.dyn_state.links,
+                self._sim.rigid_solver.dyn_state.links,
                 self.particles_info,
                 mpm_info,
                 self.particle_constraints,
             )
-        kernel_predict(
-            f,
-            self._sim.cur_t,
-            self._gravity,
-            self.particles,
-            participant.grid,
-            participant.newton,
-            self.particles_info,
-            self._mpm_force_fields,
-            mpm_info,
-        )
         kernel_report_extent(participant.grid, participant.linear_block)
         kernel_wall_pairs(f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info)
         n_pairs = int(qd_to_numpy(participant.wall_pairs.n_pairs))

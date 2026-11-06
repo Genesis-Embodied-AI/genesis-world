@@ -367,14 +367,6 @@ def stable_neohookean_parameters(mu: float, lam: float):
 
 
 @qd.func
-def fixed_corotated_energy(sigma: qd.types.vector(3), mu: float, lam: float):
-    """Energy density of the fixed corotated energy with its compression penalty (see fixed_corotated_principal)."""
-    J = sigma[0] * sigma[1] * sigma[2]
-    penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
-    return mu * (sigma - 1.0).dot(sigma - 1.0) + 0.5 * lam * (J - 1.0) ** 2 + penalty
-
-
-@qd.func
 def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float):
     """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy.
 
@@ -814,25 +806,6 @@ def elastic_principal(
 
 
 @qd.func
-def elastic_energy(
-    slot: int,
-    sigma: qd.types.vector(3),
-    mu: float,
-    lam: float,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
-):
-    """Energy density of the energy family of a material slot, from the signed singular values."""
-    psi = gs.qd_float(0.0)
-    family = materials.mat_family[slot]
-    if family == FAMILY_FIXED_COROTATED:
-        psi = fixed_corotated_energy(sigma, mu, lam)
-    else:
-        psi, g, A = elastic_principal(slot, sigma, mu, lam, materials, mpm_info)
-    return psi
-
-
-@qd.func
 def active_fibre_stiffness(slot: int, actu: float, materials: MpmMaterialTable, mpm_info: MpmInfo):
     """Active stiffness k a of the muscle fibre term of a particle, and its derivative in the actuation `actu`.
 
@@ -965,9 +938,7 @@ def return_map(
             slot, kind, sigma, Jp, materials, mpm_info
         )
         if is_changed:
-            F_new = (
-                U @ qd.Matrix([[h[0], 0.0, 0.0], [0.0, h[1], 0.0], [0.0, 0.0, h[2]]], dt=gs.qd_float) @ V.transpose()
-            )
+            F_new = U @ diagonal(h) @ V.transpose()
     return F_new, Jp_new
 
 
@@ -2670,7 +2641,7 @@ def particle_energy(
     slot = particles_info.material_idx[i_p]
     mu, lam = material_params(slot, particles.Jp[f, i_p, i_b], materials, mpm_info)
     _, S, _ = gu.qd_svd(F_trial)
-    psi = elastic_energy(slot, diagonal_of(S), mu, lam, materials, mpm_info)
+    psi, g, A = elastic_principal(slot, diagonal_of(S), mu, lam, materials, mpm_info)
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(
         slot, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_trial, materials, mpm_info
     )
@@ -2698,25 +2669,3 @@ def node_kinetic_energy(node: int, dt: float, grid: MpmGridScratch, newton: MpmN
         u = newton.u[node]
         energy = 0.5 * grid.node_mass[node] * (u - dt * grid.node_v_free[node]).norm_sqr()
     return energy
-
-
-@qd.func(requires_top_level=True)
-def func_energy(
-    f: int,
-    dt: float,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    control: qd.template(),
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
-    is_trial: qd.template(),
-):
-    """Add the energy of the particles and nodes of every environment into its start or trial energy."""
-    if qd.static(is_trial):
-        func_elastic_energy(f, dt, particles, grid, newton, control.energy_trial, particles_info, materials, mpm_info)
-        func_kinetic_energy(dt, grid, newton, control.energy_trial)
-    else:
-        func_elastic_energy(f, dt, particles, grid, newton, control.energy_start, particles_info, materials, mpm_info)
-        func_kinetic_energy(dt, grid, newton, control.energy_start)

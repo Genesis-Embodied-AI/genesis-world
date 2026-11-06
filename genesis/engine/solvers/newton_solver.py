@@ -271,10 +271,19 @@ def func_energy(f: int, newton_control: qd.template(), participants: qd.template
     """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs
     to."""
     func_reset_energy(newton_control, is_trial)
+    if qd.static(is_trial):
+        func_add_energies(f, participants, newton_control.energy_trial)
+    else:
+        func_add_energies(f, participants, newton_control.energy_start)
+
+
+@qd.func(requires_top_level=True)
+def func_add_energies(f: int, participants: qd.template(), energies: qd.template()):
+    """Add the energy of every participant and of the contacts into the entry of every environment in `energies`."""
     for member in qd.static(participants.members):
-        member.func_energy(newton_control, f, is_trial)
+        member.func_energy(f, energies)
     if qd.static(participants.has_contact):
-        participants.contact.func_contact_energy(newton_control, f, is_trial)
+        participants.contact.func_contact_energy(f, energies)
 
 
 # ================================================== kernels ==================================================

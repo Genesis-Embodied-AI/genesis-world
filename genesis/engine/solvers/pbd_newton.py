@@ -112,17 +112,14 @@ def func_pbd_step_forward(pbd: qd.template(), control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_pbd_energy(pbd_data: qd.template(), control: qd.template(), is_trial: qd.template()):
-    """Add the inertia 1/2 m |x - x~|^2 of the PBD particles to the start or trial energy."""
+def func_pbd_energy(pbd_data: qd.template(), energies: qd.template()):
+    """Add the inertia 1/2 m |x - x~|^2 of the PBD particles into the entry of every environment in `energies`."""
     qd.loop_config(name="mpm_pbd_energy")
     for i_q, i_b in qd.ndrange(pbd_data.pbd._n_particles, pbd_data.pbd._B):
         if is_moving(i_q, i_b, pbd_data.pbd):
             diff = pbd_data.pbd.particles_reordered[i_q, i_b].pos - pbd_data.target[i_q, i_b]
             energy = 0.5 * pbd_data.pbd.particles_info_reordered[i_q, i_b].mass * diff.dot(diff)
-            if is_trial:
-                qd.atomic_add(control.energy_trial[i_b], energy)
-            else:
-                qd.atomic_add(control.energy_start[i_b], energy)
+            qd.atomic_add(energies[i_b], energy)
 
 
 @qd.func(requires_top_level=True)
@@ -226,8 +223,8 @@ class PbdNewtonParticipant(NewtonDevice):
         func_pbd_step_forward(self, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
-        func_pbd_energy(self.pbd_data, control, is_trial)
+    def func_energy(self, f: int, energies: qd.template()):
+        func_pbd_energy(self.pbd_data, energies)
 
     # ------------------------------------------- vertex map -------------------------------------------
 

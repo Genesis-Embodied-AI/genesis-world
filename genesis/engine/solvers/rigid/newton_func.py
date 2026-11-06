@@ -235,17 +235,11 @@ def func_rigid_evaluate(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_energy(
-    rigid_data: RigidNewtonScratch, control: qd.template(), newton_info: RigidNewtonInfo, is_trial: qd.template()
-):
-    """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, to its start or trial energy."""
-    n_envs = rigid_data.x.shape[1]
+def func_rigid_energy(rigid_data: RigidNewtonScratch, energies: qd.template(), newton_info: RigidNewtonInfo):
+    """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, into its entry in `energies`."""
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
-    for i_b in range(n_envs):
-        if is_trial:
-            control.energy_trial[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
-        else:
-            control.energy_start[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
+    for i_b in range(rigid_data.x.shape[1]):
+        energies[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
 
 
 @qd.func(requires_top_level=True)

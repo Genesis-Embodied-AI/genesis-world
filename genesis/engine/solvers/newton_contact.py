@@ -344,15 +344,12 @@ def func_contact_rigid_product(f: int, contact: qd.template(), linear: NewtonLin
 
 
 @qd.func(requires_top_level=True)
-def func_contact_energy(f: int, control: qd.template(), contact: qd.template(), is_trial: qd.template()):
-    """Add the energy of every pair at the current iterate to the start or trial energy of its environment."""
+def func_contact_energy(f: int, contact: qd.template(), energies: qd.template()):
+    """Add the energy of every pair at the current iterate into the entry of its environment in `energies`."""
     if qd.static(contact.has_rigid_map):
         contact.rigid_map.func_vertex_begin(f, SRC_ITERATE)
     for pair_kind in qd.static(contact.pair_kinds):
-        if qd.static(is_trial):
-            pair_kind.func_pair_energy(f, control.energy_trial)
-        else:
-            pair_kind.func_pair_energy(f, control.energy_start)
+        pair_kind.func_pair_energy(f, energies)
 
 
 @qd.kernel
@@ -446,5 +443,5 @@ class NewtonContact(NewtonDevice):
         func_contact_rigid_product(f, self, linear, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_contact_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
-        func_contact_energy(f, control, self, is_trial)
+    def func_contact_energy(self, f: int, energies: qd.template()):
+        func_contact_energy(f, self, energies)

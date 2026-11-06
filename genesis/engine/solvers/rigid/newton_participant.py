@@ -155,9 +155,9 @@ class RigidNewtonParticipant(NewtonDevice):
         newton_func.func_rigid_step_forward(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
+    def func_energy(self, f: int, energies: qd.template()):
         self.func_evaluate(f)
-        newton_func.func_rigid_energy(self.rigid_data, control, self.newton_info, is_trial)
+        newton_func.func_rigid_energy(self.rigid_data, energies, self.newton_info)
 
 
 @qd.kernel

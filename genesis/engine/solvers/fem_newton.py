@@ -116,8 +116,9 @@ def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(), is_trial: qd.template()):
-    """Add FEM's incremental potential at the end-of-substep positions, times dt^2, to the start or trial energy.
+def func_fem_energy(f: int, dt: float, fem: qd.template(), energies: qd.template()):
+    """Add FEM's incremental potential at the end-of-substep positions, times dt^2, into the entry of every environment
+    in `energies`.
 
     The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
     the elements, at the positions of frame f + 1."""
@@ -130,18 +131,12 @@ def func_fem_energy(f: int, dt: float, fem: qd.template(), control: qd.template(
         if qd.static(fem.config.has_damping):
             step = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v[f, i_v, i_b].pos
             energy += 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * step.dot(step) * damping_alpha_dt
-        if is_trial:
-            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
-        else:
-            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
+        qd.atomic_add(energies[i_b], dt_sq * energy)
     fem.solver.func_compute_ele_energy(f)
     qd.loop_config(name="mpm_fem_energy_elements")
     for i_b, i_e in qd.ndrange(fem.n_envs, fem.n_elements):
         energy = fem.elements_el_energy[i_b, i_e].energy * fem.elements_i[i_e].V
-        if is_trial:
-            qd.atomic_add(control.energy_trial[i_b], dt_sq * energy)
-        else:
-            qd.atomic_add(control.energy_start[i_b], dt_sq * energy)
+        qd.atomic_add(energies[i_b], dt_sq * energy)
 
 
 # ============================================ Layer 2: participant =============================================
@@ -275,8 +270,8 @@ class FemNewtonParticipant(NewtonDevice):
         func_fem_step_forward(f, self, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), f: int, is_trial: qd.template()):
-        func_fem_energy(f, self.substep_dt, self, control, is_trial)
+    def func_energy(self, f: int, energies: qd.template()):
+        func_fem_energy(f, self.substep_dt, self, energies)
 
     # ------------------------------------------- vertex map -------------------------------------------
 
