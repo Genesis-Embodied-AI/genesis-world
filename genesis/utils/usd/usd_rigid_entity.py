@@ -723,7 +723,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
 
     # A density authored on the link's MassAPI overrides any per-geom physics-material density (USD
     # precedence); the per-geom densities then drive the rigid build's link inertial estimate wherever
-    # no explicit mass is authored.
+    # no explicit mass is authored, from the visual geoms of the link as well as from its collision ones.
     for link, link_g_infos in zip(links, links_g_infos):
         if not link.HasAPI(UsdPhysics.MassAPI):
             continue
@@ -731,8 +731,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
         if link_density is None:
             continue
         for g_info in link_g_infos:
-            if g_info.get("contype") or g_info.get("conaffinity"):
-                g_info["density"] = link_density
+            g_info["density"] = link_density
 
     # The prim paths are fully consumed at this point; strip them so they do not leak into the generic
     # entity-building pipeline (including the visual copies of collision geoms).

@@ -237,7 +237,7 @@ def parse_xml(morph, surface, rigid_options=None):
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
     mj = build_model(
         file,
-        not morph.visualization,
+        not (morph.visualization or morph.inertia_from_visual),
         merge_fixed_links,
         exclude_ground_plane,
         links_to_keep,
