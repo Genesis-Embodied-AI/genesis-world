@@ -499,7 +499,7 @@ def kernel_refresh_collision_bvh(
     # The leaves cover every face in order, one tree per env
     for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_face_aabb(i_t, i_f, i_f, i_t, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
@@ -519,7 +519,7 @@ def kernel_refresh_collision_subset_bvh(
         func_update_all_verts(dyn_state, dyn_info, rigid_config)
     for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_face_aabb(i_t, i_a, faces_idx[i_a], i_t, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
     # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
     for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
@@ -536,11 +536,13 @@ def kernel_refresh_grouped_collision_bvh(
     rigid_config: qd.template(),
     eps: float,
 ):
-    """Fit the leaf boxes of a grouped collision BVH set covering every face in order, from the already refreshed
-    vertices of the representative envs, and rebuild its trees."""
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+    """Fit the leaf boxes of a grouped collision BVH set covering every face in order and build one tree per group.
+
+    The boxes come from the already refreshed vertices of the representative envs, and the trees take the first slots.
+    """
+    for i_t, i_f in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_face_aabb(i_t, i_f, i_f, batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
@@ -554,13 +556,16 @@ def kernel_refresh_grouped_collision_subset_bvh(
     rigid_config: qd.template(),
     eps: float,
 ):
-    """Fit the leaf boxes of a grouped collision BVH set over a face subset from the already refreshed vertices of the
-    representative envs, rebuild its trees and remap the leaves to global faces."""
-    for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+    """Fit the leaf boxes of a grouped collision BVH set over a face subset and build one tree per group.
+
+    The boxes come from the already refreshed vertices of the representative envs. The trees take the first slots, their
+    sorted leaves naming the global faces of the subset.
+    """
+    for i_t, i_a in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_face_aabb(i_t, i_a, faces_idx[i_a], batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
     # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
-    for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+    for i_t, i_leaf in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
         bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
 
@@ -578,7 +583,7 @@ def kernel_refresh_visual_bvh(
     """Fit the leaf boxes of a per-env visual BVH set, unhittable where the face mask is 0, and rebuild its trees."""
     for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_visual_face_aabb(i_t, i_f, i_t, face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
@@ -592,14 +597,13 @@ def kernel_refresh_grouped_visual_bvh(
     rigid_config: qd.template(),
     eps: float,
 ):
-    """Fit the leaf boxes of a grouped visual BVH set from its representative envs, unhittable where the face mask is
-    0, and rebuild its trees.
+    """Fit the leaf boxes of a grouped visual BVH set from its representative envs and build one tree per group.
 
-    See RaycastContext.update for the grouping.
+    A face masked by 0 is unhittable, and the trees take the first slots (see RaycastContext.update for the grouping).
     """
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
+    for i_t, i_f in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
         update_visual_face_aabb(i_t, i_f, batch_repr_env[i_t], face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state, bvh_config, eps)
+    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
