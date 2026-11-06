@@ -119,7 +119,8 @@ class NPZFile(BaseFileWriterOptions):
     """
     Buffers all data and writes to a .npz file at cleanup.
 
-    Can handle any numeric or array-like or dict[str, array-like] data, e.g. from sensors.
+    Can handle numeric, array-like or dict[str, array-like] data, e.g. from sensors.
+    The field "timestamp" is reserved for the recorder's sampling times.
 
     Parameters
     ----------

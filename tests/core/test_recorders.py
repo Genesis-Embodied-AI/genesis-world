@@ -7,6 +7,7 @@ import pytest
 import av
 
 import genesis as gs
+from genesis.recorders.file_writers import NPZFileWriter
 from genesis.utils.image_exporter import as_grayscale_image
 
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
@@ -297,6 +298,21 @@ def test_file_writers(tmp_path):
     is_paused = False
     scene.step()
     assert scene.timings["period"] > timings["step"] > 0.0
+
+
+@pytest.mark.required
+def test_npz_reserved_timestamp(tmp_path):
+    path = tmp_path / "samples.npz"
+    writer = NPZFileWriter(None, gs.recorders.NPZFile(filename=path), lambda: None)
+    writer.build()
+    writer.process({"force": 2}, 0.0)
+    with pytest.raises(gs.GenesisException, match="timestamp.*reserved"):
+        writer.process({"force": 3, "timestamp": 12.3}, 0.01)
+    writer.process({"force": 4}, 0.02)
+    writer.cleanup()
+    with np.load(path) as archive:
+        np.testing.assert_array_equal(archive["timestamp"], [0.0, 0.02])
+        np.testing.assert_array_equal(archive["force"], [2, 4])
 
 
 @pytest.mark.required

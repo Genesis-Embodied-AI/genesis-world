@@ -154,6 +154,8 @@ class NPZFileWriter(BaseFileWriter):
         super().build()
 
     def process(self, data, cur_time):
+        if isinstance(data, dict) and "timestamp" in data:
+            gs.raise_exception("NPZ field 'timestamp' is reserved for the recorder's sampling times.")
         self.all_data["timestamp"].append(cur_time)
         if isinstance(data, dict):
             for key, value in data.items():
