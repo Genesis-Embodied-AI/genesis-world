@@ -245,26 +245,32 @@ class MpmNewtonParticipant(NewtonDevice):
     def func_pair_count(self):
         return self.wall_pairs.n_pairs[()]
 
+    @qd.func
+    def wall_pair_terms(self, i_pair: int):
+        """Environment, energy, gradient and Hessian of the row of a wall pair at the current iterate."""
+        env, slots, w = mpm_func.particle_stencil(self.wall_pairs.s[i_pair], self.grid, self.newton, self.mpm_info)
+        dx = mpm_func.particle_node_sum(slots, w, self.newton.u)
+        J = mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair])
+        energy, g, H = mpm_func.soft_row_terms(J, self.wall_pairs.D[i_pair], self.wall_pairs.t[i_pair], dx)
+        return env, energy, g, H
+
     @qd.func(requires_top_level=True)
     def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
-        mpm_func.func_wall_pair_terms(
-            f,
-            contact.matrices.doublet_offsets[i_kind],
-            contact.matrices.triplet_offsets[i_kind],
-            self.vertex_offset[()],
-            self.particles,
-            self.grid,
-            self.newton,
-            self.wall_pairs,
-            self.mpm_info,
-            contact,
-        )
+        """Write the gradient and Hessian of the row of every wall pair at the current iterate on its particle."""
+        qd.loop_config(name="mpm_wall_pair_terms")
+        for i_pair in range(self.wall_pairs.n_pairs[()]):
+            env, energy, g, H = self.wall_pair_terms(i_pair)
+            i_v = self.vertex_offset[()] + self.wall_pairs.s[i_pair]
+            contact.write_doublet(contact.matrices.doublet_offsets[i_kind] + i_pair, i_v, g)
+            contact.write_triplet(contact.matrices.triplet_offsets[i_kind] + i_pair, i_v, i_v, H)
 
     @qd.func(requires_top_level=True)
     def func_pair_energy(self, f: int, energies: qd.template()):
-        mpm_func.func_wall_pair_energy(
-            f, self.particles, self.grid, self.newton, self.wall_pairs, energies, self.mpm_info
-        )
+        """Add the energy of the row of every wall pair at the current iterate into the entry of its environment."""
+        qd.loop_config(name="mpm_wall_pair_energy")
+        for i_pair in range(self.wall_pairs.n_pairs[()]):
+            env, energy, g, H = self.wall_pair_terms(i_pair)
+            qd.atomic_add(energies[env], energy)
 
 
 @qd.data_oriented

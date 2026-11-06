@@ -23,7 +23,7 @@ from genesis.engine.numerics.bcoo_matrix import (
 )
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import contact_band_width, particle_of_sorted, pyramid_terms
-from genesis.engine.solvers.newton_contact import append_pair, write_doublet, write_triplet
+from genesis.engine.solvers.newton_contact import append_pair
 from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.utils.array_class import QUERY_RESULTS, BVHQueryResults
@@ -247,11 +247,11 @@ class CouplingPairs(NewtonDevice):
             i_d = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
             i_t = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
             for k in range(qd.static(self.n_doublets)):
-                write_doublet(i_d + k, verts[k], weights[k] * g, contact)
+                contact.write_doublet(i_d + k, verts[k], weights[k] * g)
             for i_block in range(qd.static(self.n_triplets)):
                 k = block_rows[i_block]
                 l = block_cols[i_block]
-                write_triplet(i_t + i_block, verts[k], verts[l], (weights[k] * weights[l]) * H, contact)
+                contact.write_triplet(i_t + i_block, verts[k], verts[l], (weights[k] * weights[l]) * H)
 
     @qd.func(requires_top_level=True)
     def func_pair_energy(self, f: int, energies: qd.template()):

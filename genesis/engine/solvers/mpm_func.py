@@ -47,7 +47,7 @@ from .mpm_data import (
     MpmParticlesNG,
     MpmWallPairs,
 )
-from .newton_contact import append_pair, write_doublet, write_triplet
+from .newton_contact import append_pair
 from .newton_linear import LinearBlock, NewtonLinearScratch, discard_block
 
 # Biased signed range of block coordinates packed into 14 bits per axis
@@ -1634,53 +1634,6 @@ def add_particle_node_vector(slots, w: qd.types.vector(8), y: qd.types.vector(3)
 def wall_normal(axis: int, sign: float):
     """Inward normal sign e_axis of a wall pair."""
     return sign * qd.Vector([gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float)
-
-
-@qd.func(requires_top_level=True)
-def func_wall_pair_terms(
-    f: int,
-    i_d0: int,
-    i_t0: int,
-    i_v0: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    pairs: MpmWallPairs,
-    mpm_info: MpmInfo,
-    contact: qd.template(),
-):
-    """Write the gradient and Hessian of the row of every wall pair at the current iterate, from doublet slot `i_d0`
-    and triplet slot `i_t0` on, the particles being the contact vertices from `i_v0` on."""
-    qd.loop_config(name="mpm_wall_pair_terms")
-    for i_pair in range(pairs.n_pairs[()]):
-        s = pairs.s[i_pair]
-        env, slots, w = particle_stencil(s, grid, newton, mpm_info)
-        dx = particle_node_sum(slots, w, newton.u)
-        J = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
-        _, g, H = soft_row_terms(J, pairs.D[i_pair], pairs.t[i_pair], dx)
-        write_doublet(i_d0 + i_pair, i_v0 + s, g, contact)
-        write_triplet(i_t0 + i_pair, i_v0 + s, i_v0 + s, H, contact)
-
-
-@qd.func(requires_top_level=True)
-def func_wall_pair_energy(
-    f: int,
-    particles: MpmParticles,
-    grid: MpmGridScratch,
-    newton: MpmNewtonScratch,
-    pairs: MpmWallPairs,
-    energies: qd.template(),
-    mpm_info: MpmInfo,
-):
-    """Add the energy of the row of every wall pair at the current iterate into the entry of its environment."""
-    qd.loop_config(name="mpm_wall_pair_energy")
-    for i_pair in range(pairs.n_pairs[()]):
-        s = pairs.s[i_pair]
-        env, slots, w = particle_stencil(s, grid, newton, mpm_info)
-        dx = particle_node_sum(slots, w, newton.u)
-        J = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
-        energy, grad, hess = soft_row_terms(J, pairs.D[i_pair], pairs.t[i_pair], dx)
-        qd.atomic_add(energies[env], energy)
 
 
 @qd.func(requires_top_level=True)
