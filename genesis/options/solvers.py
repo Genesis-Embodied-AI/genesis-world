@@ -4,7 +4,7 @@ import numpy as np
 from pydantic import PrivateAttr, StrictBool, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
+from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, Vec3FType
 
 from .options import Options
 
@@ -895,21 +895,3 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
     enable_vertex_constraints: StrictBool = False
-
-
-class SFOptions(TimeBasedMixin):
-    """
-    Options configuring the SFSolver.
-    """
-
-    res: PositiveInt = 128
-    solver_iters: PositiveInt = 500
-    decay: PositiveFloat = 0.99
-
-    T_low: float = 1.0
-    T_high: float = 0.0
-
-    inlet_pos: Vec3FType = (0.6, 0.0, 0.1)
-    inlet_vel: Vec3FType = (0.0, 0.0, 1.0)
-    inlet_quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
-    inlet_s: PositiveFloat = 400.0

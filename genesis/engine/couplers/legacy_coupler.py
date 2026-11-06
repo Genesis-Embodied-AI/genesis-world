@@ -37,7 +37,6 @@ class LegacyCoupler(RBC):
         self.sph_solver = self.sim.sph_solver
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
-        self.sf_solver = self.sim.sf_solver
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any(self.rigid_couplings))

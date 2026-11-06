@@ -13,7 +13,6 @@ ALLOW_PATTERNS = {
     "deformable/**/*.py",
     "drone/interactive_drone.py",
     "drone/fly_route.py",
-    "fluid/**/*.py",
     "ipc/**/*.py",
     "kinematic/**/*.py",
     "rendering/**/*.py",
