@@ -120,6 +120,42 @@ def qd_xyz_to_quat(xyz):
 
 
 @qd.func
+def qd_svd(A: qd.types.matrix(3, 3)):
+    """Decompose a 3x3 matrix into U S V^T to the rounding of the simulation precision.
+
+    U and V are proper rotations and S is diagonal, its last entry negative where the determinant of the matrix is, as
+    for 'qd.svd'.
+    """
+    U, S, V = qd.svd(A)
+    # FIXME: quadrants#1065 - 'qd.svd' stops at an error near 2e-10 in double precision, which three sweeps of two-sided
+    # Jacobi rotations over the nearly diagonal U^T A V bring down to the rounding, nearly repeated singular values
+    # included, for nine 2x2 decompositions.
+    if qd.static(qd.lang.impl.get_runtime().default_fp == qd.f64):
+        B = U.transpose() @ A @ V
+        for _ in qd.static(range(3)):
+            for p, q in qd.static(((0, 1), (0, 2), (1, 2))):
+                # The block of rows and columns p and q is R(phi) diag(s_p, s_q) R(theta) in closed form, R(.) being the
+                # planar rotation by an angle and s_p, s_q signed
+                e = 0.5 * (B[p, p] + B[q, q])
+                f = 0.5 * (B[p, p] - B[q, q])
+                g = 0.5 * (B[q, p] + B[p, q])
+                h = 0.5 * (B[q, p] - B[p, q])
+                angle_f = qd.atan2(g, f)
+                angle_e = qd.atan2(h, e)
+                phi = 0.5 * (angle_e + angle_f)
+                theta = 0.5 * (angle_e - angle_f)
+                L = qd.Matrix.identity(gs.qd_float, 3)
+                L[p, p], L[p, q], L[q, p], L[q, q] = qd.cos(phi), -qd.sin(phi), qd.sin(phi), qd.cos(phi)
+                R = qd.Matrix.identity(gs.qd_float, 3)
+                R[p, p], R[p, q], R[q, p], R[q, q] = qd.cos(theta), qd.sin(theta), -qd.sin(theta), qd.cos(theta)
+                B = L.transpose() @ B @ R
+                U = U @ L
+                V = V @ R
+        S = qd.Matrix([[B[0, 0], 0.0, 0.0], [0.0, B[1, 1], 0.0], [0.0, 0.0, B[2, 2]]], dt=gs.qd_float)
+    return U, S, V
+
+
+@qd.func
 def qd_R_to_xyz(R, eps):
     """
     Convert a rotation matrix into intrinsic x-y-z Euler angles.

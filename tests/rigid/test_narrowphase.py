@@ -284,17 +284,8 @@ def create_modified_narrowphase_file(tmp_path: Path):
 
     lines = content.split("\n")
 
-    # Disable capsule-capsule analytical path in all kernels
-    lines = find_and_disable_all_conditions(lines, "capsule_contact.func_capsule_capsule_contact")
-
-    # Disable sphere-capsule analytical path in all kernels
-    lines = find_and_disable_all_conditions(lines, "capsule_contact.func_sphere_capsule_contact")
-
-    # Disable sphere-sphere analytical path in all kernels
-    lines = find_and_disable_all_conditions(lines, "capsule_contact.func_sphere_sphere_contact")
-
-    # Disable sphere-box analytical path in all kernels
-    lines = find_and_disable_all_conditions(lines, "func_sphere_box_contact")
+    # Disable the analytical paths in all kernels
+    lines = find_and_disable_all_conditions(lines, "= func_analytic_contact(")
 
     # Insert errno marker in contact0's GJK path (before gjk.func_gjk call, uses i_b)
     lines = insert_errno_before_call(lines, "gjk.func_gjk(", ERRNO_CALLED_GJK_K1, "MODIFIED: GJK detection in contact0")

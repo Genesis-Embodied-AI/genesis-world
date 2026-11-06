@@ -527,24 +527,27 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
     tm_scene.export(glb_path)
 
     scene = gs.Scene(show_viewer=False)
-    entity = scene.add_entity(
-        gs.morphs.Mesh(
-            file=str(glb_path),
-            collision=False,
-            fixed=True,
-            file_meshes_are_zup=False,
-        ),
-    )
+    entities = [
+        scene.add_entity(
+            gs.morphs.Mesh(
+                file=str(glb_path),
+                pos=(0.0, 2.0 * i, 0.0),
+                collision=False,
+                fixed=True,
+                file_meshes_are_zup=False,
+            ),
+        )
+        for i in range(2)
+    ]
 
     # Submeshes are kept separate (group_by_material defaults to False to preserve baked convex decompositions), but
-    # they share one Surface whose resolved RGBA texture is memoized, so a single image array backs all of them rather
-    # than one full-resolution copy per submesh.
-    vgeoms = entity.vgeoms
-    assert len(vgeoms) == n_submeshes
-    assert len({id(geom.surface) for geom in vgeoms}) == 1
-    # Hold every array alive before counting so that ids cannot be recycled by the garbage collector.
-    rgba_arrays = [geom.surface.get_rgba().image_array for geom in vgeoms]
-    assert len({id(array) for array in rgba_arrays}) == 1
+    # they share one Surface whose resolved RGBA texture is memoized on its content, so a single image array backs all
+    # of them, and those of every other entity loaded from the file, rather than one full-resolution copy per submesh.
+    for entity in entities:
+        assert len(entity.vgeoms) == n_submeshes
+        assert len({id(geom.surface) for geom in entity.vgeoms}) == 1
+    rgba_arrays = [geom.surface.get_rgba().image_array for entity in entities for geom in entity.vgeoms]
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
 
     scene.build()
     retriever = GenesisGeomRetriever(scene.sim.rigid_solver, seg_level="entity")
@@ -900,6 +903,17 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
 
     explicit_uvs = [np.unique(vgeoms["mesh_explicit_a"].uvs, axis=0), np.unique(vgeoms["mesh_explicit_b"].uvs, axis=0)]
     assert_allclose(explicit_uvs, EXPECTED_EXPLICIT_UVS, tol=gs.EPS)
+
+    rgba_arrays = [vgeom.vmesh.surface.get_rgba().image_array for vgeom in vgeoms.values()]
+    assert all([array is rgba_arrays[0] for array in rgba_arrays])
+    rigid_nodes = scene.visualizer.context.rigid_nodes
+    base_color_textures = [
+        rigid_nodes[vgeom.uid].mesh.primitives[0].material.baseColorTexture for vgeom in vgeoms.values()
+    ]
+    assert base_color_textures[0] is not None
+    assert all([texture is base_color_textures[0] for texture in base_color_textures])
+    with pytest.raises(ValueError, match="read-only"):
+        vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array[0, 0] = 0
 
 
 # ==================== Surface Reconstruction Tests ====================

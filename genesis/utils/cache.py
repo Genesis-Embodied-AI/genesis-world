@@ -6,7 +6,7 @@ import functools
 import hashlib
 import marshal
 import os
-import pickle as pkl
+import pickle
 import sys
 import types
 import weakref
@@ -14,7 +14,10 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
+import numba as nb
 import numpy as np
+
+from pydantic import BaseModel
 
 import genesis as gs
 
@@ -343,10 +346,90 @@ def get_usd_bake_path(file_path):
     return os.path.join(get_usd_cache_dir(), "bake", hashkey)
 
 
+# Primes of the 64-bit xxHash (XXH64)
+_XXH64_PRIME_1 = np.uint64(0x9E3779B185EBCA87)
+_XXH64_PRIME_2 = np.uint64(0xC2B2AE3D27D4EB4F)
+_XXH64_PRIME_3 = np.uint64(0x165667B19E3779F9)
+_XXH64_PRIME_4 = np.uint64(0x85EBCA77C2B2AE63)
+_XXH64_PRIME_5 = np.uint64(0x27D4EB2F165667C5)
+
+
+@nb.jit(nopython=True, cache=True)
+def xxh64(data):
+    """Compute the 64-bit xxHash (XXH64) digest of a byte array, with seed zero.
+
+    XXH64 is a non-cryptographic hash running close to memory bandwidth, with a negligible accidental collision rate.
+    'data' is a contiguous one-dimensional array of bytes. Returns the digest as an unsigned 64-bit integer, which
+    matches the reference implementation on little-endian machines.
+    """
+    n_bytes = data.shape[0]
+    n_stripes = n_bytes // 32
+    words = data[: n_stripes * 32].view(np.uint64)
+    # The four lanes are scalars, so that they stay in registers
+    lane_0 = _XXH64_PRIME_1 + _XXH64_PRIME_2
+    lane_1 = _XXH64_PRIME_2
+    lane_2 = np.uint64(0)
+    lane_3 = np.uint64(0) - _XXH64_PRIME_1
+    for i_stripe in range(n_stripes):
+        acc = lane_0 + words[4 * i_stripe] * _XXH64_PRIME_2
+        lane_0 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_1 + words[4 * i_stripe + 1] * _XXH64_PRIME_2
+        lane_1 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_2 + words[4 * i_stripe + 2] * _XXH64_PRIME_2
+        lane_2 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+        acc = lane_3 + words[4 * i_stripe + 3] * _XXH64_PRIME_2
+        lane_3 = ((acc << np.uint64(31)) | (acc >> np.uint64(33))) * _XXH64_PRIME_1
+
+    if n_stripes > 0:
+        acc = (
+            ((lane_0 << np.uint64(1)) | (lane_0 >> np.uint64(63)))
+            + ((lane_1 << np.uint64(7)) | (lane_1 >> np.uint64(57)))
+            + ((lane_2 << np.uint64(12)) | (lane_2 >> np.uint64(52)))
+            + ((lane_3 << np.uint64(18)) | (lane_3 >> np.uint64(46)))
+        )
+        for lane in (lane_0, lane_1, lane_2, lane_3):
+            lane *= _XXH64_PRIME_2
+            lane = ((lane << np.uint64(31)) | (lane >> np.uint64(33))) * _XXH64_PRIME_1
+            acc = (acc ^ lane) * _XXH64_PRIME_1 + _XXH64_PRIME_4
+    else:
+        acc = _XXH64_PRIME_5
+    acc += np.uint64(n_bytes)
+
+    # The bytes past the last stripe go by words of 8, then 4, then one by one, read in little-endian order
+    i_byte = n_stripes * 32
+    for _ in range((n_bytes - i_byte) // 8):
+        word = np.uint64(0)
+        for k in range(8):
+            word |= np.uint64(data[i_byte + k]) << np.uint64(8 * k)
+        word *= _XXH64_PRIME_2
+        word = ((word << np.uint64(31)) | (word >> np.uint64(33))) * _XXH64_PRIME_1
+        acc ^= word
+        acc = ((acc << np.uint64(27)) | (acc >> np.uint64(37))) * _XXH64_PRIME_1 + _XXH64_PRIME_4
+        i_byte += 8
+    if n_bytes - i_byte >= 4:
+        word = np.uint64(0)
+        for k in range(4):
+            word |= np.uint64(data[i_byte + k]) << np.uint64(8 * k)
+        acc ^= word * _XXH64_PRIME_1
+        acc = ((acc << np.uint64(23)) | (acc >> np.uint64(41))) * _XXH64_PRIME_2 + _XXH64_PRIME_3
+        i_byte += 4
+    for i_byte_ in range(i_byte, n_bytes):
+        acc ^= np.uint64(data[i_byte_]) * _XXH64_PRIME_5
+        acc = ((acc << np.uint64(11)) | (acc >> np.uint64(53))) * _XXH64_PRIME_1
+
+    acc ^= acc >> np.uint64(33)
+    acc *= _XXH64_PRIME_2
+    acc ^= acc >> np.uint64(29)
+    acc *= _XXH64_PRIME_3
+    acc ^= acc >> np.uint64(32)
+    return acc
+
+
 def get_hashkey(*args):
     # Containers are replaced by the tuples of their items, sorted for sets and for dicts other than OrderedDict since
-    # equal ones may iterate in different orders (string hashes are salted per process). Items are replaced before their
-    # container, so that sorting compares canonical representations, which order items of any type.
+    # equal ones may iterate in different orders (string hashes are salted per process). A pydantic model is replaced by
+    # its type and the values of its fields, which leaves out the values cached on the instance. Items are replaced
+    # before their container, so that sorting compares canonical representations, which order items of any type.
     values, nodes = [], [(args, False)]
     while nodes:
         node, is_expanded = nodes.pop()
@@ -355,26 +438,30 @@ def get_hashkey(*args):
             if isinstance(node, (set, frozenset)) or (isinstance(node, dict) and not isinstance(node, OrderedDict)):
                 items.sort(key=repr)
             values.append(tuple(items))
+        elif isinstance(node, BaseModel):
+            fields = type(node).model_fields
+            nodes.append(([type(node).__qualname__, *[value for name, value in node if name in fields]], False))
         elif isinstance(node, (dict, list, tuple, set, frozenset)):
             nodes.append((node, True))
-            nodes.extend((item, False) for item in (node.items() if isinstance(node, dict) else node))
+            nodes.extend([(item, False) for item in (node.items() if isinstance(node, dict) else node)])
         else:
+            if isinstance(node, Path):
+                file_stats = node.stat()
+                node = (str(node), file_stats.st_size, file_stats.st_mtime)
+            if isinstance(node, str):
+                node = node.encode()
+            elif not isinstance(node, bytes):
+                try:
+                    buffer = memoryview(node)
+                except TypeError:
+                    node = marshal.dumps(node)
+                else:
+                    # A buffer is hashed in place, sparing a copy of a large array, together with its layout so that
+                    # the same bytes read with another shape or item type give another key.
+                    data = np.frombuffer(buffer if buffer.c_contiguous else buffer.tobytes(), dtype=np.uint8)
+                    node = marshal.dumps((buffer.format, buffer.shape, xxh64(data)))
             values.append(node)
-
-    hasher = hashlib.sha256()
-    for arg in (*values[0], gs.__version__.encode()):
-        if isinstance(arg, Path):
-            file_stats = arg.stat()
-            arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)
-        if isinstance(arg, str):
-            arg = arg.encode()
-        elif not isinstance(arg, bytes):
-            try:
-                arg = bytes(memoryview(arg))
-            except TypeError:
-                arg = marshal.dumps(arg)
-        hasher.update(arg)
-    return hasher.hexdigest()
+    return hashlib.sha256(marshal.dumps((values[0], gs.__version__))).hexdigest()
 
 
 class MeshCache:
@@ -424,11 +511,11 @@ class MeshCache:
                 with open(os.path.join(self._bucket_dir, filename), "rb") as file:
                     # Each record needs its own unpickler: one reused across both would carry its memo from the
                     # vertices into the payload and misread it.
-                    verts_ref = pkl.load(file)
+                    verts_ref = pickle.load(file)
                     if verts_ref.shape != self._verts.shape or (np.abs(self._verts - verts_ref) > atol).any():
                         continue
-                    return pkl.load(file)
-            except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
+                    return pickle.load(file)
+            except (EOFError, ModuleNotFoundError, pickle.UnpicklingError, TypeError, MemoryError):
                 gs.logger.info("Ignoring corrupted cache.")
         return None
 
@@ -437,5 +524,5 @@ class MeshCache:
         assert payload is not None
         os.makedirs(self._bucket_dir, exist_ok=True)
         with open(os.path.join(self._bucket_dir, self._filename), "wb") as file:
-            pkl.dump(self._verts, file, protocol=pkl.HIGHEST_PROTOCOL)
-            pkl.dump(payload, file, protocol=pkl.HIGHEST_PROTOCOL)
+            pickle.dump(self._verts, file, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(payload, file, protocol=pickle.HIGHEST_PROTOCOL)

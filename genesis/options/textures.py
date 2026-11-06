@@ -1,15 +1,15 @@
 import os
 from functools import cached_property
-from typing import Annotated, Sequence, Literal, Iterable, cast
+from typing import Annotated, Iterable, Literal, Sequence, cast
 
 import numpy as np
+
 from PIL import Image
-from pydantic import model_validator, computed_field, BeforeValidator, Field
+from pydantic import BeforeValidator, Field, computed_field, model_validator
 
 import genesis as gs
 import genesis.utils.mesh as mu
-from genesis.typing import LaxUnitIntervalArrayType, LaxFArrayType, UnitIntervalArrayType, NDArrayType
-
+from genesis.typing import LaxFArrayType, LaxUnitIntervalArrayType, NDArrayType, UnitIntervalArrayType
 from genesis.utils.serialization import Exporting, Loading, SerializationMixin
 
 from .options import Options
@@ -31,7 +31,7 @@ class Texture(Options):
     # Pydantic disables hashing for models with a field-based __eq__; its only opt-in (model_config frozen=True) also
     # forbids the in-place edits done during setup (apply_cutoff, check_dim reassign image_array/color). Restore
     # identity hashing instead: textures are shared by reference and stable once a surface is built, so their identity
-    # is a valid key for caches such as the get_rgba cache.
+    # is a valid key for caches such as the trimesh materials cache (see 'surface_uvs_to_trimesh_visual').
     __hash__ = object.__hash__
 
     def __init__(self, **data):

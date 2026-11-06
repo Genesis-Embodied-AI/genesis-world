@@ -1117,6 +1117,7 @@ class Collider:
             self._solver.rigid_info,
             self.collider_info,
             self._solver.rigid_config,
+            self.collider_config,
             self._solver._errno,
         )
 

@@ -4532,6 +4532,7 @@ def func_narrow_phase_diff_convex_vs_convex(
     rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
+    collider_config: qd.template(),
     errno: qd.Tensor,
 ):
     # The reverse is the only launch of this kernel, and it costs a thread of the grid whether it holds a contact or
@@ -4616,77 +4617,88 @@ def func_narrow_phase_diff_convex_vs_convex(
                         dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
                         and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
                     ):
-                        # The perturbed detection of func_convex_convex_contact that found the contact runs again on the
-                        # current geom poses. Contact 0 of the pair is read back from the contact data that the
-                        # reference loop above writes, so that the gradient also reaches the poses through it. The
-                        # overlap axes of a capsule are the default ones (see func_contact_overlap_axes), and MuJoCo
-                        # compatibility disables multi-contact between capsules (see func_convex_convex_contact).
-                        ga_pos = dyn_state.geoms.pos[i_ga, i_b]
-                        ga_quat = dyn_state.geoms.quat[i_ga, i_b]
-                        gb_pos = dyn_state.geoms.pos[i_gb, i_b]
-                        gb_quat = dyn_state.geoms.quat[i_gb, i_b]
-                        normal_0 = collider_state.contact_data.normal[ref_id, i_b]
-                        contact_pos_0 = collider_state.contact_data.pos[ref_id, i_b]
-                        penetration_0 = collider_state.contact_data.penetration[ref_id, i_b]
-                        i_detection = collider_state.diff_contact_input.detection_idx[i_b, i_c]
+                        # A scene of no convex-convex pair besides box and plane ones holds no capsule pair, and leaves
+                        # the GJK scratch state unallocated (see 'opt_in' in Collider).
+                        if qd.static(collider_config.has_non_box_plane_convex_convex):
+                            # The perturbed detection of func_convex_convex_contact that found the contact runs again on
+                            # the current geom poses. Contact 0 of the pair is read back from the contact data that the
+                            # reference loop above writes, so that the gradient also reaches the poses through it. The
+                            # overlap axes of a capsule are the default ones (see func_contact_overlap_axes), and MuJoCo
+                            # compatibility disables multi-contact between capsules (see func_convex_convex_contact).
+                            ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+                            ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+                            gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+                            gb_quat = dyn_state.geoms.quat[i_gb, i_b]
+                            normal_0 = collider_state.contact_data.normal[ref_id, i_b]
+                            contact_pos_0 = collider_state.contact_data.pos[ref_id, i_b]
+                            penetration_0 = collider_state.contact_data.penetration[ref_id, i_b]
+                            i_detection = collider_state.diff_contact_input.detection_idx[i_b, i_c]
 
-                        axis_0, axis_1 = func_contact_orthogonals(
-                            i_ga, i_gb, i_b, normal_0, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
-                        )
-                        overlap_axes = qd.Matrix.rows([axis_0, -axis_0, axis_1, -axis_1])
-                        qrot, _, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current = (
-                            func_perturb_geom_pair(
-                                i_detection,
-                                axis_0,
-                                axis_1,
-                                overlap_axes,
+                            axis_0, axis_1 = func_contact_orthogonals(
+                                i_ga,
+                                i_gb,
+                                i_b,
+                                normal_0,
+                                geoms_init_AABB,
+                                dyn_state,
+                                dyn_info,
+                                rigid_info,
+                                rigid_config,
+                            )
+                            overlap_axes = qd.Matrix.rows([axis_0, -axis_0, axis_1, -axis_1])
+                            qrot, _, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current = (
+                                func_perturb_geom_pair(
+                                    i_detection,
+                                    axis_0,
+                                    axis_1,
+                                    overlap_axes,
+                                    contact_pos_0,
+                                    ga_pos,
+                                    ga_quat,
+                                    gb_pos,
+                                    gb_quat,
+                                    rigid_info,
+                                    collider_info,
+                                    rigid_config,
+                                )
+                            )
+                            _, contact_normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
+                                i_ga,
+                                i_gb,
+                                ga_pos_current,
+                                ga_quat_current,
+                                gb_pos_current,
+                                gb_quat_current,
+                                dyn_info,
+                                rigid_info,
+                            )
+                            geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+                            contact_normal, penetration, contact_pos = func_recompute_perturbed_contact(
+                                i_ga,
+                                i_gb,
+                                i_b,
+                                contact_normal,
+                                penetration,
+                                contact_pos,
+                                normal_0,
                                 contact_pos_0,
+                                penetration_0,
+                                qrot,
                                 ga_pos,
                                 ga_quat,
                                 gb_pos,
                                 gb_quat,
+                                mpr_state,
+                                gjk_state,
+                                dyn_info,
                                 rigid_info,
                                 collider_info,
                                 rigid_config,
+                                geom_pair_scale,
+                                used_gjk=False,
+                                used_gjk_0=False,
                             )
-                        )
-                        _, contact_normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
-                            i_ga,
-                            i_gb,
-                            ga_pos_current,
-                            ga_quat_current,
-                            gb_pos_current,
-                            gb_quat_current,
-                            dyn_info,
-                            rigid_info,
-                        )
-                        geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
-                        contact_normal, penetration, contact_pos = func_recompute_perturbed_contact(
-                            i_ga,
-                            i_gb,
-                            i_b,
-                            contact_normal,
-                            penetration,
-                            contact_pos,
-                            normal_0,
-                            contact_pos_0,
-                            penetration_0,
-                            qrot,
-                            ga_pos,
-                            ga_quat,
-                            gb_pos,
-                            gb_quat,
-                            mpr_state,
-                            gjk_state,
-                            dyn_info,
-                            rigid_info,
-                            collider_info,
-                            rigid_config,
-                            geom_pair_scale,
-                            used_gjk=False,
-                            used_gjk_0=False,
-                        )
-                        weight = 1.0
+                            weight = 1.0
                     else:
                         ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
                         contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
