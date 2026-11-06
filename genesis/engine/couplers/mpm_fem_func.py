@@ -102,9 +102,9 @@ def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.tem
     """Whether a point lies in a tetrahedral element, by its barycentric coordinates.
 
     The point is x and the element i_e of environment i_b, at frame f. A degenerate element holds no point."""
-    el2v = fem.elements_i[i_e].el2v
-    v3 = fem.elements_v[f, el2v[3], i_b].pos
-    D = qd.Matrix.cols([fem.elements_v[f, el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
+    el2v = fem.solver.elements_i[i_e].el2v
+    v3 = fem.solver.elements_v[f, el2v[3], i_b].pos
+    D = qd.Matrix.cols([fem.solver.elements_v[f, el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
     is_inside = False
     if qd.abs(D.determinant()) > gs.EPS:
         lam = D.inverse() @ (x - v3)
@@ -157,12 +157,12 @@ def kernel_fit_triangle_leaves(f: int, query: qd.template()):
         lo = gu.qd_vec3(qd.math.inf)
         hi = gu.qd_vec3(-qd.math.inf)
         speed = gs.qd_float(0.0)
-        i_e = query.fem.surface[i_s].tri2el
+        i_e = query.fem.solver.surface[i_s].tri2el
         for k in qd.static(range(4)):
-            i_v = query.fem.elements_i[i_e].el2v[k]
-            lo = qd.min(lo, query.fem.elements_v[f, i_v, i_b].pos)
-            hi = qd.max(hi, query.fem.elements_v[f, i_v, i_b].pos)
-            speed = qd.max(speed, query.fem.elements_v[f, i_v, i_b].vel.norm())
+            i_v = query.fem.solver.elements_i[i_e].el2v[k]
+            lo = qd.min(lo, query.fem.solver.elements_v[f, i_v, i_b].pos)
+            hi = qd.max(hi, query.fem.solver.elements_v[f, i_v, i_b].pos)
+            speed = qd.max(speed, query.fem.solver.elements_v[f, i_v, i_b].vel.norm())
         margin = thickness + 2.0 * dt * speed
         query.leaves.aabbs_min[i_b, i_s] = lo - margin
         query.leaves.aabbs_max[i_b, i_s] = hi + margin
@@ -176,10 +176,10 @@ def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vecto
     direction to the particle, the signed distance along its normal, the barycentric coordinates of the closest point
     and the contact normal. A particle behind the plane of a triangle is kept only if it lies in the box of the element
     behind the triangle, so that penetration deeper than the surface elements gives no pair."""
-    tri2v = fem.surface[i_s].tri2v
-    a = fem.elements_v[f, tri2v[0], i_b].pos
-    b = fem.elements_v[f, tri2v[1], i_b].pos
-    c = fem.elements_v[f, tri2v[2], i_b].pos
+    tri2v = fem.solver.surface[i_s].tri2v
+    a = fem.solver.elements_v[f, tri2v[0], i_b].pos
+    b = fem.solver.elements_v[f, tri2v[1], i_b].pos
+    c = fem.solver.elements_v[f, tri2v[2], i_b].pos
     bary = closest_point_barycentric(x, a, b, c)
     d = x - (bary[0] * a + bary[1] * b + bary[2] * c)
     dist = d.norm()
@@ -188,7 +188,7 @@ def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vecto
     is_valid = True
     if d.dot(n_tri) < 0.0:
         side = -1.0
-        is_valid = is_in_element(fem.surface[i_s].tri2el, i_b, f, x, fem)
+        is_valid = is_in_element(fem.solver.surface[i_s].tri2el, i_b, f, x, fem)
     align = qd.abs(d.dot(n_tri)) / qd.max(dist, gs.EPS)
     normal = n_tri
     if side > 0.0 and dist > gs.EPS:
@@ -247,14 +247,14 @@ class MpmFemContact(CouplingPairs):
         v_q = qd.Vector.zero(gs.qd_float, 3)
         inv_mass = gs.qd_float(0.0)
         for k in qd.static(range(3)):
-            i_v = self.fem.surface[i_s].tri2v[k]
-            v_q += bary[k] * self.fem.elements_v[f, i_v, i_b].vel
-            inv_mass += bary[k] * bary[k] / self.fem.elements_v_info[i_v].mass
+            i_v = self.fem.solver.surface[i_s].tri2v[k]
+            v_q += bary[k] * self.fem.solver.elements_v[f, i_v, i_b].vel
+            inv_mass += bary[k] * bary[k] / self.fem.solver.elements_v_info[i_v].mass
         v_rel = self.mpm.particles.vel[f, i_p, i_b] - v_q
         if phi < contact_band_width(-normal.dot(v_rel), self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info):
             invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info) + inv_mass
-            i_e = self.fem.surface[i_s].tri2el
-            friction = qd.max(self.fem.elements_i[i_e].friction_mu, MIN_FRICTION)
+            i_e = self.fem.solver.surface[i_s].tri2el
+            friction = qd.max(self.fem.solver.elements_i[i_e].friction_mu, MIN_FRICTION)
             D = qd.Vector([self.query.contact.stiffness[()] / invweight] * PYRAMID_ROWS)
             i_pair = self.add_pair(s, i_b, normal, friction, D, qd.Vector([-phi] * PYRAMID_ROWS))
             if i_pair >= 0:
@@ -268,7 +268,7 @@ class MpmFemContact(CouplingPairs):
         i_b = self.pairs.i_b[i_pair]
         bary = self.pairs.bary[i_pair]
         i_s = self.pairs.tri[i_pair]
-        tri2v = self.fem.surface[i_s].tri2v
+        tri2v = self.fem.solver.surface[i_s].tri2v
         i_fv = qd.Vector([i_b * self.fem.n_vertices + tri2v[k] for k in qd.static(range(3))], dt=gs.qd_int)
         i_vp = self.mpm.vertex_offset[()] + self.pairs.s[i_pair]
         verts = qd.Vector([i_vp] + [self.fem.vertex_offset[()] + i_fv[k] for k in qd.static(range(3))], dt=gs.qd_int)

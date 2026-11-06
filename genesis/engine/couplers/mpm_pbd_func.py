@@ -71,8 +71,8 @@ class PbdParticleQuery:
         self.pbd = pbd
         self.mpm_info = mpm_info
         self.contact = contact
-        self.radius = pbd.particle_radius
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.n_particles, 1))
+        self.radius = pbd.solver.particle_radius
+        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
 
@@ -90,9 +90,9 @@ def kernel_fit_pbd_leaves(query: qd.template()):
     An inactive particle gets an empty box with a finite center, for the Morton code."""
     reach = qd.static(query.radius) + query.contact.thickness[()]
     for i_b, i_q in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
-        if query.pbd.particles_ng_reordered[i_q, i_b].active:
-            x0 = query.pbd.particles_reordered[i_q, i_b].ipos
-            x1 = query.pbd.particles_reordered[i_q, i_b].pos
+        if query.pbd.solver.particles_ng_reordered[i_q, i_b].active:
+            x0 = query.pbd.solver.particles_reordered[i_q, i_b].ipos
+            x1 = query.pbd.solver.particles_reordered[i_q, i_b].pos
             query.leaves.aabbs_min[i_b, i_q] = qd.min(x0, x1) - reach
             query.leaves.aabbs_max[i_b, i_q] = qd.max(x0, x1) + reach
         else:
@@ -295,7 +295,7 @@ class MpmPbdContact(CouplingPairs):
         """Gap of sorted particle `s` to the sphere of PBD particle i_q at the substep start, its distance minus the PBD
         radius and the contact thickness, infinite for a PBD particle at the position of the particle."""
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
-        dist = (self.mpm.particles.pos[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].ipos).norm()
+        dist = (self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos).norm()
         score = qd.math.inf
         if dist > gs.EPS:
             score = dist - qd.static(self.query.radius) - self.query.contact.thickness[()]
@@ -310,13 +310,13 @@ class MpmPbdContact(CouplingPairs):
         target -phi and stiffness `query.contact.stiffness` times its effective mass, the inverse of the inverse
         weights of the two particles."""
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
-        d = self.mpm.particles.pos[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].ipos
+        d = self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos
         normal = d / d.norm()
-        v_rel = self.mpm.particles.vel[f, i_p, i_b] - self.pbd.particles_reordered[i_q, i_b].vel
+        v_rel = self.mpm.particles.vel[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].vel
         if phi < contact_band_width(-normal.dot(v_rel), self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info):
             invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info)
-            if is_moving(i_q, i_b, self.pbd):
-                invweight += 1.0 / self.pbd.particles_info_reordered[i_q, i_b].mass
+            if is_moving(i_q, i_b, self.pbd.solver):
+                invweight += 1.0 / self.pbd.solver.particles_info_reordered[i_q, i_b].mass
             D = qd.Vector([self.query.contact.stiffness[()] / invweight] * PYRAMID_ROWS)
             i_pair = self.add_pair(s, i_b, normal, self.query.contact.friction[()], D, qd.Vector([-phi] * PYRAMID_ROWS))
             if i_pair >= 0:

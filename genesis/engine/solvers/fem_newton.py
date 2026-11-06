@@ -36,109 +36,6 @@ from .newton_solver import NewtonDevice, NewtonHost
 ELEMENT_BLOCKS = 10
 
 
-# ============================================ Layer 1: the FEM block ============================================
-
-
-@qd.func
-def is_free(i_b: int, i_v: int, fem: qd.template()):
-    """Whether a vertex is an unknown of the solve, not held at its target by a vertex constraint."""
-    is_constrained = False
-    if qd.static(fem.config.has_vertex_constraints):
-        is_constrained = fem.vertex_constraints.is_constrained[i_v, i_b]
-    return not is_constrained
-
-
-@qd.func(requires_top_level=True)
-def func_fem_assemble(f: int, dt: float, fem: qd.template(), linear: NewtonLinearScratch, rows: LinearBlock):
-    """Write the gradient -dt^2 force of every vertex, its mass block and the blocks of every element, all scaled to
-    the joint energy.
-
-    The block of vertices (k, l) of an element is V (1 + beta / dt) sum_ij S_ki S_lj H_ij, H being the Hessian of the
-    energy density in the deformation gradient, and S the mapping matrix of the element (see FEMSolver.compute_Ap). A
-    constrained vertex takes an identity block and a zero gradient, and the blocks of the elements on it are
-    discarded."""
-    fem.solver.func_compute_ele_hessian_gradient(f)
-    fem.solver.func_accumulate_vertex_force_preconditioner(f)
-    dt_sq = dt * dt
-    qd.loop_config(name="mpm_fem_assemble_vertices")
-    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
-        i_r = i_b * fem.n_vertices + i_v
-        row = rows.row_start[()] + i_r
-        mass = gs.qd_float(1.0)
-        g = qd.Vector.zero(gs.qd_float, 3)
-        if is_free(i_b, i_v, fem):
-            mass = dt_sq * fem.elements_v_info[i_v].mass_over_dt2 * (1.0 + fem.damping_alpha_dt)
-            g = -dt_sq * fem.elements_v_energy[i_b, i_v].force
-        write_block(rows.triplet_start[()] + i_r, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), linear)
-        linear.b_rhs[row] = g
-        linear.pcg.row_env[row] = i_b
-    qd.loop_config(name="mpm_fem_assemble_elements")
-    for i_b, i_e in qd.ndrange(fem.n_envs, fem.n_elements):
-        i_vs = fem.elements_i[i_e].el2v
-        S = fem.solver._func_compute_element_mapping_matrix(i_vs, fem.elements_i[i_e].B, i_b)
-        scale = dt_sq * fem.elements_i[i_e].V * fem.damping_beta_factor
-        i_t = rows.triplet_start[()] + fem.n_envs * fem.n_vertices + ELEMENT_BLOCKS * (i_b * fem.n_elements + i_e)
-        row_start = rows.row_start[()] + i_b * fem.n_vertices
-        for k_r in qd.static(range(4)):
-            for k_c in qd.static(range(k_r, 4)):
-                i_block = qd.static(4 * k_r - k_r * (k_r - 1) // 2 + k_c - k_r)
-                if is_free(i_b, i_vs[k_r], fem) and is_free(i_b, i_vs[k_c], fem):
-                    block = qd.Matrix.zero(gs.qd_float, 3, 3)
-                    for i, j in qd.static(qd.ndrange(3, 3)):
-                        block += (S[k_r, i] * S[k_c, j]) * fem.elements_el_hessian[i_b, i, j, i_e]
-                    write_block(i_t + i_block, row_start + i_vs[k_r], row_start + i_vs[k_c], scale * block, linear)
-                else:
-                    discard_block(i_t + i_block, linear)
-
-
-@qd.func
-def fem_solution(i_b: int, i_v: int, fem: qd.template()):
-    """The solution of the linear system on a vertex, minus its Newton direction."""
-    return fem.linear.solution[fem.linear_block.row_start[()] + i_b * fem.n_vertices + i_v]
-
-
-@qd.func(requires_top_level=True)
-def func_fem_start_line_search(f: int, fem: qd.template(), control: qd.template()):
-    """The line-search start point, and the largest component of the step into the Newton measure."""
-    qd.loop_config(name="mpm_fem_start_line_search")
-    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
-        fem.linesearch_state_v[i_b, i_v].x_prev = fem.elements_v[f + 1, i_v, i_b].pos
-        qd.atomic_max(control.max_disp[i_b], qd.abs(fem_solution(i_b, i_v, fem)).max())
-
-
-@qd.func(requires_top_level=True)
-def func_fem_step_forward(f: int, fem: qd.template(), control: qd.template()):
-    qd.loop_config(name="mpm_fem_step_forward")
-    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
-        fem.elements_v[f + 1, i_v, i_b].pos = fem.linesearch_state_v[i_b, i_v].x_prev - control.alpha[
-            i_b
-        ] * fem_solution(i_b, i_v, fem)
-
-
-@qd.func(requires_top_level=True)
-def func_fem_energy(f: int, dt: float, fem: qd.template(), energies: qd.template()):
-    """Add FEM's incremental potential at the end-of-substep positions, times dt^2, into the entry of every environment
-    in `energies`.
-
-    The potential holds the inertia and the linearized damping of the vertices, and the elastic energy and damping of
-    the elements, at the positions of frame f + 1."""
-    dt_sq = dt * dt
-    damping_alpha_dt = fem.damping_alpha_dt
-    qd.loop_config(name="mpm_fem_energy_vertices")
-    for i_b, i_v in qd.ndrange(fem.n_envs, fem.n_vertices):
-        diff = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v_energy[i_b, i_v].inertia
-        energy = 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-        if qd.static(fem.config.has_damping):
-            step = fem.elements_v[f + 1, i_v, i_b].pos - fem.elements_v[f, i_v, i_b].pos
-            energy += 0.5 * fem.elements_v_info[i_v].mass_over_dt2 * step.dot(step) * damping_alpha_dt
-        qd.atomic_add(energies[i_b], dt_sq * energy)
-    fem.solver.func_compute_ele_energy(f)
-    qd.loop_config(name="mpm_fem_energy_elements")
-    for i_b, i_e in qd.ndrange(fem.n_envs, fem.n_elements):
-        energy = fem.elements_el_energy[i_b, i_e].energy * fem.elements_i[i_e].V
-        qd.atomic_add(energies[i_b], dt_sq * energy)
-
-
 # ============================================ Layer 2: participant =============================================
 
 
@@ -155,10 +52,9 @@ class FemNewtonConfig(StaticConfig):
 class FemNewtonParticipant(NewtonDevice):
     """Device stages of the FEM vertex positions in the joint solve.
 
-    It is the one place that selects the FEM arrays and scalars the stages and the couplings read, and `solver` gives
-    the stages access to the functions of FEM's own implicit solver. The step sizes are plain floats, compiled into the
-    stages as constants. The arrays are properties of the solver, so that
-    the walk over the data of the NewtonSolver (see iter_data_oriented) stops at the solver, which owns them."""
+    It selects the FEM scalars that the stages and the couplings read, and reaches the arrays and the functions of FEM's
+    own implicit solver through `solver`, which owns them, so that the walk over the data of the NewtonSolver (see
+    iter_data_oriented) stops there. The step sizes are plain floats, compiled into the stages as constants."""
 
     # The rows of a vertex are its own
     n_vertex_rows = 1
@@ -192,58 +88,63 @@ class FemNewtonParticipant(NewtonDevice):
         yield from iter_data(self, "linear_block")
         yield from iter_data(self, "jacobi")
 
-    @property
-    def vertex_constraints(self):
-        """The constrained vertices, which exist only when the solver enables vertex constraints."""
-        return self.solver.vertex_constraints
+    @qd.func
+    def is_free(self, i_b: int, i_v: int):
+        """Whether a vertex is an unknown of the solve, not held at its target by a vertex constraint."""
+        is_constrained = False
+        if qd.static(self.config.has_vertex_constraints):
+            is_constrained = self.solver.vertex_constraints.is_constrained[i_v, i_b]
+        return not is_constrained
 
-    @property
-    def surface(self):
-        return self.solver.surface
-
-    @property
-    def batch_active(self):
-        return self.solver.batch_active
-
-    @property
-    def batch_pcg_active(self):
-        return self.solver.batch_pcg_active
-
-    @property
-    def batch_linesearch_active(self):
-        return self.solver.batch_linesearch_active
-
-    @property
-    def elements_v(self):
-        return self.solver.elements_v
-
-    @property
-    def elements_i(self):
-        return self.solver.elements_i
-
-    @property
-    def elements_v_info(self):
-        return self.solver.elements_v_info
-
-    @property
-    def elements_v_energy(self):
-        return self.solver.elements_v_energy
-
-    @property
-    def elements_el_energy(self):
-        return self.solver.elements_el_energy
-
-    @property
-    def elements_el_hessian(self):
-        return self.solver.elements_el_hessian
-
-    @property
-    def linesearch_state_v(self):
-        return self.solver.linesearch_state_v
+    @qd.func
+    def solution(self, i_b: int, i_v: int):
+        """The solution of the linear system on a vertex, minus its Newton direction."""
+        return self.linear.solution[self.linear_block.row_start[()] + i_b * self.n_vertices + i_v]
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int, is_exact: qd.template()):
-        func_fem_assemble(f, self.substep_dt, self, self.linear, self.linear_block)
+        """Write the gradient -dt^2 force of every vertex, its mass block and the blocks of every element, all scaled to
+        the joint energy.
+
+        The block of vertices (k, l) of an element is V (1 + beta / dt) sum_ij S_ki S_lj H_ij, H being the Hessian of
+        the energy density in the deformation gradient, and S the mapping matrix of the element (see
+        FEMSolver.compute_Ap). A constrained vertex takes an identity block and a zero gradient, and the blocks of the
+        elements on it are discarded."""
+        self.solver.func_compute_ele_hessian_gradient(f)
+        self.solver.func_accumulate_vertex_force_preconditioner(f)
+        dt_sq = self.substep_dt * self.substep_dt
+        qd.loop_config(name="mpm_fem_assemble_vertices")
+        for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
+            i_r = i_b * self.n_vertices + i_v
+            row = self.linear_block.row_start[()] + i_r
+            mass = gs.qd_float(1.0)
+            g = qd.Vector.zero(gs.qd_float, 3)
+            if self.is_free(i_b, i_v):
+                mass = dt_sq * self.solver.elements_v_info[i_v].mass_over_dt2 * (1.0 + self.damping_alpha_dt)
+                g = -dt_sq * self.solver.elements_v_energy[i_b, i_v].force
+            i_t = self.linear_block.triplet_start[()] + i_r
+            write_block(i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear)
+            self.linear.b_rhs[row] = g
+            self.linear.pcg.row_env[row] = i_b
+        qd.loop_config(name="mpm_fem_assemble_elements")
+        for i_b, i_e in qd.ndrange(self.n_envs, self.n_elements):
+            i_vs = self.solver.elements_i[i_e].el2v
+            S = self.solver._func_compute_element_mapping_matrix(i_vs, self.solver.elements_i[i_e].B, i_b)
+            scale = dt_sq * self.solver.elements_i[i_e].V * self.damping_beta_factor
+            i_t = self.linear_block.triplet_start[()] + self.n_envs * self.n_vertices
+            i_t += ELEMENT_BLOCKS * (i_b * self.n_elements + i_e)
+            row_start = self.linear_block.row_start[()] + i_b * self.n_vertices
+            for k_r in qd.static(range(4)):
+                for k_c in qd.static(range(k_r, 4)):
+                    i_block = qd.static(4 * k_r - k_r * (k_r - 1) // 2 + k_c - k_r)
+                    if self.is_free(i_b, i_vs[k_r]) and self.is_free(i_b, i_vs[k_c]):
+                        block = qd.Matrix.zero(gs.qd_float, 3, 3)
+                        for i, j in qd.static(qd.ndrange(3, 3)):
+                            block += (S[k_r, i] * S[k_c, j]) * self.solver.elements_el_hessian[i_b, i, j, i_e]
+                        rows = row_start + i_vs
+                        write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
+                    else:
+                        discard_block(i_t + i_block, self.linear)
 
     @qd.func(requires_top_level=True)
     def func_factor_begin(self):
@@ -263,15 +164,39 @@ class FemNewtonParticipant(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
-        func_fem_start_line_search(f, self, control)
+        """Record the line-search start point, and add the largest component of the step into the Newton measure."""
+        qd.loop_config(name="mpm_fem_start_line_search")
+        for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
+            self.solver.linesearch_state_v[i_b, i_v].x_prev = self.solver.elements_v[f + 1, i_v, i_b].pos
+            qd.atomic_max(control.max_disp[i_b], qd.abs(self.solution(i_b, i_v)).max())
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: qd.template(), f: int):
-        func_fem_step_forward(f, self, control)
+        qd.loop_config(name="mpm_fem_step_forward")
+        for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
+            x_prev = self.solver.linesearch_state_v[i_b, i_v].x_prev
+            self.solver.elements_v[f + 1, i_v, i_b].pos = x_prev - control.alpha[i_b] * self.solution(i_b, i_v)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
-        func_fem_energy(f, self.substep_dt, self, energies)
+        """Add FEM's incremental potential at the end-of-substep positions, times dt^2, into the entry of every
+        environment in `energies`: the inertia and the linearized damping of the vertices, and the elastic energy and
+        damping of the elements, at the positions of frame f + 1."""
+        dt_sq = self.substep_dt * self.substep_dt
+        qd.loop_config(name="mpm_fem_energy_vertices")
+        for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
+            mass_over_dt2 = self.solver.elements_v_info[i_v].mass_over_dt2
+            diff = self.solver.elements_v[f + 1, i_v, i_b].pos - self.solver.elements_v_energy[i_b, i_v].inertia
+            energy = 0.5 * mass_over_dt2 * diff.dot(diff)
+            if qd.static(self.config.has_damping):
+                step = self.solver.elements_v[f + 1, i_v, i_b].pos - self.solver.elements_v[f, i_v, i_b].pos
+                energy += 0.5 * mass_over_dt2 * step.dot(step) * self.damping_alpha_dt
+            qd.atomic_add(energies[i_b], dt_sq * energy)
+        self.solver.func_compute_ele_energy(f)
+        qd.loop_config(name="mpm_fem_energy_elements")
+        for i_b, i_e in qd.ndrange(self.n_envs, self.n_elements):
+            energy = self.solver.elements_el_energy[i_b, i_e].energy * self.solver.elements_i[i_e].V
+            qd.atomic_add(energies[i_b], dt_sq * energy)
 
     # ------------------------------------------- vertex map -------------------------------------------
 
@@ -279,30 +204,30 @@ class FemNewtonParticipant(NewtonDevice):
     def func_vertex_value(self, f: int, i_v: int):
         i_b = i_v // self.n_vertices
         i_fv = i_v - i_b * self.n_vertices
-        return self.elements_v[f + 1, i_fv, i_b].pos - self.elements_v[f, i_fv, i_b].pos
+        return self.solver.elements_v[f + 1, i_fv, i_b].pos - self.solver.elements_v[f, i_fv, i_b].pos
 
     @qd.func
     def func_vertex_rows(self, i_v: int):
         i_b = i_v // self.n_vertices
         rows = qd.Vector([self.linear_block.row_start[()] + i_v], dt=gs.qd_int)
-        weights = qd.Vector([gs.qd_float(is_free(i_b, i_v - i_b * self.n_vertices, self))], dt=gs.qd_float)
+        weights = qd.Vector([gs.qd_float(self.is_free(i_b, i_v - i_b * self.n_vertices))], dt=gs.qd_float)
         return 1, rows, weights
 
 
 @qd.kernel
 def kernel_fem_begin(fem: qd.template()):
     for i_b in range(fem.n_envs):
-        fem.batch_active[i_b] = True
-        fem.batch_pcg_active[i_b] = True
-        fem.batch_linesearch_active[i_b] = True
+        fem.solver.batch_active[i_b] = True
+        fem.solver.batch_pcg_active[i_b] = True
+        fem.solver.batch_linesearch_active[i_b] = True
 
 
 @qd.kernel
 def kernel_fem_freeze(f: int, fem: qd.template(), control: qd.template()):
     for i_v, i_b in qd.ndrange(fem.n_vertices, fem.n_envs):
         if control.has_failed_non_finite[i_b] != 0:
-            fem.elements_v[f + 1, i_v, i_b].pos = fem.elements_v[f, i_v, i_b].pos
-            fem.elements_v[f + 1, i_v, i_b].vel = fem.elements_v[f, i_v, i_b].vel
+            fem.solver.elements_v[f + 1, i_v, i_b].pos = fem.solver.elements_v[f, i_v, i_b].pos
+            fem.solver.elements_v[f + 1, i_v, i_b].vel = fem.solver.elements_v[f, i_v, i_b].vel
 
 
 class FemNewtonHost(NewtonHost):
