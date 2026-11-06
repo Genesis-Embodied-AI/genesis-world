@@ -11,12 +11,13 @@ import sys
 import types
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-import numba as nb
 import numpy as np
 
+import numba as nb
 from pydantic import BaseModel
 
 import genesis as gs

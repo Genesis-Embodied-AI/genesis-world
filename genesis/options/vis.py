@@ -1,5 +1,6 @@
 import sys
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, Sequence, Union
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
@@ -12,7 +13,7 @@ from .options import Options
 
 
 if TYPE_CHECKING:
-    LightType = Union[Mapping[str, Any], "DirectionalLight", "PointLight", "AmbientLight"]
+    LightType = Mapping[str, Any] | "DirectionalLight" | "PointLight" | "AmbientLight"
     LightArray = Sequence[LightType]
 else:
     LightType = Annotated["DirectionalLight | PointLight | AmbientLight", Field(discriminator="type")]

@@ -409,7 +409,7 @@ class KinematicSolver(Solver):
             box_box_detection=False,
             sparse_solve=False,
             integrator=gs.integrator.approximate_implicitfast,
-            solver_type=0,
+            solver_type=gs.constraint_solver.CG,
         )
 
     def _create_data_manager(self):

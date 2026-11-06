@@ -10,12 +10,12 @@ import os
 import random
 import sys
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import field
 from importlib import import_module
 from itertools import combinations
-from typing import Any, NoReturn, Optional, Sequence
+from typing import Any, NoReturn
 
 import numpy as np
 import torch
@@ -251,7 +251,7 @@ def set_random_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
+def get_device(backend: gs.constants.backend, device_idx: int | None = None):
     if backend == gs.gpu:
         if torch.cuda.is_available():
             if torch.version.hip:

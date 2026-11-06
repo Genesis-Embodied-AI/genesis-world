@@ -31,11 +31,13 @@ resetting errno explicit in this test.
 import copy
 import importlib.util
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
+
 import pytest
 import trimesh
 from scipy.spatial import ConvexHull

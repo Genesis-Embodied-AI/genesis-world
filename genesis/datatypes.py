@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Generic, TypeVar, SupportsIndex, overload, get_args
+from typing import SupportsIndex, get_args, overload
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
@@ -13,10 +13,7 @@ from genesis.styles import colors, formats, styless
 LOGGER = logging.getLogger(__name__)
 
 
-T = TypeVar("T", bound=RBC)
-
-
-class List(RBC, list[T], Generic[T]):
+class List[T: RBC](RBC, list[T]):
     """
     Custom list with more informative repr.
 

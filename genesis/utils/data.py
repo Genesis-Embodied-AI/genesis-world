@@ -10,7 +10,7 @@ import typing
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import Annotated, Any, ClassVar, NamedTuple, dataclass_transform
 
 import numpy as np
@@ -20,7 +20,6 @@ import pydantic
 from pydantic import TypeAdapter
 
 import quadrants as qd
-from quadrants.lang import impl
 from quadrants.lang.util import to_numpy_type
 
 import genesis as gs
@@ -42,10 +41,10 @@ class StaticConfig:
     """
     Base of the static configs, the compile-time switches kernels take as `qd.template()`.
 
-    A subclass declares its fields as annotations of type bool, int, IntEnum or another static config, an optional
-    default as their value. Kernels key their compiled instances on the configs they take, by equality, so a rebuilt
-    scene with the same values reuses its kernels. A config is immutable, since a write would change the key under which
-    its kernels are stored and leave them unreachable.
+    A subclass declares its fields as annotations of type bool, int, IntEnum, StrEnum or another static config, an
+    optional default as their value. Kernels key their compiled instances on the configs they take, by equality, so a
+    rebuilt scene with the same values reuses its kernels. A config is immutable, since a write would change the key
+    under which its kernels are stored and leave them unreachable.
     """
 
     def __init_subclass__(cls, **kwargs):
@@ -63,12 +62,12 @@ class StaticConfig:
                 validators[key] = TypeAdapter(StrictBool)
             elif annotation is int:
                 validators[key] = TypeAdapter(StrictInt)
-            elif isinstance(annotation, type) and issubclass(annotation, IntEnum):
+            elif isinstance(annotation, type) and issubclass(annotation, (IntEnum, StrEnum)):
                 validators[key] = TypeAdapter(annotation)
             elif isinstance(annotation, type) and issubclass(annotation, StaticConfig):
                 validators[key] = TypeAdapter(annotation, config=pydantic.ConfigDict(arbitrary_types_allowed=True))
             else:
-                raise TypeError(f"{name}.{key}: a static config holds bool, int, IntEnum or static configs.")
+                raise TypeError(f"{name}.{key}: a static config holds bool, int, IntEnum, StrEnum or static configs.")
         defaults = {key: cls.__dict__[key] for key in annotations if key in cls.__dict__}
 
         def __init__(self, **kwargs):
@@ -730,35 +729,6 @@ def _selection_depth(scope, items, leaf) -> int | None:
     return max(depths, default=None)
 
 
-# FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
-# constant. A constant waits for the next materialization instead, at the cost of one synchronization there.
-_pending_fields_fill: list[tuple[qd.Tensor, Any]] = []
-_materialize = impl.PyQuadrants.materialize
-_clear = impl.PyQuadrants.clear
-
-
-def _materialize_then_fill(self):
-    _materialize(self)
-    # The list is emptied before replaying it, since each fill launches a kernel that materializes again. The replay
-    # ends with a synchronization because a DLPack export materializes right before handing out its buffer, which
-    # leaves its caller no chance to synchronize between the fill and the first read.
-    fields_fill = _pending_fields_fill.copy()
-    _pending_fields_fill.clear()
-    for tensor, value in fields_fill:
-        tensor.fill(value)
-    if fields_fill:
-        self.prog.synchronize()
-
-
-def _clear_then_drop_fills(self):
-    _clear(self)
-    _pending_fields_fill.clear()
-
-
-impl.PyQuadrants.materialize = _materialize_then_fill
-impl.PyQuadrants.clear = _clear_then_drop_fills
-
-
 def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
     # The element type, its base resolved to the precision of the simulation and its element shape to the sizes
     dtype, element_shape = leaf.spec.dtype if isinstance(leaf.spec.dtype, tuple) else (leaf.spec.dtype, ())
@@ -784,17 +754,9 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         value = values
         for name in leaf.path:
             value = value[name]
-        array = V(dtype=dtype, shape=())
         if isinstance(value, tuple):
             value = qd.Vector(value, dt=dtype.dtype)
-        # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
-        # materialization (see quadrants#941 above). An ndarray is filled at once: on CPU and Compute Unified Device
-        # Architecture (CUDA) GPUs, its zero-copy export materializes nothing, so a deferred fill would come too late.
-        if not gs.use_ndarray:
-            _pending_fields_fill.append((array, value))
-        else:
-            array.fill(value)
-        return array
+        return V(dtype=dtype, shape=(), fill=value)
 
     dims, axes = [], []
     for dim in leaf.shape:

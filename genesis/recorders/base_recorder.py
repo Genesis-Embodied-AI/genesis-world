@@ -1,7 +1,8 @@
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import genesis as gs
 from genesis.options.recorders import RecorderOptions
@@ -11,10 +12,7 @@ if TYPE_CHECKING:
     from .recorder_manager import RecorderManager
 
 
-T = TypeVar("T")
-
-
-class Recorder(Generic[T]):
+class Recorder[T]:
     """
     Base class for all recorders.
 

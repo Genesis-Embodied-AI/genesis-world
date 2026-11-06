@@ -5,11 +5,12 @@ import math
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 import numpy as np
+
 from PIL import Image
 
 import genesis as gs
@@ -55,10 +56,7 @@ MPL_PLOTTER_WINDOW_REFRESH_PERIOD = 0.1
 COLORS = itertools.cycle(("r", "g", "b", "c", "m", "y"))
 
 
-T = TypeVar("T")
-
-
-class BasePlotter(Recorder):
+class BasePlotter[T](Recorder[T]):
     def __init__(self, manager: "RecorderManager", options: BasePlotterOptions, data_func: Callable[[], T]):
         if options.show_window is None:
             options.show_window = has_display()
@@ -229,7 +227,7 @@ class LinePlotHelper:
         return self._subplot_structure
 
 
-class BasePyQtPlotter(BasePlotter):
+class BasePyQtPlotter[T](BasePlotter[T]):
     """
     Base class for PyQt based plotters.
     """
@@ -349,7 +347,7 @@ class PyQtLinePlotter(BasePyQtPlotter):
         self.curves.clear()
 
 
-class BaseMPLPlotter(BasePlotter):
+class BaseMPLPlotter[T](BasePlotter[T]):
     """
     Base class for matplotlib based plotters.
     """

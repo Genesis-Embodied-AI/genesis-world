@@ -22,6 +22,17 @@ class IntEnum(enum.IntEnum):
         return f"<{self.name}: {self.value}>"
 
 
+class StrEnum(enum.StrEnum):
+    """Enumeration of a user-facing option, whose value is the name of its member so that it reads as such in a file."""
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        return name
+
+    def __repr__(self):
+        return f"<gs.{self.__class__.__name__}.{self.name}>"
+
+
 # geom type in rigid solver
 class GEOM_TYPE(IntEnum):
     # Beware PLANE must be the first geometry type as this is assumed by MPR collision detection.
@@ -59,20 +70,20 @@ class CTRL_MODE(IntEnum):
 
 ######### User accessible constants do not capitalize #########
 # rigid solver intergrator
-class integrator(IntEnum):
-    Euler = 0
-    implicitfast = 1
-    approximate_implicitfast = 2
+class integrator(StrEnum):
+    Euler = enum.auto()
+    implicitfast = enum.auto()
+    approximate_implicitfast = enum.auto()
 
 
 # rigid solver constraint solver
-class constraint_solver(IntEnum):
-    CG = 0
-    Newton = 1
+class constraint_solver(StrEnum):
+    CG = enum.auto()
+    Newton = enum.auto()
 
 
 # rigid solver contact friction cone
-class friction_cone(IntEnum):
+class friction_cone(StrEnum):
     """
     Contact friction cone model, trading numerical robustness for physical accuracy.
 
@@ -85,12 +96,12 @@ class friction_cone(IntEnum):
     put at rest instead of slowly creeping.
     """
 
-    pyramidal = 0
-    elliptic = 1
+    pyramidal = enum.auto()
+    elliptic = enum.auto()
 
 
 # rigid solver contact resolution
-class contact_resolution(IntEnum):
+class contact_resolution(StrEnum):
     """
     How a contact's normal force and friction force are resolved against each other.
 
@@ -114,12 +125,12 @@ class contact_resolution(IntEnum):
     Appendix C, whose Signorini condition is what forbids the normal force from absorbing tangential demand.
     """
 
-    convex = 0
-    signorini = 1
+    convex = enum.auto()
+    signorini = enum.auto()
 
 
 # rigid solver broadphase traversal strategy
-class broadphase_traversal(IntEnum):
+class broadphase_traversal(StrEnum):
     """
     Strategy for broad-phase collision detection in the rigid solver.
 
@@ -132,13 +143,13 @@ class broadphase_traversal(IntEnum):
 
     Attributes
     ----------
-    SAP : int
+    SAP : str
         Sweep-and-prune. Sorts the link boxes along one axis then only checks the link pairs that overlap on that axis.
         The sort and sweep are single-threaded per environment, which uses GPU cores poorly when there are few
         environments. The boxes stay nearly sorted from one step to the next, so the sort usually runs in near-linear
         time, up to O(n_links^2) after a large reordering, and the sweep checks the k link pairs overlapping along
         the axis.
-    ALL_VS_ALL : int
+    ALL_VS_ALL : str
         Checks every valid link pair every step, in parallel across GPU threads. The cost per step grows with the number
         of valid link pairs, which grows quadratically with the number of independent bodies in the scene. With
         heterogeneous entities, every environment also checks the link pairs of the variants it does not carry.
@@ -153,8 +164,8 @@ class broadphase_traversal(IntEnum):
       empty boxes, which yield no candidate pair).
     """
 
-    SAP = 0
-    ALL_VS_ALL = 1
+    SAP = enum.auto()
+    ALL_VS_ALL = enum.auto()
 
 
 class link_ref_frame(IntEnum):

@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from pydantic import StrictBool
 
@@ -7,10 +7,8 @@ from genesis.options.options import Options
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
 
-EntityT = TypeVar("EntityT", bound="Entity")
 
-
-class Material(Options, Generic[EntityT]):
+class Material[EntityT: "Entity"](Options):
     """
     The base class of materials.
 
