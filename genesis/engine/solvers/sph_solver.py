@@ -192,16 +192,14 @@ class SPHSolver(ParticleSolver):
             self._n_particles, self.particles.pos, self.particles_ng.active, self.particles_ng.reordered_idx
         )
 
-        # copy to reordered
-        self.particles_ng_reordered.active.fill(False)
-
+        # Copy to reordered, the active particles taking the first sorted indices (see compute_reordered_idx).
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            self.particles_ng_reordered[i_p, i_b].active = i_p < self.sh.cur_cnt[i_b]
             if self.particles_ng[i_p, i_b].active:
                 reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
 
                 self.particles_reordered[reordered_idx, i_b] = self.particles[i_p, i_b]
                 self.particles_info_reordered[reordered_idx, i_b] = self.particles_info[i_p]
-                self.particles_ng_reordered[reordered_idx, i_b].active = self.particles_ng[i_p, i_b].active
 
         if qd.static(self._coupler._rigid_sph):
             for i_p, i_g, i_b in qd.ndrange(self._n_particles, self._coupler.rigid_solver.n_geoms, self._B):
@@ -831,8 +829,8 @@ class SPHSolver(ParticleSolver):
             if i_p >= 0:
                 for i in qd.static(range(3)):
                     self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
-                self.particles[i_p, i_b].vel.fill(0.0)
-                self.particles[i_p, i_b].acc.fill(0.0)
+                self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
+                self.particles[i_p, i_b].acc = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_get_particles_pos(

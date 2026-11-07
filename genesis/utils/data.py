@@ -27,20 +27,34 @@ from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array, get_own_annotations
 
 
-def eoa(tensor):
-    """Return the axes of a loop over a data index then the environment that follow the memory order of tensor.
+def eoa(tensor, ndim=2):
+    """Return the axes of a loop whose last index is the environment that follow the memory order of a tensor.
 
-    On CPU, the axes are (1, 0), visiting the environments in the outer loop, when the environment, the last index of
-    tensor, is outermost in its memory, so that each thread runs over the contiguous memory of its own environments.
-    They are None otherwise, the order of the indices. Evaluated in `qd.static` on a kernel argument, whose memory order
-    the kernel cache key holds.
+    The loop runs over `ndim` indices. On CPU, its axes visit the environments in the outer loop, the other indices in
+    their order, when the environment, the last index of `tensor`, is outermost in its memory, so that each thread runs
+    over the contiguous memory of its own environments. They are None otherwise, the order of the indices. Evaluated in
+    `qd.static` on a kernel argument, whose memory order the kernel cache key holds.
     """
     # FIXME: quadrants#934 - a kernel reads the axis permutation of an ndarray argument through the private _qd_layout
     # alone, its public layout() being the storage order of the elements.
     # FIXME: quadrants#1082 - a struct-for over a field ignores serialize on GPU, so loops over a whole tensor run over
     # its shape along these axes instead of a struct-for over the tensor itself, which would follow its memory order.
     layout = tensor.layout if isinstance(tensor, qd.Field) else tensor._qd_layout
-    return (1, 0) if gs.backend == gs.cpu and layout is not None and layout[0] == len(layout) - 1 else None
+    if gs.backend == gs.cpu and layout is not None and layout[0] == len(layout) - 1:
+        return (ndim - 1, *range(ndim - 1))
+    return None
+
+
+@qd.kernel(fastcache=True)
+def kernel_fill(tensor: qd.Tensor, value: qd.template()):
+    """Write a constant into every entry of a tensor, looping in its memory order.
+
+    `tensor` is a field or an ndarray of any rank, its entries scalars, vectors or matrices, `value` a Python int or
+    bool broadcast to every component of an entry. The value is a compile-time constant: the constants written being
+    few (0, -1, False, a user-set iteration count), each compiles once, and the loop body stores an immediate.
+    """
+    for I in qd.grouped(qd.ndrange(*tensor.shape, axes=qd.static(eoa(tensor, len(tensor.shape))))):
+        tensor[I] = value
 
 
 # FIXME: quadrants#1081 - qd.ndarray takes no memory layout, so the ndarrays are allocated through the qd.tensor wrapper
