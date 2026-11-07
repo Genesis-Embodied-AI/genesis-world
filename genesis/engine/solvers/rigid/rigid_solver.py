@@ -551,8 +551,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         has_scalar_seed_factor = (
             enable_tiled_island_seed and is_single_island and not enable_cooperative_constraint_kernels
         )
+        # A CPU thread runs a contiguous range of environments, one after the other (see _allocate in data.py)
         constraint_layout_batch_first = (
-            enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
+            gs.backend == gs.cpu or enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
 
         # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which the CPU does not offer, and

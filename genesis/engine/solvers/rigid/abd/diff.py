@@ -9,6 +9,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.utils.array_class import DynInfo, DynState, ErrorCode, RigidInfo
+from genesis.utils.data import eoa
 from genesis.utils.misc import qd_isfinite
 
 from .forward_dynamics import func_clear_coupling_wrench
@@ -22,7 +23,11 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
     as it was so that the value does not propagate. Every velocity and position takes its own thread.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
+    for i_dq, i_b in qd.ndrange(
+        qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]),
+        errno.shape[0],
+        axes=qd.static(eoa(dyn_state.dofs.vel_next)),
+    ):
         is_valid = True
         if i_dq < dyn_state.dofs.vel.shape[0]:
             is_valid = qd_isfinite(dyn_state.dofs.vel_next[i_dq, i_b])
@@ -33,7 +38,11 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
 
     # The sizes are read in the loop ranges, since autodiff takes a top level made of loops alone
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_dq, i_b in qd.ndrange(qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]), errno.shape[0]):
+    for i_dq, i_b in qd.ndrange(
+        qd.max(dyn_state.dofs.vel.shape[0], rigid_info.qpos.shape[0]),
+        errno.shape[0],
+        axes=qd.static(eoa(dyn_state.dofs.vel)),
+    ):
         if (errno[i_b] & ErrorCode.INVALID_ACC_NAN) == 0:
             if i_dq < dyn_state.dofs.vel.shape[0]:
                 dyn_state.dofs.vel[i_dq, i_b] = dyn_state.dofs.vel_next[i_dq, i_b]

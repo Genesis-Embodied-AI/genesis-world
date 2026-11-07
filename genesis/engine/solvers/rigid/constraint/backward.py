@@ -3,6 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.utils.data import eoa
 
 from . import solver
 
@@ -110,12 +111,10 @@ def kernel_solve_adjoint_u(
     The gradient g sums the one of the acceleration and the direct one of the constraint forces: efc_force is
     -D * (J qacc - aref) on an active row and a constant otherwise, so g += J^T * (-D * dL/defc_force).
     """
-    n_dofs = constraint_state.bw_u.shape[0]
     _B = constraint_state.bw_u.shape[1]
-    len_constraints = constraint_state.bw_Ju.shape[0]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
+    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
         if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
             dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
@@ -124,7 +123,7 @@ def kernel_solve_adjoint_u(
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(*constraint_state.bw_u.shape, axes=qd.static(eoa(constraint_state.bw_u))):
         constraint_state.bw_u[i_d, i_b] = 0.0
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
@@ -171,7 +170,6 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
     """
     _B = constraint_state.bw_u.shape[1]
     n_dofs = constraint_state.bw_u.shape[0]
-    len_constraints = constraint_state.bw_Ju.shape[0]
 
     # The adjoint of the mass matrix is read whole (see kernel_accumulate_constraint_solver_grads), so it is cleared
     # whole before the mass blocks are written
@@ -179,13 +177,13 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
         constraint_state.dL_dM[i_d0, i_d1, i_b] = gs.qd_float(0.0)
 
     # force: u
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.dL_dforce))):
         constraint_state.dL_dforce[i_d, i_b] = constraint_state.bw_u[i_d, i_b]
 
     # One thread per row of every env. The reverses of the row assembly read the rows of the env alone, each over its
     # support (jac_dofs_idx), so the adjoints of a row are written there alone, zero for an inactive row: an entry
     # outside the support is structurally zero and moves nothing.
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
+    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.bw_Ju))):
         if i_c < constraint_state.n_constraints[i_b]:
             # Ju, and w = J qacc - aref
             Ju = gs.qd_float(0.0)
@@ -214,7 +212,7 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
 
     # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
     # outside them is structurally zero and moves nothing, so its gradient is zero.
-    for i, i_b in qd.ndrange(n_dofs, _B):
+    for i, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.dL_dM))):
         for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
             val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
             val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
@@ -228,13 +226,11 @@ def kernel_load_dL_dqacc_from_acc_grad(
     """Copy the acc grad into constraint_state.dL_dqacc (the input buffer consumed by kernel_solve_adjoint_u) and
     zero the source grad so the downstream implicit-function-theorem path does not re-consume it.
     """
-    _B = dyn_state.dofs.acc.shape[1]
-    n_dofs = dyn_state.dofs.acc.shape[0]
     qd.loop_config(
         name="kernel_load_dL_dqacc_from_acc_grad",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(*dyn_state.dofs.acc.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
         constraint_state.dL_dqacc[i_d, i_b] = dyn_state.dofs.acc.grad[i_d, i_b]
         dyn_state.dofs.acc.grad[i_d, i_b] = gs.qd_float(0.0)
 
@@ -254,7 +250,7 @@ def kernel_accumulate_constraint_solver_grads(
         name="kernel_accumulate_constraint_solver_grads",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(dyn_state.dofs.qf_smooth))):
         dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):

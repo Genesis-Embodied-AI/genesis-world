@@ -29,7 +29,7 @@ from genesis.utils.array_class import (
     cholesky_tile_size_for,
     island_tile_caps,
 )
-from genesis.utils.data import DataItem, iter_data
+from genesis.utils.data import DataItem, eoa, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
@@ -162,7 +162,8 @@ class ConstraintSolver:
         # One update slot per fused update of the per-island factor, one for the whole-env factor of a single island
         nt_vec_n_slots = config.hessian_rank_update_batch if self.sparse_solve or not config.is_single_island else 1
         n_tile_classes = len(island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
-        is_serialized = config.para_level < gs.PARA_LEVEL.ALL
+        # A CPU thread, like serialized execution, runs its environments one after the other
+        is_env_by_env = config.backend == gs.cpu or config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = ConstraintState(
             sizes=dict(
                 envs=solver._B,
@@ -179,8 +180,8 @@ class ConstraintSolver:
             ),
             env_first={
                 "cooperative_rows": config.constraint_layout_batch_first,
-                "jacobian_rows": config.enable_cooperative_constraint_kernels or is_serialized,
-                "serial_rows": is_serialized,
+                "jacobian_rows": config.enable_cooperative_constraint_kernels or is_env_by_env,
+                "serial_rows": is_env_by_env,
                 ConstraintState.nt_H_cone_free_diag: True,
             },
             # The noslip columns hold the environments (see noslip_MinvJT), stored first along with the rows
@@ -979,15 +980,14 @@ def _add_collision_constraints_per_contact(
 ):
     """Build all collision-contact constraints with one GPU thread per contact."""
     EPS = rigid_info.EPS[None]
-    _B = dyn_state.dofs.ctrl_mode.shape[1]
-    max_candidate_contacts = collider_state.contact_data.link_a.shape[0]
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
 
     # Iteration order follows the jac layout: batch-outer keeps every write within one env's batch-first block, while
     # the batch-inner order keeps consecutive GPU threads on consecutive envs (coalesced batch-last).
     qd.loop_config(name="add_collision_constraints", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_col_, i_b in qd.ndrange(
-        max_candidate_contacts, _B, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
+        *collider_state.contact_data.link_a.shape,
+        axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
     ):
         # i_col_ counts the live contacts, the ones after the kept contacts of the sleepers (see n_contacts_hibernated
         # in array_class.py), and numbers the row group
@@ -1524,12 +1524,10 @@ def func_add_equality_constraints(
 ):
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
-    n_links = dyn_state.links.pos.shape[0]
-
     # Reset the per-link constraint involvement (see is_constrained in array_class.py); the equality funcs below and
     # the collision assembly mark it back.
     qd.loop_config(name="clear_links_constrained", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.is_constrained))):
         dyn_state.links.is_constrained[i_l, i_b] = False
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -5290,11 +5288,8 @@ def _func_update_qfrc_constraint_coop(constraint_state: ConstraintState):
     The lanes of a warp then read consecutive dofs of every row of the batch-first Jacobian (see jac_layout in
     array_class.py), and each sums the rows of its env in order.
     """
-    n_dofs = constraint_state.qfrc_constraint.shape[0]
-    _B = constraint_state.grad.shape[1]
-
     qd.loop_config(name="update_constraint_qfrc")
-    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=(1, 0)):
+    for i_d, i_b in qd.ndrange(*constraint_state.qfrc_constraint.shape, axes=(1, 0)):
         qfrc = gs.qd_float(0.0)
         for i_c in range(constraint_state.n_constraints[i_b]):
             qfrc = qfrc + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
@@ -5448,11 +5443,10 @@ def func_update_gradient_no_solve(dyn_state: DynState, constraint_state: Constra
     Under enable_cooperative_constraint_kernels the ndrange is swapped so adjacent lanes vary i_d - 3 of 4 in-loop
     accesses (grad, Ma, qfrc_constraint) are DOF-vec flipped; only dyn_state.dofs.force stays canonical.
     """
-    _B = constraint_state.grad.shape[1]
-    n_dofs = constraint_state.grad.shape[0]
     qd.loop_config(name="update_gradient_no_solve", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(
-        n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
+        *constraint_state.grad.shape,
+        axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None),
     ):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
             # The gradient of an island standing still is kept (see improved in IslandState)
@@ -5509,7 +5503,6 @@ def _initialize_Jaref_per_env(qacc: qd.template(), constraint_state: ConstraintS
 def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: ConstraintState, rigid_config: qd.template()):
     """Initialize Jaref = J @ qacc, parallelised over (constraint, env)."""
     _B = constraint_state.jac.shape[2]
-    len_constraints = constraint_state.Jaref.shape[0]
 
     # Lanes vary the stride-1 axis of jac so jac loads coalesce: i_c under the flipped layout, i_b under canonical. On
     # the cooperative path, one block per env strides its rows (see _func_update_constraint_forces in
@@ -5528,7 +5521,8 @@ def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: Constraint
     else:
         qd.loop_config(name="init_jaref_parallel", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_c, i_b in qd.ndrange(
-            len_constraints, _B, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
+            *constraint_state.Jaref.shape,
+            axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None),
         ):
             if i_c < constraint_state.n_constraints[i_b]:
                 _initialize_Jaref_body(i_c, i_b, qacc, constraint_state)
@@ -5536,15 +5530,12 @@ def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: Constraint
 
 @qd.func
 def initialize_Ma(Ma: qd.Tensor, qacc: qd.Tensor, rigid_info: RigidInfo, rigid_config: qd.template()):
-    _B = rigid_info.mass_mat.shape[2]
-    n_dofs = qacc.shape[0]
-
     # Flipped mass_mat layout=(2,1,0): physical (_B, n_dofs, n_dofs) with i_d1 stride-1. Make i_d1 the innermost
     # ndrange axis so adjacent lanes vary i_d1 -> coalesced reads of mass_mat[i_d1, i_d2, i_b]. qacc[i_d2, i_b] is
     # constant within the warp -> broadcast load.
     qd.loop_config(name="init_ma", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d1, i_b in qd.ndrange(
-        n_dofs, _B, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
+        *qacc.shape, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
     ):
         Ma_ = gs.qd_float(0.0)
         # Mass couples only DOFs within the same kinematic-tree block, so restrict to i_d1's block (cross-block is
@@ -5573,9 +5564,10 @@ def func_solve_init(
 
     if qd.static(rigid_config.enable_signorini_contact):
         # The first row update of the solve seeds every latch, see func_relatch_cone.
-        n_cones = constraint_state.cone_latch.shape[0]
         qd.loop_config(name="reset_cone_latches", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_cone, i_b in qd.ndrange(n_cones, _B):
+        for i_cone, i_b in qd.ndrange(
+            *constraint_state.cone_latch.shape, axes=qd.static(eoa(constraint_state.cone_latch))
+        ):
             constraint_state.cone_latch[i_cone, i_b] = -1.0
 
     if qd.static(rigid_config.enable_mujoco_compatibility):
@@ -5610,7 +5602,7 @@ def func_solve_init(
 
         # Pick the best starting point between current state and warmstart
         qd.loop_config(name="solve_init_pick_warmstart", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_d, i_b in qd.ndrange(n_dofs, _B):
+        for i_d, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.qacc))):
             if constraint_state.cost_ws[i_b] < constraint_state.cost[i_b]:
                 constraint_state.qacc[i_d, i_b] = constraint_state.qacc_ws[i_d, i_b]
                 constraint_state.Ma[i_d, i_b] = constraint_state.Ma_ws[i_d, i_b]
@@ -5976,11 +5968,12 @@ def func_update_contact_force(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    n_links = dyn_state.links.contact_force.shape[0]
     _B = dyn_state.links.contact_force.shape[1]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(n_links, _B):
+    for i_l, i_b in qd.ndrange(
+        *dyn_state.links.contact_force.shape, axes=qd.static(eoa(dyn_state.links.contact_force))
+    ):
         dyn_state.links.contact_force[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
     # A kept contact of a sleeper (see n_contacts_hibernated in array_class.py) has no row and keeps the force of the
@@ -5997,7 +5990,9 @@ def func_update_contact_force(
                 )
     else:
         qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_c, i_b in qd.ndrange(collider_state.contact_sort_idx.shape[0], _B):
+        for i_c, i_b in qd.ndrange(
+            *collider_state.contact_sort_idx.shape, axes=qd.static(eoa(collider_state.contact_data.force))
+        ):
             n_first_contact = collider_state.n_contacts_hibernated[i_b]
             if i_c >= n_first_contact and i_c < collider_state.n_contacts[i_b]:
                 i_col = collider_state.contact_sort_idx[i_c, i_b]
@@ -6058,11 +6053,10 @@ def kernel_resolve_post(
 def func_update_qacc(
     dyn_state: DynState, constraint_state: ConstraintState, rigid_config: qd.template(), errno: qd.Tensor
 ):
-    n_dofs = dyn_state.dofs.acc.shape[0]
     _B = dyn_state.dofs.acc.shape[1]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
+    for i_d, i_b in qd.ndrange(*dyn_state.dofs.acc.shape, axes=qd.static(eoa(dyn_state.dofs.acc))):
         # A hibernated dof is left out of the solve, so its zero acceleration and last awake forces stand.
         if qd.static(rigid_config.use_hibernation):
             if dyn_state.dofs.is_hibernated[i_d, i_b]:

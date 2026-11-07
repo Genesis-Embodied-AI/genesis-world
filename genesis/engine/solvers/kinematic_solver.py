@@ -1440,7 +1440,9 @@ class KinematicSolver(Solver):
                     entity_links=max([entity.n_links for entity in entities], default=0),
                     entity_joints=max([entity.n_joints for entity in entities], default=0),
                     ik_targets=n_tgts,
-                )
+                ),
+                # The initial configuration of an environment is read as a whole
+                env_first={IKScratch.targets.init_qpos: True},
             )
         ik_state, ik_fk, targets = self._ik_scratch.state, self._ik_scratch.fk, self._ik_scratch.targets
 
