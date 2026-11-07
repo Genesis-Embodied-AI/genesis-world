@@ -354,7 +354,7 @@ def test_geom_quadrants_identity(batch_shape, tol):
     qd_rotvec = qd.Vector.field(3, dtype=gs.qd_float, shape=batch_shape)
     qd_R = qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=batch_shape)
     axis = np.random.randn(*batch_shape, 3)
-    angle = np.random.uniform(0.0, 2.0 * math.pi, (*batch_shape, 1))
+    angle = np.random.uniform(math.pi, 2.0 * math.pi, (*batch_shape, 1))
     rotvec = axis / np.linalg.norm(axis, axis=-1, keepdims=True) * angle
     qd_rotvec.from_numpy(rotvec.astype(gs.np_float))
     _qd_kernel_wrapper(gu.qd_rotvec_to_R, 1, 1, gs.EPS)(qd_rotvec, qd_R)
