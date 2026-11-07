@@ -326,11 +326,16 @@ def _store_array(value, exported: "Exported") -> int:
     """
     layout = value.__array_interface__
     key = (layout["data"][0], layout["shape"], layout["strides"], layout["typestr"])
-    slot = exported.slots.get(key)
+    # The address of an empty array is arbitrary (pickle protocol 5 loads every empty array at one address), so keying
+    # it would make the slots depend on how the arrays were created. Each empty array is stored in a slot of its own.
+    # Leaving it out of the file instead would require the manifest to record its shape and dtype, since the manifest
+    # holds nothing but the slot index of each array.
+    slot = exported.slots.get(key) if value.nbytes > 0 else None
     if slot is None:
         slot = len(exported.values)
-        exported.slots[key] = slot
-        exported.stored.append(value)
+        if value.nbytes > 0:
+            exported.slots[key] = slot
+            exported.stored.append(value)
         exported.values.append(np.require(value, requirements="C"))
     return slot
 
