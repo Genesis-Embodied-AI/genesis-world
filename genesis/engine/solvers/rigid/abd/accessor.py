@@ -1140,14 +1140,13 @@ def kernel_update_drone_propeller_vgeoms(
     """
     Update the angle of the vgeom in the propellers of a drone entity.
     """
-    EPS = rigid_info.EPS[None]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_pp, i_b in qd.ndrange(*propellers_revs.shape, axes=qd.static(eoa(dyn_state.vgeoms.quat))):
         i_vg = propellers_vgeom_idxs[i_pp]
         rad = propellers_revs[i_pp, i_b] * propellers_spin[i_pp] * rigid_info.substep_dt[None] * qd.math.pi / 30.0
         dyn_state.vgeoms.quat[i_vg, i_b] = gu.qd_transform_quat_by_quat(
-            gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float), EPS), dyn_state.vgeoms.quat[i_vg, i_b]
+            gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float)), dyn_state.vgeoms.quat[i_vg, i_b]
         )
 
 

@@ -259,7 +259,6 @@ def func_gjk_contact(
                         collider_state,
                         gjk_state,
                         dyn_info,
-                        rigid_info,
                         collider_info,
                         rigid_config,
                         collider_config,

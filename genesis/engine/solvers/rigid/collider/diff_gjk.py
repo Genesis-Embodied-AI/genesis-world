@@ -63,7 +63,6 @@ def func_gjk_contact(
     Note that these terms can be computed from the non-differentiable contact data in a differentiable way. Therefore,
     we store the non-differentiable contact data along with the differentiable contact data for the backward pass.
     """
-    EPS = rigid_info.EPS[None]
 
     # Clear the cache to prepare for this GJK-EPA run.
     GJK.clear_cache(i_b, gjk_state)
@@ -104,7 +103,7 @@ def func_gjk_contact(
             # otherwise it would be more sensitive to ill-conditionning.
             axis = (2 * (i % 2) - 1) * axis_0 + (1 - 2 * ((i // 2) % 2)) * axis_1
             rotang = 1e-2 * (100 ** ((i - 1) // 4))
-            qrot = gu.qd_rotvec_to_quat(rotang * axis, EPS)
+            qrot = gu.qd_rotvec_to_quat(rotang * axis)
 
             # Apply perturbation to local variables
             ga_pos_local, ga_quat_local = contact.func_rotate_frame(
@@ -213,8 +212,17 @@ def func_gjk_contact(
                         default_contact_pos = 0.5 * (witness1 + witness2)
                         default_penetration = penetration
 
+                        # The witness points coincide at zero penetration, so the axes follow the face, whose outward
+                        # normal points against the contact normal.
                         axis_0, axis_1 = func_contact_orthogonals(
-                            i_ga, i_gb, i_b, normal / penetration, geoms_init_AABB, dyn_state, dyn_info, rigid_info
+                            i_ga,
+                            i_gb,
+                            i_b,
+                            -gjk_state.polytope_faces.normal[i_f, i_b],
+                            geoms_init_AABB,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
                         )
 
                         found_default_epa = True
@@ -631,12 +639,16 @@ def func_add_diff_contact_input(
         affine_coords = func_triangle_affine_coords(mink1, mink2, mink3, normal, proj_o)
         is_origin_outside_face = affine_coords.min() < -collider_info.gjk.diff_contact_eps_affine[None]
 
-    # Orient the face normal, so that it points to the other side of the origin.
-    face_center = (mink1 + mink2 + mink3) / 3.0
+    # The face is wound so that its normal points outward, as EPA oriented it from the whole polytope, the face plane
+    # holding the origin at zero penetration and leaving its center no side to tell. The differentiable contact reads
+    # the orientation from the winding of the vertices stored below.
+    if normal.dot(gjk_state.polytope_faces.normal[i_f, i_b]) < 0.0:
+        i_v_swap = i_v2
+        i_v2 = i_v3
+        i_v3 = i_v_swap
+        normal = -normal
     if normal_norm > collider_info.gjk.FLOAT_MIN[None]:
         normal = normal.normalized()
-    if normal.dot(face_center) < 0.0:
-        normal = -normal
 
     # Compute the support point along the face normal.
     obj1, obj2, localpos1, localpos2, id1, id2, mink = GJK.func_support(
@@ -807,11 +819,9 @@ def func_differentiable_contact(
     w2 = pos2a * _lambda[0] + pos2b * _lambda[1] + pos2c * _lambda[2]
 
     # The normal and the depth come from the face plane: the difference of the witness points, which is the projection
-    # of the origin onto the face, vanishes with the depth and cannot be normalized.
-    face_normal = normal
-    if normal.dot(face_center) < 0.0:
-        face_normal = -normal
-    face_normal = face_normal.normalized()
+    # of the origin onto the face, vanishes with the depth and cannot be normalized. The winding of the stored vertices
+    # makes the normal point outward (see func_add_diff_contact_input).
+    face_normal = normal.normalized()
 
     contact_pos = 0.5 * (w1 + w2)
     contact_normal = -face_normal

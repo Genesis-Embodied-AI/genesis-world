@@ -115,7 +115,7 @@ def func_forward_kinematics_scratch(
 
                 q_delta = qpos[q_loc, i_col_q] - rigid_info.qpos0[q_start, i_b]
                 if joint_type == gs.JOINT_TYPE.REVOLUTE:
-                    qloc = gu.qd_rotvec_to_quat(axis * q_delta, rigid_info.EPS[None])
+                    qloc = gu.qd_rotvec_to_quat(axis * q_delta)
                     quat = gu.qd_transform_quat_by_quat(qloc, quat)
                     pos = joints_xanchor[i_j - joint_offset, i_col_out] - gu.qd_transform_by_quat(
                         dyn_info.joints.pos[I_j], quat
@@ -306,7 +306,6 @@ def func_integrate_dq_scratch(
     dq: qd.Tensor,
     qpos: qd.Tensor,
     dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     rigid_config: qd.template(),
     respect_joint_limit: int,
 ):
@@ -316,7 +315,6 @@ def func_integrate_dq_scratch(
     entity-local DOF; a FREE root advances its position additively and its orientation by a world-frame delta
     rotation, and a REVOLUTE / PRISMATIC DOF advances additively with optional limit clamping.
     """
-    EPS = rigid_info.EPS[None]
 
     for i_l in range(dyn_info.entities.link_start[entity_idx], dyn_info.entities.link_end[entity_idx]):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -338,8 +336,7 @@ def func_integrate_dq_scratch(
                 [qpos[q_loc + 3, i_col], qpos[q_loc + 4, i_col], qpos[q_loc + 5, i_col], qpos[q_loc + 6, i_col]]
             )
             dquat = gu.qd_rotvec_to_quat(
-                qd.Vector([dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float),
-                EPS,
+                qd.Vector([dq[dq_start + 3, i_col], dq[dq_start + 4, i_col], dq[dq_start + 5, i_col]], dt=gs.qd_float)
             )
             # The delta rotation is expressed in the world frame, so it composes on the left of the orientation.
             quat = gu.qd_transform_quat_by_quat(quat, dquat)
@@ -398,7 +395,6 @@ def func_inverse_kinematics(
     forward-kinematics scratch (fk), so the live solver state is only read; unconverged restarts resample
     joint-limited DOFs with a counter-based draw so the result is deterministic across parallel schedules.
     """
-    EPS = rigid_info.EPS[None]
 
     n_error_dims = 6 * n_links
 
@@ -453,7 +449,7 @@ def func_inverse_kinematics(
                         solved = False
 
                     err_rot_i = gu.qd_quat_to_rotvec(
-                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b]), EPS
+                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
                     )
                     for k in range(3):
                         err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])
@@ -542,7 +538,6 @@ def func_inverse_kinematics(
                     ik_state.delta_qpos,
                     fk.qpos,
                     dyn_info,
-                    rigid_info,
                     rigid_config,
                     respect_joint_limit,
                 )
@@ -581,7 +576,7 @@ def func_inverse_kinematics(
                         solved = False
 
                     err_rot_i = gu.qd_quat_to_rotvec(
-                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b]), EPS
+                        gu.qd_transform_quat_by_quat(gu.qd_inv_quat(ee_quat), targets.quat[i_ee, i_b])
                     )
                     for k in range(3):
                         err_rot_i[k] = err_rot_i[k] * (targets.rot_mask[k] * targets.link_rot_mask[i_ee])

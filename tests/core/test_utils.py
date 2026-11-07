@@ -333,9 +333,9 @@ def test_geom_quadrants_identity(batch_shape, tol):
         (
             (gu.qd_xyz_to_quat, gu.qd_quat_to_rotvec, gu.qd_rotvec_to_R, gu.qd_R_to_xyz),
             ([3], [4], [3], [3, 3]),
-            ((), (gs.EPS,), (gs.EPS,), (gs.EPS,)),
+            ((), (), (), (gs.EPS,)),
         ),
-        ((gu.qd_rotvec_to_quat, gu.qd_quat_to_rotvec), ([3], [4]), ((gs.EPS,), (gs.EPS,))),
+        ((gu.qd_rotvec_to_quat, gu.qd_quat_to_rotvec), ([3], [4]), ((), ())),
     ):
         qd_args = []
         for shape_arg in (*shape_args, shape_args[0]):
@@ -357,7 +357,7 @@ def test_geom_quadrants_identity(batch_shape, tol):
     angle = np.random.uniform(math.pi, 2.0 * math.pi, (*batch_shape, 1))
     rotvec = axis / np.linalg.norm(axis, axis=-1, keepdims=True) * angle
     qd_rotvec.from_numpy(rotvec.astype(gs.np_float))
-    _qd_kernel_wrapper(gu.qd_rotvec_to_R, 1, 1, gs.EPS)(qd_rotvec, qd_R)
+    _qd_kernel_wrapper(gu.qd_rotvec_to_R, 1, 1)(qd_rotvec, qd_R)
     R_true = Rotation.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
     assert_allclose(qd_R.to_numpy(), R_true, tol=tol)
 
