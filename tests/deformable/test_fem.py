@@ -243,14 +243,21 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     SPHERE_RHO = 500.0
     BOX_POS = (0.0, 0.1, 0.3)
     BOX_SIZE = 0.05
+    GRAVITY = 9.81
+    BAR_LENGTH = 0.5
+    BAR_WIDTH = 0.05
+    BAR_RHO = 1000.0
+    BAR_E = 1e8
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1.0 / 60.0,
             substeps=3 if coupler_type == gs.options.SAPCouplerOptions else 2,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
+            enable_vertex_constraints=True,
         ),
         coupler_options=coupler_type(),
         viewer_options=gs.options.ViewerOptions(
@@ -281,9 +288,27 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         ),
         material=gs.materials.FEM.Elastic(),
     )
+    # A bar hanging far from the ground, whose stiffness is far beyond what the explicit solver keeps stable at this
+    # time step.
+    bar = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(2.0, 0.0, 1.0),
+            size=(BAR_WIDTH, BAR_WIDTH, BAR_LENGTH),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=BAR_E,
+            nu=0.0,
+            rho=BAR_RHO,
+            model="linear",
+        ),
+    )
 
     # Build the scene
     scene.build()
+
+    # Clamp the top face of the bar
+    bar_pos_0 = bar.init_positions
+    bar.set_vertex_constraints(torch.nonzero(bar_pos_0[:, 2] > bar_pos_0[:, 2].max() - gs.EPS)[:, 0])
 
     sphere_mass_ref = (4 / 3 * np.pi * SPHERE_RADIUS**3) * SPHERE_RHO
     elems_mass_scaled = scene.fem_solver.elements_i.mass_scaled.to_numpy()
@@ -326,6 +351,14 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         penetration_depth_ref = 0.0
         tol = 1e-3 if coupler_type == gs.options.SAPCouplerOptions else 0.05
         assert_allclose(-state.pos[..., 2].min(), penetration_depth_ref, tol=tol)
+
+    # Without Poisson contraction, the bar stretches uniaxially under its own weight, and its free end comes to rest
+    # rho * g * L^2 / (2 * E) below its initial height.
+    bar_state = bar.get_state()
+    assert_allclose(bar_state.vel, 0.0, atol=2e-15)
+    is_bottom = bar_pos_0[:, 2] < bar_pos_0[:, 2].min() + gs.EPS
+    bar_sag = (bar_pos_0[is_bottom, 2] - bar_state.pos[..., is_bottom, 2]).mean()
+    assert_allclose(bar_sag, BAR_RHO * GRAVITY * BAR_LENGTH**2 / (2 * BAR_E), rtol=2e-3)
 
 
 @pytest.mark.required
