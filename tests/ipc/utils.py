@@ -1,10 +1,12 @@
+from importlib.util import find_spec
+
 import numpy as np
 import pytest
 
-try:
-    import uipc
-except ImportError:
-    pytest.skip("IPC Coupler is not supported because 'uipc' module is not available.", allow_module_level=True)
+from ..conftest import SKIP_NO_IPC
+
+if find_spec("uipc") is None:
+    pytest.skip(SKIP_NO_IPC, allow_module_level=True)
 
 from uipc.backend import SceneVisitor
 from uipc.geometry import SimplicialComplexSlot, apply_transform, merge

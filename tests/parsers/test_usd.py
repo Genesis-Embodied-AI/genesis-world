@@ -8,16 +8,15 @@ loaded from USD files match equivalent scenes loaded from compared files.
 import os
 import xml.etree.ElementTree as ET
 import zipfile
+from importlib.util import find_spec
 
 import numpy as np
 import pytest
 
-try:
-    from pxr import Usd
-except ImportError as e:
+if find_spec("pxr") is None:
     pytest.skip("USD is not supported because 'pxr' module is not available.", allow_module_level=True)
 
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
 from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
