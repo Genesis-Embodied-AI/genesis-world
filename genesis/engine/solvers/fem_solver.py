@@ -53,7 +53,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._mats = list()
         self._mats_idx = list()
         self._mats_update_stress = list()
-        self._mats_compute_energy_gradient_hessian = list()
         self._mats_compute_energy = list()
 
         # lazy initialization
@@ -172,8 +171,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             needs_grad=False,
             layout=qd.Layout.SOA,
         )
-
-        self.elements_el_hessian = qd.field(shape=(self._B, 3, 3, self.n_elements), dtype=gs.qd_mat3)
 
         self.elements_v_energy = element_state_v_energy.field(
             shape=(self._B, self.n_vertices),
@@ -384,7 +381,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             material.idx = len(self._mats_idx)
             self._mats_idx.append(material.idx)
             self._mats_update_stress.append(material.update_stress)
-            self._mats_compute_energy_gradient_hessian.append(material.compute_energy_gradient_hessian)
             self._mats_compute_energy.append(material.compute_energy)
 
         # create entity
@@ -431,17 +427,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             F = D @ B
             J = F.determinant()
 
+            mu = self.elements_i[i_e].mu
+            lam = self.elements_i[i_e].lam
+            actu = self.elements_el[f, i_e, i_b].actu
+            m_dir = self.elements_i[i_e].muscle_direction
             stress = qd.Matrix.zero(gs.qd_float, 3, 3)
             for mat_idx in qd.static(self._mats_idx):
                 if self.elements_i[i_e].mat_idx == mat_idx:
-                    stress = self._mats_update_stress[mat_idx](
-                        mu=self.elements_i[i_e].mu,
-                        lam=self.elements_i[i_e].lam,
-                        J=J,
-                        F=F,
-                        actu=self.elements_el[f, i_e, i_b].actu,
-                        m_dir=self.elements_i[i_e].muscle_direction,
-                    )
+                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
 
             verts = self.elements_i[i_e].el2v
             mass_scaled = self.elements_i[i_e].mass_scaled
@@ -488,7 +481,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             J, F = self._compute_ele_J_F(f, i_e, i_b)  # use last time step's pos to compute
             for mat_idx in qd.static(self._mats_idx):
                 if self.elements_i[i_e].mat_idx == mat_idx:
-                    self._mats[mat_idx].pre_compute(J=J, F=F, i_e=i_e, i_b=i_b)
+                    self._mats[mat_idx].pre_compute(i_e, i_b, J, F)
 
     @qd.kernel
     def init_pos_and_inertia(self, f: qd.i32, links_state: LinksState):
@@ -533,44 +526,42 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return J, F
 
     @qd.kernel
-    def compute_ele_hessian_gradient(self, f: qd.i32):
+    def compute_ele_energy_gradient(self, f: qd.i32):
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
                 continue
 
             J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
-
+            mu = self.elements_i[i_e].mu
+            lam = self.elements_i[i_e].lam
+            actu = self.elements_el[f, i_e, i_b].actu
+            m_dir = self.elements_i[i_e].muscle_direction
             for mat_idx in qd.static(self._mats_idx):
                 if self.elements_i[i_e].mat_idx == mat_idx:
-                    if self._mats[mat_idx]._hessian_ready:
-                        (
-                            self.elements_el_energy[i_b, i_e].energy,
-                            self.elements_el_energy[i_b, i_e].gradient,
-                        ) = self._mats[mat_idx].compute_energy_gradient(
-                            mu=self.elements_i[i_e].mu,
-                            lam=self.elements_i[i_e].lam,
-                            J=J,
-                            F=F,
-                            actu=self.elements_el[f, i_e, i_b].actu,
-                            m_dir=self.elements_i[i_e].muscle_direction,
-                            i_e=i_e,
-                            i_b=i_b,
-                        )
-                    else:
-                        (
-                            self.elements_el_energy[i_b, i_e].energy,
-                            self.elements_el_energy[i_b, i_e].gradient,
-                        ) = self._mats[mat_idx].compute_energy_gradient_hessian(
-                            mu=self.elements_i[i_e].mu,
-                            lam=self.elements_i[i_e].lam,
-                            J=J,
-                            F=F,
-                            actu=self.elements_el[f, i_e, i_b].actu,
-                            m_dir=self.elements_i[i_e].muscle_direction,
-                            i_e=i_e,
-                            i_b=i_b,
-                            hessian_field=self.elements_el_hessian,
-                        )
+                    (
+                        self.elements_el_energy[i_b, i_e].energy,
+                        self.elements_el_energy[i_b, i_e].gradient,
+                    ) = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
+
+    @qd.func
+    def compute_elastic_product(self, i_e: int, i_b: int, S: qd.types.matrix(4, 3), x: qd.types.matrix(3, 4)):
+        """
+        Return the change of the deformation gradient of an element along a displacement of its vertices, and the product
+        of the Hessian of its energy density with that change.
+
+        `x` holds the displacement of each vertex of the element in its columns, and `S` maps them to the deformation
+        gradient (see _func_compute_element_mapping_matrix). The product of the Hessian of the element with the
+        displacement is then the product of the second matrix with the transpose of `S`, and the second order term of
+        the energy density along it half the scalar product of the two matrices.
+        """
+        dF = x @ S
+        mu = self.elements_i[i_e].mu
+        lam = self.elements_i[i_e].lam
+        dP = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for mat_idx in qd.static(self._mats_idx):
+            if self.elements_i[i_e].mat_idx == mat_idx:
+                dP = self._mats[mat_idx].hessian_product(i_e, i_b, mu, lam, dF)
+        return dF, dP
 
     @qd.func
     def _func_compute_element_mapping_matrix(self, i_vs, B, i_b):
@@ -597,18 +588,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 continue
 
             J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
-
+            mu = self.elements_i[i_e].mu
+            lam = self.elements_i[i_e].lam
+            actu = self.elements_el[f, i_e, i_b].actu
+            m_dir = self.elements_i[i_e].muscle_direction
             for mat_idx in qd.static(self._mats_idx):
                 if self.elements_i[i_e].mat_idx == mat_idx:
                     self.elements_el_energy[i_b, i_e].energy = self._mats[mat_idx].compute_energy(
-                        mu=self.elements_i[i_e].mu,
-                        lam=self.elements_i[i_e].lam,
-                        J=J,
-                        F=F,
-                        actu=self.elements_el[f, i_e, i_b].actu,
-                        m_dir=self.elements_i[i_e].muscle_direction,
-                        i_e=i_e,
-                        i_b=i_b,
+                        i_e, i_b, mu, lam, J, F, actu, m_dir
                     )
 
             # add linearized damping energy
@@ -618,22 +605,16 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 B = self.elements_i[i_e].B
                 S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
 
-                x_diff = qd.Vector.zero(gs.qd_float, 12)
-                for i in qd.static(range(4)):
-                    x_diff[i * 3 : i * 3 + 3] = (
+                x_diff = qd.Matrix.cols(
+                    [
                         self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
-                    )
-                St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 4)):
-                    St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
-
-                H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    H_St_x_diff[i * 3 : i * 3 + 3] += (
-                        self.elements_el_hessian[i_b, i, j, i_e] @ St_x_diff[j * 3 : j * 3 + 3]
-                    )
-
-                self.elements_el_energy[i_b, i_e].energy += 0.5 * damping_beta_over_dt * St_x_diff.dot(H_St_x_diff)
+                        for i in qd.static(range(4))
+                    ]
+                )
+                dF, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
+                self.elements_el_energy[i_b, i_e].energy = (
+                    self.elements_el_energy[i_b, i_e].energy + 0.5 * damping_beta_over_dt * (dF * dP).sum()
+                )
 
     @qd.kernel
     def accumulate_vertex_force_preconditioner(self, f: qd.i32):
@@ -670,38 +651,33 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
             force = -V * gradient @ S.transpose()
 
-            # atomic
             for i in qd.static(range(4)):
-                self.elements_v_energy[i_b, i_vs[i]].force += force[:, i]
+                qd.atomic_add(self.elements_v_energy[i_b, i_vs[i]].force, force[:, i])
 
             if self._damping_beta > gs.EPS:
-                x_diff = qd.Vector.zero(gs.qd_float, 12)
-                for i in qd.static(range(4)):
-                    x_diff[i * 3 : i * 3 + 3] = (
+                x_diff = qd.Matrix.cols(
+                    [
                         self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
-                    )
-                St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 4)):
-                    St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
-
-                H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    H_St_x_diff[i * 3 : i * 3 + 3] += (
-                        self.elements_el_hessian[i_b, i, j, i_e] @ St_x_diff[j * 3 : j * 3 + 3]
-                    )
-                S_H_St_x_diff = qd.Vector.zero(gs.qd_float, 12)
-                for i, j in qd.static(qd.ndrange(4, 3)):
-                    S_H_St_x_diff[i * 3 : i * 3 + 3] += S[i, j] * H_St_x_diff[j * 3 : j * 3 + 3]
-                for i in qd.static(range(4)):
-                    self.elements_v_energy[i_b, i_vs[i]].force += (
-                        -damping_beta_over_dt * V * S_H_St_x_diff[i * 3 : i * 3 + 3]
-                    )
-
-            # diagonal 3-by-3 block of hessian
-            for k, i, j in qd.ndrange(4, 3, 3):
-                self.pcg_state_v[i_b, i_vs[k]].diag3x3 += (
-                    V * damping_beta_factor * S[k, i] * S[k, j] * self.elements_el_hessian[i_b, i, j, i_e]
+                        for i in qd.static(range(4))
+                    ]
                 )
+                _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
+                damping_force = -damping_beta_over_dt * V * dP @ S.transpose()
+                for i in qd.static(range(4)):
+                    qd.atomic_add(self.elements_v_energy[i_b, i_vs[i]].force, damping_force[:, i])
+
+            # The diagonal 3-by-3 block of the Hessian at vertex k, whose column c is the force a unit displacement of
+            # the vertex along axis c induces on it.
+            for k in qd.static(range(4)):
+                S_k = qd.Vector([S[k, 0], S[k, 1], S[k, 2]])
+                vertex_unit = qd.Vector([gs.qd_float(k == i) for i in qd.static(range(4))])
+                diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
+                # A runtime loop over the axes keeps a single inlined instance of the product per vertex
+                for c in range(3):
+                    axis_unit = qd.Vector([gs.qd_float(c == i) for i in qd.static(range(3))])
+                    _, dP = self.compute_elastic_product(i_e, i_b, S, axis_unit.outer_product(vertex_unit))
+                    diag3x3 = diag3x3 + (dP @ S_k).outer_product(axis_unit)
+                qd.atomic_add(self.pcg_state_v[i_b, i_vs[k]].diag3x3, V * damping_beta_factor * diag3x3)
 
         # inverse
         for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
@@ -741,23 +717,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_vs = self.elements_i[i_e].el2v
             S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
 
-            p9 = qd.Vector([0.0] * 9, dt=gs.qd_float)
+            p = qd.Matrix.cols([self.pcg_state_v[i_b, i_vs[i]].p for i in qd.static(range(4))])
+            _, dP = self.compute_elastic_product(i_e, i_b, S, p)
+            Ap = V * damping_beta_factor * dP @ S.transpose()
 
-            for i, j in qd.static(qd.ndrange(3, 4)):
-                p9[i * 3 : i * 3 + 3] = p9[i * 3 : i * 3 + 3] + S[j, i] * self.pcg_state_v[i_b, i_vs[j]].p
-
-            new_p9 = qd.Vector([0.0] * 9, dt=gs.qd_float)
-
-            for i, j in qd.static(qd.ndrange(3, 3)):
-                new_p9[i * 3 : i * 3 + 3] = (
-                    new_p9[i * 3 : i * 3 + 3] + self.elements_el_hessian[i_b, i, j, i_e] @ p9[j * 3 : j * 3 + 3]
-                )
-
-            # atomic
             for i in qd.static(range(4)):
-                self.pcg_state_v[i_b, i_vs[i]].Ap += (
-                    (S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]) * V * damping_beta_factor
-                )
+                qd.atomic_add(self.pcg_state_v[i_b, i_vs[i]].Ap, Ap[:, i])
 
     @qd.kernel
     def init_pcg_solve(self):
@@ -933,12 +898,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         for i in range(self._n_newton_iterations):
             # compute element energy and gradient
-            self.compute_ele_hessian_gradient(f)
-
-            # If the hessian is invariant, we only need to compute it once
-            for mat_idx in self._mats_idx:
-                if self._mats[mat_idx].hessian_invariant:
-                    self._mats[mat_idx]._hessian_ready = True
+            self.compute_ele_energy_gradient(f)
 
             # accumulate vertex force and preconditioner
             self.accumulate_vertex_force_preconditioner(f)
