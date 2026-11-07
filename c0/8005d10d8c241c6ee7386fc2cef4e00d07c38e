@@ -1,0 +1,21 @@
+genesis/constants.py
+  s_30743dd4e1d4b2::t_c0632daa758478 172-191
+genesis/options/sensors/options.py
+  s_30743dd4e1d4b2::t_c0632daa758478 630-632
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c08005d10d8c241c6ee7386fc2cef4e00d07c38e",
+  "prompts": {},
+  "sessions": {
+    "s_30743dd4e1d4b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcbc5529-4957-4e0d-8c5f-2573abbad53d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
