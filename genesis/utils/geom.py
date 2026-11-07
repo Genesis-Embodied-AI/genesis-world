@@ -180,8 +180,7 @@ def qd_rotvec_to_R(rotvec, eps):
 
     angle = rotvec.norm()
     if angle > eps:
-        c = qd.cos(angle)
-        s = qd.sqrt(1.0 - c**2)
+        c, s = qd.cos(angle), qd.sin(angle)
         t = 1.0 - c
         x, y, z = rotvec / angle
 
@@ -844,6 +843,8 @@ class GeomConstants(NamedTuple):
     slerp_weights_offset: torch.Tensor
     slerp_weights_slope: torch.Tensor
     slerp_weights_slope_flipped: torch.Tensor
+    T_identity: torch.Tensor
+    T_bottom_row: torch.Tensor
 
 
 # Constant tensors of the torch geometry helpers by device and dtype. torch.compile traces a lookup in a dict, while it
@@ -905,6 +906,8 @@ def _tc_geom_constants(device: torch.device, dtype: torch.dtype) -> GeomConstant
             slerp_weights_offset=torch.tensor((1.0, 0.0, 1.0), dtype=dtype, device=device),
             slerp_weights_slope=torch.tensor((-1.0, 1.0, 0.0), dtype=dtype, device=device),
             slerp_weights_slope_flipped=torch.tensor((-1.0, -1.0, 0.0), dtype=dtype, device=device),
+            T_identity=torch.eye(4, dtype=dtype, device=device),
+            T_bottom_row=torch.tensor((0.0, 0.0, 0.0, 1.0), dtype=dtype, device=device),
         )
     return constants
 
@@ -1264,33 +1267,33 @@ def R_to_xyz(R, rpy=False, degrees=False):
 
 
 def trans_R_to_T(trans=None, R=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, R) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, R) if e is not None)
+    args = tuple(e for e in (trans, R) if e is not None)
+    is_torch = all(isinstance(e, torch.Tensor) for e in args)
+    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in args)
 
     T = out
     B = () if trans is None and R is None else R.shape[:-2] if trans is None else trans.shape[:-1]
-    dtype = R.dtype if trans is None else trans.dtype
     if is_torch:
         if T is None:
-            device = R.device if trans is None else trans.device
-            T = torch.zeros((*B, 4, 4), dtype=dtype, device=device)
+            dtype = args[0].dtype if len(args) == 1 else torch.promote_types(trans.dtype, R.dtype)
+            T = torch.empty((*B, 4, 4), dtype=dtype, device=args[0].device)
     elif is_numpy:
         if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
+            T = np.empty((*B, 4, 4), dtype=np.result_type(*args))
     else:
         gs.raise_exception(f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(R)=}")
     if B:
         assert T.shape == (*B, 4, 4)
 
-    T[..., 3, 3] = 1.0
+    # Copying the identity is a single contiguous write, cheaper than the strided writes of the entries that a missing
+    # input leaves to it. Once both inputs are given, the bottom row is all that remains.
+    if trans is None or R is None:
+        T[...] = _tc_geom_constants(T.device, T.dtype).T_identity if is_torch else np.eye(4)
+    else:
+        T[..., 3, :] = _tc_geom_constants(T.device, T.dtype).T_bottom_row if is_torch else (0.0, 0.0, 0.0, 1.0)
     if trans is not None:
         T[..., :3, 3] = trans
-    if R is None:
-        if is_torch:
-            torch.diagonal(T, dim1=-2, dim2=-1).fill_(1.0)
-        else:
-            T[..., [0, 1, 2], [0, 1, 2]] = 1.0
-    else:
+    if R is not None:
         T[..., :3, :3] = R
 
     return T
@@ -1304,34 +1307,8 @@ def trans_to_T(trans, *, out=None):
     return trans_R_to_T(trans, None, out=out)
 
 
-def trans_quat_to_T(trans=None, quat=None, *, out=None):
-    is_torch = all(isinstance(e, torch.Tensor) for e in (trans, quat) if e is not None)
-    is_numpy = not is_torch and all(isinstance(e, np.ndarray) for e in (trans, quat) if e is not None)
-
-    T = out
-    B = () if trans is None and quat is None else quat.shape[:-2] if trans is None else trans.shape[:-1]
-    if is_torch:
-        if T is None:
-            T = torch.zeros((*B, 4, 4), dtype=trans.dtype, device=trans.device)
-    elif is_numpy:
-        dtype = np.result_type(trans, quat)
-        trans, quat = trans.astype(dtype), quat.astype(dtype)
-        if T is None:
-            T = np.zeros((*B, 4, 4), dtype=dtype)
-    else:
-        gs.raise_exception(
-            f"both of the inputs must be torch.Tensor or np.ndarray. got: {type(trans)=} and {type(quat)=}"
-        )
-    if B:
-        assert T.shape == (*B, 4, 4)
-
-    T[..., 3, 3] = 1.0
-    if trans is not None:
-        T[..., :3, 3] = trans
-    if quat is not None:
-        quat_to_R(quat, out=T[..., :3, :3])
-
-    return T
+def trans_quat_to_T(trans=None, quat=None):
+    return trans_R_to_T(trans, None if quat is None else quat_to_R(quat))
 
 
 def T_to_trans(T):
@@ -1866,13 +1843,16 @@ def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -
     q0 = q0 / torch.linalg.vector_norm(q0, ord=2, dim=-1, keepdim=True)
     q1 = q1 / torch.linalg.vector_norm(q1, ord=2, dim=-1, keepdim=True)
     dot = (q0 * q1).sum(-1, keepdim=True)
-    dot_abs = dot.abs()
+    # Clamping the cosine keeps the angle at least acos(1 - eps), so that the spherical weights and their gradient stay
+    # finite. Below that angle, the weights differ from the exact ones by O(eps). The bound is raised to the machine
+    # epsilon of the quaternions, since '1 - eps' rounds to 1 in a lower precision than the simulation.
+    angle = torch.acos(dot.abs().clamp(max=1.0 - max(eps, torch.finfo(q0.dtype).eps)))
     # Weights '1 - t' of q0 and '+-t' of q1, signed to interpolate along the shorter arc, then 1. Once multiplied by the
     # angle between q0 and q1, a single sine evaluates the numerators and the denominator of the spherical weights.
     weights_slope = torch.where(dot < 0.0, constants.slerp_weights_slope_flipped, constants.slerp_weights_slope)
     weights_linear = torch.addcmul(constants.slerp_weights_offset, t[..., None], weights_slope)
-    weights_sin = torch.sin(weights_linear * torch.acos(dot_abs))
-    weights = torch.where(dot_abs > 1.0 - eps, weights_linear[..., :2], weights_sin[..., :2] / weights_sin[..., 2:])
+    weights_sin = torch.sin(weights_linear * angle)
+    weights = weights_sin[..., :2] / weights_sin[..., 2:]
     return torch.addcmul(q0 * weights[..., :1], q1, weights[..., 1:])
 
 
@@ -2140,48 +2120,49 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
 
 
 @nb.jit(nopython=True, cache=True)
-def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
-    if isinstance(cos_theta, (float, np.float32, np.float64)):
-        assert axis.ndim == 1
-    else:
-        assert axis.ndim - 1 == cos_theta.ndim
-    if out is None:
-        out_ = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
-    else:
-        assert out.shape == (*axis.shape[:-1], 3, 3)
-        out_ = out
-
-    axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
-    axis = axis / axis_norm
-    if not isinstance(cos_theta, (float, np.float32, np.float64)):
-        cos_theta = cos_theta[..., None]
-    sin_theta = np.sqrt(1.0 - cos_theta**2)
-    cos1_axis = (1.0 - cos_theta) * axis
-    sin_axis = sin_theta * axis
-
-    tmp = cos1_axis[..., 0] * axis[..., 1]
-    out_[..., 0, 1] = tmp - sin_axis[..., 2]
-    out_[..., 1, 0] = tmp + sin_axis[..., 2]
-    tmp = cos1_axis[..., 0] * axis[..., 2]
-    out_[..., 0, 2] = tmp + sin_axis[..., 1]
-    out_[..., 2, 0] = tmp - sin_axis[..., 1]
-    tmp = cos1_axis[..., 1] * axis[..., 2]
-    out_[..., 1, 2] = tmp - sin_axis[..., 0]
-    out_[..., 2, 1] = tmp + sin_axis[..., 0]
-    tmp = cos1_axis * axis + cos_theta
-    out_[..., 0, 0] = tmp[..., 0]
-    out_[..., 1, 1] = tmp[..., 1]
-    out_[..., 2, 2] = tmp[..., 2]
-
-    return out_
+def _np_unit_axis_cos_sin_to_R(x: float, y: float, z: float, c: float, s: float, R: np.ndarray) -> None:
+    t = 1.0 - c
+    t_xy, t_xz, t_yz = t * x * y, t * x * z, t * y * z
+    R[0, 0], R[0, 1], R[0, 2] = t * x * x + c, t_xy - s * z, t_xz + s * y
+    R[1, 0], R[1, 1], R[1, 2] = t_xy + s * z, t * y * y + c, t_yz - s * x
+    R[2, 0], R[2, 1], R[2, 2] = t_xz - s * y, t_yz + s * x, t * z * z + c
 
 
+@nb.jit(nopython=True, cache=True)
 def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    return _np_axis_cos_angle_to_R(axis, np.cos(theta))
+    """Compute the rotation matrices of a single or a batch of rotations given as an axis and an angle.
+
+    'axis' holds rotation axes of arbitrary non-zero norm. 'theta' holds one angle per axis in radians, or is a scalar
+    for a single axis.
+    """
+    theta = np.asarray(theta)
+    assert axis.shape[:-1] == theta.shape
+
+    out = np.empty((*axis.shape[:-1], 3, 3), dtype=axis.dtype)
+    for i in np.ndindex(axis.shape[:-1]):
+        x, y, z = axis[i]
+        axis_norm_inv = 1.0 / np.sqrt(x * x + y * y + z * z)
+        c, s = np.cos(theta[i]), np.sin(theta[i])
+        _np_unit_axis_cos_sin_to_R(x * axis_norm_inv, y * axis_norm_inv, z * axis_norm_inv, c, s, out[i])
+
+    return out
 
 
+@nb.jit(nopython=True, cache=True)
 def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
-    return axis_angle_to_R(rotvec, np.linalg.norm(rotvec, axis=-1))
+    """Compute the rotation matrices of a single or a batch of rotation vectors, whose norm is the angle in radians."""
+    out = np.empty((*rotvec.shape[:-1], 3, 3), dtype=rotvec.dtype)
+    for i in np.ndindex(rotvec.shape[:-1]):
+        x, y, z = rotvec[i]
+        theta = np.sqrt(x * x + y * y + z * z)
+        if theta < gs.EPS:
+            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, out[i])
+        else:
+            theta_inv = 1.0 / theta
+            c, s = np.cos(theta), np.sin(theta)
+            _np_unit_axis_cos_sin_to_R(x * theta_inv, y * theta_inv, z * theta_inv, c, s, out[i])
+
+    return out
 
 
 @nb.jit(nopython=True, cache=True)
@@ -2199,96 +2180,79 @@ def R_to_rotvec(R: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
 
 
 @nb.jit(nopython=True, cache=True)
-def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+def z_to_R(v_a: np.ndarray) -> np.ndarray:
     """
-    Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a rotation matrix.
+    Compute the shortest rotation mapping the z-axis onto a direction, as a rotation matrix.
 
-    This operation is computed by rotating the world frame by moving the original z-axis to the given vector via the
-    shortest path.
+    It is the rotation of `z_to_quat`, whose docstring describes the handling of the degenerate directions.
     """
-    B = v_a.shape[:-1]
-
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*B, 1)))
-    v_a = v_a / v_a_norm
-
-    axis = np.empty((*B, 3), dtype=v_a.dtype)
-    cos_theta = np.empty(B, dtype=v_a.dtype)
-    for i in np.ndindex(B):
-        axis_i = axis[i]
+    out = np.empty((*v_a.shape[:-1], 3, 3), dtype=v_a.dtype)
+    for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
-        cos_theta[i] = v_z
-        if abs(cos_theta[i]) < 1.0 - gs.EPS:
-            axis_i[0] = -v_y
-            axis_i[1] = v_x
-            axis_i[2] = 0.0
-        else:
-            axis_i[:] = 0.0, 1.0, 0.0
+        R = out[i]
 
-    return _np_axis_cos_angle_to_R(axis, cos_theta, out)
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
+            R[:] = np.nan
+        elif v_norm < gs.EPS:
+            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, R)
+        else:
+            v_norm_inv = 1.0 / v_norm
+            v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
+            transverse_sq = v_x * v_x + v_y * v_y
+            if v_z >= 0.0 or transverse_sq > 0.0:
+                # Near -z, 1 + v_z loses its digits to cancellation, so use the equal (1 - v_z) / (v_x^2 + v_y^2)
+                f = 1.0 / (1.0 + v_z) if v_z >= 0.0 else (1.0 - v_z) / transverse_sq
+                f_xy = -f * v_x * v_y
+                R[0, 0], R[0, 1], R[0, 2] = 1.0 - f * v_x * v_x, f_xy, v_x
+                R[1, 0], R[1, 1], R[1, 2] = f_xy, 1.0 - f * v_y * v_y, v_y
+                R[2, 0], R[2, 1], R[2, 2] = -v_x, -v_y, v_z
+            else:
+                _np_unit_axis_cos_sin_to_R(0.0, 1.0, 0.0, -1.0, 0.0, R)
+
+    return out
 
 
 @nb.jit(nopython=True, cache=True)
-def z_to_quat(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+def z_to_quat(v_a: np.ndarray) -> np.ndarray:
     """
-    Compute the "smallest" rotation transforming vector 'v_a' in 'e_z' as a quaternion (q_w, q_x, q_y, q_z).
+    Compute the shortest rotation mapping the z-axis onto a direction, as a quaternion (q_w, q_x, q_y, q_z).
 
-    This method is (surprisingly) slower than `z_up_to_R`, w/ and w/o chaining `transform_by_(quat|R)`.
+    'v_a' holds a single or a batch of directions of arbitrary norm. A direction whose norm is below `gs.EPS` gives the
+    identity. The exact -z direction gives the rotation by pi about the y-axis, out of all the shortest rotations. A
+    direction with a non-finite component, or whose squared norm overflows, gives a NaN quaternion.
     """
-    if out is None:
-        out_ = np.empty((*v_a.shape[:-1], 4), dtype=v_a.dtype)
-    else:
-        assert out.shape == (*v_a.shape[:-1], 4)
-        out_ = out
-
-    v_a_norm = np.sqrt(np.sum(np.square(v_a.reshape((-1, 3))), -1).reshape((*v_a.shape[:-1], 1)))
-    v_a = v_a / v_a_norm
-    v_x, v_y, v_z = v_a[..., 0], v_a[..., 1], v_a[..., 2]
-
+    out = np.empty((*v_a.shape[:-1], 4), dtype=v_a.dtype)
     for i in np.ndindex(v_a.shape[:-1]):
         v_x, v_y, v_z = v_a[i]
-        quat = out_[i]
+        quat = out[i]
 
-        if v_a_norm[i] < gs.EPS:
+        v_norm = np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z)
+        if not np.isfinite(v_norm):
+            quat[:] = np.nan
+        elif v_norm < gs.EPS:
             quat[:] = 1.0, 0.0, 0.0, 0.0
-        elif v_z > -1.0 + gs.EPS:
-            s = np.sqrt(2.0 * (1.0 + v_z))
-            s_inv = 1.0 / s
-            quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
         else:
-            eps_thr = np.sqrt(gs.EPS)
-            eps_x = abs(v_x) < gs.EPS
-            eps_y = abs(v_y) < gs.EPS
-            if not eps_y:
-                ratio = v_x / v_y
-                if eps_x:
-                    esp_ratio = abs(ratio) < eps_thr
-            elif eps_y and not eps_x:
-                ratio = v_y / v_x
-                esp_ratio = abs(ratio) < eps_thr
-            w_2 = 0.5 * (1.0 + max(v_z, -1.0))
-            quat[0] = np.sqrt(w_2)
-            if eps_x and eps_y:
-                # Both q_x and q_y would do fine. Picking q_y arbitrarily.
-                quat[1] = 0.0
-                quat[2] = 1.0
-            elif esp_ratio:
-                coef_abs = np.sqrt(1.0 - w_2) * (1.0 - 0.5 * ratio**2)
-                if eps_x:
-                    quat[1] = -np.sign(v_y) * coef_abs
-                    quat[2] = -quat[1] * ratio
-                else:
-                    quat[2] = np.sign(v_x) * coef_abs
-                    quat[1] = -quat[2] * ratio
+            v_norm_inv = 1.0 / v_norm
+            v_x, v_y, v_z = v_x * v_norm_inv, v_y * v_norm_inv, v_z * v_norm_inv
+            if v_z >= 0.0:
+                s = np.sqrt(2.0 * (1.0 + v_z))
+                s_inv = 1.0 / s
+                quat[:] = 0.5 * s, -v_y * s_inv, v_x * s_inv, 0.0
             else:
-                q_x_abs = np.sqrt((1.0 - w_2) / (1.0 + ratio**2))
-                quat[1] = -np.sign(v_y) * q_x_abs
-                quat[2] = +np.sign(v_x) * q_x_abs * ratio
-            quat[3] = 0.0
+                # Near -z, 1 + v_z loses cos(theta/2) to cancellation. Recover it from the transverse norm instead.
+                transverse_norm = np.sqrt(v_x * v_x + v_y * v_y)
+                if transverse_norm > 0.0:
+                    sin_half_angle = np.sqrt(0.5 * (1.0 - v_z))
+                    axis_scale = sin_half_angle / transverse_norm
+                    quat[:] = 0.5 * transverse_norm / sin_half_angle, -v_y * axis_scale, v_x * axis_scale, 0.0
+                else:
+                    quat[:] = 0.0, 0.0, 1.0, 0.0
 
-            # First order quaternion normalization is accurate enough
-            quat *= 0.5 * (3.0 - np.sum(np.square(quat), -1))
+                # First order quaternion normalization is accurate enough
+                quat *= 0.5 * (3.0 - (quat[0] ** 2 + quat[1] ** 2 + quat[2] ** 2))
 
-    return out_
+    return out
 
 
 def compute_camera_angle(camera_pos, camera_lookat):
