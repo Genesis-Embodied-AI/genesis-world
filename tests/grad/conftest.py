@@ -4,13 +4,18 @@ import weakref
 import xml.etree.ElementTree as ET
 
 import pytest
-import torch
 
-import quadrants as qd
+from ..conftest import lazy_imports
 
-import genesis as gs
-from genesis.grad.bridge import LaunchRecorder
-from genesis.utils.misc import qd_to_torch
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import torch
+
+    import quadrants as qd
+
+    import genesis as gs
+    from genesis.grad.bridge import LaunchRecorder
+    from genesis.utils.misc import qd_to_torch
 
 
 @pytest.fixture(autouse=True)

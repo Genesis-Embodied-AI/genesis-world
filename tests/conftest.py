@@ -1,6 +1,9 @@
+import builtins
+import contextlib
 import ctypes
 import gc
 import hashlib
+import importlib
 import itertools
 import logging
 import os
@@ -11,6 +14,7 @@ import sys
 import warnings
 from argparse import SUPPRESS
 from enum import Enum
+from importlib.util import find_spec, resolve_name
 from io import BytesIO
 from pathlib import Path
 
@@ -51,12 +55,7 @@ else:
         has_display = bool(num_displays.value)
 
 # Determine whether the optional 'imgui-bundle' dependency is available
-try:
-    import imgui_bundle  # noqa: F401
-
-    is_imgui_bundle_supported = True
-except ImportError:
-    is_imgui_bundle_supported = False
+is_imgui_bundle_supported = find_spec("imgui_bundle") is not None
 
 # Forcibly disable Mujoco OpenGL to avoid conflicts with Genesis
 os.environ["MUJOCO_GL"] = "0"
@@ -100,6 +99,73 @@ SKIP_NO_VIEWER = _skip_reason("Interactive viewer not supported on this platform
 SKIP_NO_OMNIVERSE_KIT = _skip_reason("omniverse-kit support not available")
 SKIP_NO_IPC = _skip_reason("IPC Coupler is not supported because 'uipc' module is not available.")
 SKIP_NO_IMGUI_BUNDLE = _skip_reason("'imgui-bundle' is not available.")
+
+# Modules whose import is delayed until the environment of the worker is set, since they read environment variables
+# (device selection, thread counts, cache folders) as they are imported
+DELAYED_MODULES = ("genesis", "numba", "numpy", "quadrants", "torch")
+
+
+@contextlib.contextmanager
+def lazy_imports():
+    """Defer the imports of the block to the first use of each name they bind, as 'lazy import' does from Python 3.15.
+
+    A conftest names modules, functions and classes at module level without importing anything. A name stands for
+    its object everywhere but as the type 'isinstance' checks or a class derives from.
+    """
+
+    class LazyImport:
+        # Attribute access and assignment and calls reach the object, imported on the first of them. The attributes the
+        # import statement itself reads (its 'from' names, or the submodules of a dotted import) import nothing.
+        def __init__(self, module, name, pending):
+            object.__setattr__(self, "_module", module)
+            object.__setattr__(self, "_name", name)
+            object.__setattr__(self, "_pending", pending)
+
+        def _resolve(self):
+            imported = importlib.import_module(self._module)
+            if self._name is None:
+                return imported
+            if self._name in vars(imported):
+                return vars(imported)[self._name]
+            return importlib.import_module(f"{self._module}.{self._name}")
+
+        def __getattr__(self, attr):
+            if attr in self._pending:
+                module = self._module if self._name is None else f"{self._module}.{self._name}"
+                path = self._pending[attr]
+                return LazyImport(module, attr, {path[0]: path[1:]} if path else {})
+            return getattr(self._resolve(), attr)
+
+        def __setattr__(self, attr, value):
+            setattr(self._resolve(), attr, value)
+
+        def __call__(self, *args, **kwargs):
+            return self._resolve()(*args, **kwargs)
+
+    def import_lazily(name, globals=None, locals=None, fromlist=(), level=0):
+        if level > 0:
+            name = resolve_name("." * level + name, globals["__package__"])
+        if fromlist:
+            return LazyImport(name, None, {attr: () for attr in fromlist})
+        top, *submodules = name.split(".")
+        return LazyImport(top, None, {submodules[0]: tuple(submodules[1:])} if submodules else {})
+
+    builtin_import = builtins.__import__
+    builtins.__import__ = import_lazily
+    try:
+        yield
+    finally:
+        builtins.__import__ = builtin_import
+
+
+with lazy_imports():
+    import numpy as np
+    import torch
+
+    import genesis as gs
+
+    from .utils.assets import get_hf_dataset
+    from .utils.simulators import build_genesis_sim, build_mujoco_sim
 
 
 def is_mem_monitoring_supported():
@@ -217,9 +283,15 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     # relying on this mechanism is fragile.
     os.environ.setdefault("QD_ENABLE_PYBUF", "0" if sys.stdout is sys.__stdout__ else "1")
 
-    # Enforce special environment variable before importing test modules if distributed framework is enabled
+    # Enforce special environment variable before importing test modules if distributed framework is enabled. The
+    # conftest of every test folder passed on the command line is imported before this hook, so none imports the
+    # DELAYED_MODULES or anything importing them (trimesh, tests.utils) outside of a 'lazy_imports' block.
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id and worker_id.startswith("gw"):
+        modules_imported = [name for name in DELAYED_MODULES if name in sys.modules]
+        if modules_imported:
+            raise pytest.UsageError(f"Imported before the environment of the worker is set: {modules_imported}.")
+
         # Enforce GPU affinity
         gpu_indices = _get_gpu_indices()
         if gpu_indices:
@@ -298,8 +370,6 @@ def _torch_get_gpu_idx(device):
     # confirmable. Returns the resolved physical device index, or -1 when it cannot be confirmed (no GPU
     # management library, or a UUID unknown to it), which the caller turns into a hard error rather than
     # letting an unverified device through.
-    import torch
-
     device_uuid = str(torch.cuda.get_device_properties(device).uuid)
 
     backend = detect_gpu_backend()
@@ -377,8 +447,6 @@ def pytest_xdist_auto_num_workers(config):
             vram_memory = sum(devices_vram_memory) / 1024
         else:
             # FIXME: There is no easy way for Intel ARC device. Ignore device visibility issue for now...
-            import torch
-
             if torch.xpu.is_available():
                 num_gpus = torch.xpu.device_count()
                 vram_memory = 0.0
@@ -671,16 +739,11 @@ def caplog(caplog):
 
 @pytest.fixture
 def tol():
-    import numpy as np
-    import genesis as gs
-
     return TOL_DOUBLE if gs.np_float == np.float64 else TOL_SINGLE
 
 
 @pytest.fixture
 def precision(request, backend):
-    import genesis as gs
-
     precision = None
     for mark in request.node.iter_markers("precision"):
         if mark.args:
@@ -712,8 +775,6 @@ def mujoco_compatibility(request):
 
 @pytest.fixture
 def friction_cone(request):
-    import genesis as gs
-
     friction_cone = None
     for mark in request.node.iter_markers("friction_cone"):
         if mark.args:
@@ -894,8 +955,6 @@ def use_deterministic_algorithms(request):
 def initialize_genesis(
     request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache, use_deterministic_algorithms
 ):
-    import genesis as gs
-
     # Early return if backend is None
     if backend is None:
         yield
@@ -988,8 +1047,6 @@ def mj_sim(
     gjk_collision,
     friction_cone,
 ):
-    from .utils.simulators import build_mujoco_sim
-
     return build_mujoco_sim(
         xml_path,
         gs_solver,
@@ -1020,8 +1077,6 @@ def gs_sim(
     show_viewer,
     mj_sim,
 ):
-    from .utils.simulators import build_genesis_sim
-
     return build_genesis_sim(
         xml_paths,
         gs_solver,
@@ -1133,8 +1188,6 @@ def png_snapshot(request, snapshot):
             assert path.is_file()
             path.unlink()
     else:
-        from .utils.assets import get_hf_dataset
-
         # The snapshots repository mirrors the tests tree ('rendering/__snapshots__/test_offscreen/...'), so the
         # snapshot directory path relative to the tests root is also its path in the repository.
         tests_dir = Path(__file__).parent
@@ -1164,10 +1217,7 @@ def load_trajectory_snapshot(request):
     of steps it records, and whether the replay shows the viewer, and returns the loaded trajectory. The scene is built
     and recorded only when the snapshots are updated, the published snapshot being loaded otherwise.
     """
-    import genesis as gs
     from genesis.recorders.trajectory import TRAJECTORY_FORMAT
-
-    from .utils.assets import get_hf_dataset
 
     # The path is the one syrupy gives a single-file snapshot of the test. The test reads the file itself, so syrupy
     # leaves it out of its count of unused snapshots.

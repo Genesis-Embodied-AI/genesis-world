@@ -1,12 +1,11 @@
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from ..conftest import SKIP_NO_IPC
 
-try:
-    import uipc
-except ImportError:
+if find_spec("uipc") is None:
     pytest.skip(SKIP_NO_IPC, allow_module_level=True)
 
 

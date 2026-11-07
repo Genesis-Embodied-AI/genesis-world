@@ -1,13 +1,18 @@
 import os
 import xml.etree.ElementTree as ET
 
-import numpy as np
 import pytest
-import trimesh
 from PIL import Image
 
-import genesis.utils.geom as gu
-from genesis.utils.misc import get_assets_dir
+from ..conftest import lazy_imports
+
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+    import trimesh
+
+    import genesis.utils.geom as gu
+    from genesis.utils.misc import get_assets_dir
 
 
 @pytest.fixture

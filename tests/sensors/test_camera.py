@@ -1,6 +1,7 @@
 import gc
 import sys
 import weakref
+from importlib.util import find_spec
 
 import numpy as np
 import pytest
@@ -13,19 +14,9 @@ from genesis.utils.geom import pos_lookat_up_to_T, trans_quat_to_T, trans_to_T
 from ..conftest import SKIP_NO_LUISA, SKIP_NO_MADRONA
 from ..utils.assertions import assert_allclose, assert_equal, rgb_array_to_png_bytes
 
-
-try:
-    import LuisaRenderPy
-
-    ENABLE_RAYTRACER = True
-except ImportError:
-    ENABLE_RAYTRACER = False
-try:
-    import gs_madrona
-
-    ENABLE_MADRONA = True
-except ImportError:
-    ENABLE_MADRONA = False
+# LuisaRenderPy is found through the path that genesis appends as it is imported
+ENABLE_RAYTRACER = find_spec("LuisaRenderPy") is not None
+ENABLE_MADRONA = find_spec("gs_madrona") is not None
 
 
 @pytest.mark.required

@@ -4,26 +4,25 @@ import os
 import xml.etree.ElementTree as ET
 from functools import partial, partialmethod
 
-import numpy as np
 import pygltflib
 import pytest
-import trimesh
 from PIL import Image
 
-import genesis as gs
-import genesis.utils.geom as gu
+from ..conftest import lazy_imports
 
-from genesis.utils.misc import get_assets_dir
-
-from ..utils.assertions import assert_allclose, assert_equal
-from ..utils.assets import get_hf_dataset
-
-try:
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+    import trimesh
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, UsdUtils
 
+    import genesis as gs
+    import genesis.utils.geom as gu
+    from genesis.utils.misc import get_assets_dir
     from genesis.utils.usd import UsdContext
-except ImportError:
-    pass
+
+    from ..utils.assertions import assert_allclose, assert_equal
+    from ..utils.assets import get_hf_dataset
 
 
 @pytest.fixture
@@ -196,7 +195,7 @@ def check_gs_surfaces(gs_surface1, gs_surface2, material_name):
     check_gs_textures(gs_surface1.emissive_texture, gs_surface2.emissive_texture, 0.0, material_name, "emissive")
 
 
-def to_array(s: str) -> np.ndarray:
+def to_array(s: str) -> "np.ndarray":
     """Convert a string of space-separated floats to a numpy array."""
     return np.array([float(x) for x in s.split()])
 
@@ -357,7 +356,7 @@ def compare_vgeoms(compared_vgeoms, usd_vgeoms, tol):
         check_gs_surfaces(compared_vgeom_surface, usd_vgeom_surface, mesh_name)
 
 
-def compare_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
+def compare_scene(compared_scene: "gs.Scene", usd_scene: "gs.Scene", tol: float):
     """Compare structure and data between compared scene and USD scene."""
     compared_entities = compared_scene.entities
     usd_entities = usd_scene.entities
@@ -375,7 +374,7 @@ def compare_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
     compare_links(compared_links, usd_links, tol=tol)
 
 
-def compare_mesh_scene(compared_scene: gs.Scene, usd_scene: gs.Scene, tol: float):
+def compare_mesh_scene(compared_scene: "gs.Scene", usd_scene: "gs.Scene", tol: float):
     """Compare mesh data between mesh scene and USD scene."""
     compared_entities = compared_scene.entities
     usd_entities = usd_scene.entities

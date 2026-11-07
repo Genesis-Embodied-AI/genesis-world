@@ -1,4 +1,5 @@
 import math
+from importlib.util import find_spec
 from itertools import permutations
 from typing import TYPE_CHECKING, cast
 
@@ -7,9 +8,7 @@ import pytest
 
 from ..conftest import SKIP_NO_IPC, TOL_SINGLE
 
-try:
-    import uipc
-except ImportError:
+if find_spec("uipc") is None:
     pytest.skip(SKIP_NO_IPC, allow_module_level=True)
 
 from uipc import builtin
