@@ -127,7 +127,7 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
     # heterogeneous entity and the homogeneous references.
     for relative in (True, False):
         ref_quats = torch.cat(
-            [ref_obj.get_quat(envs_idx=[i_env], relative=relative) for i_env, ref_obj in enumerate(ref_objs)]
+            [ref_obj.get_quat(envs_idx=i_env, relative=relative) for i_env, ref_obj in enumerate(ref_objs)]
         )
         assert_allclose(het_obj.get_quat(relative=relative), ref_quats, tol=tol)
 
@@ -135,22 +135,22 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
         scene.step()
 
     # Every environment simulates the link frames and joints of the dual arm variant it carries, as its reference does
-    ref_dual_arm_qpos = torch.cat([ref.get_qpos(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    ref_dual_arm_qpos = torch.cat([ref.get_qpos(envs_idx=i_env) for i_env, ref in enumerate(ref_dual_arms)])
     assert_allclose(het_dual_arm.get_qpos(), ref_dual_arm_qpos, tol=tol)
-    ref_links_pos = torch.cat([ref.get_links_pos(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    ref_links_pos = torch.cat([ref.get_links_pos(envs_idx=i_env) for i_env, ref in enumerate(ref_dual_arms)])
     assert_allclose(ref_links_pos - het_dual_arm.get_links_pos(), np.expand_dims(REFERENCE_OFFSETS, 1), tol=tol)
-    ref_dofs_damping = torch.cat([ref.get_dofs_damping(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    ref_dofs_damping = torch.cat([ref.get_dofs_damping(envs_idx=i_env) for i_env, ref in enumerate(ref_dual_arms)])
     assert_allclose(het_dual_arm.get_dofs_damping(), ref_dofs_damping, tol=gs.EPS)
 
     for _ in range(N_STEPS - N_STEPS_FALLING):
         scene.step()
 
     # After the drop each environment matches the homogeneous reference of its variant in pose, velocity and mass.
-    ref_pos = torch.cat([ref_obj.get_pos(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
-    ref_vel = torch.cat([ref_obj.get_vel(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
+    ref_pos = torch.cat([ref_obj.get_pos(envs_idx=i_env) for i_env, ref_obj in enumerate(ref_objs)])
+    ref_vel = torch.cat([ref_obj.get_vel(envs_idx=i_env) for i_env, ref_obj in enumerate(ref_objs)])
     # Batch layout and translation change rounding, which can change which nearly equivalent corners pruning retains.
     # The velocity comparison allows their accumulated effect over the drop.
-    assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
+    assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=tol)
     assert_allclose(het_obj.get_vel(), ref_vel, atol=1e-3)
     assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
 
@@ -159,7 +159,7 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
     assert tensor_to_array(het_dual_arm.get_contacts(with_entity=het_dual_arm)["valid_mask"]).any(axis=-1).all()
 
     # Each cube rests on the torso of the dual arm variant its environment carries, as its reference does
-    ref_cube_pos = torch.cat([ref_cube.get_pos(envs_idx=[i_env]) for i_env, ref_cube in enumerate(ref_cubes)])
+    ref_cube_pos = torch.cat([ref_cube.get_pos(envs_idx=i_env) for i_env, ref_cube in enumerate(ref_cubes)])
     assert_allclose(ref_cube_pos - het_cube.get_pos(), REFERENCE_OFFSETS, tol=tol)
     torso_top = het_dual_arm.get_link("torso").get_AABB()[:, 1, 2]
     assert_allclose(het_cube.get_pos()[:, 2] - torso_top, 0.5 * np.array(CUBE_SIZES), tol=2e-4)
