@@ -7,7 +7,7 @@ name = "genesis-world"
 version = "1.4.5"
 description = "A universal and generative physics engine"
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "psutil",
     "quadrants==1.4.0",
@@ -47,11 +47,11 @@ dependencies = [
     # Optional `trimesh` dependency for loading `.dae` mesh files
     "pycollada",
     # Used for parsing `.glb` mesh files
-    "pygltflib==1.16.0",
+    "pygltflib",
     # Used for decoding Draco-compressed `.glb` mesh files
     "DracoPy",
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
-    "tetgen==0.8.2",
+    "tetgen",
     # Used for some advanced mesh processing such as `skeletonization`
     # * 0.8.0 is the first release with native binaries for each platform, Linux ARM included.
     "PyGEL3D>=0.8.0",
@@ -63,13 +63,9 @@ dependencies = [
     # Use by `RigidGeom.visualize_sdf` to render SDF as level 0 marching cubes
     "scikit-image",
     # Convex decomposition library
-    "coacd",
+    "coacd>=1.0.12",
     # Ray casting used in mesh to height field conversion
     "rtree",
-    # Constraint Satisfaction Solver.
-    # Used to compute contype and conaffinity bitmasks from complete list of excluded collision pairs.
-    # * >= 4.15.5.0 does not provide pre-compiled wheels on Linux
-    "z3-solver<4.15.5.0",
     # Used for loading raytracing special texture images used by LuisaRender
     "OpenEXR",
     # Native batch renderer specifically designed for Genesis
@@ -82,7 +78,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
     # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
     "pytest<9.2.0",
     "pytest-xdist",
@@ -106,6 +101,8 @@ dev = [
     # * Mujoco 3.10.0 aligned the primal solvers with Genesis (Hager-Zhang CG update, shifted linesearch costs);
     #   the step-by-step solver consistency tests only hold when both engines run the same algorithm.
     "mujoco>=3.10.0,<3.11.0",
+    # Used by the locomotion environments to batch observations
+    "tensordict",
     # Used internally by 'MPLPlotter'
     # * 3.7.0: introduces Button blitting and 'outside' keyword legend location
     "matplotlib>=3.7.0",
@@ -137,13 +134,12 @@ docs = [
 ]
 render = [
     "pybind11[global]",
-    # Pre-compiled wheels are only published for cp38-cp312 on macOS (universal2), Linux x86_64, and Windows.
-    "open3d; python_version < '3.13' and platform_machine != 'aarch64'",
+    "open3d",
     "imgui-bundle",
 ]
 usd = [
     # Used for parsing `.usd` mesh files
-    "usd-core==25.11",
+    "usd-core",
     # Used to serialize concurrent omni-kit bake operations (concurrent bootstrapping causes segfaults)
     "filelock",
 ]
@@ -161,14 +157,6 @@ genesis = [
     "ext/pyrender/fonts/*",
     "ext/pyrender/shaders/*",
 ]
-
-[tool.black]
-line-length = 120
-force-exclude = '''
-/(
-    genesis/ext
-)/
-'''
 
 [tool.ruff]
 line-length = 120

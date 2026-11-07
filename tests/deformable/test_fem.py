@@ -260,9 +260,12 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
-            pos=(0.4, -0.1, 0.10),
+            pos=SPHERE_POS,
             radius=SPHERE_RADIUS,
         ),
         material=gs.materials.FEM.Elastic(
@@ -297,7 +300,7 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     for _ in range(n_steps):
         scene.step()
 
-    for entity, init_pos, entity_halfsize_ref in zip(scene.entities, (SPHERE_POS, BOX_POS), (SPHERE_RADIUS, BOX_SIZE)):
+    for entity, init_pos, entity_halfsize_ref in zip((sphere, box), (SPHERE_POS, BOX_POS), (SPHERE_RADIUS, BOX_SIZE)):
         # Not moving anymore
         state = entity.get_state()
         assert_allclose(state.vel, 0.0, tol=0.025)
@@ -330,7 +333,8 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
 @pytest.mark.parametrize("precision", ["64"])
 def test_hard_constraint(use_implicit_solver, show_viewer):
     DT = 0.01
-    HEIGHT = 2.0  # It must be height enough to avoid hitting the ground when dropping the box at the end
+    # The free fall at the end crosses z=0, where a scene without ground plane has no floor to stop it
+    HEIGHT = 0.5
     BOX_SIZE = 0.1
     MOTION_RADIUS = 0.1
     MOTION_SPEED = 0.005
@@ -561,6 +565,9 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, SPHERE_RADIUS),
@@ -591,7 +598,7 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     for _ in range(40):
         scene.step()
 
-    for entity, init_height in zip(scene.entities, (SPHERE_RADIUS, 2 * SPHERE_RADIUS + BOX_SIZE)):
+    for entity, init_height in zip((sphere, box), (SPHERE_RADIUS, 2 * SPHERE_RADIUS + BOX_SIZE)):
         # Barely moving
         state = entity.get_state()
         assert_allclose(state.vel, 0.0, tol=0.05)
@@ -609,7 +616,8 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 @pytest.mark.parametrize("precision", ["64"])
 def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
     DT = 0.01
-    HEIGHT = 2.0  # It must be height enough to avoid hitting the ground when dropping the box at the end
+    # The free fall at the end crosses z=0, where a scene without ground plane has no floor to stop it
+    HEIGHT = 0.5
     BOX_SIZE = 0.1
     SPHERE_RADIUS = 0.03
     MOTION_RADIUS = 0.1

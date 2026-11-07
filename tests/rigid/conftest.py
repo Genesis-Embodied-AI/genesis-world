@@ -800,14 +800,28 @@ def sliding_ball_pair():
 
 @pytest.fixture(scope="session")
 def free_bodies_in_one_model():
-    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks."""
+    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks. Every
+    geom states its collision bitmasks, and the first body reaches into the second through a massless geom, the pair
+    of bodies being excluded from collision."""
     mjcf = ET.Element("mujoco")
     worldbody = ET.SubElement(mjcf, "worldbody")
     for i_body, mass in enumerate((1.0, 3.0)):
         body = ET.SubElement(worldbody, "body", name=f"free_{i_body}", pos=f"{i_body} 4.0 0.4")
         ET.SubElement(body, "freejoint")
-        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass))
-    return ET.tostring(mjcf, encoding="unicode")
+        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass), contype="3", conaffinity="5")
+    ET.SubElement(
+        worldbody[0],
+        "geom",
+        type="box",
+        size="0.05 0.05 0.05",
+        pos="0.95 0.0 0.0",
+        mass="0",
+        contype="3",
+        conaffinity="5",
+    )
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "exclude", body1="free_0", body2="free_1")
+    return mjcf
 
 
 @pytest.fixture(scope="session")
@@ -1212,23 +1226,47 @@ def freeflyer_mjcf():
 
 @pytest.fixture(scope="session")
 def trees_and_slider_mjcf():
-    """Generate an MJCF model holding three kinematic trees: a free body with a hinged child twice, the second hinge
-    with an authored armature, and a body sliding on the world along one axis with an authored armature."""
+    """Generate an MJCF model of four kinematic trees, none of whose poses, anchors, axes or references is a default.
+
+    The first two trees are a free body with a hinged child, the second hinge with an authored armature. The third is a
+    body sliding on the world with an authored armature. The fourth chains every other joint type from a free body: a
+    ball joint, then a body moving through a hinge and a slide together, then a welded body, then a hinge, the free body
+    branching into a sliding body too. Its hinge and slide moving a body alone carry an authored armature.
+    """
     mjcf = ET.Element("mujoco", model="trees_and_slider")
+    ET.SubElement(mjcf, "compiler", angle="degree")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
-        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+    for name, pos, joint_attrs in (("tree_a", "0.1 -0.1 1", {}), ("tree_b", "1 0.1 1.1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos, euler="10 -20 30")
         ET.SubElement(body, "joint", type="free")
         ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
-        ET.SubElement(body, "geom", type="sphere", size="0.05")
-        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
-        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(body, "geom", type="sphere", size="0.05", pos="0.01 -0.02 0.01")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0.02 0.01 0.1", euler="-15 5 25")
+        ET.SubElement(child, "joint", type="hinge", axis="0.2 1 0.3", pos="0.01 0.02 -0.01", ref="20", **joint_attrs)
         ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
-        ET.SubElement(child, "geom", type="sphere", size="0.02")
-    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0 1")
-    ET.SubElement(slider, "joint", type="slide", axis="1 0 0", armature="0.3")
+        ET.SubElement(child, "geom", type="sphere", size="0.02", pos="0.02 0.01 -0.01")
+    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0.1 1", euler="5 -8 12")
+    ET.SubElement(slider, "joint", type="slide", axis="1 0.2 -0.3", pos="0.01 0.02 0.03", ref="0.05", armature="0.3")
     ET.SubElement(slider, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
-    ET.SubElement(slider, "geom", type="sphere", size="0.05")
+    ET.SubElement(slider, "geom", type="sphere", size="0.05", pos="-0.01 0.02 0.01")
+    base = ET.SubElement(worldbody, "body", name="chain_base", pos="3 -0.2 0.8", euler="10 -20 30")
+    ET.SubElement(base, "freejoint")
+    ET.SubElement(base, "geom", type="box", size="0.1 0.05 0.03", pos="0.02 0.01 -0.03", euler="5 -8 15")
+    ball = ET.SubElement(base, "body", name="chain_ball", pos="0.15 0.02 0.05", euler="-12 30 7")
+    ET.SubElement(ball, "joint", type="ball", axis="0.2 0.3 0.9", pos="-0.03 0.01 0.02")
+    ET.SubElement(ball, "geom", type="capsule", size="0.02 0.05", pos="0.06 -0.01 0.02", euler="3 90 -6")
+    multi = ET.SubElement(ball, "body", name="chain_multi", pos="0.12 -0.03 0.01", euler="15 9 -10")
+    ET.SubElement(multi, "joint", type="hinge", axis="0.3 -0.5 0.8", pos="0.02 0.03 -0.01", ref="25")
+    ET.SubElement(multi, "joint", type="slide", axis="-0.6 0.2 0.4", pos="0.01 -0.02 0.03", ref="0.07")
+    ET.SubElement(multi, "geom", type="sphere", size="0.03", pos="0.04 -0.02 0.01", euler="20 -15 35")
+    welded = ET.SubElement(multi, "body", name="chain_welded", pos="0.08 0.02 -0.01", euler="6 -40 20")
+    ET.SubElement(welded, "geom", type="box", size="0.02 0.02 0.02", pos="0.01 0.03 -0.02", euler="-25 10 5")
+    tip = ET.SubElement(welded, "body", name="chain_tip", pos="0.05 -0.01 0.02", euler="-18 4 27")
+    ET.SubElement(tip, "joint", type="hinge", axis="1 1 0.3", pos="0.01 0.02 -0.02", ref="-35", armature="0.3")
+    ET.SubElement(tip, "geom", type="cylinder", size="0.01 0.04", pos="0.01 0.02 0.03", euler="90 -12 8")
+    side = ET.SubElement(base, "body", name="chain_side", pos="-0.12 0.04 0.02", euler="7 -11 45")
+    ET.SubElement(side, "joint", type="slide", axis="0.1 0.6 0.8", pos="0.02 0.01 -0.01", ref="-0.05", armature="0.3")
+    ET.SubElement(side, "geom", type="box", size="0.03 0.02 0.01", pos="0.01 0.02 -0.01", euler="12 -9 4")
     return ET.tostring(mjcf, encoding="unicode")
 
 

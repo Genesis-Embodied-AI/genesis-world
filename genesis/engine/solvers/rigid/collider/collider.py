@@ -7,6 +7,7 @@ terrain), and contact management.
 """
 
 from collections.abc import Iterator
+from itertools import product
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,7 +19,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.array_class import (
     ColliderInfo,
@@ -401,7 +403,7 @@ class Collider:
                 contact_slots=1 if self._solver._options.enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
             ),
-            env_first={ColliderState.contact_sort_key: True, "pruning": True},
+            env_first={(ColliderState.contact_sort_key, ColliderState.diff_contact_input): True, "pruning": True},
             unused=dict(
                 box_box=not config.box_box_detection,
                 contact_cache=not self.collider_config.has_non_box_plane_convex_convex,
@@ -528,6 +530,25 @@ class Collider:
             is_weld = np.array([(link_min[i], link_max[i]) in weld_pairs for i in range(len(row))], dtype=bool)
             valid &= ~is_weld
 
+        # Link pairs that the description of their entity excludes from collision. Each variant of a heterogeneous
+        # entity states its own, which apply to the geoms it gives those links (see 'RigidVariantLinkDescription').
+        excluded_geom_pairs = []
+        for entity in self._solver.entities:
+            variants_links_desc = [entity.desc.links, *[variant.links for variant in entity.desc.variants[1:]]]
+            for i_variant, links_desc in enumerate(variants_links_desc):
+                for link, l_desc in zip(entity.links, links_desc):
+                    for name in l_desc.contact_exclusions:
+                        links_geoms_range = [
+                            (link_.geom_start, link_.geom_end)
+                            if link_._variant_geom_ranges is None
+                            else link_._variant_geom_ranges[i_variant]
+                            for link_ in (link, entity.get_link(name))
+                        ]
+                        for i_ga, i_gb in product(*[range(*geoms_range) for geoms_range in links_geoms_range]):
+                            excluded_geom_pairs.append(min(i_ga, i_gb) * n_geoms + max(i_ga, i_gb))
+        if excluded_geom_pairs:
+            valid &= ~np.isin(row * n_geoms + col, excluded_geom_pairs)
+
         # Heterogeneous variants that no environment carries together never collide, and keeping their pairs would
         # grow the pair count quadratically with the pool size. An entity dispatches the same variant to all of its
         # links in a given environment, so a pair is kept only if some environment carries the variant of both geoms.
@@ -570,13 +591,13 @@ class Collider:
             # carrying its variant. The pair filter above leaves only variants that some environment carries, and every
             # same-root pair left belongs to a single variant of one entity, so the first environment carrying a geom
             # carries the other geom of its pair as well.
+            _, _, geoms_pos, geoms_quat, _, _ = compute_forward_kinematics(
+                self._solver.entities, n_envs=self._solver._B
+            )
             for i_g in self_root_geom_idxs:
                 geom = geoms[i_g]
                 i_b = geom.active_envs_idx[0] if geom.active_envs_idx is not None else 0
-                env_idx = i_b if self._solver.n_envs > 0 else None
-                geom_pos = tensor_to_array(geom.get_pos(env_idx, relative=False).reshape((3,)))
-                geom_quat = tensor_to_array(geom.get_quat(env_idx, relative=False).reshape((4,)))
-                verts = gu.transform_by_trans_quat(geom.init_verts, geom_pos, geom_quat)
+                verts = gu.transform_by_trans_quat(geom.init_verts, geoms_pos[i_b, i_g], geoms_quat[i_b, i_g])
                 centroid = verts.mean(axis=0, keepdims=True)
                 verts = centroid + (1.0 - 1e-3) * (verts - centroid)
                 geoms_verts[i_g] = verts

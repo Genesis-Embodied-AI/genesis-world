@@ -1,6 +1,7 @@
 import os
+from collections.abc import Iterable, Sequence
 from functools import cached_property
-from typing import Annotated, Iterable, Literal, Sequence, cast
+from typing import Annotated, Literal, cast
 
 import numpy as np
 
@@ -288,7 +289,7 @@ class BatchTexture(Texture):
 
     Parameters
     ----------
-    textures : List[Optional[Texture]]
+    textures : list[Texture | None]
         List of textures.
     """
 
@@ -307,13 +308,13 @@ class BatchTexture(Texture):
 
         Parameters
         ----------
-        image_paths : List[str], optional
+        image_paths : list[str], optional
             List of paths to the image files.
         image_folder : str, optional
             Path to the image folder.
-        image_arrays : List[np.ndarray], optional
+        image_arrays : list[np.ndarray], optional
             List of image arrays.
-        image_colors : List[Union[float, List[float]]], optional
+        image_colors : list[float | list[float]], optional
             List of color factors that will be multiplied with the base color, stored as tuple. Default is None.
         encoding : str, optional
             The encoding way of the image. Possible values are ['srgb', 'linear']. Default is 'srgb'.
@@ -349,9 +350,9 @@ class BatchTexture(Texture):
             gs.raise_exception("No images found.")
 
         if image_colors is not None:
-            if isinstance(image_colors[0], float):  # List[float]
+            if isinstance(image_colors[0], float):  # list[float]
                 image_colors = [image_colors for _ in range(num_images)]
-            else:  # List[List[float]]
+            else:  # list[list[float]]
                 if len(image_colors) != num_images:
                     gs.raise_exception("The number of image colors must be the same as the number of images.")
         else:
@@ -377,7 +378,7 @@ class BatchTexture(Texture):
 
         Parameters
         ----------
-        colors : List[List[float]]
+        colors : list[list[float]]
             List of colors.
         """
         return BatchTexture(textures=[ColorTexture(color=color) for color in colors])

@@ -20,6 +20,7 @@ from genesis.utils.array_class import (
     GeomsInitAABB,
     RigidInfo,
 )
+from genesis.utils.data import eoa
 
 from .contact import func_collider_clear_env, func_is_link_pair_hibernated
 from .utils import func_is_geom_boxes_overlap
@@ -252,7 +253,7 @@ def _func_broad_phase_links_all_vs_all(
     n_valid_link_pairs = collider_info.n_valid_link_pairs[None]
 
     qd.loop_config(name="traverse_valid_links", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_lp, i_b in qd.ndrange(n_valid_link_pairs, _B):
+    for i_lp, i_b in qd.ndrange(n_valid_link_pairs, _B, axes=qd.static(eoa(dyn_state.geoms.pos))):
         # See func_collision_clear. No geom pair is ever a candidate when no link pair is valid.
         if i_lp == 0:
             collider_state.n_broad_pairs[i_b] = 0
@@ -287,11 +288,10 @@ def func_broad_phase_geoms(
     Each geom of the outer link of a candidate pair, the link holding the most geoms, is tested against the box of the
     inner link first, then against each geom of the inner link, so the work spreads over the geoms of the larger link.
     """
-    n_geoms = dyn_state.geoms.aabb_min.shape[0]
-    _B = collider_state.n_contacts.shape[0]
-
     qd.loop_config(name="traverse_link_pairs_geoms", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
+    for i_g, i_b in qd.ndrange(
+        *dyn_state.geoms.aabb_min.shape, axes=qd.static(eoa(collider_state.broad_collision_pairs))
+    ):
         i_l = dyn_info.geoms.link_idx[i_g]
         for i_lp_ in range(collider_state.n_broad_link_pairs[i_b]):
             i_lp = collider_state.broad_link_pairs[i_lp_, i_b]

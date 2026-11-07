@@ -10,8 +10,9 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
+from collections.abc import Callable, Iterable
 from functools import cached_property
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -24,10 +25,9 @@ import genesis.utils.mesh as mu
 from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.force_fields import ForceField
-from genesis.engine.materials.base import EntityT, Material
+from genesis.engine.materials.base import Material
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -36,7 +36,7 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
-    SFOptions,
+    SceneOptions,
     SimOptions,
     SPHOptions,
     ViewerOptions,
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
-    from genesis.options.sensors.options import SensorOptions, SensorT
+    from genesis.options.sensors.options import SensorOptions
     from genesis.recorders import Recorder
 
 
@@ -156,8 +156,6 @@ class Scene(RBC):
         The options configuring the sph_solver (``scene.sim.SPHSolver``).
     fem_options : gs.options.FEMOptions
         The options configuring the fem_solver (``scene.sim.FEMSolver``).
-    sf_options : gs.options.SFOptions
-        The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
     newton_options : gs.options.NewtonOptions
@@ -188,7 +186,6 @@ class Scene(RBC):
         mpm_options: MPMOptions | None = None,
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
-        sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
         newton_options: NewtonOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
@@ -210,7 +207,6 @@ class Scene(RBC):
             mpm_options,
             sph_options,
             fem_options,
-            sf_options,
             pbd_options,
             newton_options,
             coupler_options,
@@ -231,7 +227,6 @@ class Scene(RBC):
                 mpm=mpm_options,
                 sph=sph_options,
                 fem=fem_options,
-                sf=sf_options,
                 pbd=pbd_options,
                 newton=newton_options,
                 coupler=coupler_options,
@@ -326,7 +321,7 @@ class Scene(RBC):
     ) -> "RigidEntity": ...
 
     @overload
-    def add_entity(
+    def add_entity[EntityT: "Entity"](
         self,
         morph: Morph | Iterable[Morph],
         material: Material[EntityT] = ...,
@@ -430,15 +425,6 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
-        elif isinstance(material, gs.materials.SF.Smoke):
-            if surface.vis_mode is None:
-                surface.vis_mode = "particle"
-
-            if surface.vis_mode not in ("particle",):
-                gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
-                )
-
         elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
@@ -502,7 +488,7 @@ class Scene(RBC):
 
         Returns
         -------
-        entities : List[genesis.Entity]
+        entities : list[genesis.Entity]
             The created entities.
         """
         if not isinstance(morph, gs.morphs.USD):
@@ -600,7 +586,7 @@ class Scene(RBC):
         self.visualizer.add_light(pos, dir, color, intensity, directional, castshadow, cutoff, attenuation)
 
     @gs.assert_unbuilt
-    def add_sensor(self, sensor_options: "SensorOptions[SensorT]") -> "SensorT":
+    def add_sensor[SensorT: "Sensor"](self, sensor_options: "SensorOptions[SensorT]") -> SensorT:
         """
         Add a sensor to the scene.
 
@@ -629,7 +615,7 @@ class Scene(RBC):
 
         Returns
         -------
-        dict[Type[Sensor], torch.Tensor]
+        dict[type[Sensor], torch.Tensor]
             For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)

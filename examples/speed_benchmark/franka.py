@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 import genesis as gs
@@ -28,7 +30,7 @@ franka = scene.add_entity(
 
 
 # create 30000 parallel environments
-B = 30000
+B = 30000 if "PYTEST_VERSION" not in os.environ else 2
 scene.build(n_envs=B, env_spacing=(1.0, 1.0))
 
 # control all the robots
@@ -38,5 +40,5 @@ franka.control_dofs_position(
     torch.tile(torch.tensor([0, 0, 0, -1.0, 0, 1.0, 0, 0.02, 0.02], device=gs.device), (B, 1)),
 )
 
-for i in range(1000):
+for i in range(1000 if "PYTEST_VERSION" not in os.environ else 5):
     scene.step()

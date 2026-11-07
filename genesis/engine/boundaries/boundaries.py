@@ -45,27 +45,3 @@ class CubeBoundary:
             f"upper       : {brief(self.upper)}\n"
             f"restitution : {brief(self.restitution)}"
         )
-
-
-@qd.data_oriented
-class FloorBoundary:
-    def __init__(self, height, restitution=0.0):
-        self.height = height
-        self.restitution = restitution
-
-    @qd.func
-    def impose_pos_vel(self, pos, vel):
-        if pos[2] <= self.height and vel[2] <= 0:
-            vel[2] *= -self.restitution
-
-        pos[2] = qd.max(pos[2], self.height)
-
-        return pos, vel
-
-    @qd.func
-    def impose_pos(self, pos):
-        pos[2] = qd.max(pos[2], self.height)
-        return pos
-
-    def __repr__(self):
-        return f"{brief(self)}\nheight      : {brief(self.height)}\nrestitution : {brief(self.restitution)}"

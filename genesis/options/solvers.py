@@ -4,7 +4,7 @@ import numpy as np
 from pydantic import PrivateAttr, StrictBool, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
+from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, Vec3FType
 
 from .options import Options
 
@@ -38,8 +38,6 @@ class SimOptions(Options):
         exception. Defaults to 1.
     gravity : tuple, optional
         Gravity force in N/kg. Defaults to (0.0, 0.0, -9.81).
-    floor_height : float, optional
-        Height of the floor in meters. Defaults to 0.0.
     requires_grad : bool, optional
         Whether to enable differentiable mode. Defaults to False.
     use_hydroelastic_contact : bool, optional
@@ -49,7 +47,6 @@ class SimOptions(Options):
     dt: PositiveFloat = 1e-2
     substeps: PositiveInt = 1
     gravity: Vec3FType = (0.0, 0.0, -9.81)
-    floor_height: float = 0.0
     requires_grad: StrictBool = False
 
 
@@ -133,7 +130,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     point_contact_stiffness : float, optional
         Stiffness for point contact. Defaults to 1e8.
     fem_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none".
+        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none". The floor is the rigid
+        ground plane of the scene, which must be a single fixed plane facing up. A scene without one has no floor.
         TET would be the default choice for most cases.
         VERT would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
     enable_fem_self_tet_contact : bool, optional
@@ -141,7 +139,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     rigid_rigid_type : str, optional
         Type of contact between rigid bodies. Defaults to "tet". Can be "tet", "vert", or "none".
     rigid_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none".
+        Type of contact against the floor, as for `fem_floor_contact_type`. Defaults to "tet". Can be "tet", "vert",
+        or "none".
         Tet would be the default choice for most cases.
         Vert would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
     enable_rigid_fem_contact : bool, optional
@@ -977,8 +976,6 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     ----------
     damping : float, optional
         Damping factor. Defaults to 0.0.
-    floor_height : float, optional
-        Height of the floor in meters. If none, it will inherit from `SimOptions`. Defaults to None.
     use_implicit_solver : bool, optional
         Whether to use the implicit solver. Defaults to False.
         Implicit solver is a more stable solver for FEM. It can be used with a large time step.
@@ -1005,7 +1002,6 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     """
 
     damping: NonNegativeFloat = 0.0
-    floor_height: float | None = None
     use_implicit_solver: StrictBool = False
     n_newton_iterations: PositiveInt = 1
     n_pcg_iterations: PositiveInt = 500
@@ -1017,21 +1013,3 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
     enable_vertex_constraints: StrictBool = False
-
-
-class SFOptions(TimeBasedMixin):
-    """
-    Options configuring the SFSolver.
-    """
-
-    res: PositiveInt = 128
-    solver_iters: PositiveInt = 500
-    decay: PositiveFloat = 0.99
-
-    T_low: float = 1.0
-    T_high: float = 0.0
-
-    inlet_pos: Vec3FType = (0.6, 0.0, 0.1)
-    inlet_vel: Vec3FType = (0.0, 0.0, 1.0)
-    inlet_quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
-    inlet_s: PositiveFloat = 400.0

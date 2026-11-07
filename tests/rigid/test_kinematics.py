@@ -7,6 +7,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1017,3 +1018,141 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
             links=franka.links[: n_tgts + 1],
             poss=[target_pos] * (n_tgts + 1),
         )
+
+
+@pytest.mark.required
+def test_host_forward_kinematics(
+    trees_and_slider_mjcf, fixed_base_dual_arm, fixed_base_dual_arm_high_damping, show_viewer, tol
+):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, -2.5, 1.5),
+            camera_lookat=(0.0, 0.0, 0.4),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_links_info=True,
+            batch_joints_info=True,
+            batch_dofs_info=True,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            pos=(-3.0, -3.0, -0.2),
+            n_subterrains=(1, 1),
+            subterrain_size=(2.0, 2.0),
+            horizontal_scale=0.25,
+            subterrain_types="pyramid_sloped_terrain",
+        ),
+    )
+    trees = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=trees_and_slider_mjcf,
+        ),
+    )
+    # A chain of attached entities: a free-based robot whose fixed links merge at load, a free box, then a fixed box
+    robot = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file="urdf/go2/urdf/go2.urdf",
+            pos=(0.3, -0.1, 0.2),
+            euler=(5.0, -10.0, 15.0),
+        ),
+    )
+    robot.attach(trees, "chain_tip", pos=(0.02, -0.03, -0.1), quat=(0.9, 0.1, -0.2, 0.3))
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.05, 0.04, 0.03),
+            pos=(0.1, 0.2, 0.3),
+            euler=(20.0, -5.0, 10.0),
+        ),
+    )
+    box.attach(robot, "FL_calf", pos=(0.03, 0.02, -0.05), quat=(0.8, -0.3, 0.1, 0.2))
+    fixed_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.03, 0.03, 0.03),
+            pos=(-0.1, 0.1, 0.2),
+            euler=(-15.0, 25.0, 5.0),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    fixed_box.attach(box, box.base_link.name, pos=(0.04, -0.01, 0.02), quat=(0.7, 0.2, 0.4, -0.1))
+    scene.add_entity(
+        morph=[
+            gs.morphs.Box(
+                size=(0.1, 0.06, 0.04),
+                pos=(0.0, 1.0, 0.3),
+                euler=(10.0, 20.0, 30.0),
+            ),
+            gs.morphs.Sphere(
+                radius=0.05,
+                pos=(0.2, 1.1, 0.5),
+                euler=(-15.0, 5.0, 40.0),
+            ),
+        ],
+    )
+    scene.add_entity(
+        morph=[
+            gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+                pos=(0.0, -1.0, 0.05),
+                euler=(5.0, -10.0, 25.0),
+                fixed=True,
+            ),
+            gs.morphs.Cylinder(
+                radius=0.05,
+                height=0.2,
+                pos=(0.3, -1.2, 0.1),
+                euler=(12.0, 90.0, -7.0),
+                fixed=True,
+            ),
+        ],
+    )
+    scene.add_entity(
+        morph=[
+            gs.morphs.URDF(
+                file=fixed_base_dual_arm,
+                pos=(1.0, -1.0, 0.5),
+                euler=(5.0, -10.0, 20.0),
+                fixed=True,
+            ),
+            gs.morphs.URDF(
+                file=fixed_base_dual_arm_high_damping,
+                pos=(1.1, -0.9, 0.6),
+                euler=(-5.0, 15.0, 80.0),
+                scale=1.25,
+                fixed=True,
+            ),
+        ],
+    )
+    scene.build(n_envs=2)
+    solver = scene.rigid_solver
+
+    # The neutral configuration of every entity, then of the homogeneous chain of attached ones alone, then a random
+    # configuration. A fixed joint has neither anchor nor axis.
+    qpos = tensor_to_array(solver.get_qpos()) + np.random.uniform(-0.5, 0.5, (2, solver.n_qs))
+    for joint in solver.joints:
+        if joint.type in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.SPHERICAL):
+            qs_quat = slice(joint.q_end - 4, joint.q_end)
+            qpos[:, qs_quat] /= np.linalg.norm(qpos[:, qs_quat], axis=-1, keepdims=True)
+    for entities, qpos_host in (
+        (solver.entities, None),
+        ([trees, robot, box, fixed_box], None),
+        (solver.entities, qpos),
+    ):
+        if qpos_host is not None:
+            solver.set_qpos(qpos_host)
+        links_idx = [link.idx for entity in entities for link in entity.links]
+        geoms_idx = [geom.idx for entity in entities for geom in entity.geoms]
+        joints = [joint for entity in entities for joint in entity.joints]
+        joints_mask = [joint.type != gs.JOINT_TYPE.FIXED for joint in joints]
+        joints_idx = [joint.idx for joint in joints if joint.type != gs.JOINT_TYPE.FIXED]
+        links_pos, links_quat, geoms_pos, geoms_quat, joints_xanchor, joints_xaxis = compute_forward_kinematics(
+            entities, n_envs=2, qpos=qpos_host
+        )
+        assert_allclose(links_pos, solver.get_links_pos(links_idx), tol=tol)
+        assert_allclose(links_quat, solver.get_links_quat(links_idx), tol=tol)
+        assert_allclose(geoms_pos, solver.get_geoms_pos(geoms_idx), tol=tol)
+        assert_allclose(geoms_quat, solver.get_geoms_quat(geoms_idx), tol=tol)
+        assert_allclose(joints_xanchor[:, joints_mask], solver.get_joints_anchor_pos(joints_idx), tol=tol)
+        assert_allclose(joints_xaxis[:, joints_mask], solver.get_joints_anchor_axis(joints_idx), tol=tol)

@@ -1,31 +1,27 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
-from genesis.options.sensors import ContactDepthProbe as ContactDepthProbeOptions
-from genesis.options.sensors import ContactProbe as ContactProbeOptions
-from genesis.options.sensors import KinematicTaxel as KinematicTaxelOptions
+from genesis.options.sensors import (
+    ContactDepthProbe as ContactDepthProbeOptions,
+    ContactProbe as ContactProbeOptions,
+    KinematicTaxel as KinematicTaxelOptions,
+)
 from genesis.utils.array_class import BVHTreeState, ColliderInfo, ColliderState, DynInfo, DynState, RigidInfo
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 
-from .raycaster import RaycastContext
-
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 from .contact_force import ContactFilterMetadataMixin, _func_link_is_filtered
-from .probe import (
-    ProbeSensorMetadataMixin,
-    ProbeSensorMixin,
-    ProbeSensorSharedMetadataT,
-    func_noised_probe_radius,
-    get_measured_bufs,
-)
+from .probe import ProbeSensorMetadataMixin, ProbeSensorMixin, func_noised_probe_radius, get_measured_bufs
+from .raycaster import RaycastContext
 from .tactile_shared import (
     ContactDepthQueryMetadataMixin,
     ContactDepthQuerySensorMixin,
@@ -952,7 +948,9 @@ def _kernel_kinematic_taxel_bvh(
                 output_measured[torque_start + j, i_b] = torque_m[j]
 
 
-class KinematicTactileSensorMixin(ContactDepthQuerySensorMixin, ProbeSensorMixin[ProbeSensorSharedMetadataT]):
+class KinematicTactileSensorMixin[ProbeSensorSharedMetadataT: ProbeSensorMetadataMixin](
+    ContactDepthQuerySensorMixin, ProbeSensorMixin[ProbeSensorSharedMetadataT]
+):
     """Contact-depth probe family (ContactDepthProbe, ContactProbe, KinematicTaxel).
 
     The class-wide SDF/raycast backend is resolved by ``ContactDepthQuerySensorMixin.build``, and subclasses add their

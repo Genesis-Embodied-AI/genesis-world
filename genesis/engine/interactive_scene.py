@@ -1,6 +1,7 @@
 import contextlib
+from collections.abc import Iterable
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 import genesis as gs
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release, is_owned_cache_release_enabled

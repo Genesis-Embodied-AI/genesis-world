@@ -1,11 +1,13 @@
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Generic, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
-import quadrants as qd
 import torch
 import torch.nn.functional as F
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -580,12 +582,7 @@ class ViscoelasticHysteresisMetadataMixin:
     has_any_hysteresis: bool = False
 
 
-ViscoelasticHysteresisSharedMetadataT = TypeVar(
-    "ViscoelasticHysteresisSharedMetadataT", bound=ViscoelasticHysteresisMetadataMixin
-)
-
-
-class ViscoelasticHysteresisMixin(Generic[ViscoelasticHysteresisSharedMetadataT]):
+class ViscoelasticHysteresisMixin[ViscoelasticHysteresisSharedMetadataT: ViscoelasticHysteresisMetadataMixin]:
     """
     Viscoelastic hysteresis (single Maxwell element, equilibrium gain normalized to 1).
 
@@ -808,10 +805,7 @@ def apply_spatial_crosstalk(
         cache_data[:, t0 : t0 + n_probes * 3] = torque_out.permute(0, 2, 3, 1).reshape(B, n_probes * 3)
 
 
-SpatialCrosstalkSharedMetadataT = TypeVar("SpatialCrosstalkSharedMetadataT", bound=SpatialCrosstalkMetadataMixin)
-
-
-class SpatialCrosstalkMixin(Generic[SpatialCrosstalkSharedMetadataT]):
+class SpatialCrosstalkMixin[SpatialCrosstalkSharedMetadataT: SpatialCrosstalkMetadataMixin]:
     """
     Adds grid spatial crosstalk to a taxel sensor on the measured branch.
 

@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable
+from typing import Any
 
 import genesis as gs
 

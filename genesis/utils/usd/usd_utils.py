@@ -1,7 +1,7 @@
 import math
-from typing import List, Tuple
 
 import numpy as np
+
 from pxr import Gf, Usd, UsdGeom
 
 import genesis as gs
@@ -234,7 +234,7 @@ def usd_primvar_array_to_numpy(
     return None if return_none else np.empty(0, dtype=dtype)
 
 
-def extract_scale(T: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def extract_scale(T: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     R, S = gu.polar(T[:3, :3], pure_rotation=True, side="right")
     det_R = np.linalg.det(R)
     if det_R < 0:
@@ -249,7 +249,7 @@ def extract_scale(T: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return Q, S
 
 
-def get_attr_value_by_candidates(prim: Usd.Prim, candidates: List[str], attr_name: str, default_value: float):
+def get_attr_value_by_candidates(prim: Usd.Prim, candidates: list[str], attr_name: str, default_value: float):
     for candidate in candidates:
         attr_value = prim.GetAttribute(candidate).Get()
         if attr_value is not None:

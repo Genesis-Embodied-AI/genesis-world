@@ -34,6 +34,9 @@ def main():
         ),
         show_viewer=args.vis,
     )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 0.1),

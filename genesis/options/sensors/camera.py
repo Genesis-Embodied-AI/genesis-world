@@ -17,13 +17,14 @@ from genesis.typing import (
     Vec3FType,
 )
 
-from .options import KinematicSensorOptionsMixin, SensorT
+from .options import KinematicSensorOptionsMixin
 
 if TYPE_CHECKING:
+    from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.sensors.camera import BatchRendererCameraSensor, RasterizerCameraSensor, RaytracerCameraSensor
 
 
-class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
+class BaseCameraOptions[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
     """
     Base class for camera sensor options containing common properties.
 

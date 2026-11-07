@@ -22,7 +22,7 @@ jobs:
       matrix:
         # See official Github documentation for details: https://shorturl.at/NJgsj
         OS: ["ubuntu-24.04", "macos-15"]
-        PYTHON_VERSION: ["3.12", "3.13"]
+        PYTHON_VERSION: ["3.12", "3.13", "3.14"]
         GS_BACKEND: ["cpu"]
         GS_ENABLE_NDARRAY: ["1"]
         include:
@@ -139,13 +139,7 @@ jobs:
       - name: Install Genesis
         shell: bash
         run: |
-          PYTHON_DEPS="dev,render"
-          # Install USD for all platforms except ARM (usd-core doesn't support ARM)
-          # This is required for test_mesh.py which tests USD parsing functionality
-          if [[ "${{ matrix.OS }}" != 'ubuntu-24.04-arm' ]] ; then
-            PYTHON_DEPS="${PYTHON_DEPS},usd"
-          fi
-          pip install ".[${PYTHON_DEPS}]"
+          pip install ".[dev,render,usd]"
 
           # FIXME: matplotlib 3.11.0 changed text rasterization, breaking the MPLPlotter PNG snapshot
           # (test_recorders.py::test_plotter). Pin below 3.11 until the snapshot is regenerated.

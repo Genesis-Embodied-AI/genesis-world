@@ -1,6 +1,7 @@
+import argparse
 import multiprocessing
 import os
-import argparse
+import sys
 
 import torch
 
@@ -12,8 +13,6 @@ def main():
     parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    gpu_id = torch.cuda.current_device()
-    print("gpu_id:", gpu_id)
     # Selecting the CUDA device to simulate on is the whole point of this example.
     gs.init(backend=gs.gpu, logger_verbose_time=True)
 
@@ -38,7 +37,7 @@ def main():
     )
 
     scene.build()
-    for i in range(1000):
+    for i in range(1000 if "PYTEST_VERSION" not in os.environ else 5):
         scene.step()
 
 
@@ -52,7 +51,8 @@ def run(gpu_id, func):
 
 
 if __name__ == "__main__":
-    num_gpus = 2
+    # One simulation per GPU, a single one when there is no GPU
+    num_gpus = max(torch.cuda.device_count(), 1)
 
     processes = []
     for i in range(num_gpus):
@@ -62,3 +62,5 @@ if __name__ == "__main__":
 
     for p in processes:
         p.join()
+    if any(p.exitcode != 0 for p in processes):
+        sys.exit(1)

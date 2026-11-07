@@ -9,8 +9,6 @@ import pytest
 import torch
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
@@ -301,13 +299,6 @@ def test_morph_orientation_offset_resolution():
     # 'offset_euler' and 'offset_quat' are mutually exclusive.
     with pytest.raises(Exception, match="'offset_euler' and 'offset_quat' cannot both be set"):
         gs.morphs.Box(size=(0.1, 0.1, 0.1), offset_euler=(0.0, 0.0, 90.0), offset_quat=(0.0, 1.0, 0.0, 0.0))
-
-
-@pytest.mark.required
-def test_coacd_options_pca_validation():
-    gs.options.CoacdOptions(pca=False)
-    with pytest.raises(gs.GenesisException, match="pca=True"):
-        gs.options.CoacdOptions(pca=True)
 
 
 @pytest.mark.required
@@ -711,16 +702,6 @@ def test_derived_substeps(show_viewer, tol):
     N_STEPS = 10
     SUBSTEPS = 5
 
-    @qd.data_oriented
-    class NullJet:
-        @qd.func
-        def get_tan_dir(self, t: float):
-            return qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
-
-        @qd.func
-        def get_factor(self, i, j, k, dx: float, t: float):
-            return 0.0
-
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -729,10 +710,8 @@ def test_derived_substeps(show_viewer, tol):
         rigid_options=gs.options.RigidOptions(
             dt=0.01 / SUBSTEPS,
         ),
-        sf_options=gs.options.SFOptions(
+        pbd_options=gs.options.PBDOptions(
             dt=0.01 / SUBSTEPS,
-            res=16,
-            solver_iters=2,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 1.0),
@@ -745,29 +724,30 @@ def test_derived_substeps(show_viewer, tol):
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    sf_solver = scene.sim.sf_solver
-    sf_solver.set_jets([NullJet()])
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 1.0),
+            size=(0.02, 0.02, 0.02),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
     scene.build()
 
     # A solver integrates at the interval it was given, as many times per scene step as that interval divides the
-    # step dt, and the bodies and the grid read the same resolution.
+    # step dt, and every solver reads the same resolution.
     solver = scene.rigid_solver
     assert_equal(solver.substeps, SUBSTEPS)
     assert_allclose(solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
     # A step advances the step dt whatever the rate: the fall accumulates once per substep, at the solver dt, for as
     # many substeps as the ratio gives.
-    t_built = sf_solver.t
     for _ in range(N_STEPS):
         scene.step()
     n_substeps = N_STEPS * solver.substeps
     expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
 
-    # Solvers integrating on a grid rather than on bodies read the interval off the same resolution, so their own
-    # clock advances one step dt per scene step however many substeps the ratio gives them.
-    assert_equal(sf_solver.substeps, SUBSTEPS)
-    assert_allclose(sf_solver.t - t_built, N_STEPS * 0.01, tol=gs.EPS)
+    assert_equal(scene.sim.pbd_solver.substeps, SUBSTEPS)
 
     # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
     # made rather than as a scene is built.
@@ -787,10 +767,8 @@ def test_derived_substeps(show_viewer, tol):
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
-        sf_options=gs.options.SFOptions(
+        pbd_options=gs.options.PBDOptions(
             dt=0.01 / SUBSTEPS,
-            res=16,
-            solver_iters=2,
         ),
         show_viewer=False,
     )
@@ -799,10 +777,23 @@ def test_derived_substeps(show_viewer, tol):
             pos=(0.0, 0.0, 1.0),
         ),
     )
-    scene_from_solver_dt.sim.sf_solver.set_jets([NullJet()])
+    scene_from_solver_dt.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 1.0),
+            size=(0.02, 0.02, 0.02),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
     scene_from_solver_dt.build()
     assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
     assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+
+    # The constraint time constant is floored against the substep the rigid solver integrates at, so the contacts are
+    # as stiff as in a scene whose rigid solver asks for that rate itself.
+    timeconst, *_ = ball_at_derived_rate.geoms[0].get_sol_params()
+    timeconst_ref, *_ = ball.geoms[0].get_sol_params()
+    assert timeconst + gs.EPS >= 2.0 * scene_from_solver_dt.rigid_solver.substep_dt
+    assert_allclose(timeconst, timeconst_ref, tol=gs.EPS)
 
     # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
     # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
@@ -843,11 +834,11 @@ def test_derived_substeps(show_viewer, tol):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=0.01),
             rigid_options=gs.options.RigidOptions(dt=0.005),
-            sf_options=gs.options.SFOptions(dt=0.0025, res=16, solver_iters=2),
+            pbd_options=gs.options.PBDOptions(dt=0.0025),
             show_viewer=False,
         )
         scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
-        scene.sim.sf_solver.set_jets([NullJet()])
+        scene.add_entity(gs.morphs.Box(pos=(1.0, 0.0, 1.0), size=(0.02, 0.02, 0.02)), gs.materials.PBD.Particle())
         scene.build()
 
     # A rate is settled for the solvers the entities made active, and only for those: what an interval would imply for

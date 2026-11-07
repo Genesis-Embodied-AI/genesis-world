@@ -86,8 +86,8 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     def func_assemble(self, f: int, is_exact: qd.template()):
         """Write the gradient -dt^2 force of every vertex, its mass block and the blocks of every element, all scaled to
         the joint energy."""
-        self.solver.func_compute_ele_hessian_gradient(f)
-        self.solver.func_accumulate_vertex_force_preconditioner(f)
+        self.solver.func_compute_ele_energy_gradient(f)
+        self.solver.func_accumulate_vertex_force_preconditioner(f, with_preconditioner=False)
         dt_sq = self.substep_dt * self.substep_dt
         qd.loop_config(name="mpm_fem_assemble_vertices")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
@@ -110,13 +110,23 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             i_t = self.linear_block.triplet_start[()] + self.n_envs * self.n_vertices
             i_t += ELEMENT_BLOCKS * (i_b * self.n_elements + i_e)
             row_start = self.linear_block.row_start[()] + i_b * self.n_vertices
-            for k_r in qd.static(range(4)):
-                for k_c in qd.static(range(k_r, 4)):
+            for k_c in qd.static(range(4)):
+                vertex_unit = qd.Vector([gs.qd_float(k_c == i) for i in qd.static(range(4))])
+                # Row 3 k_r + a, column c: the force on vertex k_r along a of a unit displacement of vertex k_c along c
+                columns = qd.Matrix.zero(gs.qd_float, 12, 3)
+                # A runtime loop over the axes keeps a single inlined instance of the product per vertex
+                for c in range(3):
+                    axis_unit = qd.Vector([gs.qd_float(c == i) for i in qd.static(range(3))])
+                    _, dP = self.solver.compute_elastic_product(i_e, i_b, S, axis_unit.outer_product(vertex_unit))
+                    forces = dP @ S.transpose()
+                    column = qd.Vector([forces[a, k_r] for k_r in qd.static(range(4)) for a in qd.static(range(3))])
+                    columns = columns + column.outer_product(axis_unit)
+                for k_r in qd.static(range(k_c + 1)):
                     i_block = qd.static(4 * k_r - k_r * (k_r - 1) // 2 + k_c - k_r)
                     if self.is_free(i_b, i_vs[k_r]) and self.is_free(i_b, i_vs[k_c]):
-                        block = qd.Matrix.zero(gs.qd_float, 3, 3)
-                        for i, j in qd.static(qd.ndrange(3, 3)):
-                            block += (S[k_r, i] * S[k_c, j]) * self.solver.elements_el_hessian[i_b, i, j, i_e]
+                        block = qd.Matrix(
+                            [[columns[3 * k_r + a, c] for c in qd.static(range(3))] for a in qd.static(range(3))]
+                        )
                         rows = row_start + i_vs
                         write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
                     else:

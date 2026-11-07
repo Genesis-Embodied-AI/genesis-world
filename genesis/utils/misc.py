@@ -10,12 +10,12 @@ import os
 import random
 import sys
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import field
 from importlib import import_module
 from itertools import combinations
-from typing import Any, NoReturn, Optional, Sequence
+from typing import Any, NoReturn
 
 import numpy as np
 import torch
@@ -39,6 +39,9 @@ from genesis.typing import is_sequence
 
 LOGGER = logging.getLogger(__name__)
 
+_WIN_STD_ERROR_HANDLE = -12
+_WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2
+
 
 class DeprecationError(Exception):
     pass
@@ -57,13 +60,18 @@ class redirect_libc_stderr:
     Context-manager that temporarily redirects C / C++ std::cerr (i.e. the C `stderr` file descriptor 2) to a given
     Python file-like object's fd.
 
-    Works on macOS, Linux (glibc / musl), and Windows (MSVCRT / Universal CRT ≥ VS2015).
+    Works on macOS, Linux (glibc / musl) and Windows (Universal C Runtime). On Windows, native code writing to the
+    standard error handle of the process rather than to descriptor 2 (e.g. the logger of Quadrants) still writes to the
+    original stream.
     """
 
     def __init__(self, fd):
         self.fd = fd
         self.stderr_fileno = None
         self.original_stderr_fileno = None
+        self.original_sys_stderr = None
+        self.stderr_handle = None
+        self.stderr_handle_flags = None
 
     def __enter__(self):
         try:
@@ -80,18 +88,32 @@ class redirect_libc_stderr:
             libc.fflush(None)
             libc.dup2(self.fd.fileno(), self.stderr_fileno)
         elif os.name == "nt":  # Windows
-            # FIXME: Do not redirect stderr on Windows OS when running pytest, otherwise it will raise this exception:
-            # "OSError: [WinError 6] The handle is invalid"
-            if "PYTEST_VERSION" not in os.environ:
-                msvcrt = ctypes.CDLL("msvcrt")
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetStdHandle.restype = ctypes.c_void_p
 
-                msvcrt.fflush(None)
-                msvcrt._dup2(self.fd.fileno(), self.stderr_fileno)
+            # Native code caches the standard error handle of the process (the logger of Quadrants does). Descriptor 2
+            # owns that handle, so redirecting it closes the handle and makes the file the standard error handle. The
+            # handle is protected from closing during the swap and restored afterward, otherwise writes through the
+            # cached value go to whichever file reuses it.
+            self.stderr_handle = ctypes.c_void_p(kernel32.GetStdHandle(_WIN_STD_ERROR_HANDLE))
+            stderr_handle_flags = ctypes.c_ulong()
+            kernel32.GetHandleInformation(self.stderr_handle, ctypes.byref(stderr_handle_flags))
+            self.stderr_handle_flags = stderr_handle_flags.value
+            kernel32.SetHandleInformation(
+                self.stderr_handle, _WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE, _WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE
+            )
 
-                STDERR_HANDLE = -12
-                new_os_handle = msvcrt._get_osfhandle(self.fd.fileno())
-                kernel32.SetStdHandle(STDERR_HANDLE, new_os_handle)
+            # Python links the Universal C Runtime, so 'os.dup2' acts on the descriptor table native extensions share
+            ctypes.CDLL("ucrtbase").fflush(None)
+            os.dup2(self.fd.fileno(), self.stderr_fileno)
+            kernel32.SetStdHandle(_WIN_STD_ERROR_HANDLE, self.stderr_handle)
+
+            # A console stream of Python looks up the handle of its descriptor at every write and fails once that handle
+            # is a file, so Python writes go through a plain stream on the same descriptor meanwhile, as on POSIX.
+            self.original_sys_stderr = sys.stderr
+            sys.stderr = open(
+                self.stderr_fileno, "w", buffering=1, errors=self.original_sys_stderr.errors, closefd=False
+            )
         else:
             gs.logger.warning(f"Unsupported platform for redirecting libc stderr: {sys.platform}")
 
@@ -101,23 +123,25 @@ class redirect_libc_stderr:
         if self.stderr_fileno is None:
             return
 
+        sys.stderr.flush()
         if os.name == "posix":
             libc = ctypes.CDLL(None)
-            sys.stderr.flush()
             libc.fflush(None)
             libc.dup2(self.original_stderr_fileno, self.stderr_fileno)
         elif os.name == "nt":
-            if "PYTEST_VERSION" not in os.environ:
-                msvcrt = ctypes.CDLL("msvcrt")
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-                sys.stderr.flush()
-                msvcrt.fflush(None)
-                msvcrt._dup2(self.original_stderr_fileno, self.stderr_fileno)
-
-                STDERR_HANDLE = -12
-                orig_os_handle = msvcrt._get_osfhandle(self.original_stderr_fileno)
-                kernel32.SetStdHandle(STDERR_HANDLE, orig_os_handle)
+            sys.stderr.close()
+            sys.stderr = self.original_sys_stderr
+            ctypes.CDLL("ucrtbase").fflush(None)
+            os.dup2(self.original_stderr_fileno, self.stderr_fileno)
+            kernel32.SetStdHandle(_WIN_STD_ERROR_HANDLE, self.stderr_handle)
+            kernel32.SetHandleInformation(
+                self.stderr_handle, _WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE, self.stderr_handle_flags
+            )
+            self.original_sys_stderr = None
+            self.stderr_handle = None
+            self.stderr_handle_flags = None
 
         os.close(self.original_stderr_fileno)
         self.stderr_fileno = None
@@ -227,7 +251,7 @@ def set_random_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
+def get_device(backend: gs.constants.backend, device_idx: int | None = None):
     if backend == gs.gpu:
         if torch.cuda.is_available():
             if torch.version.hip:

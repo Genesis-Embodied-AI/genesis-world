@@ -18,6 +18,7 @@ from .description import (
     RigidEntityDescription,
     RigidEqualityDescription,
     RigidLinkDescription,
+    _balanced_variant_mapping,
 )
 from .inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT, compose_inertial_from_g_infos, finalize_inertial
 from .rigid_equality import RigidEquality
@@ -29,6 +30,158 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
+
+
+def get_variants_kinematics(entity, n_envs: int):
+    """Get the links, joints and qpos0 of every variant of an entity, and the variant each environment carries.
+
+    The first variant holds the live links and joints, which an attach reshapes, and a homogeneous entity holds this
+    one alone. The other variants of a heterogeneous entity, which an attach refuses, hold those their descriptions
+    state. Returns, for every variant, the descriptions of its links and of its joints and its neutral configuration
+    (qpos0), then the variant carried by each of the 'n_envs' environment rows.
+    """
+    variants = entity.desc.variants[1:]
+    variants_links = [[link.desc for link in entity.links], *[variant.links for variant in variants]]
+    variants_joints = [
+        [joint.desc for joint in entity.joints],
+        *[[j_desc for l_desc in variant.links for j_desc in l_desc.joints] for variant in variants],
+    ]
+    variants_qpos0 = [variant.init_qpos for variant in entity.desc.variants] or [entity.init_qpos]
+    envs_variant_idx = _balanced_variant_mapping(len(variants_links), n_envs)
+    return variants_links, variants_joints, variants_qpos0, envs_variant_idx
+
+
+def compute_forward_kinematics(entities, n_envs: int, qpos=None):
+    """Compute the world poses of the links and the geoms of rigid entities on the host, from their descriptions alone.
+
+    It reads no solver data, so it runs before the rigid solver allocates any. 'n_envs' is the number of environment
+    rows returned, each taking the variant of a heterogeneous entity that the solver dispatches to it (see
+    'get_variants_kinematics'). 'qpos' gathers the generalized coordinates of the entities in order, one row per
+    environment, and defaults to the neutral configuration (qpos0). The parent of every attached entity must be part of
+    'entities'.
+
+    Returns the positions and the quaternions of the links of the entities in order, then those of their geoms, then
+    the world anchors and axes of their joints, each with a leading environment dimension. A fixed joint has a null
+    axis, and a free joint takes the world vertical axis at the origin of its link.
+    """
+    links_idx = np.array([link.idx for entity in entities for link in entity.links])
+    links_parent_idx = np.array([link.parent_idx for entity in entities for link in entity.links])
+    links_parent_idx = np.where(links_parent_idx == -1, -1, np.searchsorted(links_idx, links_parent_idx))
+    links_n_joints = np.array([link.n_joints for entity in entities for link in entity.links])
+    links_joint_start = np.cumsum(links_n_joints) - links_n_joints
+    joints_type = np.array([joint.type for entity in entities for joint in entity.joints])
+    joints_n_qs = np.array([joint.n_qs for entity in entities for joint in entity.joints])
+    joints_q_start = np.cumsum(joints_n_qs) - joints_n_qs
+    geoms_link_idx = np.searchsorted(links_idx, [geom.link.idx for entity in entities for geom in entity.geoms])
+    geoms_pos = np.array([geom.init_pos for entity in entities for geom in entity.geoms]).reshape((-1, 3))
+    geoms_quat = np.array([geom.init_quat for entity in entities for geom in entity.geoms]).reshape((-1, 4))
+    # Homogeneous entities at their neutral configuration stand at the same poses in every environment
+    n_envs_computed = 1 if qpos is None and not any([entity.desc.variants for entity in entities]) else n_envs
+
+    # The parameters of every variant of every entity, then the row each environment reads from
+    links_pos_table, links_quat_table, joints_pos_table, joints_axis_table, qpos0_table = [], [], [], [], []
+    links_row, joints_row, qs_row = [], [], []
+    for entity in entities:
+        variants_links, variants_joints, variants_qpos0, envs_variant_idx = get_variants_kinematics(
+            entity, n_envs=n_envs_computed
+        )
+        envs_variant_idx = envs_variant_idx[:, None]
+        links_row.append(len(links_pos_table) + envs_variant_idx * entity.n_links + np.arange(entity.n_links))
+        joints_row.append(len(joints_pos_table) + envs_variant_idx * entity.n_joints + np.arange(entity.n_joints))
+        qs_row.append(len(qpos0_table) + envs_variant_idx * entity.n_qs + np.arange(entity.n_qs))
+        for links, joints in zip(variants_links, variants_joints):
+            links_pos_table += [l_desc.pos for l_desc in links]
+            links_quat_table += [l_desc.quat for l_desc in links]
+            joints_pos_table += [j_desc.pos for j_desc in joints]
+            # A revolute joint turns about its angular motion axis, a prismatic one slides along its linear one, a fixed
+            # one has no axis, and the others take the vertical axis of the link frame
+            joints_axis_table += [
+                j_desc.dofs_motion_ang[0]
+                if j_desc.type == gs.JOINT_TYPE.REVOLUTE
+                else j_desc.dofs_motion_vel[0]
+                if j_desc.type == gs.JOINT_TYPE.PRISMATIC
+                else gu.zero_pos()
+                if j_desc.type == gs.JOINT_TYPE.FIXED
+                else np.array((0.0, 0.0, 1.0))
+                for j_desc in joints
+            ]
+        qpos0_table += [q for qpos0 in variants_qpos0 for q in qpos0]
+    links_pos = np.array(links_pos_table)[np.concatenate(links_row, axis=1)]
+    links_quat = np.array(links_quat_table)[np.concatenate(links_row, axis=1)]
+    joints_pos = np.array(joints_pos_table).reshape((-1, 3))[np.concatenate(joints_row, axis=1)]
+    joints_axis = np.array(joints_axis_table).reshape((-1, 3))[np.concatenate(joints_row, axis=1)]
+    qpos0 = np.array(qpos0_table)[np.concatenate(qs_row, axis=1)]
+    if qpos is None:
+        qpos = qpos0
+    joints_xanchor = np.empty_like(joints_pos)
+    joints_xaxis = np.empty_like(joints_axis)
+
+    links_depth = np.zeros_like(links_parent_idx)
+    links_ancestor_idx = links_parent_idx.copy()
+    while (links_ancestor_idx != -1).any():
+        is_ancestor = links_ancestor_idx != -1
+        links_depth += is_ancestor
+        links_ancestor_idx[is_ancestor] = links_parent_idx[links_ancestor_idx[is_ancestor]]
+
+    # Walk the kinematic trees one depth level at a time, the parents of a level being final once it is reached
+    for depth in range(links_depth.max() + 1):
+        links_level_idx = np.flatnonzero(links_depth == depth)
+        if depth > 0:
+            links_level_parent_idx = links_parent_idx[links_level_idx]
+            links_pos[:, links_level_idx], links_quat[:, links_level_idx] = gu.transform_pos_quat_by_trans_quat(
+                links_pos[:, links_level_idx],
+                links_quat[:, links_level_idx],
+                links_pos[:, links_level_parent_idx],
+                links_quat[:, links_level_parent_idx],
+            )
+
+        # The joints of a link chain in order, so each slot moves the links that hold that many joints at least.
+        # Revolute and prismatic joints move from qpos0, a spherical joint sets the orientation relative to the frame
+        # the link stands at, and a free joint sets the world pose. Rotations turn about the joint anchor.
+        for i_slot in range(links_n_joints[links_level_idx].max(initial=0)):
+            links_slot_idx = links_level_idx[links_n_joints[links_level_idx] > i_slot]
+            joints_slot_idx = links_joint_start[links_slot_idx] + i_slot
+            joints_slot_type = joints_type[joints_slot_idx]
+            joints_slot_q_start = joints_q_start[joints_slot_idx]
+            pos, quat = links_pos[:, links_slot_idx], links_quat[:, links_slot_idx]
+            xanchor = pos + gu.transform_by_quat(joints_pos[:, joints_slot_idx], quat)
+            xaxis = gu.transform_by_quat(joints_axis[:, joints_slot_idx], quat)
+
+            is_free = joints_slot_type == gs.JOINT_TYPE.FREE
+            q_free = qpos[:, joints_slot_q_start[is_free, None] + np.arange(7)]
+            pos[:, is_free] = xanchor[:, is_free] = q_free[..., :3]
+            quat[:, is_free] = q_free[..., 3:] / np.linalg.norm(q_free[..., 3:], axis=-1, keepdims=True)
+            xaxis[:, is_free] = (0.0, 0.0, 1.0)
+
+            is_prismatic = joints_slot_type == gs.JOINT_TYPE.PRISMATIC
+            q_prismatic = joints_slot_q_start[is_prismatic]
+            pos[:, is_prismatic] += xaxis[:, is_prismatic] * (qpos[:, q_prismatic] - qpos0[:, q_prismatic])[..., None]
+
+            is_revolute = joints_slot_type == gs.JOINT_TYPE.REVOLUTE
+            is_spherical = joints_slot_type == gs.JOINT_TYPE.SPHERICAL
+            is_rotation = is_revolute | is_spherical
+            q_revolute = joints_slot_q_start[is_revolute]
+            angle = qpos[:, q_revolute] - qpos0[:, q_revolute]
+            qloc = np.empty((n_envs_computed, is_rotation.sum(), 4))
+            qloc[:, is_revolute[is_rotation]] = gu.axis_angle_to_quat(
+                angle, joints_axis[:, joints_slot_idx[is_revolute]]
+            )
+            qloc[:, is_spherical[is_rotation]] = qpos[:, joints_slot_q_start[is_spherical, None] + np.arange(4)]
+            quat[:, is_rotation] = gu.transform_quat_by_quat(qloc, quat[:, is_rotation])
+            anchor = gu.transform_by_quat(joints_pos[:, joints_slot_idx[is_rotation]], quat[:, is_rotation])
+            pos[:, is_rotation] = xanchor[:, is_rotation] - anchor
+
+            links_pos[:, links_slot_idx], links_quat[:, links_slot_idx] = pos, quat
+            joints_xanchor[:, joints_slot_idx], joints_xaxis[:, joints_slot_idx] = xanchor, xaxis
+
+    geoms_pos, geoms_quat = gu.transform_pos_quat_by_trans_quat(
+        np.tile(geoms_pos, (n_envs_computed, 1, 1)),
+        np.tile(geoms_quat, (n_envs_computed, 1, 1)),
+        links_pos[:, geoms_link_idx],
+        links_quat[:, geoms_link_idx],
+    )
+    poses = (links_pos, links_quat, geoms_pos, geoms_quat, joints_xanchor, joints_xaxis)
+    return tuple([np.broadcast_to(values, (n_envs, *values.shape[1:])) for values in poses])
 
 
 class KinematicEntity(Entity):
@@ -1572,10 +1725,9 @@ class RigidEntity(KinematicEntity):
 
     def _load_model(self):
         self._equalities = gs.List()
-        # MJCF and USD express in-model collision filtering (MJCF '<contact><exclude>', USD CollisionGroup /
-        # FilteredPairsAPI) through synthesized contype/conaffinity bitmasks. Those masks are only consistent within
-        # the entity: applied across entities, they would spuriously disable collision against geoms whose default
-        # masks happen not to overlap (e.g. the ground plane).
+        # The contype/conaffinity bitmasks of an MJCF or USD asset are authored for its own geoms alone: applied across
+        # entities, they would spuriously disable collision against geoms whose masks the asset never accounted for
+        # (e.g. the ground plane).
         self._is_local_collision_mask = isinstance(self._morph, (gs.morphs.MJCF, gs.morphs.USD))
 
         # Imported here since the couplers import the rigid entity package

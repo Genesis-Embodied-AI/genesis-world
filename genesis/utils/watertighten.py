@@ -4,8 +4,6 @@ The main entrypoint is `watertighten_mesh`; see its docstring for the algorithm 
 adaptive defaults.
 """
 
-from typing import Tuple
-
 import numpy as np
 
 import igl
@@ -46,7 +44,7 @@ _EDGE_ENDPOINTS = np.array(
 
 
 @nb.jit(nopython=True, cache=True)
-def _solve3x3(A: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, float]:
+def _solve3x3(A: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, float]:
     """Solve a symmetric 3x3 system `A x = b` via cofactor expansion; returns `(x, det)` with caller fallback near zero.
 
     The cofactor form skips the LU factorisation `np.linalg.solve` would do, which pays off on the millions of single
@@ -195,7 +193,7 @@ def _union_find_merge(parent: list, first: int, second: int) -> None:
         parent[max(root_first, root_second)] = min(root_first, root_second)
 
 
-def _build_edge_component_table() -> Tuple[np.ndarray, np.ndarray]:
+def _build_edge_component_table() -> tuple[np.ndarray, np.ndarray]:
     """Label, per cube sign-configuration (256 of them), the connected surface component of each of the 12 cube edges
     (-1 when the edge is inactive), and count the components per configuration.
 
@@ -244,7 +242,7 @@ _EDGE_COMPONENT, _N_COMPONENTS = _build_edge_component_table()
 
 def _extract_dual_contour_mesh(
     field: np.ndarray, grad: np.ndarray, level: float, pitch: float, origin: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Manifold dual contouring: one QEF-solved vertex per connected surface component in each active cell + quads per
     sign-changing axis-aligned grid edge.
 
@@ -1106,7 +1104,7 @@ def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):
     return alpha, pitch, max_cost
 
 
-def _keep_outer_shell(verts: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _keep_outer_shell(verts: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Drop inverted-winding components produced by dual contouring around internal cavities of the source mesh.
 
     When the source has hollow regions, dual contouring on the unsigned distance field extracts one outer shell around
@@ -1183,7 +1181,7 @@ def _glue_manifold_corners(
     return parent
 
 
-def _resolve_nonmanifold_edges(verts: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _resolve_nonmanifold_edges(verts: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Un-weld self-touch pinches so every edge is shared by exactly two faces (edge-manifold).
 
     Manifold dual contouring can still route two iso-surface sheets that pinch inside a single cell through one shared
@@ -1217,7 +1215,7 @@ def decimate_mesh(
     faces: np.ndarray,
     target_face_num: int = 500,
     aggressiveness: int = 5,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Manifold-preserving quadric decimation toward `target_face_num` triangles.
 
     The feature-cost cutoff derived from `aggressiveness` refuses edge collapses that would tear a thin shell,
@@ -1236,7 +1234,7 @@ def watertighten_mesh(
     aggressiveness: int = 5,
     target_face_num: int = 500,
     sigma: float = 0.8,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Return a watertight wrap of the input triangle soup, strictly outside it and within `alpha` of it.
 
     Pipeline: padded unsigned distance field on a regular grid (`_sdf_field`); separable Gaussian blur to kill

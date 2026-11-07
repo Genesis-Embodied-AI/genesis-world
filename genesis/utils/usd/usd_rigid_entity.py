@@ -1,12 +1,13 @@
-from typing import Dict, List, NamedTuple, Tuple
+from typing import NamedTuple
 
 import numpy as np
+
 from pxr import Usd, UsdPhysics
 
 import genesis as gs
-from genesis.utils import geom as gu
-from genesis.utils import urdf as urdf_utils
+from genesis.utils import geom as gu, urdf as urdf_utils
 
+from .usd_collision import apply_collision_filtering
 from .usd_context import (
     UsdContext,
     extract_links_referenced_by_joints,
@@ -15,7 +16,6 @@ from .usd_context import (
     get_current_usd_context,
     resolve_rigid_body_link_path,
 )
-from .usd_collision import apply_collision_filtering
 from .usd_geometry import parse_prim_geoms
 from .usd_utils import (
     AXES_VECTOR,
@@ -81,7 +81,7 @@ class _LinkJoint(NamedTuple):
     frame_path: str | None
 
 
-def _detect_generic_joint_type(joint_prim: Usd.Prim) -> Tuple[int, int, int, str | None]:
+def _detect_generic_joint_type(joint_prim: Usd.Prim) -> tuple[int, int, int, str | None]:
     """Detect Genesis joint type for a generic PhysicsJoint by inspecting DOF limits and drives.
 
     If no DriveAPI or LimitAPI is applied to any DOF, the joint is treated as FREE (6 DOF).
@@ -128,7 +128,7 @@ def _parse_joint_axis_pos(
     joint_frame: Usd.Prim,
     is_body1: bool,
     axis_override: str | None = None,
-) -> Tuple[str, np.ndarray, np.ndarray]:
+) -> tuple[str, np.ndarray, np.ndarray]:
     # localPos/localRot are expressed in the frame of 'joint_frame', the joint body-relationship target,
     # which may be a collision child prim rather than the canonical RigidBodyAPI link prim.
     joint_pos_attr = joint.GetLocalPos1Attr() if is_body1 else joint.GetLocalPos0Attr()
@@ -166,8 +166,8 @@ def _parse_joint_axis_pos(
 def _parse_link(
     context: UsdContext,
     link: Usd.Prim,
-    joints: List[_LinkJoint],
-    links: List[Usd.Prim],
+    joints: list[_LinkJoint],
+    links: list[Usd.Prim],
     morph: gs.morphs.USD,
 ):
     l_info = {}
@@ -488,7 +488,7 @@ def _parse_link(
 
 # Rigidbody requirements: https://docs.omniverse.nvidia.com/kit/docs/asset-requirements/latest/capabilities/physics_bodies/physics_rigid_bodies/capability-physics_rigid_bodies.html
 # Joint requirements: https://docs.omniverse.nvidia.com/kit/docs/asset-requirements/latest/capabilities/physics_bodies/physics_joints/capability-physics_joints.html
-def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint_prims: List[str] | None = None):
+def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint_prims: list[str] | None = None):
     link_path_joints = {}
 
     # Get joints to process - joint_prims is computed by parse_usd_rigid_entity (from the stage,
@@ -560,10 +560,10 @@ def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint
 def _parse_geoms(
     context: UsdContext,
     entity_prim: Usd.Prim,
-    link_path_to_idx: Dict[str, int],
+    link_path_to_idx: dict[str, int],
     morph: gs.morphs.USD,
     surface: gs.surfaces.Surface,
-) -> List[List[Dict]]:
+) -> list[list[dict]]:
     links_g_infos = [[] for _ in range(len(link_path_to_idx))]
     parse_prim_geoms(context, entity_prim, None, links_g_infos, link_path_to_idx, morph, surface)
     return links_g_infos
@@ -571,10 +571,10 @@ def _parse_geoms(
 
 def _parse_links(
     context: UsdContext,
-    links: List[Usd.Prim],
-    link_joints: List[List[_LinkJoint]],
+    links: list[Usd.Prim],
+    link_joints: list[list[_LinkJoint]],
     morph: gs.morphs.USD,
-) -> Tuple[List[Dict], List[List[Dict]]]:
+) -> tuple[list[dict], list[list[dict]]]:
     l_infos = []
     links_j_infos = []
     for link, joints in zip(links, link_joints):
@@ -584,7 +584,7 @@ def _parse_links(
     return l_infos, links_j_infos
 
 
-def _compute_joint_prim_paths(stage: Usd.Stage, entity_prim: Usd.Prim) -> List[str] | None:
+def _compute_joint_prim_paths(stage: Usd.Stage, entity_prim: Usd.Prim) -> list[str] | None:
     """
     Compute joint prim paths for an entity. Joints are those that reference (body0 or body1)
     any rigid body in the entity subtree, so that entities whose prim_path is a link (e.g.
@@ -715,11 +715,10 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
             g_info = {**g_info, "vmesh": mesh, "contype": 0, "conaffinity": 0}
             link_g_infos.append(g_info)
 
-    # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to this entity's collision geoms.
-    cg_infos = [g for link_g_infos in links_g_infos for g in link_g_infos if g.get("contype") or g.get("conaffinity")]
-    apply_collision_filtering(context, cg_infos)
-
     l_infos, links_j_infos = _parse_links(context, links, link_joints, morph)
+
+    # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to the links of this entity
+    apply_collision_filtering(context, l_infos, links_g_infos)
 
     # A density authored on the link's MassAPI overrides any per-geom physics-material density (USD
     # precedence); the per-geom densities then drive the rigid build's link inertial estimate wherever

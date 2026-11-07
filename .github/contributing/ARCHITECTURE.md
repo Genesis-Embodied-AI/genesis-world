@@ -15,8 +15,7 @@ Genesis/
 │   │   │   ├── mpm_solver.py  # Material Point Method
 │   │   │   ├── sph_solver.py  # Smoothed Particle Hydrodynamics
 │   │   │   ├── fem_solver.py  # Finite Element Method
-│   │   │   ├── pbd_solver.py  # Position Based Dynamics
-│   │   │   └── sf_solver.py   # Stable Fluid
+│   │   │   └── pbd_solver.py  # Position Based Dynamics
 │   │   ├── materials/         # Material definitions per solver
 │   │   └── couplers/          # Inter-solver coupling
 │   ├── options/               # Configuration classes (Pydantic models)
@@ -103,7 +102,6 @@ Location: `genesis/engine/materials/`
 | SPH | `gs.options.SPHOptions` | Fluid simulation |
 | FEM | `gs.options.FEMOptions` | Finite element deformation |
 | PBD | `gs.options.PBDOptions` | Fast soft body simulation |
-| SF | `gs.options.SFOptions` | Eulerian fluid/smoke |
 
 Location: `genesis/engine/solvers/`
 

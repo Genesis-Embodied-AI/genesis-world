@@ -6,13 +6,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, NamedTuple
+from typing import NamedTuple
 
-import filelock
 import numpy as np
 import torch
+
+import filelock
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import genesis as gs
@@ -258,9 +260,9 @@ class UsdContext:
         """
         Emit a one-time warning that cross-entity USD collision filtering is not applied.
 
-        ``scene.add_stage`` splits a stage into separate entities, and collision filtering is solved
+        ``scene.add_stage`` splits a stage into separate entities, and collision filtering is applied
         per entity. A CollisionGroup / FilteredPairsAPI relationship that spans two prims which end up
-        in different entities cannot be expressed as per-entity contype/conaffinity, so those pairs
+        in different entities cannot be expressed as a link pair of one entity, so those pairs
         keep colliding. Within-entity (self-collision) filtering is unaffected.
         """
         if not self._is_cross_entity_filtering_warned:

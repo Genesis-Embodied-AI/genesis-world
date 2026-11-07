@@ -56,14 +56,12 @@ Three sections, mirroring the Genesis layers that ship runnable demos: **Physics
 | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/fem_hard_and_soft_constraint.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/tutorials_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_sand_wheel.webp" width="240"> |
 | [SPH: rigid](./examples/coupling/sph_rigid.py) | [SPH: + MPM](./examples/coupling/sph_mpm.py) | [PBD: liquid](./examples/deformable/pbd_liquid.py) |
 | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_sph_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_sph_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/pbd_liquid.webp" width="240"> |
-| [PBD: cloth](./examples/tutorials/pbd_cloth.py) | [Stable Fluid: smoke](./examples/fluid/smoke.py) | [IPC: robot cloth teleop](./examples/ipc/ipc_robot_cloth_teleop.py) |
-| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/tutorials_pbd_cloth.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/smoke.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/ipc_cloth_teleop.webp" width="240"> |
-| [Coupler: cloth on rigid](./examples/coupling/cloth_on_rigid.py) | [Coupler: rigid + MPM](./examples/coupling/rigid_mpm_attachment.py) | [Coupler: cut dragon](./examples/coupling/cut_dragon.py) |
-| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_cloth_on_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_rigid_mpm_attachment.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_cut_dragon.webp" width="240"> |
-| [Coupler: water wheel](./examples/coupling/water_wheel.py) | [Coupler: flush cubes](./examples/coupling/flush_cubes.py) | [SAP: Franka grasp rigid cube](./examples/sap_coupling/franka_grasp_rigid_cube.py) |
-| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_water_wheel.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_flush_cubes.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/sap_franka_grasp_rigid_cube.webp" width="240"> |
-| [Rigid: contact patch](./examples/collision/contact_manifold.py) | | |
-| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/collision_contact_manifold.webp" width="240"> | | |
+| [PBD: cloth](./examples/tutorials/pbd_cloth.py) | [IPC: robot cloth teleop](./examples/ipc/ipc_robot_cloth_teleop.py) | [Coupler: cloth on rigid](./examples/coupling/cloth_on_rigid.py) |
+| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/tutorials_pbd_cloth.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/ipc_cloth_teleop.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_cloth_on_rigid.webp" width="240"> |
+| [Coupler: rigid + MPM](./examples/coupling/rigid_mpm_attachment.py) | [Coupler: cut dragon](./examples/coupling/cut_dragon.py) | [Coupler: water wheel](./examples/coupling/water_wheel.py) |
+| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_rigid_mpm_attachment.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_cut_dragon.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_water_wheel.webp" width="240"> |
+| [Coupler: flush cubes](./examples/coupling/flush_cubes.py) | [SAP: Franka grasp rigid cube](./examples/sap_coupling/franka_grasp_rigid_cube.py) | [Rigid: contact patch](./examples/collision/contact_manifold.py) |
+| <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/coupling_flush_cubes.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/sap_franka_grasp_rigid_cube.webp" width="240"> | <img src="https://raw.githubusercontent.com/Genesis-Embodied-AI/genesis-world/readme-assets/videos/collision_contact_manifold.webp" width="240"> |
 
 ### Rendering
 
@@ -103,7 +101,7 @@ Install **PyTorch** first following the [official instructions](https://pytorch.
 
 Then, install Genesis via PyPI:
 ```bash
-pip install genesis-world  # Requires Python>=3.12,<3.14;
+pip install genesis-world  # Requires Python>=3.12,<3.15;
 ```
 
 For the latest version to date, make sure that `pip` is up-to-date via `pip install --upgrade pip`, then run command:
