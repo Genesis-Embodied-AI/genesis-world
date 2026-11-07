@@ -94,7 +94,7 @@ def func_forward_kinematics_link_bw(
             axis = dyn_info.dofs.motion_ang[I_d]
             angle = rigid_info.qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
             rotvec = axis * angle
-            qloc = gu.qd_rotvec_to_quat(rotvec, rigid_info.EPS[None])
+            qloc = gu.qd_rotvec_to_quat(rotvec)
             # quat_out = transform_quat_by_quat(qloc, quat_in) = quat_mul(quat_in, qloc)
             quat_out = gu.qd_transform_quat_by_quat(qloc, quat_in)
 
@@ -103,7 +103,7 @@ def func_forward_kinematics_link_bw(
             gq_out = g_quat - gu.qd_transform_by_quat_grad_quat(joint_pos_off, quat_out, g_pos)
             g_qloc = gu.qd_quat_mul_grad_rhs(quat_in, qloc, gq_out)
             g_quat_in_apply = gu.qd_quat_mul_grad_lhs(quat_in, qloc, gq_out)
-            rotvec_grad = gu.qd_rotvec_to_quat_grad_rotvec(rotvec, rigid_info.EPS[None], g_qloc)
+            rotvec_grad = gu.qd_rotvec_to_quat_grad_rotvec(rotvec, g_qloc)
             angle_grad = axis[0] * rotvec_grad[0] + axis[1] * rotvec_grad[1] + axis[2] * rotvec_grad[2]
             # The forward also publishes the angle as dofs.pos[dof_start] = qpos - qpos0, whose grad (accumulated by the
             # force-stage reverses) folds back linearly.

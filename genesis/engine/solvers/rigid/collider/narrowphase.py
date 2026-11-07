@@ -1528,7 +1528,6 @@ def func_contact_mpr_terrain(
     ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
     gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
     margin = gs.qd_float(0.0)
-    EPS = rigid_info.EPS[None]
     n_max = qd.static(collider_config.n_contacts_per_convex_pair)
     N_PERTURBATIONS = qd.static(4)
 
@@ -1635,7 +1634,7 @@ def func_contact_mpr_terrain(
                     if i_detection > 0:
                         axis = axis_0 if i_detection < 3 else axis_1
                         angle_sign = 2 * (i_detection % 2) - 1
-                        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis)
                         ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
                         ga_pos_tf, ga_quat_tf = gu.qd_transform_pos_quat_by_trans_quat(
                             ga_pos_curr - gb_pos, ga_quat_curr, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
@@ -2896,7 +2895,6 @@ def func_convex_convex_contact(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        rigid_info,
                         collider_info,
                         rigid_config,
                     )
@@ -3554,7 +3552,6 @@ def _func_multicontact_detect(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        rigid_info,
                         collider_info,
                         rigid_config,
                     )
@@ -4658,7 +4655,6 @@ def func_narrow_phase_diff_convex_vs_convex(
                                     ga_quat,
                                     gb_pos,
                                     gb_quat,
-                                    rigid_info,
                                     collider_info,
                                     rigid_config,
                                 )

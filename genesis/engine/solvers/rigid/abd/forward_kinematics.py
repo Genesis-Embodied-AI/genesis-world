@@ -491,7 +491,7 @@ def func_forward_kinematics_link(
         elif joint_type == gs.JOINT_TYPE.REVOLUTE:
             axis = dyn_info.dofs.motion_ang[I_d]
             dyn_state.dofs.pos[dof_start, i_b] = qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
-            qloc = gu.qd_rotvec_to_quat(axis * dyn_state.dofs.pos[dof_start, i_b], rigid_info.EPS[None])
+            qloc = gu.qd_rotvec_to_quat(axis * dyn_state.dofs.pos[dof_start, i_b])
             quat_ = gu.qd_transform_quat_by_quat(qloc, R(curr_I, quat, dyn_state.links.quat_bw, BW))
             quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
             pos_ = dyn_state.joints.xanchor[i_j, i_b] - gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat)

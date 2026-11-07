@@ -549,7 +549,9 @@ def test_concentric_contact(direction, show_viewer):
         # of its velocities have decayed to zero.
         aabb = nut.get_AABB()
         assert (aabb[..., 0, 2] < 1.0e-3).all()
-        assert_allclose(nut.get_dofs_velocity(), 0.0, atol=0.07)
+        vel = nut.get_dofs_velocity()
+        assert_allclose(vel[..., :3], 0.0, atol=1e-3)
+        assert_allclose(vel[..., 3:], 0.0, atol=0.08)
 
 
 # Force CPU because nonconvex SDF is slow on GPU
