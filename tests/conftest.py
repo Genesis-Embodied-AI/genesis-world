@@ -113,34 +113,37 @@ def lazy_imports():
     its object everywhere but as the type 'isinstance' checks or a class derives from.
     """
 
+    def resolve(module, name):
+        imported = importlib.import_module(module)
+        if name is None:
+            return imported
+        if name in vars(imported):
+            return vars(imported)[name]
+        return importlib.import_module(f"{module}.{name}")
+
     class LazyImport:
-        # Attribute access and assignment and calls reach the object, imported on the first of them. The attributes the
-        # import statement itself reads (its 'from' names, or the submodules of a dotted import) import nothing.
+        # Every attribute access and assignment and every call reaches the object, imported on the first of them. The
+        # proxy reads its own state through 'object', so that none of its attributes, '__init__' included, hides the
+        # one of the object. The attributes the import statement itself reads (its 'from' names, or the submodules of a
+        # dotted import) import nothing.
         def __init__(self, module, name, pending):
-            object.__setattr__(self, "_module", module)
-            object.__setattr__(self, "_name", name)
-            object.__setattr__(self, "_pending", pending)
+            object.__setattr__(self, "_state", (module, name, pending))
 
-        def _resolve(self):
-            imported = importlib.import_module(self._module)
-            if self._name is None:
-                return imported
-            if self._name in vars(imported):
-                return vars(imported)[self._name]
-            return importlib.import_module(f"{self._module}.{self._name}")
-
-        def __getattr__(self, attr):
-            if attr in self._pending:
-                module = self._module if self._name is None else f"{self._module}.{self._name}"
-                path = self._pending[attr]
-                return LazyImport(module, attr, {path[0]: path[1:]} if path else {})
-            return getattr(self._resolve(), attr)
+        def __getattribute__(self, attr):
+            module, name, pending = object.__getattribute__(self, "_state")
+            if attr in pending:
+                parent = module if name is None else f"{module}.{name}"
+                path = pending[attr]
+                return LazyImport(parent, attr, {path[0]: path[1:]} if path else {})
+            return getattr(resolve(module, name), attr)
 
         def __setattr__(self, attr, value):
-            setattr(self._resolve(), attr, value)
+            module, name, _ = object.__getattribute__(self, "_state")
+            setattr(resolve(module, name), attr, value)
 
         def __call__(self, *args, **kwargs):
-            return self._resolve()(*args, **kwargs)
+            module, name, _ = object.__getattribute__(self, "_state")
+            return resolve(module, name)(*args, **kwargs)
 
     def import_lazily(name, globals=None, locals=None, fromlist=(), level=0):
         if level > 0:
