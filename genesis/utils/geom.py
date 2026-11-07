@@ -1844,8 +1844,9 @@ def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -
     q1 = q1 / torch.linalg.vector_norm(q1, ord=2, dim=-1, keepdim=True)
     dot = (q0 * q1).sum(-1, keepdim=True)
     # Clamping the cosine keeps the angle at least acos(1 - eps), so that the spherical weights and their gradient stay
-    # finite. Below that angle, the weights differ from the exact ones by O(eps).
-    angle = torch.acos(dot.abs().clamp(max=1.0 - eps))
+    # finite. Below that angle, the weights differ from the exact ones by O(eps). The bound is raised to the machine
+    # epsilon of the quaternions, since '1 - eps' rounds to 1 in a lower precision than the simulation.
+    angle = torch.acos(dot.abs().clamp(max=1.0 - max(eps, torch.finfo(q0.dtype).eps)))
     # Weights '1 - t' of q0 and '+-t' of q1, signed to interpolate along the shorter arc, then 1. Once multiplied by the
     # angle between q0 and q1, a single sine evaluates the numerators and the denominator of the spherical weights.
     weights_slope = torch.where(dot < 0.0, constants.slerp_weights_slope_flipped, constants.slerp_weights_slope)

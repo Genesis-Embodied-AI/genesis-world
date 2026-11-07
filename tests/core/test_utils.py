@@ -506,6 +506,7 @@ def test_slerp(batch_shape, tol):
     assert_allclose(jac0, (1.0 - t[:, None, None]) * tangent_projection, tol=tol)
     assert_allclose(jac1, sign[..., None] * t[:, None, None] * tangent_projection, tol=tol)
     assert_allclose(jac_t, 0.0, tol=tol)
+    assert_allclose(gu.slerp(q0.to(torch.float16), (sign * q0).to(torch.float16), t), q0, tol=5e-3)
 
 
 @pytest.mark.required
