@@ -105,6 +105,49 @@ def build_block_jacobi(n_rows: int) -> BlockJacobiScratch:
     return BlockJacobiScratch(sizes={JACOBI_ROWS: max(n_rows, 1)})
 
 
+@qd.data_oriented
+class BlockJacobiOwner:
+    """Block Jacobi preconditioner of an owner of rows of the linear system, which holds its rows in `linear_block` and
+    their diagonal blocks in `jacobi` (see BlockJacobiScratch)."""
+
+    @qd.func(requires_top_level=True)
+    def func_factor_begin(self):
+        qd.loop_config(name="newton_block_jacobi_reset")
+        for i_r in range(self.linear_block.n_rows[()]):
+            self.jacobi.blocks[i_r] = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+    @qd.func
+    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
+        # The reduced blocks of a row are distinct, so that its diagonal block comes once
+        if i_r == i_c:
+            self.jacobi.blocks[i_r] = H
+
+    @qd.func(requires_top_level=True)
+    def func_factor(self):
+        """Invert every diagonal block, equilibrated to a unit diagonal.
+
+        The equilibration keeps the determinant near one where that of a row of vanishing mass would flush to zero in
+        single precision. A block whose equilibrated determinant is not positive takes the identity."""
+        qd.loop_config(name="newton_block_jacobi_invert")
+        for i_r in range(self.linear_block.n_rows[()]):
+            D = self.jacobi.blocks[i_r]
+            d = qd.Vector([D[0, 0], D[1, 1], D[2, 2]], dt=gs.qd_float)
+            scale = qd.select(d > 0.0, 1.0 / qd.sqrt(qd.select(d > 0.0, d, 1.0)), 1.0)
+            scaling = scale.outer_product(scale)
+            S_inv = qd.Matrix.identity(gs.qd_float, 3)
+            if (D * scaling).determinant() > 0.0:
+                S_inv = (D * scaling).inverse()
+            self.jacobi.blocks[i_r] = S_inv * scaling
+
+    @qd.func(requires_top_level=True)
+    def func_precondition(self):
+        """z = M^-1 r over the rows of the owner, M^-1 being its inverted diagonal blocks."""
+        qd.loop_config(name="newton_block_jacobi_apply")
+        for i_r in range(self.linear_block.n_rows[()]):
+            row = self.linear_block.row_start[()] + i_r
+            self.linear.pcg.z[row] = self.jacobi.blocks[i_r] @ self.linear.pcg.r[row]
+
+
 # ============================================== Layer 1: stages ==============================================
 
 
@@ -142,36 +185,6 @@ def func_linear_visit(linear: NewtonLinearScratch, owners: qd.template()):
             n_rows = owner.linear_block.n_rows[()]
             if 0 <= i_r_local and i_r_local < n_rows and 0 <= i_c_local and i_c_local < n_rows:
                 owner.func_linear_visit_block(i_r_local, i_c_local, H)
-
-
-@qd.func(requires_top_level=True)
-def func_block_jacobi_reset(n_rows: int, jacobi: BlockJacobiScratch):
-    qd.loop_config(name="newton_block_jacobi_reset")
-    for i_r in range(n_rows):
-        jacobi.blocks[i_r] = qd.Matrix.zero(gs.qd_float, 3, 3)
-
-
-@qd.func
-def block_jacobi_visit(i_r: int, i_c: int, H: qd.types.matrix(3, 3), jacobi: BlockJacobiScratch):
-    """Keep a diagonal block of the matrix, the reduced blocks of a row being distinct."""
-    if i_r == i_c:
-        jacobi.blocks[i_r] = H
-
-
-@qd.func(requires_top_level=True)
-def func_block_jacobi_invert(n_rows: int, jacobi: BlockJacobiScratch):
-    qd.loop_config(name="newton_block_jacobi_invert")
-    for i_r in range(n_rows):
-        jacobi.blocks[i_r] = jacobi.blocks[i_r].inverse()
-
-
-@qd.func(requires_top_level=True)
-def func_block_jacobi_apply(block: LinearBlock, linear: NewtonLinearScratch, jacobi: BlockJacobiScratch):
-    """z = M^-1 r over the rows of an owner, M^-1 being its inverted diagonal blocks."""
-    qd.loop_config(name="newton_block_jacobi_apply")
-    for i_r in range(block.n_rows[()]):
-        row = block.row_start[()] + i_r
-        linear.pcg.z[row] = jacobi.blocks[i_r] @ linear.pcg.r[row]
 
 
 @qd.func

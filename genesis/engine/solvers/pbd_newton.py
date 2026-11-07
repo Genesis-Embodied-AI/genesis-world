@@ -14,15 +14,12 @@ import genesis as gs
 from genesis.utils.data import iter_data
 
 from .newton_linear import (
+    BlockJacobiOwner,
     BlockJacobiScratch,
     LinearBlock,
     NewtonLinearScratch,
-    block_jacobi_visit,
     build_block_jacobi,
     build_linear_block,
-    func_block_jacobi_apply,
-    func_block_jacobi_invert,
-    func_block_jacobi_reset,
     write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
@@ -35,7 +32,7 @@ def is_moving(i_q: int, i_b: int, pbd: qd.template()):
 
 
 @qd.data_oriented
-class PbdNewtonParticipant(NewtonDevice):
+class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     """Device stages of the PBD end positions in the joint solve.
 
     It holds per reordered PBD particle and environment [i_q, i_b] the projection `target` of PBD's own substep and the
@@ -93,22 +90,6 @@ class PbdNewtonParticipant(NewtonDevice):
             write_block(i_t, row, row, m * qd.Matrix.identity(gs.qd_float, 3), self.linear)
             self.linear.b_rhs[row] = grad
             self.linear.pcg.row_env[row] = i_b
-
-    @qd.func(requires_top_level=True)
-    def func_factor_begin(self):
-        func_block_jacobi_reset(self.linear_block.n_rows[()], self.jacobi)
-
-    @qd.func
-    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
-        block_jacobi_visit(i_r, i_c, H, self.jacobi)
-
-    @qd.func(requires_top_level=True)
-    def func_factor(self):
-        func_block_jacobi_invert(self.linear_block.n_rows[()], self.jacobi)
-
-    @qd.func(requires_top_level=True)
-    def func_precondition(self):
-        func_block_jacobi_apply(self.linear_block, self.linear, self.jacobi)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):

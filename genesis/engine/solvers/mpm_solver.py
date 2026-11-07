@@ -33,7 +33,6 @@ from . import mpm_adjoint_func, mpm_func
 from .mpm_data import (
     BLOCK_CELLS,
     MIN_BLOCKS,
-    MpmBrickScratch,
     MpmErrno,
     MpmForceFields,
     MpmGridScratch,
@@ -45,7 +44,6 @@ from .mpm_data import (
     MpmParticlesNG,
     MpmWallPairs,
     build_mpm_grid,
-    build_mpm_bricks,
     build_mpm_newton,
     build_wall_pairs,
     initial_block_capacity,
@@ -53,8 +51,11 @@ from .mpm_data import (
 from .newton_linear import (
     CAPACITY_GROW_FACTOR,
     MIN_SLOTS,
+    BlockJacobiOwner,
+    BlockJacobiScratch,
     LinearBlock,
     NewtonLinearScratch,
+    build_block_jacobi,
     build_linear_block,
     grown_capacity,
     retire_scratch,
@@ -94,14 +95,14 @@ def material_table_column(material):
 
 
 @qd.data_oriented
-class MpmNewtonParticipant(NewtonDevice):
+class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     """Grid displacement as a participant of the NewtonSolver.
 
     It owns the rows of the grid nodes in the linear system `linear` from `linear_block` on (see newton_linear.py),
-    which it assembles and preconditions by bricks, and it is the one holder of the grid, the Newton state and the
-    bricks (see `replace_scratch`). It is also the vertex map of the sorted particles in the contacts of the solve, a
-    particle moving by sum_a w_a u_a over the movable nodes of its stencil, and the pair kind of their domain-wall pairs
-    `wall_pairs`."""
+    which it assembles and preconditions by block Jacobi, and it is the one holder of the grid, the Newton state and
+    the diagonal blocks (see `replace_scratch`). It is also the vertex map of the sorted particles in the contacts of
+    the solve, a particle moving by sum_a w_a u_a over the movable nodes of its stencil, and the pair kind of their
+    domain-wall pairs `wall_pairs`."""
 
     # A wall pair writes the gradient and the Hessian of its row on its particle alone
     n_doublets = 1
@@ -116,7 +117,7 @@ class MpmNewtonParticipant(NewtonDevice):
         materials: MpmMaterialTable,
         grid: MpmGridScratch,
         newton: MpmNewtonScratch,
-        bricks: MpmBrickScratch,
+        jacobi: BlockJacobiScratch,
         wall_pairs: MpmWallPairs,
         mpm_info: MpmInfo,
         n_sort: int,
@@ -126,7 +127,7 @@ class MpmNewtonParticipant(NewtonDevice):
         self.materials = materials
         self.grid = grid
         self.newton = newton
-        self.bricks = bricks
+        self.jacobi = jacobi
         self.wall_pairs = wall_pairs
         self.mpm_info = mpm_info
         # The linear system of the solve, bound by the NewtonSolver
@@ -143,16 +144,16 @@ class MpmNewtonParticipant(NewtonDevice):
         retire_scratch(self.wall_pairs, self._scratches_replaced)
         self.wall_pairs = wall_pairs
 
-    def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, bricks: MpmBrickScratch) -> None:
-        """Swap the grid, the Newton state and the bricks, and free the arrays of those replaced (see retire_scratch),
-        except the error flags, which the new grid binds again."""
-        for scratch_old, scratch in zip((self.grid, self.newton, self.bricks), (grid, newton, bricks)):
+    def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, jacobi: BlockJacobiScratch) -> None:
+        """Swap the grid, the Newton state and the diagonal blocks, and free the arrays of those replaced (see
+        retire_scratch), except the error flags, which the new grid binds again."""
+        for scratch_old, scratch in zip((self.grid, self.newton, self.jacobi), (grid, newton, jacobi)):
             if scratch_old is not scratch:
                 for path, array in iter_state_arrays(scratch_old):
                     if path[0] != "errors":
                         qd_destroy_data(array)
                 self._scratches_replaced.append(scratch_old)
-        self.grid, self.newton, self.bricks = grid, newton, bricks
+        self.grid, self.newton, self.jacobi = grid, newton, jacobi
 
     @property
     def max_linear_rows(self) -> int:
@@ -163,7 +164,7 @@ class MpmNewtonParticipant(NewtonDevice):
     def data(self) -> Iterator[DataItem]:
         yield from iter_data(self, "grid")
         yield from iter_data(self, "newton")
-        yield from iter_data(self, "bricks")
+        yield from iter_data(self, "jacobi")
         yield from iter_data(self, "linear_block")
         yield from iter_data(self, "wall_pairs")
 
@@ -182,22 +183,6 @@ class MpmNewtonParticipant(NewtonDevice):
             self.mpm_info,
             is_exact,
         )
-
-    @qd.func(requires_top_level=True)
-    def func_factor_begin(self):
-        mpm_func.func_reset_brick(self.grid, self.bricks)
-
-    @qd.func
-    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
-        mpm_func.brick_visit(i_r, i_c, H, self.bricks)
-
-    @qd.func(requires_top_level=True)
-    def func_factor(self):
-        mpm_func.func_invert_brick(self.grid, self.bricks)
-
-    @qd.func(requires_top_level=True)
-    def func_precondition(self):
-        mpm_func.func_apply_brick(self.grid, self.bricks, self.linear, self.linear_block)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):
@@ -407,7 +392,7 @@ class MPMSolver(ParticleSolver):
             self.mpm_materials,
             grid,
             build_mpm_newton(n_sort, max_blocks),
-            build_mpm_bricks(max_blocks),
+            build_block_jacobi(max_blocks * BLOCK_CELLS),
             build_wall_pairs(MIN_SLOTS),
             self.mpm_info,
             n_sort,
@@ -647,13 +632,13 @@ class MPMSolver(ParticleSolver):
         pass
 
     def _resize_blocks(self, max_blocks):
-        """Build the grid, the Newton state and the bricks again for a new capacity of node blocks, and swap them on the
-        participant, the grid carrying no state across substeps."""
+        """Build the grid, the Newton state and the diagonal blocks again for a new capacity of node blocks, and swap
+        them on the participant, the grid carrying no state across substeps."""
         n_sort = self._B * self._n_particles
         with namespace(self._namespace):
             grid = build_mpm_grid(n_sort, max_blocks)
         self._newton_participant.replace_scratch(
-            grid, build_mpm_newton(n_sort, max_blocks), build_mpm_bricks(max_blocks)
+            grid, build_mpm_newton(n_sort, max_blocks), build_block_jacobi(max_blocks * BLOCK_CELLS)
         )
 
     def _size_to_particles(self, f):

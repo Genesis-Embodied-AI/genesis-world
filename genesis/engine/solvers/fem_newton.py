@@ -12,16 +12,13 @@ import genesis as gs
 from genesis.utils.data import StaticConfig, iter_data
 
 from .newton_linear import (
+    BlockJacobiOwner,
     BlockJacobiScratch,
     LinearBlock,
     NewtonLinearScratch,
-    block_jacobi_visit,
     build_block_jacobi,
     build_linear_block,
     discard_block,
-    func_block_jacobi_apply,
-    func_block_jacobi_invert,
-    func_block_jacobi_reset,
     write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
@@ -43,7 +40,7 @@ class FemNewtonConfig(StaticConfig):
 
 
 @qd.data_oriented
-class FemNewtonParticipant(NewtonDevice):
+class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     """Device stages of the FEM vertex positions in the joint solve.
 
     It selects the FEM scalars that the stages and the couplings read, and reaches the arrays and the functions of FEM's
@@ -139,22 +136,6 @@ class FemNewtonParticipant(NewtonDevice):
                         write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
                     else:
                         discard_block(i_t + i_block, self.linear)
-
-    @qd.func(requires_top_level=True)
-    def func_factor_begin(self):
-        func_block_jacobi_reset(self.linear_block.n_rows[()], self.jacobi)
-
-    @qd.func
-    def func_linear_visit_block(self, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
-        block_jacobi_visit(i_r, i_c, H, self.jacobi)
-
-    @qd.func(requires_top_level=True)
-    def func_factor(self):
-        func_block_jacobi_invert(self.linear_block.n_rows[()], self.jacobi)
-
-    @qd.func(requires_top_level=True)
-    def func_precondition(self):
-        func_block_jacobi_apply(self.linear_block, self.linear, self.jacobi)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: qd.template(), f: int):

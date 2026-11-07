@@ -1,13 +1,12 @@
 """Data of the implicit material point method (MPM) solver: the material table, the sparse grid rebuilt every substep,
-the Newton state over the grid displacement, and the brick preconditioner of its rows of the linear system.
+and the Newton state over the grid displacement.
 
-The grid, Newton and brick structs are built at a capacity in blocks, which grows by building them again and swapping
+The grid and Newton structs are built at a capacity in blocks, which grows by building them again and swapping
 them on the participant of the Newton solve (see MpmNewtonParticipant)."""
 
 import numpy as np
 import quadrants as qd
 
-import genesis as gs
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSumScratch, dynamic_exclusive_sum_sizes
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSortScratch, dynamic_radix_sort_sizes
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHashScratch, open_addressing_hash_sizes
@@ -25,29 +24,16 @@ REDUCE_BLOCK = 256
 # Every assembled elastic task emits the upper triangle of the 8 x 8 node stencil of its cell
 STENCIL_BLOCKS = 36
 
-# Brick preconditioner: one-level additive Schwarz over bricks of 2 x 2 x 4 nodes of a grid block, each brick a dense
-# 48 x 48 matrix stored as the packed upper triangle of its 16 x 16 node blocks
-BRICK_NODES = 16
-BRICKS_PER_BLOCK = BLOCK_CELLS // BRICK_NODES
-BRICK_SYM_BLOCKS = BRICK_NODES * (BRICK_NODES + 1) // 2
-BRICK_SCALARS = BRICK_SYM_BLOCKS * 9
-BRICK_DIM = BRICK_NODES * 3
-# Bricks inverted per thread block of the inversion, one warp each
-BRICK_INVERT_WARPS = 4
-
 # Rows of the friction pyramid of a contact pair: n +- mu d1 and n +- mu d2 (see pyramid_dirs)
 PYRAMID_ROWS = 4
 
 # Sizes of the data of the implicit step that grows: the sorted particle keys, the blocks of the grid and its particle
-# blocks, the nodes of the blocks, the keys of the neighbor blocks of the particle blocks, and the bricks of the nodes
+# blocks, the nodes of the blocks and the keys of the neighbor blocks of the particle blocks
 SORT = Size("sort")
 BLOCKS = Size("blocks")
 PARTICLE_BLOCKS = Size("particle_blocks")
 NODES = BLOCKS * BLOCK_CELLS
 NEIGHBORS = 8 * PARTICLE_BLOCKS
-BRICKS = NODES // BRICK_NODES
-# Entries of the scratch of the serial brick inversion of a CPU backend
-BRICK_SCRATCH = Size("brick_scratch")
 
 # Sizes of the particle data: the frames of the substep window and the particles
 FRAMES = Size("frames")
@@ -227,16 +213,6 @@ class MpmWallPairs(Data, kind=DataKind.SCRATCH):
     t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
 
 
-class MpmBrickScratch(Data, kind=DataKind.SCRATCH):
-    """Brick preconditioner of the node rows of the linear system: per brick, its packed 48 x 48 matrix and then
-    inverse, and the mask of its nodes coupled to another node of the brick."""
-
-    brick: qd.Tensor = field(float, shape=(BRICKS * BRICK_SCALARS,), ndarray=True)
-    brick_mask: qd.Tensor = field(int, shape=(BRICKS,), ndarray=True)
-    # The serial inversion of a CPU backend: per brick, the equilibration of its rows and the pivot column
-    brick_scratch: qd.Tensor = field(float, shape=(BRICK_SCRATCH,), ndarray=True)
-
-
 def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
     """Build the grid of `n_sort` sorted particles and `max_blocks` blocks, with every counter at zero, the error flags
     of the solver being bound from the entered namespace (see `requires`)."""
@@ -278,14 +254,6 @@ def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
     for constraint in (newton.constraint_spring, newton.constraint_damping, newton.constraint_target):
         constraint.fill(0.0)
     return newton
-
-
-def build_mpm_bricks(max_blocks: int) -> MpmBrickScratch:
-    """Build the brick preconditioner of `max_blocks` blocks."""
-    n_bricks = max(max_blocks * BLOCK_CELLS // BRICK_NODES, 1)
-    return MpmBrickScratch(
-        sizes={BLOCKS: max_blocks, BRICK_SCRATCH: n_bricks * 2 * BRICK_DIM if gs.backend == gs.cpu else 1}
-    )
 
 
 def build_wall_pairs(max_pairs: int) -> MpmWallPairs:
