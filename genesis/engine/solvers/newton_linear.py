@@ -183,5 +183,8 @@ def write_block(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), linear: 
 
 @qd.func
 def discard_block(i_t: int, linear: NewtonLinearScratch):
-    """Discard triplet slot `i_t`, that of a block on an eliminated row."""
+    """Discard triplet slot `i_t`, that of a block on an eliminated row.
+
+    An owner eliminates the unknown of a row by an identity diagonal block and a zero right-hand side, and discards the
+    other blocks on the row, so that the row decouples and its solution is exactly zero."""
     func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)

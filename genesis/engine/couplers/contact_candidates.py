@@ -116,7 +116,11 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
 @qd.data_oriented
 class CouplingPairs(NewtonDevice):
     """Pair kind of the contacts of the material point method (MPM) particles with the partners of one coupling, the
-    nearest partner of every particle (see NewtonContact)."""
+    nearest partner of every particle (see NewtonContact).
+
+    A coupling provides the `query` of its partners, `pairs_type`, `n_doublets` and `n_triplets`, and three hooks: the
+    narrow phase `candidate_score`, `build_pair`, and `pair_vertices`, the vertices of a pair with their weights in its
+    relative displacement."""
 
     tie_ratio = 0.0
 
