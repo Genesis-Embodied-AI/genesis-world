@@ -788,6 +788,13 @@ def test_derived_substeps(show_viewer, tol):
     assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
     assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
 
+    # The constraint time constant is floored against the substep the rigid solver integrates at, so the contacts are
+    # as stiff as in a scene whose rigid solver asks for that rate itself.
+    timeconst, *_ = ball_at_derived_rate.geoms[0].get_sol_params()
+    timeconst_ref, *_ = ball.geoms[0].get_sol_params()
+    assert timeconst + gs.EPS >= 2.0 * scene_from_solver_dt.rigid_solver.substep_dt
+    assert_allclose(timeconst, timeconst_ref, tol=gs.EPS)
+
     # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
     # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
     for _ in range(N_STEPS):
