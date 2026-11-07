@@ -1022,10 +1022,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self,
         f: qd.i32,
         mat_idx: qd.i32,
-        mat_mu: qd.f32,
-        mat_lam: qd.f32,
-        mat_rho: qd.f32,
-        mat_friction_mu: qd.f32,
+        mat_mu: float,
+        mat_lam: float,
+        mat_rho: float,
+        mat_friction_mu: float,
         v_start: qd.i32,
         el_start: qd.i32,
         s_start: qd.i32,
@@ -1526,7 +1526,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         envs_idx: qd.types.ndarray(),  # shape [n_selected_envs]
         link_idx: qd.i32,
         is_soft_constraint: qd.i32,
-        stiffness: qd.f32,
+        stiffness: float,
         target_poss: qd.types.ndarray(),  # shape [n_selected_envs, n_verts, 3]
         link_init_pos: qd.types.ndarray(),  # shape [n_selected_envs, 3]
         link_init_quat: qd.types.ndarray(),  # shape [n_selected_envs, 4]

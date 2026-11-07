@@ -10,6 +10,9 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 @pytest.mark.required
 def test_particle_constraints(show_viewer, tol):
+    # A density that single precision cannot represent
+    RHO = 1000.1
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
@@ -40,7 +43,7 @@ def test_particle_constraints(show_viewer, tol):
         material=gs.materials.MPM.Elastic(
             E=5e4,
             nu=0.3,
-            rho=1000,
+            rho=RHO,
         ),
         morph=gs.morphs.Box(
             pos=(0, 0, 0.35),
@@ -62,6 +65,9 @@ def test_particle_constraints(show_viewer, tol):
         ),
     )
     scene.build(n_envs=2)
+
+    # The mass of the particles follows the density at the precision of the simulation
+    assert_allclose(mpm_cube.get_mass(), mpm_cube.n_particles * scene.mpm_solver.particle_volume_real * RHO, tol=tol)
 
     # Each member is rotated about its own position: the box offset lands at -x for the member rotated about z and at
     # +z for the one rotated about x, and the long axis follows. A regular lattice spans the box minus one particle.
