@@ -10,25 +10,19 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
+from genesis.engine.bvh import build_bvh, get_bvh_data
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, contact_band_width, contact_invweight, particle_of_sorted
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
-from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import Data, DataKind, field
 
 from .contact_candidates import CouplingPairs
 
-# Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
-# OBSTACLE_REACH contact distances of its start or predicted position
-OBSTACLE_NEIGHBORS = 32
-OBSTACLE_REACH = 1.5
-
 
 class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest PBD particle (see MpmPbdContact.func_build_pairs).
+    """The pairs of the particles with their nearest PBD particle (see MpmPbdContact.build_pair).
 
     A pair holds its sorted particle `s`, its environment `i_b`, its PBD particle `particle` in PBD's reordered layout,
     and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with friction coefficient
@@ -98,176 +92,6 @@ def kernel_fit_pbd_leaves(query: qd.template()):
         else:
             query.leaves.aabbs_min[i_b, i_q] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
             query.leaves.aabbs_max[i_b, i_q] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-
-
-# ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
-
-
-@qd.data_oriented
-class MpmParticleObstacles:
-    """The MPM particles at the start of the substep as immovable obstacles of the PBD particles (see
-    PBDSolver.set_particle_obstacles).
-
-    The obstacles act in the contact group of PBD's loop and in its pre-stabilization, at the contact distance of the
-    MPM-PBD rows, so that PBD's own projection does not push its particles into the MPM material. A linear bounding
-    volume hierarchy (LBVH) over the MPM particles finds the candidates of each PBD particle once per substep, at [i_q,
-    j, i_b] for the j-th of them."""
-
-    def __init__(self, mpm_solver, pbd, contact: PbdContactParams, n_envs):
-        self.mpm_particles = mpm_solver.particles
-        self.mpm_particles_ng = mpm_solver.particles_ng
-        self.pbd = pbd
-        self.contact = contact
-        self.radius = pbd.particle_radius
-        n_pbd = max(pbd.n_particles, 1)
-        self.frame = qd.ndarray(gs.qd_int, shape=())
-        self.neighbors_idx = qd.ndarray(gs.qd_int, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
-        self.neighbors_dist = qd.ndarray(gs.qd_float, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
-        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(n_pbd, n_envs))
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
-        self.results = BVHQueryResults(sizes=dict(query_results=1))
-
-    def build(self, f):
-        """Fit the leaves to the MPM particles, build the trees, and gather the obstacle candidates of every PBD
-        particle, once PBD predicted its positions.
-
-        The leaves sit at the MPM particles of frame f."""
-        kernel_fit_mpm_obstacle_leaves(f, self)
-        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
-        kernel_gather_obstacle_neighbors(self)
-
-    @qd.func(requires_top_level=True)
-    def func_project(self, pbd: qd.template(), f: int):
-        """The contacts of every PBD particle at its current position with the MPM particles, with friction."""
-        func_pbd_obstacles(self, is_stabilization=False)
-
-    @qd.func(requires_top_level=True)
-    def func_stabilize(self, pbd: qd.template(), f: int):
-        """The non-penetration of every PBD particle at its start position with the MPM particles."""
-        func_pbd_obstacles(self, is_stabilization=True)
-
-
-@qd.kernel
-def kernel_fit_mpm_obstacle_leaves(f: int, obstacles: qd.template()):
-    """A point leaf at every active MPM particle, and an empty box with a finite center at the others.
-
-    The particles are those of frame f, which the kernel stores in `obstacles.frame` for the filters."""
-    for _ in range(1):
-        obstacles.frame[()] = f
-    for i_b, i_p in qd.ndrange(obstacles.leaves.aabbs_min.shape[0], obstacles.leaves.aabbs_min.shape[1]):
-        if obstacles.mpm_particles_ng.active[f, i_p, i_b]:
-            x = obstacles.mpm_particles.pos[f, i_p, i_b]
-            obstacles.leaves.aabbs_min[i_b, i_p] = x
-            obstacles.leaves.aabbs_max[i_b, i_p] = x
-        else:
-            obstacles.leaves.aabbs_min[i_b, i_p] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            obstacles.leaves.aabbs_max[i_b, i_p] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-
-
-@qd.func
-def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """Project PBD particle i_q of environment i_t out of MPM particle i_a to the contact distance, with the friction of
-    Macklin et al. 2014 (Eq. 23-24) on its tangential displacement over the substep."""
-    f = obstacles.frame[()]
-    x_q = obstacles.pbd.particles_reordered[i_q, i_t].pos
-    d_vec = x_q - obstacles.mpm_particles.pos[f, i_a, i_t]
-    dist = d_vec.norm()
-    target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
-    if dist < target and dist > gs.EPS:
-        n = d_vec / dist
-        depth = target - dist
-        dx = x_q - obstacles.pbd.particles_reordered[i_q, i_t].ipos
-        dx_t = dx - n * n.dot(dx)
-        mu_s = obstacles.pbd.particles_info_reordered[i_q, i_t].mu_s
-        mu_k = obstacles.pbd.particles_info_reordered[i_q, i_t].mu_k
-        friction = -dx_t
-        if dx_t.norm() >= mu_s * depth:
-            friction = friction * qd.min(1.0, mu_k * depth / dx_t.norm(gs.EPS))
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos += depth * n + friction
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount += 1.0
-    return True
-
-
-@qd.func
-def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """The non-penetration of a PBD particle at its start position with an MPM particle, for the pre-stabilization.
-
-    The PBD particle is i_q of environment i_t and the MPM particle i_a. The filter records no pair."""
-    f = obstacles.frame[()]
-    d_vec = obstacles.pbd.particles_reordered[i_q, i_t].ipos - obstacles.mpm_particles.pos[f, i_a, i_t]
-    dist = d_vec.norm()
-    target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
-    if dist < target and dist > gs.EPS:
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos += (target - dist) / dist * d_vec
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount += 1.0
-    return True
-
-
-@qd.func
-def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """Keep MPM particle i_a among the nearest OBSTACLE_NEIGHBORS obstacle candidates of PBD particle i_q of environment
-    i_t if it lies within OBSTACLE_REACH contact distances of its start or predicted position."""
-    f = obstacles.frame[()]
-    x_m = obstacles.mpm_particles.pos[f, i_a, i_t]
-    dist = qd.min(
-        (obstacles.pbd.particles_reordered[i_q, i_t].pos - x_m).norm(),
-        (obstacles.pbd.particles_reordered[i_q, i_t].ipos - x_m).norm(),
-    )
-    reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
-    if dist < reach:
-        n = obstacles.n_neighbors[i_q, i_t]
-        if n < qd.static(OBSTACLE_NEIGHBORS):
-            obstacles.neighbors_idx[i_q, n, i_t] = i_a
-            obstacles.neighbors_dist[i_q, n, i_t] = dist
-            obstacles.n_neighbors[i_q, i_t] = n + 1
-        else:
-            j_worst = 0
-            for j in range(1, qd.static(OBSTACLE_NEIGHBORS)):
-                if obstacles.neighbors_dist[i_q, j, i_t] > obstacles.neighbors_dist[i_q, j_worst, i_t]:
-                    j_worst = j
-            if dist < obstacles.neighbors_dist[i_q, j_worst, i_t]:
-                obstacles.neighbors_idx[i_q, j_worst, i_t] = i_a
-                obstacles.neighbors_dist[i_q, j_worst, i_t] = dist
-    return True
-
-
-@qd.kernel
-def kernel_gather_obstacle_neighbors(obstacles: qd.template()):
-    """The obstacle candidates of every free PBD particle for the substep, by a box query of the MPM trees around its
-    start and predicted positions."""
-    reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
-    qd.loop_config(name="pbd_mpm_obstacle_neighbors")
-    for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        obstacles.n_neighbors[i_q, i_b] = 0
-        if is_moving(i_q, i_b, obstacles.pbd):
-            x0 = obstacles.pbd.particles_reordered[i_q, i_b].ipos
-            x1 = obstacles.pbd.particles_reordered[i_q, i_b].pos
-            func_bvh_query_aabb(
-                i_b,
-                i_q,
-                qd.min(x0, x1) - reach,
-                qd.max(x0, x1) + reach,
-                obstacles.tree,
-                obstacles.results,
-                func_obstacle_gather_filter,
-                obstacles,
-            )
-
-
-@qd.func(requires_top_level=True)
-def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()):
-    """Accumulate the obstacle corrections of every free PBD particle against its obstacle candidates of the substep, at
-    its current or start position."""
-    qd.loop_config(name="pbd_mpm_obstacles")
-    for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        for j in range(obstacles.n_neighbors[i_q, i_b]):
-            i_a = obstacles.neighbors_idx[i_q, j, i_b]
-            if qd.static(is_stabilization):
-                func_obstacle_start_filter(i_b, i_a, i_q, obstacles)
-            else:
-                func_obstacle_contact_filter(i_b, i_a, i_q, obstacles)
 
 
 # ============================================== Layer 2: pair kind ===============================================

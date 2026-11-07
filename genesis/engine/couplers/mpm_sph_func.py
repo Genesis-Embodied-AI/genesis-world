@@ -12,9 +12,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
+from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF
 from genesis.utils.array_class import BVHQueryResults
-
-from .mpm_pbd_func import kernel_fit_mpm_obstacle_leaves
 
 
 @qd.data_oriented
@@ -49,7 +48,7 @@ class MpmSphBoundary:
         """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep.
 
         The leaves sit at the MPM particles of frame f."""
-        kernel_fit_mpm_obstacle_leaves(f, self)
+        kernel_fit_mpm_particle_leaves(f, self)
         build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
 
     def gather(self):
@@ -64,6 +63,23 @@ class MpmSphBoundary:
         """Hand the MPM particles of frame f the impulses SPH's substep accumulated, before the MPM particle-to-grid
         transfer."""
         kernel_apply_boundary_impulse(f, self)
+
+
+@qd.kernel
+def kernel_fit_mpm_particle_leaves(f: int, boundary: qd.template()):
+    """A point leaf at every active MPM particle, and an empty box with a finite center at the others.
+
+    The particles are those of frame f, which the kernel stores in `boundary.frame` for the filters."""
+    for _ in range(1):
+        boundary.frame[()] = f
+    for i_b, i_p in qd.ndrange(boundary.leaves.aabbs_min.shape[0], boundary.leaves.aabbs_min.shape[1]):
+        if boundary.mpm_particles_ng.active[f, i_p, i_b]:
+            x = boundary.mpm_particles.pos[f, i_p, i_b]
+            boundary.leaves.aabbs_min[i_b, i_p] = x
+            boundary.leaves.aabbs_max[i_b, i_p] = x
+        else:
+            boundary.leaves.aabbs_min[i_b, i_p] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+            boundary.leaves.aabbs_max[i_b, i_p] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
 
 
 @qd.func

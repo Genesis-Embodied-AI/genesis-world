@@ -69,10 +69,6 @@ class PBDSolver(ParticleSolver):
         self._is_loop_running = qd.ndarray(qd.i32, shape=())
         self._loop_iter = qd.ndarray(qd.i32, shape=())
         self._max_correction = qd.ndarray(gs.qd_float, shape=())
-        # Particles of another solver the PBD particles collide with as immovable obstacles, set by that solver before
-        # the first substep (see set_particle_obstacles)
-        self._particle_obstacles = None
-        self._has_particle_obstacles = False
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -248,16 +244,6 @@ class PBDSolver(ParticleSolver):
         inertia (see PbdNewtonHost). The caller registers the returned host and participant."""
         participant = PbdNewtonParticipant(self, self._B)
         return PbdNewtonHost(participant), participant
-
-    def set_particle_obstacles(self, obstacles):
-        """Make the PBD particles collide with the particles of another solver as immovable obstacles.
-
-        The obstacles act in the contact group of the unified loop and in the pre-stabilization. `obstacles` provides
-        `build(f)`, called at the start of every substep, and the top-level funcs `func_project(pbd, f)` and
-        `func_stabilize(pbd, f)`, which accumulate the corrections of the PBD particles in `dpos` and `dcount` of the
-        reordered particles."""
-        self._particle_obstacles = obstacles
-        self._has_particle_obstacles = True
 
     def build(self):
         super().build()
@@ -960,13 +946,6 @@ class PBDSolver(ParticleSolver):
                     self._func_solve_collision_pair(i_p, j, i_b)
 
     @qd.kernel
-    def _kernel_solve_obstacles(self, f: qd.i32, is_stabilization: qd.template()):
-        if qd.static(is_stabilization):
-            self._particle_obstacles.func_stabilize(self, f)
-        else:
-            self._particle_obstacles.func_project(self, f)
-
-    @qd.kernel
     def _kernel_solve_boundary_collision(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             # boundary is enforced regardless of whether free
@@ -1149,13 +1128,9 @@ class PBDSolver(ParticleSolver):
             self._kernel_apply_external_force(f, self._sim.cur_t)
             self._kernel_reorder_particles(f)
             self._kernel_gather_collision_neighbors(f)
-            if self._has_particle_obstacles:
-                self._particle_obstacles.build(f)
 
             for _ in range(self._stabilization_iterations):
                 self._kernel_solve_collision(f, is_stabilization=True)
-                if self._has_particle_obstacles:
-                    self._kernel_solve_obstacles(f, is_stabilization=True)
                 self._kernel_apply_corrections(f, is_average=True, is_stabilization=True)
 
             self._kernel_constraint_loop(f)
@@ -1187,8 +1162,6 @@ class PBDSolver(ParticleSolver):
             if qd.static(self._n_fluid_particles > 0):
                 self._func_solve_density(f)
             self._func_solve_collision(f, is_stabilization=False)
-            if qd.static(self._has_particle_obstacles):
-                self._particle_obstacles.func_project(self, f)
             self._func_apply_corrections(f, is_average=True, is_stabilization=False)
             self._func_end_iteration()
 
