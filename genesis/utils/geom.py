@@ -843,6 +843,8 @@ class GeomConstants(NamedTuple):
     slerp_weights_offset: torch.Tensor
     slerp_weights_slope: torch.Tensor
     slerp_weights_slope_flipped: torch.Tensor
+    T_identity: torch.Tensor
+    T_bottom_row: torch.Tensor
 
 
 # Constant tensors of the torch geometry helpers by device and dtype. torch.compile traces a lookup in a dict, while it
@@ -904,6 +906,8 @@ def _tc_geom_constants(device: torch.device, dtype: torch.dtype) -> GeomConstant
             slerp_weights_offset=torch.tensor((1.0, 0.0, 1.0), dtype=dtype, device=device),
             slerp_weights_slope=torch.tensor((-1.0, 1.0, 0.0), dtype=dtype, device=device),
             slerp_weights_slope_flipped=torch.tensor((-1.0, -1.0, 0.0), dtype=dtype, device=device),
+            T_identity=torch.eye(4, dtype=dtype, device=device),
+            T_bottom_row=torch.tensor((0.0, 0.0, 0.0, 1.0), dtype=dtype, device=device),
         )
     return constants
 
@@ -1281,16 +1285,15 @@ def trans_R_to_T(trans=None, R=None, *, out=None):
     if B:
         assert T.shape == (*B, 4, 4)
 
-    T[..., 3, :3] = 0.0
-    T[..., 3, 3] = 1.0
-    T[..., :3, 3] = 0.0 if trans is None else trans
-    if R is None:
-        T[..., :3, :3] = 0.0
-        if is_torch:
-            torch.diagonal(T, dim1=-2, dim2=-1).fill_(1.0)
-        else:
-            T[..., [0, 1, 2], [0, 1, 2]] = 1.0
+    # Copying the identity is a single contiguous write, cheaper than the strided writes of the entries that a missing
+    # input leaves to it. Once both inputs are given, the bottom row is all that remains.
+    if trans is None or R is None:
+        T[...] = _tc_geom_constants(T.device, T.dtype).T_identity if is_torch else np.eye(4)
     else:
+        T[..., 3, :] = _tc_geom_constants(T.device, T.dtype).T_bottom_row if is_torch else (0.0, 0.0, 0.0, 1.0)
+    if trans is not None:
+        T[..., :3, 3] = trans
+    if R is not None:
         T[..., :3, :3] = R
 
     return T
@@ -1840,16 +1843,15 @@ def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -
     q0 = q0 / torch.linalg.vector_norm(q0, ord=2, dim=-1, keepdim=True)
     q1 = q1 / torch.linalg.vector_norm(q1, ord=2, dim=-1, keepdim=True)
     dot = (q0 * q1).sum(-1, keepdim=True)
-    dot_abs = dot.abs()
-    is_linear = dot_abs > 1.0 - eps
-    # Keep the unused spherical branch away from acos(1) and division by zero, including in the backward pass
-    spherical_dot = torch.where(is_linear, 0.0, dot_abs)
+    # Clamping the cosine keeps the angle at least acos(1 - eps), so that the spherical weights and their gradient stay
+    # finite. Below that angle, the weights differ from the exact ones by O(eps).
+    angle = torch.acos(dot.abs().clamp(max=1.0 - eps))
     # Weights '1 - t' of q0 and '+-t' of q1, signed to interpolate along the shorter arc, then 1. Once multiplied by the
     # angle between q0 and q1, a single sine evaluates the numerators and the denominator of the spherical weights.
     weights_slope = torch.where(dot < 0.0, constants.slerp_weights_slope_flipped, constants.slerp_weights_slope)
     weights_linear = torch.addcmul(constants.slerp_weights_offset, t[..., None], weights_slope)
-    weights_sin = torch.sin(weights_linear * torch.acos(spherical_dot))
-    weights = torch.where(is_linear, weights_linear[..., :2], weights_sin[..., :2] / weights_sin[..., 2:])
+    weights_sin = torch.sin(weights_linear * angle)
+    weights = weights_sin[..., :2] / weights_sin[..., 2:]
     return torch.addcmul(q0 * weights[..., :1], q1, weights[..., 1:])
 
 
