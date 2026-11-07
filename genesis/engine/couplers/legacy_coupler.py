@@ -138,14 +138,14 @@ class LegacyCoupler(RBC):
         Registering activates the implicit solve of every substep whenever MPM is in the scene. MPM joins first, then
         the solvers it couples with implicitly, each owning the data of its own unknowns. The substep of such a solver
         stops before its own solve, which the joint solve takes over. The MPM particles are also boundary particles of
-        the SPH fluid (see mpm_sph_func), staggered with the solve."""
+        the SPH fluid (see mpm_sph_func) and obstacles of the PBD particles, both staggered with the solve."""
         # Imported here to avoid a circular dependency: the couplings with MPM import the solvers, whose entities import
         # the couplers
         from genesis.engine.solvers.newton_contact import NewtonContact
 
         from .contact_candidates import CouplingPairsHost
         from .mpm_fem_func import FemContactParams, FemTriangleQuery, MpmFemContact
-        from .mpm_pbd_func import MpmPbdContact, PbdContactParams, PbdParticleQuery
+        from .mpm_pbd_func import MpmParticleObstacles, MpmPbdContact, PbdContactParams, PbdParticleQuery
         from .mpm_rigid_func import RigidGeomQuery
         from .mpm_rigid_newton import MpmRigidContact, MpmRigidContactHost
         from .mpm_sph_func import MpmSphBoundary
@@ -191,6 +191,7 @@ class LegacyCoupler(RBC):
             contact = MpmPbdContact(mpm_participant, pbd_participant, query)
             couplings.append((CouplingPairsHost(contact), contact))
             pair_kinds.append(contact)
+            pbd.set_particle_obstacles(MpmParticleObstacles(mpm, pbd, pbd_contact, n_envs))
         if self._mpm_sph:
             self._sph_boundary = MpmSphBoundary(mpm, self.sph_solver, mpm.mpm_info, n_envs)
             self.sph_solver.set_boundary(self._sph_boundary)

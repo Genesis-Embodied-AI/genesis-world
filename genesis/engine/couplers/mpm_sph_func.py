@@ -54,18 +54,19 @@ class MpmSphBoundary:
 
 
 @qd.kernel
-def kernel_fit_mpm_particle_leaves(f: int, boundary: qd.template()):
-    """A point leaf at every active MPM particle, and an empty box with a finite center at the others."""
+def kernel_fit_mpm_particle_leaves(f: int, query: qd.template()):
+    """A point leaf at every active MPM particle of the tree of `query` (MpmSphBoundary, MpmParticleObstacles), and an
+    empty box with a finite center at the others."""
     for _ in range(1):
-        boundary.frame[()] = f
-    for i_b, i_p in qd.ndrange(boundary.leaves.aabbs_min.shape[0], boundary.leaves.aabbs_min.shape[1]):
-        if boundary.mpm_particles_ng.active[f, i_p, i_b]:
-            x = boundary.mpm_particles.pos[f, i_p, i_b]
-            boundary.leaves.aabbs_min[i_b, i_p] = x
-            boundary.leaves.aabbs_max[i_b, i_p] = x
+        query.frame[()] = f
+    for i_b, i_p in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
+        if query.mpm_particles_ng.active[f, i_p, i_b]:
+            x = query.mpm_particles.pos[f, i_p, i_b]
+            query.leaves.aabbs_min[i_b, i_p] = x
+            query.leaves.aabbs_max[i_b, i_p] = x
         else:
-            boundary.leaves.aabbs_min[i_b, i_p] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            boundary.leaves.aabbs_max[i_b, i_p] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+            query.leaves.aabbs_min[i_b, i_p] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+            query.leaves.aabbs_max[i_b, i_p] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
 
 
 @qd.func
