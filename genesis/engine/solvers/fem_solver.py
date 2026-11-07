@@ -125,7 +125,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             mat_idx=gs.qd_int,  # material model index
             B=gs.qd_mat3,  # inverse of the deformation gradient at rest state
             V=gs.qd_float,  # rest volume of the element
-            V_scaled=gs.qd_float,  # scaled rest volume of the element
             friction_mu=gs.qd_float,  # friction coefficient for contact
             # for muscle
             muscle_group=gs.qd_int,
@@ -361,10 +360,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         if self.n_elements_max > 0:
             self._init_surface_info()
-            if self._use_implicit_solver and self._env_block_dim > 1:
+            if self._env_block_dim > 1:
                 # The corners of the elements, vertex by vertex then element by element, each one packed as 4 times its
                 # element plus its local index. A vertex gathers the terms of its corners in this order, so the
-                # implicit solve sums them without atomics.
+                # implicit solve and the internal force getter sum them without atomics.
                 el2v = qd_to_numpy(self.elements_i.el2v)
                 self.vertices_corners_start = qd.field(dtype=gs.qd_int, shape=(self.n_vertices + 1,))
                 self.vertices_corners_start.from_numpy(
@@ -436,42 +435,34 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_v[f + 1, i_v, i_b].pos = self.elements_v[f, i_v, i_b].pos
             self.elements_v[f + 1, i_v, i_b].vel = self.elements_v[f, i_v, i_b].vel
 
+    @qd.func
+    def _func_element_internal_force(self, f: int, i_e: int, i_b: int):
+        # The elastic force of the element on each of its vertices, one per column, from the stress its solver uses. The
+        # columns sum to zero, so the forces conserve momentum once each vertex divides its own by its own mass.
+        J, F = self._compute_ele_J_F(f, i_e, i_b)
+        mu = self.elements_i[i_e].mu
+        lam = self.elements_i[i_e].lam
+        actu = self.elements_el[f, i_e, i_b].actu
+        m_dir = self.elements_i[i_e].muscle_direction
+        stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for mat_idx in qd.static(self._mats_idx):
+            if self.elements_i[i_e].mat_idx == mat_idx:
+                if qd.static(self._use_implicit_solver):
+                    _, stress = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
+                else:
+                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
+        H = -self.elements_i[i_e].V * stress @ self.elements_i[i_e].B.transpose()
+        return qd.Matrix.cols([H[:, 0], H[:, 1], H[:, 2], -H[:, 0] - H[:, 1] - H[:, 2]])
+
     @qd.kernel
     def compute_vel(self, f: qd.i32):
         for i_e, i_b in qd.ndrange(self.n_elements, self._B):
-            i_v0, i_v1, i_v2, i_v3 = self.elements_i[i_e].el2v
-            pos_v0 = self.elements_v[f, i_v0, i_b].pos
-            pos_v1 = self.elements_v[f, i_v1, i_b].pos
-            pos_v2 = self.elements_v[f, i_v2, i_b].pos
-            pos_v3 = self.elements_v[f, i_v3, i_b].pos
-            D = qd.Matrix.cols([pos_v0 - pos_v3, pos_v1 - pos_v3, pos_v2 - pos_v3])
-
-            V_scaled = self.elements_i[i_e].V_scaled
-            B = self.elements_i[i_e].B
-            F = D @ B
-            J = F.determinant()
-
-            mu = self.elements_i[i_e].mu
-            lam = self.elements_i[i_e].lam
-            actu = self.elements_el[f, i_e, i_b].actu
-            m_dir = self.elements_i[i_e].muscle_direction
-            stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
-
-            verts = self.elements_i[i_e].el2v
-            mass_scaled = self.elements_i[i_e].mass_scaled
-            H_scaled = -V_scaled * stress @ B.transpose()
-            for k in qd.static(range(3)):
-                force_scaled = qd.Vector([H_scaled[j, k] for j in range(3)])
-
-                # store so forces can be read out
-                self.elements_v_energy[i_b, verts[k]].force = force_scaled
-
-                dv = self.substep_dt * force_scaled / mass_scaled
-                self.elements_v[f + 1, verts[k], i_b].vel += dv
-                self.elements_v[f + 1, verts[3], i_b].vel -= dv
+            force = self._func_element_internal_force(f, i_e, i_b)
+            i_vs = self.elements_i[i_e].el2v
+            for i in qd.static(range(4)):
+                i_v = i_vs[i]
+                dv = self.substep_dt * self.elements_v_info[i_v].mass_inv * force[:, i]
+                qd.atomic_add(self.elements_v[f + 1, i_v, i_b].vel, dv)
 
     @qd.kernel
     def apply_uniform_force(self, f: qd.i32):
@@ -675,11 +666,18 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return totals
 
     @qd.func
-    def _func_accumulate_vertices(self, f: int, batch_active: qd.template(), gather_Ap: qd.template()):
-        # The elastic terms of every vertex, Ap alone or else the force and the diagonal block, added up in a fixed
-        # order. On CPU, one thread per environment walks the corners of the elements in element order and adds each
-        # term to its vertex. On GPU, the lanes of a vertex stride its corners (see 'vertices_corners_idx'), then add up
-        # their sums in a fixed order.
+    def _func_accumulate_vertices(
+        self,
+        f: int,
+        forces: qd.template(),
+        batch_active: qd.template(),
+        gather_Ap: qd.template(),
+        gather_internal_force: qd.template(),
+    ):
+        # The elastic terms of every vertex, summed in a fixed order: the internal force alone into 'forces' for every
+        # environment if asked, else Ap alone or the force and diagonal block of the active environments. On CPU, one
+        # thread per environment walks the corners in element order and adds each term to its vertex. On GPU, the lanes
+        # of a vertex stride its corners (see 'vertices_corners_idx'), then add up their sums in a fixed order.
         is_serial = qd.static(self._env_block_dim == 1)
         n_lanes = qd.static(1 if is_serial else 2**LOG2_CORNER_LANES)
         n_env_threads = qd.static(1 if is_serial else self.n_vertices * n_lanes)
@@ -692,23 +690,27 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_v = i_flat // n_lanes % self.n_vertices
             vec_elastic = qd.Vector.zero(gs.qd_float, 3)
             mat_elastic = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if batch_active[i_b]:
+            is_active = True
+            if qd.static(not gather_internal_force):
+                is_active = batch_active[i_b]
+            if is_active:
                 i_c_start = 0
                 n_corners = 4 * self.n_elements
-                if qd.static(is_serial):
+                if qd.static(is_serial and not gather_internal_force):
                     for i_v_ in range(self.n_vertices):
                         if qd.static(gather_Ap):
                             self.pcg_state_v[i_b, i_v_].Ap = qd.Vector.zero(gs.qd_float, 3)
                         else:
                             self.elements_v_energy[i_b, i_v_].force = qd.Vector.zero(gs.qd_float, 3)
                             self.pcg_state_v[i_b, i_v_].diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
-                else:
+                if qd.static(not is_serial):
                     i_c_start = self.vertices_corners_start[i_v]
                     n_corners = self.vertices_corners_start[i_v + 1] - i_c_start
 
-                # The corners of an element follow each other on CPU, sharing its mapping matrix and stress
+                # On CPU the corners of an element follow each other, sharing its mapping matrix, stress or force
                 S = qd.Matrix.zero(gs.qd_float, 4, 3)
                 stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+                force_internal = qd.Matrix.zero(gs.qd_float, 3, 4)
                 for i_c_ in range((n_corners + n_lanes - 1) // n_lanes):
                     i_c = i_c_ * n_lanes + i_lane
                     if i_c < n_corners:
@@ -723,7 +725,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                         if qd.static(is_serial):
                             is_new_element = i_k == 0
                         if is_new_element:
-                            S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+                            if qd.static(gather_internal_force):
+                                force_internal = self._func_element_internal_force(f, i_e, i_b)
+                            else:
+                                S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
                             if qd.static(gather_Ap):
                                 p = qd.Matrix.cols([self.pcg_state_v[i_b, i_vs[i]].p for i in qd.static(range(4))])
                                 _, dP = self.compute_elastic_product(i_e, i_b, S, p)
@@ -732,7 +737,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
                         vec_corner = qd.Vector.zero(gs.qd_float, 3)
                         mat_corner = qd.Matrix.zero(gs.qd_float, 3, 3)
-                        if qd.static(gather_Ap):
+                        if qd.static(gather_internal_force):
+                            vec_corner = force_internal[:, i_k]
+                        elif qd.static(gather_Ap):
                             vec_corner = stress @ S_k
                         else:
                             vec_corner = -V * self.elements_el_energy[i_b, i_e].gradient @ S_k
@@ -745,7 +752,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
                         if qd.static(is_serial):
                             i_v_k = i_vs[i_k]
-                            if qd.static(gather_Ap):
+                            if qd.static(gather_internal_force):
+                                for j in qd.static(range(3)):
+                                    forces[i_b, i_v_k, j] = forces[i_b, i_v_k, j] + vec_corner[j]
+                            elif qd.static(gather_Ap):
                                 self.pcg_state_v[i_b, i_v_k].Ap = self.pcg_state_v[i_b, i_v_k].Ap + vec_corner
                             else:
                                 force = self.elements_v_energy[i_b, i_v_k].force + vec_corner
@@ -758,12 +768,18 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if qd.static(not is_serial):
                 for i in qd.static(range(3)):
                     vec_elastic[i] = su.qd_block_sum(vec_elastic[i], LOG2_CORNER_LANES)
-                    if qd.static(not gather_Ap):
+                    if qd.static(not gather_Ap and not gather_internal_force):
                         for j in qd.static(range(3)):
                             mat_elastic[i, j] = su.qd_block_sum(mat_elastic[i, j], LOG2_CORNER_LANES)
 
-            # The inertia terms of the vertices this thread owns add to their elastic sums
-            if batch_active[i_b]:
+            if qd.static(gather_internal_force):
+                # The first lane of a vertex writes its sum, which the walk over the corners adds up directly on CPU
+                if qd.static(not is_serial):
+                    if i_lane == 0:
+                        for j in qd.static(range(3)):
+                            forces[i_b, i_v, j] = vec_elastic[j]
+            elif is_active:
+                # The inertia terms of the vertices this thread owns add to their elastic sums
                 n_owned = 1 if i_lane == 0 else 0
                 if qd.static(is_serial):
                     n_owned = self.n_vertices
@@ -798,7 +814,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def accumulate_vertex_force_preconditioner(self, f: qd.i32):
-        self._func_accumulate_vertices(f, self.batch_active, gather_Ap=False)
+        self._func_accumulate_vertices(
+            f, forces=None, batch_active=self.batch_active, gather_Ap=False, gather_internal_force=False
+        )
 
     @qd.kernel
     def init_pcg_solve(self):
@@ -832,7 +850,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def one_pcg_iter(self):
-        self._func_accumulate_vertices(f=0, batch_active=self.batch_pcg_active, gather_Ap=True)
+        self._func_accumulate_vertices(
+            f=0, forces=None, batch_active=self.batch_pcg_active, gather_Ap=True, gather_internal_force=False
+        )
 
         n_threads = qd.static(self._env_block_dim)
         qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
@@ -1118,15 +1138,35 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def get_forces(self):
         """
-        Get forces on all vertices.
+        Get the internal elastic force on every vertex, computed from the current state.
+
+        The force of each element follows the material model of the solver in use, and the forces of a body sum to zero.
+        Damping, gravity and contact forces are left out. With the IPC coupler, which simulates the FEM entities itself,
+        it raises an exception.
 
         Returns:
             torch.Tensor : shape (B, n_vertices, 3) where B is batch size
         """
         if not self.is_active:
             return None
+        # Imported here to avoid a circular dependency (see 'substep_pre_coupling').
+        from genesis.engine.couplers import IPCCoupler
 
-        return qd_to_torch(self.elements_v_energy.force, copy=True)
+        # The IPC coupler simulates the FEM entities with its own models, and leaves the elements of Cloth ones empty.
+        if isinstance(self._sim.coupler, IPCCoupler):
+            gs.raise_exception("The internal forces of FEM entities are not available with the IPC coupler.")
+
+        # Between two steps, the state sits in frame 0 (see 'Solver.has_frames'). The linear corotated model takes the
+        # rotation of each element from this state.
+        if self._use_implicit_solver:
+            self.precompute_material_data(0)
+        forces = torch.zeros((self._B, self.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
+        self._kernel_get_forces(0, forces)
+        return forces
+
+    @qd.kernel
+    def _kernel_get_forces(self, f: int, forces: qd.types.ndarray()):
+        self._func_accumulate_vertices(f, forces, batch_active=None, gather_Ap=False, gather_internal_force=True)
 
     @qd.kernel
     def add_elements(
@@ -1175,8 +1215,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.tet_wrong_order[None] = True
             V = qd.abs(det) / 6.0
             self.elements_i[i_global].V = V
-            V_scaled = V * self._vol_scale
-            self.elements_i[i_global].V_scaled = V_scaled
 
             for j in qd.static(range(4)):
                 self.elements_i[i_global].el2v[j] = elems[i_e, j] + v_start
@@ -1184,7 +1222,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_i[i_global].mu = mat_mu
             self.elements_i[i_global].lam = mat_lam
             self.elements_i[i_global].friction_mu = mat_friction_mu
-            self.elements_i[i_global].mass_scaled = mat_rho * V_scaled
+            self.elements_i[i_global].mass_scaled = mat_rho * V * self._vol_scale
             self.elements_i[i_global].muscle_group = 0
             self.elements_i[i_global].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
 

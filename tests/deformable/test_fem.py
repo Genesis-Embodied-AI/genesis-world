@@ -469,23 +469,44 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         pos_z = pos_z + substep_dt * vel_z
     assert_allclose(free_box.get_state().pos - free_box_pos_0, (0.0, 0.0, pos_z), tol=5e-10)
 
-    if use_implicit_solver:
-        # The internal forces of the deformed box add up to zero, so its center of mass falls like the free box. Each
-        # vertex carries a quarter of the rest mass of every element it belongs to.
-        verts = box.init_positions
-        elems = box.get_el2v()
-        elems_mass = RHO * torch.linalg.det(verts[elems[:, :3]] - verts[elems[:, 3:]]).abs() / 6.0
-        verts_mass = torch.zeros_like(verts[:, 0])
-        for i in range(4):
-            verts_mass.index_add_(0, elems[:, i], 0.25 * elems_mass)
-        com_vel = verts_mass @ box_state_0.vel / verts_mass.sum()
-        com_pos = verts_mass @ box_state_0.pos / verts_mass.sum()
-        for _ in range(n_steps * N_SUBSTEPS):
-            com_vel[..., 2] -= GRAVITY * substep_dt
+    # The internal forces of the deformed box add up to zero, so its center of mass falls like the free box. Each vertex
+    # carries a quarter of the rest mass of every element it belongs to.
+    verts = box.init_positions
+    elems = box.get_el2v()
+    edges_rest = verts[elems[:, :3]] - verts[elems[:, 3:]]
+    elems_vol = torch.linalg.det(edges_rest).abs() / 6.0
+    elems_mass = RHO * elems_vol
+    verts_mass = torch.zeros_like(verts[:, 0])
+    for i in range(4):
+        verts_mass.index_add_(0, elems[:, i], 0.25 * elems_mass)
+    com_vel = verts_mass @ box_state_0.vel / verts_mass.sum()
+    com_pos = verts_mass @ box_state_0.pos / verts_mass.sum()
+    for _ in range(n_steps * N_SUBSTEPS):
+        com_vel[..., 2] -= GRAVITY * substep_dt
+        if use_implicit_solver:
             com_vel /= 1.0 + DAMPING_ALPHA * substep_dt
-            com_pos += substep_dt * com_vel
-        assert_allclose(verts_mass @ box.get_state().pos / verts_mass.sum(), com_pos, atol=5e-12)
+        com_pos += substep_dt * com_vel
+    assert_allclose(verts_mass @ box.get_state().pos / verts_mass.sum(), com_pos, atol=5e-12)
 
+    # The internal forces are the opposite of the gradient of the elastic energy of the box with respect to the
+    # positions of its vertices. The linear corotated model takes the rotation of each element as given.
+    mu, lam = box.material.mu, box.material.lam
+    pos = box.get_state().pos.requires_grad_()
+    F = (torch.linalg.inv(edges_rest) @ (pos[:, elems[:, :3]] - pos[:, elems[:, 3:]])).transpose(-1, -2)
+    if use_implicit_solver:
+        U, _, Vh = torch.linalg.svd(F.detach())
+        F_rot = (U @ Vh).transpose(-1, -2) @ F
+        eps = 0.5 * (F_rot + F_rot.transpose(-1, -2)) - torch.eye(3, dtype=gs.tc_float, device=gs.device)
+        energy_density = mu * eps.square().sum((-2, -1)) + 0.5 * lam * eps.diagonal(dim1=-2, dim2=-1).sum(-1) ** 2
+    else:
+        F_norm_sqr = F.square().sum((-2, -1))
+        J_shift = torch.linalg.det(F) - 1.0 - 0.75 * mu / lam
+        energy_density = 0.5 * mu * (F_norm_sqr - 3.0 - (F_norm_sqr + 1.0).log()) + 0.5 * lam * J_shift**2
+    energy = (elems_vol * energy_density).sum()
+    forces = scene.fem_solver.get_forces()[:, box.v_start : box.v_start + box.n_vertices]
+    assert_allclose(forces, -torch.autograd.grad(energy, pos)[0], tol=1e-11)
+
+    if use_implicit_solver:
         # Replaying the free fall reproduces it bitwise
         fall_pos = box.get_state().pos
         scene.reset(state=fall_state)

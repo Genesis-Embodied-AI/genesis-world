@@ -118,6 +118,8 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     scene.build(n_envs=n_envs)
     assert scene.sim is not None
     assert scene.sim.substeps == n_substeps
+    with pytest.raises(gs.GenesisException, match="not available with the IPC coupler"):
+        scene.sim.fem_solver.get_forces()
     coupler = cast("IPCCoupler", scene.sim.coupler)
 
     envs_idx = range(max(scene.n_envs, 1))
