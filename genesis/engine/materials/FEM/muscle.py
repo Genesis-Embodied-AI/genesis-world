@@ -20,7 +20,7 @@ class Muscle(Elastic):
     nu : float, optional
         Poisson ratio. Default is 0.2.
     rho : float, optional
-        Material density (kg/m³). Default is 1000.
+        Material density (kg/m^3). Default is 1000.
     model : str, optional
         Constitutive model ('linear' or 'stable_neohookean'). Default is 'linear'.
     n_groups : int, optional
@@ -33,7 +33,7 @@ class Muscle(Elastic):
 
     n_groups: PositiveInt = 1
 
-    # Auto-generated — equals E.
+    # Auto-generated, equal to E.
     stiffness: ValidFloat = Field(default=0.0, exclude=True)
 
     _update_stress_without_actuation: Any = PrivateAttr(default=None)
@@ -46,7 +46,15 @@ class Muscle(Elastic):
         self.update_stress = self._update_stress_with_actuation
 
     @qd.func
-    def _update_stress_with_actuation(self, mu, lam, J, F, actu, m_dir):
+    def _update_stress_with_actuation(
+        self,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         stress = self._update_stress_without_actuation(mu, lam, J, F, actu, m_dir)
 
         l = (F @ m_dir).norm(1e-12)

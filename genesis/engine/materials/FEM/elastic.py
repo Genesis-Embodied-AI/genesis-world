@@ -30,7 +30,7 @@ class Elastic(Base):
     nu : float, optional
         Poisson ratio, describing the material's volume change under stress. Default is 0.2.
     rho : float, optional
-        Material density (kg/m³). Default is 1000.
+        Material density (kg/m^3). Default is 1000.
     hydroelastic_modulus : float, optional
         Hydroelastic modulus for hydroelastic contact. Default is 1e7.
     friction_mu : float, optional
@@ -64,21 +64,19 @@ class Elastic(Base):
 
         if self.model == "linear":
             self.update_stress = self._update_stress_linear
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear
+            self.hessian_product = self._hessian_product_linear
             self.compute_energy_gradient = self._compute_energy_gradient_linear
             self.compute_energy = self._compute_energy_linear
-            self.hessian_invariant = True
         elif self.model == "stable_neohookean":
             self.update_stress = self._update_stress_stable_neohookean
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_stable_neohookean
+            self.hessian_product = self._hessian_product_stable_neohookean
             self.compute_energy_gradient = self._compute_energy_gradient_stable_neohookean
             self.compute_energy = self._compute_energy_stable_neohookean
-            self.hessian_invariant = False
         elif self.model == "linear_corotated":
             self.build = self._build_linear_corotated
             self.pre_compute = self._pre_compute_linear_corotated
             self.update_stress = self._update_stress_linear_corotated
-            self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear_corotated
+            self.hessian_product = self._hessian_product_linear_corotated
             self.compute_energy_gradient = self._compute_energy_gradient_linear_corotated
             self.compute_energy = self._compute_energy_linear_corotated
 
@@ -86,48 +84,43 @@ class Elastic(Base):
         self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
 
     @qd.func
-    def _pre_compute_linear_corotated(self, J, F, i_e, i_b):
+    def _pre_compute_linear_corotated(self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3)):
         U, S, V = gu.qd_svd(F)
         R = U @ V.transpose()
         self._R[i_b, i_e] = R
 
-    # ─── Linear model ───
+    # --- Linear model ---
 
     @qd.func
-    def _update_stress_linear(self, mu, lam, J, F, actu, m_dir):
+    def _update_stress_linear(
+        self,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         I = qd.Matrix.identity(dt=gs.qd_float, n=3)
         stress = mu * (F + F.transpose() - 2 * I) + lam * (F - I).trace() * I
         return stress
 
     @qd.func
-    def _compute_energy_gradient_hessian_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
-        I = qd.Matrix.identity(dt=gs.qd_float, n=3)
-        eps = 0.5 * (F + F.transpose()) - I
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * eps + lam * trEps * I
-
-        for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
-            hessian_field[i_b, i, i_e].fill(0.0)
-
-        for i, k in qd.static(qd.ndrange(3, 3)):
-            hessian_field[i_b, i, i, i_e][k, k] = mu
-
-        hessian_field[i_b, 0, 0, i_e][0, 0] += mu + lam
-        hessian_field[i_b, 1, 1, i_e][1, 1] += mu + lam
-        hessian_field[i_b, 2, 2, i_e][2, 2] += mu + lam
-
-        hessian_field[i_b, 0, 1, i_e][1, 0] = hessian_field[i_b, 1, 0, i_e][0, 1] = mu
-        hessian_field[i_b, 0, 2, i_e][2, 0] = hessian_field[i_b, 2, 0, i_e][0, 2] = mu
-        hessian_field[i_b, 1, 2, i_e][2, 1] = hessian_field[i_b, 2, 1, i_e][1, 2] = mu
-
-        hessian_field[i_b, 0, 1, i_e][0, 1] = hessian_field[i_b, 0, 2, i_e][0, 2] = lam
-        hessian_field[i_b, 1, 0, i_e][1, 0] = hessian_field[i_b, 2, 0, i_e][2, 0] = lam
-        hessian_field[i_b, 1, 2, i_e][1, 2] = hessian_field[i_b, 2, 1, i_e][2, 1] = lam
-        return energy, gradient
+    def _hessian_product_linear(self, i_e: int, i_b: int, mu: float, lam: float, dF: qd.types.matrix(3, 3)):
+        return mu * (dF + dF.transpose()) + lam * dF.trace() * qd.Matrix.identity(dt=gs.qd_float, n=3)
 
     @qd.func
-    def _compute_energy_gradient_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_gradient_linear(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         I = qd.Matrix.identity(dt=gs.qd_float, n=3)
         eps = 0.5 * (F + F.transpose()) - I
         trEps = eps.trace()
@@ -136,17 +129,35 @@ class Elastic(Base):
         return energy, gradient
 
     @qd.func
-    def _compute_energy_linear(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_linear(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         I = qd.Matrix.identity(dt=gs.qd_float, n=3)
         eps = 0.5 * (F + F.transpose()) - I
         trEps = eps.trace()
         energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
         return energy
 
-    # ─── Stable Neo-Hookean model ───
+    # --- Stable Neo-Hookean model ---
 
     @qd.func
-    def _update_stress_stable_neohookean(self, mu, lam, J, F, actu, m_dir):
+    def _update_stress_stable_neohookean(
+        self,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         IC = F.norm_sqr()
         dJdF0 = F[:, 1].cross(F[:, 2])
         dJdF1 = F[:, 2].cross(F[:, 0])
@@ -157,15 +168,35 @@ class Elastic(Base):
         return stress
 
     @qd.func
-    def _compute_energy_gradient_hessian_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
+    def _hessian_product_stable_neohookean(self, i_e: int, i_b: int, mu: float, lam: float, dF: qd.types.matrix(3, 3)):
         raise NotImplementedError("Hessian computation is not implemented for stable_neohookean model.")
 
     @qd.func
-    def _compute_energy_gradient_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_gradient_stable_neohookean(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         gs.raise_exception("Gradient computation is not implemented for stable_neohookean model.")
 
     @qd.func
-    def _compute_energy_stable_neohookean(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_stable_neohookean(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         _lambda = lam + mu
         _alpha = 1.0 + mu / _lambda
         Ic = F.norm_sqr()
@@ -173,36 +204,38 @@ class Elastic(Base):
         energy = 0.5 * (mu * (Ic - 3.0) + _lambda * Jminus1**2)
         return energy
 
-    # ─── Linear Corotated model ───
+    # --- Linear Corotated model ---
 
     @qd.func
-    def _update_stress_linear_corotated(self, mu, lam, J, F, actu, m_dir):
+    def _update_stress_linear_corotated(
+        self,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         gs.raise_exception("Linear corotated stress update is not implemented yet.")
 
     @qd.func
-    def _compute_energy_gradient_hessian_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):
+    def _hessian_product_linear_corotated(self, i_e: int, i_b: int, mu: float, lam: float, dF: qd.types.matrix(3, 3)):
+        # The Hessian depends on the rotation of the element alone, taken at the start of the substep (see pre_compute)
         R = self._R[i_b, i_e]
-        F_hat = R.transpose() @ F
-        eps = 0.5 * (F_hat + F_hat.transpose())
-        for i in qd.static(range(3)):
-            eps[i, i] -= 1.0
-        trEps = eps.trace()
-        energy = mu * eps.norm_sqr() + 0.5 * lam * trEps**2
-        gradient = 2.0 * mu * R @ eps + lam * trEps * R
-
-        for i in qd.static(qd.grouped(qd.ndrange(3, 3))):
-            hessian_field[i_b, i, i_e].fill(0.0)
-
-        for i, k in qd.static(qd.ndrange(3, 3)):
-            hessian_field[i_b, i, i, i_e][k, k] = mu
-
-        for i, j, alpha, beta in qd.ndrange(3, 3, 3, 3):
-            hessian_field[i_b, j, beta, i_e][i, alpha] += mu * R[i, beta] * R[alpha, j] + lam * R[alpha, beta] * R[i, j]
-
-        return energy, gradient
+        return mu * dF + mu * R @ dF.transpose() @ R + lam * (R * dF).sum() * R
 
     @qd.func
-    def _compute_energy_gradient_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_gradient_linear_corotated(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         F_hat = self._R[i_b, i_e].transpose() @ F
         eps = 0.5 * (F_hat + F_hat.transpose())
         for i in qd.static(range(3)):
@@ -213,7 +246,17 @@ class Elastic(Base):
         return energy, gradient
 
     @qd.func
-    def _compute_energy_linear_corotated(self, mu, lam, J, F, actu, m_dir, i_e, i_b):
+    def _compute_energy_linear_corotated(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        J: float,
+        F: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         F_hat = self._R[i_b, i_e].transpose() @ F
         eps = 0.5 * (F_hat + F_hat.transpose())
         for i in qd.static(range(3)):

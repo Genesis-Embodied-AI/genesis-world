@@ -1105,20 +1105,6 @@ class SAPCoupler(RBC):
         )
 
     @qd.func
-    def compute_elastic_products(self, i_b, i_e, S, i_vs, src):
-        p9 = qd.Vector.zero(gs.qd_float, 9)
-        for i, j in qd.static(qd.ndrange(3, 4)):
-            p9[i * 3 : i * 3 + 3] = p9[i * 3 : i * 3 + 3] + (S[j, i] * src[i_b, i_vs[j]])
-
-        H9_p9 = qd.Vector.zero(gs.qd_float, 9)
-
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            H9_p9[i * 3 : i * 3 + 3] = H9_p9[i * 3 : i * 3 + 3] + (
-                self.fem_solver.elements_el_hessian[i_b, i, j, i_e] @ p9[j * 3 : j * 3 + 3]
-            )
-        return p9, H9_p9
-
-    @qd.func
     def compute_fem_matrix_vector_product(self, src, dst, active):
         """
         Compute the FEM matrix-vector product, including mass matrix and elasticity stiffness matrix.
@@ -1151,11 +1137,11 @@ class SAPCoupler(RBC):
                     if self.fem_solver.vertex_constraints.is_constrained[i_vs[i], i_b]:
                         S[i, :] = qd.Vector.zero(gs.qd_float, 3)
 
-            _, new_p9 = self.compute_elastic_products(i_b, i_e, S, i_vs, src)
-            # atomic
-            scale = V_dt2 * damping_beta_factor
+            x = qd.Matrix.cols([src[i_b, i_vs[i]] for i in qd.static(range(4))])
+            _, dP = self.fem_solver.compute_elastic_product(i_e, i_b, S, x)
+            A_src = V_dt2 * damping_beta_factor * dP @ S.transpose()
             for i in qd.static(range(4)):
-                dst[i_b, i_vs[i]] += (S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]) * scale
+                qd.atomic_add(dst[i_b, i_vs[i]], A_src[:, i])
 
     @qd.kernel
     def init_pcg_solve(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
@@ -1505,8 +1491,9 @@ class SAPCoupler(RBC):
                     if self.fem_solver.vertex_constraints.is_constrained[i_vs[i], i_b]:
                         S[i, :] = qd.Vector.zero(gs.qd_float, 3)
 
-            p9, H9_p9 = self.compute_elastic_products(i_b, i_e, S, i_vs, self.fem_state_v.v_diff)
-            energy[i_b] += 0.5 * p9.dot(H9_p9) * damping_beta_factor * V_dt2
+            x = qd.Matrix.cols([self.fem_state_v.v_diff[i_b, i_vs[i]] for i in qd.static(range(4))])
+            dF, dP = self.fem_solver.compute_elastic_product(i_e, i_b, S, x)
+            qd.atomic_add(energy[i_b], 0.5 * (dF * dP).sum() * damping_beta_factor * V_dt2)
 
     @qd.func
     def compute_rigid_energy(self, energy: qd.template(), dofs_state: DofsState, rigid_info: RigidInfo):
