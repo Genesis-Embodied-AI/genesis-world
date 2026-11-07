@@ -97,7 +97,6 @@ class GJK:
                 # We apply sqrt to the 10 * EPS value because we often use the square of the normal norm as the
                 # denominator.
                 diff_contact_min_normal_norm=math.sqrt(gs.EPS * 10.0),
-                diff_contact_min_penetration=gs.EPS * 100.0,
             )
         )
 

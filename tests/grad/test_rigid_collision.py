@@ -65,7 +65,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                 scene.add_entity(
                     gs.morphs.Box(
                         size=(0.4, 0.4, 0.4),
-                        pos=(0.0, 0.0, 0.2),
+                        pos=(-0.5, 0.0, 0.2),
                     ),
                     vis_mode="collision",
                 ),
@@ -118,8 +118,16 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
         return scene, entities, ground
 
     def _n_contacts(entities):
-        # The entities never touch each other, so that each contact involves a single one of them
-        return sum(len(entity.get_contacts()["geom_a"]) for entity in entities)
+        # The entities never touch each other, so that each contact involves a single one of them. Each entity stays in
+        # contact with its support, at points on its own surface.
+        n_contacts = 0
+        for entity in entities:
+            contacts = entity.get_contacts()
+            aabb = entity.get_AABB()
+            assert len(contacts["geom_a"]) > 0
+            assert ((aabb[0] - 1e-3 < contacts["position"]) & (contacts["position"] < aabb[1] + 1e-3)).all()
+            n_contacts += len(contacts["geom_a"])
+        return n_contacts
 
     def _losses(scene, entities):
         # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
@@ -149,6 +157,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             for entity in entities:
                 entity.control_dofs_force(base_force)
             scene.step()
+            _n_contacts(entities)
 
     scene_ana, entities_ana, ground_ana = _build_contact_scene(
         shape, grad_capsule, grad_capsule_ground, requires_grad=True, show_viewer=show_viewer
@@ -156,8 +165,11 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     init_force = np.broadcast_to(base_force, (n_steps, len(entities_ana), 6)).copy()
     scene_ana.reset()
     settle(scene_ana, entities_ana)
+    # Each entity comes to rest vertically on its support, which a contact dropped for a single substep would set
+    # bouncing again
+    for entity in entities_ana:
+        assert_allclose(entity.get_dofs_velocity()[2], 0.0, atol=1e-4)
     nc = _n_contacts(entities_ana)
-    assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
     if shape == "ground_box":
         n_contacts_capsule = _n_contacts(entities_ana[2:])
         assert n_contacts_capsule > 1, "setup error: multi-contact found no perturbed contact between the capsules"
