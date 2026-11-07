@@ -141,7 +141,7 @@ jobs:
         shell: bash
         run: |
           pip install .
-          python -c "import genesis"
+          cd "${RUNNER_TEMP}" && python -c "import genesis"
 
       - name: Install Genesis
         shell: bash
