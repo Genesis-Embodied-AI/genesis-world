@@ -886,9 +886,6 @@ class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
     diff_contact_eps_affine: qd.Tensor = field(float)
     # Minimum norm of a valid normal of the differentiable contact
     diff_contact_min_normal_norm: qd.Tensor = field(float)
-    # Minimum penetration of a differentiable contact. It must exceed the rounding gap between the depths of the forward
-    # and backward passes, since a depth the backward pass computes as zero yields a NaN normal.
-    diff_contact_min_penetration: qd.Tensor = field(float)
 
 
 # The states GJK runs on: one per env for the single-kernel narrowphase, and those of the passes of the split
