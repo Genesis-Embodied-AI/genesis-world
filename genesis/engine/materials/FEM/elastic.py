@@ -62,18 +62,17 @@ class Elastic(Base):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
 
+        self.hessian_invariant = self.model == "linear"
         if self.model == "linear":
             self.update_stress = self._update_stress_linear
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_linear
             self.compute_energy_gradient = self._compute_energy_gradient_linear
             self.compute_energy = self._compute_energy_linear
-            self.hessian_invariant = True
         elif self.model == "stable_neohookean":
             self.update_stress = self._update_stress_stable_neohookean
             self.compute_energy_gradient_hessian = self._compute_energy_gradient_hessian_stable_neohookean
             self.compute_energy_gradient = self._compute_energy_gradient_stable_neohookean
             self.compute_energy = self._compute_energy_stable_neohookean
-            self.hessian_invariant = False
         elif self.model == "linear_corotated":
             self.build = self._build_linear_corotated
             self.pre_compute = self._pre_compute_linear_corotated

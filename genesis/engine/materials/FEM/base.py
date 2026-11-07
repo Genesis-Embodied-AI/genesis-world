@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Annotated, Any
 
 import quadrants as qd
-from pydantic import Field, PrivateAttr, StrictBool
+from pydantic import Field, PrivateAttr
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, ValidFloat
@@ -36,8 +36,6 @@ class Base(Material["FEMEntity"]):
     contact_resistance : float | None, optional
         IPC contact resistance/stiffness override for this material. ``None`` means
         use the IPC coupler global default (``IPCCouplerOptions.contact_resistance``).
-    hessian_invariant : bool, optional
-        If True, Hessian is computed only once. Default is False.
     """
 
     E: PositiveFloat = 1e6
@@ -46,7 +44,10 @@ class Base(Material["FEMEntity"]):
     hydroelastic_modulus: PositiveFloat = 1e7
     friction_mu: NonNegativeFloat = 0.1
     contact_resistance: PositiveFloat | None = None
-    hessian_invariant: StrictBool = False
+
+    # Whether the Hessian of the energy is independent of the deformation, which the implicit solver then computes once,
+    # set by the subclasses
+    hessian_invariant: bool = Field(default=False, exclude=True, repr=False)
 
     # Dispatch fields — set by subclass model_post_init, not user-specified.
     build: Any = Field(default=None, exclude=True, repr=False)
