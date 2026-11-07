@@ -329,6 +329,86 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["64"])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_legacy_coupler_rigid_velocity_correction(show_viewer):
+    DT = 0.01
+    GRAVITY = 9.81
+    BOX_SIZE = 0.1
+    GAP = 0.001
+    VEL_Z = -0.5
+    DROP_HEIGHT = 0.02
+    # Soft enough for the explicit integration to stay stable at this time step
+    SOFT_E = 1e2
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.8, 0.3),
+            camera_lookat=(0.25, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    ground = scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    box_thrown = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.0, 0.0, 0.5 * BOX_SIZE + GAP),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=SOFT_E,
+        ),
+    )
+    box_dropped = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.5, 0.0, 0.5 * BOX_SIZE + DROP_HEIGHT),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=SOFT_E,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # An entity translates rigidly until its first contact with the ground, so the elastic forces vanish and the
+    # coupling with the ground alone alters the velocity of its vertices. Wherever the influence of the ground exceeds
+    # its threshold, each surface triangle scales the normal velocity of each of its vertices by
+    # '1 - influence * (1 + restitution)', once per incident triangle.
+    box_thrown.set_velocity((0.0, 0.0, VEL_Z))
+    # The thrown box touches the ground at the first step. The lowest vertex of the dropped box falls by
+    # 'g * dt^2 * n * (n + 1) / 2' over n steps, so it stays out of range for the largest n with
+    # 'n * (n + 1) <= fall_ratio', and the contact starts at the step after the next one.
+    z_range = -ground.material.coup_softness * math.log(0.1)
+    fall_ratio = 2.0 * (box_dropped.init_positions[:, 2].min() - z_range) / (GRAVITY * DT**2)
+    n_steps = math.floor(0.5 * (math.sqrt(1.0 + 4.0 * fall_ratio) - 1.0)) + 2
+    entities = (box_thrown, box_dropped)
+    for i_step in range(n_steps):
+        entities_state = [entity.get_state() for entity in entities]
+        scene.step()
+        for entity, state_prev in zip(entities, entities_state):
+            verts_influence = torch.clamp(torch.exp(-state_prev.pos[..., 2] / ground.material.coup_softness), max=1.0)
+            verts_n_tris = sum(
+                [
+                    torch.bincount(verts_idx, minlength=entity.n_vertices)
+                    for verts_idx in torch.as_tensor(entity.surface_triangles, device=gs.device).T
+                ]
+            )
+            verts_factor = (1.0 - verts_influence * (1.0 + ground.material.coup_restitution)) ** verts_n_tris
+            verts_scale = torch.where(verts_influence > 0.1, verts_factor, 1.0)
+            verts_vel_z_ref = (state_prev.vel[..., 2] - GRAVITY * DT) * verts_scale
+            verts_vel = entity.get_state().vel
+            assert_allclose(verts_vel[..., :2], 0.0, tol=gs.EPS)
+            assert_allclose(verts_vel[..., 2], verts_vel_z_ref, tol=gs.EPS)
+        assert (verts_influence > 0.1).any() == (i_step == n_steps - 1)
+        entities = (box_dropped,)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("use_implicit_solver", [False, True])
 @pytest.mark.parametrize("precision", ["64"])
 def test_hard_constraint(use_implicit_solver, show_viewer):
