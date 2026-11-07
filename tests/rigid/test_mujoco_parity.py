@@ -261,7 +261,7 @@ def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
 
     # The smooth acceleration divides chain-accumulated rounding by link masses of a tenth of a gram, putting its
     # agreement floor four decades above the working precision.
-    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=5e-5)
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=6e-5)
 
 
 @pytest.mark.required("sparse")

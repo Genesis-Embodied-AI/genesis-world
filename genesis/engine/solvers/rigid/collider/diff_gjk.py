@@ -63,7 +63,6 @@ def func_gjk_contact(
     Note that these terms can be computed from the non-differentiable contact data in a differentiable way. Therefore,
     we store the non-differentiable contact data along with the differentiable contact data for the backward pass.
     """
-    EPS = rigid_info.EPS[None]
 
     # Clear the cache to prepare for this GJK-EPA run.
     GJK.clear_cache(i_b, gjk_state)
@@ -104,7 +103,7 @@ def func_gjk_contact(
             # otherwise it would be more sensitive to ill-conditionning.
             axis = (2 * (i % 2) - 1) * axis_0 + (1 - 2 * ((i // 2) % 2)) * axis_1
             rotang = 1e-2 * (100 ** ((i - 1) // 4))
-            qrot = gu.qd_rotvec_to_quat(rotang * axis, EPS)
+            qrot = gu.qd_rotvec_to_quat(rotang * axis)
 
             # Apply perturbation to local variables
             ga_pos_local, ga_quat_local = contact.func_rotate_frame(
