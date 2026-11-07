@@ -793,7 +793,8 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 # This test cannot be flagged as required because it takes 400s to run on CPU.
 # @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
-def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
+@pytest.mark.parametrize("model_name", ["coupled_sliders"])
+def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_viewer):
     DT = 0.01
     # The free fall at the end crosses z=0, where a scene without ground plane has no floor to stop it
     HEIGHT = 0.5
@@ -802,6 +803,7 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
     MOTION_RADIUS = 0.1
     MOTION_SPEED = 0.005
     VERTICES_IDX = [4, 6]
+    SLIDER_FORCE = 0.01
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -850,6 +852,14 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
         ),
         material=gs.materials.Rigid(),
     )
+    sliders = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=xml_path,
+        ),
+        material=gs.materials.Rigid(
+            gravity_compensation=1.0,
+        ),
+    )
     scene.build()
 
     # Attach the sphere to a distant rigid anchor by its center
@@ -859,6 +869,9 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
     sphere_target_poss = sphere.init_positions[sphere_center_idx]
     sphere.set_vertex_constraints(sphere_center_idx, link=anchor.base_link)
 
+    # Push the heavy slider alone, while the light one is tied to it by the joint equality
+    sliders.control_dofs_force([SLIDER_FORCE, 0.0])
+
     # The center of the sphere follows the anchor, while the box is still far from it
     for shift in (-0.05, 0.0):
         anchor.set_pos((10.0, shift, HEIGHT))
@@ -866,6 +879,14 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
         sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
         shift_pos = torch.tensor((0.0, shift, 0.0), dtype=gs.tc_float, device=gs.device)
         assert_allclose(sphere_center, sphere_target_poss + shift_pos, tol=tol)
+
+    # The sliders move at the ratio of the joint equality while nothing is in contact yet. With the heavy slider
+    # displacement being 'ratio' times the light one, the light slider has the inertia 'ratio^2 * M0 + M1'.
+    ratio = sliders.equalities[0].eq_data[1]
+    dofs_inertia = sliders.get_mass_mat().diagonal()
+    light_slider_acc = SLIDER_FORCE * ratio / (ratio**2 * dofs_inertia[0] + dofs_inertia[1])
+    slider_vel = torch.tensor((ratio, 1.0), dtype=gs.tc_float, device=gs.device) * light_slider_acc * 2 * DT
+    assert_allclose(sliders.get_dofs_velocity(), slider_vel, tol=tol)
 
     # Move the box against the sphere, wait for a few extra steps, then release the box and let it fall
     n_steps_moving = int(0.5 * math.pi / MOTION_SPEED)

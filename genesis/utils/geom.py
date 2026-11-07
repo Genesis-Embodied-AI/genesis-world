@@ -765,6 +765,24 @@ def qd_orthogonals(a):
 
 
 @qd.func
+def joint_equality_residual(pos: float, diff: float, eq_data: qd.types.vector(18)):
+    """Evaluate the residual of a joint equality constraint and the derivative of its polynomial.
+
+    The constraint ties the displacement 'pos' of the first joint to the displacement 'diff' of the second one through
+    the polynomial y - y0 = a0 + a1 * (x - x0) + a2 * (x - x0)^2 + a3 * (x - x0)^3 + a4 * (x - x0)^4, whose coefficients
+    are the first five entries of 'eq_data'. Returns 'pos' minus the polynomial at 'diff', and the derivative of the
+    polynomial at 'diff', the opposite of the Jacobian entry of the second joint.
+    """
+    deriv = gs.qd_float(0.0)
+    for i_5 in qd.static(range(5)):
+        diff_power = diff**i_5
+        pos = pos - diff_power * eq_data[i_5]
+        if qd.static(i_5 < 4):
+            deriv = deriv + eq_data[i_5 + 1] * diff_power * (i_5 + 1)
+    return pos, deriv
+
+
+@qd.func
 def imp_aref(params, neg_penetration, vel, pos):
     timeconst, dampratio, dmin, dmax, width, mid, power = params
 

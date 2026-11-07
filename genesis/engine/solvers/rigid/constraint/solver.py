@@ -1475,15 +1475,7 @@ def func_equality_joint(
     pos1 = rigid_info.qpos[i_qpos1, i_b]
     ref1 = rigid_info.qpos0[i_qpos1, i_b]
 
-    pos = pos1 - ref1
-    deriv = gs.qd_float(0.0)
-
-    # y - y0 = a0 + a1 * (x-x0) + a2 * (x-x0)^2 + a3 * (x-fx0)^3 + a4 * (x-x0)^4
-    for i_5 in range(5):
-        diff_power = diff**i_5
-        pos = pos - diff_power * dyn_info.equalities.eq_data[i_e, i_b][i_5]
-        if i_5 < 4:
-            deriv = deriv + dyn_info.equalities.eq_data[i_e, i_b][i_5 + 1] * diff_power * (i_5 + 1)
+    pos, deriv = gu.joint_equality_residual(pos1 - ref1, diff, dyn_info.equalities.eq_data[i_e, i_b])
 
     constraint_state.jac[n_con, i_dof1, i_b] = gs.qd_float(1.0)
     jac_qvel = dyn_state.dofs.vel[i_dof1, i_b]

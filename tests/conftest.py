@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import warnings
+import xml.etree.ElementTree as ET
 from argparse import SUPPRESS
 from enum import Enum
 from importlib.util import find_spec, resolve_name
@@ -1037,6 +1038,53 @@ def initialize_genesis(
     finally:
         gs.destroy()
         gc.collect()
+
+
+@pytest.fixture
+def xml_path(request, tmp_path, model_name):
+    """The model Mujoco is built from, which holds every subtree, however Genesis groups them into entities."""
+    # An asset-relative path passes through to the asset resolver; a bare name is the fixture generating the model.
+    if "/" in model_name:
+        return model_name
+    mjcf = request.getfixturevalue(model_name)
+    file_name = f"{model_name}.urdf" if mjcf.tag == "robot" else f"{model_name}.xml"
+    file_path = str(tmp_path / file_name)
+    ET.ElementTree(mjcf).write(file_path, encoding="utf-8", xml_declaration=True)
+    return file_path
+
+
+@pytest.fixture
+def xml_paths(request, tmp_path, xml_path):
+    """The models the Genesis scene is assembled from, one entity per model, which is the Mujoco model by default.
+
+    A test marked 'split_entities' gets the model of 'model_name' split into one model per independent subtree, so that
+    the Genesis scene holds one entity per subtree while Mujoco holds them all in one model. Every top-level body of
+    the worldbody roots a subtree of its own, and the geoms of the worldbody itself root nothing, so they make a model
+    of their own. Each part keeps the headers of the source model, its defaults and assets included.
+
+    Splitting changes which entity a body belongs to, and with it how Genesis pairs contacts, so it is asked for by the
+    tests that compare what must not depend on the grouping, rather than applied to every model.
+    """
+    if next(request.node.iter_markers("split_entities"), None) is None:
+        return (xml_path,)
+
+    model_name = request.getfixturevalue("model_name")
+    mjcf = request.getfixturevalue(model_name)
+    parts = []
+    worldbody = mjcf.find("worldbody")
+    geoms = worldbody.findall("geom")
+    for children in [[body] for body in worldbody.findall("body")] + ([geoms] if geoms else []):
+        part = ET.Element(mjcf.tag, mjcf.attrib)
+        part.extend(header for header in mjcf if header.tag != "worldbody")
+        ET.SubElement(part, "worldbody").extend(children)
+        parts.append(part)
+
+    paths = []
+    for i_part, part in enumerate(parts):
+        file_path = str(tmp_path / f"{model_name}_{i_part}.xml")
+        ET.ElementTree(part).write(file_path, encoding="utf-8", xml_declaration=True)
+        paths.append(file_path)
+    return tuple(paths)
 
 
 @pytest.fixture
