@@ -41,13 +41,16 @@ def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: Dyn
 def bvh_ray_cast(
     i_t: int,
     i_b: int,
+    i_s: int,
     ray_start: qd.types.vector(3),
     ray_dir: qd.types.vector(3),
     max_range: float,
+    is_link_excluded: qd.template(),
     dyn_state: DynState,
     bvh_tree_state: BVHTreeState,
     dyn_info: DynInfo,
     eps: float,
+    exclude_links: qd.template(),
 ):
     """
     Cast a ray through a BVH and find the closest intersection.
@@ -71,6 +74,7 @@ def bvh_ray_cast(
     hit_face = -1
     closest_distance = gs.qd_float(max_range)
     hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
+    is_excluded = False
 
     axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
 
@@ -106,7 +110,12 @@ def bvh_ray_cast(
                 # Perform ray-triangle intersection
                 hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
 
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
+                if qd.static(exclude_links):
+                    i_g = dyn_info.faces.geom_idx[i_f]
+                    i_l = dyn_info.geoms.link_idx[i_g]
+                    is_excluded = is_link_excluded[i_s, i_l]
+
+                if not is_excluded and hit_distance >= 0.0 and hit_distance < closest_distance:
                     closest_distance = hit_distance
                     hit_face = i_f
                     hit_normal = triangle_face_normal(v0, v1, v2)
@@ -395,17 +404,29 @@ def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_in
 
 @qd.func
 def bvh_ray_cast_visual(
-    i_t, i_b, ray_start, ray_dir, max_range, dyn_state: DynState, bvh_tree_state: BVHTreeState, dyn_info: DynInfo, eps
+    i_t: int,
+    i_b: int,
+    i_s: int,
+    ray_start: qd.types.vector(3),
+    ray_dir: qd.types.vector(3),
+    max_range: float,
+    is_link_excluded: qd.template(),
+    dyn_state: DynState,
+    bvh_tree_state: BVHTreeState,
+    dyn_info: DynInfo,
+    eps: float,
+    exclude_links: qd.template(),
 ):
     """Cast a single ray against the visual-mesh BVH; returns (hit_face, distance, normal).
 
-    See bvh_ray_cast for the tree slot (i_t) / env (i_b) split.
+    See bvh_ray_cast for the tree slot (i_t) / env (i_b) split and the link exclusion.
     """
     n_triangles = bvh_tree_state.leaves_idx.shape[1]
 
     hit_face = -1
     closest_distance = gs.qd_float(max_range)
     hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
+    is_excluded = False
 
     axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
 
@@ -434,7 +455,12 @@ def bvh_ray_cast_visual(
 
                 hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
 
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
+                if qd.static(exclude_links):
+                    i_vg = dyn_info.vfaces.vgeom_idx[i_f]
+                    i_l = dyn_info.vgeoms.link_idx[i_vg]
+                    is_excluded = is_link_excluded[i_s, i_l]
+
+                if not is_excluded and hit_distance >= 0.0 and hit_distance < closest_distance:
                     closest_distance = hit_distance
                     hit_face = i_f
                     hit_normal = triangle_face_normal(v0, v1, v2)
@@ -649,25 +675,31 @@ def kernel_cast_ray(
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast_visual(
                 i_b,
                 i_b,
+                0,
                 ray_start,
                 ray_direction_world,
                 max_range,
+                None,
                 dyn_state,
                 bvh_tree_state,
                 dyn_info,
                 eps,
+                exclude_links=False,
             )
         else:
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
                 i_b,
                 i_b,
+                0,
                 ray_start,
                 ray_direction_world,
                 max_range,
+                None,
                 dyn_state,
                 bvh_tree_state,
                 dyn_info,
                 eps,
+                exclude_links=False,
             )
         if cur_hit_face >= 0:
             result.distance[i_b] = cur_distance
@@ -806,6 +838,7 @@ def kernel_cast_rays(
     sensor_point_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - point start index for each sensor
     sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
     sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
+    is_link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] - True where the sensor ignores the link
     output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
     dyn_state: DynState,
     bvh_tree_state_a: BVHTreeState,
@@ -816,6 +849,7 @@ def kernel_cast_rays(
     is_last: qd.template(),
     is_env_major: qd.template(),
     is_split: qd.template(),
+    exclude_links: qd.template(),
 ):
     """Cast every ray of every env against the collision BVH set of a solver, or against its two sets when its faces
     are split between static and movable links (see RaycastContext.activate), taking the closer hit.
@@ -848,26 +882,32 @@ def kernel_cast_rays(
         hit_face, hit_distance, _hit_normal = bvh_ray_cast(
             env_bvh_idx_a[i_b],
             i_b,
+            i_s,
             ray_start_world,
             ray_direction_world,
             max_ranges[i_s],
+            is_link_excluded,
             dyn_state,
             bvh_tree_state_a,
             dyn_info,
             eps,
+            exclude_links,
         )
         if qd.static(is_split):
             hit_range = max_ranges[i_s] if hit_face < 0 else hit_distance
             hit_face_b, hit_distance_b, _hit_normal_b = bvh_ray_cast(
                 env_bvh_idx_b[i_b],
                 i_b,
+                i_s,
                 ray_start_world,
                 ray_direction_world,
                 hit_range,
+                is_link_excluded,
                 dyn_state,
                 bvh_tree_state_b,
                 dyn_info,
                 eps,
+                exclude_links,
             )
             if hit_face_b >= 0:
                 hit_face = hit_face_b
@@ -910,6 +950,7 @@ def kernel_cast_rays_visual(
     sensor_point_offsets: qd.types.ndarray(ndim=1),
     sensor_point_counts: qd.types.ndarray(ndim=1),
     sensor_return_points: qd.types.ndarray(ndim=1),
+    is_link_excluded: qd.types.ndarray(ndim=2),
     output_hits: qd.types.ndarray(ndim=2),
     dyn_state: DynState,
     bvh_tree_state: BVHTreeState,
@@ -918,6 +959,7 @@ def kernel_cast_rays_visual(
     is_merge: qd.template(),
     is_last: qd.template(),
     is_env_major: qd.template(),
+    exclude_links: qd.template(),
 ):
     """Cast every ray of every env against one visual BVH set.
 
@@ -941,13 +983,16 @@ def kernel_cast_rays_visual(
         hit_face, hit_distance, _hit_normal = bvh_ray_cast_visual(
             env_bvh_idx[i_b],
             i_b,
+            i_s,
             ray_start_world,
             ray_direction_world,
             max_ranges[i_s],
+            is_link_excluded,
             dyn_state,
             bvh_tree_state,
             dyn_info,
             eps,
+            exclude_links,
         )
         write_ray_hit(
             i_b,

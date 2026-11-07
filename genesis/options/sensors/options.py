@@ -626,6 +626,14 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
         Pick False for distance-only sensing (e.g. depth images); keep True when the point cloud is needed.
+    ray_alignment : gs.ray_alignment, optional
+        The orientation of the ray pattern relative to the sensor link. Defaults to 'gs.ray_alignment.base', which
+        tracks the full orientation of the link. 'gs.ray_alignment.yaw' keeps the pattern level for terrain height maps,
+        and 'gs.ray_alignment.world' fixes it in the world frame. See 'gs.ray_alignment' for details.
+    exclude_link_idx : array-like[int], optional
+        The global indices of the rigid links whose geometry the rays pass through, typically the robot's own links
+        for a terrain scan. Defaults to none. Excluding any link on any raycaster slows down the ray casts of every
+        raycaster in the scene.
     debug_sphere_radius: float, optional
         The radius of each debug sphere drawn in the scene. Defaults to 0.02.
     debug_ray_start_color: array-like[float, float, float, float], optional
@@ -640,10 +648,21 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     no_hit_value: float | None = None
     return_world_frame: StrictBool = False
     return_points: StrictBool = True
+    ray_alignment: gs.ray_alignment = gs.ray_alignment.base
+    exclude_link_idx: OptionalIArrayType = Field(default_factory=tuple)
 
     debug_sphere_radius: PositiveFloat = 0.02
     debug_ray_start_color: Vec4FType = (0.5, 0.5, 1.0, 1.0)
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
+
+    def validate_scene(self, scene: "Scene"):
+        super().validate_scene(scene)
+        if self.exclude_link_idx:
+            n_links = scene.sim.rigid_solver.n_links
+            if np.any(np.array(self.exclude_link_idx) < 0) or np.any(np.array(self.exclude_link_idx) >= n_links):
+                gs.raise_exception(
+                    f"{type(self).__name__}: exclude_link_idx must be in [0, {n_links}). Got {self.exclude_link_idx}."
+                )
 
     def model_post_init(self, context: Any) -> None:
         if self.no_hit_value is None:
