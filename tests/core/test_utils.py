@@ -451,6 +451,7 @@ def test_geom_tensor_identity(batch_shape, tol):
         )
         assert_equal(np.isnan(gu.z_to_quat(directions)), True)
         assert_equal(np.isnan(gu.z_to_R(directions)), True)
+        assert_equal(np.isnan(gu.rotvec_to_R(directions)), True)
 
     # Rotation angles of both signs and beyond pi, whose sine is negative
     axis = np.random.randn(*batch_shape, 3)

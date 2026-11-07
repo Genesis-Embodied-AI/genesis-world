@@ -2152,12 +2152,12 @@ def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
     for i in np.ndindex(rotvec.shape[:-1]):
         x, y, z = rotvec[i]
         theta = np.sqrt(x * x + y * y + z * z)
-        if theta > gs.EPS:
+        if theta < gs.EPS:
+            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, out[i])
+        else:
             theta_inv = 1.0 / theta
             c, s = np.cos(theta), np.sin(theta)
             _np_unit_axis_cos_sin_to_R(x * theta_inv, y * theta_inv, z * theta_inv, c, s, out[i])
-        else:
-            _np_unit_axis_cos_sin_to_R(0.0, 0.0, 1.0, 1.0, 0.0, out[i])
 
     return out
 
