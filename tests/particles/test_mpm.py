@@ -196,7 +196,7 @@ def _falling_block(n_envs, show_viewer):
         morph=gs.morphs.Plane(),
     )
     # Off the faces of the grid cells: the regular lattice of a block centered on a node puts particles on faces, whose
-    # cell the rounding of their position then picks, and the motion jumps with it (see MPM_FD_EPS in test_hybrid_push)
+    # cell the rounding of their position then picks, and the motion jumps with it
     block = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.003, 0.002, 0.1),

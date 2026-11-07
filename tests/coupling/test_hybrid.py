@@ -200,7 +200,7 @@ def test_rigid_mpm_legacy_coupling(tol, show_viewer):
             sampler="regular",
         ),
         # Off the faces of the grid cells, where the rounding of a position would pick the cell, so that the rollout
-        # after the reset repeats the first (see MPM_FD_EPS in test_hybrid_push)
+        # after the reset repeats the first
         morph=gs.morphs.Box(
             pos=(0.003, 0.002, 0.201),
             size=(0.3, 0.3, 0.3),

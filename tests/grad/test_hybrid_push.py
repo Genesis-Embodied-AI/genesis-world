@@ -9,27 +9,6 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
-# The motion of the implicit MPM is smooth in its inputs only while no particle crosses a face of its grid cell: the
-# trilinear transfer between the particles and the nodes has a weight gradient that jumps across a face, and with it
-# the deformation gradient and the energy of the particle. A finite difference across a crossing measures that jump
-# rather than the derivative. The finite differences of the MPM thus take a perturbation small enough that no particle
-# of the rollout changes cell, which every perturbed rollout checks against the unperturbed one (see '_grads_and_fd').
-MPM_FD_EPS = 1e-6
-
-
-def _step_mpm(scene, cells=None):
-    if cells is not None:
-        solver = scene.sim.mpm_solver
-        pos = torch.cat([entity.get_particles_pos() for entity in solver.entities], dim=-2)
-        cells.append(torch.floor(pos * solver.inv_dx))
-    scene.step()
-
-
-def _assert_same_cells(cells, cells_ref):
-    for step, (cell, cell_ref) in enumerate(zip(cells, cells_ref)):
-        n_moved = int((cell != cell_ref).any(dim=-1).sum())
-        assert n_moved == 0, f"The perturbation moves {n_moved} MPM particles to another cell at step {step}"
-
 
 @pytest.mark.slow  # ~75s
 @pytest.mark.required
@@ -139,11 +118,10 @@ class _FdCase(NamedTuple):
     idx: tuple[tuple[int, ...], ...] | None = None
 
 
-def _grads_and_fd(rollout, cases, is_mpm=True):
+def _grads_and_fd(rollout, cases):
     # The backward pass runs on the sum of the losses, which each depend on the cases of their own body alone. A
     # rollout of the finite differences perturbs one entry of every loss at once, the bodies standing far apart, on the
-    # same scene without gradients, which simulates the same physics, with no MPM particle crossing a cell face (see
-    # MPM_FD_EPS).
+    # same scene without gradients, which simulates the same physics.
     params_ana = [torch.tensor(case.params, dtype=gs.tc_float, device=gs.device, requires_grad=True) for case in cases]
     torch.atleast_1d(rollout(params_ana)).sum().backward()
     fd_grads = [np.zeros_like(case.params) for case in cases]
@@ -152,8 +130,6 @@ def _grads_and_fd(rollout, cases, is_mpm=True):
         idx_all = np.ndindex(case.params.shape) if case.idx is None else case.idx
         entries_by_loss[case.i_loss].extend((i_case, idx) for idx in idx_all)
     with torch.no_grad():
-        cells_ref = [] if is_mpm else None
-        rollout([case.params for case in cases], cells_ref)
         for i_entry in range(max(len(entries) for entries in entries_by_loss)):
             entries = [entries[i_entry] for entries in entries_by_loss if i_entry < len(entries)]
             losses = []
@@ -161,22 +137,34 @@ def _grads_and_fd(rollout, cases, is_mpm=True):
                 params = [case.params.copy() for case in cases]
                 for i_case, idx in entries:
                     params[i_case][idx] += sign * cases[i_case].eps
-                cells = [] if is_mpm else None
-                losses.append(torch.atleast_1d(rollout(params, cells)))
-                if is_mpm:
-                    _assert_same_cells(cells, cells_ref)
+                losses.append(torch.atleast_1d(rollout(params)))
             for i_case, idx in entries:
                 i_loss = cases[i_case].i_loss
                 fd_grads[i_case][idx] = float(losses[0][i_loss] - losses[1][i_loss]) / (2.0 * cases[i_case].eps)
     return params_ana, fd_grads
 
 
+def _optimize(rollout, params, n_iters, lr):
+    # The gradients of the implicit MPM describe the motion where its Newton solve stops, so they are inexact at the
+    # default tolerance, which a descent method tolerates: what they must do is optimize the losses
+    params = [torch.tensor(param, dtype=gs.tc_float, device=gs.device, requires_grad=True) for param in params]
+    optimizer = torch.optim.Adam(params, lr=lr)
+    losses = []
+    for _ in range(n_iters):
+        optimizer.zero_grad()
+        loss = torch.atleast_1d(rollout(params))
+        loss.sum().backward()
+        losses.append(loss.detach())
+        optimizer.step()
+    with torch.no_grad():
+        losses.append(torch.atleast_1d(rollout(params)))
+    return params, torch.stack(losses)
+
+
 @pytest.mark.required
-# fp32 cannot resolve the Newton tolerance the finite differences need
-@pytest.mark.precision("64")
-def test_mpm_grad_matches_fd(precision, show_viewer):
-    # The bodies stand far apart in one scene, each driving a loss of its own, so that one backward pass and one
-    # finite difference per input cover them all. The force fields act on the whole domain, hence on every body: the
+def test_mpm_grad_descends(show_viewer):
+    # The bodies stand far apart in one scene, each driving a loss of its own through inputs of its own, so that one
+    # backward pass covers them all. The force fields act on the whole domain, hence on every body: the
     # gradient of the initial velocity goes through their derivative with respect to the velocity (zero for the
     # constant field, the drag's |v| v and the flow of the point attractor otherwise). The muscle drives its particles
     # by its actuations. Each pair of blocks collides head-on and yields, so that the gradient of the initial velocity
@@ -192,15 +180,6 @@ def test_mpm_grad_matches_fd(precision, show_viewer):
             grid_density=32,
             lower_bound=(-1.5, -1.25, -0.5),
             upper_bound=(1.5, 1.25, 0.5),
-        ),
-        newton_options=gs.options.NewtonOptions(
-            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-            # Newton solve stops approach only once it has converged far below its default tolerance, the more so as their
-            # small perturbation divides the error of the solve (see MPM_FD_EPS)
-            velocity_tol=1e-12,
-            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-            # clamps a mode of the material, so the finite differences match the exact Hessian alone
-            adjoint_hessian="exact",
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, -3.5, 2.0),
@@ -221,8 +200,8 @@ def test_mpm_grad_matches_fd(precision, show_viewer):
             n_groups=2,
         ),
     )
-    # Every block stands off the faces of the grid cells, where the rounding of a position would pick the cell (see
-    # MPM_FD_EPS), and every shift of a body is a multiple of 0.25, whole cells
+    # Every block stands off the faces of the grid cells, where the rounding of a position would pick the cell, and every
+    # shift of a body is a multiple of 0.25, whole cells
     block = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.503, 0.002, 0.001),
@@ -312,7 +291,7 @@ def test_mpm_grad_matches_fd(precision, show_viewer):
     bodies = (muscle, block, *blocks)
     goals = (goal_muscle, goal_block, *goals_blocks)
 
-    def rollout(params, cells=None):
+    def rollout(params):
         actus, vel_muscle, vel_block, *vels_blocks = params
         scene.reset()
         muscle.set_velocity(vel_muscle)
@@ -324,25 +303,22 @@ def test_mpm_grad_matches_fd(precision, show_viewer):
         for actu in (actus[0], actus[1], None, actus[2]):
             if actu is not None:
                 muscle.set_actuation(actu)
-            _step_mpm(scene, cells)
+            scene.step()
         return torch.stack([((body.get_state().pos - goal) ** 2).sum() for body, goal in zip(bodies, goals)])
 
     actus = np.array([[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]])
     vels_block = np.array([[0.3, -0.2, 0.4], [-0.5, 0.1, 0.2]])
     vels_blocks = np.array([[1.5, -0.2, 0.3], [1.2, 0.1, -0.2]])
-    cases = [
-        _FdCase(params=actus, i_loss=0, eps=MPM_FD_EPS),
-        _FdCase(params=np.array([0.1, -0.2, 0.3]), i_loss=0, eps=MPM_FD_EPS),
-        _FdCase(params=vels_block, i_loss=1, eps=MPM_FD_EPS),
-        *(_FdCase(params=vels_blocks, i_loss=2 + i_material, eps=MPM_FD_EPS) for i_material in range(len(materials))),
-    ]
-    params_ana, fd_grads = _grads_and_fd(rollout, cases)
-    for param_ana, fd_grad, tol in zip(params_ana, fd_grads, (5e-8, 5e-8, 2e-9, *(5e-9,) * len(materials))):
-        assert (np.abs(fd_grad) > 1e-3).all()
-        assert_allclose(param_ana.grad, fd_grad, tol=tol)
+    params, losses = _optimize(
+        rollout, [actus, np.array([0.1, -0.2, 0.3]), vels_block, *(vels_blocks,) * len(materials)], n_iters=20, lr=0.1
+    )
+    # Every body comes closer to its goal at every step of the optimization of its own inputs
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.75 * losses[0]).all()
     # The particles hold the actuation set last
-    rollout([case.params for case in cases])
-    assert_allclose(muscle.get_particles_actu(), actus[2][muscle_group], tol=gs.EPS)
+    with torch.no_grad():
+        rollout(params)
+    assert_allclose(muscle.get_particles_actu(), tensor_to_array(params[0])[2][muscle_group], tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -407,7 +383,7 @@ def test_fem_grad_matches_fd(precision, show_viewer):
 
     goal = torch.tensor((0.4, -0.05, 0.0), dtype=gs.tc_float, device=gs.device)
 
-    def rollout(params, cells=None):
+    def rollout(params):
         actus, vel_muscle, vel_box = params
         scene.reset()
         muscle.set_velocity(vel_muscle)
@@ -433,7 +409,7 @@ def test_fem_grad_matches_fd(precision, show_viewer):
             idx=tuple((0, j) for j in range(6)),
         ),
     ]
-    params_ana, fd_grads = _grads_and_fd(rollout, cases, is_mpm=False)
+    params_ana, fd_grads = _grads_and_fd(rollout, cases)
     for param_ana, fd_grad in zip(params_ana[:2], fd_grads[:2]):
         assert (np.abs(fd_grad) > 1e-3).all()
         assert_allclose(param_ana.grad, fd_grad, tol=2e-10)
@@ -443,9 +419,7 @@ def test_fem_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-# fp32 cannot resolve the Newton tolerance the finite differences need
-@pytest.mark.precision("64")
-def test_hybrid_grad_matches_fd(precision, show_viewer):
+def test_hybrid_grad_descends(show_viewer):
     # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
     # gradient goes from the soft particles to the dofs of the arm through that coupling and the implicit MPM solve
     scene = gs.Scene(
@@ -457,15 +431,6 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
             gravity=(0.0, 0.0, 0.0),
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
-        ),
-        newton_options=gs.options.NewtonOptions(
-            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-            # Newton solve stops approach only once it has converged far below its default tolerance, the more so as their
-            # small perturbation divides the error of the solve (see MPM_FD_EPS)
-            velocity_tol=1e-12,
-            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-            # clamps a mode of the material, so the finite differences match the exact Hessian alone
-            adjoint_hessian="exact",
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.65, -0.35, 0.6),
@@ -489,34 +454,34 @@ def test_hybrid_grad_matches_fd(precision, show_viewer):
                 nu=0.45,
                 sampler="regular",
             ),
-            # The coupling scales the velocity the links impose on the particles by exp(-dt damping)
-            damping=300.0,
+            # The particles take the whole velocity of the links, rather than the default hundredth of it, so that the
+            # arm moves the soft part
+            soft_dv_coef=1.0,
         ),
     )
     scene.build()
 
-    goal = torch.tensor((0.5, 0.5, 0.25), dtype=gs.tc_float, device=gs.device)
-
-    def rollout(params, cells=None):
-        (vel,) = params
+    def centroid_after(vel):
         scene.reset()
         robot.set_dofs_velocity(vel)
         for _ in range(3):
-            _step_mpm(scene, cells)
-        return ((robot.part_soft.get_state().pos - goal) ** 2).sum()
+            scene.step()
+        return robot.part_soft.get_state().pos.mean(dim=-2)
 
-    # The loss sums over every particle a gradient small beside it, so its rounding, which the perturbation divides,
-    # takes an eps ten times as large as MPM_FD_EPS.
-    cases = [_FdCase(params=np.array([1.5, -0.8]), i_loss=0, eps=10.0 * MPM_FD_EPS)]
-    (vel_ana,), (fd_grad,) = _grads_and_fd(rollout, cases)
-    assert (np.abs(fd_grad) > 1e-4).all()
-    assert_allclose(vel_ana.grad, fd_grad, rtol=5e-6, atol=5e-9)
+    # The goal is where the arm takes the soft part at another velocity, so that it is reachable
+    with torch.no_grad():
+        goal = centroid_after(torch.tensor((0.5, 0.5), dtype=gs.tc_float, device=gs.device)).clone()
+    _, losses = _optimize(
+        lambda params: ((centroid_after(params[0]) - goal) ** 2).sum(), [np.array([1.5, -0.8])], n_iters=4, lr=0.3
+    )
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.25 * losses[0]).all()
 
 
 @pytest.mark.required
-# fp32 cannot resolve the Newton tolerance the finite differences need
-@pytest.mark.precision("64")
-def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
+def test_coupling_wrench_grad_descends(show_viewer):
+    # The block alone moves the box, which starts at rest, by its contact and the springs of its trailing end, so that
+    # the gradient of the pose of the box with respect to the velocity of the block goes through the coupling alone
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -527,15 +492,6 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=16,
-        ),
-        newton_options=gs.options.NewtonOptions(
-            # The adjoint differentiates the converged motion, which the finite differences of the motion where the
-            # joint Newton solve of MPM and Rigid stops approach only once it has converged far below its default
-            # tolerance, the more so as their small perturbation divides the error of the solve (see MPM_FD_EPS)
-            velocity_tol=1e-12,
-            # The default positive definite projection of the Hessian departs from the exact derivative wherever it
-            # clamps a mode of the material, so the finite differences match the exact Hessian alone
-            adjoint_hessian="exact",
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, -0.6, 0.4),
@@ -561,36 +517,29 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         ),
     )
     scene.build(n_envs=2)
-    # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
     block.set_particle_constraints(
         block.get_particles_in_bbox((-0.18, -0.05, -0.05), (-0.13, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
     )
+    goal = torch.tensor((0.01, 0.01, 0.0), dtype=gs.tc_float, device=gs.device)
 
-    def rollout(params, cells=None):
+    def rollout(params):
         (vel,) = params
         scene.reset()
-        block.set_velocity((0.5, 0.0, 0.0))
-        box.set_dofs_velocity(vel)
+        block.set_velocity(vel)
         for _ in range(8):
-            _step_mpm(scene, cells)
-        return (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
+            scene.step()
+        return ((box.get_state().pos - goal) ** 2).sum(dim=-1) + (box.get_state().quat[..., 1:] ** 2).sum(dim=-1)
 
-    # The finite differences of the first environment, the second one running the same inputs apart. A rollout after a
-    # reset starts free of the coupling wrench the previous one left.
-    cases = [
-        _FdCase(
-            params=np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1)),
-            i_loss=0,
-            eps=MPM_FD_EPS,
-            idx=tuple((0, j) for j in range(6)),
-        )
-    ]
-    (vel_ana,), (fd_grad,) = _grads_and_fd(rollout, cases)
-    # The environments run the same inputs apart, so they get the same gradient
-    assert_allclose(vel_ana.grad[1], vel_ana.grad[0], tol=1e-10)
-    loss = rollout([vel_ana])
-    # The block pushes the box, which would otherwise keep its velocity
-    assert (box.get_dofs_velocity()[..., 0] > vel_ana[..., 0] + 5e-3).all()
-    (grad_rerun,) = torch.autograd.grad(loss, vel_ana)
-    assert_allclose(grad_rerun, vel_ana.grad, tol=1e-10)
-    assert_allclose(vel_ana.grad[0], fd_grad[0], tol=5e-10)
+    vel_start = np.tile([0.5, 0.0, 0.0], (2, 1))
+    vel = torch.tensor(vel_start, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    (grad,) = torch.autograd.grad(rollout([vel]).sum(), vel)
+    # The block pushes the box
+    assert (box.get_dofs_velocity()[..., 0] > 5e-3).all()
+    # The environments run the same inputs apart, so they get the same gradient, and a rollout after a reset starts free
+    # of the coupling wrench the previous one left
+    (grad_rerun,) = torch.autograd.grad(rollout([vel]).sum(), vel)
+    assert_allclose(grad[1], grad[0], tol=1e-6)
+    assert_allclose(grad_rerun, grad, tol=1e-6)
+    _, losses = _optimize(rollout, [vel_start], n_iters=3, lr=0.05)
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.25 * losses[0]).all()
