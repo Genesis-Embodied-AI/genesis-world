@@ -733,30 +733,35 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
         shift_pos = torch.tensor((0.0, shift, 0.0), dtype=gs.tc_float, device=gs.device)
         assert_allclose(sphere_center, sphere_target_poss + shift_pos, tol=tol)
 
-    # Simulate
-    n_steps = int(0.5 * math.pi / MOTION_SPEED)
-    box_pos_y_min = torch.tensor(float("inf"), dtype=gs.tc_float, device=gs.device)
-    for it in range(n_steps):
-        # Update the position of the fixed vertices
-        target_poss = torch.zeros((2, 3), dtype=gs.tc_float, device=gs.device)
-        target_poss[0, 0] = MOTION_RADIUS * math.sin(MOTION_SPEED * it)
-        target_poss[0, 1] = MOTION_RADIUS * math.cos(MOTION_SPEED * it)
-        target_poss[0, 2] = HEIGHT
-        target_poss[1, 0] = (MOTION_RADIUS + BOX_SIZE) * math.sin(MOTION_SPEED * it)
-        target_poss[1, 1] = (MOTION_RADIUS + BOX_SIZE) * math.cos(MOTION_SPEED * it)
-        target_poss[1, 2] = HEIGHT
-        box.set_vertex_constraints(VERTICES_IDX, target_poss)
+    # Move the box against the sphere, wait for a few extra steps, then release the box and let it fall
+    n_steps_moving = int(0.5 * math.pi / MOTION_SPEED)
+    n_steps_waiting = 10
+    n_steps_falling = 40
+    for it in range(n_steps_moving + n_steps_waiting + n_steps_falling):
+        is_moving = it < n_steps_moving
+        if is_moving:
+            # Update the position of the fixed vertices
+            target_poss = torch.zeros((2, 3), dtype=gs.tc_float, device=gs.device)
+            target_poss[0, 0] = MOTION_RADIUS * math.sin(MOTION_SPEED * it)
+            target_poss[0, 1] = MOTION_RADIUS * math.cos(MOTION_SPEED * it)
+            target_poss[0, 2] = HEIGHT
+            target_poss[1, 0] = (MOTION_RADIUS + BOX_SIZE) * math.sin(MOTION_SPEED * it)
+            target_poss[1, 1] = (MOTION_RADIUS + BOX_SIZE) * math.cos(MOTION_SPEED * it)
+            target_poss[1, 2] = HEIGHT
+            box.set_vertex_constraints(VERTICES_IDX, target_poss)
+        if it == n_steps_moving + n_steps_waiting:
+            # Disable box constraints only
+            box.remove_vertex_constraints(VERTICES_IDX)
+            com_pos_0 = box.get_state().pos[..., 8, :]
 
         # Do one simulation step
         scene.step(update_visualizer=False)
 
-        # Check that the constrained vertices are at their respective target positions
         corners = box.get_state().pos[..., :8, :]
-        assert_allclose(corners[..., VERTICES_IDX, :], target_poss, tol=tol)
         sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
         assert_allclose(sphere_center, sphere_target_poss, tol=tol)
 
-        # Check that the box is more or less a box
+        # The frame of the box from its corners
         e_z = corners[..., 5, :] - corners[..., 4, :]
         e_z /= torch.linalg.norm(e_z, dim=-1, keepdim=True)
         e_y = corners[..., 6, :] - corners[..., 4, :]
@@ -764,46 +769,44 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(tol, show_viewer):
         e_x = torch.cross(e_y, e_z, dim=-1)
         e_x /= torch.linalg.norm(e_x, dim=-1, keepdim=True)
         R = torch.stack((e_x, e_y, e_z), dim=-1)
-        corners_local = (corners - corners[..., [0], :]) @ R + box.init_positions[0]
-        assert_allclose(corners_local, box.init_positions[:8], tol=0.02)
 
-        # Check that the sphere is more or less a sphere
-        sphere_poss = sphere.get_state().pos
-        sphere_poss -= torch.tensor(sphere.morph.pos, device=gs.device)
-        sphere_dist_max = torch.linalg.norm(sphere_poss, dim=-1).max(dim=-1).values
-        assert_allclose(sphere_dist_max, SPHERE_RADIUS, tol=0.01)
+        # Check that the sphere does not enter the box further than the compliance of the contact, which a missing
+        # contact would let it cross entirely
+        sphere_local = (sphere.get_state().pos - corners[..., [0], :]) @ R + box.init_positions[0]
+        box_lower, box_upper = box.init_positions[:8].min(dim=0).values, box.init_positions[:8].max(dim=0).values
+        sphere_depth = torch.minimum(sphere_local - box_lower, box_upper - sphere_local).min(dim=-1).values
+        assert (sphere_depth < 0.01).all()
 
-        # Check that the box is not going to far along y-axis due to collision with the sphere
-        box_pos_y_min = torch.minimum(corners[..., [2, 3, 7], 1].min(dim=-1).values, box_pos_y_min)
-        assert (box_pos_y_min > -0.05).all()
+        if it >= n_steps_moving + n_steps_waiting:
+            # Gravity acts along z and the contact only repels, so the released box cannot move back toward the sphere
+            assert (box.get_state().pos[..., 8, 1] > com_pos_0[..., 1] - 2e-4).all()
+
+        if is_moving:
+            # Check that the constrained vertices are at their respective target positions
+            assert_allclose(corners[..., VERTICES_IDX, :], target_poss, tol=tol)
+
+            # Check that the box is more or less a box
+            corners_local = (corners - corners[..., [0], :]) @ R + box.init_positions[0]
+            assert_allclose(corners_local, box.init_positions[:8], tol=0.02)
+
+            # Check that the sphere is more or less a sphere
+            sphere_poss = sphere.get_state().pos
+            sphere_poss -= torch.tensor(sphere.morph.pos, device=gs.device)
+            sphere_dist_max = torch.linalg.norm(sphere_poss, dim=-1).max(dim=-1).values
+            assert_allclose(sphere_dist_max, SPHERE_RADIUS, tol=0.01)
+
+            # Check that the box is not going to far along y-axis due to collision with the sphere
+            assert (corners[..., [2, 3, 7], 1] > -0.05).all()
 
         # Update the viewer if requested
         if show_viewer:
-            if it % max(int(1e-3 / (MOTION_SPEED * DT)), 1) == 0:
+            if is_moving and it % max(int(1e-3 / (MOTION_SPEED * DT)), 1) == 0:
                 scene.draw_debug_spheres(poss=target_poss, radius=0.005, color=(1, 0, 1, 0.8))
             scene.visualizer.update(force=False, auto=True)
 
-    # Wait for a few extra steps
-    for _ in range(10):
-        scene.step()
-
-    # Disable box constraints only
-    box.remove_vertex_constraints(VERTICES_IDX)
-
-    # Simulate for a while
-    n_steps = 40
-    com_pos_z_0 = box.get_state().pos[..., 8, 2]
-    for _ in range(n_steps):
-        # Do one simulation step
-        scene.step()
-
-        # Check that the box is not moving much further along y-axis despite removing constraints
-        box_pos = box.get_state().pos
-        assert (box_pos[..., 1].min(dim=-1).values > box_pos_y_min - 0.01).all()
-
     # Check that the box has been free-falling, but not the sphere
-    com_pos_z_f = box_pos[..., 8, 2]
-    com_pos_delta = -0.5 * 9.81 * (n_steps * DT) ** 2
-    assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
+    com_pos_z_f = box.get_state().pos[..., 8, 2]
+    com_pos_delta = -0.5 * 9.81 * (n_steps_falling * DT) ** 2
+    assert_allclose(com_pos_z_f - com_pos_0[..., 2], com_pos_delta, tol=0.05)
     sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
     assert_allclose(sphere_center, sphere_target_poss, tol=tol)
