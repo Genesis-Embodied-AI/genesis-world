@@ -546,16 +546,24 @@ def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
 # @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
+    DT = 1.0 / 60.0
+    SUBSTEPS = 2
+    GRAVITY = -9.81
+    DAMPING_ALPHA = 0.5
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.015
+    FLIGHT_HEIGHT = 1.0
+    FLIGHT_VEL = 30.0
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1.0 / 60.0,
-            substeps=2,
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, GRAVITY),
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
+            damping_alpha=DAMPING_ALPHA,
         ),
         coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
@@ -592,23 +600,38 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
             model="linear_corotated",
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
-    # Run simulation
-    for _ in range(40):
-        scene.step()
+    # The second environment throws both bodies upward, far apart from each other and from the ground
+    entities_init_height = (SPHERE_RADIUS, 2 * SPHERE_RADIUS + BOX_SIZE)
+    for entity, init_height, flight_offset in zip((sphere, box), entities_init_height, (0.0, FLIGHT_HEIGHT)):
+        entity.set_position([[0.0, 0.0, init_height], [0.0, 0.0, init_height + FLIGHT_HEIGHT + flight_offset]])
+        entity.set_velocity([[0.0, 0.0, 0.0], [0.0, 0.0, FLIGHT_VEL]])
 
-    for entity, init_height in zip((sphere, box), (SPHERE_RADIUS, 2 * SPHERE_RADIUS + BOX_SIZE)):
-        # Barely moving
-        state = entity.get_state()
-        assert_allclose(state.vel, 0.0, tol=0.05)
+    # Barely moving at first, then settling down, and staying more or less at the initial position all along
+    entities_vel_max = [0.05, 0.05]
+    for _ in range(2):
+        for _ in range(40):
+            scene.step()
+        for i_e, (entity, init_height) in enumerate(zip((sphere, box), entities_init_height)):
+            state = entity.get_state()
+            vel_max = state.vel[0].abs().max()
+            assert vel_max < entities_vel_max[i_e]
+            entities_vel_max[i_e] = vel_max
 
-        # More or less at the initial position
-        pos = tensor_to_array(state.pos[0])
-        BV, *_ = igl.bounding_box(pos)
-        entity_center = 0.5 * (BV[0] + BV[-1])
-        assert_allclose(entity_center[:2], 0.0, tol=0.02)
-        assert_allclose(entity_center[2], init_height, tol=5e-3)
+            pos = tensor_to_array(state.pos[0])
+            BV, *_ = igl.bounding_box(pos)
+            entity_center = 0.5 * (BV[0] + BV[-1])
+            assert_allclose(entity_center[:2], 0.0, tol=0.02)
+            assert_allclose(entity_center[2], init_height, tol=5e-3)
+
+    # Free flight in the environment without contact, under the mass-proportional damping of the implicit integration,
+    # which updates the velocity as 'v <- (v + g * h) / (1 + alpha * h)' at each substep of duration 'h'. The vertical
+    # velocity is averaged over the vertices, which vibrate around it.
+    vel_terminal = GRAVITY / DAMPING_ALPHA
+    vel_flight = vel_terminal + (FLIGHT_VEL - vel_terminal) / (1.0 + DAMPING_ALPHA * DT / SUBSTEPS) ** (80 * SUBSTEPS)
+    for entity in (sphere, box):
+        assert_allclose(entity.get_state().vel[1, :, 2].mean(), vel_flight, tol=1e-3)
 
 
 # This test cannot be flagged as required because it takes 400s to run on CPU.

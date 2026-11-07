@@ -108,7 +108,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     n_pcg_iterations : int, optional
         Number of iterations for the Preconditioned Conjugate Gradient solver. Defaults to 100.
     n_linesearch_iterations : int, optional
-        Max number of iterations for the line search solver. Defaults to 10.
+        Max number of iterations for the line search solver. Defaults to 20. Fewer iterations save time per iteration
+        of the SAP solver, at the cost of steps cut short that slow down or stall its convergence.
     sap_convergence_atol : float, optional
         Absolute tolerance for SAP convergence. Defaults to 1e-6.
     sap_convergence_rtol : float, optional
@@ -120,7 +121,9 @@ class SAPCouplerOptions(BaseCouplerOptions):
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
     pcg_threshold : float, optional
-        Threshold for the Preconditioned Conjugate Gradient solver. Defaults to 1e-6.
+        Convergence threshold of the Preconditioned Conjugate Gradient solver on the squared norm of its residual,
+        relative to its initial value. Defaults to 1e-6. A smaller value takes more iterations per Newton step of the
+        SAP solver, in return for steps that bring it closer to convergence.
     linesearch_ftol : float, optional
         Line search sufficient value close to zero for exact linesearch. Defaults to 1e-6.
     linesearch_max_step_size : float, optional
@@ -149,7 +152,7 @@ class SAPCouplerOptions(BaseCouplerOptions):
 
     n_sap_iterations: PositiveInt = 5
     n_pcg_iterations: PositiveInt = 100
-    n_linesearch_iterations: PositiveInt = 10
+    n_linesearch_iterations: PositiveInt = 20
     sap_convergence_atol: PositiveFloat = 1e-6
     sap_convergence_rtol: PositiveFloat = 1e-5
     sap_taud: PositiveFloat = 0.1

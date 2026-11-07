@@ -568,6 +568,7 @@ class SAPCoupler(RBC):
 
     def _init_sap_fields(self):
         self.batch_active = qd.field(dtype=gs.qd_bool, shape=(self.sim._B,), needs_grad=False)
+        self.batch_has_contact = qd.field(dtype=gs.qd_bool, shape=(self.sim._B,), needs_grad=False)
         sap_state = qd.types.struct(
             gradient_norm=gs.qd_float,  # norm of the gradient
             momentum_norm=gs.qd_float,  # norm of the momentum
@@ -648,6 +649,7 @@ class SAPCoupler(RBC):
 
         pcg_state = qd.types.struct(
             rTr=gs.qd_float,
+            rTr_tol=gs.qd_float,
             rTz=gs.qd_float,
             rTr_new=gs.qd_float,
             rTz_new=gs.qd_float,
@@ -757,6 +759,7 @@ class SAPCoupler(RBC):
         # traversal call of each handler.
         has_contact = False
         overflow = False
+        self.batch_has_contact.fill(False)
         for contact in qd.static(self.contact_handlers):
             overflow |= contact.detection(
                 i_step,
@@ -770,6 +773,9 @@ class SAPCoupler(RBC):
                 contact_queries_state=contact_queries_state,
             )
             has_contact |= contact.n_contact_pairs[None] > 0
+            for i_p in range(qd.min(contact.n_contact_pairs[None], contact.max_contact_pairs)):
+                i_b = contact.contact_pairs[i_p].batch_idx
+                self.batch_has_contact[i_b] = True
             contact.compute_jacobian(links_info=links_info, dofs_state=dofs_state, links_state=links_state)
         return has_contact, overflow
 
@@ -903,9 +909,9 @@ class SAPCoupler(RBC):
 
     def sap_solve(self, i_step):
         self._init_sap_solve(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
-        for iter in range(self._n_sap_iterations):
+        for _ in range(self._n_sap_iterations):
             # init gradient and preconditioner
-            self.compute_unconstrained_gradient_diag(i_step, iter)
+            self.compute_unconstrained_gradient_diag(i_step)
 
             # compute contact hessian and gradient
             self.compute_constraint_contact_gradient_hessian_diag_prec()
@@ -988,6 +994,12 @@ class SAPCoupler(RBC):
 
     @qd.func
     def _init_v(self, i_step: qd.i32, dofs_state: DofsState):
+        # The Newton iterations start from the velocity at the beginning of the substep. The stick region of a contact
+        # is a narrow cone, so each iteration settles the stick or slide state of a few contacts only: starting from the
+        # free motion velocity re-settles every contact of a resting body at every substep, while the previous velocity
+        # already has them in their final state. An environment without contact starts from the free motion velocity,
+        # since the convergence test would accept its previous velocity before any Newton step, which drops the
+        # acceleration of the substep.
         if qd.static(self.fem_solver.is_active):
             self._init_v_fem(i_step)
         if qd.static(self.rigid_solver.is_active):
@@ -996,18 +1008,30 @@ class SAPCoupler(RBC):
     @qd.func
     def _init_v_fem(self, i_step: qd.i32):
         for i_b, i_v in qd.ndrange(self._B, self.fem_solver.n_vertices):
+            is_warm_started = self.batch_has_contact[i_b]
+            # A constrained vertex moves at its free motion velocity, which jumps it to its target
+            if qd.static(self.fem_solver._enable_vertex_constraints):
+                if self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
+                    is_warm_started = False
             self.fem_state_v.v[i_b, i_v] = self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel
+            if is_warm_started:
+                self.fem_state_v.v[i_b, i_v] = self.fem_solver.elements_v[i_step, i_v, i_b].vel
 
     @qd.func
     def _init_v_rigid(self, i_step: qd.i32, dofs_state: DofsState):
         for i_b, i_d in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs):
+            is_warm_started = self.batch_has_contact[i_b]
+            # The velocity integration skips hibernated dofs, which leaves their previous velocity stale
+            if qd.static(self.rigid_solver.rigid_config.use_hibernation):
+                if dofs_state.is_hibernated[i_d, i_b]:
+                    is_warm_started = False
             self.rigid_state_dof.v[i_b, i_d] = dofs_state.vel[i_d, i_b]
+            if is_warm_started:
+                self.rigid_state_dof.v[i_b, i_d] = dofs_state.vel_prev[i_d, i_b]
 
-    def compute_unconstrained_gradient_diag(self, i_step: qd.i32, iter: int):
+    def compute_unconstrained_gradient_diag(self, i_step: qd.i32):
         self.init_unconstrained_gradient_diag(i_step)
-        # No need to do this for iter=0 because v=v* and A(v-v*) = 0
-        if iter > 0:
-            self.compute_unconstrained_gradient()
+        self.compute_unconstrained_gradient()
 
     def init_unconstrained_gradient_diag(self, i_step: qd.i32):
         if self.fem_solver.is_active:
@@ -1287,7 +1311,8 @@ class SAPCoupler(RBC):
         for i_b in qd.ndrange(self._B):
             if not self.batch_pcg_active[i_b]:
                 continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr > self._pcg_threshold
+            self.pcg_state[i_b].rTr_tol = self._pcg_threshold * self.pcg_state[i_b].rTr
+            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr > self.pcg_state[i_b].rTr_tol
 
     def one_pcg_iter(self):
         self._kernel_one_pcg_iter(
@@ -1414,7 +1439,7 @@ class SAPCoupler(RBC):
         for i_b in qd.ndrange(self._B):
             if not self.batch_pcg_active[i_b]:
                 continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr_new > self._pcg_threshold
+            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr_new > self.pcg_state[i_b].rTr_tol
         # update beta, rTr, rTz
         for i_b in qd.ndrange(self._B):
             if not self.batch_pcg_active[i_b]:
@@ -1746,15 +1771,14 @@ class SAPCoupler(RBC):
         if qd.static(self.rigid_solver.is_active):
             self.update_initial_rigid_state()
 
-        # When tolerance is small but gradient norm is small, take step 1.0 and end, this is a rare case, directly
-        # copied from drake
-        # Link: https://github.com/RobotLocomotion/drake/blob/3bb00e611983fb894151c547776d5aa85abe9139/multibody/contact_solvers/sap/sap_solver.cc#L625
+        # The line search normalizes the derivative of the cost by its value at the origin, which is meaningless once it
+        # drops to the round-off level of the cost: take the full Newton step and end. Any looser bound accepts full
+        # steps that raise the cost near convergence, where this derivative is small but still meaningful.
+        # See: https://github.com/RobotLocomotion/drake/blob/3bb00e611983fb894151c547776d5aa85abe9139/multibody/contact_solvers/sap/sap_solver.cc#L625
         for i_b in range(self._B):
             if not self.batch_linesearch_active[i_b]:
                 continue
-            err_threshold = (
-                self._sap_convergence_atol + self._sap_convergence_rtol * self.linesearch_state[i_b].prev_energy
-            )
+            err_threshold = gs.EPS * self.linesearch_state[i_b].prev_energy
             if -self.linesearch_state[i_b].m < err_threshold:
                 self.batch_linesearch_active[i_b] = False
                 self.linesearch_state[i_b].step_size = 1.0
@@ -1764,9 +1788,7 @@ class SAPCoupler(RBC):
         for i_b, i_v in qd.ndrange(self._B, self.fem_solver.n_vertices):
             if not self.batch_linesearch_active[i_b]:
                 continue
-            err_threshold = (
-                self._sap_convergence_atol + self._sap_convergence_rtol * self.linesearch_state[i_b].prev_energy
-            )
+            err_threshold = gs.EPS * self.linesearch_state[i_b].prev_energy
             if -self.linesearch_state[i_b].m < err_threshold:
                 self.fem_state_v.v[i_b, i_v] = (
                     self.linesearch_fem_state_v[i_b, i_v].x_prev + self.pcg_fem_state_v[i_b, i_v].x
@@ -1777,9 +1799,7 @@ class SAPCoupler(RBC):
         for i_b, i_d in qd.ndrange(self._B, self.rigid_solver.n_dofs):
             if not self.batch_linesearch_active[i_b]:
                 continue
-            err_threshold = (
-                self._sap_convergence_atol + self._sap_convergence_rtol * self.linesearch_state[i_b].prev_energy
-            )
+            err_threshold = gs.EPS * self.linesearch_state[i_b].prev_energy
             if -self.linesearch_state[i_b].m < err_threshold:
                 self.rigid_state_dof.v[i_b, i_d] = (
                     self.linesearch_rigid_state_dof[i_b, i_d].x_prev + self.pcg_rigid_state_dof[i_b, i_d].x
