@@ -321,7 +321,7 @@ class LegacyCoupler(RBC):
     def mpm_grid_op(
         self,
         f: qd.i32,
-        t: qd.f32,
+        t: float,
         geoms_state: GeomsState,
         geoms_info: GeomsInfo,
         links_state: LinksState,
@@ -757,7 +757,7 @@ class LegacyCoupler(RBC):
             self.particle_attach_info[i_p, i_b].local_pos = qd.math.vec3([0.0, 0.0, 0.0])
 
     @qd.kernel
-    def kernel_pbd_rigid_solve_animate_particles_by_link(self, clamped_inv_dt: qd.f32, links_state: LinksState):
+    def kernel_pbd_rigid_solve_animate_particles_by_link(self, clamped_inv_dt: float, links_state: LinksState):
         """
         Itearates all particles and environments, and sets corrective velocity for all animated particle.
 

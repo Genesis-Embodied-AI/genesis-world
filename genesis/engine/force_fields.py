@@ -428,7 +428,7 @@ class Custom(ForceField):
     Parameters:
     -----------
     func: A callable Quadrants func (a python function wrapped by `@qd.func`)
-        The acceleration function. Must have the signature `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: qd.f32) -> qd.types.vector(3)`.
+        The acceleration function. Must have the signature `f(pos: qd.types.vector(3), vel: qd.types.vector(3), t: float) -> qd.types.vector(3)`.
     """
 
     def __init__(self, func):
