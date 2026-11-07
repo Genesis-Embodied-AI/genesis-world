@@ -87,7 +87,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         """Write the gradient -dt^2 force of every vertex, its mass block and the blocks of every element, all scaled to
         the joint energy."""
         self.solver.func_compute_ele_energy_gradient(f)
-        self.solver.func_accumulate_vertex_force_preconditioner(f, with_preconditioner=False)
+        self.solver._func_accumulate_vertices(f, self.solver.batch_active, gather_Ap=False)
         dt_sq = self.substep_dt * self.substep_dt
         qd.loop_config(name="mpm_fem_assemble_vertices")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
@@ -162,7 +162,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
                 step = self.solver.elements_v[f + 1, i_v, i_b].pos - self.solver.elements_v[f, i_v, i_b].pos
                 energy += 0.5 * mass_over_dt2 * step.dot(step) * self.damping_alpha_dt
             qd.atomic_add(energies[i_b], dt_sq * energy)
-        self.solver.func_compute_ele_energy(f)
+        self.solver._func_compute_ele_energy(f)
         qd.loop_config(name="mpm_fem_energy_elements")
         for i_b, i_e in qd.ndrange(self.n_envs, self.n_elements):
             energy = self.solver.elements_el_energy[i_b, i_e].energy * self.solver.elements_i[i_e].V

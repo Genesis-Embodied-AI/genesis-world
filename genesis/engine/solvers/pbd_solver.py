@@ -574,7 +574,7 @@ class PBDSolver(ParticleSolver):
                 self.particles_ng_reordered[reordered_idx, i_b].active = self.particles_ng[i_p, i_b].active
 
     @qd.kernel
-    def _kernel_apply_external_force(self, f: qd.i32, t: qd.f32):
+    def _kernel_apply_external_force(self, f: qd.i32, t: float):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles[i_p, i_b].free:
                 # gravity

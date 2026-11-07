@@ -306,7 +306,7 @@ class SPHSolver(ParticleSolver):
         ret += f_v
 
     @qd.kernel
-    def _kernel_compute_non_pressure_forces(self, f: qd.i32, t: qd.f32):
+    def _kernel_compute_non_pressure_forces(self, f: qd.i32, t: float):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i_p, i_b].active:
                 acc = self._gravity[i_b]
@@ -862,11 +862,11 @@ class SPHSolver(ParticleSolver):
         active: qd.i32,
         particle_start: qd.i32,
         n_particles: qd.i32,
-        mat_rho: qd.f32,
-        mat_stiffness: qd.f32,
-        mat_exponent: qd.f32,
-        mat_mu: qd.f32,
-        mat_gamma: qd.f32,
+        mat_rho: float,
+        mat_stiffness: float,
+        mat_exponent: float,
+        mat_mu: float,
+        mat_gamma: float,
         pos: qd.types.ndarray(),
     ):
         for i_p_, i_b in qd.ndrange(n_particles, self._B):

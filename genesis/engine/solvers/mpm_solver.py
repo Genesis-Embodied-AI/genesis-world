@@ -847,8 +847,8 @@ class MPMSolver(ParticleSolver):
         particle_start: int,
         n_particles: int,
         material_idx: int,
-        mat_default_Jp: qd.f32,
-        mat_rho: qd.f32,
+        mat_default_Jp: float,
+        mat_rho: float,
         pos: qd.types.ndarray(),  # shape [n_particles, 3]
     ):
         for i_p_ in range(n_particles):
