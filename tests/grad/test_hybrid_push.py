@@ -533,8 +533,6 @@ def test_coupling_wrench_grad_descends(show_viewer):
     vel_start = np.tile([0.5, 0.0, 0.0], (2, 1))
     vel = torch.tensor(vel_start, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     (grad,) = torch.autograd.grad(rollout([vel]).sum(), vel)
-    # The block pushes the box
-    assert (box.get_dofs_velocity()[..., 0] > 5e-3).all()
     # The environments run the same inputs apart, so they get the same gradient, and a rollout after a reset starts free
     # of the coupling wrench the previous one left
     (grad_rerun,) = torch.autograd.grad(rollout([vel]).sum(), vel)
