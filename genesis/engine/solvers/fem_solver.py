@@ -8,6 +8,7 @@ import igl
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.simt as su
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
@@ -15,9 +16,15 @@ from genesis.engine.states.solvers import FEMSolverState
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_numpy, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+
+# Number of consecutive vertices or elements of an environment whose terms of a sum over the environment are added up
+# together, by the lanes of a subgroup tile on GPU and serially on CPU, before the sums of the chunks are added up in
+# turn. Every sum then adds its terms in a fixed order, which floating-point atomics would leave to the order in which
+# the threads land, so the implicit solve is bitwise reproducible.
+CHUNK_SIZE = 32
 
 
 @qd.data_oriented
@@ -59,6 +66,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # lazy initialization
         self._constraints_initialized = False
 
+        # Lanes adding up the terms of a chunk together (see CHUNK_SIZE)
+        self._n_chunk_lanes = 1 if gs.backend == gs.cpu else CHUNK_SIZE
+
     def init_batch_fields(self):
         self.batch_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
         self.batch_pcg_active = qd.field(dtype=gs.qd_bool, shape=(self._B,), needs_grad=False)
@@ -78,9 +88,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         pcg_state = qd.types.struct(
             rTr=gs.qd_float,
             rTz=gs.qd_float,
-            rTr_new=gs.qd_float,
-            rTz_new=gs.qd_float,
-            pTAp=gs.qd_float,
             alpha=gs.qd_float,
             beta=gs.qd_float,
         )
@@ -88,7 +95,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         linesearch_state = qd.types.struct(
             prev_energy=gs.qd_float,
-            energy=gs.qd_float,
             step_size=gs.qd_float,
             m=gs.qd_float,
         )
@@ -109,6 +115,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # element info (properties that remain static through time)
         element_info = qd.types.struct(
             el2v=gs.qd_ivec4,  # vertex index of an element
+            el2slot=gs.qd_ivec4,  # slot of each vertex of an element (see elements_slot)
             mu=gs.qd_float,  # lame parameters (1)
             lam=gs.qd_float,  # lame parameters (2)
             mass_scaled=gs.qd_float,  # scaled element mass. The real mass is mass_scaled / self._vol_scale
@@ -154,6 +161,29 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             x_prev=gs.qd_vec3,  # solution vector
         )
 
+        # Terms of an element in the sums of its vertices, one slot per vertex of the element. The slots of vertex i_v
+        # are vertices_slot_start[i_v]:vertices_slot_start[i_v + 1], in increasing element index, so that each vertex
+        # gathers its terms in a fixed order from neighbouring addresses.
+        element_state_slot = qd.types.struct(
+            force=gs.qd_vec3,
+            diag3x3=gs.qd_mat3,
+            Ap=gs.qd_vec3,
+        )
+
+        # Sums over the chunks of an environment (see CHUNK_SIZE), the chunks of the vertices followed by the chunks
+        # of the elements for the linesearch
+        pcg_state_chunk = qd.types.struct(
+            rTr=gs.qd_float,
+            rTz=gs.qd_float,
+            pTAp=gs.qd_float,
+        )
+        linesearch_state_chunk = qd.types.struct(
+            energy=gs.qd_float,
+            m=gs.qd_float,
+        )
+        self._n_vertices_chunks = (self.n_vertices + CHUNK_SIZE - 1) // CHUNK_SIZE
+        self._n_elements_chunks = (self.n_elements + CHUNK_SIZE - 1) // CHUNK_SIZE
+
         # construct field
         self.elements_v = element_state_v.field(
             shape=(self.n_frames, self.n_vertices, self._B), needs_grad=True, layout=qd.Layout.SOA
@@ -197,6 +227,16 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             shape=(self._B, self.n_vertices),
             needs_grad=False,
             layout=qd.Layout.SOA,
+        )
+
+        self.elements_slot = element_state_slot.field(
+            shape=(self._B, 4 * self.n_elements), needs_grad=False, layout=qd.Layout.SOA
+        )
+        self.pcg_state_chunk = pcg_state_chunk.field(
+            shape=(self._B, self._n_vertices_chunks), needs_grad=False, layout=qd.Layout.SOA
+        )
+        self.linesearch_state_chunk = linesearch_state_chunk.field(
+            shape=(self._B, self._n_vertices_chunks + self._n_elements_chunks), needs_grad=False, layout=qd.Layout.SOA
         )
 
     def init_surface_fields(self):
@@ -345,6 +385,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             for entity in self._entities:
                 entity._add_to_solver()
+
+            # Slots sorted by vertex, then element (see elements_slot)
+            el2v = qd_to_numpy(self.elements_i.el2v)
+            slots_order = np.argsort(el2v, axis=None, kind="stable")
+            self.elements_i.el2slot.from_numpy(np.argsort(slots_order).reshape(el2v.shape))
+            self.vertices_slot_start = qd.field(dtype=gs.qd_int, shape=(self.n_vertices + 1,))
+            self.vertices_slot_start.from_numpy(np.searchsorted(el2v.take(slots_order), np.arange(self.n_vertices + 1)))
 
         for mat in self._mats:
             mat.build(self)
@@ -588,52 +635,63 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return S
 
     @qd.func
-    def _func_compute_ele_energy(self, f: qd.i32):
+    def _func_compute_ele_energy(self, f: qd.i32, i_e: qd.i32, i_b: qd.i32):
+        """Compute the energy of an element, its linearized damping energy included. Used by the linesearch alone."""
+        energy = gs.qd_float(0.0)
+        J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
+        for mat_idx in qd.static(self._mats_idx):
+            if self.elements_i[i_e].mat_idx == mat_idx:
+                energy = self._mats[mat_idx].compute_energy(
+                    mu=self.elements_i[i_e].mu,
+                    lam=self.elements_i[i_e].lam,
+                    J=J,
+                    F=F,
+                    actu=self.elements_el[f, i_e, i_b].actu,
+                    m_dir=self.elements_i[i_e].muscle_direction,
+                    i_e=i_e,
+                    i_b=i_b,
+                )
+
+        if self._damping_beta > gs.EPS:
+            damping_beta_over_dt = self._damping_beta / self._substep_dt
+            i_vs = self.elements_i[i_e].el2v
+            B = self.elements_i[i_e].B
+            S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
+
+            x_diff = qd.Vector.zero(gs.qd_float, 12)
+            for i in qd.static(range(4)):
+                x_diff[i * 3 : i * 3 + 3] = (
+                    self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
+                )
+            St_x_diff = qd.Vector.zero(gs.qd_float, 9)
+            for i, j in qd.static(qd.ndrange(3, 4)):
+                St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
+
+            H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                H_St_x_diff[i * 3 : i * 3 + 3] += (
+                    self.elements_el_hessian[i_b, i, j, i_e] @ St_x_diff[j * 3 : j * 3 + 3]
+                )
+
+            energy += 0.5 * damping_beta_over_dt * St_x_diff.dot(H_St_x_diff)
+        return energy
+
+    @qd.func
+    def _func_sum_chunks(self, values: qd.template(), i_b: qd.i32, tid: qd.i32, n_chunks: qd.i32):
+        """Sum the first chunk sums of an environment in a fixed order, every lane of the tile receiving the total.
+
+        Lane tid adds up the chunks tid, tid + n_lanes, ... before the lanes of the tile add up their sums (see
+        CHUNK_SIZE). 'values' holds the chunk sums of every environment, of which the first 'n_chunks' are added up.
         """
-        Compute the energy for each element in the batch. Should only be used in linesearch.
-        """
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-
-            J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
-
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    self.elements_el_energy[i_b, i_e].energy = self._mats[mat_idx].compute_energy(
-                        mu=self.elements_i[i_e].mu,
-                        lam=self.elements_i[i_e].lam,
-                        J=J,
-                        F=F,
-                        actu=self.elements_el[f, i_e, i_b].actu,
-                        m_dir=self.elements_i[i_e].muscle_direction,
-                        i_e=i_e,
-                        i_b=i_b,
-                    )
-
-            # add linearized damping energy
-            if self._damping_beta > gs.EPS:
-                damping_beta_over_dt = self._damping_beta / self._substep_dt
-                i_vs = self.elements_i[i_e].el2v
-                B = self.elements_i[i_e].B
-                S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
-
-                x_diff = qd.Vector.zero(gs.qd_float, 12)
-                for i in qd.static(range(4)):
-                    x_diff[i * 3 : i * 3 + 3] = (
-                        self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
-                    )
-                St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 4)):
-                    St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
-
-                H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 3)):
-                    H_St_x_diff[i * 3 : i * 3 + 3] += (
-                        self.elements_el_hessian[i_b, i, j, i_e] @ St_x_diff[j * 3 : j * 3 + 3]
-                    )
-
-                self.elements_el_energy[i_b, i_e].energy += 0.5 * damping_beta_over_dt * St_x_diff.dot(H_St_x_diff)
+        n_lanes = qd.static(self._n_chunk_lanes)
+        total = gs.qd_float(0.0)
+        for i_chunk_ in range((n_chunks + n_lanes - 1) // n_lanes):
+            i_chunk = i_chunk_ * n_lanes + tid
+            if i_chunk < n_chunks:
+                total = total + values[i_b, i_chunk]
+        if qd.static(n_lanes > 1):
+            total = su.qd_block_sum(total)
+        return total
 
     @qd.kernel
     def accumulate_vertex_force_preconditioner(self, f: qd.i32):
@@ -641,25 +699,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         damping_alpha_factor = damping_alpha_dt + 1.0
         damping_beta_over_dt = self._damping_beta / self._substep_dt
         damping_beta_factor = damping_beta_over_dt + 1.0
-        # inertia
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_active[i_b]:
-                continue
-            self.elements_v_energy[i_b, i_v].force = -self.elements_v_info[i_v].mass_over_dt2 * (
-                (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia)
-                + (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos) * damping_alpha_dt
-            )
-            # A constrained vertex sits at its target, which the damping of its jump to it would otherwise pull away
-            if qd.static(self._enable_vertex_constraints):
-                if self.vertex_constraints.is_constrained[i_v, i_b]:
-                    self.elements_v_energy[i_b, i_v].force = qd.Vector.zero(gs.qd_float, 3)
-            self.pcg_state_v[i_b, i_v].diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i in qd.static(range(3)):
-                self.pcg_state_v[i_b, i_v].diag3x3[i, i] = (
-                    self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor
-                )
 
-        # elastic
+        # elastic, per slot
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
                 continue
@@ -670,10 +711,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
             force = -V * gradient @ S.transpose()
 
-            # atomic
-            for i in qd.static(range(4)):
-                self.elements_v_energy[i_b, i_vs[i]].force += force[:, i]
-
+            S_H_St_x_diff = qd.Vector.zero(gs.qd_float, 12)
             if self._damping_beta > gs.EPS:
                 x_diff = qd.Vector.zero(gs.qd_float, 12)
                 for i in qd.static(range(4)):
@@ -689,50 +727,90 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     H_St_x_diff[i * 3 : i * 3 + 3] += (
                         self.elements_el_hessian[i_b, i, j, i_e] @ St_x_diff[j * 3 : j * 3 + 3]
                     )
-                S_H_St_x_diff = qd.Vector.zero(gs.qd_float, 12)
                 for i, j in qd.static(qd.ndrange(4, 3)):
                     S_H_St_x_diff[i * 3 : i * 3 + 3] += S[i, j] * H_St_x_diff[j * 3 : j * 3 + 3]
-                for i in qd.static(range(4)):
-                    self.elements_v_energy[i_b, i_vs[i]].force += (
-                        -damping_beta_over_dt * V * S_H_St_x_diff[i * 3 : i * 3 + 3]
-                    )
 
-            # diagonal 3-by-3 block of hessian
-            for k, i, j in qd.ndrange(4, 3, 3):
-                self.pcg_state_v[i_b, i_vs[k]].diag3x3 += (
-                    V * damping_beta_factor * S[k, i] * S[k, j] * self.elements_el_hessian[i_b, i, j, i_e]
+            i_slots = self.elements_i[i_e].el2slot
+            for i_k in qd.static(range(4)):
+                i_slot = i_slots[i_k]
+                self.elements_slot[i_b, i_slot].force = (
+                    force[:, i_k] - damping_beta_over_dt * V * S_H_St_x_diff[i_k * 3 : i_k * 3 + 3]
                 )
+                # diagonal 3-by-3 block of hessian
+                diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    diag3x3 += S[i_k, i] * S[i_k, j] * self.elements_el_hessian[i_b, i, j, i_e]
+                self.elements_slot[i_b, i_slot].diag3x3 = V * damping_beta_factor * diag3x3
 
-        # inverse
+        # inertia, plus the slots of the vertex, and inverse
         for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
             if not self.batch_active[i_b]:
                 continue
-            # Use 3-by-3 diagonal block inverse for preconditioner
-            self.pcg_state_v[i_b, i_v].prec = self.pcg_state_v[i_b, i_v].diag3x3.inverse()
-
-            # Other options for preconditioner:
-            # Uncomment one of the following lines to test different preconditioners
-            # Use identity for preconditioner
-            # self.pcg_state_v[i_b, i_v].prec = qd.Matrix.identity(gs.qd_float, 3)
-
-            # Use diagonal for preconditioner
-            # self.pcg_state_v[i_b, i_v].prec = qd.Matrix([[1 / self.pcg_state_v[i_b, i_v].diag3x3[0, 0], 0, 0],
-            #                                            [0, 1 / self.pcg_state_v[i_b, i_v].diag3x3[1, 1], 0],
-            #                                            [0, 0, 1 / self.pcg_state_v[i_b, i_v].diag3x3[2, 2]]])
-
-    @qd.func
-    def compute_Ap(self):
-        damping_alpha_dt = self._damping_alpha * self._substep_dt
-        damping_alpha_factor = damping_alpha_dt + 1.0
-        damping_beta_over_dt = self._damping_beta / self._substep_dt
-        damping_beta_factor = damping_beta_over_dt + 1.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].Ap = (
-                self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor * self.pcg_state_v[i_b, i_v].p
+            force = -self.elements_v_info[i_v].mass_over_dt2 * (
+                (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia)
+                + (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos) * damping_alpha_dt
             )
+            # A constrained vertex sits at its target, which the damping of its jump to it would otherwise pull away
+            if qd.static(self._enable_vertex_constraints):
+                if self.vertex_constraints.is_constrained[i_v, i_b]:
+                    force = qd.Vector.zero(gs.qd_float, 3)
+            diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for i in qd.static(range(3)):
+                diag3x3[i, i] = self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor
+            for i_slot in range(self.vertices_slot_start[i_v], self.vertices_slot_start[i_v + 1]):
+                force = force + self.elements_slot[i_b, i_slot].force
+                diag3x3 = diag3x3 + self.elements_slot[i_b, i_slot].diag3x3
+            self.elements_v_energy[i_b, i_v].force = force
+            self.pcg_state_v[i_b, i_v].diag3x3 = diag3x3
+            # Use 3-by-3 diagonal block inverse for preconditioner
+            self.pcg_state_v[i_b, i_v].prec = diag3x3.inverse()
 
+    @qd.kernel
+    def init_pcg_solve(self):
+        n_lanes = qd.static(self._n_chunk_lanes)
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_vertices_chunks, n_lanes):
+            rTr = gs.qd_float(0.0)
+            rTz = gs.qd_float(0.0)
+            if self.batch_active[i_b]:
+                for i_v_ in range(CHUNK_SIZE // n_lanes):
+                    i_v = i_chunk * CHUNK_SIZE + i_v_ * n_lanes + tid
+                    if i_v < self.n_vertices:
+                        r = self.elements_v_energy[i_b, i_v].force
+                        z = self.pcg_state_v[i_b, i_v].prec @ r
+                        self.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
+                        self.pcg_state_v[i_b, i_v].r = r
+                        self.pcg_state_v[i_b, i_v].z = z
+                        self.pcg_state_v[i_b, i_v].p = z
+                        rTr = rTr + r.dot(r)
+                        rTz = rTz + r.dot(z)
+            if qd.static(n_lanes > 1):
+                rTr = su.qd_block_sum(rTr)
+                rTz = su.qd_block_sum(rTz)
+            if tid == 0:
+                self.pcg_state_chunk[i_b, i_chunk].rTr = rTr
+                self.pcg_state_chunk[i_b, i_chunk].rTz = rTz
+
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, tid in qd.ndrange(self._B, n_lanes):
+            is_pcg_active = False
+            if self.batch_active[i_b]:
+                rTr = self._func_sum_chunks(self.pcg_state_chunk.rTr, i_b, tid, self._n_vertices_chunks)
+                rTz = self._func_sum_chunks(self.pcg_state_chunk.rTz, i_b, tid, self._n_vertices_chunks)
+                if tid == 0:
+                    self.pcg_state[i_b].rTr = rTr
+                    self.pcg_state[i_b].rTz = rTz
+                is_pcg_active = rTr > self._pcg_threshold
+            if tid == 0:
+                self.batch_pcg_active[i_b] = is_pcg_active
+
+    @qd.kernel
+    def one_pcg_iter(self):
+        n_lanes = qd.static(self._n_chunk_lanes)
+        damping_alpha_factor = self._damping_alpha * self._substep_dt + 1.0
+        damping_beta_factor = self._damping_beta / self._substep_dt + 1.0
+
+        # compute the elastic part of Ap, per slot
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_pcg_active[i_b]:
                 continue
@@ -742,88 +820,87 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
 
             p9 = qd.Vector([0.0] * 9, dt=gs.qd_float)
-
             for i, j in qd.static(qd.ndrange(3, 4)):
                 p9[i * 3 : i * 3 + 3] = p9[i * 3 : i * 3 + 3] + S[j, i] * self.pcg_state_v[i_b, i_vs[j]].p
 
             new_p9 = qd.Vector([0.0] * 9, dt=gs.qd_float)
-
             for i, j in qd.static(qd.ndrange(3, 3)):
                 new_p9[i * 3 : i * 3 + 3] = (
                     new_p9[i * 3 : i * 3 + 3] + self.elements_el_hessian[i_b, i, j, i_e] @ p9[j * 3 : j * 3 + 3]
                 )
 
-            # atomic
-            for i in qd.static(range(4)):
-                self.pcg_state_v[i_b, i_vs[i]].Ap += (
-                    (S[i, 0] * new_p9[0:3] + S[i, 1] * new_p9[3:6] + S[i, 2] * new_p9[6:9]) * V * damping_beta_factor
+            i_slots = self.elements_i[i_e].el2slot
+            for i_k in qd.static(range(4)):
+                self.elements_slot[i_b, i_slots[i_k]].Ap = (
+                    (S[i_k, 0] * new_p9[0:3] + S[i_k, 1] * new_p9[3:6] + S[i_k, 2] * new_p9[6:9])
+                    * V
+                    * damping_beta_factor
                 )
 
-    @qd.kernel
-    def init_pcg_solve(self):
-        for i_b in range(self._B):
-            self.batch_pcg_active[i_b] = self.batch_active[i_b]
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].rTr = 0.0
-            self.pcg_state[i_b].rTz = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].x = 0
-            self.pcg_state_v[i_b, i_v].r = self.elements_v_energy[i_b, i_v].force
-            self.pcg_state_v[i_b, i_v].z = self.pcg_state_v[i_b, i_v].prec @ self.pcg_state_v[i_b, i_v].r
-            self.pcg_state_v[i_b, i_v].p = self.pcg_state_v[i_b, i_v].z
-            qd.atomic_add(self.pcg_state[i_b].rTr, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].r))
-            qd.atomic_add(self.pcg_state[i_b].rTz, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].z))
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr > self._pcg_threshold
+        # compute Ap from the inertia and the slots of the vertex, and pTAp
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_vertices_chunks, n_lanes):
+            pTAp = gs.qd_float(0.0)
+            if self.batch_pcg_active[i_b]:
+                for i_v_ in range(CHUNK_SIZE // n_lanes):
+                    i_v = i_chunk * CHUNK_SIZE + i_v_ * n_lanes + tid
+                    if i_v < self.n_vertices:
+                        p = self.pcg_state_v[i_b, i_v].p
+                        Ap = self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor * p
+                        for i_slot in range(self.vertices_slot_start[i_v], self.vertices_slot_start[i_v + 1]):
+                            Ap = Ap + self.elements_slot[i_b, i_slot].Ap
+                        self.pcg_state_v[i_b, i_v].Ap = Ap
+                        pTAp = pTAp + p.dot(Ap)
+            if qd.static(n_lanes > 1):
+                pTAp = su.qd_block_sum(pTAp)
+            if tid == 0:
+                self.pcg_state_chunk[i_b, i_chunk].pTAp = pTAp
 
-    @qd.kernel
-    def one_pcg_iter(self):
-        self.compute_Ap()
+        # compute alpha
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, tid in qd.ndrange(self._B, n_lanes):
+            if self.batch_pcg_active[i_b]:
+                pTAp = self._func_sum_chunks(self.pcg_state_chunk.pTAp, i_b, tid, self._n_vertices_chunks)
+                if tid == 0:
+                    self.pcg_state[i_b].alpha = self.pcg_state[i_b].rTz / pTAp
 
-        # compute pTAp
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].pTAp = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            qd.atomic_add(self.pcg_state[i_b].pTAp, self.pcg_state_v[i_b, i_v].p.dot(self.pcg_state_v[i_b, i_v].Ap))
+        # update x, r, z, and compute the new rTr, rTz
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_vertices_chunks, n_lanes):
+            rTr = gs.qd_float(0.0)
+            rTz = gs.qd_float(0.0)
+            if self.batch_pcg_active[i_b]:
+                for i_v_ in range(CHUNK_SIZE // n_lanes):
+                    i_v = i_chunk * CHUNK_SIZE + i_v_ * n_lanes + tid
+                    if i_v < self.n_vertices:
+                        self.pcg_state_v[i_b, i_v].x = (
+                            self.pcg_state_v[i_b, i_v].x + self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].p
+                        )
+                        r = self.pcg_state_v[i_b, i_v].r - self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].Ap
+                        z = self.pcg_state_v[i_b, i_v].prec @ r
+                        self.pcg_state_v[i_b, i_v].r = r
+                        self.pcg_state_v[i_b, i_v].z = z
+                        rTr = rTr + r.dot(r)
+                        rTz = rTz + r.dot(z)
+            if qd.static(n_lanes > 1):
+                rTr = su.qd_block_sum(rTr)
+                rTz = su.qd_block_sum(rTz)
+            if tid == 0:
+                self.pcg_state_chunk[i_b, i_chunk].rTr = rTr
+                self.pcg_state_chunk[i_b, i_chunk].rTz = rTz
 
-        # compute alpha and update x, r, z, rTr, rTz
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].alpha = self.pcg_state[i_b].rTz / self.pcg_state[i_b].pTAp
-            self.pcg_state[i_b].rTr_new = 0.0
-            self.pcg_state[i_b].rTz_new = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].x += self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].p
-            self.pcg_state_v[i_b, i_v].r -= self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].Ap
-            self.pcg_state_v[i_b, i_v].z = self.pcg_state_v[i_b, i_v].prec @ self.pcg_state_v[i_b, i_v].r
-            qd.atomic_add(self.pcg_state[i_b].rTr_new, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].r))
-            qd.atomic_add(self.pcg_state[i_b].rTz_new, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].z))
-
-        # check convergence
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr_new > self._pcg_threshold
-
-        # update beta, rTr, rTz
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].beta = self.pcg_state[i_b].rTz_new / self.pcg_state[i_b].rTz
-            self.pcg_state[i_b].rTr = self.pcg_state[i_b].rTr_new
-            self.pcg_state[i_b].rTz = self.pcg_state[i_b].rTz_new
+        # check convergence, and update beta, rTr, rTz
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, tid in qd.ndrange(self._B, n_lanes):
+            if self.batch_pcg_active[i_b]:
+                rTr = self._func_sum_chunks(self.pcg_state_chunk.rTr, i_b, tid, self._n_vertices_chunks)
+                rTz = self._func_sum_chunks(self.pcg_state_chunk.rTz, i_b, tid, self._n_vertices_chunks)
+                if tid == 0:
+                    self.batch_pcg_active[i_b] = rTr > self._pcg_threshold
+                    if self.batch_pcg_active[i_b]:
+                        self.pcg_state[i_b].beta = rTz / self.pcg_state[i_b].rTz
+                        self.pcg_state[i_b].rTr = rTr
+                        self.pcg_state[i_b].rTz = rTz
 
         # update p
         for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
@@ -840,72 +917,108 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def init_linesearch(self, f: qd.i32):
-        for i_b in range(self._B):
-            self.batch_linesearch_active[i_b] = self.batch_active[i_b]
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].prev_energy = 0.0
-            self.linesearch_state[i_b].step_size = 1.0
-            self.linesearch_state[i_b].m = 0.0
+        n_lanes = qd.static(self._n_chunk_lanes)
+        # Inertia, x_prev, m over the chunks of the vertices, and elastic over the chunks of the elements
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_vertices_chunks + self._n_elements_chunks, n_lanes):
+            energy = gs.qd_float(0.0)
+            m = gs.qd_float(0.0)
+            if self.batch_active[i_b]:
+                if i_chunk < self._n_vertices_chunks:
+                    for i_v_ in range(CHUNK_SIZE // n_lanes):
+                        i_v = i_chunk * CHUNK_SIZE + i_v_ * n_lanes + tid
+                        if i_v < self.n_vertices:
+                            diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia
+                            energy = energy + 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
+                            self.linesearch_state_v[i_b, i_v].x_prev = self.elements_v[f + 1, i_v, i_b].pos
+                            m = m - self.pcg_state_v[i_b, i_v].x.dot(self.elements_v_energy[i_b, i_v].force)
+                else:
+                    for i_e_ in range(CHUNK_SIZE // n_lanes):
+                        i_e = (i_chunk - self._n_vertices_chunks) * CHUNK_SIZE + i_e_ * n_lanes + tid
+                        if i_e < self.n_elements:
+                            energy = energy + self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+            if qd.static(n_lanes > 1):
+                energy = su.qd_block_sum(energy)
+                m = su.qd_block_sum(m)
+            if tid == 0:
+                self.linesearch_state_chunk[i_b, i_chunk].energy = energy
+                self.linesearch_state_chunk[i_b, i_chunk].m = m
 
-        # Inertia, x_prev, m
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia
-            self.linesearch_state[i_b].prev_energy += 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-            self.linesearch_state_v[i_b, i_v].x_prev = self.elements_v[f + 1, i_v, i_b].pos
-            self.linesearch_state[i_b].m -= self.pcg_state_v[i_b, i_v].x.dot(self.elements_v_energy[i_b, i_v].force)
-        # Elastic
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].prev_energy += self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, tid in qd.ndrange(self._B, n_lanes):
+            if self.batch_active[i_b]:
+                prev_energy = self._func_sum_chunks(
+                    self.linesearch_state_chunk.energy, i_b, tid, self._n_vertices_chunks + self._n_elements_chunks
+                )
+                m = self._func_sum_chunks(self.linesearch_state_chunk.m, i_b, tid, self._n_vertices_chunks)
+                if tid == 0:
+                    self.linesearch_state[i_b].prev_energy = prev_energy
+                    self.linesearch_state[i_b].step_size = 1.0
+                    self.linesearch_state[i_b].m = m
+            if tid == 0:
+                self.batch_linesearch_active[i_b] = self.batch_active[i_b]
 
     @qd.kernel
     def one_linesearch_iter(self, f: qd.i32):
-        for i_b in range(self._B):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].energy = 0.0
+        n_lanes = qd.static(self._n_chunk_lanes)
+        # update pos and compute Inertia energy over the chunks of the vertices
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_vertices_chunks, n_lanes):
+            energy = gs.qd_float(0.0)
+            if self.batch_linesearch_active[i_b]:
+                for i_v_ in range(CHUNK_SIZE // n_lanes):
+                    i_v = i_chunk * CHUNK_SIZE + i_v_ * n_lanes + tid
+                    if i_v < self.n_vertices:
+                        pos = (
+                            self.linesearch_state_v[i_b, i_v].x_prev
+                            + self.linesearch_state[i_b].step_size * self.pcg_state_v[i_b, i_v].x
+                        )
+                        self.elements_v[f + 1, i_v, i_b].pos = pos
+                        diff = pos - self.elements_v_energy[i_b, i_v].inertia
+                        energy = energy + 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
+                        # damping
+                        if self._damping_alpha > 0.0:
+                            damping_alpha_dt = self._damping_alpha * self._substep_dt
+                            diff = pos - self.elements_v[f, i_v, i_b].pos
+                            energy = energy + (
+                                0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff) * damping_alpha_dt
+                            )
+            if qd.static(n_lanes > 1):
+                energy = su.qd_block_sum(energy)
+            if tid == 0:
+                self.linesearch_state_chunk[i_b, i_chunk].energy = energy
 
-        # update pos and compute Inertia energy
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.elements_v[f + 1, i_v, i_b].pos = (
-                self.linesearch_state_v[i_b, i_v].x_prev
-                + self.linesearch_state[i_b].step_size * self.pcg_state_v[i_b, i_v].x
-            )
-            diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia
-            self.linesearch_state[i_b].energy += 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-            # damping
-            if self._damping_alpha > 0.0:
-                damping_alpha_dt = self._damping_alpha * self._substep_dt
-                diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos
-                self.linesearch_state[i_b].energy += (
-                    0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff) * damping_alpha_dt
-                )
-
-        # compute elastic energy
-        self._func_compute_ele_energy(f)
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].energy += self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+        # compute elastic energy over the chunks of the elements
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, i_chunk, tid in qd.ndrange(self._B, self._n_elements_chunks, n_lanes):
+            energy = gs.qd_float(0.0)
+            if self.batch_linesearch_active[i_b]:
+                for i_e_ in range(CHUNK_SIZE // n_lanes):
+                    i_e = i_chunk * CHUNK_SIZE + i_e_ * n_lanes + tid
+                    if i_e < self.n_elements:
+                        energy = energy + self._func_compute_ele_energy(f, i_e, i_b) * self.elements_i[i_e].V
+            if qd.static(n_lanes > 1):
+                energy = su.qd_block_sum(energy)
+            if tid == 0:
+                self.linesearch_state_chunk[i_b, self._n_vertices_chunks + i_chunk].energy = energy
 
         # check condition
-        for i_b in range(self._B):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.batch_linesearch_active[i_b] = (
-                self.linesearch_state[i_b].energy
-                > self.linesearch_state[i_b].prev_energy
-                + self._linesearch_c * self.linesearch_state[i_b].step_size * self.linesearch_state[i_b].m
-            )
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].step_size *= self._linesearch_tau
+        qd.loop_config(block_dim=CHUNK_SIZE)
+        for i_b, tid in qd.ndrange(self._B, n_lanes):
+            if self.batch_linesearch_active[i_b]:
+                energy = self._func_sum_chunks(
+                    self.linesearch_state_chunk.energy, i_b, tid, self._n_vertices_chunks + self._n_elements_chunks
+                )
+                if tid == 0:
+                    self.batch_linesearch_active[i_b] = (
+                        energy
+                        > self.linesearch_state[i_b].prev_energy
+                        + self._linesearch_c * self.linesearch_state[i_b].step_size * self.linesearch_state[i_b].m
+                    )
+                    if self.batch_linesearch_active[i_b]:
+                        self.linesearch_state[i_b].step_size = (
+                            self.linesearch_state[i_b].step_size * self._linesearch_tau
+                        )
 
     @qd.kernel
     def skip_linesearch(self, f: qd.i32):

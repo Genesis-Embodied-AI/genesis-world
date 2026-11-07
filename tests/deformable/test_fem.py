@@ -441,12 +441,21 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
     # Check that the box has been free-falling
     n_steps = 50
+    fall_state = scene.get_state()
     com_pos_z_0 = box.get_state().pos[..., 8, 2]
     for _ in range(n_steps):
         scene.step()
     com_pos_z_f = box.get_state().pos[..., 8, 2]
     com_pos_delta = -0.5 * 9.81 * (n_steps * DT) ** 2
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
+
+    # Replaying the free fall reproduces it bitwise
+    if use_implicit_solver:
+        fall_pos = box.get_state().pos
+        scene.reset(state=fall_state)
+        for _ in range(n_steps):
+            scene.step()
+        assert_equal(box.get_state().pos, fall_pos)
 
     # Distinct positions and link poses per environment make cross-environment index mixups observable.
     box.set_position(((0.0, 0.0, 0.0), (0.0, 0.0, 0.2)))
