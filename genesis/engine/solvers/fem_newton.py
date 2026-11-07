@@ -1,10 +1,4 @@
-"""Implicit finite element method (FEM) as a participant of the NewtonSolver.
-
-The FEM unknown is the end-of-substep vertex position x. Its share of the joint energy is FEM's incremental potential
-(inertia, elasticity and the linearized damping of its implicit solver) times dt^2. FEM owns the rows of its vertices in
-the linear system of the solve (see newton_linear.py), the mass block of every vertex and the 10 upper blocks of every
-element, preconditioned by their diagonal blocks, a vertex held at its target being an eliminated row. The joint solve
-replaces FEM's own implicit substep (see FEMSolver.build_newton_participant)."""
+"""Implicit finite element method (FEM) as a participant of the NewtonSolver."""
 
 import quadrants as qd
 
@@ -41,11 +35,7 @@ class FemNewtonConfig(StaticConfig):
 
 @qd.data_oriented
 class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
-    """Device stages of the FEM vertex positions in the joint solve.
-
-    It selects the FEM scalars that the stages and the couplings read, and reaches the arrays and the functions of FEM's
-    own implicit solver through `solver`, which owns them, so that the walk over the data of the NewtonSolver (see
-    iter_data_oriented) stops there. The step sizes are plain floats, compiled into the stages as constants."""
+    """Device stages of the FEM vertex positions in the joint solve."""
 
     # The rows of a vertex are its own
     n_vertex_rows = 1
@@ -95,12 +85,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int, is_exact: qd.template()):
         """Write the gradient -dt^2 force of every vertex, its mass block and the blocks of every element, all scaled to
-        the joint energy.
-
-        The block of vertices (k, l) of an element is V (1 + beta / dt) sum_ij S_ki S_lj H_ij, H being the Hessian of
-        the energy density in the deformation gradient, and S the mapping matrix of the element (see
-        FEMSolver.compute_Ap). A constrained vertex takes an identity block and a zero gradient, and the blocks of the
-        elements on it are discarded."""
+        the joint energy."""
         self.solver.func_compute_ele_hessian_gradient(f)
         self.solver.func_accumulate_vertex_force_preconditioner(f)
         dt_sq = self.substep_dt * self.substep_dt

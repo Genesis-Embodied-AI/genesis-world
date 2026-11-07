@@ -13,14 +13,7 @@ PCG_BLOCK = 256
 
 @qd.data_oriented
 class PCGScalars:
-    """Device-resident scalars of the preconditioned conjugate gradient (PCG) solves of the environments of a batch.
-
-    Every owner of rows adds its share of r . z and p . Ap into the scalars of the environment of each row, and reads
-    the step alpha (see func_pcg_step) and the direction factor beta (see func_pcg_decide). The iterations run while any
-    environment runs (`is_running`), `max_iter` at most, an environment converging once its r . z falls to `tol_rate`
-    times its start value. An environment left out by `env_active` starts converged, and an adjoint solve takes those of
-    `is_env_adjoint`. With `is_curvature_checked`, `has_breakdown` flags the environments whose operator is
-    indefinite."""
+    """Device-resident scalars of the preconditioned conjugate gradient (PCG) solves of the environments of a batch."""
 
     def __init__(self, value_type, max_iter: int, tol_rate: float, n_envs: int = 1) -> None:
         self.value_type = value_type
@@ -125,12 +118,7 @@ def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scala
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch):
-    """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form.
-
-    The energy form sums w p_r^T B p_c over the stored upper blocks (w = 1 on the diagonal, 2 off it), so every term is
-    local to one entry. The products of one row are summed before they reach Ap (see add_by_key), and the entries of an
-    environment that converged are skipped. An owner whose operator has a term beyond the matrix adds it before
-    func_pcg_step."""
+    """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form."""
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
     for i_nz in range(warp_padded(matrix.bcoo_nnz[()])):
         i_r = gs.qd_int(-1)
@@ -150,8 +138,6 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.tem
 
 @qd.func
 def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix: BCOOMatrixScratch):
-    """Product B p_c of a stored upper block of row `i_r` for its row and its energy form, the mirrored product B^T p_r
-    of an off-diagonal block being added to Ap of its column."""
     i_c = matrix.bcoo_col[i_nz]
     block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
     p_col = pcg_workspace.p[i_c]
@@ -211,9 +197,7 @@ def func_pcg_select_envs(pcg_scalars: qd.template(), newton_control: qd.template
 
 @qd.func(requires_top_level=True)
 def func_pcg_reset(pcg_scalars: qd.template()):
-    """Reset the scalars of a solve before its owners start their rows, and re-arm the iteration budget.
-
-    An environment outside `env_active` starts converged, so that the owners leave its rows as they are."""
+    """Reset the scalars of a solve before its owners start their rows, and re-arm the iteration budget."""
     for _ in range(1):
         pcg_scalars.iter_remaining[()] = pcg_scalars.max_iter[()]
     for i_b in range(pcg_scalars.rz.shape[0]):
@@ -253,10 +237,7 @@ def func_pcg_step(pcg_scalars: qd.template()):
 @qd.func(requires_top_level=True)
 def func_pcg_decide(pcg_scalars: qd.template()):
     """Take beta = rz_new / rz and the convergence decision of every running environment once every owner added its r .
-    z, then roll rz over and zero p.Ap.
-
-    A non-finite rz_new fails the assertion in debug mode, or else stops the environment unconverged, its Newton solve
-    judging the non-finite solution."""
+    z, then roll rz over and zero p.Ap."""
     for _ in range(1):
         pcg_scalars.iter_remaining[()] -= 1
         pcg_scalars.is_running[()] = 0

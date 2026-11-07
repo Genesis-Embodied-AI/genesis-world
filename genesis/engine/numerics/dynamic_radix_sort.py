@@ -16,12 +16,7 @@ RADIX_CHUNKS = Size("radix_chunks")
 
 
 class DynamicRadixSortScratch(Data, kind=DataKind.SCRATCH):
-    """Pass state of a stable radix sort of keys and their permutation, with a device-side count.
-
-    On a graphics processing unit (GPU), the sort is OneSweep (Adinets and Merrill, 2022), which ranks the keys of a
-    tile by warp ballots and shared-memory histograms and chains the tiles by a decoupled look-back. On a central
-    processing unit (CPU), each pass is a counting sort over CPU_CHUNKS chunks: their digit histograms, the digit-major
-    exclusive sum of the histograms, then the stable scatter of each chunk."""
+    """Pass state of a stable radix sort of keys and their permutation, with a device-side count."""
 
     bins: qd.Tensor = field(int, shape=(RADIX_PASSES, _RADIX_DIGITS), ndarray=True)
     lookback_status: qd.Tensor = field(int, shape=(RADIX_TILES, _RADIX_DIGITS), ndarray=True)
@@ -394,11 +389,8 @@ def func_dynamic_radix_sort(
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    """Sort keys stably together with their permutation inside a graph kernel, the result landing in the input arrays.
-
-    The first `n[()]` entries of `keys_a` and `perm_a` are sorted, `n` being a device scalar, `keys_b` and `perm_b`
-    being the scratch halves of the double buffer. On a GPU, the passes run in a device loop, two per iteration, so that
-    the graph holds the code of two passes whatever the key width."""
+    """Sort keys stably together with their permutation inside a graph kernel, the result landing in the input
+    arrays."""
     if qd.static(gs.backend == gs.cpu):
         _func_cpu_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
     else:

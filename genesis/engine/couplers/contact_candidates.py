@@ -1,9 +1,4 @@
-"""Nearest contact candidate of every particle of the material point method (MPM) in one coupling.
-
-The box query of a sorted particle records every partner of the coupling it meets as a candidate, which the narrow phase
-scores (infinite for a rejected one) with a secondary score breaking the ties. Sorted by particle, the candidates of a
-particle form a segment, of which the smallest score is kept, then among the candidates within `tie_tol` of it the
-largest secondary score, then the first candidate."""
+"""Nearest contact candidate of every particle of the material point method (MPM) in one coupling."""
 
 from collections.abc import Iterator
 
@@ -32,11 +27,8 @@ CANDIDATES = Size("candidates")
 
 
 class ContactCandidates(Data, kind=DataKind.SCRATCH):
-    """The candidates that the box queries of the particles of a coupling find, and the nearest one of every particle.
-
-    `results` holds the (environment, partner, sorted particle) triplet of every candidate, `order` sorts them by
-    particle with their score as block, `secondary` holds their secondary score, and the `best_*` arrays the best score,
-    secondary score and candidate of every segment of a particle."""
+    """The candidates that the box queries of the particles of a coupling find, and the nearest one of every
+    particle."""
 
     results: BVHQueryResults
     order: BCOOMatrixScratch
@@ -124,14 +116,7 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
 @qd.data_oriented
 class CouplingPairs(NewtonDevice):
     """Pair kind of the contacts of the material point method (MPM) particles with the partners of one coupling, the
-    nearest partner of every particle (see NewtonContact).
-
-    Before the Newton solve of every substep, `prepare` rebuilds the tree of the partners in `query` (`build_query`),
-    records the candidates of the box query of every particle, scores them by the narrow phase of the coupling
-    (`candidate_score`), and pairs every particle with its nearest one (`build_pair`) into `pairs`, of the struct
-    `pairs_type`, the ties within `tie_ratio` grid cells going to the larger secondary score. The candidates and the
-    pairs grow on overflow. A pair holds the rows of its friction pyramid on the relative displacement of its
-    `n_doublets` vertices (`pair_vertices`), and writes the `n_triplets` upper blocks between them."""
+    nearest partner of every particle (see NewtonContact)."""
 
     tie_ratio = 0.0
 

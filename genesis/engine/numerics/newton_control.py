@@ -11,17 +11,7 @@ NEWTON_FAILED_LINE_SEARCH = 3
 
 @qd.data_oriented
 class NewtonControl:
-    """Device-resident scalars steering a Newton solve with a backtracking line search inside one graph.
-
-    Every environment runs its own solve from the measures its participants write: the energy at its start and trial
-    points and its largest displacement update. The loops run while any environment runs (`is_newton_running`,
-    `is_line_search_running`), within `max_newton_iter` iterations of `max_ls_iter` trial steps at most, the step
-    shrinking by `ls_shrink`.
-
-    `failed` says how the last solve of an environment stopped short: NEWTON_FAILED_ITERATIONS at the iteration cap,
-    NEWTON_FAILED_NON_FINITE at once on a measure that is not finite, or NEWTON_FAILED_LINE_SEARCH with `is_strict` at a
-    line search that found no lower energy. `has_failed_non_finite` latches the environments stopped on a non-finite
-    measure, which skip the solves of the rest of the step, and `has_failed_iterations` a solve at the iteration cap."""
+    """Device-resident scalars steering a Newton solve with a backtracking line search inside one graph."""
 
     def __init__(
         self,
@@ -106,10 +96,7 @@ def func_reset_energy(control: qd.template(), is_trial: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_check_convergence(control: qd.template()):
-    """Judge the convergence of every running environment on its Newton direction, before the line search.
-
-    An environment converges once its largest displacement update falls under disp_tol. A direction or a start energy
-    that is not finite fails the assertion in debug mode, or else fails its solve with NEWTON_FAILED_NON_FINITE."""
+    """Judge the convergence of every running environment on its Newton direction, before the line search."""
     for i_b in range(control.failed.shape[0]):
         if control.is_env_running[i_b] != 0:
             control.is_converged[i_b] = gs.qd_int(control.max_disp[i_b] < control.disp_tol[()])
@@ -137,11 +124,7 @@ def func_init_line_search(control: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_accept_or_backtrack(control: qd.template()):
-    """Accept the trial step of every environment once its energy is at most the start energy, or shrink its alpha.
-
-    A converged direction is accepted at its first trial. Exhausting the trials keeps the last one, or with `is_strict`
-    fails the solve with NEWTON_FAILED_LINE_SEARCH. The accepted trial energy is the start energy of the next
-    iteration."""
+    """Accept the trial step of every environment once its energy is at most the start energy, or shrink its alpha."""
     for _ in range(1):
         control.is_line_search_running[()] = 0
     for i_b in range(control.failed.shape[0]):

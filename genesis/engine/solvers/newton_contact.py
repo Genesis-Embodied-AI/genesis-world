@@ -1,19 +1,4 @@
-"""Contacts of the joint Newton solve as a sparse matrix over contact vertices.
-
-A contact vertex is a point whose displacement over the substep is linear in the unknowns of one participant, with a
-global index: the `vertex_offset` of its vertex map plus its index in the map. A participant owning rows of the linear
-system (see newton_linear.py) maps its vertices onto them by `func_vertex_value(f, i_v)` and `func_vertex_rows(i_v)`,
-the rows a vertex moves and their weights, zero on an eliminated row. The contact points on Rigid links have a map of
-their own (see MpmRigidContact).
-
-A pair kind holds the pairs of one kind, built before the Newton solve and fixed over it, each writing the gradient and
-the Hessian of its energy into fixed slots of the vertex-space doublets and upper triangular triplets of
-`NewtonContactScratch`. It provides `func_pair_count()`, `func_pair_terms(f, i_kind, contact)` and `func_pair_energy(f,
-energies)`.
-
-The keys of the slots are sorted once per substep and their values reduced at every assembly. A reduced entry between
-vertices of the linear system expands into the blocks of their rows, and one on a Rigid contact point stays in vertex
-space, reaching Rigid through its map."""
+"""Contacts of the joint Newton solve as a sparse matrix over contact vertices."""
 
 from collections.abc import Iterator
 
@@ -116,10 +101,7 @@ def append_pair(n_pairs: qd.template(), capacity: int):
 @qd.data_oriented
 class NewtonContact(NewtonDevice):
     """The contacts of the joint Newton solve, over the vertices of `linear_maps` and `rigid_map` and the pairs of
-    `pair_kinds`.
-
-    Once the pairs are built, `prepare` lays the slots out, grows the vertex-space matrices, sorts their keys and
-    numbers the blocks that the reduced entries add to the linear system (`linear_block`)."""
+    `pair_kinds`."""
 
     def __init__(self, linear_maps: list, rigid_map, pair_kinds: list):
         self.linear_maps = participant_group("NewtonContactLinearMaps", linear_maps)
@@ -137,10 +119,7 @@ class NewtonContact(NewtonDevice):
         yield from iter_data(self, "linear_block")
 
     def lay_out_vertices(self) -> None:
-        """Set the offset of every vertex map, in order, from the vertex counts of those before it.
-
-        The map of the Rigid contact points comes last, its count growing with the pairs, so that its growth moves no
-        other offset."""
+        """Set the offset of every vertex map, in order, from the vertex counts of those before it."""
         offset = 0
         for vertex_map in [*self.linear_maps, *([] if self.rigid_map is None else [self.rigid_map])]:
             vertex_map.vertex_offset.fill(offset)

@@ -28,10 +28,7 @@ from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf
 @qd.data_oriented
 class MpmRigidContact(CouplingPairs):
     """Pair kind of the contacts between the material point method (MPM) and Rigid, the pair of a particle and its
-    nearest coupled geom, and with `has_rigid_dofs` the vertex map of their contact points on the links of `rigid`.
-
-    A Rigid without dofs gives a participant that is no member of the solve, and a pair then acts on its particle
-    alone."""
+    nearest coupled geom, and with `has_rigid_dofs` the vertex map of their contact points on the links of `rigid`."""
 
     pairs_type = MpmRigidPairs
 
@@ -77,14 +74,7 @@ class MpmRigidContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_a: int, s: int, phi: float):
         """Pair sorted particle `s` with coupled geom i_a at gap phi if it lies within its soft range or short of it by
-        less than `contact_band_width`.
-
-        The geom's `coup_softness` is a contact margin, so that the resting penetration of the soft row is taken up
-        outside the geom. As in Rigid's contact assembly, the friction coefficient is `max(friction * friction_ratio,
-        0.01)`, the time constant is floored at twice the substep, and every pyramid row `normal + mu d_k` gets Rigid's
-        regularization `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`. The row target
-        `dt J.v_p + dt^2 aref` is on the displacement of the particle relative to the motion of its contact point beyond
-        the link's start velocity (see band_row)."""
+        less than `contact_band_width`."""
         i_g = self.query.coupled_geoms[i_a]
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
@@ -221,11 +211,7 @@ class MpmRigidContact(CouplingPairs):
 
     @qd.func(requires_top_level=True)
     def func_reaction(self, f: int):
-        """Apply the force of the pairs on Rigid at the converged solve, after func_rigid_write_back.
-
-        qfrc_constraint becomes M qacc - qf_smooth, so that dofs.force is M qacc as after Rigid's own solve, the spatial
-        force of the rows on each link stays in `link_force_vel` / `link_force_ang` (in units of dt^2 force), and a link
-        pushed by the rows is marked constrained, which keeps it out of the midpoint integration of free links."""
+        """Apply the force of the pairs on Rigid at the converged solve, after func_rigid_write_back."""
         self.func_vertex_begin(f, SRC_ITERATE)
         qd.loop_config(name="mpm_reaction_pairs")
         for i_pair in range(self.pairs.n_pairs[()]):

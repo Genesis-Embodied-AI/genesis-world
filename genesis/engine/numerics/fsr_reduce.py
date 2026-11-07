@@ -32,7 +32,6 @@ def head_segmented_reduce_add(value, tail_flag, is_max: qd.template() = False):
 
 @qd.func
 def _key_runs(key):
-    """Whether the lane starts and ends a run of equal keys in its warp."""
     lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
     previous_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.max(lane - 1, 0)))
     next_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.min(lane + 1, 31)))
@@ -41,11 +40,7 @@ def _key_runs(key):
 
 @qd.func
 def add_by_key(value, key, out: qd.template(), n_components: qd.template() = 0):
-    """Add the value of an entry into the entry of its key in `out`, an entry of key -1 adding nothing.
-
-    On a GPU, the lanes of a warp hold consecutive entries sorted by key, every lane of the warp takes part, and each
-    run of one key adds its sum by one atomic, a `value` of `n_components` components being reduced component by
-    component. A CPU has no lanes, and every entry adds alone."""
+    """Add the value of an entry into the entry of its key in `out`, an entry of key -1 adding nothing."""
     if qd.static(gs.backend == gs.cpu):
         if key >= 0:
             qd.atomic_add(out[key], value)

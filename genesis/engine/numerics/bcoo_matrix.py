@@ -24,11 +24,7 @@ BLOCK_SCALARS = Size("block_scalars")
 
 
 class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
-    """Block coordinate (BCOO) storage of a sparse matrix and its assembly workspace.
-
-    Writers append (row, column, block) triplets, which `func_sort_reduce_bcoo` sorts by (row, column) and sums into the
-    reduced entries. A symmetric matrix stores its upper triangle only. The capacity in triplets is the shape of the
-    triplet arrays (see bcoo_matrix_sizes)."""
+    """Block coordinate (BCOO) storage of a sparse matrix and its assembly workspace."""
 
     n_triplets: qd.Tensor = field(int, ndarray=True)
     padded_triplets: qd.Tensor = field(int, ndarray=True)
@@ -86,7 +82,6 @@ def func_report_triplet_demand(count: int, matrix: BCOOMatrixScratch):
 
 @qd.func
 def _upper_block(i_r: int, i_c: int, block: qd.template(), is_symmetric: qd.template()):
-    """Row, column and block of a triplet as stored: mirrored into the upper triangle for symmetric storage."""
     row = i_r
     col = i_c
     upper = block
@@ -192,10 +187,8 @@ def func_extract_unique_bcoo_entries(matrix: BCOOMatrixScratch):
 
 @qd.func(requires_top_level=True)
 def func_sort_bcoo(matrix: BCOOMatrixScratch):
-    """Sort the live triplets by (row, column) and number the runs of equal keys, the segments of the reduced entries.
-
-    The sort holds as long as the writers keep the rows and columns of the triplets, for func_reduce_bcoo to sum new
-    values again."""
+    """Sort the live triplets by (row, column) and number the runs of equal keys, the segments of the reduced
+    entries."""
     func_compose_bcoo_sort_keys(matrix)
     func_dynamic_radix_sort(
         matrix.triplet_keys,

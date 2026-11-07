@@ -1,9 +1,5 @@
 """Contact pairs of the implicit material point method (MPM) with position based dynamics (PBD) in the joint Newton
-solve (see pbd_newton.py for the PBD unknown and its stages).
-
-An MPM particle gets a pair of penalty rows against its nearest PBD particle, a sphere of the PBD radius plus a contact
-thickness, on its displacement relative to that of the PBD particle. The pairs are contact pairs of the Newton solve
-(see newton_contact.py)."""
+solve (see pbd_newton.py for the PBD unknown and its stages)."""
 
 import numpy as np
 
@@ -22,11 +18,7 @@ from .contact_candidates import CouplingPairs
 
 
 class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest PBD particle (see MpmPbdContact.build_pair).
-
-    A pair holds its sorted particle `s`, its environment `i_b`, its PBD particle `particle` in PBD's reordered layout,
-    and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with friction coefficient
-    `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    """The pairs of the particles with their nearest PBD particle (see MpmPbdContact.build_pair)."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -79,9 +71,7 @@ class PbdParticleQuery:
 @qd.kernel
 def kernel_fit_pbd_leaves(query: qd.template()):
     """The box of every PBD particle over its sweep from its start to its projected end position, grown by its radius
-    and the contact thickness.
-
-    An inactive particle gets an empty box with a finite center, for the Morton code."""
+    and the contact thickness."""
     reach = qd.static(query.radius) + query.contact.thickness[()]
     for i_b, i_q in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         if query.pbd.solver.particles_ng_reordered[i_q, i_b].active:
@@ -128,11 +118,7 @@ class MpmPbdContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_q: int, s: int, phi: float):
         """Pair sorted particle `s` with PBD particle i_q at gap phi if it lies within its contact range or short of it
-        by less than `contact_band_width`.
-
-        Every row J = n +- mu d of the pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of
-        target -phi and stiffness `query.contact.stiffness` times its effective mass, the inverse of the inverse
-        weights of the two particles."""
+        by less than `contact_band_width`."""
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
         d = self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos
         normal = d / d.norm()

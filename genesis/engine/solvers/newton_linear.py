@@ -1,13 +1,4 @@
-"""Linear system of the joint Newton solve over the rows of every participant that assembles one.
-
-The Newton solver owns one block coordinate (BCOO) matrix of 3 x 3 blocks, its right-hand side `b_rhs`, its solution and
-the vectors of its preconditioned conjugate gradient (PCG). Every participant that assembles its operator owns a range
-of the block rows and of the triplets, laid out at every assembly from its `LinearBlock` (see func_linear_layout), and
-the contacts own a range of their own. The preconditioner is the block diagonal of the participants, whose blocks one
-traverse of the matrix hands to their visitors.
-
-A row whose unknown an owner eliminates takes an identity diagonal block and a zero right-hand side, and every other
-block on it is discarded (see discard_block), so that the row decouples and its solution is exactly zero."""
+"""Linear system of the joint Newton solve over the rows of every participant that assembles one."""
 
 import numpy as np
 
@@ -124,10 +115,7 @@ class BlockJacobiOwner:
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
-        """Invert every diagonal block, equilibrated to a unit diagonal.
-
-        The equilibration keeps the determinant near one where that of a row of vanishing mass would flush to zero in
-        single precision. A block whose equilibrated determinant is not positive takes the identity."""
+        """Invert every diagonal block, equilibrated to a unit diagonal."""
         qd.loop_config(name="newton_block_jacobi_invert")
         for i_r in range(self.linear_block.n_rows[()]):
             D = self.jacobi.blocks[i_r]
@@ -195,5 +183,5 @@ def write_block(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), linear: 
 
 @qd.func
 def discard_block(i_t: int, linear: NewtonLinearScratch):
-    """Discard triplet slot `i_t`, that of a block on an eliminated row (see the module docstring)."""
+    """Discard triplet slot `i_t`, that of a block on an eliminated row."""
     func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)

@@ -1,15 +1,4 @@
-"""Layer-1 stages of the adjoint of the implicit material point method (MPM) substep.
-
-The substep maps the particle state p of frame f to frame f + 1 through the grid displacement u* with grad_u E(u*, p) =
-0. Its backward pass consumes the adjoint of frame f + 1 in the `.grad` of the particle arrays and adds that of frame f
-in four steps:
-
-1. the reverse of the grid-to-particle transfer (G2P) and of the advection, giving the adjoint u_bar of u*, 2. the
-adjoint solve H lambda = u_bar by the preconditioned conjugate gradient (PCG) of the forward solve, 3. the
-implicit-function pullback p_bar = -(d grad_u E / dp)^T lambda over the kinetic, elastic, wall and spring terms, 4. the
-reverse of the particle-to-grid transfer (P2G).
-
-The gradients are approximate where the projection clamps a mode of the elastic Hessian."""
+"""Layer-1 stages of the adjoint of the implicit material point method (MPM) substep."""
 
 import quadrants as qd
 
@@ -68,11 +57,7 @@ def return_map_vjp(
     mpm_info: MpmInfo,
 ):
     """Reverse of `return_map`: the adjoints of the trial deformation gradient F and of the plastic state Jp, given
-    F_new_bar and Jp_new_bar.
-
-    Every map but the liquid's is the isotropic matrix function F_new = U diag(h(sigma, Jp)) V^T, which reverses by its
-    differential with the transposed Jacobian dh/dsigma, plus the dependence of Jp_new on sigma. The liquid's F_new =
-    J^(1/3) I reverses through det F where the clamp of J is inactive."""
+    F_new_bar and Jp_new_bar."""
     F_bar = F_new_bar
     Jp_bar = Jp_new_bar
     if kind == PLASTIC_LIQUID:
@@ -99,10 +84,7 @@ def return_map_vjp(
 def band_row_bw(
     sol_params: qd.types.vector(7), phi: float, vel: float, diag_coef: float, dt: float, D_bar: float, t_bar: float
 ):
-    """Reverse of `band_row` (see soft_row), from the adjoints of the coefficients of a row to those of its inputs.
-
-    Returns the adjoints of phi, vel and diag_coef, given D_bar and t_bar, the adjoints of the coefficients D and t.
-    """
+    """Reverse of `band_row` (see soft_row), from the adjoints of the coefficients of a row to those of its inputs."""
     phi_bar = gs.qd_float(0.0)
     vel_bar = gs.qd_float(0.0)
     width = sol_params[4]
@@ -210,11 +192,7 @@ def func_constraint_adjoint(
     constraints: qd.template(),
 ):
     """Pull the constraint springs (see func_build_constraint_rows) back into the adjoints of frame f of the particles
-    and of the poses of the links that hold them.
-
-    A spring adds delta . g to lambda^T grad_u E, with g = kappa (x + Delta - T) + gamma Delta, kappa = dt^2 k, gamma =
-    dt c, Delta = sum_a w_a u_a and delta = sum_a w_a lambda_a. Hence x_bar = -[kappa delta + sum_a (lambda_a . g +
-    (kappa + gamma) u_a . delta) grad w_a] and T_bar = kappa delta."""
+    and of the poses of the links that hold them."""
     qd.loop_config(name="mpm_constraint_adjoint")
     for s in range(grid.n_valid[()]):
         spring = newton.constraint_spring[s]
@@ -260,10 +238,7 @@ def func_adjoint_g2p(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Reverse of the grid-to-particle transfer (G2P) and of the advection, from the adjoint of the next frame.
-
-    The forward maps are x' = x + dt v, v = sum_a w_a u_a / dt, C = sum_a u_a grad w_a^T / dt and (F', Jp') =
-    return_map((I + dt C) F, Jp). The direct terms add to frame f, and the adjoint of u* to `newton.du`."""
+    """Reverse of the grid-to-particle transfer (G2P) and of the advection, from the adjoint of the next frame."""
     qd.loop_config(name="mpm_adjoint_g2p")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)
@@ -329,11 +304,7 @@ def func_adjoint_nodes(
     mpm_info: MpmInfo,
 ):
     """Pull lambda back through the kinetic term and reverse the free velocity of every node into `newton.adj_mom` and
-    `newton.adj_mass`.
-
-    From grad_{u_a} E = m_a (u_a - dt v_free_a): v_free_bar = m_a dt lambda_a and m_bar = -lambda_a . (u_a - dt
-    v_free_a), the force fields adding dt (d acc / dv)^T v_free_bar to v_bar (see 'ForceField.get_acc_vel_vjp'). A fixed
-    or massless node gets zero adjoints."""
+    `newton.adj_mass`."""
     qd.loop_config(name="mpm_adjoint_nodes")
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):
         mass = grid.node_mass[node]
@@ -371,12 +342,7 @@ def func_adjoint_particles(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Pull lambda back through the elastic term and reverse the particle-to-grid transfer (P2G) of valid particles.
-
-    With A = I + sum_a u_a grad w_a^T, Lambda = sum_a lambda_a grad w_a^T and F_trial = A F, the elastic gradient gives
-    phi = V dt^2 P(F_trial) : (Lambda F) and p_bar = -d phi / dp: F_bar -= V dt^2 (A^T Q + Lambda^T P) with Q =
-    dP[Lambda F], and x_bar -= V dt^2 sum_a H_a F (Q^T u_a + P^T lambda_a) through the weight Hessians H_a. P2G then
-    reverses into v, C and x from the node adjoints."""
+    """Pull lambda back through the elastic term and reverse the particle-to-grid transfer (P2G) of valid particles."""
     qd.loop_config(name="mpm_adjoint_particles")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(s, grid, mpm_info)

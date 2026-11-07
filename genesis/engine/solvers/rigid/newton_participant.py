@@ -225,9 +225,7 @@ class RigidNewtonHost(NewtonHost):
         self._rigid_solver.integrate_deferred_substep()
 
     def newton_backward(self, f, solve):
-        """Reverse Rigid's constraint solve, with its adjoint solve run jointly with the other participants.
-
-        `solve` runs the joint adjoint solve."""
+        """Reverse Rigid's constraint solve, with its adjoint solve run jointly with the other participants."""
         self._rigid_solver._constraint_force_grad(solve_adjoint=solve)
 
     def newton_adjoint_rhs(self, f):

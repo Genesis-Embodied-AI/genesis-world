@@ -1,10 +1,4 @@
-"""Global Newton solver of the implicit solvers that couple strongly.
-
-One Newton solve per substep minimizes the sum of the participants' incremental potentials and of their contacts, with a
-line search on the total energy. The participants that assemble their operator (MPM, FEM, PBD) own a range of the rows
-of one linear system (see newton_linear.py), to which their contacts add their blocks (see newton_contact.py). Rigid
-solves its own rows within the same preconditioned conjugate gradient (PCG), matrix-free. The participants enter the
-kernels as one template argument, `NewtonParticipants`."""
+"""Global Newton solver of the implicit solvers that couple strongly."""
 
 import collections
 import functools
@@ -69,11 +63,7 @@ DEFAULT_ADJOINT_PCG_TOL = {64: 1e-24, 32: 1e-12}
 
 @qd.data_oriented
 class NewtonParticipants:
-    """Participants of a Newton solve, their contacts and their linear system, gathered into one kernel argument.
-
-    `owners` is a @qd.data_oriented NamedTuple (see `participant_group`) of the participants that assemble their share
-    of `linear`, `rigid` the participant of Rigid or None, and `members` all of them. `contact` is the NewtonContact of
-    the solve or None. They stay members of this object, which the kernel cache can weakly reference."""
+    """Participants of a Newton solve, their contacts and their linear system, gathered into one kernel argument."""
 
     def __init__(self, owners: list, rigid, contact, linear: NewtonLinearScratch):
         self.owners = participant_group("NewtonOwners", owners)
@@ -95,10 +85,8 @@ class NewtonDevice:
 
 
 def participant_group(name: str, devices: list):
-    """Gather the device objects of several participants into a @qd.data_oriented NamedTuple, which qd.static iterates.
-
-    Quadrants declares the arrays a kernel reaches through a template argument by walking its @qd.data_oriented members.
-    """
+    """Gather the device objects of several participants into a @qd.data_oriented NamedTuple, which qd.static
+    iterates."""
     fields = [f"member_{i}" for i in range(len(devices))]
     # FIXME: quadrants#1040 - the walk of the arguments reads the members of a data-oriented object through vars(),
     # which a NamedTuple has none of. A subclass without __slots__ carries a __dict__, which holds the members under
@@ -110,12 +98,7 @@ def participant_group(name: str, devices: list):
 
 
 class NewtonHost:
-    """Host stages of a participant or a coupling around the Newton solve of a substep, which do nothing by default.
-
-    `newton_begin` runs before the pre-coupling phase of every solver. A participant reverses the part of its substep
-    that the solve takes over around the adjoint solve (`newton_backward`) and flags the solves stopped on a non-finite
-    measure (`newton_flag_non_finite`). `newton_finish` and `newton_end` leave the environments of
-    `control.has_failed_non_finite` as they were at the substep start."""
+    """Host stages of a participant or a coupling around the Newton solve of a substep, which do nothing by default."""
 
     is_differentiable = False
 
@@ -149,9 +132,8 @@ class NewtonHost:
 
 @qd.func(requires_top_level=True)
 def func_assemble_terms(f: int, participants: qd.template(), is_exact: qd.template()):
-    """Assemble the Newton system at the current iterate but for the reduction of the matrix: every owner of rows
-    writes its blocks and its gradient into the linear system and Rigid assembles its own, then the contacts add
-    theirs."""
+    """Assemble the Newton system at the current iterate but for the reduction of the matrix: every owner of rows writes
+    its blocks and its gradient into the linear system and Rigid assembles its own, then the contacts add theirs."""
     for member in qd.static(participants.members):
         member.func_assemble(f, is_exact)
     if qd.static(participants.has_contact):
@@ -172,11 +154,7 @@ def func_pcg_start(
     participants: qd.template(),
     is_adjoint: qd.template(),
 ):
-    """Build the preconditioner and start the preconditioned conjugate gradient from 0 over all the rows.
-
-    The owners take their diagonal blocks from one traverse of the matrix (see func_linear_visit), and the contacts add
-    theirs on Rigid, before they factor them. The environments whose Newton solve stopped take no part, except in an
-    adjoint solve."""
+    """Build the preconditioner and start the preconditioned conjugate gradient from 0 over all the rows."""
     func_pcg_select_envs(pcg_scalars, newton_control, is_adjoint)
     func_pcg_reset(pcg_scalars)
     for member in qd.static(participants.members):
@@ -225,10 +203,7 @@ def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.temp
 
 @qd.func(requires_top_level=True)
 def func_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
-    """Start the line search and set the Newton direction of every participant from the conjugate gradient solution.
-
-    The participants report the measure of the direction, on which the convergence is checked, and may lower the start
-    step of the line search below its full value."""
+    """Start the line search and set the Newton direction of every participant from the conjugate gradient solution."""
     func_reset_newton_measures(newton_control)
     func_init_line_search(newton_control)
     for member in qd.static(participants.members):
@@ -245,8 +220,7 @@ def func_step_forward(f: int, newton_control: qd.template(), participants: qd.te
 
 @qd.func(requires_top_level=True)
 def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
-    """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs
-    to."""
+    """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs to."""
     func_reset_energy(newton_control, is_trial)
     if qd.static(is_trial):
         func_add_energies(f, participants, newton_control.energy_trial)
@@ -354,11 +328,7 @@ def kernel_newton_loop(f: int, newton_control: qd.template(), pcg_scalars: qd.te
 
 
 class NewtonSolver(Solver):
-    """Solver running one Newton solve per substep over the participants registered into it (see the module docstring).
-
-    It owns no physical state, and runs its substep at the start of the post-coupling phase. The coupler registers every
-    participant and coupling (see LegacyCoupler) as a host object (see NewtonHost) and a device object, with the
-    contacts of the solve (see NewtonContact)."""
+    """Solver running one Newton solve per substep over the participants registered into it."""
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "NewtonOptions"):
         super().__init__(scene, sim, options)
@@ -380,11 +350,7 @@ class NewtonSolver(Solver):
 
     def register(self, owners, rigid, couplings, contact, host_only_devices=()):
         """Register the participants of the Newton solve and the couplings between them, each as a pair of its host
-        object and its device object, and the contacts of the solve, which activates the solver.
-
-        `owners` assemble their share of the linear system, and `rigid`, the participant of Rigid or None, solves its
-        own rows. The device of a coupling is a pair kind of `contact`. `host_only_devices` lists the devices that the
-        solve reads without being participants of it."""
+        object and its device object, and the contacts of the solve, which activates the solver."""
         participants = [*owners, *([] if rigid is None else [rigid])]
         options = self._options
         self.control = NewtonControl(
@@ -441,14 +407,9 @@ class NewtonSolver(Solver):
 
     @property
     def _max_linear_rows(self):
-        """Block rows that the owners of the linear system can hold at their capacity."""
         return sum(device.max_linear_rows for device in self._owner_devices)
 
     def _prepare_linear(self):
-        """Lay the linear system out for the substep, once every owner and the contacts reported their counts, and grow
-        it to them.
-
-        The rows grow with the capacity of the owners, and the triplets with the demand of the layout."""
         participants = self._participants
         kernel_linear_layout(participants)
         linear = participants.linear
@@ -463,7 +424,6 @@ class NewtonSolver(Solver):
             kernel_linear_layout(participants)
 
     def _bind_linear(self, linear: NewtonLinearScratch):
-        """Hand the linear system to the solve and to every owner of its rows, which reads it as `linear`."""
         self._participants.linear = linear
         for device in self._owner_devices:
             device.linear = linear
@@ -474,8 +434,6 @@ class NewtonSolver(Solver):
 
     @property
     def _is_joint(self):
-        """Whether the device stages of the solve read the data of another solver than MPM, a participant or the partner
-        of a coupling."""
         return len(self._participant_hosts) > 1 or bool(self._coupling_hosts)
 
     def begin(self, f):
@@ -487,11 +445,7 @@ class NewtonSolver(Solver):
 
     def step(self, f):
         """Run the Newton solve of substep `f`: the preparation of the participants, the start energy, the Newton
-        iterations and the hand-back of the solution.
-
-        The launches form one entry of the step recorded for `backward`, which differentiates the solve by the implicit
-        function theorem. An environment whose solve stopped on a non-finite measure keeps its state for the rest of the
-        step, which raises for it at its end (see `_check_failures`)."""
+        iterations and the hand-back of the solution."""
         if not self.is_active:
             return
         with custom_backward(self.backward, f):
@@ -516,9 +470,6 @@ class NewtonSolver(Solver):
             )
 
     def _check_failures(self):
-        """Report the solves that failed since the last check: the non-finite ones to every participant, an error being
-        raised at the beginning of the next step, and those that reached `max_iterations` as a warning, every
-        `failure_check_interval` substeps."""
         control = self.control
         sim = self._sim
         if (sim.cur_substep_global + 1) % sim._substeps == 0:
@@ -581,10 +532,6 @@ class NewtonSolver(Solver):
             host.newton_adjoint_rhs(f)
 
     def _pcg_adjoint(self, f, check_curvature=False):
-        """Solve the staged adjoint system by the conjugate gradient, over the environments of `is_env_adjoint`.
-
-        With `check_curvature`, meant for a Hessian without positive definite projection, returns for every environment
-        whether its solve met a direction of non-positive curvature."""
         pcg_scalars = self.pcg_scalars
         pcg_scalars.tol_rate.from_numpy(np.array(self._adjoint_pcg_tol, dtype=gs.np_float))
         pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
@@ -624,8 +571,6 @@ class NewtonSolver(Solver):
         sort_reduce_bcoo(self._participants.linear.matrix, block_scalars=9)
 
     def _pcg(self, f, is_adjoint=False):
-        """Run the conjugate gradient iterations of a substep from its staged right-hand side, as one graph, over the
-        environments whose Newton solve runs, or every environment with `is_adjoint`."""
         participants = self._participants
         pcg_scalars = self.pcg_scalars
         kernel_pcg_start(f, self.control, pcg_scalars, participants, is_adjoint)

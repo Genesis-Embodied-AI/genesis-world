@@ -1,12 +1,6 @@
 """Coupling of the implicit material point method (MPM) solver with smoothed particle hydrodynamics (SPH), the MPM
 particles acting as boundary particles of the fluid (Akinci et al. 2012, with the divergence-free SPH (DFSPH) boundary
-terms of Bender and Koschier 2017).
-
-An MPM particle b of volume V_b counts in the density of a fluid particle i as rho0 V_b W_ib. Over one SPH step the
-boundary enters every stage through three sums per fluid particle, gathered once: sum_b V_b W_ib, sum_b V_b grad W_ib
-and sum_b V_b v_b . grad W_ib. The boundary changes the velocity of fluid particle i by s_i sum_b V_b grad W_ib, s_i
-being set by the equation of state of the weakly compressible SPH (WCSPH) or the DFSPH stiffness, and every MPM particle
-takes the opposite impulse -m_i s_i V_b grad W_ib before its particle-to-grid transfer."""
+terms of Bender and Koschier 2017)."""
 
 import quadrants as qd
 
@@ -18,11 +12,7 @@ from genesis.utils.array_class import BVHQueryResults
 
 @qd.data_oriented
 class MpmSphBoundary:
-    """The MPM particles at the start of the substep as boundary particles of SPH (see SPHSolver.set_boundary).
-
-    It holds a linear bounding volume hierarchy (LBVH) over them for every environment, the impulse of every MPM
-    particle at [i_p, i_b], and the boundary sums and velocity coefficient `s` of every reordered SPH particle at [i_s,
-    i_b]."""
+    """The MPM particles at the start of the substep as boundary particles of SPH (see SPHSolver.set_boundary)."""
 
     def __init__(self, mpm_solver, sph, mpm_info, n_envs):
         self.mpm_particles = mpm_solver.particles
@@ -45,9 +35,7 @@ class MpmSphBoundary:
         self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
-        """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep.
-
-        The leaves sit at the MPM particles of frame f."""
+        """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep."""
         kernel_fit_mpm_particle_leaves(f, self)
         build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
 
@@ -67,9 +55,7 @@ class MpmSphBoundary:
 
 @qd.kernel
 def kernel_fit_mpm_particle_leaves(f: int, boundary: qd.template()):
-    """A point leaf at every active MPM particle, and an empty box with a finite center at the others.
-
-    The particles are those of frame f, which the kernel stores in `boundary.frame` for the filters."""
+    """A point leaf at every active MPM particle, and an empty box with a finite center at the others."""
     for _ in range(1):
         boundary.frame[()] = f
     for i_b, i_p in qd.ndrange(boundary.leaves.aabbs_min.shape[0], boundary.leaves.aabbs_min.shape[1]):
@@ -84,9 +70,7 @@ def kernel_fit_mpm_particle_leaves(f: int, boundary: qd.template()):
 
 @qd.func
 def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
-    """Add an MPM particle to the boundary sums of an SPH particle if it lies within the kernel support.
-
-    The MPM particle is i_a and the SPH particle i_q of environment i_t. The filter records no pair."""
+    """Add an MPM particle to the boundary sums of an SPH particle if it lies within the kernel support."""
     f = boundary.frame[()]
     sph = boundary.sph
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
@@ -103,9 +87,7 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
 
 @qd.func
 def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
-    """Give an MPM particle within the kernel support of an SPH particle its impulse -m_i s_i V_b grad W_ib.
-
-    The MPM particle is i_a and the SPH particle i_q of environment i_t. The filter records no pair."""
+    """Give an MPM particle within the kernel support of an SPH particle its impulse -m_i s_i V_b grad W_ib."""
     f = boundary.frame[()]
     sph = boundary.sph
     r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]

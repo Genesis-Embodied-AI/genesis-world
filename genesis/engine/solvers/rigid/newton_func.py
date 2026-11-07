@@ -1,11 +1,5 @@
-"""Stages of Rigid's dofs as a participant of the NewtonSolver, in the joint solve with the solvers coupled with Rigid.
-
-The Rigid unknown is x = dt^2 qacc per dof, so that a link point moves by dt v + J_pt x over the substep. Rigid's convex
-primal cost times dt^4 joins the joint energy, with gradient dt^2 times that of Rigid and Hessian M + J^T D J. Rigid's
-block of the preconditioner is its island Cholesky factor of that Hessian plus the contact stiffness of its links (see
-func_add_link_stiffness_island). A point at arm r from the root center of mass (COM) of its link moves by V_lin + V_ang
-x r for the link's spatial displacement V = sum over its chain of cdof x_d, and a force g on it pushes the chain with
-the spatial force (g, r x g)."""
+"""Stages of Rigid's dofs as a participant of the NewtonSolver, in the joint solve with the solvers coupled with
+Rigid."""
 
 import quadrants as qd
 
@@ -35,11 +29,7 @@ LINKS = Size("links")
 
 
 class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
-    """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors.
-
-    `qacc`, `Ma` and `cost` hold Rigid's evaluation of x = dt^2 qacc, and `r`, `z`, `p`, `ap` and `sol` its rows of the
-    conjugate gradient. Per link, `link_motion_vel` / `link_motion_ang` hold the spatial displacement of a dof vector
-    and `link_force_vel` / `link_force_ang` accumulate a spatial force, about the root center of mass."""
+    """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors."""
 
     x: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     x_temp: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
@@ -73,9 +63,7 @@ def func_link_spatial_disp(
     links_info: LinksInfo,
     config: qd.template(),
 ):
-    """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link.
-
-    The displacement is the sum over the dofs of the chain of the link of cdof src_d."""
+    """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link."""
     n_links = rigid_data.link_motion_vel.shape[0]
     n_envs = rigid_data.link_motion_vel.shape[1]
     qd.loop_config(name="mpm_link_spatial_disp")
@@ -104,9 +92,7 @@ def func_link_force_to_dofs(
     links_info: LinksInfo,
     config: qd.template(),
 ):
-    """Add the generalized force of the spatial forces accumulated on the links to a dof vector.
-
-    out_d += scale cdof_d . f over the links whose chain holds dof d, with f the spatial force of the link."""
+    """Add the generalized force of the spatial forces accumulated on the links to a dof vector."""
     n_links = rigid_data.link_force_vel.shape[0]
     n_envs = rigid_data.link_force_vel.shape[1]
     qd.loop_config(name="mpm_link_force_to_dofs")
@@ -143,10 +129,7 @@ def func_rigid_begin(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Start the Rigid unknown from Rigid's warm start and group Rigid's assembled rows by island.
-
-    The start point matches that of Rigid's own solve. Every island is marked as iterating, so that the factor covers
-    every dof, including those of islands without rows."""
+    """Start the Rigid unknown from Rigid's warm start and group Rigid's assembled rows by island."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     dt = newton_info.substep_dt[()]
@@ -224,9 +207,7 @@ def func_rigid_gradient(
     newton_info: RigidNewtonInfo,
     config: qd.template(),
 ):
-    """Compute the gradient of Rigid's share of the joint energy in x, after func_rigid_evaluate at the current x.
-
-    The gradient is dt^2 (M qacc - qf_smooth - qfrc_constraint)."""
+    """Compute the gradient of Rigid's share of the joint energy in x, after func_rigid_evaluate at the current x."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
@@ -249,10 +230,7 @@ def rigid_solve(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Solve the Rigid block system of one environment by Rigid's own factors.
-
-    out = A^-1 rhs in environment i_b, with A = M + J^T D J by Rigid's island Cholesky factor, or A = M by Rigid's mass
-    factor in a scene without Rigid constraint rows."""
+    """Solve the Rigid block system of one environment by Rigid's own factors."""
     if qd.static(config.has_rigid_rows):
         for i_island in range(constraint_state.island.n_islands[i_b]):
             func_cholesky_solve_batch(
@@ -282,10 +260,7 @@ def func_add_link_stiffness_island(
     config: qd.template(),
 ):
     """Add the contact stiffness J_l^T K_l J_l of every link of an island to the lower triangle of its Hessian block,
-    J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see link_K).
-
-    The entries couple dofs of one chain, within the skyline envelope of the block, and take the Jacobi equilibration of
-    the block (see func_hessian_direct_batch)."""
+    J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see link_K)."""
     for i_l in range(rigid_data.link_K.shape[0]):
         K = rigid_data.link_K[i_l, i_b]
         if K.norm_sqr() > 0.0:
@@ -333,9 +308,7 @@ def func_rigid_precondition(
 
 @qd.func(requires_top_level=True)
 def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template(), is_adjoint: qd.template()):
-    """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared.
-
-    With `is_adjoint`, an environment left out of the solve keeps its solution (see func_init_linear_pcg_residual)."""
+    """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_pcg_init")
@@ -461,10 +434,7 @@ def func_rigid_step_forward(rigid_data: RigidNewtonScratch, control: qd.template
 
 @qd.func(requires_top_level=True)
 def func_rigid_write_back(rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, config: qd.template()):
-    """Hand the converged qacc to Rigid as the solution of its constraint solve.
-
-    Runs after func_rigid_evaluate at the converged x, which left the row activity, forces and qfrc_constraint of Rigid
-    consistent with it."""
+    """Hand the converged qacc to Rigid as the solution of its constraint solve."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_write_back")
@@ -478,10 +448,7 @@ def func_rigid_write_back(rigid_data: RigidNewtonScratch, constraint_state: Cons
 def func_rigid_adjoint_rhs(
     rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
 ):
-    """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts.
-
-    The right-hand side is the adjoint of x = dt^2 qacc, dL/dqacc / dt^2, with dL/dqacc as taken by Rigid's own adjoint
-    solve (see ConstraintSolver.backward)."""
+    """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])
@@ -494,10 +461,7 @@ def func_rigid_adjoint_rhs(
 def func_rigid_adjoint_finish(
     rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
 ):
-    """Set the solution of Rigid's adjoint solve from that of the joint one.
-
-    Rigid's share of the joint energy is dt^4 times its cost of x / dt^2, whose gradient in the parameters of Rigid's
-    rows is dt^2 times that of its cost, so u = dt^2 lambda_x."""
+    """Set the solution of Rigid's adjoint solve from that of the joint one."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]

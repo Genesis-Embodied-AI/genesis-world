@@ -1,9 +1,5 @@
 """Contact pairs of the material point method (MPM) with the implicit finite element method (FEM) in the joint Newton
-solve (see fem_newton.py for the FEM unknown and its stages).
-
-An MPM particle gets a pair of penalty rows against its nearest FEM surface triangle, at its signed distance minus a
-contact thickness, on its displacement relative to that of its closest point, the barycentric combination of the
-triangle's vertex displacements. The pairs are contact pairs of the Newton solve (see newton_contact.py)."""
+solve (see fem_newton.py for the FEM unknown and its stages)."""
 
 import numpy as np
 
@@ -28,11 +24,7 @@ TIE_DIST_RATIO = 1e-6
 
 
 class MpmFemPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest FEM surface triangle (see MpmFemContact.build_pair).
-
-    A pair holds its sorted particle `s`, its environment `i_b`, its triangle `tri`, the barycentric coordinates `bary`
-    of the closest point, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with
-    friction coefficient `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    """The pairs of the particles with their nearest FEM surface triangle (see MpmFemContact.build_pair)."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -53,9 +45,7 @@ def closest_point_barycentric(
     p: qd.types.vector(3), a: qd.types.vector(3), b: qd.types.vector(3), c: qd.types.vector(3)
 ):
     """Barycentric coordinates of the closest point of a triangle to a point (Ericson 2005, Real-Time Collision
-    Detection, Sec. 5.1.5).
-
-    The coordinates are those of the point of triangle abc closest to p, in the order a, b, c."""
+    Detection, Sec. 5.1.5)."""
     ab = b - a
     ac = c - a
     ap = p - a
@@ -99,9 +89,7 @@ def closest_point_barycentric(
 
 @qd.func
 def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.template()):
-    """Whether a point lies in a tetrahedral element, by its barycentric coordinates.
-
-    The point is x and the element i_e of environment i_b, at frame f. A degenerate element holds no point."""
+    """Whether a point lies in a tetrahedral element, by its barycentric coordinates."""
     el2v = fem.solver.elements_i[i_e].el2v
     v3 = fem.solver.elements_v[f, el2v[3], i_b].pos
     D = qd.Matrix.cols([fem.solver.elements_v[f, el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
@@ -170,12 +158,7 @@ def kernel_fit_triangle_leaves(f: int, query: qd.template()):
 
 @qd.func
 def triangle_closest_point(f: int, s: int, i_b: int, i_s: int, x: qd.types.vector(3), fem: qd.template()):
-    """The closest point of a FEM surface triangle to the position `x` of sorted particle `s`, at frame `f`.
-
-    Returns whether the triangle may hold the particle, its unsigned distance, the alignment of its normal with the
-    direction to the particle, the signed distance along its normal, the barycentric coordinates of the closest point
-    and the contact normal. A particle behind the plane of a triangle is kept only if it lies in the box of the element
-    behind the triangle, so that penetration deeper than the surface elements gives no pair."""
+    """The closest point of a FEM surface triangle to the position `x` of sorted particle `s`, at frame `f`."""
     tri2v = fem.solver.surface[i_s].tri2v
     a = fem.solver.elements_v[f, tri2v[0], i_b].pos
     b = fem.solver.elements_v[f, tri2v[1], i_b].pos
@@ -234,12 +217,7 @@ class MpmFemContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_s: int, s: int, dist: float):
         """Pair sorted particle `s` with its nearest FEM surface triangle i_s if it lies within its contact range or
-        short of it by less than `contact_band_width`.
-
-        The gap phi is the signed distance minus `query.contact.thickness`, and every row J = n +- mu d of the friction
-        pyramid is a penalty on the end gap phi + J.r of the relative displacement r, of target -phi and stiffness
-        `query.contact.stiffness` times its effective mass, the inverse of the inverse weights of the particle and of
-        the triangle point. The friction coefficient is the element's, at least MIN_FRICTION."""
+        short of it by less than `contact_band_width`."""
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         is_valid, dist, align, signed_dist, bary, normal = triangle_closest_point(f, s, i_b, i_s, x_p, self.fem)

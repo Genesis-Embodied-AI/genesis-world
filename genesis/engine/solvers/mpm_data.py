@@ -1,8 +1,5 @@
 """Data of the implicit material point method (MPM) solver: the material table, the sparse grid rebuilt every substep,
-and the Newton state over the grid displacement.
-
-The grid and Newton structs are built at a capacity in blocks, which grows by building them again and swapping
-them on the participant of the Newton solve (see MpmNewtonParticipant)."""
+and the Newton state over the grid displacement."""
 
 import numpy as np
 import quadrants as qd
@@ -117,11 +114,7 @@ def _padded(length: int, multiple: int = REDUCE_BLOCK) -> int:
 
 
 class MpmGridScratch(Data, kind=DataKind.SCRATCH):
-    """Block-sparse grid rebuilt from the particles every substep.
-
-    Particles are sorted by (environment, block, cell), every particle block activating its positive-octant neighbour
-    blocks. A block slot is the rank of its key among the sorted unique keys, and a node or cell slot is `block_slot *
-    BLOCK_CELLS + local index`."""
+    """Block-sparse grid rebuilt from the particles every substep."""
 
     errors: MpmErrno = requires()
     # Number of particle keys sorted, n_envs * n_particles

@@ -96,13 +96,7 @@ def material_table_column(material):
 
 @qd.data_oriented
 class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
-    """Grid displacement as a participant of the NewtonSolver.
-
-    It owns the rows of the grid nodes in the linear system `linear` from `linear_block` on (see newton_linear.py),
-    which it assembles and preconditions by block Jacobi, and it is the one holder of the grid, the Newton state and
-    the diagonal blocks (see `replace_scratch`). It is also the vertex map of the sorted particles in the contacts of
-    the solve, a particle moving by sum_a w_a u_a over the movable nodes of its stencil, and the pair kind of their
-    domain-wall pairs `wall_pairs`."""
+    """Grid displacement as a participant of the NewtonSolver."""
 
     # A wall pair writes the gradient and the Hessian of its row on its particle alone
     n_doublets = 1
@@ -253,10 +247,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
 @qd.data_oriented
 class MPMSolver(ParticleSolver):
-    """Implicit material point method.
-
-    Every substep solves for the grid node displacement that minimizes the incremental potential of the grid inertia and
-    the particle elastic energy on a block-sparse grid, in the joint Newton solve of the simulator."""
+    """Implicit material point method."""
 
     material_cls = MPM.Base
     has_frames = True
@@ -348,9 +339,7 @@ class MPMSolver(ParticleSolver):
         )
 
     def init_implicit_data(self):
-        """Allocate the data of the implicit step at the smallest capacity.
-
-        The first substep sizes it to the particles, and later substeps grow it when the grid or matrix overflows."""
+        """Allocate the data of the implicit step at the smallest capacity."""
         n_sort = self._B * self._n_particles
         max_blocks = MIN_BLOCKS
         self._is_mpm_sized = False
@@ -405,9 +394,6 @@ class MPMSolver(ParticleSolver):
         return self, self._newton_participant
 
     def _liquid_band(self):
-        """Return the width in volume ratio over which the stiffness of a liquid rises below J = 1: the volume change of
-        a cell under the displacement of `MPMOptions.liquid_smoothing_velocity` over a substep, by default the velocity
-        tolerance of the Newton solve, under which the solve does not resolve the motion anyway."""
         velocity = self._options.liquid_smoothing_velocity
         if velocity is None:
             velocity = self._scene.options.newton.velocity_tol
@@ -421,8 +407,6 @@ class MPMSolver(ParticleSolver):
         return band
 
     def _wall_sol_params(self):
-        """Return the solref / solimp parameters of the wall rows: Rigid's defaults, with `MPMOptions.wall_timeconst`
-        floored at twice the substep as Rigid floors its contacts."""
         params = gu.default_solver_params()
         params[0] = max(self._options.wall_timeconst, 2.0 * self.substep_dt)
         return tuple(float(p) for p in params)
@@ -525,9 +509,6 @@ class MPMSolver(ParticleSolver):
             self._init_contact_invweight()
 
     def _init_contact_invweight(self):
-        """Compute the inverse weight of every particle in its contact rows (see func_contact_invweight), a model
-        constant of the configuration the particles are added in, as Rigid's inverse weights are of its initial mass
-        matrix. A particle inactive there keeps the inverse of its own mass."""
         participant = self._newton_participant
         self._predict(0, t=0.0)
         kernel_contact_invweight(
@@ -541,8 +522,6 @@ class MPMSolver(ParticleSolver):
         )
 
     def _predict(self, f, t):
-        """Build the grid of frame `f`, grown until it holds the particles, and transfer the particles to it at time
-        `t`."""
         if not self._is_mpm_sized:
             self._size_to_particles(f)
         participant = self._newton_participant
@@ -618,8 +597,6 @@ class MPMSolver(ParticleSolver):
     @no_grad
     @qd.kernel
     def _kernel_flag_newton_non_finite(self, control: qd.template()):
-        """Flag INVALID_MPM_SOLVE_NAN for every environment whose Newton solve stopped on a non-finite measure since the
-        Newton solver last cleared the latch (see NewtonControl)."""
         for i_b in range(self.mpm_errno.errno.shape[0]):
             if control.has_failed_non_finite[i_b] != 0:
                 self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
@@ -632,8 +609,6 @@ class MPMSolver(ParticleSolver):
         pass
 
     def _resize_blocks(self, max_blocks):
-        """Build the grid, the Newton state and the diagonal blocks again for a new capacity of node blocks, and swap
-        them on the participant, the grid carrying no state across substeps."""
         n_sort = self._B * self._n_particles
         with namespace(self._namespace):
             grid = build_mpm_grid(n_sort, max_blocks)
@@ -1354,9 +1329,7 @@ def kernel_grid_cells(grid: MpmGridScratch):
 
 
 def build_grid(particles, particles_ng, grid, mpm_info, f):
-    """Rebuild the block-sparse grid of the substep from the particles, its topology fixed until the next substep.
-
-    The stages launch from the host, the sorts and scans running as launches of their own."""
+    """Rebuild the block-sparse grid of the substep from the particles, its topology fixed until the next substep."""
     kernel_grid_keys(f, particles, particles_ng, grid, mpm_info)
     dynamic_radix_sort(
         grid.particle_sort,
@@ -1492,9 +1465,8 @@ def kernel_adjoint_g2p(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Compute the adjoint of u* into `newton.du` and the direct terms of the adjoint of the start frame of the substep.
-
-    See mpm_adjoint_func."""
+    """Compute the adjoint of u* into `newton.du` and the direct terms of the adjoint of the start frame of the
+    substep."""
     dt = mpm_info.substep_dt[()]
     mpm_adjoint_func.func_adjoint_reset_u_bar(grid, newton)
     mpm_adjoint_func.func_adjoint_g2p(f, dt, particles, grid, newton, particles_info, materials, mpm_info)
@@ -1522,11 +1494,7 @@ def kernel_adjoint_pullback(
     force_fields: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Pull the adjoint solution back into the start frame of a substep, then clear the adjoint of its end frame.
-
-    The pullback includes the share of the wall pairs and the reverse of the particle-to-grid transfer into frame `f`,
-    and the adjoint of frame `f + 1` is cleared after it (see mpm_adjoint_func). `t` is the time at which the forward
-    substep evaluated the force fields."""
+    """Pull the adjoint solution back into the start frame of a substep, then clear the adjoint of its end frame."""
     dt = mpm_info.substep_dt[()]
     mpm_adjoint_func.func_adjoint_nodes(t, dt, grid, newton, linear, rows, force_fields, mpm_info)
     mpm_adjoint_func.func_adjoint_particles(

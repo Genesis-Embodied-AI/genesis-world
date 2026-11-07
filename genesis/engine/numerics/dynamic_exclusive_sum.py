@@ -15,11 +15,7 @@ SCAN_PARTIALS = Size("scan_partials")
 
 
 class DynamicExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
-    """Tile state of an exclusive sum of 32-bit integer (i32) values, with a device-side count.
-
-    On a graphics processing unit (GPU), warp and block operations scan each tile, which waits on the status its
-    predecessors publish (decoupled look-back). On a central processing unit (CPU), the scan runs over CPU_CHUNKS
-    chunks: the chunk sums, their exclusive sum, then the scan of each chunk from its offset."""
+    """Tile state of an exclusive sum of 32-bit integer (i32) values, with a device-side count."""
 
     status: qd.Tensor = field(int, shape=(SCAN_TILES,), ndarray=True)
     partial: qd.Tensor = field(int, shape=(SCAN_PARTIALS,), ndarray=True)

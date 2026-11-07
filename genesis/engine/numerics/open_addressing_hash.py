@@ -10,11 +10,7 @@ HASH_SLOTS = Size("hash_slots")
 
 
 class OpenAddressingHashScratch(Data, kind=DataKind.SCRATCH):
-    """Linear-probing hash table from unique 64-bit unsigned integer (u64) keys to 32-bit integer (i32) values.
-
-    The capacity is a power of two at least twice the number of keys of a build (see open_addressing_hash_sizes). The
-    keys of one phase are unique, so an insert is one compare-and-swap claim of the slot, and lookups run in later
-    phases. A table is empty once func_reset_hash ran."""
+    """Linear-probing hash table from unique 64-bit unsigned integer (u64) keys to 32-bit integer (i32) values."""
 
     keys: qd.Tensor = field(qd.u64, shape=(HASH_SLOTS,), ndarray=True)
     vals: qd.Tensor = field(int, shape=(HASH_SLOTS,), ndarray=True)

@@ -1,10 +1,4 @@
-"""Contact pairs between the implicit material point method (MPM) and Rigid in the joint Newton solve.
-
-The deepest Rigid geom of a particle within its soft range gives a pair of the pyramid rows of its friction cone, with
-Rigid's own contact model (the geom's friction and solref / solimp impedance, the summed inverse weights of the link and
-the particle). A row acts on the displacement of the particle relative to its contact point on the link, a contact
-vertex of the Newton solve (see newton_contact.py) that moves with the link (see rigid/newton_func.py). A Rigid without
-dofs gives contact points of no displacement."""
+"""Contact pairs between the implicit material point method (MPM) and Rigid in the joint Newton solve."""
 
 import quadrants as qd
 
@@ -22,11 +16,7 @@ from genesis.utils.data import Data, DataKind, field
 
 
 class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
-    """The pairs of the particles with their nearest coupled Rigid geom (see MpmRigidContact.build_pair).
-
-    A pair holds its sorted particle `s`, its environment `i_b`, its geom `geom` and link `link`, the gap `phi` at the
-    substep start, and the stiffness `D` and target `t` of the rows of its friction pyramid around `normal` with
-    friction coefficient `friction`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    """The pairs of the particles with their nearest coupled Rigid geom (see MpmRigidContact.build_pair)."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -57,10 +47,8 @@ def link_point_jacobian(r: qd.types.vector(3)):
 
 @qd.func
 def geom_sdf_grid(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, sdf_info: SDFInfo):
-    """Continuous signed distance and its gradient in the mesh frame of a geom with a signed distance field (SDF) grid.
-
-    Inside the grid, the trilinear interpolant and its analytic gradient. Outside, the value at the point clamped onto
-    the grid plus the distance to it, which joins the interpolant on the grid boundary."""
+    """Continuous signed distance and its gradient in the mesh frame of a geom with a signed distance field (SDF)
+    grid."""
     pos_mesh = gu.qd_inv_transform_by_trans_quat(x, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b])
     pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[i_g])
     sdf_res = sdf_info.geoms_info.sdf_res[i_g]
@@ -129,10 +117,7 @@ def geom_normal(
 
 @qd.data_oriented
 class RigidGeomQuery:
-    """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment.
-
-    The tree comes from genesis.engine.bvh. The query also holds the Rigid data that the fit of its leaves reads, from
-    the Rigid participant `rigid`."""
+    """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment."""
 
     def __init__(self, rigid: RigidNewtonParticipant, n_envs: int):
         self.n_coupled = len(rigid.coupled_geoms_idx)

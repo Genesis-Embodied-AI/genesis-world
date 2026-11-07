@@ -1,12 +1,4 @@
-"""Position based dynamics (PBD) as a participant of the NewtonSolver.
-
-The PBD particles enter the joint solve with their inertia alone. PBD projects its own constraints for the substep
-before the solve, so its particles hold their start position `ipos` and the end position `pos` of the projection. The
-joint solve takes the end positions as unknowns, starting at the projection x~, with the inertia energy
-1/2 m |x - x~|^2 around it, and PBD projects its constraints again the next substep. The particles own their rows of
-the linear system of the solve (see newton_linear.py), preconditioned by their diagonal blocks, an attached particle
-being an eliminated row (see is_moving). After the solve, a PBD particle takes the velocity of its displacement.
-"""
+"""Position based dynamics (PBD) as a participant of the NewtonSolver."""
 
 import quadrants as qd
 
@@ -33,13 +25,7 @@ def is_moving(i_q: int, i_b: int, pbd: qd.template()):
 
 @qd.data_oriented
 class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
-    """Device stages of the PBD end positions in the joint solve.
-
-    It holds per reordered PBD particle and environment [i_q, i_b] the projection `target` of PBD's own substep and the
-    line-search start `x_prev`, and per PBD particle [i_p, i_b] the position and velocity of the substep start
-    `pos_begin` and `vel_begin`, which the particles of a failed environment return to. It reads the particles, in
-    PBD's reordered layout, through `solver`, which owns them, so that the walk over the data of the NewtonSolver (see
-    iter_data_oriented) stops there."""
+    """Device stages of the PBD end positions in the joint solve."""
 
     # The rows of a particle are its own
     n_vertex_rows = 1
@@ -163,9 +149,7 @@ def kernel_pbd_finish(dt: float, pbd: qd.template(), control: qd.template()):
 
 class PbdNewtonHost(NewtonHost):
     """Host stages of PBD around the joint solve: the projection of its substep as the inertia target before, and its
-    velocities from the solved positions after.
-
-    PBD runs its own substep before the solve, so the host saves the start of the substep first."""
+    velocities from the solved positions after."""
 
     def __init__(self, device: PbdNewtonParticipant):
         self._device = device

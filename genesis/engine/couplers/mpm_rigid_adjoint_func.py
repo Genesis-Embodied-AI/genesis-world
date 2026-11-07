@@ -1,11 +1,4 @@
-"""Adjoint of the contact rows between the material point method (MPM) and Rigid in the joint Newton solve.
-
-The backward pass of the joint solve pulls back theta_bar = -d/dtheta [lambda^T grad_y E] at the solution. The share
-of the rows is Phi = sum g . delta over the pairs, g = sum_k D_k c_k J_k over the active rows, c_k = J_k . Delta - t_k,
-with Delta the displacement of the particle relative to its contact point and delta the same map of lambda. Phi
-depends on theta through the weights and the arm of the particle, the cdofs of its link, and the row coefficients that
-`MpmRigidContact.build_pair` derives from the particle state, the pose of the geom and the velocity of the link. The
-friction, the impedance parameters and the inverse weight matrix of the particle are model constants."""
+"""Adjoint of the contact rows between the material point method (MPM) and Rigid in the joint Newton solve."""
 
 import quadrants as qd
 
@@ -87,9 +80,7 @@ def geom_contact_bw(
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
 ):
-    """Reverse of the signed distance `geom_sdf` and of the normal `geom_normal` of a geom at a world point.
-
-    Returns the adjoint of x from phi_bar and n_bar, and adds the adjoints of the pose of geom i_g to its gradients."""
+    """Reverse of the signed distance `geom_sdf` and of the normal `geom_normal` of a geom at a world point."""
     EPS = rigid_info.EPS[None]
     geom_pos = geoms_state.pos[i_g, i_b]
     geom_quat = geoms_state.quat[i_g, i_b]
@@ -139,9 +130,7 @@ def link_chain_spatial(
     links_info: LinksInfo,
     config: qd.template(),
 ):
-    """Spatial displacement of a link from a dof vector (see func_link_spatial_disp).
-
-    Returns the linear and angular parts of the sum of cdof src_d over the dofs of the chain of link i_l."""
+    """Spatial displacement of a link from a dof vector (see func_link_spatial_disp)."""
     lin = qd.Vector.zero(gs.qd_float, 3)
     ang = qd.Vector.zero(gs.qd_float, 3)
     i_a = i_l
@@ -178,12 +167,7 @@ def func_rigid_contact_adjoint(
     mpm_info: MpmInfo,
     config: qd.template(),
 ):
-    """Pull the MPM-Rigid pairs back into the adjoints of frame f of the particles and of Rigid's state.
-
-    With the joint solution (u*, x*), the adjoint lambda = (`linear.solution`, `rigid_data.sol`) and a_k = J_k . delta
-    over the active rows, Phi has D_k_bar = -c_k a_k, t_k_bar = D_k a_k, J_k_bar = -D_k (a_k Delta + c_k delta),
-    Delta_bar = -sum D_k a_k J_k and delta_bar = -sum D_k c_k J_k. Delta and delta move with the weights, the arm of the
-    particle and the cdofs of its chain, and the rows with the particle state, the geom pose and the link velocity."""
+    """Pull the MPM-Rigid pairs back into the adjoints of frame f of the particles and of Rigid's state."""
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for i_pair in range(pairs.n_pairs[()]):
