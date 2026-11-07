@@ -1,0 +1,31 @@
+genesis/__init__.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 505
+genesis/options/sensors/options.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 629,634-635,637,657
+  s_30743dd4e1d4b2::t_17c00e334cadfb 630-632
+  s_30743dd4e1d4b2::t_097edf5921f822 2
+examples/sensors/lidar_teleop.py
+  s_30743dd4e1d4b2::t_23b1924d8b570f 31-33
+genesis/constants.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 171-177
+tests/sensors/test_raycaster.py
+  s_30743dd4e1d4b2::t_23b1924d8b570f 676,686,688,691
+genesis/engine/sensors/raycaster.py
+  s_30743dd4e1d4b2::t_f39e81c02d28bc 599,605,674
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8607fec8d806964a95a346bc944223b8478b7828",
+  "prompts": {},
+  "sessions": {
+    "s_30743dd4e1d4b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bcbc5529-4957-4e0d-8c5f-2573abbad53d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
