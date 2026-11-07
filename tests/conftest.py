@@ -927,6 +927,12 @@ def initialize_genesis(
     # Redirect name terrain cache directory to some test-local temporary location to avoid conflict and persistence
     monkeypatch.setattr("genesis.utils.cache.get_gnd_cache_dir", lambda: str(tmp_path / ".cache" / "terrain"))
 
+    # Software H.264 encoding is preferred because VideoToolbox drops frames silently on the macOS CI virtual machines
+    codecs = gs.utils.video_encoder.H264_CODEC_CANDIDATES
+    monkeypatch.setattr(
+        "genesis.utils.video_encoder.H264_CODEC_CANDIDATES", ("libx264", *[c for c in codecs if c != "libx264"])
+    )
+
     try:
         # Skip if requested backend is not available
         try:
