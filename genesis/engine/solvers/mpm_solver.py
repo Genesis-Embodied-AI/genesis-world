@@ -504,13 +504,13 @@ class MPMSolver(ParticleSolver):
                         sep_geom_idx = self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b]
                         if sep_geom_idx != -1:
                             grid_vel = self.sim.coupler._func_collide_in_rigid_geom(
-                                self.particles[f, i_p, i_b].pos,
-                                self.particles[f, i_p, i_b].vel,
-                                self.particles_info[i_p].mass * weight / self._particle_volume_scale,
-                                self._coupler.mpm_rigid_normal[i_p, sep_geom_idx, i_b],
-                                1.0,
                                 sep_geom_idx,
                                 i_b,
+                                self.particles[f, i_p, i_b].pos,
+                                self.particles[f, i_p, i_b].vel,
+                                mass=self.particles_info[i_p].mass * weight / self._particle_volume_scale,
+                                normal_rigid=self._coupler.mpm_rigid_normal[i_p, sep_geom_idx, i_b],
+                                influence=1.0,
                                 geoms_info=geoms_info,
                                 links_state=links_state,
                                 rigid_info=rigid_info,

@@ -15,7 +15,7 @@ from genesis.engine.states.solvers import FEMSolverState
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_numpy, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -263,7 +263,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         pos_np = self.elements_v.pos.to_numpy()[0, :, 0, :][surface_vertices_np]
         surface_vertices_mapping = np.full(self.n_vertices, -1, dtype=np.int32)
         surface_vertices_mapping[surface_vertices_np] = np.arange(len(surface_vertices_np))
-        mass = igl.massmatrix(pos_np, surface_vertices_mapping[surface_triangles_np])
+        surface_tris_sv_idx = surface_vertices_mapping[surface_triangles_np]
+        mass = igl.massmatrix(pos_np, surface_tris_sv_idx)
         surface_vert_mass_np = mass.diagonal().astype(gs.np_float, copy=False)
         self.surface_vert_mass = qd.field(
             dtype=gs.qd_float,
@@ -271,6 +272,23 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             needs_grad=False,
         )
         self.surface_vert_mass.from_numpy(surface_vert_mass_np)
+
+        # The incident triangles of surface vertex i_sv are surface_vertices_tri_idx[surface_vertices_tri_start[i_sv]:
+        # surface_vertices_tri_start[i_sv + 1]], in increasing triangle index (stable sort of the triangle corners).
+        corners_order = np.argsort(surface_tris_sv_idx, axis=None, kind="stable")
+        self.surface_vertices_tri_start = qd.field(dtype=gs.qd_int, shape=(len(surface_vertices_np) + 1,))
+        self.surface_vertices_tri_start.from_numpy(
+            np.searchsorted(surface_tris_sv_idx.take(corners_order), np.arange(len(surface_vertices_np) + 1))
+        )
+        corners_tri_idx = corners_order // 3
+        self.surface_vertices_tri_idx = qd.field(dtype=gs.qd_int, shape=(len(corners_order),))
+        self.surface_vertices_tri_idx.from_numpy(corners_tri_idx)
+        # The scaled element mass of each incident triangle, gathered once so that the coupling kernel reads it without
+        # going through the triangle and its element.
+        self.surface_vertices_tri_mass_scaled = qd.field(dtype=gs.qd_float, shape=(len(corners_order),))
+        self.surface_vertices_tri_mass_scaled.from_numpy(
+            qd_to_numpy(self.elements_i.mass_scaled)[qd_to_numpy(self.surface.tri2el)[corners_tri_idx]]
+        )
 
     @qd.kernel
     def compute_surface_vertices(self):
