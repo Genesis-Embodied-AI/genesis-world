@@ -316,7 +316,6 @@ def test_halt_on_nan(show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.required
 # The SAP coupler, one of the configurations refused, supports 64 bits precision alone
 @pytest.mark.precision("64")
 def test_reject_unsupported_configurations():
