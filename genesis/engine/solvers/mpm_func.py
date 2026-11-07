@@ -330,7 +330,7 @@ def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float):
 
 
 @qd.func
-def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float, is_penalized: qd.template() = True):
+def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float):
     """Energy density, gradient and Hessian of the Stable Neo-Hookean energy (Smith et al. 2018, Eq. 14) in the signed
     singular values, defined for inverted states."""
     mu_s, lam_s, alpha, rest = stable_neohookean_parameters(mu, lam)
@@ -343,11 +343,6 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
     A = mu_s * (1.0 - barrier) * qd.Matrix.identity(gs.qd_float, 3)
     A += 2.0 * mu_s * barrier * barrier * sigma.outer_product(sigma)
     A += lam_s * (cof.outer_product(cof) + (J - alpha) * cofactor_jacobian(sigma))
-    if qd.static(is_penalized):
-        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
-        psi += penalty
-        g += g_penalty
-        A += diagonal(A_penalty)
     return psi, g, A
 
 
@@ -452,7 +447,7 @@ def cubic_first_root(c0: float, c1: float, c2: float, c3: float, t_max: float):
 
 
 @qd.func
-def fixed_corotated_principal(sigma: qd.types.vector(3), mu: float, lam: float, is_penalized: qd.template() = True):
+def fixed_corotated_principal(sigma: qd.types.vector(3), mu: float, lam: float):
     """Energy density, gradient and Hessian of the fixed corotated energy in the signed singular values."""
     J = sigma[0] * sigma[1] * sigma[2]
     cof = cofactor(sigma)
@@ -460,19 +455,7 @@ def fixed_corotated_principal(sigma: qd.types.vector(3), mu: float, lam: float, 
     g = 2.0 * mu * (sigma - 1.0) + lam * (J - 1.0) * cof
     A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3)
     A += lam * (cof.outer_product(cof) + (J - 1.0) * cofactor_jacobian(sigma))
-    if qd.static(is_penalized):
-        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
-        psi += penalty
-        g += g_penalty
-        A += diagonal(A_penalty)
     return psi, g, A
-
-
-@qd.func
-def isotropic_pair_eigenvalues(sigma: qd.types.vector(3), g: qd.types.vector(3), A: qd.types.matrix(3, 3)):
-    """Twist and flip eigenvalues of an isotropic energy, clamped at zero (see isotropic_pair_eigenvalues_exact)."""
-    twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
-    return qd.max(twist, 0.0), qd.max(flip, 0.0)
 
 
 @qd.func
@@ -525,17 +508,15 @@ def isotropic_projected_modes(
     """Symmetric positive definite (SPD) projection of the principal Hessian of an isotropic energy, as a scaling block
     and per-pair modes."""
     S = 0.5 * (A + A.transpose())
-    twist = qd.Vector.zero(gs.qd_float, 3)
-    flip = qd.Vector.zero(gs.qd_float, 3)
-    if qd.static(is_exact):
-        twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
-    else:
+    twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
+    if qd.static(not is_exact):
         eigenvalues, Q = qd.sym_eig(S, gs.qd_float)
         S = qd.Matrix.zero(gs.qd_float, 3, 3)
         for k in qd.static(range(3)):
             eigenvector = Q[:, k]
             S += qd.max(eigenvalues[k], 0.0) * eigenvector.outer_product(eigenvector)
-        twist, flip = isotropic_pair_eigenvalues(sigma, g, A)
+        twist = qd.max(twist, 0.0)
+        flip = qd.max(flip, 0.0)
     return S, 0.5 * (flip + twist), 0.5 * (flip - twist)
 
 
@@ -592,14 +573,19 @@ def elastic_principal(
     g = qd.Vector.zero(gs.qd_float, 3)
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
     family = materials.mat_family[slot]
-    if family == FAMILY_STABLE_NEOHOOKEAN:
-        psi, g, A = stable_neohookean_principal(sigma, mu, lam)
-    elif family == FAMILY_EXTENDED_HENCKY:
+    if family == FAMILY_EXTENDED_HENCKY:
         psi, g, A = extended_hencky_principal(sigma, mu, lam)
     elif family == FAMILY_LIQUID:
         psi, g, A = liquid_principal(sigma, mu, lam, mpm_info.liquid_band[()])
     else:
-        psi, g, A = fixed_corotated_principal(sigma, mu, lam)
+        if family == FAMILY_STABLE_NEOHOOKEAN:
+            psi, g, A = stable_neohookean_principal(sigma, mu, lam)
+        else:
+            psi, g, A = fixed_corotated_principal(sigma, mu, lam)
+        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
+        psi += penalty
+        g += g_penalty
+        A += diagonal(A_penalty)
     return psi, g, A
 
 
