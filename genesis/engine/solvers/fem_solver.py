@@ -8,6 +8,7 @@ import igl
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.simt as su
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
@@ -15,9 +16,14 @@ from genesis.engine.states.solvers import FEMSolverState
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_numpy, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+
+# Lanes of a GPU subgroup tile that gather together the element corners of a vertex (see 'vertices_corners_idx')
+LOG2_CORNER_LANES = 2
+# Threads of the GPU block that sums the terms of an environment over its vertices and elements in a fixed order
+ENV_BLOCK_DIM = 256
 
 
 @qd.data_oriented
@@ -45,6 +51,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._damping_alpha = options.damping_alpha
         self._damping_beta = options.damping_beta
         self._enable_vertex_constraints = options.enable_vertex_constraints
+
+        # The implicit solve adds up every term in a fixed order, so it is reproducible bitwise. On CPU, one thread runs
+        # each environment, the environments filling the cores. On GPU, the lanes of a subgroup tile gather the terms
+        # of a vertex and a block of threads sums those of an environment.
+        self._env_block_dim = 1 if gs.backend == gs.cpu else ENV_BLOCK_DIM
 
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = float(1e4)
@@ -124,7 +135,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # element state for energy
         element_state_el_energy = qd.types.struct(
             energy=gs.qd_float,  # energy density for the element
-            gradient=gs.qd_mat3,  # gradient density for the element, del energy / del F
+            # gradient density for the element, del energy / del F, plus the stress of the Rayleigh stiffness damping
+            # under the implicit solver.
+            gradient=gs.qd_mat3,
         )
 
         element_state_v_energy = qd.types.struct(
@@ -348,6 +361,17 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         if self.n_elements_max > 0:
             self._init_surface_info()
+            if self._use_implicit_solver and self._env_block_dim > 1:
+                # The corners of the elements, vertex by vertex then element by element, each one packed as 4 times its
+                # element plus its local index. A vertex gathers the terms of its corners in this order, so the
+                # implicit solve sums them without atomics.
+                el2v = qd_to_numpy(self.elements_i.el2v)
+                self.vertices_corners_start = qd.field(dtype=gs.qd_int, shape=(self.n_vertices + 1,))
+                self.vertices_corners_start.from_numpy(
+                    np.searchsorted(np.sort(el2v, axis=None), np.arange(self.n_vertices + 1))
+                )
+                self.vertices_corners_idx = qd.field(dtype=gs.qd_int, shape=(4 * self.n_elements,))
+                self.vertices_corners_idx.from_numpy(np.argsort(el2v, axis=None, kind="stable"))
             if self.tet_wrong_order[None]:
                 raise RuntimeError(
                     "The order of vertices in the tetrahedral elements is not correct. "
@@ -485,6 +509,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def init_pos_and_inertia(self, f: qd.i32, links_state: LinksState):
+        # Every environment enters the Newton iterations of the substep that follows
+        for i_b in range(self._B):
+            self.batch_active[i_b] = True
         dt2 = self.substep_dt**2
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             if qd.static(self._enable_vertex_constraints):
@@ -527,6 +554,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def compute_ele_energy_gradient(self, f: qd.i32):
+        damping_beta_over_dt = self._damping_beta / self._substep_dt
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
                 continue
@@ -542,6 +570,20 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                         self.elements_el_energy[i_b, i_e].energy,
                         self.elements_el_energy[i_b, i_e].gradient,
                     ) = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
+
+            # The stress of the Rayleigh stiffness damping, for the displacement over the substep, adds to the gradient
+            if qd.static(self._damping_beta > gs.EPS):
+                i_vs = self.elements_i[i_e].el2v
+                S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+                x_diff = qd.Matrix.cols(
+                    [
+                        self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
+                        for i in qd.static(range(4))
+                    ]
+                )
+                _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
+                gradient = self.elements_el_energy[i_b, i_e].gradient + damping_beta_over_dt * dP
+                self.elements_el_energy[i_b, i_e].gradient = gradient
 
     @qd.func
     def compute_elastic_product(self, i_e: int, i_b: int, S: qd.types.matrix(4, 3), x: qd.types.matrix(3, 4)):
@@ -602,8 +644,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if self._damping_beta > gs.EPS:
                 damping_beta_over_dt = self._damping_beta / self._substep_dt
                 i_vs = self.elements_i[i_e].el2v
-                B = self.elements_i[i_e].B
-                S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
+                S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
 
                 x_diff = qd.Matrix.cols(
                     [
@@ -616,187 +657,240 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     self.elements_el_energy[i_b, i_e].energy + 0.5 * damping_beta_over_dt * (dF * dP).sum()
                 )
 
-    @qd.kernel
-    def accumulate_vertex_force_preconditioner(self, f: qd.i32):
-        damping_alpha_dt = self._damping_alpha * self._substep_dt
-        damping_alpha_factor = damping_alpha_dt + 1.0
-        damping_beta_over_dt = self._damping_beta / self._substep_dt
-        damping_beta_factor = damping_beta_over_dt + 1.0
-        # inertia
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_active[i_b]:
-                continue
-            self.elements_v_energy[i_b, i_v].force = -self.elements_v_info[i_v].mass_over_dt2 * (
-                (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia)
-                + (self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos) * damping_alpha_dt
-            )
-            # A constrained vertex sits at its target, which the damping of its jump to it would otherwise pull away
-            if qd.static(self._enable_vertex_constraints):
-                if self.vertex_constraints.is_constrained[i_v, i_b]:
-                    self.elements_v_energy[i_b, i_v].force = qd.Vector.zero(gs.qd_float, 3)
-            self.pcg_state_v[i_b, i_v].diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i in qd.static(range(3)):
-                self.pcg_state_v[i_b, i_v].diag3x3[i, i] = (
-                    self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor
-                )
-
-        # elastic
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_active[i_b]:
-                continue
-            V = self.elements_i[i_e].V
-            B = self.elements_i[i_e].B
-            gradient = self.elements_el_energy[i_b, i_e].gradient
-            i_vs = self.elements_i[i_e].el2v
-            S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
-            force = -V * gradient @ S.transpose()
-
-            for i in qd.static(range(4)):
-                qd.atomic_add(self.elements_v_energy[i_b, i_vs[i]].force, force[:, i])
-
-            if self._damping_beta > gs.EPS:
-                x_diff = qd.Matrix.cols(
-                    [
-                        self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
-                        for i in qd.static(range(4))
-                    ]
-                )
-                _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
-                damping_force = -damping_beta_over_dt * V * dP @ S.transpose()
-                for i in qd.static(range(4)):
-                    qd.atomic_add(self.elements_v_energy[i_b, i_vs[i]].force, damping_force[:, i])
-
-            # The diagonal 3-by-3 block of the Hessian at vertex k, whose column c is the force a unit displacement of
-            # the vertex along axis c induces on it.
-            for k in qd.static(range(4)):
-                S_k = qd.Vector([S[k, 0], S[k, 1], S[k, 2]])
-                vertex_unit = qd.Vector([gs.qd_float(k == i) for i in qd.static(range(4))])
-                diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
-                # A runtime loop over the axes keeps a single inlined instance of the product per vertex
-                for c in range(3):
-                    axis_unit = qd.Vector([gs.qd_float(c == i) for i in qd.static(range(3))])
-                    _, dP = self.compute_elastic_product(i_e, i_b, S, axis_unit.outer_product(vertex_unit))
-                    diag3x3 = diag3x3 + (dP @ S_k).outer_product(axis_unit)
-                qd.atomic_add(self.pcg_state_v[i_b, i_vs[k]].diag3x3, V * damping_beta_factor * diag3x3)
-
-        # inverse
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_active[i_b]:
-                continue
-            # Use 3-by-3 diagonal block inverse for preconditioner
-            self.pcg_state_v[i_b, i_v].prec = self.pcg_state_v[i_b, i_v].diag3x3.inverse()
-
-            # Other options for preconditioner:
-            # Uncomment one of the following lines to test different preconditioners
-            # Use identity for preconditioner
-            # self.pcg_state_v[i_b, i_v].prec = qd.Matrix.identity(gs.qd_float, 3)
-
-            # Use diagonal for preconditioner
-            # self.pcg_state_v[i_b, i_v].prec = qd.Matrix([[1 / self.pcg_state_v[i_b, i_v].diag3x3[0, 0], 0, 0],
-            #                                            [0, 1 / self.pcg_state_v[i_b, i_v].diag3x3[1, 1], 0],
-            #                                            [0, 0, 1 / self.pcg_state_v[i_b, i_v].diag3x3[2, 2]]])
+    @qd.func
+    def _func_block_sum(self, i_t: int, values, sh_sum: qd.template()):
+        # The tiles of 32 threads sum first, then every thread adds up the tile sums in order, so the totals are the same
+        # bitwise on every run. On CPU, the block is a single thread.
+        totals = values
+        if qd.static(self._env_block_dim > 1):
+            for i in qd.static(range(values.n)):
+                value_tile = su.qd_block_sum(values[i])
+                if i_t % 32 == 0:
+                    sh_sum[i, i_t // 32] = value_tile
+            qd.simt.block.sync()
+            totals = qd.Vector.zero(gs.qd_float, values.n)
+            for i_tile in range(self._env_block_dim // 32):
+                totals = totals + qd.Vector([sh_sum[i, i_tile] for i in qd.static(range(values.n))])
+            qd.simt.block.sync()
+        return totals
 
     @qd.func
-    def compute_Ap(self):
+    def _func_accumulate_vertices(self, f: int, batch_active: qd.template(), gather_Ap: qd.template()):
+        # The elastic terms of every vertex, Ap alone or else the force and the diagonal block, added up in a fixed
+        # order. On CPU, one thread per environment walks the corners of the elements in element order and adds each
+        # term to its vertex. On GPU, the lanes of a vertex stride its corners (see 'vertices_corners_idx'), then add up
+        # their sums in a fixed order.
+        is_serial = qd.static(self._env_block_dim == 1)
+        n_lanes = qd.static(1 if is_serial else 2**LOG2_CORNER_LANES)
+        n_env_threads = qd.static(1 if is_serial else self.n_vertices * n_lanes)
         damping_alpha_dt = self._damping_alpha * self._substep_dt
-        damping_alpha_factor = damping_alpha_dt + 1.0
-        damping_beta_over_dt = self._damping_beta / self._substep_dt
-        damping_beta_factor = damping_beta_over_dt + 1.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].Ap = (
-                self.elements_v_info[i_v].mass_over_dt2 * damping_alpha_factor * self.pcg_state_v[i_b, i_v].p
-            )
+        damping_beta_factor = self._damping_beta / self._substep_dt + 1.0
+        I_3 = qd.Matrix.identity(gs.qd_float, 3)
+        for i_flat in range(self._B * n_env_threads):
+            i_b = i_flat // n_env_threads
+            i_lane = i_flat % n_lanes
+            i_v = i_flat // n_lanes % self.n_vertices
+            vec_elastic = qd.Vector.zero(gs.qd_float, 3)
+            mat_elastic = qd.Matrix.zero(gs.qd_float, 3, 3)
+            if batch_active[i_b]:
+                i_c_start = 0
+                n_corners = 4 * self.n_elements
+                if qd.static(is_serial):
+                    for i_v_ in range(self.n_vertices):
+                        if qd.static(gather_Ap):
+                            self.pcg_state_v[i_b, i_v_].Ap = qd.Vector.zero(gs.qd_float, 3)
+                        else:
+                            self.elements_v_energy[i_b, i_v_].force = qd.Vector.zero(gs.qd_float, 3)
+                            self.pcg_state_v[i_b, i_v_].diag3x3 = qd.Matrix.zero(gs.qd_float, 3, 3)
+                else:
+                    i_c_start = self.vertices_corners_start[i_v]
+                    n_corners = self.vertices_corners_start[i_v + 1] - i_c_start
 
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            V = self.elements_i[i_e].V
-            B = self.elements_i[i_e].B
-            i_vs = self.elements_i[i_e].el2v
-            S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
+                # The corners of an element follow each other on CPU, sharing its mapping matrix and stress
+                S = qd.Matrix.zero(gs.qd_float, 4, 3)
+                stress = qd.Matrix.zero(gs.qd_float, 3, 3)
+                for i_c_ in range((n_corners + n_lanes - 1) // n_lanes):
+                    i_c = i_c_ * n_lanes + i_lane
+                    if i_c < n_corners:
+                        i_corner = i_c
+                        if qd.static(not is_serial):
+                            i_corner = self.vertices_corners_idx[i_c_start + i_c]
+                        i_e = i_corner // 4
+                        i_k = i_corner % 4
+                        V = self.elements_i[i_e].V
+                        i_vs = self.elements_i[i_e].el2v
+                        is_new_element = True
+                        if qd.static(is_serial):
+                            is_new_element = i_k == 0
+                        if is_new_element:
+                            S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+                            if qd.static(gather_Ap):
+                                p = qd.Matrix.cols([self.pcg_state_v[i_b, i_vs[i]].p for i in qd.static(range(4))])
+                                _, dP = self.compute_elastic_product(i_e, i_b, S, p)
+                                stress = V * damping_beta_factor * dP
+                        S_k = S[i_k, :]
 
-            p = qd.Matrix.cols([self.pcg_state_v[i_b, i_vs[i]].p for i in qd.static(range(4))])
-            _, dP = self.compute_elastic_product(i_e, i_b, S, p)
-            Ap = V * damping_beta_factor * dP @ S.transpose()
+                        vec_corner = qd.Vector.zero(gs.qd_float, 3)
+                        mat_corner = qd.Matrix.zero(gs.qd_float, 3, 3)
+                        if qd.static(gather_Ap):
+                            vec_corner = stress @ S_k
+                        else:
+                            vec_corner = -V * self.elements_el_energy[i_b, i_e].gradient @ S_k
+                            # Column j of the block is the force that a unit displacement of the vertex along axis j
+                            # induces on it.
+                            corner_k = qd.Matrix.identity(gs.qd_float, 4)[i_k, :]
+                            for j in range(3):
+                                _, dP = self.compute_elastic_product(i_e, i_b, S, I_3[:, j].outer_product(corner_k))
+                                mat_corner = mat_corner + (V * damping_beta_factor * dP @ S_k).outer_product(I_3[:, j])
 
-            for i in qd.static(range(4)):
-                qd.atomic_add(self.pcg_state_v[i_b, i_vs[i]].Ap, Ap[:, i])
+                        if qd.static(is_serial):
+                            i_v_k = i_vs[i_k]
+                            if qd.static(gather_Ap):
+                                self.pcg_state_v[i_b, i_v_k].Ap = self.pcg_state_v[i_b, i_v_k].Ap + vec_corner
+                            else:
+                                force = self.elements_v_energy[i_b, i_v_k].force + vec_corner
+                                self.elements_v_energy[i_b, i_v_k].force = force
+                                diag3x3 = self.pcg_state_v[i_b, i_v_k].diag3x3 + mat_corner
+                                self.pcg_state_v[i_b, i_v_k].diag3x3 = diag3x3
+                        else:
+                            vec_elastic = vec_elastic + vec_corner
+                            mat_elastic = mat_elastic + mat_corner
+            if qd.static(not is_serial):
+                for i in qd.static(range(3)):
+                    vec_elastic[i] = su.qd_block_sum(vec_elastic[i], LOG2_CORNER_LANES)
+                    if qd.static(not gather_Ap):
+                        for j in qd.static(range(3)):
+                            mat_elastic[i, j] = su.qd_block_sum(mat_elastic[i, j], LOG2_CORNER_LANES)
+
+            # The inertia terms of the vertices this thread owns add to their elastic sums
+            if batch_active[i_b]:
+                n_owned = 1 if i_lane == 0 else 0
+                if qd.static(is_serial):
+                    n_owned = self.n_vertices
+                for i_o in range(n_owned):
+                    i_v_o = i_v
+                    if qd.static(is_serial):
+                        i_v_o = i_o
+                        vec_elastic = self.elements_v_energy[i_b, i_v_o].force
+                        mat_elastic = self.pcg_state_v[i_b, i_v_o].diag3x3
+                        if qd.static(gather_Ap):
+                            vec_elastic = self.pcg_state_v[i_b, i_v_o].Ap
+                    mass_over_dt2 = self.elements_v_info[i_v_o].mass_over_dt2
+                    if qd.static(gather_Ap):
+                        p = self.pcg_state_v[i_b, i_v_o].p
+                        self.pcg_state_v[i_b, i_v_o].Ap = mass_over_dt2 * (damping_alpha_dt + 1.0) * p + vec_elastic
+                    else:
+                        pos = self.elements_v[f + 1, i_v_o, i_b].pos
+                        force_inertia = -mass_over_dt2 * (
+                            (pos - self.elements_v_energy[i_b, i_v_o].inertia)
+                            + (pos - self.elements_v[f, i_v_o, i_b].pos) * damping_alpha_dt
+                        )
+                        # A constrained vertex sits at its target, which the damping of its jump to it would otherwise
+                        # pull away.
+                        if qd.static(self._enable_vertex_constraints):
+                            if self.vertex_constraints.is_constrained[i_v_o, i_b]:
+                                force_inertia = qd.Vector.zero(gs.qd_float, 3)
+                        self.elements_v_energy[i_b, i_v_o].force = force_inertia + vec_elastic
+                        diag3x3 = mat_elastic + mass_over_dt2 * (damping_alpha_dt + 1.0) * I_3
+                        self.pcg_state_v[i_b, i_v_o].diag3x3 = diag3x3
+                        # 3-by-3 block Jacobi preconditioner
+                        self.pcg_state_v[i_b, i_v_o].prec = diag3x3.inverse()
+
+    @qd.kernel
+    def accumulate_vertex_force_preconditioner(self, f: qd.i32):
+        self._func_accumulate_vertices(f, self.batch_active, gather_Ap=False)
 
     @qd.kernel
     def init_pcg_solve(self):
-        for i_b in range(self._B):
-            self.batch_pcg_active[i_b] = self.batch_active[i_b]
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].rTr = 0.0
-            self.pcg_state[i_b].rTz = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].x = 0
-            self.pcg_state_v[i_b, i_v].r = self.elements_v_energy[i_b, i_v].force
-            self.pcg_state_v[i_b, i_v].z = self.pcg_state_v[i_b, i_v].prec @ self.pcg_state_v[i_b, i_v].r
-            self.pcg_state_v[i_b, i_v].p = self.pcg_state_v[i_b, i_v].z
-            qd.atomic_add(self.pcg_state[i_b].rTr, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].r))
-            qd.atomic_add(self.pcg_state[i_b].rTz, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].z))
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr > self._pcg_threshold
+        n_threads = qd.static(self._env_block_dim)
+        qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+        for i_flat in range(self._B * n_threads):
+            i_b = i_flat // n_threads
+            i_t = i_flat % n_threads
+            sh_sum = qd.simt.block.SharedArray((2, qd.static((n_threads + 31) // 32)), gs.qd_float)
+            is_active = self.batch_active[i_b]
+            rTr = gs.qd_float(0.0)
+            rTz = gs.qd_float(0.0)
+            if is_active:
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        r = self.elements_v_energy[i_b, i_v].force
+                        z = self.pcg_state_v[i_b, i_v].prec @ r
+                        self.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
+                        self.pcg_state_v[i_b, i_v].r = r
+                        self.pcg_state_v[i_b, i_v].z = z
+                        self.pcg_state_v[i_b, i_v].p = z
+                        rTr = rTr + r.dot(r)
+                        rTz = rTz + r.dot(z)
+            rTr, rTz = self._func_block_sum(i_t, qd.Vector([rTr, rTz]), sh_sum)
+            if i_t == 0:
+                if is_active:
+                    self.pcg_state[i_b].rTr = rTr
+                    self.pcg_state[i_b].rTz = rTz
+                self.batch_pcg_active[i_b] = is_active and rTr > self._pcg_threshold
 
     @qd.kernel
     def one_pcg_iter(self):
-        self.compute_Ap()
+        self._func_accumulate_vertices(f=0, batch_active=self.batch_pcg_active, gather_Ap=True)
 
-        # compute pTAp
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].pTAp = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            qd.atomic_add(self.pcg_state[i_b].pTAp, self.pcg_state_v[i_b, i_v].p.dot(self.pcg_state_v[i_b, i_v].Ap))
+        n_threads = qd.static(self._env_block_dim)
+        qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+        for i_flat in range(self._B * n_threads):
+            i_b = i_flat // n_threads
+            i_t = i_flat % n_threads
+            sh_sum = qd.simt.block.SharedArray((2, qd.static((n_threads + 31) // 32)), gs.qd_float)
+            is_active = self.batch_pcg_active[i_b]
+            rTz = self.pcg_state[i_b].rTz
 
-        # compute alpha and update x, r, z, rTr, rTz
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].alpha = self.pcg_state[i_b].rTz / self.pcg_state[i_b].pTAp
-            self.pcg_state[i_b].rTr_new = 0.0
-            self.pcg_state[i_b].rTz_new = 0.0
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].x += self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].p
-            self.pcg_state_v[i_b, i_v].r -= self.pcg_state[i_b].alpha * self.pcg_state_v[i_b, i_v].Ap
-            self.pcg_state_v[i_b, i_v].z = self.pcg_state_v[i_b, i_v].prec @ self.pcg_state_v[i_b, i_v].r
-            qd.atomic_add(self.pcg_state[i_b].rTr_new, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].r))
-            qd.atomic_add(self.pcg_state[i_b].rTz_new, self.pcg_state_v[i_b, i_v].r.dot(self.pcg_state_v[i_b, i_v].z))
+            # pTAp, then x, r, z and the new rTr, rTz
+            pTAp = gs.qd_float(0.0)
+            if is_active:
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        pTAp = pTAp + self.pcg_state_v[i_b, i_v].p.dot(self.pcg_state_v[i_b, i_v].Ap)
+            pTAp = self._func_block_sum(i_t, qd.Vector([pTAp]), sh_sum)[0]
+            alpha = gs.qd_float(0.0)
+            rTr_new = gs.qd_float(0.0)
+            rTz_new = gs.qd_float(0.0)
+            if is_active:
+                alpha = rTz / pTAp
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        p = self.pcg_state_v[i_b, i_v].p
+                        r = self.pcg_state_v[i_b, i_v].r - alpha * self.pcg_state_v[i_b, i_v].Ap
+                        z = self.pcg_state_v[i_b, i_v].prec @ r
+                        self.pcg_state_v[i_b, i_v].x = self.pcg_state_v[i_b, i_v].x + alpha * p
+                        self.pcg_state_v[i_b, i_v].r = r
+                        self.pcg_state_v[i_b, i_v].z = z
+                        rTr_new = rTr_new + r.dot(r)
+                        rTz_new = rTz_new + r.dot(z)
+            rTr_new, rTz_new = self._func_block_sum(i_t, qd.Vector([rTr_new, rTz_new]), sh_sum)
 
-        # check convergence
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.batch_pcg_active[i_b] = self.pcg_state[i_b].rTr_new > self._pcg_threshold
-
-        # update beta, rTr, rTz
-        for i_b in range(self._B):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state[i_b].beta = self.pcg_state[i_b].rTz_new / self.pcg_state[i_b].rTz
-            self.pcg_state[i_b].rTr = self.pcg_state[i_b].rTr_new
-            self.pcg_state[i_b].rTz = self.pcg_state[i_b].rTz_new
-
-        # update p
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_pcg_active[i_b]:
-                continue
-            self.pcg_state_v[i_b, i_v].p = (
-                self.pcg_state_v[i_b, i_v].z + self.pcg_state[i_b].beta * self.pcg_state_v[i_b, i_v].p
-            )
+            # Convergence check, then the new search direction
+            is_still_active = is_active and rTr_new > self._pcg_threshold
+            beta = gs.qd_float(0.0)
+            if is_still_active:
+                beta = rTz_new / rTz
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        self.pcg_state_v[i_b, i_v].p = (
+                            self.pcg_state_v[i_b, i_v].z + beta * self.pcg_state_v[i_b, i_v].p
+                        )
+            if i_t == 0:
+                if is_active:
+                    self.pcg_state[i_b].pTAp = pTAp
+                    self.pcg_state[i_b].alpha = alpha
+                    self.pcg_state[i_b].rTr_new = rTr_new
+                    self.pcg_state[i_b].rTz_new = rTz_new
+                if is_still_active:
+                    self.pcg_state[i_b].beta = beta
+                    self.pcg_state[i_b].rTr = rTr_new
+                    self.pcg_state[i_b].rTz = rTz_new
+                self.batch_pcg_active[i_b] = is_still_active
 
     def pcg_solve(self):
         self.init_pcg_solve()
@@ -805,72 +899,91 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def init_linesearch(self, f: qd.i32):
-        for i_b in range(self._B):
-            self.batch_linesearch_active[i_b] = self.batch_active[i_b]
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].prev_energy = 0.0
-            self.linesearch_state[i_b].step_size = 1.0
-            self.linesearch_state[i_b].m = 0.0
-
-        # Inertia, x_prev, m
-        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia
-            self.linesearch_state[i_b].prev_energy += 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-            self.linesearch_state_v[i_b, i_v].x_prev = self.elements_v[f + 1, i_v, i_b].pos
-            self.linesearch_state[i_b].m -= self.pcg_state_v[i_b, i_v].x.dot(self.elements_v_energy[i_b, i_v].force)
-        # Elastic
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].prev_energy += self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+        n_threads = qd.static(self._env_block_dim)
+        qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+        for i_flat in range(self._B * n_threads):
+            i_b = i_flat // n_threads
+            i_t = i_flat % n_threads
+            sh_sum = qd.simt.block.SharedArray((2, qd.static((n_threads + 31) // 32)), gs.qd_float)
+            is_active = self.batch_active[i_b]
+            prev_energy = gs.qd_float(0.0)
+            m = gs.qd_float(0.0)
+            if is_active:
+                # Inertia, x_prev, m
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        pos = self.elements_v[f + 1, i_v, i_b].pos
+                        diff = pos - self.elements_v_energy[i_b, i_v].inertia
+                        prev_energy = prev_energy + 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
+                        self.linesearch_state_v[i_b, i_v].x_prev = pos
+                        m = m - self.pcg_state_v[i_b, i_v].x.dot(self.elements_v_energy[i_b, i_v].force)
+                # Elastic
+                for i_e_ in range((self.n_elements + n_threads - 1) // n_threads):
+                    i_e = i_e_ * n_threads + i_t
+                    if i_e < self.n_elements:
+                        prev_energy = prev_energy + self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+            prev_energy, m = self._func_block_sum(i_t, qd.Vector([prev_energy, m]), sh_sum)
+            if i_t == 0:
+                self.batch_linesearch_active[i_b] = is_active
+                if is_active:
+                    self.linesearch_state[i_b].prev_energy = prev_energy
+                    self.linesearch_state[i_b].step_size = 1.0
+                    self.linesearch_state[i_b].m = m
 
     @qd.kernel
     def one_linesearch_iter(self, f: qd.i32):
-        for i_b in range(self._B):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].energy = 0.0
-
-        # update pos and compute Inertia energy
+        # update pos
         for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.elements_v[f + 1, i_v, i_b].pos = (
-                self.linesearch_state_v[i_b, i_v].x_prev
-                + self.linesearch_state[i_b].step_size * self.pcg_state_v[i_b, i_v].x
-            )
-            diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v_energy[i_b, i_v].inertia
-            self.linesearch_state[i_b].energy += 0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff)
-            # damping
-            if self._damping_alpha > 0.0:
-                damping_alpha_dt = self._damping_alpha * self._substep_dt
-                diff = self.elements_v[f + 1, i_v, i_b].pos - self.elements_v[f, i_v, i_b].pos
-                self.linesearch_state[i_b].energy += (
-                    0.5 * self.elements_v_info[i_v].mass_over_dt2 * diff.dot(diff) * damping_alpha_dt
+            if self.batch_linesearch_active[i_b]:
+                self.elements_v[f + 1, i_v, i_b].pos = (
+                    self.linesearch_state_v[i_b, i_v].x_prev
+                    + self.linesearch_state[i_b].step_size * self.pcg_state_v[i_b, i_v].x
                 )
 
         # compute elastic energy
         self._func_compute_ele_energy(f)
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].energy += self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
 
-        # check condition
-        for i_b in range(self._B):
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.batch_linesearch_active[i_b] = (
-                self.linesearch_state[i_b].energy
-                > self.linesearch_state[i_b].prev_energy
-                + self._linesearch_c * self.linesearch_state[i_b].step_size * self.linesearch_state[i_b].m
-            )
-            if not self.batch_linesearch_active[i_b]:
-                continue
-            self.linesearch_state[i_b].step_size *= self._linesearch_tau
+        damping_alpha_dt = self._damping_alpha * self._substep_dt
+        n_threads = qd.static(self._env_block_dim)
+        qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+        for i_flat in range(self._B * n_threads):
+            i_b = i_flat // n_threads
+            i_t = i_flat % n_threads
+            sh_sum = qd.simt.block.SharedArray((2, qd.static((n_threads + 31) // 32)), gs.qd_float)
+            is_active = self.batch_linesearch_active[i_b]
+            energy = gs.qd_float(0.0)
+            if is_active:
+                # Inertia and damping
+                for i_v_ in range((self.n_vertices + n_threads - 1) // n_threads):
+                    i_v = i_v_ * n_threads + i_t
+                    if i_v < self.n_vertices:
+                        mass_over_dt2 = self.elements_v_info[i_v].mass_over_dt2
+                        pos = self.elements_v[f + 1, i_v, i_b].pos
+                        diff = pos - self.elements_v_energy[i_b, i_v].inertia
+                        energy = energy + 0.5 * mass_over_dt2 * diff.dot(diff)
+                        if self._damping_alpha > 0.0:
+                            diff = pos - self.elements_v[f, i_v, i_b].pos
+                            energy = energy + 0.5 * mass_over_dt2 * diff.dot(diff) * damping_alpha_dt
+                # Elastic
+                for i_e_ in range((self.n_elements + n_threads - 1) // n_threads):
+                    i_e = i_e_ * n_threads + i_t
+                    if i_e < self.n_elements:
+                        energy = energy + self.elements_el_energy[i_b, i_e].energy * self.elements_i[i_e].V
+            energy = self._func_block_sum(i_t, qd.Vector([energy]), sh_sum)[0]
+
+            # check condition
+            if i_t == 0 and is_active:
+                self.linesearch_state[i_b].energy = energy
+                step_size = self.linesearch_state[i_b].step_size
+                is_still_active = (
+                    energy
+                    > self.linesearch_state[i_b].prev_energy
+                    + self._linesearch_c * step_size * self.linesearch_state[i_b].m
+                )
+                self.batch_linesearch_active[i_b] = is_still_active
+                if is_still_active:
+                    self.linesearch_state[i_b].step_size = step_size * self._linesearch_tau
 
     @qd.kernel
     def skip_linesearch(self, f: qd.i32):
@@ -894,8 +1007,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.one_linesearch_iter(f)
 
     def batch_solve(self, f: qd.i32):
-        self.batch_active.fill(True)
-
         for i in range(self._n_newton_iterations):
             # compute element energy and gradient
             self.compute_ele_energy_gradient(f)
@@ -1074,12 +1185,18 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_i[i_global].lam = mat_lam
             self.elements_i[i_global].friction_mu = mat_friction_mu
             self.elements_i[i_global].mass_scaled = mat_rho * V_scaled
-            for j in qd.static(range(4)):
-                mass = 0.25 * mat_rho * V
-                self.elements_v_info[self.elements_i[i_global].el2v[j]].mass += mass
-                self.elements_v_info[self.elements_i[i_global].el2v[j]].mass_over_dt2 += mass * dt2_inv
             self.elements_i[i_global].muscle_group = 0
             self.elements_i[i_global].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+
+        # The elements add their mass to their vertices in order, so the vertex masses are reproducible bitwise
+        qd.loop_config(serialize=True)
+        for i_e in range(n_elems_local):
+            i_global = i_e + el_start
+            mass = 0.25 * mat_rho * self.elements_i[i_global].V
+            for j in qd.static(range(4)):
+                i_v = self.elements_i[i_global].el2v[j]
+                self.elements_v_info[i_v].mass = self.elements_v_info[i_v].mass + mass
+                self.elements_v_info[i_v].mass_over_dt2 = self.elements_v_info[i_v].mass_over_dt2 + mass * dt2_inv
 
         for i_v in range(n_verts_local):
             i_global = i_v + v_start

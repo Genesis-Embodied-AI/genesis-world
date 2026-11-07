@@ -333,9 +333,13 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
 @pytest.mark.parametrize("precision", ["64"])
 def test_hard_constraint(use_implicit_solver, show_viewer):
     DT = 0.01
+    GRAVITY = 9.81
+    DAMPING_ALPHA = 0.5
+    N_SUBSTEPS = 2 if use_implicit_solver else 6
     # The free fall at the end crosses z=0, where a scene without ground plane has no floor to stop it
     HEIGHT = 0.5
     BOX_SIZE = 0.1
+    RHO = 1000.0
     MOTION_RADIUS = 0.1
     MOTION_SPEED = 0.005
     VERTICES_IDX = [5, 7]
@@ -343,11 +347,13 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
-            substeps=2 if use_implicit_solver else 100,
-            gravity=(0.0, 0.0, -9.81),
+            substeps=N_SUBSTEPS,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=use_implicit_solver,
+            pcg_threshold=1e-20,
+            damping_alpha=DAMPING_ALPHA,
             enable_vertex_constraints=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -357,8 +363,9 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    # Place the tested entity after another FEM entity so its local and solver indices differ.
-    scene.add_entity(
+    # Place the tested entity after another FEM entity so its local and solver indices differ. That one free-falls from
+    # rest all along.
+    free_box = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
@@ -366,7 +373,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         material=gs.materials.FEM.Elastic(
             E=1e5,
             nu=0.45,
-            rho=1000.0,
+            rho=RHO,
             model="linear_corotated" if use_implicit_solver else "stable_neohookean",
         ),
     )
@@ -378,7 +385,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         material=gs.materials.FEM.Elastic(
             E=1e5,
             nu=0.45,
-            rho=1000.0,
+            rho=RHO,
             model="linear_corotated" if use_implicit_solver else "stable_neohookean",
         ),
     )
@@ -391,6 +398,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         material=gs.materials.Rigid(),
     )
     scene.build(n_envs=2)
+    free_box_pos_0 = free_box.get_state().pos
 
     assert_equal(box.get_el2v(), box.elems)
 
@@ -441,12 +449,49 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
     # Check that the box has been free-falling
     n_steps = 50
-    com_pos_z_0 = box.get_state().pos[..., 8, 2]
+    fall_state = scene.get_state()
+    box_state_0 = box.get_state()
+    com_pos_z_0 = box_state_0.pos[..., 8, 2]
     for _ in range(n_steps):
         scene.step()
     com_pos_z_f = box.get_state().pos[..., 8, 2]
-    com_pos_delta = -0.5 * 9.81 * (n_steps * DT) ** 2
+    com_pos_delta = -0.5 * GRAVITY * (n_steps * DT) ** 2
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
+
+    # The undeformed box follows the discrete free fall exactly: the gravity kick of each substep, damped by the
+    # Rayleigh mass damping under the implicit solver, then the position update by the new velocity.
+    substep_dt = DT / N_SUBSTEPS
+    vel_z, pos_z = 0.0, 0.0
+    for _ in range((1 + int(0.5 * math.pi / MOTION_SPEED) + n_steps) * N_SUBSTEPS):
+        vel_z = vel_z - GRAVITY * substep_dt
+        if use_implicit_solver:
+            vel_z = vel_z / (1.0 + DAMPING_ALPHA * substep_dt)
+        pos_z = pos_z + substep_dt * vel_z
+    assert_allclose(free_box.get_state().pos - free_box_pos_0, (0.0, 0.0, pos_z), tol=5e-10)
+
+    if use_implicit_solver:
+        # The internal forces of the deformed box add up to zero, so its center of mass falls like the free box. Each
+        # vertex carries a quarter of the rest mass of every element it belongs to.
+        verts = box.init_positions
+        elems = box.get_el2v()
+        elems_mass = RHO * torch.linalg.det(verts[elems[:, :3]] - verts[elems[:, 3:]]).abs() / 6.0
+        verts_mass = torch.zeros_like(verts[:, 0])
+        for i in range(4):
+            verts_mass.index_add_(0, elems[:, i], 0.25 * elems_mass)
+        com_vel = verts_mass @ box_state_0.vel / verts_mass.sum()
+        com_pos = verts_mass @ box_state_0.pos / verts_mass.sum()
+        for _ in range(n_steps * N_SUBSTEPS):
+            com_vel[..., 2] -= GRAVITY * substep_dt
+            com_vel /= 1.0 + DAMPING_ALPHA * substep_dt
+            com_pos += substep_dt * com_vel
+        assert_allclose(verts_mass @ box.get_state().pos / verts_mass.sum(), com_pos, atol=5e-12)
+
+        # Replaying the free fall reproduces it bitwise
+        fall_pos = box.get_state().pos
+        scene.reset(state=fall_state)
+        for _ in range(n_steps):
+            scene.step()
+        assert_equal(box.get_state().pos, fall_pos)
 
     # Distinct positions and link poses per environment make cross-environment index mixups observable.
     box.set_position(((0.0, 0.0, 0.0), (0.0, 0.0, 0.2)))
