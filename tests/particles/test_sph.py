@@ -323,7 +323,7 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
             sampler="regular",
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
     for _ in range(100):
         scene.step()
@@ -358,3 +358,10 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     for _ in range(5):
         scene.step()
     assert_equal(liquid.get_particles_pos(), pos)
+
+    # The trajectory of an environment must not depend on what the other environments simulate alongside it.
+    scene.reset(state)
+    liquid.set_particles_vel((0.0, 0.0, 0.5), envs_idx=[1])
+    for _ in range(5):
+        scene.step()
+    assert_equal(liquid.get_particles_pos(envs_idx=[0]), pos[[0]])
