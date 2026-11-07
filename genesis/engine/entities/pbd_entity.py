@@ -330,6 +330,28 @@ class PBD2DEntity(PBDTetEntity):
             self._inner_edges_len_rest,
         )
 
+    def _add_vverts_to_solver(self):
+        """Embed every vvert in its nearest triangle of the simulation mesh at rest, by its barycentric coordinates.
+
+        The vverts of a cloth follow the particles of that triangle alone, so that neighboring vverts, embedded in the
+        same or adjacent triangles, stay on one continuous surface as the cloth bends. The affine fit over the nearest
+        particles of `ParticleEntity` switches support sets between neighboring vverts and creases the rendered cloth.
+        The supports past the three of the triangle take zero weight."""
+        n_supports = self.solver.n_vvert_supports
+        if n_supports < 3:
+            super()._add_vverts_to_solver()
+            return
+        faces = self._mesh.faces
+        mesh = trimesh.Trimesh(vertices=self._particles, faces=faces, process=False)
+        closest, _, tri_idx = trimesh.proximity.closest_point(mesh, self._vverts)
+        bary = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_idx], closest)
+        support_idxs = np.zeros((len(self._vverts), n_supports), dtype=gs.np_int)
+        support_weights = np.zeros((len(self._vverts), n_supports), dtype=gs.np_float)
+        support_idxs[:, :3] = faces[tri_idx]
+        support_idxs[:, 3:] = faces[tri_idx, :1]
+        support_weights[:, :3] = bary
+        self._solver.add_vverts_weighted(self._vvert_start, self._particle_start, support_idxs, support_weights)
+
     @property
     def n_inner_edges(self):
         """The number of inner edges in the 2D mesh."""

@@ -2,9 +2,8 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
-
 import quadrants as qd
+import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -33,6 +32,7 @@ from genesis.utils.data import DataItem, eoa, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
+from . import backward as backward_constraint_solver, linesearch, noslip as constraint_noslip
 from .island import (
     func_build_islands,
     func_build_islands_coop,
@@ -44,9 +44,6 @@ from .island import (
     func_sort_contacts,
     func_sort_contacts_coop,
 )
-from . import backward as backward_constraint_solver
-from . import linesearch
-from . import noslip as constraint_noslip
 
 
 @qd.func
@@ -376,6 +373,10 @@ class ConstraintSolver:
             self._solver.rigid_config,
             self._n_iterations,
         )
+        self.resolve_post()
+
+    def resolve_post(self):
+        """Update the accelerations and the contact forces from the constraint solution."""
         kernel_resolve_post(
             self._solver.dyn_state,
             self._collider.collider_state,
@@ -530,18 +531,25 @@ class ConstraintSolver:
             self._solver.rigid_config,
         )
 
-    def backward(self):
+    def backward(self, solve_adjoint=None):
         """Adjoint solve of the constraint force computation.
 
         The caller must pre-populate the upstream gradient constraint_state.dL_dqacc (see
-        RigidSolver._constraint_force_grad)."""
+        RigidSolver._constraint_force_grad). `solve_adjoint`, for a constraint solve run by another solver jointly with
+        its own unknowns, replaces the solve of A u = g: called once g is complete in dL_dqacc, it writes u in bw_u."""
         if not self._solver._requires_grad:
             gs.raise_exception("Please set `requires_grad` to True in SimOptions to enable differentiable mode.")
 
         # 1. We first need to find a solution to A^T * u = g system.
-        backward_constraint_solver.kernel_solve_adjoint_u(
-            self.constraint_state, self._solver.dyn_info, self._solver.rigid_info, self._solver.rigid_config
-        )
+        if solve_adjoint is None:
+            backward_constraint_solver.kernel_solve_adjoint_u(
+                self.constraint_state, self._solver.dyn_info, self._solver.rigid_info, self._solver.rigid_config
+            )
+        else:
+            backward_constraint_solver.kernel_add_constraint_force_grad(
+                self.constraint_state, self._solver.rigid_config
+            )
+            solve_adjoint()
 
         # 2. Using the solution u, we can compute the gradients of the input variables.
         backward_constraint_solver.kernel_compute_gradients(self.constraint_state, self._solver.rigid_info)
@@ -3688,17 +3696,32 @@ def func_hessian_and_cholesky_factor_direct_batch(
             func_cholesky_factor_direct_batch(i_b, i_island, constraint_state, rigid_info, rigid_config)
 
 
+@qd.data_oriented
+class NoExtraHessian:
+    """The `extra_hessian` of func_hessian_and_cholesky_factor_direct that adds nothing."""
+
+    has_extra_hessian = False
+
+
+NO_EXTRA_HESSIAN = NoExtraHessian()
+
+
 @qd.func
 def func_hessian_and_cholesky_factor_direct(
     constraint_state: ConstraintState,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     compute_envelope: qd.template() = False,
+    extra_hessian: qd.template() = NO_EXTRA_HESSIAN,
 ):
     """Assemble and factor the Hessian block of every island still iterating, over the flat (env, island) grid.
 
     compute_envelope computes each island's structural skyline envelope before factoring; it is structural, so callers
-    set it once per step (func_solve_init) and leave it False for the per-iteration re-factorizations.
+    set it once per step (func_solve_init) and leave it False for the per-iteration re-factorizations. An
+    `extra_hessian` whose `has_extra_hessian` is set adds a stiffness of its own to the block of every island between
+    its assembly and its factorization, by `func_add_island_hessian(i_b, i_island, constraint_state, rigid_config)` on
+    the lower triangle of `nt_H` (see func_hessian_direct_batch), within the dofs of the island and the skyline envelope
+    of its block.
     """
     _B = constraint_state.jac.shape[2]
 
@@ -3717,6 +3740,8 @@ def func_hessian_and_cholesky_factor_direct(
                 if qd.static(compute_envelope):
                     func_compute_island_envelope(i_b, i_island, constraint_state, rigid_info, rigid_config)
                 func_hessian_direct_batch(i_b, i_island, constraint_state, rigid_info, rigid_config)
+                if qd.static(extra_hessian.has_extra_hessian):
+                    extra_hessian.func_add_island_hessian(i_b, i_island, constraint_state, rigid_config)
                 func_cholesky_factor_direct_batch(i_b, i_island, constraint_state, rigid_info, rigid_config)
 
 

@@ -32,6 +32,7 @@ from genesis.options import (
     FEMOptions,
     KinematicOptions,
     MPMOptions,
+    NewtonOptions,
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
@@ -157,6 +158,9 @@ class Scene(RBC):
         The options configuring the fem_solver (``scene.sim.FEMSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+    newton_options : gs.options.NewtonOptions
+        The options configuring the newton_solver (``scene.sim.NewtonSolver``), which runs the implicit solve of the
+        MPM solver and of the solvers coupled with it.
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
@@ -183,6 +187,7 @@ class Scene(RBC):
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
         pbd_options: PBDOptions | None = None,
+        newton_options: NewtonOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
@@ -203,6 +208,7 @@ class Scene(RBC):
             sph_options,
             fem_options,
             pbd_options,
+            newton_options,
             coupler_options,
             vis_options,
             viewer_options,
@@ -222,6 +228,7 @@ class Scene(RBC):
                 sph=sph_options,
                 fem=fem_options,
                 pbd=pbd_options,
+                newton=newton_options,
                 coupler=coupler_options,
                 vis=vis_options,
                 viewer=viewer_options,

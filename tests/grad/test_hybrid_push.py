@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import numpy as np
 import pytest
 import torch
@@ -16,8 +18,7 @@ def test_mpm_rigid_push_grad(show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=2e-3,
-            substeps=10,
+            dt=1e-2,
             requires_grad=True,
         ),
         mpm_options=gs.options.MPMOptions(
@@ -43,7 +44,7 @@ def test_mpm_rigid_push_grad(show_viewer):
             pos=(0.5, 0.5, 0.05),
             euler=(90.0, 0.0, 0.0),
         ),
-        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+        # Heavy, so that the object it pushes barely changes its motion
         material=gs.materials.Rigid(
             rho=1e6,
             coup_friction=8.0,
@@ -57,6 +58,7 @@ def test_mpm_rigid_push_grad(show_viewer):
         ),
         material=gs.materials.MPM.Elastic(
             rho=500,
+            sampler="regular",
         ),
     )
     # A second stick, far from the object, whose position the loss reads: it moves by its velocity times the step
@@ -108,165 +110,250 @@ def test_mpm_rigid_push_grad(show_viewer):
     assert v_far_list[-1].grad is None
 
 
+class _FdCase(NamedTuple):
+    params: np.ndarray
+    i_loss: int
+    eps: float
+    # The entries whose finite difference is taken, every entry when None
+    idx: tuple[tuple[int, ...], ...] | None = None
+
+
+def _grads_and_fd(rollout, cases):
+    # The backward pass runs on the sum of the losses, which each depend on the cases of their own body alone. A
+    # rollout of the finite differences perturbs one entry of every loss at once, the bodies standing far apart, on the
+    # same scene without gradients, which simulates the same physics.
+    params_ana = [torch.tensor(case.params, dtype=gs.tc_float, device=gs.device, requires_grad=True) for case in cases]
+    torch.atleast_1d(rollout(params_ana)).sum().backward()
+    fd_grads = [np.zeros_like(case.params) for case in cases]
+    entries_by_loss = [[] for _ in range(max(case.i_loss for case in cases) + 1)]
+    for i_case, case in enumerate(cases):
+        idx_all = np.ndindex(case.params.shape) if case.idx is None else case.idx
+        entries_by_loss[case.i_loss].extend((i_case, idx) for idx in idx_all)
+    with torch.no_grad():
+        for i_entry in range(max(len(entries) for entries in entries_by_loss)):
+            entries = [entries[i_entry] for entries in entries_by_loss if i_entry < len(entries)]
+            losses = []
+            for sign in (+1, -1):
+                params = [case.params.copy() for case in cases]
+                for i_case, idx in entries:
+                    params[i_case][idx] += sign * cases[i_case].eps
+                losses.append(torch.atleast_1d(rollout(params)))
+            for i_case, idx in entries:
+                i_loss = cases[i_case].i_loss
+                fd_grads[i_case][idx] = float(losses[0][i_loss] - losses[1][i_loss]) / (2.0 * cases[i_case].eps)
+    return params_ana, fd_grads
+
+
+def _optimize(rollout, params, n_iters, lr):
+    # The gradients of the implicit MPM describe the motion where its Newton solve stops, so they are inexact at the
+    # default tolerance, which a descent method tolerates: what they must do is optimize the losses
+    params = [torch.tensor(param, dtype=gs.tc_float, device=gs.device, requires_grad=True) for param in params]
+    optimizer = torch.optim.Adam(params, lr=lr)
+    losses = []
+    for _ in range(n_iters):
+        optimizer.zero_grad()
+        loss = torch.atleast_1d(rollout(params))
+        loss.sum().backward()
+        losses.append(loss.detach())
+        optimizer.step()
+    with torch.no_grad():
+        losses.append(torch.atleast_1d(rollout(params)))
+    return params, torch.stack(losses)
+
+
 @pytest.mark.required
-def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
-    # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
-    # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
-    scenes, boxes_by_scene = [], []
-    for requires_grad in (True, False):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=4e-3,
-                substeps=2,
-                requires_grad=requires_grad,
-            ),
-            mpm_options=gs.options.MPMOptions(
-                lower_bound=(-0.5, -0.5, -0.1),
-                upper_bound=(0.5, 0.5, 0.5),
-                grid_density=32,
-            ),
-            # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
-            coupler_options=gs.options.LegacyCouplerOptions(
-                fem_mpm=False,
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.6, -0.9, 0.5),
-                camera_lookat=(0.0, 0.0, 0.15),
-            ),
-            show_viewer=show_viewer and requires_grad,
+def test_mpm_grad_descends(show_viewer):
+    # The bodies stand far apart in one scene, each driving a loss of its own through inputs of its own, so that one
+    # backward pass covers them all. The force fields act on the whole domain, hence on every body: the
+    # gradient of the initial velocity goes through their derivative with respect to the velocity (zero for the
+    # constant field, the drag's |v| v and the flow of the point attractor otherwise). The muscle drives its particles
+    # by its actuations. Each pair of blocks collides head-on and yields, so that the gradient of the initial velocity
+    # of the first goes through the reverse of the return map of every substep after the impact, and through the
+    # plastic volume ratio Jp for the snow and the sand.
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            gravity=(0.0, 0.0, 0.0),
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=32,
+            lower_bound=(-1.5, -1.25, -0.5),
+            upper_bound=(1.5, 1.25, 0.5),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, -3.5, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    muscle = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.85, -0.1, 0.1),
+            upper=(-0.65, 0.1, 0.2),
+        ),
+        material=gs.materials.MPM.Muscle(
+            E=5e4,
+            nu=0.3,
+            rho=1000.0,
+            sampler="regular",
+            n_groups=2,
+        ),
+    )
+    # Every block stands off the faces of the grid cells, where the rounding of a position would pick the cell, and every
+    # shift of a body is a multiple of 0.25, whole cells
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.503, 0.002, 0.001),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=5e4,
+            sampler="regular",
+        ),
+    )
+    materials = (
+        gs.materials.MPM.ElastoPlastic(
+            E=5e4,
+            sampler="regular",
+            von_mises_yield_stress=500.0,
+        ),
+        gs.materials.MPM.ElastoPlastic(
+            E=5e4,
+            sampler="regular",
+            use_von_mises=False,
+        ),
+        gs.materials.MPM.Snow(
+            E=5e4,
+            sampler="regular",
+        ),
+        gs.materials.MPM.Sand(
+            E=5e4,
+            sampler="regular",
+        ),
+        gs.materials.MPM.Liquid(
+            E=5e4,
+            sampler="regular",
+            viscous=True,
+        ),
+    )
+    blocks, targets = [], []
+    for i_material, material in enumerate(materials):
+        blocks.append(
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(-0.052, 0.002 + 0.5 * (i_material - 2), 0.001),
+                    size=(0.1, 0.1, 0.1),
+                ),
+                material=material,
+            )
         )
-        mpm_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                lower=(-0.35, -0.1, 0.1),
-                upper=(-0.15, 0.1, 0.2),
-            ),
-            material=gs.materials.MPM.Muscle(
-                E=5e4,
-                nu=0.3,
-                rho=1000.0,
-                sampler="regular",
-                n_groups=2,
-            ),
+        targets.append(
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(0.058, 0.012 + 0.5 * (i_material - 2), 0.001),
+                    size=(0.1, 0.1, 0.1),
+                ),
+                material=material,
+            )
         )
-        fem_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.3, 0.0, 0.3),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.FEM.Muscle(
-                E=5e4,
-                nu=0.3,
-                n_groups=2,
-            ),
-        )
-        scene.build(n_envs=2)
-        # One muscle group on each side of each box
-        mpm_muscle_group = (mpm_box.init_particles[:, 0] > -0.25).astype(gs.np_int)
-        mpm_box.set_muscle(muscle_group=mpm_muscle_group)
-        elems_centroid = tensor_to_array(fem_box.init_positions)[fem_box.elems].mean(axis=1)
-        fem_box.set_muscle(muscle_group=(elems_centroid[:, 0] > 0.3).astype(gs.np_int))
-        scenes.append(scene)
-        boxes_by_scene.append((mpm_box, fem_box))
-
-    def rollout(scene, boxes, actus, vels):
-        scene.reset()
-        for box, vel, actu in zip(boxes, vels, actus):
-            box.set_velocity(vel)
-            box.set_actuation(actu[0])
-        scene.step()
-        for box, actu in zip(boxes, actus):
-            box.set_actuation(actu[1])
-        scene.step()
-        scene.step()
-        for box, actu in zip(boxes, actus):
-            box.set_actuation(actu[2])
-        scene.step()
-        # The loss of each box, which alone depends on its inputs since the boxes are uncoupled
-        goals = ((-0.15, -0.05, 0.0), (0.4, -0.05, 0.0))
-        return tuple(
-            ((box.get_state().pos - torch.tensor(goal, dtype=gs.tc_float, device=gs.device)) ** 2).sum()
-            for box, goal in zip(boxes, goals)
-        )
-
-    # Actuations of each box (MPM, FEM) at steps 0, 1 and 3, then their initial velocities
-    actus = np.array([[[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]], [[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]])
-    vels = np.array([[0.1, -0.2, 0.3], [-0.2, 0.1, 0.2]])
-    # Every substep of a step reads the actuation set last
-    for scene, boxes in zip(scenes, boxes_by_scene):
-        rollout(scene, boxes, actus, vels)
-        assert_allclose(boxes[0].get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
+    for force_field in (
+        gs.force_fields.Constant(direction=(0.0, 0.0, 1.0), strength=2.0),
+        gs.force_fields.Drag(linear=3.0, quadratic=5.0),
+        gs.force_fields.Point(strength=1.0, position=(0.3, 0.2, 0.1), flow=2.0),
+    ):
+        scene.add_force_field(force_field).activate()
+    scene.build(n_envs=2)
+    # One muscle group on each side of the box
+    muscle_group = (muscle.init_particles[:, 0] > -0.75).astype(gs.np_int)
+    muscle.set_muscle(muscle_group=muscle_group)
 
     # A particle given several times takes the value of its last occurrence, which alone gets a gradient, whether the
     # particles are given once for every environment or row by row, and whether they count from the start or the end
-    n_particles = boxes_by_scene[0][0].n_particles
-    for particles_idx_local in ([0, 0], [[0, 0], [1, 1]], [n_particles - 1, -1]):
-        scenes[0].reset()
+    for particles_idx_local in ([0, 0], [[0, 0], [1, 1]], [muscle.n_particles - 1, -1]):
+        scene.reset()
         vels_repeated = torch.tensor(
             [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]] * 2, dtype=gs.tc_float, device=gs.device, requires_grad=True
         )
-        boxes_by_scene[0][0].set_particles_vel(vels_repeated, particles_idx_local=particles_idx_local)
-        vel = boxes_by_scene[0][0].get_state().vel[[0, 1], np.array(particles_idx_local).reshape(-1, 2)[:, 0]]
+        muscle.set_particles_vel(vels_repeated, particles_idx_local=particles_idx_local)
+        vel = muscle.get_state().vel[[0, 1], np.array(particles_idx_local).reshape(-1, 2)[:, 0]]
         assert_allclose(vel, vels_repeated[:, 1], tol=gs.EPS)
         (vels_grad,) = torch.autograd.grad(vel.sum(), vels_repeated)
         assert_allclose(vels_grad[:, 0], 0.0, tol=gs.EPS)
         assert_allclose(vels_grad[:, 1], 1.0, tol=gs.EPS)
 
-    actus_ana = torch.tensor(actus, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    sum(rollout(scenes[0], boxes_by_scene[0], actus_ana, vels_ana)).backward()
+    goal_muscle = torch.tensor((-0.65, -0.05, 0.0), dtype=gs.tc_float, device=gs.device)
+    goal_block = torch.tensor((0.6, -0.05, 0.02), dtype=gs.tc_float, device=gs.device)
+    goals_blocks = [
+        torch.tensor((0.1, -0.05 + 0.5 * (i_material - 2), 0.02), dtype=gs.tc_float, device=gs.device)
+        for i_material in range(len(materials))
+    ]
+    bodies = (muscle, block, *blocks)
+    goals = (goal_muscle, goal_block, *goals_blocks)
 
-    # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error. The
-    # finite difference of the inputs of a box reads the loss of that box alone, clear of the rounding of the other.
-    eps = 1e-5 if precision == "64" else 1e-2
-    inputs = (actus, vels)
-    inputs_fd_grad = (np.zeros_like(actus), np.zeros_like(vels))
-    for i_input, (value, fd_grad) in enumerate(zip(inputs, inputs_fd_grad)):
-        for idx in np.ndindex(value.shape):
-            losses = []
-            for sign in (+1, -1):
-                perturbed_inputs = list(inputs)
-                perturbed_inputs[i_input] = value.copy()
-                perturbed_inputs[i_input][idx] += sign * eps
-                losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
-            fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
-        assert (np.abs(fd_grad) > 1e-3).all()
-    tol = 2e-9 if precision == "64" else 2e-4
-    assert_allclose(actus_ana.grad, inputs_fd_grad[0], rtol=tol, atol=tol)
-    assert_allclose(vels_ana.grad, inputs_fd_grad[1], rtol=tol, atol=tol)
+    def rollout(params):
+        actus, vel_muscle, vel_block, *vels_blocks = params
+        scene.reset()
+        muscle.set_velocity(vel_muscle)
+        block.set_velocity(vel_block)
+        for body, vel in zip(blocks, vels_blocks):
+            body.set_velocity(vel)
+        for body in targets:
+            body.set_velocity(torch.tensor(((-1.5, 0.0, 0.0),) * 2, dtype=gs.tc_float, device=gs.device))
+        for actu in (actus[0], actus[1], None, actus[2]):
+            if actu is not None:
+                muscle.set_actuation(actu)
+            scene.step()
+        return torch.stack([((body.get_state().pos - goal) ** 2).sum() for body, goal in zip(bodies, goals)])
+
+    actus = np.array([[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]])
+    vels_block = np.array([[0.3, -0.2, 0.4], [-0.5, 0.1, 0.2]])
+    vels_blocks = np.array([[1.5, -0.2, 0.3], [1.2, 0.1, -0.2]])
+    params, losses = _optimize(
+        rollout, [actus, np.array([0.1, -0.2, 0.3]), vels_block, *(vels_blocks,) * len(materials)], n_iters=20, lr=0.1
+    )
+    # Every body comes closer to its goal at every step of the optimization of its own inputs
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.75 * losses[0]).all()
+    # The particles hold the actuation set last
+    with torch.no_grad():
+        rollout(params)
+    assert_allclose(muscle.get_particles_actu(), tensor_to_array(params[0])[2][muscle_group], tol=gs.EPS)
 
 
 @pytest.mark.required
-def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
+@pytest.mark.precision("64")
+def test_fem_grad_matches_fd(precision, show_viewer):
+    # The muscle drives its elements by its actuations, and the FEM block follows the rigid box, its near end held at
+    # the box and its far end pulled toward it by springs, so the gradient also flows from the box pose to the block.
+    # The muscle stands far from the block, each driving a loss of its own.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
+            # The explicit FEM integration needs small substeps
             dt=4e-3,
             substeps=4,
             gravity=(0.0, 0.0, 0.0),
             requires_grad=True,
         ),
-        mpm_options=gs.options.MPMOptions(
-            lower_bound=(-0.5, -0.5, -0.5),
-            upper_bound=(0.5, 0.5, 0.5),
-            grid_density=16,
-        ),
         # The collisions of the FEM solver carry no gradient (see 'LegacyCoupler.is_differentiable')
         coupler_options=gs.options.LegacyCouplerOptions(
             rigid_fem=False,
-            fem_mpm=False,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.6, -0.6, 0.4),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(0.9, -0.7, 0.6),
+            camera_lookat=(0.2, 0.0, 0.15),
         ),
         show_viewer=show_viewer,
     )
-    block = scene.add_entity(
+    muscle = scene.add_entity(
         morph=gs.morphs.Box(
-            lower=(-0.2, -0.05, -0.05),
-            upper=(-0.05, 0.05, 0.05),
+            pos=(0.3, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
         ),
-        material=gs.materials.MPM.Elastic(
+        material=gs.materials.FEM.Muscle(
             E=5e4,
+            nu=0.3,
+            n_groups=2,
         ),
     )
     box = scene.add_entity(
@@ -285,48 +372,172 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         ),
     )
     scene.build(n_envs=2)
-    # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
-    block.set_particle_constraints(
-        block.get_particles_in_bbox((-0.2, -0.05, -0.05), (-0.15, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
-    )
-    # The FEM block follows the box too, its near end held at the box and its far end pulled toward it by springs
+    # One muscle group on each side of the box
+    elems_centroid = tensor_to_array(muscle.init_positions)[muscle.elems].mean(axis=1)
+    muscle.set_muscle(muscle_group=(elems_centroid[:, 0] > 0.3).astype(gs.np_int))
     fem_verts_x = tensor_to_array(fem_block.init_positions)[:, 0]
     fem_block.set_vertex_constraints(np.nonzero(fem_verts_x < 0.1 + gs.EPS)[0], link=box.links[0])
     fem_block.set_vertex_constraints(
         np.nonzero(fem_verts_x > 0.2 - gs.EPS)[0], link=box.links[0], is_soft_constraint=True, stiffness=100.0
     )
 
-    def rollout(vel):
-        scene.reset()
-        block.set_velocity((0.5, 0.0, 0.0))
-        box.set_dofs_velocity(vel)
-        for _ in range(20):
-            scene.step()
-        box_loss = (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
-        return box_loss, (fem_block.get_state().pos ** 2).sum()
+    goal = torch.tensor((0.4, -0.05, 0.0), dtype=gs.tc_float, device=gs.device)
 
-    tol = 2e-10 if precision == "64" else 1e-4
-    fem_tol = 2e-10 if precision == "64" else 5e-4
-    vel = np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1))
-    vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
-    box_loss, _ = rollout(vel_ana)
-    # The block pushes the box, which would otherwise keep its velocity
-    assert (box.get_dofs_velocity()[..., 0] > vel_ana[..., 0] + 5e-3).all()
-    box_loss.backward()
-    (fem_grad,) = torch.autograd.grad(rollout(vel_ana)[1], vel_ana)
-    # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
-    # a reset starts free of the coupling wrench the previous one left.
-    eps = 1e-6 if precision == "64" else 1e-2
-    fd_grad = np.zeros((2, *vel.shape))
+    def rollout(params):
+        actus, vel_muscle, vel_box = params
+        scene.reset()
+        muscle.set_velocity(vel_muscle)
+        box.set_dofs_velocity(vel_box)
+        for i_step in range(20):
+            if i_step < 2:
+                muscle.set_actuation(actus[i_step])
+            elif i_step == 3:
+                muscle.set_actuation(actus[2])
+            scene.step()
+            if i_step == 3:
+                loss_muscle = ((muscle.get_state().pos - goal) ** 2).sum()
+        return torch.stack([loss_muscle, (fem_block.get_state().pos ** 2).sum()])
+
+    cases = [
+        _FdCase(params=np.array([[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]), i_loss=0, eps=1e-5),
+        _FdCase(params=np.array([-0.2, 0.1, 0.2]), i_loss=0, eps=1e-5),
+        # The finite differences of the first environment, the second one running the same inputs apart
+        _FdCase(
+            params=np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1)),
+            i_loss=1,
+            eps=1e-6,
+            idx=tuple((0, j) for j in range(6)),
+        ),
+    ]
+    params_ana, fd_grads = _grads_and_fd(rollout, cases)
+    for param_ana, fd_grad in zip(params_ana[:2], fd_grads[:2]):
+        assert (np.abs(fd_grad) > 1e-3).all()
+        assert_allclose(param_ana.grad, fd_grad, tol=2e-10)
+    # The environments run the same inputs apart, so they get the same gradient
+    assert_allclose(params_ana[2].grad[1], params_ana[2].grad[0], tol=1e-10)
+    assert_allclose(params_ana[2].grad[0], fd_grads[2][0], tol=5e-10)
+
+
+@pytest.mark.required
+def test_hybrid_grad_descends(show_viewer):
+    # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
+    # gradient goes from the soft particles to the dofs of the arm through that coupling and the implicit MPM solve
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            gravity=(0.0, 0.0, 0.0),
+            lower_bound=(0.0, 0.0, -0.2),
+            upper_bound=(1.0, 1.0, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.65, -0.35, 0.6),
+            camera_lookat=(0.65, 0.45, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    robot = scene.add_entity(
+        morph=gs.morphs.URDF(
+            pos=(0.45, 0.45, 0.2),
+            file="urdf/simple/two_link_arm.urdf",
+            scale=0.2,
+            fixed=True,
+        ),
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
+            material_soft=gs.materials.MPM.Muscle(
+                E=1e4,
+                nu=0.45,
+                sampler="regular",
+            ),
+            # The particles take the whole velocity of the links, rather than the default hundredth of it, so that the
+            # arm moves the soft part
+            soft_dv_coef=1.0,
+        ),
+    )
+    scene.build()
+
+    def centroid_after(vel):
+        scene.reset()
+        robot.set_dofs_velocity(vel)
+        for _ in range(3):
+            scene.step()
+        return robot.part_soft.get_state().pos.mean(dim=-2)
+
+    # The goal is where the arm takes the soft part at another velocity, so that it is reachable
     with torch.no_grad():
-        for i, j in np.ndindex(vel.shape):
-            losses = []
-            for sign in (+1, -1):
-                perturbed = vel.copy()
-                perturbed[i, j] += sign * eps
-                losses.append([float(loss) for loss in rollout(perturbed)])
-            fd_grad[:, i, j] = (np.array(losses[0]) - np.array(losses[1])) / (2.0 * eps)
-    (grad_rerun,) = torch.autograd.grad(rollout(vel_ana)[0], vel_ana)
-    assert_allclose(grad_rerun, vel_ana.grad, tol=tol)
-    assert_allclose(vel_ana.grad, fd_grad[0], rtol=tol, atol=tol)
-    assert_allclose(fem_grad, fd_grad[1], rtol=fem_tol, atol=fem_tol)
+        goal = centroid_after(torch.tensor((0.5, 0.5), dtype=gs.tc_float, device=gs.device)).clone()
+    _, losses = _optimize(
+        lambda params: ((centroid_after(params[0]) - goal) ** 2).sum(), [np.array([1.5, -0.8])], n_iters=4, lr=0.3
+    )
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.25 * losses[0]).all()
+
+
+@pytest.mark.required
+def test_coupling_wrench_grad_descends(show_viewer):
+    # The block alone moves the box, which starts at rest, by its contact and the springs of its trailing end, so that
+    # the gradient of the pose of the box with respect to the velocity of the block goes through the coupling alone
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            gravity=(0.0, 0.0, 0.0),
+            requires_grad=True,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.5),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=16,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -0.6, 0.4),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.18, -0.05, -0.05),
+            upper=(-0.03, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=5e4,
+            # Its front particles, half a spacing behind its face, start 1 cm from the box and hit it within the rollout
+            sampler="regular",
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.01, 0.0),
+            size=(0.08, 0.08, 0.08),
+        ),
+    )
+    scene.build(n_envs=2)
+    block.set_particle_constraints(
+        block.get_particles_in_bbox((-0.18, -0.05, -0.05), (-0.13, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
+    )
+    goal = torch.tensor((0.01, 0.01, 0.0), dtype=gs.tc_float, device=gs.device)
+
+    def rollout(params):
+        (vel,) = params
+        scene.reset()
+        block.set_velocity(vel)
+        for _ in range(8):
+            scene.step()
+        return ((box.get_state().pos - goal) ** 2).sum(dim=-1) + (box.get_state().quat[..., 1:] ** 2).sum(dim=-1)
+
+    vel_start = np.tile([0.5, 0.0, 0.0], (2, 1))
+    vel = torch.tensor(vel_start, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    (grad,) = torch.autograd.grad(rollout([vel]).sum(), vel)
+    # The environments run the same inputs apart, so they get the same gradient, and a rollout after a reset starts free
+    # of the coupling wrench the previous one left
+    (grad_rerun,) = torch.autograd.grad(rollout([vel]).sum(), vel)
+    assert_allclose(grad[1], grad[0], tol=1e-6)
+    assert_allclose(grad_rerun, grad, tol=1e-6)
+    _, losses = _optimize(rollout, [vel_start], n_iters=3, lr=0.05)
+    assert (losses[1:] < losses[:-1]).all()
+    assert (losses[-1] < 0.25 * losses[0]).all()

@@ -890,9 +890,34 @@ def use_deterministic_algorithms(request):
     return use_deterministic_algorithms
 
 
+@pytest.fixture
+def cpu_threads(request):
+    """Number of threads of the CPU backend given by the 'cpu_threads' marker, None for the default of the worker.
+
+    One thread fixes the order of the reductions by atomic adds, whose floating-point sums vary from one run to the
+    next with several threads.
+    """
+    cpu_threads = None
+    for mark in request.node.iter_markers("cpu_threads"):
+        if mark.args:
+            if cpu_threads is not None:
+                pytest.fail("'cpu_threads' can only be specified once.")
+            (cpu_threads,) = mark.args
+    return cpu_threads
+
+
 @pytest.fixture(scope="function", autouse=True)
 def initialize_genesis(
-    request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache, use_deterministic_algorithms
+    request,
+    monkeypatch,
+    tmp_path,
+    backend,
+    precision,
+    performance_mode,
+    debug,
+    cache,
+    use_deterministic_algorithms,
+    cpu_threads,
 ):
     import genesis as gs
 
@@ -923,6 +948,9 @@ def initialize_genesis(
         basetemp = request.config._tmp_path_factory.getbasetemp()
         assert numba_cache_dir.is_relative_to(basetemp)
         shutil.rmtree(numba_cache_dir, ignore_errors=True)
+
+    if cpu_threads is not None and backend == gs.cpu:
+        monkeypatch.setenv("QD_NUM_THREADS", str(cpu_threads))
 
     # Redirect name terrain cache directory to some test-local temporary location to avoid conflict and persistence
     monkeypatch.setattr("genesis.utils.cache.get_gnd_cache_dir", lambda: str(tmp_path / ".cache" / "terrain"))

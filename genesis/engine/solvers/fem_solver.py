@@ -19,6 +19,8 @@ from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_q
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_numpy, qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
+from .fem_newton import FemNewtonHost, FemNewtonParticipant
+from .newton_solver import NewtonHost
 
 # Lanes of a GPU subgroup tile that gather together the element corners of a vertex (see 'vertices_corners_idx')
 LOG2_CORNER_LANES = 2
@@ -41,6 +43,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # options
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
+        # Whether the NewtonSolver runs the implicit substep (see build_newton_participant)
+        self._is_solve_deferred = False
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
         self._n_pcg_iterations = options.n_pcg_iterations
@@ -554,6 +558,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def compute_ele_energy_gradient(self, f: qd.i32):
+        self.func_compute_ele_energy_gradient(f)
+
+    @qd.func
+    def func_compute_ele_energy_gradient(self, f: int):
+        """Energy density and its gradient of every element at the end-of-substep positions, the gradient with the
+        stress of the Rayleigh stiffness damping.
+
+        The positions are those of frame f + 1."""
         damping_beta_over_dt = self._damping_beta / self._substep_dt
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
@@ -1032,6 +1044,16 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
+    def build_newton_participant(self) -> tuple[NewtonHost, FemNewtonParticipant]:
+        """Build the participant of the FEM vertex positions in the joint Newton solve and hand its implicit solve over
+        to it.
+
+        The joint solve then replaces the implicit solve of every substep, which solves it jointly with the solvers
+        coupled with FEM (see FemNewtonHost). The caller registers the returned host and participant."""
+        participant = FemNewtonParticipant(self, self._B)
+        self._is_solve_deferred = True
+        return FemNewtonHost(self, participant), participant
+
     def substep_pre_coupling(self, f):
         if self.is_active:
             # Skip FEM solver step if using IPCCoupler (IPC handles FEM simulation)
@@ -1039,6 +1061,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             if isinstance(self.sim._coupler, IPCCoupler):
                 pass  # IPC coupler handles FEM simulation
+            elif self._is_solve_deferred:
+                # The NewtonSolver solves the implicit substep jointly with the implicit MPM solver
+                pass
             elif self._use_implicit_solver:
                 self.precompute_material_data(f)
                 self.init_pos_and_inertia(f, self._sim.rigid_solver.dyn_state.links)
@@ -1053,7 +1078,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def substep_post_coupling(self, f):
         if self.is_active:
-            self.compute_pos(f)
+            # The NewtonSolver integrates the positions of a deferred solve itself (see FemNewtonHost)
+            if not self._is_solve_deferred:
+                self.compute_pos(f)
             if self._constraints_initialized and not self._use_implicit_solver:
                 self.apply_hard_constraints(f, self._sim.rigid_solver.dyn_state.links)
 

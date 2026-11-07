@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -7,18 +8,59 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
+from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
+from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
-from genesis.grad.bridge import no_grad, register_custom_backward
-from genesis.options.solvers import MPMOptions
-from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
-from genesis.utils.data import ArrayItem, DataKind, opt_in
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.grad.bridge import no_grad
+from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
+from genesis.utils.array_class import ErrorCode, LinksState
+from genesis.utils.data import DataItem, Namespace, iter_data, iter_state_arrays, namespace
+from genesis.utils.misc import (
+    DeprecationError,
+    broadcast_tensor,
+    qd_destroy_data,
+    qd_isfinite,
+    qd_to_numpy,
+    qd_to_torch,
+    qd_zero_grad,
+)
 
+from . import mpm_adjoint_func, mpm_func
+from .mpm_data import (
+    BLOCK_CELLS,
+    MIN_BLOCKS,
+    MpmErrno,
+    MpmForceFields,
+    MpmGridScratch,
+    MpmInfo,
+    MpmMaterialTable,
+    MpmNewtonScratch,
+    MpmParticles,
+    MpmParticlesInfo,
+    MpmParticlesNG,
+    MpmWallPairs,
+    build_mpm_grid,
+    build_mpm_newton,
+    build_wall_pairs,
+    initial_block_capacity,
+)
+from .newton_linear import (
+    CAPACITY_GROW_FACTOR,
+    MIN_SLOTS,
+    BlockJacobiOwner,
+    BlockJacobiScratch,
+    LinearBlock,
+    NewtonLinearScratch,
+    build_block_jacobi,
+    build_linear_block,
+    grown_capacity,
+    retire_scratch,
+)
+from .newton_solver import NewtonDevice
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
@@ -26,10 +68,191 @@ if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 
+def material_table_column(material):
+    """Compute the column of a material in the material table, its energy family and its return map."""
+    column = np.zeros(mpm_func.N_MATERIAL_PARAMS, dtype=gs.np_float)
+    column[mpm_func.PARAM_MU] = material.mu
+    column[mpm_func.PARAM_LAM] = material.lam
+    if isinstance(material, MPM.Sand):
+        column[mpm_func.PARAM_SAND_ALPHA] = material.alpha
+        return column, mpm_func.FAMILY_EXTENDED_HENCKY, mpm_func.PLASTIC_SAND
+    if isinstance(material, MPM.Liquid):
+        return column, mpm_func.FAMILY_LIQUID, mpm_func.PLASTIC_LIQUID
+    if isinstance(material, MPM.ElastoPlastic):
+        column[mpm_func.PARAM_YIELD_LOWER] = material.yield_lower
+        column[mpm_func.PARAM_YIELD_HIGHER] = material.yield_higher
+        column[mpm_func.PARAM_YIELD_STRESS] = material.von_mises_yield_stress
+        if isinstance(material, MPM.Snow):
+            return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_SNOW
+        if material.use_von_mises:
+            return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_VON_MISES
+        return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_CLAMP
+    if isinstance(material, MPM.Muscle):
+        column[mpm_func.PARAM_FIBRE] = material.stiffness
+    if isinstance(material, MPM.Elastic) and material.model == "neohooken":
+        return column, mpm_func.FAMILY_STABLE_NEOHOOKEAN, mpm_func.PLASTIC_NONE
+    return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_NONE
+
+
+@qd.data_oriented
+class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
+    """Grid displacement as a participant of the NewtonSolver."""
+
+    # A wall pair writes the gradient and the Hessian of its row on its particle alone
+    n_doublets = 1
+    n_triplets = 1
+    # The rows of a particle are those of the 8 nodes of its stencil
+    n_vertex_rows = 8
+
+    def __init__(
+        self,
+        particles: MpmParticles,
+        particles_info: MpmParticlesInfo,
+        materials: MpmMaterialTable,
+        grid: MpmGridScratch,
+        newton: MpmNewtonScratch,
+        jacobi: BlockJacobiScratch,
+        wall_pairs: MpmWallPairs,
+        mpm_info: MpmInfo,
+        n_sort: int,
+    ):
+        self.particles = particles
+        self.particles_info = particles_info
+        self.materials = materials
+        self.grid = grid
+        self.newton = newton
+        self.jacobi = jacobi
+        self.wall_pairs = wall_pairs
+        self.mpm_info = mpm_info
+        # The linear system of the solve, bound by the NewtonSolver
+        self.linear: NewtonLinearScratch | None = None
+        self.linear_block: LinearBlock = build_linear_block(0, 0)
+        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_offset.fill(0)
+        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
+        self.vertex_count.fill(n_sort)
+        self._scratches_replaced = []
+
+    def replace_wall_pairs(self, wall_pairs: MpmWallPairs) -> None:
+        """Swap the wall pairs, and free the arrays of those replaced (see retire_scratch)."""
+        retire_scratch(self.wall_pairs, self._scratches_replaced)
+        self.wall_pairs = wall_pairs
+
+    def replace_scratch(self, grid: MpmGridScratch, newton: MpmNewtonScratch, jacobi: BlockJacobiScratch) -> None:
+        """Swap the grid, the Newton state and the diagonal blocks, and free the arrays of those replaced (see
+        retire_scratch), except the error flags, which the new grid binds again."""
+        for scratch_old, scratch in zip((self.grid, self.newton, self.jacobi), (grid, newton, jacobi)):
+            if scratch_old is not scratch:
+                for path, array in iter_state_arrays(scratch_old):
+                    if path[0] != "errors":
+                        qd_destroy_data(array)
+                self._scratches_replaced.append(scratch_old)
+        self.grid, self.newton, self.jacobi = grid, newton, jacobi
+
+    @property
+    def max_linear_rows(self) -> int:
+        """Rows of the nodes of the grid at its capacity."""
+        return self.grid.block_coords.shape[0] * BLOCK_CELLS
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "grid")
+        yield from iter_data(self, "newton")
+        yield from iter_data(self, "jacobi")
+        yield from iter_data(self, "linear_block")
+        yield from iter_data(self, "wall_pairs")
+
+    @qd.func(requires_top_level=True)
+    def func_assemble(self, f: int, is_exact: qd.template()):
+        mpm_func.func_assemble(
+            f,
+            self.mpm_info.substep_dt[()],
+            self.particles,
+            self.grid,
+            self.newton,
+            self.linear,
+            self.linear_block,
+            self.particles_info,
+            self.materials,
+            self.mpm_info,
+            is_exact,
+        )
+
+    @qd.func(requires_top_level=True)
+    def func_start_line_search(self, control: qd.template(), f: int):
+        mpm_func.func_negate_du(self.grid, self.newton, self.linear, self.linear_block)
+        mpm_func.func_record_start_point(self.grid, self.newton)
+        mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.mpm_info)
+        mpm_func.func_cap_inversion_step(
+            f, self.particles, self.grid, self.newton, control, self.particles_info, self.materials, self.mpm_info
+        )
+
+    @qd.func(requires_top_level=True)
+    def func_step_forward(self, control: qd.template(), f: int):
+        mpm_func.func_step_forward(self.grid, self.newton, control)
+
+    @qd.func(requires_top_level=True)
+    def func_energy(self, f: int, energies: qd.template()):
+        dt = self.mpm_info.substep_dt[()]
+        mpm_func.func_elastic_energy(
+            f, dt, self.particles, self.grid, self.newton, energies, self.particles_info, self.materials, self.mpm_info
+        )
+        mpm_func.func_kinetic_energy(dt, self.grid, self.newton, energies)
+
+    # ------------------------------------------- vertex map -------------------------------------------
+
+    @qd.func
+    def func_vertex_value(self, f: int, i_v: int):
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        return mpm_func.particle_node_sum(slots, w, self.newton.u)
+
+    @qd.func
+    def func_vertex_rows(self, i_v: int):
+        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        return 8, self.linear_block.row_start[()] + slots, w
+
+    # ------------------------------------------- wall pairs -------------------------------------------
+
+    @qd.func
+    def func_pair_count(self):
+        return self.wall_pairs.n_pairs[()]
+
+    @qd.func
+    def wall_pair_terms(self, i_pair: int):
+        """Environment, energy, gradient and Hessian of the row of a wall pair at the current iterate."""
+        env, slots, w = mpm_func.particle_stencil(self.wall_pairs.s[i_pair], self.grid, self.newton, self.mpm_info)
+        dx = mpm_func.particle_node_sum(slots, w, self.newton.u)
+        J = mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair])
+        energy, g, H = mpm_func.soft_row_terms(J, self.wall_pairs.D[i_pair], self.wall_pairs.t[i_pair], dx)
+        return env, energy, g, H
+
+    @qd.func(requires_top_level=True)
+    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
+        """Write the gradient and Hessian of the row of every wall pair at the current iterate on its particle."""
+        qd.loop_config(name="mpm_wall_pair_terms")
+        for i_pair in range(self.wall_pairs.n_pairs[()]):
+            env, energy, g, H = self.wall_pair_terms(i_pair)
+            i_v = self.vertex_offset[()] + self.wall_pairs.s[i_pair]
+            contact.write_doublet(contact.matrices.doublet_offsets[i_kind] + i_pair, i_v, g)
+            contact.write_triplet(contact.matrices.triplet_offsets[i_kind] + i_pair, i_v, i_v, H)
+
+    @qd.func(requires_top_level=True)
+    def func_pair_energy(self, f: int, energies: qd.template()):
+        """Add the energy of the row of every wall pair at the current iterate into the entry of its environment."""
+        qd.loop_config(name="mpm_wall_pair_energy")
+        for i_pair in range(self.wall_pairs.n_pairs[()]):
+            env, energy, g, H = self.wall_pair_terms(i_pair)
+            qd.atomic_add(energies[env], energy)
+
+
 @qd.data_oriented
 class MPMSolver(ParticleSolver):
+    """Implicit material point method."""
+
     material_cls = MPM.Base
     has_frames = True
+    # The configurations without an adjoint raise at build (see '_check_supported')
+    is_differentiable = True
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -43,16 +266,14 @@ class MPMSolver(ParticleSolver):
         self._particle_size = options.particle_size
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
-        self._enable_CPIC = options.enable_CPIC
-        # Compatible Particle-In-Cell (CPIC) separates the particles from the cells by the SDF of the rigid geoms
-        opt_in(SDFInfo, cond=lambda: self.is_active and self._enable_CPIC)
         self._constraints_initialized = False
+        # The namespace of the structs the grid growth builds again, which find the error flags of the solver in it
+        self._namespace = Namespace("mpm")
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
         # `_particle_volume_scale` is used to avoid potential numerical instability, as the actual `_particle_volume` may be very small.
-        # Note that the magnitude of `_particle_volume` doesn't affect MPM simulation itself, but it is used to compute particle
-        # mass. We need to account for this scale when handling coupling.
+        # Particle masses are stored scaled by it, and the implicit step divides it back out to work in kilograms.
         self._particle_volume_real = float(self._particle_size**3)
         self._particle_volume_scale = 1e3
         self._particle_volume = self._particle_volume_real * self._particle_volume_scale
@@ -64,17 +285,10 @@ class MPMSolver(ParticleSolver):
         self._upper_bound_cell = np.round(self._grid_density * self._upper_bound).astype(gs.np_int)
         self._grid_res = self._upper_bound_cell - self._lower_bound_cell + 1  # +1 to include both corner
         self._grid_offset = qd.Vector(self._lower_bound_cell)
-        if np.prod(self._grid_res) > 1e9:
-            gs.raise_exception(
-                "Grid size larger than 1e9 not supported by MPM solver. Please reduce 'grid_density', or set tighter "
-                "boundaries via 'lower_bound' / 'upper_bound'."
-            )
 
         # materials
         self._materials = list()
         self._materials_idx = list()
-        self._materials_update_F_S_Jp = list()
-        self._materials_update_stress = list()
 
         # boundary
         self.setup_boundary()
@@ -87,89 +301,115 @@ class MPMSolver(ParticleSolver):
         )
 
     def init_particle_fields(self):
-        # dynamic particle state
-        struct_particle_state = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-            C=gs.qd_mat3,  # affine velocity field
-            F=gs.qd_mat3,  # deformation gradient
-            F_tmp=gs.qd_mat3,  # temp deformation gradient
-            U=gs.qd_mat3,  # SVD
-            V=gs.qd_mat3,  # SVD
-            S=gs.qd_mat3,  # SVD
-            actu=gs.qd_float,  # actuation
-            Jp=gs.qd_float,  # volume ratio
-        )
+        # Particle state of the frames, its gradient-free part and the static info, as dynamic tensors in the default
+        # array mode, so that a scene with another particle count reuses the compiled kernels
+        sizes_state = dict(frames=self.n_frames, particles=self._n_particles, envs=self._B)
+        self.particles = MpmParticles(sizes=sizes_state, requires_grad=self._requires_grad)
+        self.particles_ng = MpmParticlesNG(sizes=sizes_state)
+        self.particles_info = MpmParticlesInfo(sizes=dict(particles=self._n_particles))
 
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(active=gs.qd_bool)
-
-        # static particle info
-        struct_particle_info = qd.types.struct(
-            material_idx=gs.qd_int,
-            mass=gs.qd_float,
-            default_Jp=gs.qd_float,
-            free=gs.qd_bool,
-            # for muscle
-            muscle_group=gs.qd_int,
-            muscle_direction=gs.qd_vec3,
-        )
-
-        # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
-
-        # construct fields
-        self.particles = struct_particle_state.field(
-            shape=(self.n_frames, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-        self.particles_ng = struct_particle_state_ng.field(
-            shape=(self.n_frames, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info = struct_particle_info.field(
-            shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_render = struct_particle_state_render.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-
-    def init_grid_fields(self):
-        grid_cell_state = qd.types.struct(
-            mass=gs.qd_float,  # mass
-            vel_in=gs.qd_vec3,  # input momentum/velocity
-            vel_out=gs.qd_vec3,  # output momentum/velocity
-        )
-        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so one frame per substep is enough.
-        # Particles still need one more, because g2p writes the next-frame state at [f+1].
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
-        self.errno = qd.field(gs.qd_int, shape=(self._B,))
+        with namespace(self._namespace):
+            self.mpm_errno = MpmErrno(sizes=dict(envs=self._B))
         self.register_errors(
-            self.errno,
+            self.mpm_errno.errno,
             {
                 ErrorCode.INVALID_VELOCITY_NAN: (
                     "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
                     "adjust the material parameters."
                 ),
+                ErrorCode.INVALID_MPM_SOLVE_NAN: (
+                    "The implicit MPM Newton solve produced non-finite values. Try reducing the time step size or "
+                    "adjusting simulation parameters."
+                ),
+                ErrorCode.OVERFLOW_MPM_GRID_RANGE: (
+                    "MPM particles have non-finite positions or left the range the sparse grid can index."
+                ),
+                ErrorCode.INVALID_MPM_GRID: (
+                    "Internal error of the implicit MPM solver: its sparse grid or matrix storage is inconsistent. "
+                    "Rerun with `gs.init(debug=True)` to stop at the faulty kernel."
+                ),
             },
         )
 
-        self.grid = grid_cell_state.field(
-            shape=(self.n_frames - 1, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
+        # single frame particle state for rendering
+        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
+        self.particles_render = struct_particle_state_render.field(
+            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
 
-        # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
-        # p2g across all envs in the current substep; reset_dirty_cells zeroes those cells across all envs immediately
-        # after g2p, so the grid is always zero at the start of each substep and no per-substep state has to outlive a
-        # substep. grid_dirty_flag is a per-cell tristate (env-shared) that deduplicates appends: only the first env to
-        # touch a cell records it. List size is bounded by the total grid cell count because dedup ensures no more than
-        # that many unique entries.
-        # TODO: support sparse reset under requires_grad. Quadrants' differentiable framework needs the grid state at
-        # every intermediate substep for the backward pass, so we cannot eagerly wipe cells; revisit if checkpointing
-        # or selective grad masking becomes available.
-        if not self._sim.requires_grad:
-            self._grid_total = int(np.prod(self._grid_res))
-            self.grid_dirty_flag = qd.field(gs.qd_int, shape=self._grid_res)
-            self.grid_dirty_list = qd.field(gs.qd_int, shape=(self._grid_total,))
-            self.grid_dirty_count = qd.field(gs.qd_int, shape=(1,))
+    def init_implicit_data(self):
+        """Allocate the data of the implicit step at the smallest capacity."""
+        n_sort = self._B * self._n_particles
+        max_blocks = MIN_BLOCKS
+        self._is_mpm_sized = False
+        materials = {material.idx: material for material in self._materials}
+        n_materials = len(materials)
+        table = np.zeros((mpm_func.N_MATERIAL_PARAMS, n_materials), dtype=gs.np_float)
+        family = np.zeros(n_materials, dtype=gs.np_int)
+        plastic = np.zeros(n_materials, dtype=gs.np_int)
+        for idx, material in materials.items():
+            table[:, idx], family[idx], plastic[idx] = material_table_column(material)
+
+        self.mpm_info = MpmInfo(
+            values=dict(
+                n_envs=self._B,
+                n_particles=self._n_particles,
+                substep_dt=self.substep_dt,
+                dx=self._dx,
+                inv_dx=1.0 / self._dx,
+                particle_volume=self._particle_volume_real,
+                mass_scale=self._particle_volume_scale,
+                n_materials=n_materials,
+                liquid_band=self._liquid_band(),
+                wall_sol_params=self._wall_sol_params(),
+                wall_lower=tuple(self.boundary.lower),
+                wall_upper=tuple(self.boundary.upper),
+            )
+        )
+        self.mpm_materials = MpmMaterialTable(
+            sizes=dict(materials=n_materials, material_params=mpm_func.N_MATERIAL_PARAMS)
+        )
+        self.mpm_materials.material_table.from_numpy(table.reshape(-1))
+        self.mpm_materials.mat_family.from_numpy(family)
+        self.mpm_materials.mat_plastic.from_numpy(plastic)
+        with namespace(self._namespace):
+            grid = build_mpm_grid(n_sort, max_blocks)
+        self._newton_participant = MpmNewtonParticipant(
+            self.particles,
+            self.particles_info,
+            self.mpm_materials,
+            grid,
+            build_mpm_newton(n_sort, max_blocks),
+            build_block_jacobi(max_blocks * BLOCK_CELLS),
+            build_wall_pairs(MIN_SLOTS),
+            self.mpm_info,
+            n_sort,
+        )
+        self._mpm_force_fields = MpmForceFields(self._ffs)
+
+    def build_newton_participant(self) -> tuple["MPMSolver", MpmNewtonParticipant]:
+        """Build the participant of the grid displacement in the joint Newton solve, with this solver as its host (see
+        LegacyCoupler)."""
+        return self, self._newton_participant
+
+    def _liquid_band(self):
+        velocity = self._options.liquid_smoothing_velocity
+        if velocity is None:
+            velocity = self._scene.options.newton.velocity_tol
+        band = velocity * self.substep_dt / self._dx
+        if band >= 0.5:
+            gs.raise_exception(
+                f"The smoothing band of the liquid energy, {band:.3g} in volume ratio, would soften the liquid down to "
+                "half its volume: lower MPMOptions(liquid_smoothing_velocity), NewtonOptions(velocity_tol) or the "
+                "substep."
+            )
+        return band
+
+    def _wall_sol_params(self):
+        params = gu.default_solver_params()
+        params[0] = max(self._options.wall_timeconst, 2.0 * self.substep_dt)
+        return tuple(float(p) for p in params)
 
     def init_vvert_fields(self):
         struct_vvert_info = qd.types.struct(
@@ -186,7 +426,7 @@ class MPMSolver(ParticleSolver):
     def init_constraints(self):
         """Lazy initialization of particle constraint fields."""
         # Memory check: ensure index fits in int32
-        if self._n_particles * self._B * 3 > np.iinfo(np.int32).max:
+        if self._n_particles * self._B * 3 > np.iinfo(gs.np_int).max:
             gs.raise_exception(
                 f"Particle constraint shape (n_envs={self._B}, n_particles={self._n_particles}, 3) is too large. "
                 "Consider reducing n_envs or n_particles."
@@ -211,8 +451,38 @@ class MPMSolver(ParticleSolver):
         self.particle_constraints.link_idx.fill(-1)
 
     def reset_grad(self):
-        self.particles.grad.fill(0.0)
-        self.grid.grad.fill(0.0)
+        if self._requires_grad and self.is_active:
+            qd_zero_grad(self.particles)
+            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+                torch.mps.synchronize()
+
+    def _check_supported(self):
+        if self._B > mpm_func.MAX_KEY_ENVS:
+            gs.raise_exception(f"The implicit MPM solver supports {mpm_func.MAX_KEY_ENVS} environments at most.")
+        cells = np.concatenate([self._lower_bound, self._upper_bound]) * self._grid_density
+        if cells.min() < mpm_func.CELL_MIN or cells.max() >= mpm_func.CELL_END:
+            gs.raise_exception(
+                f"The MPM domain spans the cells [{cells.min():.0f}, {cells.max():.0f}], past the range "
+                f"[{mpm_func.CELL_MIN}, {mpm_func.CELL_END}) the sparse grid of the implicit solver indexes."
+            )
+        for material in self._materials:
+            if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
+                gs.raise_exception(
+                    f"The implicit MPM solver has no energy for the material {type(material).__name__}. It supports "
+                    "the materials of genesis.materials.MPM."
+                )
+        # The legacy coupler registers the Newton solve of every substep (see LegacyCoupler)
+        coupler_options = self._sim.coupler.options
+        if not isinstance(coupler_options, LegacyCouplerOptions):
+            gs.raise_exception(
+                f"The implicit MPM solver requires LegacyCouplerOptions, got {type(coupler_options).__name__}."
+            )
+        if self._requires_grad:
+            for force_field in self._ffs:
+                if not force_field.differentiable:
+                    gs.raise_exception(
+                        f"Differentiable simulation does not support the force field {type(force_field).__name__}."
+                    )
 
     def build(self):
         super().build()
@@ -223,37 +493,53 @@ class MPMSolver(ParticleSolver):
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
 
-        self._coupler = self.sim._coupler
-
-        # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
-        # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
-        # p2g via qd.static. Forced True under requires_grad so the backward path stays exactly as upstream.
-        # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
-        self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
-
         if self.is_active:
-            if self._enable_CPIC and self._sim.requires_grad:
-                gs.raise_exception(
-                    "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
-                )
+            self._check_supported()
 
             self.init_particle_fields()
-            self.init_grid_fields()
             self.init_vvert_fields()
 
             for entity in self._entities:
                 entity._add_to_solver()
 
-            # See: https://github.com/taichi-dev/taichi_elements/blob/d19678869a28b09a32ef415b162e35dc929b792d/engine/mpm_solver.py#L84
-            suggested_dt = 2e-2 * self._dx
-            if self.substep_dt > suggested_dt:
-                gs.logger.warning(
-                    f"Current `substep_dt` ({self.substep_dt:.6g}) is greater than suggested_dt ({suggested_dt:.6g}, "
-                    "calculated based on `grid_density`). Simulation might be unstable."
-                )
+            self.init_implicit_data()
 
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity()
+        if self.is_active:
+            self._init_contact_invweight()
+
+    def _init_contact_invweight(self):
+        participant = self._newton_participant
+        self._predict(0, t=0.0)
+        kernel_contact_invweight(
+            0,
+            self.particles,
+            participant.grid,
+            participant.newton,
+            self.particles_info,
+            self.mpm_materials,
+            self.mpm_info,
+        )
+
+    def _predict(self, f, t):
+        if not self._is_mpm_sized:
+            self._size_to_particles(f)
+        participant = self._newton_participant
+        build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
+        while int(qd_to_numpy(participant.grid.has_grid_overflow)):
+            self._grow_grid()
+            build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
+        kernel_predict(
+            f,
+            t,
+            self._gravity,
+            self.particles,
+            participant.grid,
+            participant.newton,
+            self.particles_info,
+            self._mpm_force_fields,
+            self.mpm_info,
+        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -287,7 +573,7 @@ class MPMSolver(ParticleSolver):
         return entity
 
     def add_material(self, material):
-        # Register material update methods if and only if the provided material is not already registered
+        # Register the material if and only if it is not already registered
         for material_i in self._materials:
             if material == material_i:
                 material.idx = material_i.idx
@@ -295,392 +581,195 @@ class MPMSolver(ParticleSolver):
         else:
             material.idx = len(self._materials_idx)
             self._materials_idx.append(material.idx)
-            self._materials_update_F_S_Jp.append(material.update_F_S_Jp)
-            self._materials_update_stress.append(material.update_stress)
         self._materials.append(material)
-
-    @qd.func
-    def stencil_range(self):
-        return qd.ndrange(3, 3, 3)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- simulation -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    @qd.kernel
-    def compute_F_tmp(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-
-    @qd.kernel
-    def svd_grad(self, f: int):
-        """Reverse the singular value decomposition of a frame, consuming the adjoint of its factors like autodiff."""
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles.grad[f, i_p, i_b].F_tmp += backward_svd(
-                    self.particles.grad[f, i_p, i_b].U,
-                    self.particles.grad[f, i_p, i_b].S,
-                    self.particles.grad[f, i_p, i_b].V,
-                    self.particles[f, i_p, i_b].U,
-                    self.particles[f, i_p, i_b].S,
-                    self.particles[f, i_p, i_b].V,
-                )
-                self.particles.grad[f, i_p, i_b].U = qd.Matrix.zero(gs.qd_float, 3, 3)
-                self.particles.grad[f, i_p, i_b].S = qd.Matrix.zero(gs.qd_float, 3, 3)
-                self.particles.grad[f, i_p, i_b].V = qd.Matrix.zero(gs.qd_float, 3, 3)
-
-    # The decomposition is reversed in closed form, which autodiff cannot derive
-    @register_custom_backward(svd_grad)
-    @qd.kernel
-    def svd(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = gu.qd_svd(
-                    self.particles[f, i_p, i_b].F_tmp
-                )
-
-    @qd.kernel
-    def compute_F_tmp_and_svd(self, f: qd.i32):
-        # Fused F_tmp + SVD: keeps F_tmp in register/local-memory for the SVD instead of round-tripping through global
-        # memory. Only used on the forward pass; the backward path continues to call compute_F_tmp / svd separately so
-        # their autodiff remains composed unchanged.
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-                self.particles[f, i_p, i_b].F_tmp = F_tmp
-                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = gu.qd_svd(
-                    F_tmp
-                )
-
-    @qd.kernel
-    def compute_F_tmp_only(self, f: qd.i32):
-        # Fast path when no registered material needs U/V/S: compute F_tmp without SVD. p2g then derives J from
-        # det(F_tmp) directly. Only used on the forward pass.
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles[f, i_p, i_b].F_tmp = (
-                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
-                ) @ self.particles[f, i_p, i_b].F
-
-    @qd.kernel
-    def p2g(
-        self,
-        f: qd.i32,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                # A. update F (deformation gradient), S (Sigma from SVD(F), essentially represents volume) and Jp
-                # (volume compression ratio) based on material type.
-                # det(F_tmp) == det(U S V^T) == det(S) for gu.qd_svd (U, V are proper rotations), so when no material
-                # needs U/V/S we can read J directly from F_tmp and skip the SVD kernel. Predeclared outside the
-                # qd.static branch because quadrants scopes qd.static branches locally.
-                J = gs.qd_float(0.0)
-                if qd.static(self.needs_svd):
-                    J = self.particles[f, i_p, i_b].S.determinant()
-                else:
-                    J = self.particles[f, i_p, i_b].F_tmp.determinant()
-                F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-                S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-                Jp_new = gs.qd_float(1.0)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        F_new, S_new, Jp_new = self._materials_update_F_S_Jp[material_idx](
-                            J=J,
-                            F_tmp=self.particles[f, i_p, i_b].F_tmp,
-                            U=self.particles[f, i_p, i_b].U,
-                            S=self.particles[f, i_p, i_b].S,
-                            V=self.particles[f, i_p, i_b].V,
-                            Jp=self.particles[f, i_p, i_b].Jp,
-                        )
-                self.particles[f + 1, i_p, i_b].F = F_new
-                self.particles[f + 1, i_p, i_b].Jp = Jp_new
-                # The actuation holds over every substep of the step it is set at, and until it is set again
-                self.particles[f + 1, i_p, i_b].actu = self.particles[f, i_p, i_b].actu
-
-                # B. compute stress
-                # NOTE:
-                # 1. Here we pass in both F_tmp and the updated F_new because in the official Quadrants example, F_new is
-                # used for stress computation. However, although this works for both elastic and elasto-plastic
-                # materials, it is mathematically incorrect for liquid material with non-zero viscosity (mu). In the
-                # latter case, stress computation needs to be based on the F_tmp (deformation gradient before resetting
-                # to identity).
-                # 2. Jp is only used by Snow material, and it uses Jp from the previous frame, not the updated one.
-                stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        stress = self._materials_update_stress[material_idx](
-                            U=self.particles[f, i_p, i_b].U,
-                            S=S_new,
-                            V=self.particles[f, i_p, i_b].V,
-                            F_tmp=self.particles[f, i_p, i_b].F_tmp,
-                            F_new=F_new,
-                            J=J,
-                            Jp=self.particles[f, i_p, i_b].Jp,
-                            actu=self.particles[f, i_p, i_b].actu,
-                            m_dir=self.particles_info[i_p].muscle_direction,
-                        )
-                stress = (-self.substep_dt * self._particle_volume * 4 * self._inv_dx * self._inv_dx) * stress
-                affine = stress + self.particles_info[i_p].mass * self.particles[f, i_p, i_b].C
-
-                # C. project onto grid
-                base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
-                fx = self.particles[f, i_p, i_b].pos * self._inv_dx - base.cast(gs.qd_float)
-                w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-                for offset in qd.static(qd.grouped(self.stencil_range())):
-                    dpos = (offset.cast(gs.qd_float) - fx) * self._dx
-                    weight = gs.qd_float(1.0)
-                    for d in qd.static(range(3)):
-                        weight *= w[offset[d]][d]
-
-                    sep_geom_idx = -1
-                    if qd.static(self._enable_CPIC and self.sim.rigid_solver.is_active):
-                        # check if particle and cell center are at different side of any thin object
-                        cell_pos = (base + offset) * self._dx
-
-                        for i_g in range(self.sim.rigid_solver.n_geoms):
-                            if geoms_info.needs_coup[i_g]:
-                                sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
-                                sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-                                )
-
-                                if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g
-                                    sep_geom_idx = i_g
-                                    break
-                        self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b] = sep_geom_idx
-                    if sep_geom_idx == -1:
-                        cell_ijk = base - self._grid_offset + offset
-                        self.grid[f, cell_ijk, i_b].vel_in += weight * (
-                            self.particles_info[i_p].mass * self.particles[f, i_p, i_b].vel + affine @ dpos
-                        )
-                        mass_contrib = weight * self.particles_info[i_p].mass
-                        prev_mass = qd.atomic_add(self.grid[f, cell_ijk, i_b].mass, mass_contrib)
-                        # Sparse-reset bookkeeping runs forward-only: backward mode composes p2g through autodiff where
-                        # these atomics are meaningless. Per-env first-writer (prev_mass == 0) tries to claim the cell
-                        # in the env-shared dirty flag via atomic_or; only the very first env to touch this cell across
-                        # the whole batch then appends to the global list. List size is bounded by grid_total because
-                        # dedup ensures uniqueness.
-                        if qd.static(not self._sim.requires_grad):
-                            if prev_mass == gs.qd_float(0.0) and mass_contrib > gs.qd_float(0.0):
-                                was_dirty = qd.atomic_or(self.grid_dirty_flag[cell_ijk], gs.qd_int(1))
-                                if was_dirty == gs.qd_int(0):
-                                    slot_idx = qd.atomic_add(self.grid_dirty_count[0], 1)
-                                    flat = (cell_ijk[0] * self._grid_res[1] + cell_ijk[1]) * self._grid_res[2] + (
-                                        cell_ijk[2]
-                                    )
-                                    self.grid_dirty_list[slot_idx] = flat
-
-                    if not self.particles_info[i_p].free:  # non-free particles behave as boundary conditions
-                        self.grid[f, base - self._grid_offset + offset, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def g2p(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState, rigid_info: RigidInfo):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                base = qd.floor(self.particles[f, i_p, i_b].pos * self._inv_dx - 0.5).cast(gs.qd_int)
-                fx = self.particles[f, i_p, i_b].pos * self._inv_dx - base.cast(gs.qd_float)
-                w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
-                new_vel = qd.Vector.zero(gs.qd_float, 3)
-                new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for offset in qd.static(qd.grouped(self.stencil_range())):
-                    dpos = offset.cast(gs.qd_float) - fx
-                    grid_vel = self.grid[f, base - self._grid_offset + offset, i_b].vel_out
-                    weight = gs.qd_float(1.0)
-                    for d in qd.static(range(3)):
-                        weight *= w[offset[d]][d]
-
-                    if qd.static(self._enable_CPIC and self.sim.rigid_solver.is_active):
-                        sep_geom_idx = self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b]
-                        if sep_geom_idx != -1:
-                            grid_vel = self.sim.coupler._func_collide_in_rigid_geom(
-                                self.particles[f, i_p, i_b].pos,
-                                self.particles[f, i_p, i_b].vel,
-                                self.particles_info[i_p].mass * weight / self._particle_volume_scale,
-                                self._coupler.mpm_rigid_normal[i_p, sep_geom_idx, i_b],
-                                1.0,
-                                sep_geom_idx,
-                                i_b,
-                                geoms_info=geoms_info,
-                                links_state=links_state,
-                                rigid_info=rigid_info,
-                            )
-
-                    new_vel += weight * grid_vel
-                    new_C += 4 * self._inv_dx * weight * grid_vel.outer_product(dpos)
-
-                # A velocity that is not finite flags its env, whose state 'freeze_invalid_envs' then leaves as it was
-                if not qd_isfinite(new_vel):
-                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
-
-                # compute actual new_pos with new_vel
-                new_pos = self.particles[f, i_p, i_b].pos + self.substep_dt * new_vel
-
-                # impose boundary for safety, in case simulation explodes and tries to access illegal cell address
-                new_pos, new_vel = self.boundary.impose_pos_vel(new_pos, new_vel)
-
-                # advect to next frame
-                self.particles[f + 1, i_p, i_b].vel = new_vel
-                self.particles[f + 1, i_p, i_b].C = new_C
-                self.particles[f + 1, i_p, i_b].pos = new_pos
-            else:
-                self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
-                self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles[f + 1, i_p, i_b].C = self.particles[f, i_p, i_b].C
-                self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
-                self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
-
-            self.particles_ng[f + 1, i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
-
-    # The state of an env whose velocities are not finite stays as it was before the substep, so that it remains finite.
-    # The flag holds until the error raises at the beginning of the next step, which freezes the env for the rest of its
-    # step, as in the rigid solver.
     @no_grad
     @qd.kernel
-    def _kernel_freeze_invalid_envs(self, f: int):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if (self.errno[i_b] & ErrorCode.INVALID_VELOCITY_NAN) != 0:
-                self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
-                self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
-                self.particles[f + 1, i_p, i_b].C = self.particles[f, i_p, i_b].C
-                self.particles[f + 1, i_p, i_b].Jp = self.particles[f, i_p, i_b].Jp
+    def _kernel_flag_non_finite_pos(self, f: int):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
+            if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
+                self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
+
+    @no_grad
+    @qd.kernel
+    def _kernel_flag_newton_non_finite(self, control: qd.template()):
+        for i_b in range(self.mpm_errno.errno.shape[0]):
+            if control.has_failed_non_finite[i_b] != 0:
+                self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        if self._sim.requires_grad:
-            self.reset_grid_and_grad(f)
-            self.compute_F_tmp(f)
-            self.svd(f)
-        else:
-            # Forward-only path: the grid is left zeroed by reset_dirty_cells at the end of the previous substep (and
-            # is zero-init on the first call), so no reset kernel is needed here.
-            if self.needs_svd:
-                self.compute_F_tmp_and_svd(f)
-            else:
-                # All registered materials ignore U/V/S; skip SVD entirely (e.g. scenes of only non-viscous Liquid
-                # and/or neohooken Elastic).
-                self.compute_F_tmp_only(f)
-        self.p2g(
-            f,
-            self.sim.coupler.rigid_solver.dyn_state.geoms,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.collider_info.sdf,
-            self.sim.coupler.rigid_solver.collider.collider_config,
+        pass
+
+    def _resize_blocks(self, max_blocks):
+        n_sort = self._B * self._n_particles
+        with namespace(self._namespace):
+            grid = build_mpm_grid(n_sort, max_blocks)
+        self._newton_participant.replace_scratch(
+            grid, build_mpm_newton(n_sort, max_blocks), build_block_jacobi(max_blocks * BLOCK_CELLS)
         )
+
+    def _size_to_particles(self, f):
+        positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
+        self._resize_blocks(initial_block_capacity(positions, self._inv_dx))
+        self._is_mpm_sized = True
+
+    def _grow_grid(self):
+        participant = self._newton_participant
+        grid = participant.grid
+        demand = max(int(qd_to_numpy(grid.grid_demand)), int(qd_to_numpy(grid.n_particle_blocks)))
+        max_blocks = max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), grid.block_coords.shape[0] + 1)
+        self._resize_blocks(max_blocks)
 
     def substep_post_coupling(self, f):
-        self.g2p(
+        """Finish the substep with the check of the particle positions.
+
+        The grid-to-particle transfer of the substep ran earlier, in the substep of the Newton solver."""
+        # The positions a step ends with are checked once, an error being raised at the beginning of the next step
+        if (self._sim.cur_substep_global + 1) % self._substeps == 0:
+            self._kernel_flag_non_finite_pos(f + 1)
+
+    # ------------------------------------------------------------------------------------
+    # --------------------------- Newton solver participant ------------------------------
+    # ------------------------------------------------------------------------------------
+
+    def newton_begin(self, f):
+        pass
+
+    def newton_prepare(self, f):
+        """Run the substep up to the Newton solve: the grid, the particle-to-grid transfer with the force fields, the
+        physical Hessian at u = 0 and the wall pairs."""
+        participant, mpm_info = self._newton_participant, self.mpm_info
+        self._predict(f, self._sim.cur_t)
+        if self._constraints_initialized:
+            kernel_constraint_rows(
+                participant.grid,
+                participant.newton,
+                self._sim.rigid_solver.dyn_state.links,
+                self.particles_info,
+                mpm_info,
+                self.particle_constraints,
+            )
+        kernel_report_extent(participant.grid, participant.linear_block)
+        kernel_wall_pairs(f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info)
+        n_pairs = int(qd_to_numpy(participant.wall_pairs.n_pairs))
+        if n_pairs > participant.wall_pairs.s.shape[0]:
+            participant.replace_wall_pairs(build_wall_pairs(grown_capacity(n_pairs)))
+            kernel_wall_pairs(
+                f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info
+            )
+
+    def newton_finish(self, f, control):
+        """Transfer the solved grid displacement back to the particles, those of an environment whose solve stopped on
+        a non-finite measure keeping their state."""
+        kernel_finalize(
             f,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
+            self.particles,
+            self.particles_ng,
+            self._newton_participant.grid,
+            self._newton_participant.newton,
+            self.particles_info,
+            self.mpm_materials,
+            self.mpm_info,
+            control.has_failed_non_finite,
         )
 
-        # The particle constraints apply after g2p
+    def newton_after(self, f):
+        pass
+
+    def newton_end(self, f, control):
+        pass
+
+    def newton_backward(self, f, solve):
+        """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func): the reverse
+        of the grid-to-particle transfer, the adjoint solve `solve`, the pullback and the reverse of the
+        particle-to-grid transfer into frame `f`."""
+        participant = self._newton_participant
+        kernel_adjoint_g2p(
+            f,
+            self.particles,
+            participant.grid,
+            participant.newton,
+            self.particles_info,
+            self.mpm_materials,
+            self.mpm_info,
+        )
+        solve()
         if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
+            kernel_constraint_adjoint(
+                f,
+                self.particles,
+                participant.grid,
+                participant.newton,
+                participant.linear,
+                participant.linear_block,
+                self._sim.rigid_solver.dyn_state.links,
+                self.mpm_info,
+                self.particle_constraints,
+            )
+        kernel_adjoint_pullback(
+            f,
+            self._sim.cur_t,
+            self._gravity,
+            self.particles,
+            self.particles_ng,
+            participant.grid,
+            participant.newton,
+            participant.linear,
+            participant.linear_block,
+            participant.wall_pairs,
+            self.particles_info,
+            self.mpm_materials,
+            self._mpm_force_fields,
+            self.mpm_info,
+        )
 
-        # Eager sparse reset: zero only the cells p2g touched this substep, across all envs, then clear the global
-        # dirty count so the next substep starts fresh. The grid is no longer read after g2p / constraints, so it is
-        # safe to wipe here. Forward-only; backward composes p2g/g2p through autodiff and uses reset_grid_and_grad.
-        if not self._sim.requires_grad:
-            self.reset_dirty_cells(f)
-            if gs.use_zerocopy:
-                grid_dirty_count = qd_to_torch(self.grid_dirty_count, copy=False)
-                grid_dirty_count.zero_()
-                # The next kernel reads the count (see qd_zero_grad in misc.py)
-                if gs.backend == gs.metal:
-                    torch.mps.synchronize()
-            else:
-                self.grid_dirty_count[0] = 0
+    def newton_adjoint_rhs(self, f):
+        """Stage the adjoint of u* left by the reverse of the grid-to-particle transfer as the right-hand side."""
+        participant = self._newton_participant
+        kernel_adjoint_rhs(participant.grid, participant.newton, participant.linear, participant.linear_block)
 
-        self._kernel_freeze_invalid_envs(f)
+    def newton_adjoint_finish(self, f):
+        pass
 
-    @qd.kernel
-    def copy_frame(self, source: qd.i32, target: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles[target, i_p, i_b].pos = self.particles[source, i_p, i_b].pos
-            self.particles[target, i_p, i_b].vel = self.particles[source, i_p, i_b].vel
-            self.particles[target, i_p, i_b].F = self.particles[source, i_p, i_b].F
-            self.particles[target, i_p, i_b].C = self.particles[source, i_p, i_b].C
-            self.particles[target, i_p, i_b].Jp = self.particles[source, i_p, i_b].Jp
-            self.particles[target, i_p, i_b].actu = self.particles[source, i_p, i_b].actu
-
-            self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
-
-    # The grid of the substep starts from zero, its adjoint included
-    @no_grad
-    @qd.kernel
-    def reset_grid_and_grad(self, f: qd.i32):
-        # Zero out the grid at frame f for *all* grid cells and *all* batch indices
-        for i, j, k, i_b in qd.ndrange(*self._grid_res, self._B):
-            self.grid[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-            self.grid[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-            self.grid[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
-
-            self.grid.grad[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-            self.grid.grad[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-            self.grid.grad[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
+    def newton_flag_non_finite(self, control):
+        self._kernel_flag_newton_non_finite(control)
 
     @qd.kernel
-    def reset_dirty_cells(self, f: qd.i32):
-        # Zero the cells p2g touched this substep, across all envs, plus their dirty flags. The dirty list is shared
-        # across envs (deduplicated via grid_dirty_flag), so threads with slot >= grid_dirty_count idle. Only one thread
-        # per slot (i_b == 0) writes the flag back to zero so it can be reused next substep.
-        for slot, i_b in qd.ndrange(self._grid_total, self._B):
-            if slot < self.grid_dirty_count[0]:
-                flat = self.grid_dirty_list[slot]
-                k = flat % self._grid_res[2]
-                rem = flat // self._grid_res[2]
-                j = rem % self._grid_res[1]
-                i = rem // self._grid_res[1]
-                self.grid[f, i, j, k, i_b].mass = gs.qd_float(0.0)
-                self.grid[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
-                self.grid[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
-                if i_b == 0:
-                    self.grid_dirty_flag[i, j, k] = gs.qd_int(0)
+    def copy_frame(self, source: int, target: int):
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
+            self.particles.pos[target, i_p, i_b] = self.particles.pos[source, i_p, i_b]
+            self.particles.vel[target, i_p, i_b] = self.particles.vel[source, i_p, i_b]
+            self.particles.F[target, i_p, i_b] = self.particles.F[source, i_p, i_b]
+            self.particles.C[target, i_p, i_b] = self.particles.C[source, i_p, i_b]
+            self.particles.Jp[target, i_p, i_b] = self.particles.Jp[source, i_p, i_b]
+            self.particles.actu[target, i_p, i_b] = self.particles.actu[source, i_p, i_b]
 
-    # ------------------------------------------------------------------------------------
-    # ------------------------------------ gradient --------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @property
-    def is_differentiable(self) -> bool:
-        return not self._enable_CPIC
-
-    @property
-    def data(self):
-        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
-        for name, field in (
-            ("particles.pos", self.particles.pos),
-            ("particles.vel", self.particles.vel),
-            ("particles.C", self.particles.C),
-            ("particles.F", self.particles.F),
-            ("particles.Jp", self.particles.Jp),
-            ("particles.actu", self.particles.actu),
-            ("particles_ng.active", self.particles_ng.active),
-        ):
-            yield ArrayItem(name, DataKind.STATE, field)
+            self.particles_ng.active[target, i_p, i_b] = self.particles_ng.active[source, i_p, i_b]
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def data(self):
+        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds, then the particle and
+        material parameters (see 'Solver.data'). The grid, Newton and linear-system arrays of the implicit step are
+        those of its participant of the Newton solve (see MpmNewtonParticipant)."""
+        yield from iter_data(self, "particles")
+        yield from iter_data(self, "particles_ng")
+        if not self.is_built or not self.is_active:
+            return
+        yield from iter_data(self, "particles_info")
+        yield from iter_data(self, "mpm_info")
+        yield from iter_data(self, "mpm_materials")
 
     @mutates()
     def set_state(self, f, state, envs_idx=None):
@@ -691,7 +780,7 @@ class MPMSolver(ParticleSolver):
     @qd.kernel
     def _kernel_set_state(
         self,
-        f: qd.i32,
+        f: int,
         pos: qd.types.ndarray(),  # shape [B, n_particles, 3]
         vel: qd.types.ndarray(),  # shape [B, n_particles, 3]
         C: qd.types.ndarray(),  # shape [B, n_particles, 3, 3]
@@ -700,19 +789,16 @@ class MPMSolver(ParticleSolver):
         actu: qd.types.ndarray(),  # shape [B, n_particles]
         active: qd.types.ndarray(),  # shape [B, n_particles]
     ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            # Write pos, vel
+        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
             for j in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[j] = pos[i_b, i_p, j]
-                self.particles[f, i_p, i_b].vel[j] = vel[i_b, i_p, j]
-                # Write C, F
+                self.particles.pos[f, i_p, i_b][j] = pos[i_b, i_p, j]
+                self.particles.vel[f, i_p, i_b][j] = vel[i_b, i_p, j]
                 for k in qd.static(range(3)):
-                    self.particles[f, i_p, i_b].C[j, k] = C[i_b, i_p, j, k]
-                    self.particles[f, i_p, i_b].F[j, k] = F[i_b, i_p, j, k]
-            # Write Jp, actu, active
-            self.particles[f, i_p, i_b].Jp = Jp[i_b, i_p]
-            self.particles[f, i_p, i_b].actu = actu[i_b, i_p]
-            self.particles_ng[f, i_p, i_b].active = active[i_b, i_p]
+                    self.particles.C[f, i_p, i_b][j, k] = C[i_b, i_p, j, k]
+                    self.particles.F[f, i_p, i_b][j, k] = F[i_b, i_p, j, k]
+            self.particles.Jp[f, i_p, i_b] = Jp[i_b, i_p]
+            self.particles.actu[f, i_p, i_b] = actu[i_b, i_p]
+            self.particles_ng.active[f, i_p, i_b] = active[i_b, i_p]
 
     def get_state(self, f):
         if not self.is_active:
@@ -735,35 +821,32 @@ class MPMSolver(ParticleSolver):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
 
     @qd.kernel
-    def _kernel_update_render_fields(self, f: qd.i32):
+    def _kernel_update_render_fields(self, f: int):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles_render[i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles_render[i_p, i_b].vel = self.particles[f, i_p, i_b].vel
+            if self.particles_ng.active[f, i_p, i_b]:
+                self.particles_render[i_p, i_b].pos = self.particles.pos[f, i_p, i_b]
+                self.particles_render[i_p, i_b].vel = self.particles.vel[f, i_p, i_b]
             else:
                 self.particles_render[i_p, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
+            self.particles_render[i_p, i_b].active = self.particles_ng.active[f, i_p, i_b]
 
         for i_v, i_b in qd.ndrange(self._n_vverts, self._B):
             vvert_pos = qd.Vector.zero(gs.qd_float, 3)
             for j in range(self._n_vvert_supports):
-                vvert_pos += (
-                    self.particles[f, self.vverts_info.support_idxs[i_v][j], i_b].pos
-                    * self.vverts_info.support_weights[i_v][j]
-                )
+                i_p_support = self.vverts_info.support_idxs[i_v][j]
+                vvert_pos += self.particles.pos[f, i_p_support, i_b] * self.vverts_info.support_weights[i_v][j]
             self.vverts_render[i_v, i_b].pos = vvert_pos
-            self.vverts_render[i_v, i_b].active = self.particles_render[
-                self.vverts_info.support_idxs[i_v][0], i_b
-            ].active
+            i_p_first = self.vverts_info.support_idxs[i_v][0]
+            self.vverts_render[i_v, i_b].active = self.particles_render[i_p_first, i_b].active
 
     @qd.kernel
     def add_particles(
         self,
-        f: qd.i32,
-        active: qd.i32,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        material_idx: qd.i32,
+        f: int,
+        active: int,
+        particle_start: int,
+        n_particles: int,
+        material_idx: int,
         mat_default_Jp: float,
         mat_rho: float,
         pos: qd.types.ndarray(),  # shape [n_particles, 3]
@@ -771,25 +854,30 @@ class MPMSolver(ParticleSolver):
         for i_p_ in range(n_particles):
             i_p = i_p_ + particle_start
 
-            self.particles_info[i_p].material_idx = material_idx
-            self.particles_info[i_p].default_Jp = mat_default_Jp
-            self.particles_info[i_p].mass = self._particle_volume * mat_rho
-            self.particles_info[i_p].free = True
-            self.particles_info[i_p].muscle_group = 0
-            self.particles_info[i_p].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+            self.particles_info.material_idx[i_p] = material_idx
+            self.particles_info.default_Jp[i_p] = mat_default_Jp
+            self.particles_info.mass[i_p] = self._particle_volume * mat_rho
+            self.particles_info.free[i_p] = True
+            self.particles_info.muscle_group[i_p] = 0
+            self.particles_info.muscle_direction[i_p] = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+            # The inverse mass of the particle alone, kept by a particle inactive in the configuration that the contact
+            # inverse weights are computed from (see _init_contact_invweight)
+            self.particles_info.contact_invweight[i_p] = qd.Matrix.identity(gs.qd_float, 3) / (
+                self._particle_volume_real * mat_rho
+            )
 
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
+        for i_p_, i_b in qd.ndrange(n_particles, self.particles.pos.shape[2]):
             i_p = i_p_ + particle_start
 
-            self.particles_ng[f, i_p, i_b].active = qd.cast(active, gs.qd_bool)
+            self.particles_ng.active[f, i_p, i_b] = qd.cast(active, gs.qd_bool)
             for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[i] = pos[i_p_, i]
+                self.particles.pos[f, i_p, i_b][i] = pos[i_p_, i]
 
-            self.particles[f, i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles[f, i_p, i_b].Jp = mat_default_Jp
-            self.particles[f, i_p, i_b].actu = gs.qd_float(0.0)
+            self.particles.vel[f, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            self.particles.F[f, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+            self.particles.C[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            self.particles.Jp[f, i_p, i_b] = mat_default_Jp
+            self.particles.actu[f, i_p, i_b] = gs.qd_float(0.0)
 
     @gs.assert_built
     @mutates()
@@ -872,13 +960,13 @@ class MPMSolver(ParticleSolver):
             # state sits in frame 0 (see 'Solver.has_frames').
             if i_p >= 0:
                 for i in qd.static(range(3)):
-                    self.particles[0, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
+                    self.particles.pos[0, i_p, i_b][i] = poss[i_b_, i_p_, i]
 
                 # Reset these attributes whenever overwriting particle positions manually
-                self.particles[0, i_p, i_b].vel.fill(0.0)
-                self.particles[0, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-                self.particles[0, i_p, i_b].C.fill(0.0)
-                self.particles[0, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
+                self.particles.vel[0, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                self.particles.F[0, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+                self.particles.C[0, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+                self.particles.Jp[0, i_p, i_b] = self.particles_info.default_Jp[i_p]
 
     @qd.kernel
     def _kernel_get_particles_pos(
@@ -888,7 +976,7 @@ class MPMSolver(ParticleSolver):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
-                poss[i_b_, i_p_, i] = self.particles[0, i_p, i_b].pos[i]
+                poss[i_b_, i_p_, i] = self.particles.pos[0, i_p, i_b][i]
 
     @qd.kernel
     def _kernel_set_particles_vel(
@@ -900,7 +988,7 @@ class MPMSolver(ParticleSolver):
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
                 for i in qd.static(range(3)):
-                    self.particles[0, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
+                    self.particles.vel[0, i_p, i_b][i] = vels[i_b_, i_p_, i]
 
     @qd.kernel
     def _kernel_get_particles_vel(
@@ -910,7 +998,7 @@ class MPMSolver(ParticleSolver):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
-                vels[i_b_, i_p_, i] = self.particles[0, i_p, i_b].vel[i]
+                vels[i_b_, i_p_, i] = self.particles.vel[0, i_p, i_b][i]
 
     @qd.kernel
     def _kernel_set_particles_active(
@@ -921,7 +1009,7 @@ class MPMSolver(ParticleSolver):
             i_b = envs_idx[i_b_]
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
-                self.particles_ng[0, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+                self.particles_ng.active[0, i_p, i_b] = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
 
     @qd.kernel
     def _kernel_get_particles_active(
@@ -930,23 +1018,19 @@ class MPMSolver(ParticleSolver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            actives[i_b_, i_p_] = self.particles_ng[0, i_p, i_b].active
+            actives[i_b_, i_p_] = self.particles_ng.active[0, i_p, i_b]
 
     @qd.kernel
     def _kernel_set_particles_actu(
-        self,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        actus: qd.types.ndarray(),  # shape [B, n_particles, n_groups]
-        n_groups: int,
+        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actus: qd.types.ndarray(), n_groups: int
     ):
         for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
-                if self.particles_info[i_p].muscle_group == i_g:
-                    self.particles[0, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
+                if self.particles_info.muscle_group[i_p] == i_g:
+                    self.particles.actu[0, i_p, i_b] = actus[i_b_, i_p_, i_g]
 
     @qd.kernel
     def _kernel_get_particles_actu(
@@ -955,7 +1039,7 @@ class MPMSolver(ParticleSolver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            actus[i_b_, i_p_] = self.particles[0, i_p, i_b].actu
+            actus[i_b_, i_p_] = self.particles.actu[0, i_p, i_b]
 
     @qd.kernel
     def _kernel_set_particles_muscle_group(self, particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray()):
@@ -963,13 +1047,13 @@ class MPMSolver(ParticleSolver):
             i_p = particles_idx[i_p_]
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
-                self.particles_info[i_p].muscle_group = muscle_group[i_p_]
+                self.particles_info.muscle_group[i_p] = muscle_group[i_p_]
 
     @qd.kernel
     def _kernel_get_particles_muscle_group(self, particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray()):
         for i_p_ in range(particles_idx.shape[0]):
             i_p = particles_idx[i_p_]
-            muscle_group[i_p_] = self.particles_info[i_p].muscle_group
+            muscle_group[i_p_] = self.particles_info.muscle_group[i_p]
 
     @qd.kernel
     def _kernel_set_particles_muscle_direction(
@@ -980,7 +1064,7 @@ class MPMSolver(ParticleSolver):
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
                 for i in qd.static(range(3)):
-                    self.particles_info[i_p].muscle_direction[i] = muscle_direction[i_p_, i]
+                    self.particles_info.muscle_direction[i_p][i] = muscle_direction[i_p_, i]
 
     @qd.kernel
     def _kernel_set_particles_free(self, particles_idx: qd.types.ndarray(), free: qd.types.ndarray()):
@@ -988,13 +1072,13 @@ class MPMSolver(ParticleSolver):
             i_p = particles_idx[i_p_]
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
-                self.particles_info[i_p].free = free[i_p_]
+                self.particles_info.free[i_p] = free[i_p_]
 
     @qd.kernel
     def _kernel_get_particles_free(self, particles_idx: qd.types.ndarray(), free: qd.types.ndarray()):
         for i_p_ in range(particles_idx.shape[0]):
             i_p = particles_idx[i_p_]
-            free[i_p_] = self.particles_info[i_p].free
+            free[i_p_] = self.particles_info.free[i_p]
 
     @qd.kernel
     def _kernel_get_particles_mass(
@@ -1002,7 +1086,7 @@ class MPMSolver(ParticleSolver):
     ):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
-            masses[i_b_, i_p_] = self.particles_info[i_p].mass / self._particle_volume_scale
+            masses[i_b_, i_p_] = self.particles_info.mass[i_p] / self._particle_volume_scale
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- particle constraints ------------------------------
@@ -1014,7 +1098,8 @@ class MPMSolver(ParticleSolver):
         """
         Attach some particles to a rigid link with critically damped springs.
 
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
+        Each particle is pulled toward the position it holds now, expressed in the frame of the link. The springs are
+        integrated implicitly, stable at any stiffness, and act on the particles alone: the link feels no reaction.
 
         Parameters
         ----------
@@ -1078,15 +1163,15 @@ class MPMSolver(ParticleSolver):
         particles_start: int,
         link_idx: int,
         stiffness: float,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
-        link_pos: qd.types.ndarray(),  # shape [n_envs, 3]
-        link_quat: qd.types.ndarray(),  # shape [n_envs, 4]
+        particles_mask: qd.types.ndarray(),
+        link_pos: qd.types.ndarray(),
+        link_quat: qd.types.ndarray(),
     ):
         for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
             if particles_mask[i_b, i_p_]:
                 i_p = i_p_ + particles_start
-                # Get current particle position. Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
-                pos = self.particles[0, i_p, i_b].pos
+                # Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
+                pos = self.particles.pos[0, i_p, i_b]
 
                 # Get link transform
                 l_pos = qd.Vector([link_pos[i_b, 0], link_pos[i_b, 1], link_pos[i_b, 2]], dt=gs.qd_float)
@@ -1105,46 +1190,12 @@ class MPMSolver(ParticleSolver):
                 self.particle_constraints[i_p, i_b].link_local_pos = local_pos
 
     @qd.kernel
-    def _kernel_remove_particle_constraints(
-        self,
-        particles_start: int,
-        particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
-    ):
+    def _kernel_remove_particle_constraints(self, particles_start: int, particles_mask: qd.types.ndarray()):
         for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
             if particles_mask[i_b, i_p_]:
                 i_p = i_p_ + particles_start
                 self.particle_constraints[i_p, i_b].is_constrained = False
                 self.particle_constraints[i_p, i_b].link_idx = -1
-
-    @qd.kernel
-    def apply_particle_constraints(self, f: qd.i32, links_state: LinksState):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particle_constraints[i_p, i_b].is_constrained:
-                # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
-                # reverse a field read back after it is overwritten in the same kernel.
-                target_pos = self.particle_constraints[i_p, i_b].target_pos
-                i_l = self.particle_constraints[i_p, i_b].link_idx
-                if i_l >= 0:
-                    link_pos = links_state.pos[i_l, i_b]
-                    link_quat = links_state.quat[i_l, i_b]
-                    local_pos = self.particle_constraints[i_p, i_b].link_local_pos
-                    target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
-
-                # The critically damped spring is integrated by backward Euler, the position moving with the velocity it
-                # gives, which keeps it stable whatever its stiffness: m (v' - v) = dt (-k (x + dt v' - x_t) - c v').
-                stiffness = self.particle_constraints[i_p, i_b].stiffness
-                mass = self.particles_info[i_p].mass / self._particle_volume_scale
-                damping = 2.0 * qd.math.sqrt(stiffness * mass)
-                dt = self.substep_dt
-                dt_damping_stiffness = dt * damping + dt**2 * stiffness
-
-                pos = self.particles[f + 1, i_p, i_b].pos
-                vel = self.particles[f + 1, i_p, i_b].vel
-                pos_error = pos - target_pos
-
-                vel_delta = -(dt_damping_stiffness * vel + dt * stiffness * pos_error) / (mass + dt_damping_stiffness)
-                # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
-                self.particles[f + 1, i_p, i_b].vel += vel_delta
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1201,7 +1252,7 @@ class MPMSolver(ParticleSolver):
 
     @property
     def use_sparse_grid(self):
-        return DeprecationError("This property has been removed.")
+        raise DeprecationError("This property has been removed.")
 
     @property
     def dx(self):
@@ -1243,36 +1294,213 @@ class MPMSolver(ParticleSolver):
     def grid_offset(self):
         return self._grid_offset
 
-    @property
-    def enable_CPIC(self):
-        return self._enable_CPIC
 
-    @property
-    def enable_particle_constraints(self):
-        return self._enable_particle_constraints
-
-
-@qd.func
-def signmax(a, eps):
-    sign = qd.select(a >= 0, 1.0, -1.0)
-    return sign * qd.max(qd.abs(a), eps)
+@qd.kernel
+def kernel_grid_keys(
+    f: int, particles: MpmParticles, particles_ng: MpmParticlesNG, grid: MpmGridScratch, mpm_info: MpmInfo
+):
+    mpm_func.func_reset_grid(grid)
+    mpm_func.func_compose_particle_keys(f, particles, particles_ng, grid, mpm_info)
 
 
-@qd.func
-def backward_svd(grad_U, grad_S, grad_V, U, S, V):
-    # https://github.com/pytorch/pytorch/blob/ab0a04dc9c8b84d4a03412f1c21a6c4a2cefd36c/tools/autograd/templates/Functions.cpp
-    vt = V.transpose()
-    ut = U.transpose()
-    S_term = U @ grad_S @ vt
+@qd.kernel
+def kernel_grid_blocks(grid: MpmGridScratch, mpm_info: MpmInfo):
+    mpm_func.func_append_particle_blocks(grid, mpm_info)
+    mpm_func.func_gen_neighbor_keys(grid)
 
-    s = qd.Vector.zero(gs.qd_float, 3)
-    s = qd.Vector([S[0, 0], S[1, 1], S[2, 2]]) ** 2
-    F = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        if i == j:
-            F[i, j] = 0.0
-        else:
-            F[i, j] = 1.0 / signmax(s[j] - s[i], 1e-6)
-    u_term = U @ ((F * (ut @ grad_U - grad_U.transpose() @ U)) @ S) @ vt
-    v_term = U @ (S @ ((F * (vt @ grad_V - grad_V.transpose() @ V)) @ vt))
-    return u_term + v_term + S_term
+
+@qd.kernel
+def kernel_grid_block_flags(grid: MpmGridScratch):
+    mpm_func.func_block_flags(grid)
+
+
+@qd.kernel
+def kernel_grid_publish_blocks(grid: MpmGridScratch):
+    mpm_func.func_publish_blocks(grid)
+    mpm_func.func_publish_grid_demand(grid)
+    mpm_func.func_cell_flags(grid)
+
+
+@qd.kernel
+def kernel_grid_cells(grid: MpmGridScratch):
+    mpm_func.func_publish_cells(grid)
+    mpm_func.func_reset_cell_segs(grid)
+    mpm_func.func_fill_cell_segs(grid)
+
+
+def build_grid(particles, particles_ng, grid, mpm_info, f):
+    """Rebuild the block-sparse grid of the substep from the particles, its topology fixed until the next substep."""
+    kernel_grid_keys(f, particles, particles_ng, grid, mpm_info)
+    dynamic_radix_sort(
+        grid.particle_sort,
+        grid.sort_keys,
+        grid.sort_keys_tmp,
+        grid.sort_ids,
+        grid.sort_ids_tmp,
+        grid.n_sort_keys,
+        key_bits=64,
+    )
+    kernel_grid_blocks(grid, mpm_info)
+    dynamic_radix_sort(
+        grid.block_sort,
+        grid.neighbor_keys,
+        grid.neighbor_keys_tmp,
+        grid.neighbor_perm,
+        grid.neighbor_perm_tmp,
+        grid.n_neighbor_keys,
+        key_bits=64,
+    )
+    kernel_grid_block_flags(grid)
+    kernel_dynamic_exclusive_sum(grid.block_flags, grid.block_ranks, grid.n_neighbor_keys, grid.block_scan)
+    kernel_grid_publish_blocks(grid)
+    kernel_dynamic_exclusive_sum(grid.cell_flags, grid.cell_ranks, grid.n_valid, grid.cell_scan)
+    kernel_dynamic_exclusive_sum(grid.task_flags, grid.task_ranks, grid.n_valid, grid.task_scan)
+    kernel_grid_cells(grid)
+
+
+@qd.kernel
+def kernel_predict(
+    f: int,
+    t: float,
+    gravity: qd.Tensor,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    particles_info: MpmParticlesInfo,
+    force_fields: qd.template(),
+    mpm_info: MpmInfo,
+):
+    """Transfer the particles to the grid with the force fields, and reset the Newton state."""
+    dt = mpm_info.substep_dt[()]
+    mpm_func.func_p2g(f, dt, gravity, particles, grid, particles_info, mpm_info)
+    mpm_func.func_apply_force_fields(t, dt, grid, force_fields, mpm_info)
+    mpm_func.func_stage_particle_pos(f, particles, grid, newton, mpm_info)
+    mpm_func.func_newton_reset(grid, newton)
+
+
+@qd.kernel
+def kernel_wall_pairs(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    pairs: MpmWallPairs,
+    particles_info: MpmParticlesInfo,
+    mpm_info: MpmInfo,
+):
+    """Build the wall pairs of the substep."""
+    dt = mpm_info.substep_dt[()]
+    mpm_func.func_build_wall_pairs(f, dt, particles, grid, pairs, particles_info, mpm_info)
+
+
+@qd.kernel
+def kernel_constraint_rows(
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    links_state: LinksState,
+    particles_info: MpmParticlesInfo,
+    mpm_info: MpmInfo,
+    constraints: qd.template(),
+):
+    mpm_func.func_build_constraint_rows(grid, newton, links_state, particles_info, mpm_info, constraints)
+
+
+@qd.kernel
+def kernel_constraint_adjoint(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
+    links_state: LinksState,
+    mpm_info: MpmInfo,
+    constraints: qd.template(),
+):
+    mpm_adjoint_func.func_constraint_adjoint(
+        f, particles, grid, newton, linear, rows, links_state, mpm_info, constraints
+    )
+
+
+@qd.kernel
+def kernel_contact_invweight(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    mpm_info: MpmInfo,
+):
+    mpm_func.func_contact_invweight(f, particles, grid, newton, particles_info, materials, mpm_info)
+
+
+@qd.kernel
+def kernel_report_extent(grid: MpmGridScratch, rows: LinearBlock):
+    mpm_func.func_report_extent(grid, rows)
+
+
+@qd.kernel
+def kernel_finalize(
+    f: int,
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    mpm_info: MpmInfo,
+    frozen: qd.types.ndarray(),
+):
+    dt = mpm_info.substep_dt[()]
+    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, mpm_info, frozen)
+
+
+@qd.kernel
+def kernel_adjoint_g2p(
+    f: int,
+    particles: MpmParticles,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    mpm_info: MpmInfo,
+):
+    """Compute the adjoint of u* into `newton.du` and the direct terms of the adjoint of the start frame of the
+    substep."""
+    dt = mpm_info.substep_dt[()]
+    mpm_adjoint_func.func_adjoint_reset_u_bar(grid, newton)
+    mpm_adjoint_func.func_adjoint_g2p(f, dt, particles, grid, newton, particles_info, materials, mpm_info)
+
+
+@qd.kernel
+def kernel_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: NewtonLinearScratch, rows: LinearBlock):
+    mpm_adjoint_func.func_adjoint_rhs(grid, newton, linear, rows)
+
+
+@qd.kernel
+def kernel_adjoint_pullback(
+    f: int,
+    t: float,
+    gravity: qd.Tensor,
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
+    grid: MpmGridScratch,
+    newton: MpmNewtonScratch,
+    linear: NewtonLinearScratch,
+    rows: LinearBlock,
+    wall_pairs: MpmWallPairs,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    force_fields: qd.template(),
+    mpm_info: MpmInfo,
+):
+    """Pull the adjoint solution back into the start frame of a substep, then clear the adjoint of its end frame."""
+    dt = mpm_info.substep_dt[()]
+    mpm_adjoint_func.func_adjoint_nodes(t, dt, grid, newton, linear, rows, force_fields, mpm_info)
+    mpm_adjoint_func.func_adjoint_particles(
+        f, dt, gravity, particles, grid, newton, linear, rows, particles_info, materials, mpm_info
+    )
+    mpm_adjoint_func.func_wall_contact_adjoint(
+        f, dt, particles, grid, newton, linear, rows, wall_pairs, particles_info, mpm_info
+    )
+    mpm_adjoint_func.func_adjoint_consume(f, particles, particles_ng, mpm_info)

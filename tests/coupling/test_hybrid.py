@@ -9,15 +9,14 @@ from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
 
 
-@pytest.mark.slow  # ~300s
+@pytest.mark.slow  # ~60s
 @pytest.mark.required
 def test_rigid_mpm_muscle(show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=3e-3,
-            substeps=10,
+            dt=1e-2,
         ),
         rigid_options=gs.options.RigidOptions(
             gravity=(0, 0, -9.8),
@@ -25,7 +24,6 @@ def test_rigid_mpm_muscle(show_viewer):
         ),
         mpm_options=gs.options.MPMOptions(
             gravity=(0.0, 0.0, 0.0),  # mimic gravity compensation
-            enable_CPIC=True,
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
         ),
@@ -58,8 +56,10 @@ def test_rigid_mpm_muscle(show_viewer):
                 nu=0.45,
                 rho=1000.0,
                 model="neohooken",
+                sampler="regular",
             ),
-            damping=1000.0,
+            # The coupling scales the velocity the links impose on the particles by exp(-dt damping)
+            damping=300.0,
             thickness=0.05,
         ),
     )
@@ -76,33 +76,97 @@ def test_rigid_mpm_muscle(show_viewer):
     scene.build()
 
     scene.reset()
-    for i in range(150):
-        robot.control_dofs_velocity(np.array([2.0 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
+    for i in range(60):
+        robot.control_dofs_velocity(np.array([4.5 * np.sin(2 * np.pi * i * 0.02)] * robot.n_dofs))
         scene.step()
 
+    # The arm drives the muscle into the ball, which rolls away on the plane, mostly along +y
     ball_pos_delta = ball.get_pos() - torch.tensor(BALL_POS_INIT, dtype=gs.tc_float, device=gs.device)
-    assert_allclose(ball_pos_delta[..., 0], 0.0, tol=1e-2)
-    assert ((0.02 < ball_pos_delta[1]) & (ball_pos_delta[1] < 0.05)).all()
+    assert (ball_pos_delta[..., 1] > 0.05).all()
+    assert (ball_pos_delta[..., 0].abs() < 0.4 * ball_pos_delta[..., 1]).all()
     assert_allclose(ball_pos_delta[..., 2], 0.0, tol=1e-3)
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("substeps", [1, 10])
-def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
-    # This test is aimining at two things:
-    # 1) When substep = 1, the rigid object should be affected by the MPM particles
-    # 2) Regardless of substeps, as far as the substep dt is the same, they should give consistent results
-    substep_dt = 4e-4
-    horizon_substeps = 100
-
+def test_mpm_on_terrain(show_viewer):
+    # The terrain is the only Rigid geom, so it is in no Rigid collision pair
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=substep_dt * substeps,
-            substeps=substeps,
+            dt=1e-2,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(0.0, 0.0, -0.2),
+            upper_bound=(2.0, 2.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            n_subterrains=(1, 1),
+            subterrain_size=(2.0, 2.0),
+            subterrain_types="flat_terrain",
+        ),
+        material=gs.materials.Rigid(),
+    )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 1.0, 0.3),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.build()
+
+    for _ in range(60):
+        scene.step()
+    pos = tensor_to_array(block.get_particles_pos())
+    assert np.isfinite(pos).all()
+    dx = 1.0 / 64
+    assert pos[..., 2].min() > -0.5 * dx
+
+
+@pytest.mark.required
+def test_reject_unsupported_mpm_coupling():
+    liquid = (gs.morphs.Box(pos=(0.0, 0.0, 0.3), size=(0.1, 0.1, 0.1)), gs.materials.MPM.Liquid())
+    box = (gs.morphs.Box(pos=(0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.Rigid())
+    soft = (gs.morphs.Box(pos=(-0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.FEM.Elastic())
+    terrain = (gs.morphs.Terrain(), gs.materials.Rigid())
+    for entities, options, requires_grad, match in (
+        ((liquid, box), {"friction_cone": gs.friction_cone.elliptic}, False, "elliptic"),
+        ((liquid, box), {"constraint_solver": gs.constraint_solver.CG}, False, "Newton solver"),
+        ((liquid, box), {"use_hibernation": True}, False, "hibernation"),
+        ((liquid, box), {"noslip_iterations": 5}, False, "noslip"),
+        ((liquid, soft), {}, False, "implicit solver"),
+        ((liquid, terrain), {}, True, "terrain"),
+    ):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(requires_grad=requires_grad),
+            rigid_options=gs.options.RigidOptions(**options),
+            show_viewer=False,
+        )
+        for morph, material in entities:
+            scene.add_entity(morph=morph, material=material)
+        with pytest.raises(gs.GenesisException, match=match):
+            scene.build()
+
+
+@pytest.mark.required
+@pytest.mark.cpu_threads(1)
+def test_rigid_mpm_legacy_coupling(tol, show_viewer):
+    # The liquid collapsing against the rigid box pushes it
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            substeps=1,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
+        ),
+        newton_options=gs.options.NewtonOptions(
+            strict=True,
         ),
         vis_options=gs.options.VisOptions(
             visualize_mpm_boundary=True,
@@ -119,7 +183,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
     obj_rigid = scene.add_entity(
         material=gs.materials.Rigid(
-            rho=1.0,
+            rho=1000.0,
         ),
         morph=gs.morphs.Box(
             pos=(0.0, -0.25, 0.1),
@@ -132,9 +196,13 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_sand = scene.add_entity(
-        material=gs.materials.MPM.Liquid(),
+        material=gs.materials.MPM.Liquid(
+            sampler="regular",
+        ),
+        # Off the faces of the grid cells, where the rounding of a position would pick the cell, so that the rollout
+        # after the reset repeats the first
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
+            pos=(0.003, 0.002, 0.201),
             size=(0.3, 0.3, 0.3),
         ),
         surface=gs.surfaces.Default(
@@ -145,17 +213,16 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
     scene.build()
 
-    horizon = horizon_substeps // substeps
-    for i in range(horizon):
+    for _ in range(10):
         scene.step()
 
-    # Check that the sand moved the box along the negative Y direction
+    # Check that the liquid moved the box along the negative Y direction
     pos = tensor_to_array(obj_rigid.get_pos())
     assert pos[1] + 0.25 < 0.0
 
     # A rollout after a reset starts free of the coupling wrench the previous one left
     scene.reset()
-    for i in range(horizon):
+    for _ in range(10):
         scene.step()
     assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
 
@@ -188,20 +255,25 @@ def test_mesh_mpm_build(show_viewer):
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_deformable_parallel(show_viewer):
     scene = gs.Scene(
+        # The implicit MPM solver is stable at one substep per step, which the explicit SPH solver splits into subcycles
         sim_options=gs.options.SimOptions(
             dt=2e-3,
-            substeps=10,
+            substeps=1,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.5, -0.1, -0.05),
             upper_bound=(0.7, 0.1, 0.3),
         ),
         sph_options=gs.options.SPHOptions(
+            n_subcycles=10,
             lower_bound=(-0.03, -0.03, -0.08),
             upper_bound=(0.33, 0.33, 1.0),
         ),
+        # The implicit MPM solver couples with the implicit FEM solver only. Its mass-proportional Rayleigh damping
+        # matches the velocity damping of the explicit FEM solver.
         fem_options=gs.options.FEMOptions(
-            damping=45.0,
+            use_implicit_solver=True,
+            damping_alpha=45.0,
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=1e-2,
@@ -253,6 +325,7 @@ def test_deformable_parallel(show_viewer):
         ),
         material=gs.materials.MPM.Elastic(
             rho=200,
+            sampler="regular",
         ),
         surface=gs.surfaces.Default(
             color=(0.9, 0.8, 0.2, 1.0),
@@ -263,11 +336,12 @@ def test_deformable_parallel(show_viewer):
             pos=(0.8, 0.8, 0.1),
             size=(0.1, 0.1, 0.1),
         ),
+        # The implicit FEM solver implements the energy Hessian of the linear models only
         material=gs.materials.FEM.Elastic(
             E=3.0e4,
             nu=0.45,
             rho=1000.0,
-            model="stable_neohookean",
+            model="linear_corotated",
         ),
     )
     scene.build(n_envs=2)
@@ -295,61 +369,66 @@ def test_deformable_parallel(show_viewer):
     assert final_water_pos[..., 2].min() > -1e-5
 
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
-    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
+    # The implicit MPM solve stops once its velocity update falls below the Newton tolerance, which bounds the velocity
+    # of the cube at rest
+    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=scene.options.newton.velocity_tol)
     assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 
 
 @pytest.mark.required
-def test_fem_outside_mpm_grid(precision, show_viewer, tol):
-    GRAVITY = -9.81
-    DT = 2e-3
-    N_STEPS = 10
+def test_fem_outside_mpm_grid(show_viewer):
+    # The joint solve of MPM and FEM moves the vertices together, so the FEM velocities hold its tolerance
+    VELOCITY_TOL = 1e-3
 
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=DT,
-            substeps=10,
-            gravity=(0.0, 0.0, GRAVITY),
-        ),
-        mpm_options=gs.options.MPMOptions(
-            lower_bound=(-0.1, -0.1, 0.0),
-            upper_bound=(0.1, 0.1, 0.2),
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.0, -1.0, 0.8),
-            camera_lookat=(0.2, 0.0, 0.3),
-        ),
-        show_viewer=show_viewer,
-    )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.MPM.Elastic(),
-    )
-    # FIXME: Building should raise when the scene cannot meet the accuracy of the simulation. The explicit time step
-    # must stay under about h / c, with h the smallest element size, c = sqrt((lambda + 2 * mu) / rho) the wave speed,
-    # lambda = E * nu / ((1 + nu) * (1 - 2 * nu)) and mu = E / (2 * (1 + nu)). The rest shape of a body accumulates
-    # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
-    # stay under the tolerance. Meanwhile, single precision takes a softer material.
-    fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.5),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e6 if precision == "64" else 1e5,
-        ),
-    )
-    scene.build(n_envs=2)
+    def fall(with_mpm):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=1e-2,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.1, -0.1, 0.0),
+                upper_bound=(0.1, 0.1, 0.2),
+            ),
+            # The implicit MPM couples with the implicit FEM alone, in their joint solve
+            fem_options=gs.options.FEMOptions(
+                use_implicit_solver=True,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                velocity_tol=VELOCITY_TOL,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(1.0, -1.0, 0.8),
+                camera_lookat=(0.2, 0.0, 0.3),
+            ),
+            show_viewer=show_viewer,
+        )
+        if with_mpm:
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(0.0, 0.0, 0.1),
+                    size=(0.05, 0.05, 0.05),
+                ),
+                material=gs.materials.MPM.Elastic(
+                    sampler="regular",
+                ),
+            )
+        fem = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e6,
+            ),
+        )
+        scene.build(n_envs=2)
+        for _ in range(10):
+            scene.step()
+        return fem.get_state().vel
 
-    for _ in range(N_STEPS):
-        scene.step()
-
-    # An unstressed body far from the grid falls freely, every vertex at the same velocity
-    assert_allclose(fem.get_state().vel, (0.0, 0.0, GRAVITY * DT * N_STEPS), tol=tol)
+    # A body far from the grid moves in the joint solve as it does in the solve of FEM alone
+    assert_allclose(fall(with_mpm=True), fall(with_mpm=False), tol=VELOCITY_TOL)
 
 
 @pytest.mark.parametrize(
@@ -366,11 +445,13 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     ],
 )
 def test_fluid_emitter(n_envs, material_type, show_viewer):
+    # The implicit MPM takes one large step, while SPH and PBD need small substeps
+    if issubclass(material_type, gs.materials.MPM.Base):
+        sim_options = gs.options.SimOptions(dt=1e-2, substeps=1)
+    else:
+        sim_options = gs.options.SimOptions(dt=4e-3, substeps=10)
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=4e-3,
-            substeps=10,
-        ),
+        sim_options=sim_options,
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, -1.5, 0.0),
             upper_bound=(1.0, 1.5, 4.0),

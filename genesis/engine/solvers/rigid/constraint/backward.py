@@ -95,6 +95,24 @@ def func_solve_adjoint_u_cg_batch(
             constraint_state.bw_p[i_d, i_b] = constraint_state.bw_r[i_d, i_b] + beta * constraint_state.bw_p[i_d, i_b]
 
 
+@qd.func(requires_top_level=True)
+def func_add_constraint_force_grad(constraint_state: ConstraintState, rigid_config: qd.template()):
+    """Add the direct gradient of the constraint forces, J^T * (-D * dL/defc_force) over the active rows, to dL_dqacc
+    (see kernel_solve_adjoint_u)."""
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
+        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
+            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_constraint_force_grad(constraint_state: ConstraintState, rigid_config: qd.template()):
+    func_add_constraint_force_grad(constraint_state, rigid_config)
+
+
 @qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
     constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
@@ -113,13 +131,7 @@ def kernel_solve_adjoint_u(
     """
     _B = constraint_state.bw_u.shape[1]
 
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
-        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
-            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
-            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
+    func_add_constraint_force_grad(constraint_state, rigid_config)
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -468,20 +480,7 @@ def kernel_manual_add_collision_constraints_bw(
                 link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
                 invweight = invweight + dyn_info.links.invweight[link_b_maybe_batch][0]
 
-            # --- forward intermediates of qd_orthogonals(normal) ---
-            #   b_raw branches on |normal[1]| < 0.5; b = normalize(b_raw)
-            #   d1 = b x normal, d2 = b
-            n0, n1, n2 = normal[0], normal[1], normal[2]
-            is_branch_a = qd.abs(n1) < 0.5
-            b_raw = gs.qd_vec3(0.0, 0.0, 0.0)
-            if is_branch_a:
-                b_raw = gs.qd_vec3(-n0 * n1, 1.0 - n1 * n1, -n2 * n1)
-            else:
-                b_raw = gs.qd_vec3(-n0 * n2, -n1 * n2, 1.0 - n2 * n2)
-            b_raw_norm = b_raw.norm()
-            b = b_raw / b_raw_norm
-            d1 = b.cross(normal)
-            d2 = b
+            d1, d2 = gu.qd_orthogonals(normal)
 
             neg_pen = -penetration
             imp, b_coef, k_coef, d_imp_d_imp_x = gu.imp_aref_grad(sol_params, neg_pen)
@@ -584,22 +583,7 @@ def kernel_manual_add_collision_constraints_bw(
                 else:
                     g_d2 += s_i * g_d
 
-            # Reverse qd_orthogonals: d1 = b x normal, d2 = b, b = normalize(b_raw(normal)).
-            dL_db = g_d2 + normal.cross(g_d1)
-            g_normal += g_d1.cross(b)
-            # b = b_raw / |b_raw|
-            dL_db_raw = (dL_db - dL_db.dot(b) * b) / b_raw_norm
-            # b_raw(normal) branch Jacobian
-            if is_branch_a:
-                # b_raw = (-n0 n1, 1 - n1^2, -n2 n1)
-                g_normal[0] += dL_db_raw[0] * (-n1)
-                g_normal[1] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-2.0 * n1) + dL_db_raw[2] * (-n2)
-                g_normal[2] += dL_db_raw[2] * (-n1)
-            else:
-                # b_raw = (-n0 n2, -n1 n2, 1 - n2^2)
-                g_normal[0] += dL_db_raw[0] * (-n2)
-                g_normal[1] += dL_db_raw[1] * (-n2)
-                g_normal[2] += dL_db_raw[0] * (-n0) + dL_db_raw[1] * (-n1) + dL_db_raw[2] * (-2.0 * n2)
+            g_normal += gu.qd_orthogonals_bw(normal, g_d1, g_d2)
 
             for j in qd.static(range(3)):
                 collider_state.contact_data.pos.grad[i_col, i_b][j] = g_pos[j]

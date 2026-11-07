@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
@@ -27,6 +29,7 @@ from .solvers import (
     SPHSolver,
 )
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
+from .solvers.newton_solver import NewtonSolver
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -107,6 +110,9 @@ class Simulator(RBC):
         self.sph_solver = SPHSolver(self.scene, self, options.sph)
         self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
         self.fem_solver = FEMSolver(self.scene, self, options.fem)
+        # The Newton solve of the solvers that couple strongly, into which they register at build. It owns no physical
+        # state, so it stays out of the solvers whose state the simulator gathers.
+        self.newton_solver = NewtonSolver(self.scene, self, options.newton)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -283,16 +289,17 @@ class Simulator(RBC):
         self._sensor_manager.destroy()
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
-        # They are gathered first, since 'data' reads the gradient of an array after yielding it.
-        for solver in self._active_solvers:
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it, and each once, since
+        # the participants of the Newton solver reach the arrays of their solvers too.
+        arrays = {}
+        for solver in (*self._active_solvers, self.newton_solver):
             if type(solver).data is not Solver.data:
-                arrays = [
-                    item.array
-                    for item in solver.data
-                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
-                ]
-                for array in arrays:
-                    qd_destroy_data(array)
+                for item in solver.data:
+                    if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor):
+                        array = item.array._unwrap() if isinstance(item.array, qd.Tensor) else item.array
+                        arrays.setdefault(id(array), item.array)
+        for array in arrays.values():
+            qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
@@ -490,6 +497,7 @@ class Simulator(RBC):
         self._steps.copy_(steps_start)
 
     def substep(self, f):
+        self.newton_solver.begin(f)
         self._coupler.preprocess(f)
         self.substep_pre_coupling(f)
         self._coupler.couple(f)
@@ -502,6 +510,7 @@ class Simulator(RBC):
 
     # -------------- post coupling --------------
     def substep_post_coupling(self, f):
+        self.newton_solver.step(f)
         for solver in self._active_solvers:
             solver.substep_post_coupling(f)
 

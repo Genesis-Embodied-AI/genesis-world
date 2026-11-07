@@ -1087,6 +1087,9 @@ def _kernel_reset_with_template_args(kernel):
     kernel.used_py_dataclass_parameters_by_key_enforcing = {}
     kernel._struct_ndarray_launch_info_by_key = {}
     kernel._struct_primitive_launch_info_by_key = {}
+    # The ndarray paths of the last launch are keyed by an instance id as well, which the new mapper numbers from 0 again
+    kernel._mutable_nd_cached_key = None
+    kernel._mutable_nd_cached_val = []
 
 
 # FIXME: quadrants#1038 - a performance dispatcher keeps the arguments of its last call for the lifetime of the process,
@@ -1137,6 +1140,16 @@ def qd_isfinite(x):
         return (qd.abs(x) < qd.math.inf).all()
     else:
         return qd.abs(x) < qd.math.inf
+
+
+def qd_debug_asserts() -> bool:
+    """
+    Whether the kernels compiling now trap on a failed assertion, which Quadrants debug mode alone does.
+
+    Outside of it, an assertion in a kernel is not removed but ends its loop iteration when it fails, skipping what
+    follows it there, so every assertion in a kernel sits under `if qd.static(qd_debug_asserts()):`.
+    """
+    return qd.lang.impl.current_cfg().debug
 
 
 def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) -> None:

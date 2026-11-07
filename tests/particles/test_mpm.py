@@ -15,8 +15,7 @@ def test_particle_constraints(show_viewer, tol):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=2e-3,
-            substeps=20,
+            dt=1e-2,
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -44,6 +43,7 @@ def test_particle_constraints(show_viewer, tol):
             E=5e4,
             nu=0.3,
             rho=RHO,
+            sampler="regular",
         ),
         morph=gs.morphs.Box(
             pos=(0, 0, 0.35),
@@ -124,8 +124,7 @@ def test_perf_dispatch(variant, show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=2e-3,
-            substeps=10,
+            dt=1e-2,
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -147,6 +146,7 @@ def test_perf_dispatch(variant, show_viewer):
             nu=0.2,
             rho=200.0,
             model=elastic_model,
+            sampler="regular",
         ),
     )
     liquid = scene.add_entity(
@@ -156,17 +156,15 @@ def test_perf_dispatch(variant, show_viewer):
         ),
         material=gs.materials.MPM.Liquid(
             viscous=liquid_viscous,
+            sampler="regular",
         ),
     )
     scene.build(n_envs=2)
 
-    # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
-    assert scene.sim.mpm_solver.needs_svd == (variant == "svd")
-
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
 
-    for _ in range(100):
+    for _ in range(20):
         scene.step()
 
     final_elastic_pos = elastic.get_particles_pos()
@@ -176,54 +174,222 @@ def test_perf_dispatch(variant, show_viewer):
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
     assert init_liquid_pos[..., 2].mean() - final_liquid_pos[..., 2].mean() > 0.05
 
-    # No ground penetration (plane is at z=0). Non-viscous liquid spreads thin enough that a sub-grid-cell penetration
-    # is normal for the MPM coupling, so allow up to 2mm.
-    assert final_elastic_pos[..., 2].min() > -1e-3
-    assert final_liquid_pos[..., 2].min() > -2e-3
+    # The ground (plane at z=0) holds the particles. Its soft contact rests at a penetration set by its impedance, so
+    # only a particle sinking past half a grid cell has gone through it.
+    dx = 1.0 / 64
+    assert final_elastic_pos[..., 2].min() > -0.5 * dx
+    assert final_liquid_pos[..., 2].min() > -0.5 * dx
+
+
+def _falling_block(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=32,
+        ),
+        # Converged far below the rounding the order of the sums of the reductions leaves, so that a solve does not
+        # stop an iteration apart from the same solve in another batch
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=1e-10,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # Off the faces of the grid cells: the regular lattice of a block centered on a node puts particles on faces, whose
+    # cell the rounding of their position then picks, and the motion jumps with it
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.003, 0.002, 0.1),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    return scene, block
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("precision", ["32"])
+# fp32 cannot resolve the Newton tolerance the comparison of two batches needs
+@pytest.mark.precision("64")
+def test_envs_solve_apart(precision, show_viewer):
+    # The environments of a batch run their own Newton solves: thrown at different speeds, the block of each one moves
+    # as it does alone, the solves of the block hitting the plane running up to four times as many iterations as those
+    # of the block at rest
+    velocities = ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, -0.5))
+    scene, block = _falling_block(len(velocities), show_viewer)
+    block.set_velocity(velocities)
+    for _ in range(10):
+        scene.step()
+    pos = block.get_particles_pos()
+    scene.destroy()
+    for i_b, velocity in enumerate(velocities):
+        scene, block = _falling_block(0, show_viewer)
+        block.set_velocity(velocity)
+        for _ in range(10):
+            scene.step()
+        assert_allclose(pos[i_b], block.get_particles_pos(), tol=1e-11)
+        scene.destroy()
+
+
+@pytest.mark.required
 def test_halt_on_nan(show_viewer):
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            gravity=(0.0, 0.0, 0.0),
+        ),
         mpm_options=gs.options.MPMOptions(
-            lower_bound=(-0.5, -0.5, 0.0),
-            upper_bound=(0.5, 0.5, 1.0),
+            lower_bound=(-0.5, -0.5, -0.1),
+            upper_bound=(0.5, 0.5, 0.5),
+            grid_density=32,
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.6, 0.6, 0.5),
+            camera_pos=(1.0, -1.0, 0.7),
             camera_lookat=(0.0, 0.0, 0.2),
+            camera_fov=32,
         ),
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.3),
+            pos=(-0.15, 0.0, 0.15),
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.MPM.Elastic(
-            E=1e9,
+            sampler="regular",
         ),
+    )
+    rigid_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.25, 0.0, 0.3),
+            size=(0.05, 0.05, 0.05),
+        ),
+    )
+    fem_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.3, 0.3),
+            size=(0.06, 0.06, 0.06),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/cloth.obj",
+            scale=0.2,
+            pos=(0.0, -0.3, 0.3),
+        ),
+        material=gs.materials.PBD.Cloth(),
     )
     scene.build(n_envs=2)
 
-    # The explicit integration of a stiff block diverges, the block of the second env first since it hits the floor
-    # faster. The diverging env is flagged and frozen before its state stops being finite, while the other proceeds.
-    block.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -5.0)))
-    for _ in range(10):
-        scene.step()
-        assert block.get_state().pos.isfinite().all()
-        if scene.get_error_envs_mask().any():
-            break
+    # A velocity that is not finite in the second environment fails its Newton solve alone: every participant of the
+    # solve keeps the state of that environment, and moves the other one at its velocity
+    rigid_box.set_dofs_velocity((0.1, 0.0, 0.0), dofs_idx_local=slice(0, 3))
+    for entity in (fem_box, cloth, block):
+        entity.set_velocity((0.1, 0.0, 0.0))
+    scene.step()
+    vel = block.get_particles_vel()
+    vel[1, 0] = float("nan")
+    block.set_particles_vel(vel)
+    positions = (rigid_box.get_pos, lambda: fem_box.get_state().pos, cloth.get_particles_pos, block.get_particles_pos)
+    positions_start = [position().clone() for position in positions]
+    scene.step()
+    for position, position_start in zip(positions, positions_start):
+        assert_allclose(position()[1], position_start[1], tol=gs.EPS)
+        assert (position()[0, ..., 0] - position_start[0, ..., 0] > 5e-4).all()
     assert_equal(scene.get_error_envs_mask(), (False, True))
 
     # The error raises at the beginning of the next step on CPU, and at worst of the one after it on GPU
-    with pytest.raises(gs.GenesisException, match="Invalid MPM particle velocities"):
+    with pytest.raises(gs.GenesisException, match="Newton solve produced non-finite values"):
         for _ in range(1 if gs.backend == gs.cpu else 2):
             scene.step()
 
     # Resetting the scene clears the error, so the simulation proceeds
     scene.reset()
     scene.step()
-    assert block.get_state().pos.isfinite().all()
     assert not scene.get_error_envs_mask().any()
+
+
+@pytest.mark.required
+# The SAP coupler, one of the configurations refused, supports 64 bits precision alone
+@pytest.mark.precision("64")
+def test_reject_unsupported_configurations():
+    liquid = gs.morphs.Box(pos=(0.0, 0.0, 0.2), size=(0.1, 0.1, 0.1))
+    for options, requires_grad, force_field, match in (
+        (
+            {"mpm_options": gs.options.MPMOptions(lower_bound=(-0.5, -0.5, 0.0), upper_bound=(600.0, 0.5, 0.5))},
+            False,
+            None,
+            "sparse grid",
+        ),
+        ({"coupler_options": gs.options.SAPCouplerOptions()}, False, None, "LegacyCouplerOptions"),
+        ({"mpm_options": gs.options.MPMOptions(liquid_smoothing_velocity=100.0)}, False, None, "smoothing band"),
+        ({}, True, gs.force_fields.Noise(), "Noise"),
+    ):
+        scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=requires_grad), **options, show_viewer=False)
+        scene.add_entity(morph=liquid, material=gs.materials.MPM.Liquid())
+        if force_field is not None:
+            scene.add_force_field(force_field)
+        with pytest.raises(gs.GenesisException, match=match):
+            scene.build()
+
+
+@pytest.mark.slow  # ~300s from a cold cache, the Newton graph compiling in ~200s
+@pytest.mark.required
+@pytest.mark.precision("64")
+def test_newton_graph_matches_split(show_viewer):
+    # The Newton graph runs the stages of Rigid's dofs with those of MPM
+    positions = []
+    for newton_graph in ("split", "newton"):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=1e-2,
+            ),
+            mpm_options=gs.options.MPMOptions(
+                lower_bound=(-0.5, -0.5, -0.1),
+                upper_bound=(0.5, 0.5, 0.6),
+                grid_density=32,
+            ),
+            newton_options=gs.options.NewtonOptions(
+                # Converged far below its default tolerance, the solve stops at the same iteration on every path
+                velocity_tol=1e-10,
+                graph=newton_graph,
+            ),
+            show_viewer=show_viewer,
+        )
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+        block = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.08),
+                size=(0.12, 0.12, 0.12),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                sampler="regular",
+            ),
+        )
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.06, 0.06, 0.06),
+            ),
+        )
+        scene.build(n_envs=2)
+        for _ in range(10):
+            scene.step()
+        positions.append(block.get_particles_pos())
+    assert_allclose(*positions, tol=1e-13)

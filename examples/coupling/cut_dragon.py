@@ -17,7 +17,6 @@ def main():
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
-            enable_CPIC=True,
             lower_bound=(-1.0, -1.0, -0.01),
             upper_bound=(1.0, 1.0, 2.0),
         ),

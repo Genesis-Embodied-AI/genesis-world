@@ -20,7 +20,7 @@ import pydantic
 from pydantic import TypeAdapter
 
 import quadrants as qd
-from quadrants.lang.util import to_numpy_type
+from quadrants.lang.util import is_data_oriented, to_numpy_type
 
 import genesis as gs
 from genesis.typing import StrictBool, StrictInt, ValidFloat
@@ -773,6 +773,8 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
             value = value[name]
         if isinstance(value, tuple):
             value = qd.Vector(value, dt=dtype.dtype)
+        if leaf.spec.is_ndarray:
+            return qd.tensor(dtype, shape=(), backend=qd.Backend.NDARRAY, fill=value)
         return V(dtype=dtype, shape=(), fill=value)
 
     dims, axes = [], []
@@ -922,6 +924,44 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
             yield ScalarItem(name, kind, owner, attr)
         else:
             gs.raise_exception(f"'{attr}' holds a {type(value).__name__} where an array, a struct or a scalar stands.")
+
+
+def iter_data_oriented(name: str, root: object, kind: DataKind) -> Iterator[ArrayItem]:
+    """Yield the quadrants arrays a data-oriented object holds, all of the given kind, named by 'name' and the attributes
+    reaching them, joined with dots.
+
+    The walk enters the data-oriented objects, plain structs and sequences it reaches, and stops at the objects owning
+    their data, such as a solver, an entity, a force field, a material or a declared struct (see 'Data'), which their
+    owner yields. An array reached twice is yielded once, under the first name reaching it. A quadrants array carrying
+    gradients yields them as one more item named 'grad'.
+    """
+    from genesis.repr_base import RBC
+
+    seen = set()
+    pending = [(name, root)]
+    while pending:
+        path, value = pending.pop()
+        if isinstance(value, (qd.Tensor, qd.Ndarray, qd.Field)):
+            array = value._unwrap() if isinstance(value, qd.Tensor) else value
+            if id(array) in seen:
+                continue
+            seen.add(id(array))
+            yield ArrayItem(path, kind, value)
+            if value.has_grad():
+                yield ArrayItem(f"{path}.grad", kind, value.grad)
+        elif isinstance(value, (RBC, Data, pydantic.BaseModel)) or id(value) in seen:
+            continue
+        elif is_data_oriented(value):
+            seen.add(id(value))
+            pending.extend((f"{path}.{attr}", member) for attr, member in reversed(vars(value).items()))
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            seen.add(id(value))
+            members = [(field.name, getattr(value, field.name)) for field in dataclasses.fields(value)]
+            pending.extend((f"{path}.{attr}", member) for attr, member in reversed(members))
+        elif isinstance(value, (tuple, list)):
+            seen.add(id(value))
+            members = value._asdict().items() if hasattr(value, "_asdict") else enumerate(value)
+            pending.extend((f"{path}.{attr}", member) for attr, member in reversed(list(members)))
 
 
 def iter_state_arrays(struct) -> Iterator[tuple[tuple[str, ...], qd.Tensor | qd.Field | qd.Ndarray]]:

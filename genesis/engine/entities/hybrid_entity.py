@@ -396,14 +396,14 @@ class HybridEntity(Entity):
     @qd.kernel
     def _kernel_update_soft_part_mpm(self, f: qd.i32, geoms_info: GeomsInfo, links_state: LinksState):
         for i_p_, i_b in qd.ndrange(self._part_soft.n_particles, self._part_soft._sim._B):
-            if self._solver_soft.particles_ng[f, i_p_, i_b].active:
+            if self._solver_soft.particles_ng.active[f, i_p_, i_b]:
                 i_global = i_p_ + self._part_soft.particle_start
                 f_ = f
                 if qd.static(not self._update_soft_part_at_pre_coupling):
                     f_ = f + 1  # NOTE: this is after g2p and thus we use f + 1
 
                 # get corresponding link
-                group_idx = self._solver_soft.particles_info[i_global].muscle_group
+                group_idx = self._solver_soft.particles_info.muscle_group[i_global]
 
                 link_idx = self._part_soft_info.link_idx[group_idx]
                 geom_idx = self._part_soft_info.geom_idx[group_idx]
@@ -440,7 +440,7 @@ class HybridEntity(Entity):
                 dt_for_rigid_acc = (
                     self._solver_rigid.dt
                 )  # NOTE: use rigid dt here as we are sorta doing integration within soft solver substep
-                mass_real = self._solver_soft.particles_info[i_global].mass / self._solver_soft._particle_volume_scale
+                mass_real = self._solver_soft.particles_info.mass[i_global] / self._solver_soft.particle_volume_scale
                 acc = vel_d / dt_for_rigid_acc
                 frc_vel = mass_real * acc
                 frc_ang = (x_pos - links_state.root_COM[link_idx, i_b]).cross(frc_vel)
