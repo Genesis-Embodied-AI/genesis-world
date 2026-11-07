@@ -433,7 +433,6 @@ def func_epa_init_polytope_2d(
     collider_state: ColliderState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
@@ -464,7 +463,7 @@ def func_epa_init_polytope_2d(
 
     # Cross product with the found axis, then rotate it by 120 degrees around the axis [diff] to get three more
     # points spaced 120 degrees apart
-    rotmat = gu.qd_rotvec_to_R(diff * qd.math.radians(120.0), rigid_info.EPS[None])
+    rotmat = gu.qd_rotvec_to_R(diff * qd.math.radians(120.0))
     e = gs.qd_vec3(0.0, 0.0, 0.0)
     e[min_i] = 1.0
 

@@ -1681,7 +1681,7 @@ def func_torque_and_passive_force(
                 ctrl_quat = gu.qd_xyz_to_quat(ctrl_xyz)
 
                 q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
-                rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
+                rotvec = gu.qd_quat_to_rotvec(q_diff)
 
                 for j in qd.static(range(3)):
                     i_d = dof_start + 3 + j
@@ -2140,7 +2140,7 @@ def func_midpoint_free_body(
         v_new = 2.0 * v_mid - v
         # The world-frame linear velocity goes through the estimated next orientation
         w_mid_body = gu.qd_transform_by_quat(w_mid, iquat)
-        qrot = gu.qd_rotvec_to_quat(w_mid_body * h, EPS)
+        qrot = gu.qd_rotvec_to_quat(w_mid_body * h)
         xquat_new = gu.qd_transform_quat_by_quat(qrot, xquat)
         v_new_world = gu.qd_transform_by_quat(gu.qd_transform_by_quat(v_new, iquat), xquat_new)
         for j in qd.static(range(3)):
@@ -2207,8 +2207,6 @@ def func_integrate(
         if is_awake:
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             if dyn_info.links.n_dofs[I_l] > 0:
-                EPS = rigid_info.EPS[None]
-
                 # A free body integrated with the midpoint rule moves with its midpoint velocity, its translation too
                 # unless its center of mass sits at its joint origin (see func_midpoint_free_body)
                 is_midpoint_ang = False
@@ -2268,7 +2266,7 @@ def func_integrate(
                         for j in qd.static(range(3)):
                             ang[j] = 0.5 * (ang[j] + dyn_state.dofs.vel[dof_start + rot_offset + j, i_b])
                     ang = ang * rigid_info.substep_dt[None]
-                    qrot = gu.qd_rotvec_to_quat(ang, EPS)
+                    qrot = gu.qd_rotvec_to_quat(ang)
                     rot = gu.qd_transform_quat_by_quat(qrot, rot0)
                     for j in qd.static(range(4)):
                         rigid_info.qpos_next[q_start + j + rot_offset, i_b] = rot[j]

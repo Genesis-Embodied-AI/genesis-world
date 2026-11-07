@@ -79,8 +79,11 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
 
 @pytest.mark.required
 def test_sim_vs_solver_state_grad_parity(show_viewer):
+    DT = 0.01
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
+            dt=DT,
             gravity=(0.0, 0.0, 0.0),
             requires_grad=True,
         ),
@@ -129,6 +132,15 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
     robot.get_state()
     robot.set_pos((0.1, -0.2, 0.3))
     assert_allclose(robot.get_state().pos[0], (0.1, -0.2, 0.3), tol=gs.EPS)
+
+    # Starting at rest, a body turns by its angular velocity times the time step, and the imaginary part of its
+    # quaternion by half of that.
+    scene.reset()
+    ang_vel = torch.zeros(3, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    robot.set_dofs_velocity(ang_vel, dofs_idx_local=[3, 4, 5])
+    scene.step()
+    (ang_vel_grad,) = torch.autograd.grad(robot.get_quat()[1:].sum(), ang_vel)
+    assert_allclose(ang_vel_grad, 0.5 * DT, tol=gs.EPS)
 
 
 @pytest.mark.required

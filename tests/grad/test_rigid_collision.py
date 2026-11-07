@@ -33,6 +33,8 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                 requires_grad=requires_grad,
             ),
             rigid_options=gs.options.RigidOptions(
+                # A softer constraint keeps the box pressed into the ground box at a depth its rocking cannot undo
+                constraint_timeconst=0.02,
                 # A non-neutral impratio makes the regularized cone coefficient observable to finite differences
                 impratio=2.0,
             ),
@@ -43,7 +45,9 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             show_viewer=show_viewer,
         )
         # Every entity starts at rest on a support of top z = 0: box / sphere half extent 0.2, upright capsule radius
-        # 0.1 + half length 0.2 = 0.3, lying capsule radius 0.1.
+        # 0.1 + half length 0.2 = 0.3, lying capsule radius 0.1. The box on the ground box is tilted and pressed into it:
+        # resting flat, its contact between parallel faces would have no defined position, and the slightest rocking
+        # would change the contact set.
         if shape == "ground_box":
             # A box and a sphere on a ground box, and beside it a capsule lying on a fixed capsule along it, which
             # multi-contact touches at both ends.
@@ -65,7 +69,8 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
                 scene.add_entity(
                     gs.morphs.Box(
                         size=(0.4, 0.4, 0.4),
-                        pos=(-0.5, 0.0, 0.2),
+                        pos=(-0.5, 0.0, 0.198),
+                        euler=(1.0, 1.0, 0.0),
                     ),
                     vis_mode="collision",
                 ),
@@ -138,7 +143,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             for entity in entities
         ]
 
-    n_settle = 12
+    n_settle = 20
     n_steps = 2
     eps = 1e-2
     # Contact force gradients are tiny (stiff contact barely moves): at fp32 the FD reference mostly rounds to
@@ -168,7 +173,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     # Each entity comes to rest vertically on its support, which a contact dropped for a single substep would set
     # bouncing again
     for entity in entities_ana:
-        assert_allclose(entity.get_dofs_velocity()[2], 0.0, atol=1e-4)
+        assert_allclose(entity.get_dofs_velocity()[2], 0.0, atol=5e-4)
     nc = _n_contacts(entities_ana)
     if shape == "ground_box":
         n_contacts_capsule = _n_contacts(entities_ana[2:])

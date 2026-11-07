@@ -175,76 +175,71 @@ def qd_R_to_xyz(R, eps):
 
 
 @qd.func
-def qd_rotvec_to_R(rotvec, eps):
-    R = qd.Matrix.identity(gs.qd_float, 3)
+def qd_half_angle_terms(thetasq):
+    """Compute cos(theta / 2), sin(theta / 2) / theta and its derivative with respect to theta divided by theta.
 
-    angle = rotvec.norm()
-    if angle > eps:
-        c, s = qd.cos(angle), qd.sin(angle)
-        t = 1.0 - c
-        x, y, z = rotvec / angle
-
-        R = qd.Matrix(
-            [
-                [t * x * x + c, t * x * y - z * s, t * x * z + y * s],
-                [t * x * y + z * s, t * y * y + c, t * y * z - x * s],
-                [t * x * z - y * s, t * y * z + x * s, t * z * z + c],
-            ],
-            dt=gs.qd_float,
-        )
-
-    return R
-
-
-@qd.func
-def qd_rotvec_to_quat(rotvec, eps):
-    quat = qd.Vector.zero(gs.qd_float, 4)
-
-    # We need to use [norm_sqr] instead of [norm] to avoid nan gradients in the backward pass. Even when theta = 0,
-    # the gradient of [norm] operation is computed and used (note that the gradient becomes NaN when theta = 0). This
-    # is seemd to be a bug in Quadrants autodiff @TODO: change back after the bug is fixed.
-    thetasq = rotvec.norm_sqr()
-    if thetasq > (eps**2):
-        theta = qd.sqrt(thetasq)
-        theta_half = 0.5 * theta
-        c, s = qd.cos(theta_half), qd.sin(theta_half)
-
-        quat[0] = c
-        xyz = s / theta * rotvec
-        for i in qd.static(range(3)):
-            quat[i + 1] = xyz[i]
-
-        # First order quaternion normalization is accurate enough yet necessary
-        quat *= 0.5 * (3.0 - quat.norm_sqr())
-    else:
-        quat[0] = 1.0
-
-    return quat
-
-
-@qd.func
-def qd_rotvec_to_quat_grad_rotvec(rotvec, eps, out_grad):
-    """Adjoint of qd_rotvec_to_quat(rotvec, eps) with respect to rotvec, given the upstream quaternion gradient.
-
-    Differentiates the eps-regularized surrogate quat = (c, sinc * rotvec) with theta_reg = sqrt(|rotvec|^2 + eps^2),
-    c = cos(theta_reg / 2) and sinc = sin(theta_reg / 2) / theta_reg. The surrogate deviates from the exact forward
-    (which branches at |rotvec| = eps and applies a first-order renormalization) by O(eps^2) in the main branch and
-    smooths over the constant-identity branch, trading exactness at the branch point for a gradient that stays
-    finite and continuous through rotvec = 0. Chain rule through theta_reg gives, per component i:
-        d(quat[0])/d(rotvec[i])   = -0.5 * sin(theta_reg / 2) * rotvec[i] / theta_reg
-        d(quat[1+j])/d(rotvec[i]) = delta(i, j) * sinc + rotvec[j] * (0.5 * c - sinc) / theta_reg^2 * rotvec[i]
+    The angle theta enters through its square. Below theta = 2, the three terms are evaluated by their Taylor series,
+    which stay accurate and smooth down to theta = 0, where the ratio of an approximate sine (fast math on GPU) to the
+    angle loses all relative accuracy and the closed form of the derivative cancels catastrophically.
     """
-    thetasq = rotvec.dot(rotvec)
-    theta_reg = qd.sqrt(thetasq + eps * eps)
-    theta_half = 0.5 * theta_reg
-    sin_half = qd.sin(theta_half)
-    cos_half = qd.cos(theta_half)
-    sinc = sin_half / theta_reg
-    d_sinc_d_theta = (0.5 * cos_half - sinc) / theta_reg
+    cos_half = 0.0
+    sinc_half = 0.0
+    sinc_half_deriv = 0.0
+    u = 0.25 * thetasq
+    if u < 1.0:
+        # Taylor coefficients in u = theta^2 / 4 of cos(theta / 2), of sin(theta / 2) / (theta / 2) and of its derivative
+        # with respect to u, highest order first for Horner's rule. The truncation error stays below the double precision
+        # up to u = 1.
+        for coef in qd.static(tuple([(-1) ** n / math.factorial(2 * n) for n in range(8, -1, -1)])):
+            cos_half = cos_half * u + coef
+        for coef in qd.static(tuple([(-1) ** n / math.factorial(2 * n + 1) for n in range(8, -1, -1)])):
+            sinc_half = sinc_half * u + coef
+        for coef in qd.static(tuple([(-1) ** n * n / math.factorial(2 * n + 1) for n in range(9, 0, -1)])):
+            sinc_half_deriv = sinc_half_deriv * u + coef
+        sinc_half = 0.5 * sinc_half
+        sinc_half_deriv = 0.25 * sinc_half_deriv
+    else:
+        theta = qd.sqrt(thetasq)
+        cos_half = qd.cos(0.5 * theta)
+        sinc_half = qd.sin(0.5 * theta) / theta
+        sinc_half_deriv = (0.5 * cos_half - sinc_half) / thetasq
+    return cos_half, sinc_half, sinc_half_deriv
 
+
+@qd.func
+def qd_rotvec_to_quat(rotvec):
+    cos_half, sinc_half, _ = qd_half_angle_terms(rotvec.norm_sqr())
+    xyz = sinc_half * rotvec
+    quat = qd.Vector([cos_half, xyz[0], xyz[1], xyz[2]], dt=gs.qd_float)
+    # First order quaternion normalization is accurate enough yet necessary
+    return quat * (0.5 * (3.0 - quat.norm_sqr()))
+
+
+@qd.func
+def qd_rotvec_to_R(rotvec):
+    """Convert a rotation vector to a rotation matrix by Rodrigues' formula R = I + a K + b K^2.
+
+    K is the cross-product matrix of the rotation vector, a = sin(theta) / theta and b = (1 - cos(theta)) / theta^2,
+    which the half-angle terms give as 2 sin(theta / 2) cos(theta / 2) / theta and 2 (sin(theta / 2) / theta)^2.
+    """
+    cos_half, sinc_half, _ = qd_half_angle_terms(rotvec.norm_sqr())
+    K = qd_vec_to_skew(rotvec)
+    return qd.Matrix.identity(gs.qd_float, 3) + 2.0 * sinc_half * cos_half * K + 2.0 * sinc_half * sinc_half * K @ K
+
+
+@qd.func
+def qd_rotvec_to_quat_grad_rotvec(rotvec, out_grad):
+    """Compute the adjoint of qd_rotvec_to_quat with respect to the rotation vector, given the quaternion gradient.
+
+    The first-order renormalization of the forward leaves its derivative unchanged, since the quaternion it receives is
+    of unit norm. With theta the norm of the rotation vector and sinc = sin(theta / 2) / theta, per component i:
+        d(quat[0])/d(rotvec[i])   = -0.5 * sinc * rotvec[i]
+        d(quat[1+j])/d(rotvec[i]) = delta(i, j) * sinc + rotvec[j] * (d(sinc)/d(theta) / theta) * rotvec[i]
+    """
+    _, sinc_half, sinc_half_deriv = qd_half_angle_terms(rotvec.norm_sqr())
     out_grad_vec = gs.qd_vec3(out_grad[1], out_grad[2], out_grad[3])
-    coeff = -0.5 * sin_half / theta_reg * out_grad[0] + d_sinc_d_theta / theta_reg * out_grad_vec.dot(rotvec)
-    return coeff * rotvec + sinc * out_grad_vec
+    coeff = -0.5 * sinc_half * out_grad[0] + sinc_half_deriv * out_grad_vec.dot(rotvec)
+    return coeff * rotvec + sinc_half * out_grad_vec
 
 
 @qd.func
@@ -395,17 +390,29 @@ def qd_quat_to_xyz_grad_quat(quat, eps, out_grad):
 
 
 @qd.func
-def qd_quat_to_rotvec(quat, eps):
-    q_w, q_x, q_y, q_z = quat
-    rotvec = qd.Vector([q_x, q_y, q_z], dt=gs.qd_float)
+def qd_quat_to_rotvec(quat):
+    """Convert a quaternion to the rotation vector of its rotation, of angle at most pi.
 
-    s2 = rotvec.norm()
-    if s2 > eps:
-        angle = 2.0 * qd.atan2(s2, qd.abs(q_w))
-        inv_sinc = angle / s2
-        rotvec = (-1.0 if q_w < 0.0 else 1.0) * inv_sinc * rotvec
-
-    return rotvec
+    Close to the identity, the ratio of the angle to the norm of the imaginary part is evaluated by the Taylor series of
+    atan(y) / y in the ratio y of the norm of the imaginary part to the real part, which stays accurate and smooth down
+    to the identity.
+    """
+    q_w = quat[0]
+    q_vec = gs.qd_vec3(quat[1], quat[2], quat[3])
+    s_sq = q_vec.norm_sqr()
+    w_sq = q_w * q_w
+    inv_sinc = 0.0
+    if s_sq < 1e-2 * w_sq:
+        ratio_sq = s_sq / w_sq
+        # Taylor coefficients of atan(y) / y in y^2, highest order first, whose truncation error stays below the double
+        # precision up to y^2 = 1e-2
+        for coef in qd.static(tuple([(-1) ** n / (2 * n + 1) for n in range(7, -1, -1)])):
+            inv_sinc = inv_sinc * ratio_sq + coef
+        inv_sinc = 2.0 / qd.abs(q_w) * inv_sinc
+    else:
+        s = qd.sqrt(s_sq)
+        inv_sinc = 2.0 * qd.atan2(s, qd.abs(q_w)) / s
+    return (-1.0 if q_w < 0.0 else 1.0) * inv_sinc * q_vec
 
 
 @qd.func
@@ -2096,11 +2103,20 @@ def quat_to_rotvec(quat: np.ndarray, out: np.ndarray | None = None) -> np.ndarra
     # Split real (qw,) and imaginary (qx, qy, qz) quaternion parts
     q_w, q_vec = quat[..., :1], np.ascontiguousarray(quat[..., 1:])
 
-    # Compute the angle-axis representation of the relative rotation
-    s2 = np.sqrt(np.sum(np.square(q_vec.reshape((-1, 3))), -1)).reshape((*B, 1))
-    angle = 2.0 * np.arctan2(s2, np.abs(q_w))
-    # FIXME: Ideally, a taylor expansion should be used to handle angle ~ 0.0
-    inv_sinc = angle / np.maximum(s2, gs.EPS)
+    # Close to the identity, the ratio of the angle to the norm of the imaginary part follows the Taylor series of
+    # atan(y) / y (see qd_quat_to_rotvec). Each branch reads safe placeholder values where the other one applies.
+    s_sq = np.sum(np.square(q_vec.reshape((-1, 3))), -1).reshape((*B, 1))
+    w_sq = np.square(q_w)
+    is_series = s_sq < 1e-2 * w_sq
+    ratio_sq = np.where(is_series, s_sq, 0.0) / np.where(is_series, w_sq, 1.0)
+    inv_sinc_series = np.zeros_like(ratio_sq)
+    for coef in [(-1) ** n / (2 * n + 1) for n in range(7, -1, -1)]:
+        inv_sinc_series = inv_sinc_series * ratio_sq + coef
+    w_abs = np.abs(q_w)
+    s = np.sqrt(np.where(is_series, 1.0, s_sq))
+    inv_sinc = np.where(
+        is_series, 2.0 / np.where(is_series, w_abs, 1.0) * inv_sinc_series, 2.0 * np.arctan2(s, w_abs) / s
+    )
     out_[:] = np.where(q_w < 0.0, -1.0, 1.0) * inv_sinc * q_vec
 
     if out is None:
@@ -2125,14 +2141,21 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
         assert out.shape == (*B, 4)
         out_ = out
 
-    # Split unit axis and positive angle
-    angle = np.sqrt(np.sum(np.square(rotvec.reshape((-1, 3))), -1)).reshape(B)
-    # FIXME: Taylor expansion should be used to handle angle ~ 0.0
-    axis = rotvec / np.maximum(angle[..., None], gs.EPS)
-
-    # Compute the quaternion representation
-    out_[..., 0] = np.cos(0.5 * angle)
-    out_[..., 1:] = np.sin(0.5 * angle[..., None]) * axis
+    # Below an angle of 2, the half-angle terms follow their Taylor series (see qd_half_angle_terms), whose factorials
+    # come from 'math.gamma' that numba supports. The closed form reads the angle clamped to that bound, so that it stays
+    # finite where the series applies.
+    thetasq = np.sum(np.square(rotvec.reshape((-1, 3))), -1).reshape((*B, 1))
+    u = 0.25 * thetasq
+    cos_half_series = np.zeros_like(u)
+    for coef in [(-1.0) ** n / math.gamma(2 * n + 1) for n in range(8, -1, -1)]:
+        cos_half_series = cos_half_series * u + coef
+    sinc_half_series = np.zeros_like(u)
+    for coef in [(-1.0) ** n / math.gamma(2 * n + 2) for n in range(8, -1, -1)]:
+        sinc_half_series = sinc_half_series * u + coef
+    theta = np.sqrt(np.maximum(thetasq, 4.0))
+    is_series = u < 1.0
+    out_[..., :1] = np.where(is_series, cos_half_series, np.cos(0.5 * theta))
+    out_[..., 1:] = np.where(is_series, 0.5 * sinc_half_series, np.sin(0.5 * theta) / theta) * rotvec
 
     return out_
 
