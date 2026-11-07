@@ -233,7 +233,7 @@ def func_COM_root_sum(
     EPS = rigid_info.EPS[None]
     i_l_end = rigid_info.links_root_end[i_l_root]
 
-    dyn_state.links.root_COM_bw[i_l_root, i_b].fill(0.0)
+    dyn_state.links.root_COM_bw[i_l_root, i_b] = qd.Vector.zero(gs.qd_float, 3)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
     # The walk covers the link span of the root and gates each link on its root (see roots_link_idx in array_class.py),
     # so a root spanning several entities, one attached beneath another, sums every link of its own before it divides

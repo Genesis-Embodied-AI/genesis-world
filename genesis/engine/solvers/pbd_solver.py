@@ -473,15 +473,14 @@ class PBDSolver(ParticleSolver):
             self._n_particles, self.particles.pos, self.particles_ng.active, self.particles_ng.reordered_idx
         )
 
-        # copy to reordered
-        self.particles_ng_reordered.active.fill(False)
+        # Copy to reordered, the active particles taking the first sorted indices (see compute_reordered_idx).
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            self.particles_ng_reordered[i_p, i_b].active = i_p < self.sh.cur_cnt[i_b]
             if self.particles_ng[i_p, i_b].active:
                 reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
 
                 self.particles_reordered[reordered_idx, i_b] = self.particles[i_p, i_b]
                 self.particles_info_reordered[reordered_idx, i_b] = self.particles_info[i_p]
-                self.particles_ng_reordered[reordered_idx, i_b].active = self.particles_ng[i_p, i_b].active
 
     @qd.kernel
     def _kernel_apply_external_force(self, f: qd.i32, t: qd.f32):
@@ -531,7 +530,7 @@ class PBDSolver(ParticleSolver):
             for i_p, i_b in qd.ndrange(self._n_particles, self._B):
                 if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
                     self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos.fill(0)
+                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_solve_bending(self, f: qd.i32):
@@ -584,7 +583,7 @@ class PBDSolver(ParticleSolver):
             for i_p, i_b in qd.ndrange(self._n_particles, self._B):
                 if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
                     self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos.fill(0)
+                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_solve_volume(self, f: qd.i32):
@@ -624,7 +623,7 @@ class PBDSolver(ParticleSolver):
             for i_p, i_b in qd.ndrange(self._n_particles, self._B):
                 if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
                     self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos.fill(0)
+                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.func
     def _func_solve_collision(self, i, j, i_b):
@@ -690,7 +689,7 @@ class PBDSolver(ParticleSolver):
                 self.particles_reordered[i_p, i_b].pos = (
                     self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
                 )
-                self.particles_reordered[i_p, i_b].dpos.fill(0)
+                self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_solve_boundary_collision(self, f: qd.i32):
@@ -766,7 +765,7 @@ class PBDSolver(ParticleSolver):
                     self.particles_reordered[i_p, i_b].pos = (
                         self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
                     )
-                    self.particles_reordered[i_p, i_b].dpos.fill(0)
+                    self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_solve_viscosity(self, f: qd.i32):
@@ -836,7 +835,7 @@ class PBDSolver(ParticleSolver):
                     self.particles_reordered[i_p, i_b].pos = (
                         self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
                     )
-                    self.particles_reordered[i_p, i_b].dpos.fill(0)
+                    self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_compute_velocity(self, f: qd.i32):
@@ -1040,7 +1039,7 @@ class PBDSolver(ParticleSolver):
             if i_p >= 0:
                 for i in qd.static(range(3)):
                     self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
-                self.particles[i_p, i_b].vel.fill(0.0)
+                self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.kernel
     def _kernel_get_particles_pos(

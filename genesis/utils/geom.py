@@ -2566,7 +2566,8 @@ class SpatialHasher:
         """
         Reordered element idx based on the given positions and active flags.
 
-        The elements of a slot take their sorted indices in ascending order of element index.
+        The active elements of an environment take the sorted indices 0 to cur_cnt - 1, those of a slot in ascending
+        order of element index.
 
         Parameters:
             n (int)       : The number of elements in the positions and active arrays.
@@ -2578,9 +2579,11 @@ class SpatialHasher:
             None
         """
 
-        self.slot_size.fill(0)
-        self.slot_start.fill(0)
-        self.cur_cnt.fill(0)
+        # The slot starts are all written before they are read, so the counts alone start from zero.
+        for i_s, i_b in qd.ndrange(self.n_slots, self._B):
+            self.slot_size[i_s, i_b] = 0
+            if i_s == 0:
+                self.cur_cnt[i_b] = 0
 
         for i_n, i_b in qd.ndrange(n, self._B):
             if active[i_n, i_b]:

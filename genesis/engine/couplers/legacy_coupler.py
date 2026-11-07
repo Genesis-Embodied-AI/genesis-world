@@ -1,15 +1,15 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
-
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
-from genesis.utils.data import opt_in
+from genesis.utils.data import kernel_fill, opt_in
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 if TYPE_CHECKING:
@@ -112,13 +112,13 @@ class LegacyCoupler(RBC):
     def reset(self, envs_idx=None) -> None:
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             if envs_idx is None:
-                self.mpm_rigid_normal.fill(0)
+                kernel_fill(self.mpm_rigid_normal, value=0)
             else:
                 self._kernel_reset_mpm(envs_idx)
 
         if self._rigid_sph:
             if envs_idx is None:
-                self.sph_rigid_normal.fill(0)
+                kernel_fill(self.sph_rigid_normal, value=0)
             else:
                 self._kernel_reset_sph(envs_idx)
 

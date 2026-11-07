@@ -4,7 +4,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.utils.array_class import ConstraintState, DynState, RigidInfo
-from genesis.utils.data import eoa
+from genesis.utils.data import eoa, kernel_fill
 from genesis.utils.misc import qd_to_torch
 
 from . import linesearch
@@ -380,5 +380,5 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
         if gs.backend == gs.metal:
             torch.mps.synchronize()
     else:
-        constraint_state.graph_counter.fill(_n_iterations)
+        kernel_fill(constraint_state.graph_counter, _n_iterations)
     _kernel_solve_graph(constraint_state.graph_counter, dyn_state, constraint_state, rigid_info, rigid_config)
