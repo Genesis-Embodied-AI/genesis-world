@@ -3335,7 +3335,8 @@ class RigidFloorTetContactHandler(RigidContactHandler):
         for i_b, i_e in qd.ndrange(self.sim._B, self.coupler.n_rigid_volume_elems):
             i_g = self.coupler.rigid_volume_elems_geom_idx[i_e]
             i_l = geoms_info.link_idx[i_g]
-            if links_info.is_fixed[i_l]:
+            I_l = [i_l, i_b] if qd.static(self.rigid_solver._options.batch_links_info) else i_l
+            if links_info.is_fixed[I_l]:
                 continue
             ground_pos = geoms_state.pos[self.coupler._ground_geom_idx, i_b]
             intersection_code = qd.int32(0)
