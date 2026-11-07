@@ -1,6 +1,8 @@
 import io
 import os
+import pickle
 from contextlib import nullcontext
+from pathlib import Path
 
 import numpy as np
 import pygltflib
@@ -14,6 +16,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
+from genesis.utils.cache import get_cvx_cache_dir
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -1038,3 +1041,16 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+
+    # The entry references numpy alone, so that any environment sharing the cache can load it.
+    class NumpyOnlyUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module != "builtins" and module.split(".")[0] != "numpy":
+                raise pickle.UnpicklingError(f"Cache entry references '{module}.{name}'.")
+            return super().find_class(module, name)
+
+    (cvx_path,) = Path(get_cvx_cache_dir()).rglob("*.cvx")
+    with open(cvx_path, "rb") as file:
+        # An entry holds two records, the reference vertices then the payload (see 'MeshCache.save').
+        NumpyOnlyUnpickler(file).load()
+        NumpyOnlyUnpickler(file).load()

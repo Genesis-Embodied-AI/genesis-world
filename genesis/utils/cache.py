@@ -26,6 +26,8 @@ import genesis as gs
 # identical by the on-disk caches. Orders of magnitude below the spacing of genuinely distinct geometry, and orders of
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
+# Bumped when the layout of a convex decomposition entry changes: forces a cache miss on stale entries.
+CVX_CACHE_VERSION = 1
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
 WT_CACHE_VERSION = 7
 # Bumped when the wall-thickness estimate changes for a fixed (mesh, quantile): forces a cache miss on stale entries.
@@ -309,7 +311,7 @@ def get_gnd_path(
 
 
 def get_cvx_cache(verts, faces, coacd_options):
-    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__)
+    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__, CVX_CACHE_VERSION)
 
 
 def get_ptc_cache(verts, faces, p_size, sampler, random_state):
