@@ -136,6 +136,13 @@ jobs:
             TORCH_SPEC="torch<2.15"
           fi
           pip3 install "${TORCH_SPEC}" --upgrade --index-url https://download.pytorch.org/whl/cpu
+      # A dependency that only arrives through an extra or through another package must not be needed to import Genesis
+      - name: Import Genesis without extras
+        shell: bash
+        run: |
+          pip install .
+          python -c "import genesis"
+
       - name: Install Genesis
         shell: bash
         run: |
