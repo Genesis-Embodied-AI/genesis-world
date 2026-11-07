@@ -16,7 +16,7 @@ from genesis.engine.states.solvers import FEMSolverState
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
-from genesis.utils.misc import broadcast_tensor, get_gpu_core_count, qd_isfinite, qd_to_numpy, qd_to_torch
+from genesis.utils.misc import broadcast_tensor, get_gpu_core_count, qd_isfinite, qd_to_numpy, qd_to_torch, qd_zero_grad
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -346,8 +346,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.vertex_constraints.link_idx.fill(-1)
 
     def reset_grad(self):
-        self.elements_v.grad.fill(0)
-        self.elements_el.grad.fill(0)
+        if self._requires_grad:
+            qd_zero_grad(self.elements_v)
+            qd_zero_grad(self.elements_el)
 
     def build(self):
         super().build()
@@ -1618,10 +1619,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if not self._constraints_initialized:
             gs.logger.warning("Ignoring remove_vertex_constraints; constraints have not been initialized.")
             return
-        # FIXME: Quadrants 'fill' method is very inefficient. Try using zero-copy if possible.
-        if verts_idx is None and envs_idx is None:
-            self.vertex_constraints.is_constrained.fill(0)
-            return
         _, verts_idx, envs_idx = self._sanitize_io_variables(
             None, verts_idx, self.n_vertices, "verts_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
@@ -1819,7 +1816,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if vc.is_constrained and not vc.is_soft_constraint:
                 target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
                 self.elements_v[f + 1, i_v, i_b].pos = target_pos
-                self.elements_v[f + 1, i_v, i_b].vel.fill(0.0)
+                self.elements_v[f + 1, i_v, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
                 if not qd_isfinite(target_pos):
                     self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VERTEX_NAN
 

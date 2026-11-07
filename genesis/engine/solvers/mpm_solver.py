@@ -17,7 +17,7 @@ from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import ArrayItem, DataKind, opt_in
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
 
 from .particle_solver import ParticleSolver
 
@@ -211,8 +211,9 @@ class MPMSolver(ParticleSolver):
         self.particle_constraints.link_idx.fill(-1)
 
     def reset_grad(self):
-        self.particles.grad.fill(0.0)
-        self.grid.grad.fill(0.0)
+        if self._requires_grad:
+            qd_zero_grad(self.particles)
+            qd_zero_grad(self.grid)
 
     def build(self):
         super().build()
@@ -875,9 +876,9 @@ class MPMSolver(ParticleSolver):
                     self.particles[0, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
 
                 # Reset these attributes whenever overwriting particle positions manually
-                self.particles[0, i_p, i_b].vel.fill(0.0)
+                self.particles[0, i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
                 self.particles[0, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-                self.particles[0, i_p, i_b].C.fill(0.0)
+                self.particles[0, i_p, i_b].C = qd.Matrix.zero(gs.qd_float, 3, 3)
                 self.particles[0, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
 
     @qd.kernel

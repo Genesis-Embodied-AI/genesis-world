@@ -5647,6 +5647,8 @@ def func_solve_init(
             constraint_state.improved[i_b] = constraint_state.n_constraints[i_b] > 0
             func_group_constraints_by_island(i_b, constraint_state, rigid_config)
     constraint_state.solver_iter_counter[()] = 0
+    # The decomposed graph iterates while its counter is positive (see _kernel_solve_graph in solver_breakdown.py)
+    constraint_state.graph_counter[()] = rigid_info.iterations[None]
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_tiled_island_seed):
         # The tiled seed: every island's Hessian block assembled into nt_H, then factored and solved in its shared
