@@ -428,6 +428,12 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     )
     assert_equal(small_emitter.entity.get_particles_active(), np.arange(10) < 8)
     assert not emitter.entity.get_particles_active().any()
+    # A batch filling the last free slots exactly wraps the cursor back to the first slot.
+    small_emitter.emit(
+        droplet_shape="rectangle", droplet_size=(7 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
+    )
+    assert small_emitter.next_particle == 0
+    assert small_emitter.entity.get_particles_active().all()
 
     emitter.emit_omni()
     for i in range(5):
