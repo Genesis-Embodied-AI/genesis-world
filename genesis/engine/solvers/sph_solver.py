@@ -36,7 +36,6 @@ class SPHSolver(ParticleSolver):
         self._df_max_error_den = options.max_density_error_percent
         self._df_max_div_iters = options.max_divergence_solver_iterations
         self._df_max_den_iters = options.max_density_solver_iterations
-        self._df_eps = 1e-5
 
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
@@ -120,6 +119,28 @@ class SPHSolver(ParticleSolver):
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
 
+        if self._pressure_solver == "DFSPH":
+            # Stiffness that the next Jacobi iteration applies, read by the neighbors of each particle
+            self.particles_k_reordered = qd.field(gs.qd_float, shape=(self._n_particles, self._B), needs_grad=False)
+
+            struct_env_df = qd.types.struct(
+                err=gs.qd_float,  # density error summed over the active particles
+                n_active=gs.qd_int,  # number of active particles, over which the density error is averaged
+                is_solving=gs.qd_bool,
+            )
+            self.envs_df = struct_env_df.field(shape=(self._B,), needs_grad=False, layout=qd.Layout.SOA)
+
+            struct_df_info = qd.types.struct(
+                substep_dt=gs.qd_float,
+                density_err_tol=gs.qd_float,  # average density error that ends the density solve, kg/m^3
+                divergence_err_tol=gs.qd_float,  # average density rate that ends the divergence solve, kg/m^3/s
+                stiffness_eps=gs.qd_float,
+                jacobi_relaxation=gs.qd_float,
+                factor_eps=gs.qd_float,
+                n_neighbors_min=gs.qd_int,  # fewer neighbors leave the density rate of a particle out of the solve
+            )
+            self.df_info = struct_df_info.field(shape=(), needs_grad=False)
+
     def build(self):
         super().build()
 
@@ -152,6 +173,21 @@ class SPHSolver(ParticleSolver):
 
             # TODO: Support per-particle density
             self._density0 = self.particles_info[0].rho
+
+            if self._pressure_solver == "DFSPH":
+                self.df_info.substep_dt[None] = self.substep_dt
+                self.df_info.density_err_tol[None] = self._df_max_error_den * 0.01 * self._density0
+                self.df_info.divergence_err_tol[None] = (
+                    1.0 / self.substep_dt * self._df_max_error_div * 0.01 * self._density0
+                )
+                self.df_info.stiffness_eps[None] = 1e-5
+                # The DFSPH factor inverts the diagonal of the pressure system alone, and the stiffness of the neighbors
+                # of a particle adds up to as much again, so the diagonally scaled system has eigenvalues up to 2. A
+                # full Jacobi update leaves the mode alternating from one particle to the next undamped, and overshoots
+                # once the liquid compresses abruptly. Half the update cancels that mode, the others still converging.
+                self.df_info.jacobi_relaxation[None] = 0.5
+                self.df_info.factor_eps[None] = 1e-6
+                self.df_info.n_neighbors_min[None] = 20
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity()
@@ -390,8 +426,16 @@ class SPHSolver(ParticleSolver):
 
     @qd.kernel
     def _kernel_compute_DFSPH_factor(self, f: qd.i32):
+        # Every environment takes part in the divergence solve that follows (see _kernel_update_convergence).
+        for i_b in range(self._B):
+            self.envs_df[i_b].is_solving = True
+            self.envs_df[i_b].err = 0.0
+            self.envs_df[i_b].n_active = 0
+
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i_p, i_b].active:
+                qd.atomic_add(self.envs_df[i_b].n_active, 1)
+
                 sum_grad_p_k = gs.qd_float(0.0)
                 grad_p_i = qd.Vector.zero(gs.qd_float, 3)
 
@@ -409,15 +453,13 @@ class SPHSolver(ParticleSolver):
 
                 # Compute pressure stiffness denominator
                 factor = gs.qd_float(0.0)
-                if sum_grad_p_k > 1e-6:
+                if sum_grad_p_k > self.df_info[None].factor_eps:
                     factor = -1.0 / sum_grad_p_k
                 else:
+                    # A particle without neighbors carries no pressure into the next density solve.
                     factor = 0.0
+                    self.particles_reordered[i_p, i_b].p = 0.0
                 self.particles_reordered[i_p, i_b].dfsph_factor = factor
-
-                # Reset the implicit pressure accumulated by the density solve (see
-                # _kernel_density_solve_iteration).
-                self.particles_reordered[i_p, i_b].p = 0.0
 
     @qd.func
     def _task_compute_density_time_derivative(self, i, j, ret: qd.template(), i_b):
@@ -434,7 +476,7 @@ class SPHSolver(ParticleSolver):
     @qd.kernel
     def _kernel_compute_density_time_derivative(self):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
+            if self.envs_df[i_b].is_solving and self.particles_ng_reordered[i_p, i_b].active:
                 ret = qd.Struct(drho=0.0, num_neighbors=0)
                 self.sh.for_all_neighbors(
                     i_p,
@@ -450,98 +492,37 @@ class SPHSolver(ParticleSolver):
                 num_neighbors = ret.num_neighbors
 
                 # Do not perform divergence solve when paritlce deficiency happens
-                if num_neighbors < 20:
+                if num_neighbors < self.df_info[None].n_neighbors_min:
                     drho = 0.0
 
                 self.particles_reordered[i_p, i_b].drho = drho
 
-    @qd.func
-    def _task_divergence_solver_iteration(self, i, j, ret: qd.template(), i_b):
-        # Fluid neighbors
-        b_j = self.particles_reordered[j, i_b].drho
-        k_j = b_j * self.particles_reordered[j, i_b].dfsph_factor
-        k_sum = (
-            self._density0 / self._density0 * ret.k_i + k_j
-        )  # TODO: make the neighbor density different for multiphase fluid
-        if qd.abs(k_sum) > self._df_eps:
-            grad_p_j = -self._particle_volume * self.cubic_kernel_derivative(
-                self.particles_reordered.pos[i, i_b] - self.particles_reordered.pos[j, i_b]
-            )
-            ret.dv -= (
-                k_sum * grad_p_j
-            )  # ki, kj already contain inverse density, i.e., density canceled if not mutiphase flow
+                # Stiffness that the next Jacobi iteration applies to cancel the density rate of the particle.
+                self.particles_k_reordered[i_p, i_b] = drho * self.particles_reordered[i_p, i_b].dfsph_factor
 
-    @qd.kernel
-    def _kernel_divergence_solver_iteration(self):
-        # Perform Jacobi iteration
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
-                # evaluate rhs
-                b_i = self.particles_reordered[i_p, i_b].drho
-                k_i = b_i * self.particles_reordered[i_p, i_b].dfsph_factor
-                ret = qd.Struct(dv=qd.Vector.zero(gs.qd_float, 3), k_i=k_i)
-                # TODO: if warm start
-                # get_kappa_V += k_i
-                self.sh.for_all_neighbors(
-                    i_p,
-                    self.particles_reordered.pos,
-                    self._support_radius,
-                    ret,
-                    self._task_divergence_solver_iteration,
-                    i_b,
-                )
-                self.particles_reordered.vel[i_p, i_b] = self.particles_reordered.vel[i_p, i_b] + ret.dv
-
-    @qd.kernel
-    def _kernel_compute_density_error(self, offset: float) -> float:
-        density_error = gs.qd_float(0.0)
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
-                density_error += self._density0 * self.particles_reordered[i_p, i_b].drho - offset
-        return density_error
-
-    def _divergence_solver_iteration(self):
-        self._kernel_divergence_solver_iteration()
-        self._kernel_compute_density_time_derivative()
-        density_err = self._kernel_compute_density_error(0.0)
-        return density_err / self._n_particles
-
-    def _divergence_solve(self, f: qd.i32):
-        # TODO: warm start
-        # Compute velocity of density change
-        self._kernel_compute_density_time_derivative()
-        inv_dt = 1 / self._substep_dt
-        # self._kernel_multiply_time_step(self.ps.dfsph_factor, inv_dt)
-
-        # Start solver
-        iteration = 0
-        avg_density_err = 0.0
-        while iteration < self._df_max_div_iters:
-            avg_density_err = self._divergence_solver_iteration()
-            # Max allowed density fluctuation
-            # The SI unit for divergence is s^-1, use max density error divided by time step size
-            eta = inv_dt * self._df_max_error_div * 0.01 * self._density0
-            if avg_density_err <= eta:
-                break
-            iteration += 1
-
-        gs.logger.debug(f"DFSPH - iteration V: {iteration} Avg divergence err: {avg_density_err / self._density0:.4f}")
-
-        # Multiply by h, the time step size has to be removed
-        # to make the stiffness value independent
-        # of the time step size
-
-        # TODO: if warm start
-        # also remove for kappa v
-
-        # self._kernel_multiply_time_step(self.ps.dfsph_factor, self.dt[None])
+                # The divergence error of the environment, summed for _kernel_update_convergence.
+                qd.atomic_add(self.envs_df[i_b].err, self.particles_info_reordered[i_p, i_b].rho * drho)
 
     @qd.kernel
     def _kernel_predict_velocity(self, f: qd.i32):
-        # compute new velocities only considering non-pressure forces
+        # Every environment takes part in the density solve that follows (see _kernel_update_convergence).
+        for i_b in range(self._B):
+            self.envs_df[i_b].is_solving = True
+            self.envs_df[i_b].err = 0.0
+
+        dt = self.df_info[None].substep_dt
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i_p, i_b].active:
-                self.particles_reordered[i_p, i_b].vel += self._substep_dt * self.particles_reordered[i_p, i_b].acc
+                # compute new velocities only considering non-pressure forces
+                self.particles_reordered[i_p, i_b].vel = (
+                    self.particles_reordered[i_p, i_b].vel + dt * self.particles_reordered[i_p, i_b].acc
+                )
+
+                # The density solve corrects a density error over the substep, which turns the DFSPH factor of the
+                # divergence solve, a velocity correction per density rate, into an acceleration per density error.
+                self.particles_reordered[i_p, i_b].dfsph_factor = self.particles_reordered[i_p, i_b].dfsph_factor * (
+                    1.0 / dt**2
+                )
 
     @qd.func
     def _task_compute_density_star(self, i, j, ret: qd.template(), i_b):
@@ -554,90 +535,128 @@ class SPHSolver(ParticleSolver):
     @qd.kernel
     def _kernel_compute_density_star(self):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
+            if self.envs_df[i_b].is_solving and self.particles_ng_reordered[i_p, i_b].active:
                 delta = gs.qd_float(0.0)
                 self.sh.for_all_neighbors(
                     i_p, self.particles_reordered.pos, self._support_radius, delta, self._task_compute_density_star, i_b
                 )
-                drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._substep_dt * delta
-                self.particles_reordered[i_p, i_b].drho = qd.max(drho, 1.0)  # - 1.0
+                rho0 = self.particles_info_reordered[i_p, i_b].rho
+                drho = self.particles_reordered[i_p, i_b].rho / rho0 + self.df_info[None].substep_dt * delta
+                self.particles_reordered[i_p, i_b].drho = drho
+
+                # Stiffness that the next Jacobi iteration applies to cancel the density error of the particle. The
+                # stiffness accumulated by the density solve is carried over from one substep to the next, so the
+                # iterations update it in both directions: they take back the part the liquid no longer needs, and
+                # clamp it so that the pressure never pulls the liquid together. The update is relaxed (see
+                # jacobi_relaxation in build).
+                kappa = -self.particles_reordered[i_p, i_b].p / rho0
+                k_i = (
+                    self.df_info[None].jacobi_relaxation
+                    * (drho - 1.0)
+                    * self.particles_reordered[i_p, i_b].dfsph_factor
+                )
+                self.particles_k_reordered[i_p, i_b] = qd.min(kappa + k_i, 0.0) - kappa
+
+                # The density error of the environment, summed for _kernel_update_convergence. A particle under
+                # pressure counts its expansion as well, which the iterations correct by taking pressure back, while
+                # a particle free of pressure only counts its compression, the liquid being free to expand.
+                err_rel = drho - 1.0
+                if kappa >= 0.0:
+                    err_rel = qd.max(err_rel, 0.0)
+                qd.atomic_add(self.envs_df[i_b].err, rho0 * qd.abs(err_rel))
 
     @qd.func
-    def density_solve_iteration_task(self, i, j, ret: qd.template(), i_b):
-        # Fluid neighbors
-        b_j = self.particles_reordered[j, i_b].drho - 1.0
-        k_j = b_j * self.particles_reordered[j, i_b].dfsph_factor
-        k_sum = (
-            self._density0 / self._density0 * ret.k_i + k_j
-        )  # TODO: make the neighbor density0 different for multiphase fluid
-        if qd.abs(k_sum) > self._df_eps:
+    def _func_stiffness(self, i_p: int, i_b: int, warm_start: bool):
+        # The warm start applies the stiffness carried over from the previous substep in particles.p (see
+        # _kernel_solver_iteration) to the particles compressed at the start of the substep.
+        k_i = self.particles_k_reordered[i_p, i_b]
+        if warm_start:
+            k_i = 0.0
+            rho0 = self.particles_info_reordered[i_p, i_b].rho
+            if self.particles_reordered[i_p, i_b].rho > rho0:
+                k_i = -self.particles_reordered[i_p, i_b].p / rho0
+        return k_i
+
+    @qd.func
+    def _task_solver_iteration(self, i_p: int, j_p: int, ret: qd.template(), i_b: int):
+        # The stiffness already holds the inverse of the density, which is the same for every particle of a liquid.
+        k_sum = ret.k_i + self._func_stiffness(j_p, i_b, ret.is_warm_start)
+        if qd.abs(k_sum) > self.df_info[None].stiffness_eps:
             grad_p_j = -self._particle_volume * self.cubic_kernel_derivative(
-                self.particles_reordered[i, i_b].pos - self.particles_reordered[j, i_b].pos
+                self.particles_reordered[i_p, i_b].pos - self.particles_reordered[j_p, i_b].pos
             )
-            # Directly update velocities instead of storing pressure accelerations
-            ret.dv -= (
-                self._substep_dt * k_sum * grad_p_j
-            )  # ki, kj already contain inverse density, i.e., density canceled if not mutiphase flow
+            ret.dv = ret.dv - ret.dv_scale * k_sum * grad_p_j
 
     @qd.kernel
-    def _kernel_density_solve_iteration(self):
-        # Compute pressure forces
+    def _kernel_solver_iteration(self, solve_density: qd.template(), warm_start: bool):
+        # Jacobi iteration: the velocity of every particle changes by the stiffness of its own and of its neighbors.
+        # The divergence solve corrects velocities directly, while the density solve accelerates over the substep.
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
-                # Evaluate rhs
-                b_i = self.particles_reordered[i_p, i_b].drho - 1.0
-                k_i = b_i * self.particles_reordered[i_p, i_b].dfsph_factor
-
-                ret = qd.Struct(dv=qd.Vector.zero(gs.qd_float, 3), k_i=k_i)
-
-                # TODO: if warmstart
-                # get kappa V
+            if self.envs_df[i_b].is_solving and self.particles_ng_reordered[i_p, i_b].active:
+                dv_scale = gs.qd_float(1.0)
+                if qd.static(solve_density):
+                    dv_scale = self.df_info[None].substep_dt
+                k_i = self._func_stiffness(i_p, i_b, warm_start)
+                ret = qd.Struct(dv=qd.Vector.zero(gs.qd_float, 3), k_i=k_i, dv_scale=dv_scale, is_warm_start=warm_start)
                 self.sh.for_all_neighbors(
-                    i_p, self.particles_reordered.pos, self._support_radius, ret, self.density_solve_iteration_task, i_b
+                    i_p, self.particles_reordered.pos, self._support_radius, ret, self._task_solver_iteration, i_b
                 )
                 self.particles_reordered[i_p, i_b].vel = self.particles_reordered[i_p, i_b].vel + ret.dv
 
-                # The stiffness k_i is the pressure this Jacobi iteration applies to cancel the current density
-                # error, up to the -1/rho0 scaling carried by dfsph_factor, so summing -k_i * rho0 over the
-                # iterations of the density solve yields the implicit pressure field that enforces
-                # incompressibility over the substep. This exposes in particles.p the same physical quantity
-                # that the equation of state provides under WCSPH. The field is zeroed once per substep in
-                # _kernel_compute_DFSPH_factor.
-                rho0 = self.particles_info_reordered[i_p, i_b].rho
-                self.particles_reordered[i_p, i_b].p = self.particles_reordered[i_p, i_b].p - k_i * rho0
-
-    def _density_solve_iteration(self):
-        self._kernel_density_solve_iteration()
-        self._kernel_compute_density_star()
-        density_err = self._kernel_compute_density_error(self._density0)
-        return density_err / self._n_particles
+                if qd.static(solve_density):
+                    # The stiffness k_i is the pressure this pass applies to cancel the density error, up to the
+                    # -1/rho0 scaling carried by dfsph_factor, so summing -k_i * rho0 over the density solve yields
+                    # the implicit pressure field that enforces incompressibility. This exposes in particles.p the
+                    # same physical quantity that the equation of state provides under WCSPH. The warm start applies
+                    # the pressure as it stands and drops the pressure of the particles it leaves out, which the
+                    # neighbors reading it in the meantime leave out the same way.
+                    rho0 = self.particles_info_reordered[i_p, i_b].rho
+                    if warm_start:
+                        if self.particles_reordered[i_p, i_b].rho <= rho0:
+                            self.particles_reordered[i_p, i_b].p = 0.0
+                    else:
+                        self.particles_reordered[i_p, i_b].p = self.particles_reordered[i_p, i_b].p - k_i * rho0
 
     @qd.kernel
-    def _kernel_multiply_time_step(self, field: qd.template(), time_step: float):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i_p, i_b].active:
-                field[i_p, i_b] *= time_step
+    def _kernel_update_convergence(self, solve_density: qd.template()) -> int:
+        # Each environment stops iterating once the average density error of its own particles meets the tolerance,
+        # so that its result is the same whatever the other environments simulate alongside it. The density rate
+        # kernels sum the error of each environment, which is reset once read for the next call.
+        n_envs_solving = 0
+        for i_b in range(self._B):
+            if self.envs_df[i_b].is_solving:
+                err_tol = self.df_info[None].divergence_err_tol
+                if qd.static(solve_density):
+                    err_tol = self.df_info[None].density_err_tol
+                if self.envs_df[i_b].err <= err_tol * self.envs_df[i_b].n_active:
+                    self.envs_df[i_b].is_solving = False
+                else:
+                    qd.atomic_add(n_envs_solving, 1)
+                self.envs_df[i_b].err = 0.0
+        return n_envs_solving
 
-    def _density_solve(self, f: qd.i32):
-        inv_dt2 = 1.0 / self._substep_dt**2
+    def _solve_incompressibility(self, solve_density: bool) -> None:
+        if solve_density:
+            kernel_compute_density_rate = self._kernel_compute_density_star
+            n_iters_max = self._df_max_den_iters
+        else:
+            kernel_compute_density_rate = self._kernel_compute_density_time_derivative
+            n_iters_max = self._df_max_div_iters
 
-        # Compute density star
-        self._kernel_compute_density_star()
+        # The convergence is checked before the first iteration: an environment that the warm start of the density
+        # solve, or a divergence-free velocity field, already brings within tolerance does not iterate at all.
+        if solve_density:
+            self._kernel_solver_iteration(solve_density, warm_start=True)
+        kernel_compute_density_rate()
+        n_envs_solving = self._kernel_update_convergence(solve_density)
+        n_iters = 0
+        while n_envs_solving > 0 and n_iters < n_iters_max:
+            self._kernel_solver_iteration(solve_density, warm_start=False)
+            kernel_compute_density_rate()
+            n_envs_solving = self._kernel_update_convergence(solve_density)
+            n_iters += 1
 
-        self._kernel_multiply_time_step(self.particles_reordered.dfsph_factor, inv_dt2)
-
-        # Start solver
-        iteration = 0
-        avg_density_err = 0.0
-        while iteration < self._df_max_den_iters:
-            avg_density_err = self._density_solve_iteration()
-            # Max allowed density fluctuation
-            eta = self._df_max_error_den * 0.01 * self._density0
-            if avg_density_err <= eta:
-                break
-            iteration += 1
-
-        gs.logger.debug(f"DFSPH - iterations: {iteration} Avg density err: {avg_density_err:.4f} kg/m^3")
+        gs.logger.debug(f"DFSPH - {'density' if solve_density else 'divergence'} solve iterations: {n_iters}")
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------- utils ----------------------------------------
@@ -717,10 +736,10 @@ class SPHSolver(ParticleSolver):
             elif self._pressure_solver == "DFSPH":
                 self._kernel_compute_rho(f)
                 self._kernel_compute_DFSPH_factor(f)
-                self._divergence_solve(f)
+                self._solve_incompressibility(solve_density=False)
                 self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
                 self._kernel_predict_velocity(f)
-                self._density_solve(f)
+                self._solve_incompressibility(solve_density=True)
 
     def substep_post_coupling(self, f):
         if self.is_active:
@@ -734,6 +753,8 @@ class SPHSolver(ParticleSolver):
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
+            if self._pressure_solver == "DFSPH":
+                self._kernel_set_pressure(state.pressure)
 
     @qd.kernel
     def _kernel_set_state(
@@ -753,6 +774,8 @@ class SPHSolver(ParticleSolver):
         if self.is_active:
             state = SPHSolverState(self.scene)
             self._kernel_get_state(f, state.pos, state.vel, state.active)
+            if self._pressure_solver == "DFSPH":
+                self._kernel_get_pressure(state.pressure)
         else:
             state = None
         return state
@@ -770,6 +793,16 @@ class SPHSolver(ParticleSolver):
                 pos[i_b, i_p, j] = self.particles[i_p, i_b].pos[j]
                 vel[i_b, i_p, j] = self.particles[i_p, i_b].vel[j]
             active[i_b, i_p] = self.particles_ng[i_p, i_b].active
+
+    @qd.kernel
+    def _kernel_set_pressure(self, pressure: qd.types.ndarray()):
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            self.particles[i_p, i_b].p = pressure[i_b, i_p]
+
+    @qd.kernel
+    def _kernel_get_pressure(self, pressure: qd.types.ndarray()):
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            pressure[i_b, i_p] = self.particles[i_p, i_b].p
 
     def update_render_fields(self):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
@@ -833,6 +866,8 @@ class SPHSolver(ParticleSolver):
                     self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
                 self.particles[i_p, i_b].vel.fill(0.0)
                 self.particles[i_p, i_b].acc.fill(0.0)
+                # The pressure that DFSPH carries over belongs to the neighborhood the particle leaves.
+                self.particles[i_p, i_b].p = 0.0
 
     @qd.kernel
     def _kernel_get_particles_pos(
@@ -883,6 +918,7 @@ class SPHSolver(ParticleSolver):
             # See '_kernel_set_particles_pos'
             if i_p >= 0:
                 self.particles_ng[i_p, i_b].active = actives[i_b_, i_p_]
+                self.particles[i_p, i_b].p = 0.0
 
     @qd.kernel
     def _kernel_get_particles_active(
@@ -912,6 +948,10 @@ class SPHSolver(ParticleSolver):
             return self._n_particles
         else:
             return sum([entity.n_particles for entity in self._entities])
+
+    @property
+    def pressure_solver(self) -> str:
+        return self._pressure_solver
 
     @property
     def particle_volume(self):
