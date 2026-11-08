@@ -1186,8 +1186,14 @@ def qd_zero_grad(value) -> None:
     if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
         if value.has_grad():
             if gs.use_zerocopy.is_supported:
-                grad_view = qd_to_torch(value.grad, copy=False)
-                grad_view.zero_()
+                try:
+                    grad_view = qd_to_torch(value.grad, copy=False)
+                except ValueError:
+                    # A member of an AOS struct field is interleaved with the others, so it has no zero-copy view, and
+                    # Quadrants exposes no layout to test beforehand (see 'fill_data' in genesis/utils/data.py)
+                    value.grad.fill(0.0)
+                else:
+                    grad_view.zero_()
             else:
                 value.grad.fill(0.0)
         return

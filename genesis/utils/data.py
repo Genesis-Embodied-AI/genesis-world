@@ -1024,7 +1024,7 @@ def fill_data(
             try:
                 view = data_to_array(item.array, to_torch=True, copy=False)
             except ValueError:
-                # A member of a struct field may have no zero-copy view (see 'qd_zero_grad')
+                # A member of an AOS struct field has no zero-copy view (see 'qd_zero_grad' in genesis/utils/misc.py)
                 pass
         if view is not None:
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
