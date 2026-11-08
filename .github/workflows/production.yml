@@ -36,9 +36,10 @@ on:
         required: false
 
 concurrency:
-  # Cancel all workflows that are still running if any when updating branches associated with PRs,
-  # BUT don't do anything for workflows that are not triggered by PRs.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # A new commit of a pull request cancels the run still testing the previous one. Any other run is left alone and
+  # grouped by the commit it tests, since a group keeps a single pending run, cancelled as soon as a newer one is
+  # queued, which would skip every commit merged on main while the previous one is being tested.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
