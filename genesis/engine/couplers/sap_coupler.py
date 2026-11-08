@@ -802,7 +802,7 @@ class SAPCoupler(RBC):
     @qd.kernel
     def fem_compute_pressure_gradient(self, i_step: qd.i32):
         for i_b, i_e in qd.ndrange(self.fem_solver._B, self.fem_solver.n_elements):
-            self.fem_pressure_gradient[i_b, i_e].fill(0.0)
+            self.fem_pressure_gradient[i_b, i_e] = qd.Vector.zero(gs.qd_float, 3)
 
             for i in qd.static(range(4)):
                 i_v0 = self.fem_solver.elements_i[i_e].el2v[i]
@@ -990,7 +990,8 @@ class SAPCoupler(RBC):
     @qd.kernel
     def _init_sap_solve(self, i_step: qd.i32, dofs_state: DofsState):
         self._init_v(i_step, dofs_state=dofs_state)
-        self.batch_active.fill(True)
+        for i_b in range(self._B):
+            self.batch_active[i_b] = True
 
     @qd.func
     def _init_v(self, i_step: qd.i32, dofs_state: DofsState):
@@ -1025,7 +1026,7 @@ class SAPCoupler(RBC):
     def init_fem_unconstrained_gradient_diag(self, i_step: qd.i32):
         dt2 = self.fem_solver._substep_dt**2
         for i_b, i_v in qd.ndrange(self.fem_solver._B, self.fem_solver.n_vertices):
-            self.fem_state_v.gradient[i_b, i_v].fill(0.0)
+            self.fem_state_v.gradient[i_b, i_v] = qd.Vector.zero(gs.qd_float, 3)
             # was using position now using velocity, need to multiply dt^2
             self.pcg_fem_state_v[i_b, i_v].diag3x3 = self.fem_solver.pcg_state_v[i_b, i_v].diag3x3 * dt2
             self.fem_state_v.v_diff[i_b, i_v] = (
@@ -1050,7 +1051,6 @@ class SAPCoupler(RBC):
 
     @qd.kernel
     def compute_rigid_unconstrained_gradient(self, rigid_info: RigidInfo):
-        self.pcg_rigid_state_dof.Ap.fill(0.0)
         for i_b, i_d0, i_d1 in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_dofs, self.rigid_solver.n_dofs):
             if not self.batch_active[i_b]:
                 continue
@@ -1079,7 +1079,7 @@ class SAPCoupler(RBC):
         for i_b, i_v in qd.ndrange(self.fem_solver._B, self.fem_solver.n_vertices):
             if not self.batch_active[i_b]:
                 continue
-            self.fem_state_v[i_b, i_v].impulse.fill(0.0)
+            self.fem_state_v[i_b, i_v].impulse = qd.Vector.zero(gs.qd_float, 3)
 
     @qd.func
     def clear_rigid_impulses(self):
@@ -1184,11 +1184,12 @@ class SAPCoupler(RBC):
         """
         Compute the rigid mass matrix-vector product.
         """
-        out.fill(0.0)
-        for i_b, i_d0, i_d1 in qd.ndrange(self._B, self.rigid_solver.n_dofs, self.rigid_solver.n_dofs):
-            if not active[i_b]:
-                continue
-            out[i_b, i_d1] += rigid_info.mass_mat[i_d1, i_d0, i_b] * vec[i_b, i_d0]
+        for i_b, i_d1 in qd.ndrange(self._B, self.rigid_solver.n_dofs):
+            prod = gs.qd_float(0.0)
+            if active[i_b]:
+                for i_d0 in range(self.rigid_solver.n_dofs):
+                    prod = prod + rigid_info.mass_mat[i_d1, i_d0, i_b] * vec[i_b, i_d0]
+            out[i_b, i_d1] = prod
 
     # FIXME: This following two rigid solves are duplicated with the one in rigid_solver.py:func_solve_mass_batched
     # Consider refactoring.
@@ -1447,7 +1448,8 @@ class SAPCoupler(RBC):
 
     @qd.func
     def compute_total_energy(self, i_step: qd.i32, energy: qd.template(), dofs_state: DofsState, rigid_info: RigidInfo):
-        energy.fill(0.0)
+        for i_b in range(self._B):
+            energy[i_b] = 0.0
         if qd.static(self.fem_solver.is_active):
             self.compute_fem_energy(i_step, energy)
         if qd.static(self.rigid_solver.is_active):
@@ -2223,8 +2225,8 @@ class BaseContactHandler(RBC):
 
         t_hat = y[:2] / yr
         contact_mode = self.compute_contact_mode(sap_info[i_p].mu, sap_info[i_p].mu_hat, yr, yn)
-        sap_info[i_p].gamma.fill(0.0)
-        sap_info[i_p].G.fill(0.0)
+        sap_info[i_p].gamma = qd.Vector.zero(gs.qd_float, 3)
+        sap_info[i_p].G = qd.Matrix.zero(gs.qd_float, 3, 3)
         if contact_mode == ContactMode.STICK:
             sap_info[i_p].gamma = y
             sap_info[i_p].G[0, 0] = sap_info[i_p].Rt_inv
@@ -2268,7 +2270,7 @@ class BaseContactHandler(RBC):
 
         t_hat = y[:2] / yr
         contact_mode = self.compute_contact_mode(sap_info[i_p].mu, sap_info[i_p].mu_hat, yr, yn)
-        sap_info[i_p].gamma.fill(0.0)
+        sap_info[i_p].gamma = qd.Vector.zero(gs.qd_float, 3)
         if contact_mode == ContactMode.STICK:
             sap_info[i_p].gamma = y
         elif contact_mode == ContactMode.SLIDE:
@@ -2322,10 +2324,11 @@ class RigidContactHandler(BaseContactHandler):
     # Consider refactoring, using better naming, and removing while.
     @qd.func
     def compute_jacobian(self, links_info: LinksInfo, dofs_state: DofsState, links_state: LinksState):
-        self.Jt.fill(0.0)
         for i_p in range(self.n_contact_pairs[None]):
             link = self.contact_pairs[i_p].link_idx
             i_b = self.contact_pairs[i_p].batch_idx
+            for i_d in range(self.rigid_solver.n_dofs):
+                self.Jt[i_p, i_d] = qd.Vector.zero(gs.qd_float, 3)
             while link > -1:
                 link_maybe_batch = [link, i_b] if qd.static(self.rigid_solver._options.batch_links_info) else link
                 # reverse order to make sure dofs in each row of self.jac_dofs_idx is strictly descending
@@ -2388,9 +2391,11 @@ class RigidContactHandler(BaseContactHandler):
             entities_info=entities_info,
             rigid_info=rigid_info,
         )
-        self.W.fill(0.0)
-        for i_p, i_d, i, j in qd.ndrange(self.n_contact_pairs[None], self.rigid_solver.n_dofs, 3, 3):
-            self.W[i_p][i, j] += self.M_inv_Jt[i_p, i_d][i] * self.Jt[i_p, i_d][j]
+        for i_p in range(self.n_contact_pairs[None]):
+            W = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for i_d in range(self.rigid_solver.n_dofs):
+                W = W + self.M_inv_Jt[i_p, i_d].outer_product(self.Jt[i_p, i_d])
+            self.W[i_p] = W
 
     @qd.func
     def compute_delassus(self, i_p):
@@ -2420,10 +2425,11 @@ class RigidRigidContactHandler(RigidContactHandler):
 
     @qd.func
     def compute_jacobian(self, links_info: LinksInfo, dofs_state: DofsState, links_state: LinksState):
-        self.Jt.fill(0.0)
         pairs = qd.static(self.contact_pairs)
         for i_p in range(self.n_contact_pairs[None]):
             i_b = pairs[i_p].batch_idx
+            for i_d in range(self.rigid_solver.n_dofs):
+                self.Jt[i_p, i_d] = qd.Vector.zero(gs.qd_float, 3)
             link = pairs[i_p].link_idx0
             while link > -1:
                 link_maybe_batch = [link, i_b] if qd.static(self.rigid_solver._options.batch_links_info) else link
@@ -3700,27 +3706,17 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     def compute_delassus_world_frame(self, entities_info: EntitiesInfo, rigid_info: RigidInfo):
         dt2_inv = 1.0 / self.sim._substep_dt**2
         # rigid
-        self.coupler.rigid_solve_jacobian(
-            self.Jt,
-            self.M_inv_Jt,
-            self.n_contact_pairs[None],
-            self.contact_pairs.batch_idx,
-            3,
-            entities_info=entities_info,
-            rigid_info=rigid_info,
-        )
-        self.W.fill(0.0)
-        for i_p, i_d, i, j in qd.ndrange(self.n_contact_pairs[None], self.rigid_solver.n_dofs, 3, 3):
-            self.W[i_p][i, j] += self.M_inv_Jt[i_p, i_d][i] * self.Jt[i_p, i_d][j]
-
+        RigidContactHandler.compute_delassus_world_frame(self, entities_info, rigid_info)
         # fem
         barycentric0 = qd.static(self.contact_pairs.barycentric0)
         for i_p in range(self.n_contact_pairs[None]):
             i_g0 = self.contact_pairs[i_p].geom_idx0
             i_b = self.contact_pairs[i_p].batch_idx
+            W = self.W[i_p]
             for i in qd.static(range(4)):
                 i_v = self.fem_solver.elements_i[i_g0].el2v[i]
-                self.W[i_p] += barycentric0[i_p][i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
+                W = W + barycentric0[i_p][i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
+            self.W[i_p] = W
 
     @qd.func
     def compute_delassus(self, i_p):

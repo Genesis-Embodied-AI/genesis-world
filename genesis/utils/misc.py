@@ -1165,33 +1165,31 @@ def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) ->
 
 
 def qd_zero_grad(value) -> None:
-    """Zero the `.grad` buffers of a Quadrants field/ndarray, or every grad-bearing slot of a `dataclass` /
-    `@qd.data_oriented` struct-of-arrays.
+    """Zero the `.grad` buffers of a Quadrants field/ndarray, of every member of a struct field, or of every
+    grad-bearing slot of a `dataclass` / `@qd.data_oriented` struct-of-arrays.
 
     Reverse-mode accumulation in Genesis writes through `qd.atomic_add`, so adjoint buffers must start at zero between
     consecutive `loss.backward()` calls. Solvers call this from `reset_grad` to clear all owned adjoint storage without
     enumerating fields by name. Zeroing goes through an in-place `zero_()` on the zero-copy torch view of each grad
-    buffer, a contiguous memset on the underlying device memory. The writes are left unsynchronized so a caller can
-    batch many calls under a single flush: on Metal, call `torch.mps.synchronize()` after the batch and before the
-    next quadrants kernel reads the buffers (see set_base_links_quat).
+    buffer, a contiguous memset on the underlying device memory, and through `.fill` without zero-copy. The writes are
+    left unsynchronized so a caller can batch many calls under a single flush: on Metal, call `torch.mps.synchronize()`
+    after the batch and before the next quadrants kernel reads the buffers (see set_base_links_quat).
     """
     if value is None:
         return
 
+    if isinstance(value, qd.StructField):
+        for key in value.keys:
+            qd_zero_grad(value.get_member_field(key))
+        return
+
     if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
         if value.has_grad():
-            grad = value.grad
             if gs.use_zerocopy.is_supported:
-                try:
-                    grad_view = qd_to_torch(grad, copy=False)
-                    grad_view.zero_()
-                except ValueError:
-                    # No zero-copy view for this buffer (e.g. an interleaved AOS struct member, or a field whose
-                    # in-tree byte offset the installed torch cannot carry through DLPack); fill it in place through
-                    # quadrants instead.
-                    grad.fill(0.0)
+                grad_view = qd_to_torch(value.grad, copy=False)
+                grad_view.zero_()
             else:
-                grad.fill(0.0)
+                value.grad.fill(0.0)
         return
 
     cls = type(value)

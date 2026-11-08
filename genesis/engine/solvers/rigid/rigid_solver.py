@@ -1617,9 +1617,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             qd_zero_grad(self.rigid_info)
             qd_zero_grad(self.dyn_state.geoms)
             qd_zero_grad(self.dyn_state.entities)
-            # One flush for the zeroing batch; see qd_zero_grad in misc.py.
-            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-                torch.mps.synchronize()
 
     def substep_post_coupling(self, f):
         from genesis.engine.couplers import SAPCoupler, IPCCoupler

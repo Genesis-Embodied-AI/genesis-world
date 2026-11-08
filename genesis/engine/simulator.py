@@ -89,6 +89,9 @@ class Simulator(RBC):
                 solver.update_errno()
                 solver.check_errno()
                 solver.reset_grad()
+            # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
+            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+                torch.mps.synchronize()
 
         def end_backward_pass():
             # The errors the solvers flagged while replaying the rollout are raised once the pass is over
@@ -312,6 +315,9 @@ class Simulator(RBC):
         # The adjoints of the state start from zero, and a new rollout of the autograd graph begins
         for solver in self._active_solvers:
             solver.reset_grad()
+        # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
         self._rollout_graph.restart()
         self._is_forward_ready = True
         # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
