@@ -476,20 +476,24 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    # Place the tested entity after another FEM entity so its local and solver indices differ. That one free-falls from
-    # rest all along.
-    free_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=RHO,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
-        ),
+    # Place the tested entity after two FEM entities sharing a material of another model, so that its local and solver
+    # indices differ, and so do the indices of its entity and of its material. Those two free-fall from rest all along.
+    free_material = gs.materials.FEM.Elastic(
+        E=1e5,
+        nu=0.45,
+        rho=RHO,
+        model="linear",
     )
+    free_boxes = [
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(pos_x, 0.0, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=free_material,
+        )
+        for pos_x in (-0.5, -1.0)
+    ]
     box = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
@@ -511,7 +515,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         material=gs.materials.Rigid(),
     )
     scene.build(n_envs=2)
-    free_box_pos_0 = free_box.get_state().pos
+    free_boxes_pos_0 = torch.stack([free_box.get_state().pos for free_box in free_boxes])
 
     assert_equal(box.get_el2v(), box.elems)
 
@@ -571,7 +575,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     com_pos_delta = -0.5 * GRAVITY * (n_steps * DT) ** 2
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
 
-    # The undeformed box follows the discrete free fall exactly: the gravity kick of each substep, damped by the
+    # The undeformed boxes follow the discrete free fall exactly: the gravity kick of each substep, damped by the
     # Rayleigh mass damping under the implicit solver, then the position update by the new velocity.
     substep_dt = DT / N_SUBSTEPS
     vel_z, pos_z = 0.0, 0.0
@@ -580,10 +584,11 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         if use_implicit_solver:
             vel_z = vel_z / (1.0 + DAMPING_ALPHA * substep_dt)
         pos_z = pos_z + substep_dt * vel_z
-    assert_allclose(free_box.get_state().pos - free_box_pos_0, (0.0, 0.0, pos_z), tol=5e-10)
+    free_boxes_pos = torch.stack([free_box.get_state().pos for free_box in free_boxes])
+    assert_allclose(free_boxes_pos - free_boxes_pos_0, (0.0, 0.0, pos_z), tol=5e-10)
 
-    # The internal forces of the deformed box add up to zero, so its center of mass falls like the free box. Each vertex
-    # carries a quarter of the rest mass of every element it belongs to.
+    # The internal forces of the deformed box add up to zero, so its center of mass falls like the free boxes. Each
+    # vertex carries a quarter of the rest mass of every element it belongs to.
     verts = box.init_positions
     elems = box.get_el2v()
     edges_rest = verts[elems[:, :3]] - verts[elems[:, 3:]]
