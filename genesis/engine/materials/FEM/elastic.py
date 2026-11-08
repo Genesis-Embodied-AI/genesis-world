@@ -82,9 +82,7 @@ class Elastic(Base):
             self.compute_energy = self._compute_energy_linear_corotated
 
     def _build_linear_corotated(self, fem_solver):
-        self._R = qd.field(
-            dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements), needs_grad=fem_solver.requires_grad
-        )
+        self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
 
     @qd.func
     def _pre_compute_linear_corotated(
@@ -96,19 +94,39 @@ class Elastic(Base):
 
     @qd.func
     def _pre_compute_grad_linear_corotated(
-        self, i_e: int, i_b: int, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        F_start: qd.types.matrix(3, 3),
+        F: qd.types.matrix(3, 3),
+        dF_damping: qd.types.matrix(3, 3),
+        gradient_grad: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
     ):
-        # With F = U S V^T, a change dF turns the rotation R = U V^T by U W V^T, where W is skew with
+        # The adjoint of the rotation R, which enters the energy gradient 2 mu R E + lam tr(E) R with
+        # E = sym(R^T F) - I and the damping stress mu D + mu R D^T R + lam (R : D) R with D = dF_damping.
+        R = self._R[i_b, i_e]
+        I_3 = qd.Matrix.identity(gs.qd_float, 3)
+        E = 0.5 * (R.transpose() @ F + F.transpose() @ R) - I_3
+        M = 0.5 * (R.transpose() @ gradient_grad + gradient_grad.transpose() @ R)
+        gradient_dot_R = (gradient_grad * R).sum()
+        R_grad = 2.0 * mu * (gradient_grad @ E + F @ M) + lam * (gradient_dot_R * F + E.trace() * gradient_grad)
+        R_grad = R_grad + mu * (gradient_grad @ R.transpose() @ dF_damping + dF_damping @ R.transpose() @ gradient_grad)
+        R_grad = R_grad + lam * (gradient_dot_R * dF_damping + (R * dF_damping).sum() * gradient_grad)
+
+        # With F_start = U S V^T, a change dF turns the rotation R = U V^T by U W V^T, where W is skew with
         # W_ij = (A_ij - A_ji) / (S_ii + S_jj) and A = U^T dF V. The singular values are signed (see 'qd_svd'), so a
         # sum vanishes only for an element turned inside out, where the rotation is not differentiable: the adjoint
         # of the state then turns non-finite, which halts the backward pass (see 'StepOperation.backward').
-        U, S, V = gu.qd_svd(F)
-        K = U.transpose() @ self._R.grad[i_b, i_e] @ V
+        U, S, V = gu.qd_svd(F_start)
+        K = U.transpose() @ R_grad @ V
         X = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i_x, j_x in qd.static(qd.ndrange(3, 3)):
             if qd.static(i_x != j_x):
                 X[i_x, j_x] = (K[i_x, j_x] - K[j_x, i_x]) / (S[i_x, i_x] + S[j_x, j_x])
-        self._R.grad[i_b, i_e] = qd.Matrix.zero(gs.qd_float, 3, 3)
         return U @ X @ V.transpose()
 
     # --- Linear model ---

@@ -47,8 +47,9 @@ class Base(Material["FEMEntity"]):
 
     # Dispatch fields, set by subclass model_post_init and never by the user.
     build: Any = Field(default=None, exclude=True, repr=False)
-    # The data the implicit solver computes from the start of a substep, and its reverse, which consumes the adjoint of
-    # that data and returns the one of the deformation gradient it derives from
+    # The data the implicit solver computes from the deformation gradient F_start at the start of a substep, and its
+    # reverse, which returns the adjoint of F_start from the adjoint of the energy gradient at the end of the substep,
+    # which the data enters along with the change dF_damping of the deformation gradient driving the stiffness damping.
     pre_compute: Any = Field(default=None, exclude=True, repr=False)
     pre_compute_grad: Any = Field(default=None, exclude=True, repr=False)
     update_stress: Any = Field(default=None, exclude=True, repr=False)
@@ -91,7 +92,19 @@ class Base(Material["FEMEntity"]):
         pass
 
     @qd.func
-    def _pre_compute_grad_noop(self, i_e: int, i_b: int, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)):
+    def _pre_compute_grad_noop(
+        self,
+        i_e: int,
+        i_b: int,
+        mu: float,
+        lam: float,
+        F_start: qd.types.matrix(3, 3),
+        F: qd.types.matrix(3, 3),
+        dF_damping: qd.types.matrix(3, 3),
+        gradient_grad: qd.types.matrix(3, 3),
+        actu: float,
+        m_dir: qd.types.vector(3),
+    ):
         return qd.Matrix.zero(gs.qd_float, 3, 3)
 
     # A material without a constitutive model (Cloth, whose physics the IPC coupler owns) dispatches stress here.
