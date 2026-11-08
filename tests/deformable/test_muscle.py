@@ -5,8 +5,11 @@ import genesis as gs
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
-@pytest.mark.parametrize("muscle_material", [gs.materials.MPM.Muscle, gs.materials.FEM.Muscle])
-def test_muscle(n_envs, muscle_material, show_viewer):
+@pytest.mark.parametrize(
+    "muscle_material, use_implicit_solver",
+    [(gs.materials.MPM.Muscle, False), (gs.materials.FEM.Muscle, False), (gs.materials.FEM.Muscle, True)],
+)
+def test_muscle(n_envs, muscle_material, use_implicit_solver, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=5e-4,
@@ -15,6 +18,9 @@ def test_muscle(n_envs, muscle_material, show_viewer):
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-1.0, -1.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=use_implicit_solver,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, -0.6, 0.5),

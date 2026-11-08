@@ -82,7 +82,7 @@ class Base(Material["FEMEntity"]):
         pass
 
     @qd.func
-    def _pre_compute_noop(self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3)):
+    def _pre_compute_noop(self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)):
         pass
 
     # A material without a constitutive model (Cloth, whose physics the IPC coupler owns) dispatches stress here.

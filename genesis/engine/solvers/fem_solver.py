@@ -549,7 +549,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             J, F = self._compute_ele_J_F(f, i_e, i_b)  # use last time step's pos to compute
             for mat_idx in qd.static(self._mats_idx):
                 if self.elements_i[i_e].mat_idx == mat_idx:
-                    self._mats[mat_idx].pre_compute(i_e, i_b, J, F)
+                    self._mats[mat_idx].pre_compute(i_e, i_b, J, F, self.elements_i[i_e].muscle_direction)
 
     @qd.kernel
     def init_pos_and_inertia(self, f: qd.i32, links_state: LinksState):
