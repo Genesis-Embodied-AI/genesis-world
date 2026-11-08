@@ -12,23 +12,23 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
 from genesis.engine.materials import Rigid
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.constraint.data import ConstraintState
+from genesis.engine.solvers.rigid.constraint.solver import cholesky_tile_size_for
+from genesis.engine.solvers.rigid.data import (
+    DynInfo,
+    DynState,
+    RigidData,
+    RigidErrorCode,
+    RigidInfo,
+    RigidSimStaticConfig,
+)
 from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
 from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
-from genesis.utils.array_class import (
-    cholesky_tile_size_for,
-    ColliderState,
-    ConstraintState,
-    DynInfo,
-    DynState,
-    ErrorCode,
-    RigidData,
-    RigidInfo,
-    RigidSimStaticConfig,
-)
 from genesis.utils.data import ConfigItem, DataItem
 from genesis.utils.misc import (
     DeprecationError,
@@ -44,12 +44,7 @@ from genesis.utils.misc import (
 )
 
 from ..base_solver import GravityMixin, TimeBasedMixin
-from ..kinematic_solver import (
-    KinematicSolver,
-    _fill_base_link_geom_offsets,
-    _offset_world_shift,
-    _select_links_offset,
-)
+from ..kinematic_solver import KinematicSolver, _fill_base_link_geom_offsets, _offset_world_shift, _select_links_offset
 from .abd.accessor import (
     ConstraintType,
     kernel_control_dofs_force,
@@ -130,8 +125,10 @@ from .abd.misc import (
     kernel_update_heterogeneous_link_info,
     kernel_wakeup_coupled_links,
 )
-from .collider import Collider
-from .constraint import ConstraintSolver
+from .collider.collider import Collider
+
+# Importing the decomposed solve registers it with func_solve_body (see solver_breakdown.py)
+from .constraint import solver_breakdown
 from .constraint.backward import (
     kernel_accumulate_constraint_solver_grads,
     kernel_load_dL_dqacc_from_acc_grad,
@@ -141,6 +138,7 @@ from .constraint.backward import (
     kernel_manual_add_joint_limit_constraints_bw,
 )
 from .constraint.solver import (
+    ConstraintSolver,
     func_add_equality_constraints,
     func_add_inequality_constraints,
     func_resolve_post,
@@ -351,32 +349,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.register_errors(
             self._errno,
             {
-                ErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
                     f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
                     "option 'multiplier_collision_broad_phase'."
                 ),
-                ErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
                     f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
                     "Please increase the value of RigidSolver's option 'max_collision_pairs'."
                 ),
-                ErrorCode.OVERFLOW_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CONTACTS: (
                     f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
                     "supported by the constraint solver. Please increase the value of RigidSolver's option "
                     "'max_contacts'."
                 ),
-                ErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
                     "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
                     "filter this pair out via 'contype'/'conaffinity'."
                 ),
-                ErrorCode.INVALID_CONTACT_NAN: (
+                RigidErrorCode.INVALID_CONTACT_NAN: (
                     "Collision detection reported a contact whose position, normal or penetration is not finite. This "
                     "is a solver-internal error, please report it."
                 ),
-                ErrorCode.INVALID_FORCE_NAN: (
+                RigidErrorCode.INVALID_FORCE_NAN: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
                 ),
-                ErrorCode.INVALID_ACC_NAN: (
+                RigidErrorCode.INVALID_ACC_NAN: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
                     "the controls given to the dofs."
                 ),
@@ -513,7 +511,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         # Under the elliptic cone any middle-zone contact invalidates the Cholesky factor every Newton iteration, so
         # a contact-dense solve rebuilds it nearly every iteration; persisting the cone-free assembled Hessian turns
-        # each rebuild into an envelope copy (see the nt_H declaration in array_class.py for the packed storage).
+        # each rebuild into an envelope copy (see the nt_H declaration in constraint/data.py for the packed storage).
         # Confined to the CPU per-island skyline path that owns per-iteration rebuilds, the GPU arms rebuilding through
         # the tiled assembly.
         enable_cone_free_hessian_reuse = (
@@ -523,7 +521,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             and self._options.constraint_solver == gs.constraint_solver.Newton
         )
 
-        # The tiled per-island seed (see enable_tiled_island_seed in array_class.py) replaces a per-env thread walking
+        # The tiled per-island seed (see enable_tiled_island_seed in rigid/data.py) replaces a per-env thread walking
         # O(n^3) dependent loads, slower than the whole Newton iteration above the core count. The cooperative body
         # kernels run one warp per env, which pays off once an env carries enough dofs to keep its lanes busy, and stops
         # paying once the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray kernels
@@ -615,7 +613,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.backend == gs.cpu or self.sim.options.requires_grad:
             rigid_config["prefer_decomposed_solver"] = 0
 
-        # Per-DOF mass-block bounds (see dofs_mass_block_start in array_class.py), computed here because the tiled
+        # Per-DOF mass-block bounds (see dofs_mass_block_start in rigid/data.py), computed here because the tiled
         # factor arms below are sized for the largest block; _init_tree_fields uploads them.
         links_by_idx = {link.idx: link for link in self.links}
         dofs_mass_block_start = np.arange(self.n_dofs_, dtype=gs.np_int)
@@ -653,7 +651,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 envs_undersaturate = self.n_envs <= max_tiled_envs
 
                 # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
-                # cholesky_tile_size_for in array_class.py.
+                # cholesky_tile_size_for in constraint/solver.py.
                 cholesky_tile_size = 32 if is_generic else cholesky_tile_size_for(self.n_dofs)
 
                 # A shared tile holds the dofs it factors rounded up to the next size of get_gpu_shared_tile_sizes,
@@ -666,7 +664,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 )
 
                 # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
-                # island_tile_cap_first in array_class.py): the last cap is the shared tile of the dof count, or the
+                # island_tile_cap_first in rigid/data.py): the last cap is the shared tile of the dof count, or the
                 # largest one where the dofs exceed it. An island holds at least one tree, so a class below the
                 # smallest tree never holds an island: the first cap starts at that tree.
                 island_tile_cap_last = min(
@@ -749,7 +747,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 if gs.use_deterministic_algorithms and rigid_config.get("prefer_decomposed_solver", -1) == -1:
                     rigid_config["prefer_decomposed_solver"] = 1
 
-        # Jacobi equilibration of the Newton system (see nt_jacobi in array_class.py): every factor, incremental
+        # Jacobi equilibration of the Newton system (see nt_jacobi in constraint/data.py): every factor, incremental
         # update and solve of every arm rides the scaled coordinates; the reference behaviour keeps the raw factor.
         # Enabled when the model's mass-diagonal spread bound (_jacobi_mass_spread_bound) exceeds what the working
         # precision's Cholesky factor conditions accurately; the double-precision threshold carries the mantissa
@@ -1009,7 +1007,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 dofs_mass_block_end[i_d] = i_d + 1
 
         # Smallest dof structurally coupled to each dof by the mass matrix (itself when none lies below it), read by the
-        # skyline envelope of the per-island solver (see dof_env_start_local in array_class.py).
+        # skyline envelope of the per-island solver (see dof_env_start_local in constraint/data.py).
         dofs_mass_envelope_start = ((mass_parent_mask + mass_parent_mask.T) > 0.5).argmax(axis=1).astype(gs.np_int)
         self.rigid_info.mass_parent_mask.from_numpy(mass_parent_mask)
         self.rigid_info.dofs_mass_envelope_start.from_numpy(dofs_mass_envelope_start)

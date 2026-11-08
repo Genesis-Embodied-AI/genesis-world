@@ -2,14 +2,16 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.simt as su
-from genesis.utils.array_class import ColliderState, ConstraintState, DynState, RigidInfo
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynState, RigidInfo
+from .data import ConstraintState
 
 
 @qd.func
 def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid_info: RigidInfo):
     """LDL^T forward-backward substitution on column i_col of vec, restricted to the mass block containing dof i_d0.
 
-    The factor is block-diagonal per mass block (see dofs_mass_block_start in array_class.py), with constant block
+    The factor is block-diagonal per mass block (see dofs_mass_block_start in rigid/data.py), with constant block
     bounds shared by every member dof, so a block is solvable independently from any member dof. The column is the env
     for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see func_noslip).
     """

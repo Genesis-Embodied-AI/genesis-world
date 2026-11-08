@@ -3,13 +3,15 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 from ..abd.misc import func_equality_links, func_wakeup_link
 from ..collider.contact import func_contact_order_key, func_promote_woken_contacts
+from .data import ConstraintState
 
 
-# Partition the dof-carrying kinematic trees (see trees_root_idx in array_class.py) into islands: the connected
+# Partition the dof-carrying kinematic trees (see trees_root_idx in rigid/data.py) into islands: the connected
 # components of the trees under the edges of (1) the contacts, (2) the equality constraints (CONNECT/WELD on links,
 # JOINT on joints) and (3) the hibernation chains. A single Genesis entity holding several free bodies (common in MJCF)
 # thus splits into one island per free body, while an articulated body's links stay one island. Each island is an
@@ -244,7 +246,7 @@ def func_group_constraints_by_island_coop(
 @qd.func
 def func_dof_range_start(i_island: int, i_b: int, constraint_state: ConstraintState):
     """First dof of an island whose ascending dof list holds consecutive dofs, -1 otherwise (see dof_range_start in
-    array_class.py).
+    constraint/data.py).
 
     The lists of the build ascend, so the first and last entries decide.
     """
@@ -278,12 +280,12 @@ def func_build_islands(
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     n_links = rigid_info.links_tree_idx.shape[0]
-    # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in array_class.py)
+    # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in collider/data.py)
     n_first_contact = collider_state.n_contacts_hibernated[i_b]
     n_contacts = collider_state.n_contacts[i_b] - n_first_contact
     n_equalities = constraint_state.qd_n_equalities[i_b]
     n_edges = n_contacts + n_equalities
-    # An env with no sleeper (see n_awake_dofs in array_class.py) has no chain edge to union, no island flag to derive
+    # An env with no sleeper (see n_awake_dofs in rigid/data.py) has no chain edge to union, no island flag to derive
     # and no sleeper to wake
     has_sleepers = False
     if qd.static(rigid_config.use_hibernation):
@@ -495,7 +497,7 @@ def func_build_islands_coop(
     n_trees = rigid_info.trees_root_idx.shape[0]
     n_links = rigid_info.links_tree_idx.shape[0]
     n_dofs = constraint_state.island.dof_id.shape[0]
-    # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in array_class.py)
+    # The live contacts follow the kept ones of the sleepers (see n_contacts_hibernated in collider/data.py)
     n_first_contact = collider_state.n_contacts_hibernated[i_b]
     n_contacts = collider_state.n_contacts[i_b] - n_first_contact
     n_equalities = constraint_state.qd_n_equalities[i_b]

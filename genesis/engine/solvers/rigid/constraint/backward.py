@@ -2,10 +2,12 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, ConstraintState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.data import eoa
 
 from . import solver
+from .data import ConstraintState
 
 
 @qd.func
@@ -210,7 +212,7 @@ def kernel_compute_gradients(constraint_state: ConstraintState, rigid_info: Rigi
                 constraint_state.dL_djac[i_c, i_d, i_b] = dL_djac if is_active else gs.qd_float(0.0)
         constraint_state.efc_force.grad[i_c, i_b] = gs.qd_float(0.0)
 
-    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
+    # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in rigid/data.py): an entry
     # outside them is structurally zero and moves nothing, so its gradient is zero.
     for i, i_b in qd.ndrange(n_dofs, _B, axes=qd.static(eoa(constraint_state.dL_dM))):
         for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):

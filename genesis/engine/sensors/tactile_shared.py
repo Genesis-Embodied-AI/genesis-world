@@ -12,9 +12,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
-from genesis.utils.array_class import SDFInfo
 from genesis.utils.data import opt_in
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
+from genesis.utils.sdf import SDFInfo
 
 if TYPE_CHECKING:
     from genesis.utils.ring_buffer import TensorRingBuffer

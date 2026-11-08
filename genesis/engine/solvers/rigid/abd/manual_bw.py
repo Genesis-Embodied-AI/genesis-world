@@ -10,7 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.data import eoa
 
 
@@ -451,7 +451,7 @@ def kernel_manual_compute_qacc_bw(dyn_state: DynState, rigid_info: RigidInfo, ri
     backward path populates it, and kernel_forward_dynamics_without_qacc.grad then reverses it into link poses.
 
     Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks of
-    each kinematic tree (see dofs_mass_block_start in array_class.py): elimination never crosses a block, and
+    each kinematic tree (see dofs_mass_block_start in rigid/data.py): elimination never crosses a block, and
     cross-block mass entries are structural zeros whose grads must stay zero.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

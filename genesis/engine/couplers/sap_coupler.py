@@ -1,3 +1,4 @@
+import dataclasses
 import math
 from typing import TYPE_CHECKING
 
@@ -11,12 +12,15 @@ import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
-from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
-from genesis.options.solvers import SAPCouplerOptions
-from genesis.repr_base import RBC
-from genesis.utils.array_class import (
+from genesis.engine.bvh import (
     BVHQueryResults,
     BVHQueryState,
+    build_bvh,
+    func_bvh_query_leaves,
+    func_no_filter,
+    get_bvh_data,
+)
+from genesis.engine.solvers.rigid.data import (
     DofsState,
     EntitiesInfo,
     EqualitiesInfo,
@@ -27,13 +31,25 @@ from genesis.utils.array_class import (
     LinksInfo,
     LinksState,
     RigidInfo,
-    SAPContactQueriesState,
     VertsInfo,
     VertsState,
 )
+from genesis.options.solvers import SAPCouplerOptions
+from genesis.repr_base import RBC
+from genesis.utils.misc import tensor_to_array
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class SAPContactQueriesState:
+    """The box queries of the SAP coupler, one per contact handler traversing a tree (see SAPCoupler._init_bvh)."""
+
+    fem_self: BVHQueryState
+    rigid_tri: BVHQueryState
+    rigid_tet: BVHQueryState
+
 
 MARCHING_TETS_EDGE_TABLE = (
     (-1, -1, -1, -1),
@@ -179,6 +195,26 @@ def tet_barycentric(p, tet_vertices):
     b3 = 1.0 - b0 - b1 - b2
 
     return qd.Vector([b0, b1, b2, b3], dt=gs.qd_float)
+
+
+def compute_pressure_field(
+    verts: np.ndarray, surface_verts: np.ndarray, surface_faces: np.ndarray, modulus: float
+) -> np.ndarray:
+    """Return the hydroelastic pressure field of a volume mesh at its vertices.
+
+    The field grows linearly with the unsigned distance from each vertex of `verts` to the surface mesh `surface_verts`,
+    `surface_faces`, from zero on the surface to `modulus` at the deepest vertex. See
+    https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
+    """
+    distance, *_ = igl.signed_distance(verts, surface_verts, surface_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED)
+    distance = distance.astype(gs.np_float, copy=False)
+    distance_max = np.max(distance)
+    if distance_max < gs.EPS:
+        gs.raise_exception(
+            f"Pressure field max distance is too small: {distance_max}. "
+            "This might be due to a mesh having no internal vertices."
+        )
+    return distance / distance_max * modulus
 
 
 @qd.data_oriented
@@ -404,7 +440,18 @@ class SAPCoupler(RBC):
 
     def _init_hydroelastic_fem_fields_and_info(self):
         self.fem_pressure = qd.field(gs.qd_float, shape=(self.fem_solver.n_vertices))
-        fem_pressure_np = np.concatenate([fem_entity.pressure_field_np for fem_entity in self.fem_solver.entities])
+        fem_pressure = []
+        for fem_entity in self.fem_solver.entities:
+            init_positions = tensor_to_array(fem_entity.init_positions)
+            fem_pressure.append(
+                compute_pressure_field(
+                    init_positions,
+                    init_positions,
+                    fem_entity.surface_triangles,
+                    fem_entity.material.hydroelastic_modulus,
+                )
+            )
+        fem_pressure_np = np.concatenate(fem_pressure)
         self.fem_pressure.from_numpy(fem_pressure_np)
         self.fem_pressure_gradient = qd.field(gs.qd_vec3, shape=(self.fem_solver._B, self.fem_solver.n_elements))
 
@@ -428,18 +475,9 @@ class SAPCoupler(RBC):
                 rigid_volume_elems.append(elems + offset)
                 rigid_volume_verts_geom_idx.append(np.full(len(verts), geom.idx, dtype=gs.np_int))
                 rigid_volume_elems_geom_idx.append(np.full(len(elems), geom.idx, dtype=gs.np_int))
-                distance_unsigned, *_ = igl.signed_distance(
-                    verts, geom.init_verts, geom.init_faces, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
+                rigid_pressure_field.append(
+                    compute_pressure_field(verts, geom.init_verts, geom.init_faces, self._hydroelastic_stiffness)
                 )
-                distance_unsigned = distance_unsigned.astype(gs.np_float, copy=False)
-                distance_max = np.max(distance_unsigned)
-                if distance_max < gs.EPS:
-                    gs.raise_exception(
-                        f"Pressure field max distance is too small: {distance_max}. "
-                        "This might be due to a mesh having no internal vertices."
-                    )
-                pressure_field_np = distance_unsigned / distance_max * self._hydroelastic_stiffness
-                rigid_pressure_field.append(pressure_field_np)
                 offset += len(verts)
         if not rigid_volume_verts:
             gs.raise_exception("No rigid collision geometries found.")

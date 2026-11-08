@@ -9,7 +9,7 @@ from quadrants.lang._perf_dispatch import PerformanceDispatcher
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
-from genesis.utils.array_class import RigidSimStaticConfig
+from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal

@@ -7,16 +7,14 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.options.sensors import IMU as IMUOptions
-from genesis.options.sensors import CrossCouplingAxisType
-from genesis.utils.array_class import DynState, RigidInfo
+from genesis.engine.solvers.rigid.data import DynState, RigidInfo
+from genesis.options.sensors import IMU as IMUOptions, CrossCouplingAxisType
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
-    from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager

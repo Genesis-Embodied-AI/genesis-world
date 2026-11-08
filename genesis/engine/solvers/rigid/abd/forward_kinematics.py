@@ -20,8 +20,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
 from genesis.grad.bridge import register_custom_backward
-from genesis.utils.array_class import DynInfo, DynState, GeomsInitAABB, RigidInfo
 from genesis.utils.data import eoa
 
 from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forward_velocity_bw
@@ -209,7 +209,7 @@ def func_update_kinematics_root(
 ):
     """Compute the poses of the links of kinematic root i_l_root of env i_b, its center of mass and its link velocities.
 
-    One thread walks the whole span of the root (see roots_link_idx in array_class.py), parents first, both its static
+    One thread walks the whole span of the root (see roots_link_idx in rigid/data.py), parents first, both its static
     links and those of its trees, so a tree reads the pose of the static link it hangs from after the walk wrote it.
     The velocities read the center of mass, so they follow in a second walk. Runs for a scene simulated without
     dynamics, where no link sleeps.
@@ -235,7 +235,7 @@ def func_COM_root_sum(
 
     dyn_state.links.root_COM_bw[i_l_root, i_b] = qd.Vector.zero(gs.qd_float, 3)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
-    # The walk covers the link span of the root and gates each link on its root (see roots_link_idx in array_class.py),
+    # The walk covers the link span of the root and gates each link on its root (see roots_link_idx in rigid/data.py),
     # so a root spanning several entities, one attached beneath another, sums every link of its own before it divides
     for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -529,7 +529,7 @@ def func_forward_kinematics_root(
     """Compute the pose of every link of kinematic root i_l_root of env i_b, parents first, its sleeping links included.
 
     The callers write the joint coordinates of an entity and read poses back (inverse kinematics, path planning). An
-    entity attached to another shares its root (see roots_link_idx in array_class.py), so the walk over the whole root
+    entity attached to another shares its root (see roots_link_idx in rigid/data.py), so the walk over the whole root
     carries the attached entities along with the joints written.
     """
     i_l_end = rigid_info.links_root_end[i_l_root]
@@ -1030,11 +1030,11 @@ def func_sweep_links_by_level(
     The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down for the forward kinematics and velocities, on the
     links of the awake trees, and for the accelerations, on the awake links of every root. It runs from the leaves up
     for the fold of the composite inertia and of the link forces together, on the links of the awake roots, each link
-    adding its children (see links_child_start in array_class.py). update_cacc applies to the accelerations alone.
+    adding its children (see links_child_start in rigid/data.py). update_cacc applies to the accelerations alone.
 
     A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
     level among them, and the block syncs before the next level, whose links read their parent, or their children,
-    from it (see trees_levels_links_idx in array_class.py for the level tables).
+    from it (see trees_levels_links_idx in rigid/data.py for the level tables).
     """
     BLOCK_DIM = qd.static(32)
     N_LANES_PER_ENV = qd.static(rigid_config.level_sweep_n_lanes_per_env)
@@ -1171,7 +1171,7 @@ def func_update_cartesian_space(
     centers of mass one thread per link and one per root.
 
     A static link moves only when a setter writes the pose of its fixed root, so the step sweep walks the awake trees
-    alone (see trees_root_idx in array_class.py), whose static parents hold still, and a tree sleeps as a unit, so a
+    alone (see trees_root_idx in rigid/data.py), whose static parents hold still, and a tree sleeps as a unit, so a
     hibernated tree keeps the poses of its last awake step. The initial placement and the backward replay cover the
     static links too and walk each root whole (see func_update_kinematics_root): the manual reverse reads the
     per-joint pose cache of every link of a root. Autodiff takes a kernel made of loops alone, so the loops are the

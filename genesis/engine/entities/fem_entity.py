@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import igl
 import trimesh
 
 import quadrants as qd
@@ -13,7 +12,6 @@ import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
@@ -213,9 +211,6 @@ class FEMEntity(Entity):
             tri2el = np.repeat(np.arange(self.elems.shape[0], dtype=gs.np_int)[:, np.newaxis], 4, axis=1)
             unique_el = tri2el.flat[unique_idcs]
             self._surface_el_np = unique_el[cnt == 1]
-
-        if isinstance(self.sim.coupler, SAPCoupler):
-            self.compute_pressure_field()
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- basic entity ops -------------------------------
@@ -472,31 +467,6 @@ class FEMEntity(Entity):
                 uvs=uvs,
                 vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
-
-    def compute_pressure_field(self):
-        """
-        Compute the pressure field for the FEM entity based on its tetrahedral elements.
-
-        For hydroelastic contact: https://drake.mit.edu/doxygen_cxx/group__hydroelastic__user__guide.html
-
-        Notes
-        -----
-        https://github.com/RobotLocomotion/drake/blob/master/geometry/proximity/make_mesh_field.cc
-        TODO: Add margin support
-        Drake's implementation of margin seems buggy.
-        """
-        init_positions = tensor_to_array(self.init_positions)
-        unsigned_distance, *_ = igl.signed_distance(
-            init_positions, init_positions, self._surface_tri_np, sign_type=igl.SIGNED_DISTANCE_TYPE_UNSIGNED
-        )
-        unsigned_distance = unsigned_distance.astype(gs.np_float, copy=False)
-        max_distance = np.max(unsigned_distance)
-        if max_distance < gs.EPS:
-            gs.raise_exception(
-                f"Pressure field max distance is too small: {max_distance}. "
-                "This might be due to a mesh having no internal vertices."
-            )
-        self.pressure_field_np = unsigned_distance / max_distance * self.material.hydroelastic_modulus  # normalize
 
     # ------------------------------------------------------------------------------------
     # ---------------------------- interfacing with solver -------------------------------

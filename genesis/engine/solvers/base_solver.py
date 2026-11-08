@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from enum import IntFlag
 from typing import TYPE_CHECKING, NamedTuple, overload
 
 import numpy as np
@@ -15,7 +16,6 @@ from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
 from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -36,6 +36,35 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+
+
+# The bits of an errno: those of an int32 without its sign bit, the flags being int32 kernel literals
+ERRNO_BITS = 31
+
+
+class BackwardErrorCode(IntFlag):
+    """The error flags every solver tracking gradients holds in its errno beside its own, which the backward pass writes.
+
+    They take the lowest bits, those of each solver starting above them (see ErrorCode).
+    """
+
+    INVALID_GRAD_NAN = 0b00000000000000000000000000000001
+
+
+class ErrorCode(IntFlag):
+    """Base of the error flags of one solver, whose members take successive bits above those of BackwardErrorCode.
+
+    Each solver declares its own flags in a subclass with auto(), in declaration order, the subclass raising at
+    creation past the bits of an errno (see ERRNO_BITS). Python refuses to subclass an enum that holds members, so the
+    flags of the backward pass stay apart in BackwardErrorCode rather than in this base.
+    """
+
+    @staticmethod
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[int]) -> int:
+        bit = max(BackwardErrorCode).bit_length() + count
+        if bit >= ERRNO_BITS:
+            raise TypeError(f"'{name}' exceeds the {ERRNO_BITS} bits of an errno.")
+        return 1 << bit
 
 
 class TimeBasedMixin:
@@ -444,7 +473,7 @@ class Solver(RBC):
             self._errno_host = torch.zeros((self._B,), dtype=gs.tc_int, pin_memory=True)
             self._errno_event = torch.cuda.Event()
         if self._requires_grad:
-            self._error_messages[ErrorCode.INVALID_GRAD_NAN] = (
+            self._error_messages[BackwardErrorCode.INVALID_GRAD_NAN] = (
                 "The backward pass produced a 'nan' or 'inf' gradient of the state. The rollout is likely too stiff to "
                 "differentiate over this horizon: shorten it, or decrease the simulation timestep."
             )

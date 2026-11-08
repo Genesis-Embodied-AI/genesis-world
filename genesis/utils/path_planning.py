@@ -2,13 +2,15 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-import quadrants as qd
 import torch
 import torch.nn.functional as F
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderState, DynInfo, DynState, RigidInfo
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver

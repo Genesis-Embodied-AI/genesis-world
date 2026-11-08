@@ -10,19 +10,12 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    ConstraintState,
-    DynInfo,
-    DynState,
-    ErrorCode,
-    GeomsInitAABB,
-    RigidInfo,
-)
+from genesis.engine.solvers.rigid.constraint.data import ConstraintState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidErrorCode, RigidInfo
 from genesis.utils.data import eoa
 
 from .contact import func_collider_clear_env, func_is_link_pair_hibernated
+from .data import ColliderInfo, ColliderState
 from .utils import func_is_geom_boxes_overlap
 
 
@@ -320,7 +313,7 @@ def func_broad_phase_geoms(
                                     collider_state.broad_collision_pairs[n_broad, i_b][0] = i_ga
                                     collider_state.broad_collision_pairs[n_broad, i_b][1] = i_gb
                                 else:
-                                    errno[i_b] = errno[i_b] | ErrorCode.OVERFLOW_CANDIDATE_CONTACTS
+                                    errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS
 
 
 @qd.func

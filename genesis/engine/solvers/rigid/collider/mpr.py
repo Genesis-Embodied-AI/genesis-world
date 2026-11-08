@@ -2,19 +2,46 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import (
-    ColliderInfo,
-    ColliderState,
-    DynInfo,
-    GeomsInitAABB,
-    MPRInfo,
-    MPRScratch,
-    MPRState,
-    RigidInfo,
-)
+from genesis.engine.solvers.rigid.data import DynInfo, GeomsInitAABB, RigidInfo
+from genesis.utils.data import WORKERS, Data, DataKind, field
 from . import support_field
 from .constants import MPR_STAGE, MPR_SUPPORT_TYPE, PORTAL_STATUS
 from .contact import func_compute_geom_pair_scale
+from .data import ColliderState
+from .support_field import SupportFieldInfo
+
+
+class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, WORKERS)):
+    """The Minkowski portal refinement (MPR) simplex of each worker: support points and their difference."""
+
+    v1: qd.Tensor = field((float, 3))
+    v2: qd.Tensor = field((float, 3))
+    v: qd.Tensor = field((float, 3))
+
+
+class MPRState(Data, kind=DataKind.SCRATCH, shape=(WORKERS,)):
+    """The scratch of the Minkowski portal refinement (MPR) of each worker: its simplex and the status of its portal."""
+
+    simplex_support: MPRSimplexSupport
+    # The PORTAL_STATUS of the contact depth in simplex_support[1..3], zero without a portal. A VALID portal seeds the
+    # perturbation reconstruction and the EPA, an INVALID one forces a GJK refinement.
+    portal_status: qd.Tensor = field(int)
+
+
+class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    """The tolerances and the iteration cap of the Minkowski portal refinement (MPR)."""
+
+    CCD_EPS: qd.Tensor = field(float)
+    CCD_TOLERANCE: qd.Tensor = field(float)
+    CCD_ITERATIONS: qd.Tensor = field(float)
+
+
+# The states MPR runs on: one per env, and those of the passes of the split narrowphase and of the terrain pass, one
+# per thread, which the collider opts in when it runs them
+class MPRScratch(Data, kind=DataKind.SCRATCH):
+    main: MPRState
+    contact0: MPRState = field(opt_in=True)
+    multicontact: MPRState = field(opt_in=True)
 
 
 class MPR:
@@ -59,17 +86,15 @@ def mpr_swap(i_b: int, i: int, j: int, mpr_state: MPRState):
 
 
 @qd.func
-def mpr_point_segment_dist2(
-    P: qd.types.vector(3), A: qd.types.vector(3), B: qd.types.vector(3), collider_info: ColliderInfo
-):
+def mpr_point_segment_dist2(P: qd.types.vector(3), A: qd.types.vector(3), B: qd.types.vector(3), mpr_info: MPRInfo):
     AB = B - A
     AP = P - A
     AB_AB = AB.dot(AB)
     AP_AB = AP.dot(AB)
     t = AP_AB / AB_AB
-    if t < collider_info.mpr.CCD_EPS[None]:
+    if t < mpr_info.CCD_EPS[None]:
         t = gs.qd_float(0.0)
-    elif t > 1.0 - collider_info.mpr.CCD_EPS[None]:
+    elif t > 1.0 - mpr_info.CCD_EPS[None]:
         t = gs.qd_float(1.0)
     Q = A + AB * t
 
@@ -78,11 +103,7 @@ def mpr_point_segment_dist2(
 
 @qd.func
 def mpr_point_tri_depth(
-    P: qd.types.vector(3),
-    x0: qd.types.vector(3),
-    B: qd.types.vector(3),
-    C: qd.types.vector(3),
-    collider_info: ColliderInfo,
+    P: qd.types.vector(3), x0: qd.types.vector(3), B: qd.types.vector(3), C: qd.types.vector(3), mpr_info: MPRInfo
 ):
     d1 = B - x0
     d2 = C - x0
@@ -99,29 +120,29 @@ def mpr_point_tri_depth(
     # d = |d1|^2 * |d2|^2 - (d1 . d2)^2 = |d1 x d2|^2 is the Gram determinant of the triangle edges (length^4);
     # comparing it to its own scale v * w makes the degeneracy test the dimensionless sin^2 of the edge angle.
     # Must use <= so that degenerate (zero-length) edges are still classified as degenerate.
-    if qd.abs(d) <= collider_info.mpr.CCD_EPS[None] * v * w:
+    if qd.abs(d) <= mpr_info.CCD_EPS[None] * v * w:
         s = t = -1.0
     else:
         s = (q * r - w * p) / d
         t = (-s * r - q) / w
 
     if (
-        (s > -collider_info.mpr.CCD_EPS[None])
-        and (s < 1.0 + collider_info.mpr.CCD_EPS[None])
-        and (t > -collider_info.mpr.CCD_EPS[None])
-        and (t < 1.0 + collider_info.mpr.CCD_EPS[None])
-        and (t + s < 1.0 + collider_info.mpr.CCD_EPS[None])
+        (s > -mpr_info.CCD_EPS[None])
+        and (s < 1.0 + mpr_info.CCD_EPS[None])
+        and (t > -mpr_info.CCD_EPS[None])
+        and (t < 1.0 + mpr_info.CCD_EPS[None])
+        and (t + s < 1.0 + mpr_info.CCD_EPS[None])
     ):
         pdir = x0 + d1 * s + d2 * t
         dist = (P - pdir).norm_sqr()
     else:
-        dist, pdir = mpr_point_segment_dist2(P, x0, B, collider_info)
-        dist2, pdir2 = mpr_point_segment_dist2(P, x0, C, collider_info)
+        dist, pdir = mpr_point_segment_dist2(P, x0, B, mpr_info)
+        dist2, pdir2 = mpr_point_segment_dist2(P, x0, C, mpr_info)
         if dist2 < dist:
             dist = dist2
             pdir = pdir2
 
-        dist2, pdir2 = mpr_point_segment_dist2(P, B, C, collider_info)
+        dist2, pdir2 = mpr_point_segment_dist2(P, B, C, mpr_info)
         if dist2 < dist:
             dist = dist2
             pdir = pdir2
@@ -161,7 +182,7 @@ def support_driver(
     quat: qd.types.vector(4),
     collider_state: ColliderState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -191,7 +212,7 @@ def support_driver(
             pos,
             quat,
             dyn_info,
-            collider_info,
+            support_field_info,
             exhaustive=qd.static(rigid_config.enable_mujoco_compatibility),
         )
 
@@ -210,7 +231,7 @@ def compute_support(
     quat_b: qd.types.vector(4),
     collider_state: ColliderState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -223,7 +244,16 @@ def compute_support(
         pos = pos_a if i_side == 0 else pos_b
         quat = quat_a if i_side == 0 else quat_b
         v = support_driver(
-            i_g, i_b, side_direction, pos, quat, collider_state, dyn_info, collider_info, rigid_config, collider_config
+            i_g,
+            i_b,
+            side_direction,
+            pos,
+            quat,
+            collider_state,
+            dyn_info,
+            support_field_info,
+            rigid_config,
+            collider_config,
         )
         if i_side == 0:
             v1 = v
@@ -257,7 +287,7 @@ def func_geom_support(
 
 
 @qd.func
-def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rigid_config: qd.template()):
+def mpr_find_pos(i_b: int, mpr_state: MPRState, mpr_info: MPRInfo, rigid_config: qd.template()):
     b = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
 
     # Only look into the direction of the portal for consistency with penetration depth computation
@@ -271,7 +301,7 @@ def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rig
 
     # Must use <= so that the all-zero weights of the non-mujoco-compatible path (which skips the tetrahedron
     # volumes above) still enter the portal-direction fallback.
-    if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
+    if sum_ <= mpr_info.CCD_EPS[None] * qd.abs(b).sum():
         direction = mpr_portal_dir(i_b, mpr_state)
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
@@ -283,7 +313,7 @@ def mpr_find_pos(i_b: int, mpr_state: MPRState, collider_info: ColliderInfo, rig
     # A portal spanning no volume along its own direction leaves every weight at zero, and the position is a ratio of
     # them: weighting the three portal vertices equally puts the contact at their centroid, which lies on the portal
     # and keeps the ratio finite.
-    if sum_ <= collider_info.mpr.CCD_EPS[None] * qd.abs(b).sum():
+    if sum_ <= mpr_info.CCD_EPS[None] * qd.abs(b).sum():
         b[0] = 0.0
         for i in qd.static(range(1, 4)):
             b[i] = 1.0
@@ -359,7 +389,7 @@ def guess_geoms_center(
     geoms_init_AABB: GeomsInitAABB,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
     rigid_config: qd.template(),
 ):
     # MPR algorithm was initially design to check whether a pair of convex geometries was colliding. The author
@@ -396,7 +426,7 @@ def guess_geoms_center(
 
     # Completely different center logics if a normal guess is provided
     if qd.static(not rigid_config.enable_mujoco_compatibility):
-        if (qd.abs(normal_ws) > collider_info.mpr.CCD_EPS[None]).any():
+        if (qd.abs(normal_ws) > mpr_info.CCD_EPS[None]).any():
             # Must start from the center of each bounding box
             center_a_local = 0.5 * (geoms_init_AABB[i_ga, 7] + geoms_init_AABB[i_ga, 0])
             center_a = gu.qd_transform_by_trans_quat(center_a_local, pos_a, quat_a)
@@ -447,11 +477,12 @@ def func_mpr_contact_from_centers(
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
-    ccd_tol = collider_info.mpr.CCD_TOLERANCE[None]
+    ccd_tol = mpr_info.CCD_TOLERANCE[None]
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         ccd_tol = ccd_tol * func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
 
@@ -506,7 +537,7 @@ def func_mpr_contact_from_centers(
             quat_b,
             collider_state,
             dyn_info,
-            collider_info,
+            support_field_info,
             rigid_config,
             collider_config,
         )
@@ -535,7 +566,7 @@ def func_mpr_contact_from_centers(
                 # collinearity test vanish as well, which would fall through to normalizing a zero cross product.
                 if (
                     qd.abs(mpr_state.simplex_support.v[1, i_b])
-                    < collider_info.mpr.CCD_EPS[None] * mpr_state.simplex_support.v[0, i_b].norm()
+                    < mpr_info.CCD_EPS[None] * mpr_state.simplex_support.v[0, i_b].norm()
                 ).all():
                     support_type = MPR_SUPPORT_TYPE.VERTEX
                     stage = MPR_STAGE.DONE
@@ -544,7 +575,7 @@ def func_mpr_contact_from_centers(
                 # the segment path. Must use <= so that an exactly zero cross product counts as degenerate.
                 elif (
                     direction.dot(direction)
-                    <= collider_info.mpr.CCD_EPS[None]
+                    <= mpr_info.CCD_EPS[None]
                     * mpr_state.simplex_support.v[0, i_b].norm_sqr()
                     * mpr_state.simplex_support.v[1, i_b].norm_sqr()
                 ):
@@ -623,7 +654,7 @@ def func_mpr_contact_from_centers(
                 support_dist - portal_v3.dot(direction),
             )
             scale = qd.max(qd.abs(v).sum(), qd.abs(portal_v1).sum(), qd.abs(portal_v2).sum(), qd.abs(portal_v3).sum())
-            is_tolerance_reached = support_gain < ccd_tol + collider_info.mpr.CCD_EPS[None] * scale
+            is_tolerance_reached = support_gain < ccd_tol + mpr_info.CCD_EPS[None] * scale
 
             is_portal_expanded = False
             if stage == MPR_STAGE.REFINE:
@@ -632,7 +663,7 @@ def func_mpr_contact_from_centers(
                     stage = MPR_STAGE.DONE
                 else:
                     is_portal_expanded = True
-            elif is_tolerance_reached or n_iters > collider_info.mpr.CCD_ITERATIONS[None]:
+            elif is_tolerance_reached or n_iters > mpr_info.CCD_ITERATIONS[None]:
                 # The contact point is defined as the projection of the origin onto the portal, i.e. the closest point
                 # to the origin that lies inside the portal. Let's consider the portal as an infinite plane rather than
                 # a face triangle. This makes sense because the projection of the origin must be strictly included into
@@ -654,7 +685,7 @@ def func_mpr_contact_from_centers(
                 # https://archive.org/details/game-programming-gems-7
                 if qd.static(rigid_config.enable_mujoco_compatibility):
                     origin = gs.qd_vec3([0.0, 0.0, 0.0])
-                    penetration, pdir = mpr_point_tri_depth(origin, portal_v1, portal_v2, portal_v3, collider_info)
+                    penetration, pdir = mpr_point_tri_depth(origin, portal_v1, portal_v2, portal_v3, mpr_info)
                     normal = -pdir.normalized()
                 else:
                     penetration = direction.dot(portal_v1)
@@ -672,14 +703,14 @@ def func_mpr_contact_from_centers(
                 min_b = qd.min(b1, qd.min(b2, b3))
                 if not is_tolerance_reached:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.UNCONVERGED
-                elif min_b >= 0.0 and bsum > collider_info.mpr.CCD_EPS[None] * babs:
+                elif min_b >= 0.0 and bsum > mpr_info.CCD_EPS[None] * babs:
                     # A portal spanning no area leaves every coordinate at zero, which satisfies min_b >= 0, so it is
                     # excluded explicitly or a portal whose depth means nothing reads as exact.
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.EXACT
                 else:
                     mpr_state.portal_status[i_b] = PORTAL_STATUS.APPROXIMATE
 
-                pos = mpr_find_pos(i_b, mpr_state, collider_info, rigid_config)
+                pos = mpr_find_pos(i_b, mpr_state, mpr_info, rigid_config)
                 is_col = True
                 stage = MPR_STAGE.DONE
             else:
@@ -723,7 +754,8 @@ def func_mpr_contact(
     mpr_state: MPRState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    mpr_info: MPRInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
 ):
@@ -738,7 +770,7 @@ def func_mpr_contact(
         geoms_init_AABB,
         dyn_info,
         rigid_info,
-        collider_info,
+        mpr_info,
         rigid_config,
     )
     return func_mpr_contact_from_centers(
@@ -755,7 +787,8 @@ def func_mpr_contact(
         collider_state,
         mpr_state,
         dyn_info,
-        collider_info,
+        mpr_info,
+        support_field_info,
         rigid_config,
         collider_config,
     )
