@@ -5,7 +5,7 @@ import torch
 import genesis as gs
 from genesis.utils.misc import tensor_to_array
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 
 
@@ -401,6 +401,12 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
             convexify=False,
         ),
     )
+    small_emitter = scene.add_emitter(
+        material=material_type(
+            sampler="regular",
+        ),
+        max_particles=10,
+    )
     emitter = scene.add_emitter(
         material=material_type(),
         max_particles=5000,
@@ -409,6 +415,19 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         ),
     )
     scene.build(n_envs=n_envs)
+
+    # A batch that does not fit in the free slots of an emitter overwrites its oldest particles, leaving those of the
+    # next entity untouched. Batches of 3, 8 (a shell of radius one particle size) and 3 particles leave 2 slots free.
+    p_size = small_emitter.entity.particle_size
+    small_emitter.emit(
+        droplet_shape="rectangle", droplet_size=(3 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
+    )
+    small_emitter.emit_omni(source_radius=p_size, pos=(0.5, -1.0, 1.0))
+    small_emitter.emit(
+        droplet_shape="rectangle", droplet_size=(3 * p_size, p_size), droplet_length=p_size, pos=(0.5, -1.0, 1.0)
+    )
+    assert_equal(small_emitter.entity.get_particles_active(), np.arange(10) < 8)
+    assert not emitter.entity.get_particles_active().any()
 
     emitter.emit_omni()
     for i in range(5):
