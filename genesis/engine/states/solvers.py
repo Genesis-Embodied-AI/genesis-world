@@ -175,6 +175,11 @@ class SPHSolverState:
             (scene.sim._B, scene.sim.sph_solver.n_particles, 3), dtype=gs.tc_float, device=gs.device
         )
         self._active = torch.zeros((scene.sim._B, scene.sim.sph_solver.n_particles), dtype=gs.tc_bool, device=gs.device)
+        self._pressure = None
+        if scene.sim.sph_solver.pressure_solver == "DFSPH":
+            self._pressure = torch.zeros(
+                (scene.sim._B, scene.sim.sph_solver.n_particles), dtype=gs.tc_float, device=gs.device
+            )
 
     @property
     def scene(self):
@@ -191,6 +196,11 @@ class SPHSolverState:
     @property
     def active(self):
         return self._active
+
+    @property
+    def pressure(self) -> torch.Tensor | None:
+        """Pressure of the particles, which DFSPH carries over from one substep to the next. None under WCSPH."""
+        return self._pressure
 
 
 class PBDSolverState:

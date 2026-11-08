@@ -323,23 +323,21 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
             sampler="regular",
         ),
     )
-    scene.build()
-
-    for _ in range(100):
-        scene.step()
-
-    sph_solver = scene.sph_solver
-    pressures = qd_to_numpy(sph_solver.particles_reordered.p, transpose=True)[0]
-    heights = qd_to_numpy(sph_solver.particles_reordered.pos, transpose=True)[0, :, 2]
+    scene.build(n_envs=2)
 
     # The pressure at the bottom of a settled column carries the weight of the whole column, which is exactly
-    # the particle count times the particle weight spread over the column footprint. The tolerance absorbs the
-    # residual sloshing of the column and two boundary effects that pull in opposite directions: the wall
-    # pressure force from the floor relieves part of the compression that the WCSPH equation of state reads,
-    # while the positive-part clamp of the DFSPH density solve rectifies velocity noise into extra pressure.
+    # the particle count times the particle weight spread over the column footprint. It must do so at every step
+    # once the column has settled. The tolerance absorbs the residual sloshing of the column and the wall pressure
+    # force from the floor, which relieves part of the compression that the WCSPH equation of state reads.
+    sph_solver = scene.sph_solver
     weight_per_area = sph_solver.n_particles * sph_solver.particles_info[0].mass * 9.81 / (0.3 * 0.3)
-    p_bottom = pressures[heights < 0.05].mean()
-    assert 0.4 * weight_per_area < p_bottom < 1.5 * weight_per_area
+    for i_step in range(100):
+        scene.step()
+        if i_step >= 80:
+            pressures = qd_to_numpy(sph_solver.particles_reordered.p, transpose=True)[0]
+            heights = qd_to_numpy(sph_solver.particles_reordered.pos, transpose=True)[0, :, 2]
+            p_bottom = pressures[heights < 0.05].mean()
+            assert 0.4 * weight_per_area < p_bottom < 1.5 * weight_per_area
 
     # The pressure must decrease with height, following the hydrostatic gradient. The factors are lower bounds
     # on the ratio of the hydrostatic depths at the band centers, with slack for pressure fluctuations.
@@ -358,3 +356,10 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     for _ in range(5):
         scene.step()
     assert_equal(liquid.get_particles_pos(), pos)
+
+    # The trajectory of an environment must not depend on what the other environments simulate alongside it.
+    scene.reset(state)
+    liquid.set_particles_vel((0.0, 0.0, 0.5), envs_idx=[1])
+    for _ in range(5):
+        scene.step()
+    assert_equal(liquid.get_particles_pos(envs_idx=[0]), pos[[0]])
