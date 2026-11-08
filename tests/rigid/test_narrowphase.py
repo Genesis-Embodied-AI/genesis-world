@@ -286,8 +286,11 @@ def create_modified_narrowphase_file(tmp_path: Path):
 
     lines = content.split("\n")
 
-    # Disable the analytical paths in all kernels
-    lines = find_and_disable_all_conditions(lines, "= func_analytic_contact(")
+    # Disable the analytical detections, so that func_analytic_contact reports every pair as non-analytic
+    lines = find_and_disable_all_conditions(lines, "is_col, normal, contact_pos, penetration = capsule_contact.func_")
+    lines = find_and_disable_all_conditions(
+        lines, "is_col, normal, contact_pos, penetration = func_sphere_box_contact("
+    )
 
     # Insert errno marker in contact0's GJK path (before gjk.func_gjk call, uses i_b)
     lines = insert_errno_before_call(lines, "gjk.func_gjk(", ERRNO_CALLED_GJK_K1, "MODIFIED: GJK detection in contact0")
