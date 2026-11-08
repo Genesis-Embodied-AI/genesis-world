@@ -47,7 +47,10 @@ class Base(Material["FEMEntity"]):
 
     # Dispatch fields, set by subclass model_post_init and never by the user.
     build: Any = Field(default=None, exclude=True, repr=False)
+    # The data the implicit solver computes from the start of a substep, and its reverse, which consumes the adjoint of
+    # that data and returns the one of the deformation gradient it derives from
     pre_compute: Any = Field(default=None, exclude=True, repr=False)
+    pre_compute_grad: Any = Field(default=None, exclude=True, repr=False)
     update_stress: Any = Field(default=None, exclude=True, repr=False)
     # The product of the Hessian of the energy density with a change of the deformation gradient, which the implicit
     # solver takes in place of the Hessian itself.
@@ -69,6 +72,8 @@ class Base(Material["FEMEntity"]):
             self.build = self._build_noop
         if self.pre_compute is None:
             self.pre_compute = self._pre_compute_noop
+        if self.pre_compute_grad is None:
+            self.pre_compute_grad = self._pre_compute_grad_noop
         if self.update_stress is None:
             self.update_stress = self._update_stress_noop
         if self.hessian_product is None:
@@ -84,6 +89,10 @@ class Base(Material["FEMEntity"]):
     @qd.func
     def _pre_compute_noop(self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)):
         pass
+
+    @qd.func
+    def _pre_compute_grad_noop(self, i_e: int, i_b: int, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)):
+        return qd.Matrix.zero(gs.qd_float, 3, 3)
 
     # A material without a constitutive model (Cloth, whose physics the IPC coupler owns) dispatches stress here.
     # The explicit solver compiles this into its static per-material loop even when no element ever executes it, so

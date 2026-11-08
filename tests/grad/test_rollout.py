@@ -371,7 +371,6 @@ def test_reject_non_differentiable_solvers():
     for materials, options, component_name in (
         ((gs.materials.PBD.Liquid(),), {}, "PBDSolver"),
         ((gs.materials.SPH.Liquid(),), {}, "SPHSolver"),
-        ((gs.materials.FEM.Elastic(),), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
         ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "LegacyCoupler"),
         ((gs.materials.Rigid(),), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
     ):

@@ -75,13 +75,16 @@ class Elastic(Base):
         elif self.model == "linear_corotated":
             self.build = self._build_linear_corotated
             self.pre_compute = self._pre_compute_linear_corotated
+            self.pre_compute_grad = self._pre_compute_grad_linear_corotated
             self.update_stress = self._update_stress_linear_corotated
             self.hessian_product = self._hessian_product_linear_corotated
             self.compute_energy_gradient = self._compute_energy_gradient_linear_corotated
             self.compute_energy = self._compute_energy_linear_corotated
 
     def _build_linear_corotated(self, fem_solver):
-        self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
+        self._R = qd.field(
+            dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements), needs_grad=fem_solver.requires_grad
+        )
 
     @qd.func
     def _pre_compute_linear_corotated(
@@ -90,6 +93,23 @@ class Elastic(Base):
         U, S, V = gu.qd_svd(F)
         R = U @ V.transpose()
         self._R[i_b, i_e] = R
+
+    @qd.func
+    def _pre_compute_grad_linear_corotated(
+        self, i_e: int, i_b: int, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)
+    ):
+        # With F = U S V^T, a change dF turns the rotation R = U V^T by U W V^T, where W is skew with
+        # W_ij = (A_ij - A_ji) / (S_ii + S_jj) and A = U^T dF V. The singular values are signed (see 'qd_svd'), so a
+        # sum vanishes only for an element turned inside out, where the rotation is not differentiable: the adjoint
+        # of the state then turns non-finite, which halts the backward pass (see 'StepOperation.backward').
+        U, S, V = gu.qd_svd(F)
+        K = U.transpose() @ self._R.grad[i_b, i_e] @ V
+        X = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for i_x, j_x in qd.static(qd.ndrange(3, 3)):
+            if qd.static(i_x != j_x):
+                X[i_x, j_x] = (K[i_x, j_x] - K[j_x, i_x]) / (S[i_x, i_x] + S[j_x, j_x])
+        self._R.grad[i_b, i_e] = qd.Matrix.zero(gs.qd_float, 3, 3)
+        return U @ X @ V.transpose()
 
     # --- Linear model ---
 

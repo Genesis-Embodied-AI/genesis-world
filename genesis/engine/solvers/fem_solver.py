@@ -13,6 +13,7 @@ from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
+from genesis.grad.bridge import custom_backward, register_custom_backward
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
@@ -29,6 +30,7 @@ ENV_BLOCK_DIM = 256
 @qd.data_oriented
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     material_cls = FEM.Base
+    is_differentiable = True
     has_frames = True
 
     # ------------------------------------------------------------------------------------
@@ -94,6 +96,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             pTAp=gs.qd_float,
             alpha=gs.qd_float,
             beta=gs.qd_float,
+            # The squared residual below which the PCG solve of a differentiable scene stops (see 'pcg_threshold_rel')
+            rTr_threshold=gs.qd_float,
         )
         self.pcg_state = pcg_state.field(shape=(self._B,), needs_grad=False, layout=qd.Layout.SOA)
 
@@ -185,9 +189,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             layout=qd.Layout.SOA,
         )
 
+        # The adjoint of the forces holds the solution of the adjoint solve (see '_implicit_solve_grad')
         self.elements_v_energy = element_state_v_energy.field(
             shape=(self._B, self.n_vertices),
-            needs_grad=False,
+            needs_grad=self._requires_grad and self._use_implicit_solver,
             layout=qd.Layout.SOA,
         )
 
@@ -406,6 +411,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     n_pcg_iterations=gs.qd_int,
                     n_linesearch_iterations=gs.qd_int,
                     pcg_threshold=gs.qd_float,
+                    pcg_threshold_rel=gs.qd_float,
                     linesearch_c=gs.qd_float,
                     linesearch_tau=gs.qd_float,
                 )
@@ -414,6 +420,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.solve_info[None].n_pcg_iterations = self._n_pcg_iterations
                 self.solve_info[None].n_linesearch_iterations = self._n_linesearch_iterations
                 self.solve_info[None].pcg_threshold = self._pcg_threshold
+                # A differentiable scene solves to round-off, relative to the first residual of the substep, since its
+                # backward pass is the adjoint of the root of the solve, and a gradient scales with its loss whatever
+                # the scale. The later Newton iterations of the substep then start at their root.
+                self.solve_info[None].pcg_threshold_rel = (1e-14 if gs.np_float == np.float64 else 1e-6) ** 2
                 self.solve_info[None].linesearch_c = self._linesearch_c
                 self.solve_info[None].linesearch_tau = self._linesearch_tau
 
@@ -544,6 +554,24 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.elements_el[f + 1, i_e, i_b].actu = self.elements_el[f, i_e, i_b].actu
 
     @qd.kernel
+    def precompute_material_data_grad(self, f: int):
+        """Reverse the data the materials compute from the start of a substep, consuming its adjoint."""
+        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
+            _, F = self._compute_ele_J_F(f, i_e, i_b)
+            F_grad = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for mat_idx in qd.static(self._mats_idx):
+                if self.elements_i[i_e].mat_idx == mat_idx:
+                    F_grad = self._mats[mat_idx].pre_compute_grad(i_e, i_b, F, self.elements_i[i_e].muscle_direction)
+            # F = D B, D holding the positions of the first three vertices relative to the last in its columns
+            D_grad = F_grad @ self.elements_i[i_e].B.transpose()
+            i_vs = self.elements_i[i_e].el2v
+            for i_k in qd.static(range(3)):
+                qd.atomic_add(self.elements_v.grad[f, i_vs[i_k], i_b].pos, D_grad[:, i_k])
+            qd.atomic_add(self.elements_v.grad[f, i_vs[3], i_b].pos, -D_grad[:, 0] - D_grad[:, 1] - D_grad[:, 2])
+
+    # The data includes the rotation of the polar decomposition, which autodiff cannot reverse
+    @register_custom_backward(precompute_material_data_grad)
+    @qd.kernel
     def precompute_material_data(self, f: qd.i32):
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             J, F = self._compute_ele_J_F(f, i_e, i_b)  # use last time step's pos to compute
@@ -556,8 +584,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Every environment enters the Newton iterations of the substep that follows
         for i_b in range(self._B):
             self.batch_active[i_b] = True
-        dt2 = self.substep_dt**2
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
+            dt2 = self.substep_dt**2
             if qd.static(self._enable_vertex_constraints):
                 if self.vertex_constraints.is_constrained[i_v, i_b]:
                     target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
@@ -597,37 +625,55 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return J, F
 
     @qd.func
+    def _func_element_energy_gradient(self, f: int, i_e: int, i_b: int):
+        # The energy density of an element at the end of a substep of the implicit solver, and its gradient with respect
+        # to the deformation gradient plus the stress of the Rayleigh stiffness damping for the displacement over it
+        J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
+        mu = self.elements_i[i_e].mu
+        lam = self.elements_i[i_e].lam
+        actu = self.elements_el[f, i_e, i_b].actu
+        m_dir = self.elements_i[i_e].muscle_direction
+        energy = gs.qd_float(0.0)
+        gradient = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for mat_idx in qd.static(self._mats_idx):
+            if self.elements_i[i_e].mat_idx == mat_idx:
+                energy, gradient = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
+        if qd.static(self._damping_beta > gs.EPS):
+            damping_beta_over_dt = self._damping_beta / self._substep_dt
+            i_vs = self.elements_i[i_e].el2v
+            S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+            x_diff = qd.Matrix.cols(
+                [
+                    self.elements_v[f + 1, i_vs[i_k], i_b].pos - self.elements_v[f, i_vs[i_k], i_b].pos
+                    for i_k in qd.static(range(4))
+                ]
+            )
+            _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
+            gradient = gradient + damping_beta_over_dt * dP
+        return energy, gradient
+
+    @qd.func
     def _func_compute_ele_energy_gradient(self, f: int):
-        damping_beta_over_dt = self._damping_beta / self._substep_dt
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            if not self.batch_active[i_b]:
-                continue
-
-            J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
-            mu = self.elements_i[i_e].mu
-            lam = self.elements_i[i_e].lam
-            actu = self.elements_el[f, i_e, i_b].actu
-            m_dir = self.elements_i[i_e].muscle_direction
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    (
-                        self.elements_el_energy[i_b, i_e].energy,
-                        self.elements_el_energy[i_b, i_e].gradient,
-                    ) = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
-
-            # The stress of the Rayleigh stiffness damping, for the displacement over the substep, adds to the gradient
-            if qd.static(self._damping_beta > gs.EPS):
-                i_vs = self.elements_i[i_e].el2v
-                S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
-                x_diff = qd.Matrix.cols(
-                    [
-                        self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
-                        for i in qd.static(range(4))
-                    ]
-                )
-                _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
-                gradient = self.elements_el_energy[i_b, i_e].gradient + damping_beta_over_dt * dP
+            if self.batch_active[i_b]:
+                energy, gradient = self._func_element_energy_gradient(f, i_e, i_b)
+                self.elements_el_energy[i_b, i_e].energy = energy
                 self.elements_el_energy[i_b, i_e].gradient = gradient
+
+    @qd.func
+    def _func_vertex_inertia_force(self, f: int, i_v: int, i_b: int):
+        # The force of the inertia and of the Rayleigh mass damping on a vertex at the end of a substep of the implicit
+        # solver. A constrained vertex sits at its target, which the damping of its jump would otherwise pull it from.
+        damping_alpha_dt = self._damping_alpha * self._substep_dt
+        pos = self.elements_v[f + 1, i_v, i_b].pos
+        force = -self.elements_v_info[i_v].mass_over_dt2 * (
+            (pos - self.elements_v_energy[i_b, i_v].inertia)
+            + (pos - self.elements_v[f, i_v, i_b].pos) * damping_alpha_dt
+        )
+        if qd.static(self._enable_vertex_constraints):
+            if self.vertex_constraints.is_constrained[i_v, i_b]:
+                force = qd.Vector.zero(gs.qd_float, 3)
+        return force
 
     @qd.func
     def compute_elastic_product(self, i_e: int, i_b: int, S: qd.types.matrix(4, 3), x: qd.types.matrix(3, 4)):
@@ -852,16 +898,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     p = self.pcg_state_v[i_b, i_v_o].p
                     self.pcg_state_v[i_b, i_v_o].Ap = mass_over_dt2 * (damping_alpha_dt + 1.0) * p + vec_elastic
                 else:
-                    pos = self.elements_v[f + 1, i_v_o, i_b].pos
-                    force_inertia = -mass_over_dt2 * (
-                        (pos - self.elements_v_energy[i_b, i_v_o].inertia)
-                        + (pos - self.elements_v[f, i_v_o, i_b].pos) * damping_alpha_dt
-                    )
-                    # A constrained vertex sits at its target, which the damping of its jump to it would otherwise
-                    # pull away.
-                    if qd.static(self._enable_vertex_constraints):
-                        if self.vertex_constraints.is_constrained[i_v_o, i_b]:
-                            force_inertia = qd.Vector.zero(gs.qd_float, 3)
+                    force_inertia = self._func_vertex_inertia_force(f, i_v_o, i_b)
                     self.elements_v_energy[i_b, i_v_o].force = force_inertia + vec_elastic
                     diag3x3 = mat_elastic + mass_over_dt2 * (damping_alpha_dt + 1.0) * I_3
                     self.pcg_state_v[i_b, i_v_o].diag3x3 = diag3x3
@@ -897,8 +934,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             )
 
     @qd.func
-    def _func_init_pcg_env(self, i_b: int, i_t: int, sh_sum: qd.template(), pcg_counter: qd.template()):
-        # The first residual of the PCG solve of an environment, by the threads of its block (see '_func_block_sum')
+    def _func_init_pcg_env(
+        self, f: int, i_b: int, i_t: int, sh_sum: qd.template(), pcg_counter: qd.template(), is_adjoint: qd.template()
+    ):
+        # The first residual of the PCG solve of an environment, by the threads of its block (see '_func_block_sum'):
+        # the forces at the end of the substep, or for the adjoint solve the adjoint of the positions there (see
+        # '_implicit_solve_grad' for that solve).
         n_threads = qd.static(self._env_block_dim)
         is_active = self.batch_active[i_b]
         rTr = gs.qd_float(0.0)
@@ -908,6 +949,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 i_v = i_v_ * n_threads + i_t
                 if i_v < self.n_vertices:
                     r = self.elements_v_energy[i_b, i_v].force
+                    if qd.static(is_adjoint):
+                        r = self.elements_v.grad[f + 1, i_v, i_b].pos
                     z = self.pcg_state_v[i_b, i_v].prec @ r
                     self.pcg_state_v[i_b, i_v].x = qd.Vector.zero(gs.qd_float, 3)
                     self.pcg_state_v[i_b, i_v].r = r
@@ -920,13 +963,23 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if is_active:
                 self.pcg_state[i_b].rTr = rTr
                 self.pcg_state[i_b].rTz = rTz
-            is_pcg_active = is_active and rTr > self.solve_info[None].pcg_threshold
+            rTr_threshold = self.solve_info[None].pcg_threshold
+            if qd.static(self._requires_grad):
+                is_first_residual = True
+                if qd.static(not is_adjoint):
+                    is_first_residual = (
+                        self.solve_iterations_left[None].newton == self.solve_info[None].n_newton_iterations
+                    )
+                if is_first_residual:
+                    self.pcg_state[i_b].rTr_threshold = self.solve_info[None].pcg_threshold_rel * rTr
+                rTr_threshold = self.pcg_state[i_b].rTr_threshold
+            is_pcg_active = is_active and rTr > rTr_threshold
             self.batch_pcg_active[i_b] = is_pcg_active
             if is_pcg_active:
                 pcg_counter[()] = 1
 
     @qd.func
-    def _func_init_pcg(self, pcg_counter: qd.template()):
+    def _func_init_pcg(self, f: int, pcg_counter: qd.template(), is_adjoint: qd.template()):
         pcg_counter[()] = 0
         n_threads = qd.static(self._env_block_dim)
         qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
@@ -934,7 +987,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             sh_sum = qd.simt.block.SharedArray((2, qd.static((n_threads + 31) // 32)), gs.qd_float)
             i_b = i_flat // n_threads
             i_t = i_flat % n_threads
-            self._func_init_pcg_env(i_b, i_t, sh_sum, pcg_counter)
+            self._func_init_pcg_env(f, i_b, i_t, sh_sum, pcg_counter, is_adjoint)
         self.solve_iterations_left[None].pcg = self.solve_info[None].n_pcg_iterations
 
     @qd.func
@@ -973,7 +1026,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         rTr_new, rTz_new = self._func_block_sum(i_t, qd.Vector([rTr_new, rTz_new]), sh_sum)
 
         # Convergence check, then the new search direction
-        is_still_active = is_active and rTr_new > self.solve_info[None].pcg_threshold
+        rTr_threshold = self.solve_info[None].pcg_threshold
+        if qd.static(self._requires_grad):
+            rTr_threshold = self.pcg_state[i_b].rTr_threshold
+        is_still_active = is_active and rTr_new > rTr_threshold
         beta = gs.qd_float(0.0)
         if is_still_active:
             beta = rTz_new / rTz
@@ -1133,7 +1189,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gather_internal_force=False,
             update_loop_flag=False,
         )
-        self._func_init_pcg(pcg_counter)
+        self._func_init_pcg(f, pcg_counter, is_adjoint=False)
 
     @qd.kernel(graph=True)
     def _kernel_batch_solve(
@@ -1149,11 +1205,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # opens with bare statements, so each loop body opens with a for loop.
         while qd.graph.do_while(newton_counter):
             self._func_newton_head(f, pcg_counter)
-            if qd.static(self._is_pcg_solved_per_env_block):
-                self._func_pcg_solve_per_env_block(pcg_counter)
-            else:
-                while qd.graph.do_while(pcg_counter):
-                    self._func_pcg_iter(pcg_counter)
+            self._func_pcg_solve(pcg_counter)
             if qd.static(self._n_linesearch_iterations > 0):
                 self._func_init_linesearch(f, linesearch_counter)
                 while qd.graph.do_while(linesearch_counter):
@@ -1163,6 +1215,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.solve_iterations_left[None].newton = self.solve_iterations_left[None].newton - 1
             if self.solve_iterations_left[None].newton <= 0:
                 newton_counter[()] = 0
+
+    @qd.func
+    def _func_pcg_solve(self, pcg_counter: qd.template()):
+        if qd.static(self._is_pcg_solved_per_env_block):
+            self._func_pcg_solve_per_env_block(pcg_counter)
+        else:
+            while qd.graph.do_while(pcg_counter):
+                self._func_pcg_iter(pcg_counter)
 
     @qd.func
     def _func_pcg_solve_per_env_block(self, pcg_counter: qd.template()):
@@ -1198,6 +1258,37 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 qd.simt.grid.mem_fence()
                 qd.simt.block.sync()
 
+    @qd.kernel(graph=True)
+    def _kernel_solve_adjoint(self, f: int, pcg_counter: qd.types.ndarray(dtype=qd.i32, ndim=0)):
+        # The adjoint solve of a substep, whose solution seeds the adjoint of the forces (see '_implicit_solve_grad')
+        self._func_init_pcg(f, pcg_counter, is_adjoint=True)
+        self._func_pcg_solve(pcg_counter)
+        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
+            self.elements_v_energy.grad[i_b, i_v].force = self.pcg_state_v[i_b, i_v].x
+
+    @qd.kernel
+    def _kernel_compute_implicit_force(self, f: int):
+        # The forces at the end of a substep of the implicit solver, whose autodiff alone runs (see
+        # '_implicit_solve_grad'). The elements scatter their forces, which autodiff reverses, where the solve gathers.
+        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
+            _, gradient = self._func_element_energy_gradient(f, i_e, i_b)
+            i_vs = self.elements_i[i_e].el2v
+            S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+            force = -self.elements_i[i_e].V * gradient @ S.transpose()
+            for i_k in qd.static(range(4)):
+                qd.atomic_add(self.elements_v_energy[i_b, i_vs[i_k]].force, force[:, i_k])
+        for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
+            qd.atomic_add(self.elements_v_energy[i_b, i_v].force, self._func_vertex_inertia_force(f, i_v, i_b))
+
+    def _implicit_solve_grad(self, f: int) -> None:
+        # The end positions x+ are the root of the forces R(x+; x, v, actu), whose Jacobian with respect to x+ is minus
+        # the Hessian H of the incremental energy, symmetric and constant since every material the implicit solver
+        # supports has an energy quadratic in x+. The adjoint solve H lambda = g of the adjoint g of x+ runs the PCG
+        # of the solve, then the autodiff of the forces seeded with lambda adds lambda^T dR/d(input) to the adjoint of
+        # every input. A constrained vertex has no force, so its target takes its adjoint plus the pull of lambda.
+        self._kernel_solve_adjoint(f, self._pcg_counter)
+        self._kernel_compute_implicit_force.grad(f)
+
     @qd.kernel
     def setup_pos_vel(self, f: qd.i32):
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
@@ -1220,7 +1311,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             elif self._use_implicit_solver:
                 self.precompute_material_data(f)
                 self.init_pos_and_inertia(f, self._sim.rigid_solver.dyn_state.links)
-                self._kernel_batch_solve(f, self._newton_counter, self._pcg_counter, self._linesearch_counter)
+                # The solve is reversed through the adjoint of its root, which spares reversing its iterations
+                with custom_backward(self._implicit_solve_grad, f):
+                    self._kernel_batch_solve(f, self._newton_counter, self._pcg_counter, self._linesearch_counter)
                 self.setup_pos_vel(f)
             else:
                 self.init_pos_and_vel(f)
@@ -1245,10 +1338,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- gradient ---------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_differentiable(self) -> bool:
-        return not self._use_implicit_solver
 
     @property
     def data(self):
