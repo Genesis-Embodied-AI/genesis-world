@@ -211,16 +211,21 @@ jobs:
               if (!run) {
                 throw new Error(`Event '${context.eventName}' carries no pull request to comment on.`);
               }
-              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: run.head_repository.owner.login,
-                repo: run.head_repository.name,
-                commit_sha: run.head_sha,
+              // Look the pull request up by head branch, closed ones included, since the benchmarks may complete after
+              // it is closed: 'repos.listPullRequestsAssociatedWithCommit' returns the merged and open ones alone. The
+              // match on the commit and the preference for an open pull request follow the setup of production.yml.
+              const { data } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'all',
+                head: `${run.head_repository.owner.login}:${run.head_branch}`,
               });
-              if (!data || !data.length) {
-                throw new Error(
-                  `No pull request is associated with commit ${run.head_sha} of ${run.head_repository.full_name}.`);
+              const pulls = data.filter((pull) => pull.head.sha === run.head_sha);
+              const pull = pulls.find((pull) => pull.state === 'open') ?? pulls[0];
+              if (!pull) {
+                throw new Error(`Commit ${run.head_sha} heads no pull request of ${context.repo.repo}.`);
               }
-              prNumber = data[0].number;
+              prNumber = pull.number;
             }
 
             const title = (process.env.HAS_REGRESSIONS || '0') === '1'
