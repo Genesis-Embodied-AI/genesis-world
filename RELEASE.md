@@ -1,5 +1,88 @@
 # Genesis Release Note
 
+## 1.4.6
+
+This release polishes our non-rigid solvers (mainly FEM, but also MPM, and PBD) and couplers. Differentiable simulation has also been greatly improved. It is now natively compatible with torch, while running about x3 faster and extended to support more setters and physics. Beyond that, the simulation is running faster than ever across all solvers, batch sizes and backends. Notably, the rigid solver and implicit FEM solver are now running multiple times faster for small batch sizes on GPU.
+
+### Breaking
+
+* [MISC] Replace the hardcoded floor of SAP and FEM with the rigid ground plane. (@duburcqa) (#3708)
+* [MISC] Speed up the implicit FEM solver by up to 1.5x with half the memory. (@duburcqa) (#3718)
+
+### New Features
+
+* Support gradients wrt PD control targets and through the dof force getters. (@duburcqa) (#3642)
+* Support level-set reconstruction, foam, physics-based sampling and hybrid entities on every platform. (@duburcqa) (#3654)
+* Support diff sim of FEM entities with the implicit solver. (@duburcqa) (#3738)
+* Support midpoint integration with diff sim. (@duburcqa) (#3601)
+
+### Bug Fixes
+
+* Fix hibernated free links losing contact forces. (@Milotrince) (#3594)
+* Fix links not waken up after deleting constraint or moving anchor link. (@Milotrince) (#3620)
+* Fix objects resting on a cylinder cap jittering. (@duburcqa) (#3600)
+* Stabilize contact pruning near symmetric support patches. (@duburcqa) (#3604)
+* Fix rigid contacts too soft when another solver sets a shorter substep. (@duburcqa) (#3711)
+* Fix setters raising in diff sim when zero-copy is unavailable. (@duburcqa) (#3639)
+* Fix diff sim failing to compile and inaccurate deformable materials in fp64. (@duburcqa) (#3681)
+* Fix misplaced and missing contacts between flat faces in diff sim. (@duburcqa) (#3729)
+* Fix zero gradient through joints at rest in diff sim. (@duburcqa) (#3720)
+* Fix contact gradients of spheres, capsules and grazing planes. (@duburcqa) (#3625, #3737)
+* Fix gradient computations when calling setters mid-rollout. (@duburcqa) (#3601)
+* Fix particle simulations not reproducible on GPU. (@duburcqa) (#3665)
+* Fix DFSPH liquids falling with twice the gravity. (@duburcqa) (#3663)
+* Fix DFSPH pressure pulsing between substeps and depending on the batch size. (@duburcqa) (#3735)
+* Fix MPM particles attached to a rigid link diverging with stiff springs. (@duburcqa) (#3679)
+* Fix diverging MPM simulation spreading 'nan' instead of halting. (@duburcqa) (#3680)
+* Fix FEM vertices attached to a rotated link jumping away from it. (@duburcqa) (#3662)
+* Fix segfault of FEM entities coupled with MPM or rigid bodies when leaving the grid or diverging. (@duburcqa) (#3664)
+* Fix FEM simulation silently returning NaN when it diverges. (@duburcqa) (#3666)
+* Fix FEM vertices attached to a rigid link lagging behind or not following it. (@duburcqa) (#3677)
+* Fix implicit FEM results not deterministic on GPU. (@duburcqa) (#3719)
+* Fix FEM entities in contact with rigid geoms settling differently on GPU with the legacy coupler. (@duburcqa) (#3724)
+* Fix free FEM bodies drifting on their own under the explicit solver. (@duburcqa) (#3727)
+* Fix FEM muscle actuation ignored by the implicit solver. (@duburcqa) (#3739)
+* Fix FEM entities simulated with the material model of another entity. (@duburcqa) (#3744)
+* Fix material parameters losing precision in fp64 simulations. (@duburcqa) (#3722)
+* Fix SAP coupler crashing on fixed rigid entities and FEM vertices missing moved targets. (@duburcqa) (#3678)
+* Fix SAP coupler failing to compile with batched link info. (@duburcqa) (#3715)
+* Fix joint equality constraints ignored by SAP coupler if no contact. (@duburcqa) (#3726)
+* Fix meshes referencing files outside their folder failing to load. (@Milotrince) (#3596)
+* Keep MJCF collision bitmasks as authored when the file excludes body pairs. (@duburcqa) (#3704)
+* Fix traj replay of scenes with entities loaded from in-memory URDF. (@duburcqa) (#3602)
+* Make the signed distance fields of meshes reproducible. (@duburcqa) (#3659)
+* Fix memory leak when building several scenes in one process. (@duburcqa) (#3655)
+* Fix crash of the threaded viewer when its scene is rebuilt or destroyed. (@duburcqa) (#3658)
+* Fix threaded viewer stalling the simulation while dragging a body or recording. (@duburcqa) (#3661)
+* Fix camera videos missing frames on macOS. (@duburcqa) (#3667)
+* Fix subprocesses failing and native output leaking on Windows. (@duburcqa) (#3688)
+* Fix unpickling a scene on Python 3.14. (@duburcqa) (#3712)
+* Fix kernel recompilation and memory reallocation when per-env poses split a static raycast BVH. (@duburcqa) (#3706)
+* Fix various edge-cases in geometry helpers. (@Milotrince) (#3709)
+* Fix PNG export of 1-channel depth images. (@guptaishaan) (#3609)
+
+### Miscellaneous
+
+* Speed up the constraint solver on GPU. (@duburcqa) (#3607)
+* Speed up noslip friction. (@duburcqa) (#3610)
+* Speed up the mass matrix solves and the incremental constraint factor update. (@duburcqa) (#3613)
+* Speed up collision detection of convex geoms whose bounding boxes overlap without contact. (@duburcqa) (#3612)
+* Speed up and reduce memory footprint of building terrains. (@Kashu7100) (#3606)
+* Speed up collision detection against terrains on GPU. (@duburcqa) (#3617)
+* Speed up compilation of non-convex collision detection on CPU. (@duburcqa) (#3633)
+* Speed up CPU simulation by storing the data of each environment contiguously. (@duburcqa) (#3705)
+* Speed up the implicit FEM solver by up to 2x with small batches. (@duburcqa) (#3736)
+* Speed up FEM and particle steps and resets by fusing fills. (@duburcqa) (#3723)
+* Speed up differentiable simulation. (@duburcqa) (#3630)
+* Speed up deduplicating integer rows. (@Milotrince) (#3621)
+* Reduce memory footprint of diff sim for implicit FEM. (@duburcqa) (#3741)
+* Reduce host memory of scenes whose geoms share a texture. (@Kashu7100) (#3674)
+* Remove mostly broken stable-fluid solver. (@duburcqa) (#3691)
+* Upgrade to quadrants 1.4.0. (@hughperkins) (#3684)
+* Drop support of Python 3.10. (@duburcqa) (#3653)
+* Drop support of Python 3.11. (@duburcqa) (#3660)
+* Support Python 3.14. (@duburcqa) (#3689, #3690)
+
 ## 1.4.5
 
 The release significantly rigid body simulation for scenes with fine convex decomposition or non-convex geometries. Besides, the overhead of trajectory recording has been dramatically reduced (<20% in most cases). Finally, caching has been improved across the board, avoiding recompilation more reliably and reloading assets much faster.
