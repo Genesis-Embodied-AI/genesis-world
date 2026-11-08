@@ -13,7 +13,7 @@ from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.grad.bridge import custom_backward, register_custom_backward
+from genesis.grad.bridge import custom_backward, no_grad
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
@@ -553,24 +553,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             for i_e, i_b in qd.ndrange(self.n_elements, self._B):
                 self.elements_el[f + 1, i_e, i_b].actu = self.elements_el[f, i_e, i_b].actu
 
-    @qd.kernel
-    def precompute_material_data_grad(self, f: int):
-        """Reverse the data the materials compute from the start of a substep, consuming its adjoint."""
-        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
-            _, F = self._compute_ele_J_F(f, i_e, i_b)
-            F_grad = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    F_grad = self._mats[mat_idx].pre_compute_grad(i_e, i_b, F, self.elements_i[i_e].muscle_direction)
-            # F = D B, D holding the positions of the first three vertices relative to the last in its columns
-            D_grad = F_grad @ self.elements_i[i_e].B.transpose()
-            i_vs = self.elements_i[i_e].el2v
-            for i_k in qd.static(range(3)):
-                qd.atomic_add(self.elements_v.grad[f, i_vs[i_k], i_b].pos, D_grad[:, i_k])
-            qd.atomic_add(self.elements_v.grad[f, i_vs[3], i_b].pos, -D_grad[:, 0] - D_grad[:, 1] - D_grad[:, 2])
-
-    # The data includes the rotation of the polar decomposition, which autodiff cannot reverse
-    @register_custom_backward(precompute_material_data_grad)
+    # The backward pass of the solve reverses the data along with the forces it enters (see '_implicit_solve_grad')
+    @no_grad
     @qd.kernel
     def precompute_material_data(self, f: qd.i32):
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
@@ -642,15 +626,20 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             damping_beta_over_dt = self._damping_beta / self._substep_dt
             i_vs = self.elements_i[i_e].el2v
             S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
-            x_diff = qd.Matrix.cols(
-                [
-                    self.elements_v[f + 1, i_vs[i_k], i_b].pos - self.elements_v[f, i_vs[i_k], i_b].pos
-                    for i_k in qd.static(range(4))
-                ]
-            )
-            _, dP = self.compute_elastic_product(i_e, i_b, S, x_diff)
+            _, dP = self.compute_elastic_product(i_e, i_b, S, self._func_element_displacement(f, i_e, i_b))
             gradient = gradient + damping_beta_over_dt * dP
         return energy, gradient
+
+    @qd.func
+    def _func_element_displacement(self, f: int, i_e: int, i_b: int):
+        # The displacement of each vertex of an element over a substep, one per column
+        i_vs = self.elements_i[i_e].el2v
+        return qd.Matrix.cols(
+            [
+                self.elements_v[f + 1, i_vs[i_k], i_b].pos - self.elements_v[f, i_vs[i_k], i_b].pos
+                for i_k in qd.static(range(4))
+            ]
+        )
 
     @qd.func
     def _func_compute_ele_energy_gradient(self, f: int):
@@ -1280,14 +1269,51 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_b, i_v in qd.ndrange(self._B, self.n_vertices):
             qd.atomic_add(self.elements_v_energy[i_b, i_v].force, self._func_vertex_inertia_force(f, i_v, i_b))
 
+    @qd.kernel
+    def _kernel_material_data_grad(self, f: int):
+        # The adjoint of the data the materials compute from the start of the substep, which the forces seeded with
+        # lambda pull on (see '_implicit_solve_grad'), carried to the start positions element by element.
+        for i_b, i_e in qd.ndrange(self._B, self.n_elements):
+            i_vs = self.elements_i[i_e].el2v
+            S = self._func_compute_element_mapping_matrix(i_vs, self.elements_i[i_e].B, i_b)
+            # The forces -V * gradient @ S^T on the vertices dotted with lambda give <gradient, -V * lambda @ S>
+            vertices_lambda = qd.Matrix.cols(
+                [self.elements_v_energy.grad[i_b, i_vs[i_k]].force for i_k in qd.static(range(4))]
+            )
+            gradient_grad = -self.elements_i[i_e].V * vertices_lambda @ S
+            _, F_start = self._compute_ele_J_F(f, i_e, i_b)
+            _, F = self._compute_ele_J_F(f + 1, i_e, i_b)
+            dF_damping = qd.Matrix.zero(gs.qd_float, 3, 3)
+            if qd.static(self._damping_beta > gs.EPS):
+                damping_beta_over_dt = self._damping_beta / self._substep_dt
+                dF_damping = damping_beta_over_dt * self._func_element_displacement(f, i_e, i_b) @ S
+            mu = self.elements_i[i_e].mu
+            lam = self.elements_i[i_e].lam
+            actu = self.elements_el[f, i_e, i_b].actu
+            m_dir = self.elements_i[i_e].muscle_direction
+            F_start_grad = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for mat_idx in qd.static(self._mats_idx):
+                if self.elements_i[i_e].mat_idx == mat_idx:
+                    F_start_grad = self._mats[mat_idx].pre_compute_grad(
+                        i_e, i_b, mu, lam, F_start, F, dF_damping, gradient_grad, actu, m_dir
+                    )
+            # F_start = D B, D holding the positions of the first three vertices relative to the last in its columns
+            D_grad = F_start_grad @ self.elements_i[i_e].B.transpose()
+            for i_k in qd.static(range(3)):
+                qd.atomic_add(self.elements_v.grad[f, i_vs[i_k], i_b].pos, D_grad[:, i_k])
+            qd.atomic_add(self.elements_v.grad[f, i_vs[3], i_b].pos, -D_grad[:, 0] - D_grad[:, 1] - D_grad[:, 2])
+
     def _implicit_solve_grad(self, f: int) -> None:
         # The end positions x+ are the root of the forces R(x+; x, v, actu), whose Jacobian with respect to x+ is minus
         # the Hessian H of the incremental energy, symmetric and constant since every material the implicit solver
         # supports has an energy quadratic in x+. The adjoint solve H lambda = g of the adjoint g of x+ runs the PCG
         # of the solve, then the autodiff of the forces seeded with lambda adds lambda^T dR/d(input) to the adjoint of
-        # every input. A constrained vertex has no force, so its target takes its adjoint plus the pull of lambda.
+        # every input but the data the materials compute from the start of the substep, which autodiff takes as
+        # constant and the closed-form reverse of the materials carries to the start positions instead. A constrained
+        # vertex has no force, so its target takes its adjoint plus the pull of lambda.
         self._kernel_solve_adjoint(f, self._pcg_counter)
         self._kernel_compute_implicit_force.grad(f)
+        self._kernel_material_data_grad(f)
 
     @qd.kernel
     def setup_pos_vel(self, f: qd.i32):
