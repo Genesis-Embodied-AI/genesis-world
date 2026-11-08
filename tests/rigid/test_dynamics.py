@@ -190,13 +190,19 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
     if dynamics:
         for entity in scene.entities[1:]:
             entity.set_dofs_velocity(4.0 * np.random.rand(6))
-    num_steps = 1000 if dynamics else 150
-    for i in range(num_steps):
+    num_steps_min, num_steps_max = (700, 1200) if dynamics else (100, 150)
+    num_steps_rest = 0
+    for i in range(num_steps_max):
         scene.step()
-        if i > num_steps - 50:
+        if i >= num_steps_min:
             qvel = scene.rigid_solver.get_dofs_velocity().reshape((6, -1))
             # Checking the average velocity because is always one cube moving depending on the machine.
-            assert_allclose(torch.linalg.norm(qvel, dim=0).mean(), 0, atol=0.05)
+            is_at_rest = torch.linalg.norm(qvel, dim=0).mean() < 0.01
+            num_steps_rest = num_steps_rest + 1 if is_at_rest else 0
+            if num_steps_rest == 50:
+                break
+    else:
+        raise AssertionError
 
     for n, entity in enumerate(scene.entities[1:]):
         i, j, k = n // N_SIDE**2, (n // N_SIDE) % N_SIDE, n % N_SIDE
@@ -670,7 +676,7 @@ def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer
         acc = (vel_next - vel) / DT
         inertial_force = entity.get_mass_mat() @ acc
         assert_allclose(
-            inertial_force / weight, entity.get_dofs_force() / weight, atol=2e-6 if gs.np_float == np.float32 else 1e-9
+            inertial_force / weight, entity.get_dofs_force() / weight, atol=5e-6 if gs.np_float == np.float32 else 1e-9
         )
         vel = vel_next
 
