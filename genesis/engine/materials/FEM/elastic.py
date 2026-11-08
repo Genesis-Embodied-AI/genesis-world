@@ -84,7 +84,9 @@ class Elastic(Base):
         self._R = qd.field(dtype=gs.qd_mat3, shape=(fem_solver._B, fem_solver.n_elements))
 
     @qd.func
-    def _pre_compute_linear_corotated(self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3)):
+    def _pre_compute_linear_corotated(
+        self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)
+    ):
         U, S, V = gu.qd_svd(F)
         R = U @ V.transpose()
         self._R[i_b, i_e] = R
