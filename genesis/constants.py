@@ -168,6 +168,32 @@ class broadphase_traversal(StrEnum):
     ALL_VS_ALL = enum.auto()
 
 
+class ray_alignment(StrEnum):
+    """
+    Orientation of the ray pattern of a raycaster sensor, relative to the link the sensor is mounted on.
+
+    The pattern is always centered on the mounting point, which follows the full pose of the link, pos_offset being
+    expressed in the frame of the link. The alignment sets the orientation of the pattern alone, and euler_offset
+    rotates the pattern within the aligned frame.
+
+    Attributes
+    ----------
+    base : str
+        The pattern tracks the full orientation of the link. Pick it for a sensor rigidly attached to the robot, such as
+        a lidar or a depth camera.
+    yaw : str
+        The pattern keeps the heading of the link and drops its roll and pitch, so it stays level when the link tilts.
+        Pick it for the terrain height map of a legged robot, whose base pitches and rolls as it walks.
+    world : str
+        The pattern keeps the orientation of the world frame, whatever the orientation of the link. Pick it to query
+        the scene in a global frame, e.g. alongside a map built by the robot.
+    """
+
+    base = enum.auto()
+    yaw = enum.auto()
+    world = enum.auto()
+
+
 class link_ref_frame(IntEnum):
     """
     Reference frame at which a per-link quantity is expressed.

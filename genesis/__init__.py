@@ -502,6 +502,7 @@ from .constants import (
     friction_cone,
     contact_resolution,
     broadphase_traversal,
+    ray_alignment,
     link_ref_frame,
 )
 
