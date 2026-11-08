@@ -65,9 +65,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # materials
         self._mats = list()
-        self._mats_idx = list()
-        self._mats_update_stress = list()
-        self._mats_compute_energy = list()
 
         # lazy initialization
         self._constraints_initialized = False
@@ -455,19 +452,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "FEMEntity":
-        # add material's update methods if not matching any existing material
-        exist = False
+        # The kernels dispatch on the index of the material among the distinct ones, so each one is registered and built
+        # once, whatever the number of entities sharing it.
         for mat in self._mats:
             if material == mat:
                 material.idx = mat.idx
-                exist = True
                 break
-        self._mats.append(material)
-        if not exist:
-            material.idx = len(self._mats_idx)
-            self._mats_idx.append(material.idx)
-            self._mats_update_stress.append(material.update_stress)
-            self._mats_compute_energy.append(material.compute_energy)
+        else:
+            material.idx = len(self._mats)
+            self._mats.append(material)
 
         # create entity
         entity = FEMEntity(
@@ -508,12 +501,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         actu = self.elements_el[f, i_e, i_b].actu
         m_dir = self.elements_i[i_e].muscle_direction
         stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for mat_idx in qd.static(self._mats_idx):
+        for mat_idx in qd.static(range(len(self._mats))):
             if self.elements_i[i_e].mat_idx == mat_idx:
                 if qd.static(self._use_implicit_solver):
                     _, stress = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
                 else:
-                    stress = self._mats_update_stress[mat_idx](mu, lam, J, F, actu, m_dir)
+                    stress = self._mats[mat_idx].update_stress(mu, lam, J, F, actu, m_dir)
         H = -self.elements_i[i_e].V * stress @ self.elements_i[i_e].B.transpose()
         return qd.Matrix.cols([H[:, 0], H[:, 1], H[:, 2], -H[:, 0] - H[:, 1] - H[:, 2]])
 
@@ -559,7 +552,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def precompute_material_data(self, f: qd.i32):
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             J, F = self._compute_ele_J_F(f, i_e, i_b)  # use last time step's pos to compute
-            for mat_idx in qd.static(self._mats_idx):
+            for mat_idx in qd.static(range(len(self._mats))):
                 if self.elements_i[i_e].mat_idx == mat_idx:
                     self._mats[mat_idx].pre_compute(i_e, i_b, J, F, self.elements_i[i_e].muscle_direction)
 
@@ -619,7 +612,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         m_dir = self.elements_i[i_e].muscle_direction
         energy = gs.qd_float(0.0)
         gradient = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for mat_idx in qd.static(self._mats_idx):
+        for mat_idx in qd.static(range(len(self._mats))):
             if self.elements_i[i_e].mat_idx == mat_idx:
                 energy, gradient = self._mats[mat_idx].compute_energy_gradient(i_e, i_b, mu, lam, J, F, actu, m_dir)
         if qd.static(self._damping_beta > gs.EPS):
@@ -679,7 +672,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         mu = self.elements_i[i_e].mu
         lam = self.elements_i[i_e].lam
         dP = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for mat_idx in qd.static(self._mats_idx):
+        for mat_idx in qd.static(range(len(self._mats))):
             if self.elements_i[i_e].mat_idx == mat_idx:
                 dP = self._mats[mat_idx].hessian_product(i_e, i_b, mu, lam, dF)
         return dF, dP
@@ -713,7 +706,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             lam = self.elements_i[i_e].lam
             actu = self.elements_el[f, i_e, i_b].actu
             m_dir = self.elements_i[i_e].muscle_direction
-            for mat_idx in qd.static(self._mats_idx):
+            for mat_idx in qd.static(range(len(self._mats))):
                 if self.elements_i[i_e].mat_idx == mat_idx:
                     self.elements_el_energy[i_b, i_e].energy = self._mats[mat_idx].compute_energy(
                         i_e, i_b, mu, lam, J, F, actu, m_dir
@@ -1292,7 +1285,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             actu = self.elements_el[f, i_e, i_b].actu
             m_dir = self.elements_i[i_e].muscle_direction
             F_start_grad = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for mat_idx in qd.static(self._mats_idx):
+            for mat_idx in qd.static(range(len(self._mats))):
                 if self.elements_i[i_e].mat_idx == mat_idx:
                     F_start_grad = self._mats[mat_idx].pre_compute_grad(
                         i_e, i_b, mu, lam, F_start, F, dF_damping, gradient_grad, actu, m_dir
