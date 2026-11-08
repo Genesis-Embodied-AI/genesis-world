@@ -166,7 +166,7 @@ class Emitter(RBC):
             self._entity.set_particles_vel(vels, particles_idx)
             self._entity.set_particles_active(gs.ACTIVE, particles_idx)
 
-            self._next_particle += n_particles
+            self._next_particle = (self._next_particle + n_particles) % self._entity.n_particles
 
             gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
@@ -232,7 +232,7 @@ class Emitter(RBC):
         self._entity.set_particles_vel(vels, particles_idx)
         self._entity.set_particles_active(gs.ACTIVE, particles_idx)
 
-        self._next_particle += n_particles
+        self._next_particle = (self._next_particle + n_particles) % self._entity.n_particles
 
         gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
