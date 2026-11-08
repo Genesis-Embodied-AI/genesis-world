@@ -2711,6 +2711,8 @@ class FEMFloorTetContactHandler(FEMContactHandler):
             # TODO A better way to handle corner cases where pressure and pressure gradient are ill defined
             if total_area < self.eps or rigid_g < self.eps:
                 continue
+            # TODO: The published hydroelastic model treats the rigid side as infinitely stiff (g = FEM gradient alone).
+            # Also, 'hydroelastic_stiffness' is a pressure gradient here but a modulus in the rigid pressure fields.
             g = 1.0 / (1.0 / deformable_g + 1.0 / rigid_g)  # harmonic average
             rigid_k = total_area * g
             rigid_phi0 = -pressure / g
@@ -2999,8 +3001,12 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             pressure = barycentric0.dot(tet_pressures0)
             g0 = self.coupler.fem_pressure_gradient[i_b, i_e0].dot(self.contact_candidates[i_c].normal)
             g1 = -self.coupler.fem_pressure_gradient[i_b, i_e1].dot(self.contact_candidates[i_c].normal)
+            g = 1.0 / (1.0 / g0 + 1.0 / g1)  # harmonic average
+            # A nonpositive gradient would give a nonpositive stiffness, which makes the SAP cost nonconvex
+            if g < self.eps:
+                continue
             # FIXME This is an approximated value, different from Drake, which actually calculates the distance
-            deformable_phi0 = -pressure / g0 - pressure / g1
+            deformable_phi0 = -pressure / g
 
             if deformable_phi0 > gs.EPS:
                 continue
@@ -3016,9 +3022,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
                 self.contact_pairs[i_p].barycentric0 = barycentric0
                 self.contact_pairs[i_p].barycentric1 = barycentric1
 
-                deformable_g = self.coupler._hydroelastic_stiffness
-                deformable_k = total_area * deformable_g
-                sap_info[i_p].k = deformable_k
+                sap_info[i_p].k = total_area * g
                 sap_info[i_p].phi0 = deformable_phi0
                 sap_info[i_p].mu = qd.sqrt(
                     self.fem_solver.elements_i[i_e0].friction_mu * self.fem_solver.elements_i[i_e1].friction_mu
@@ -3654,6 +3658,8 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
             pressure = barycentric0.dot(tet_pressures)
             if total_area < self.eps or rigid_g < self.eps:
                 continue
+            # TODO: The published hydroelastic model treats the rigid side as infinitely stiff (g = FEM gradient alone).
+            # Also, 'hydroelastic_stiffness' is a pressure gradient here but a modulus in the rigid pressure fields.
             g = rigid_g * deformable_g / (deformable_g + rigid_g)  # harmonic average
             rigid_k = total_area * g
             rigid_phi0 = -pressure / g
