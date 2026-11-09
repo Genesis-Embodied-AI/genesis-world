@@ -233,14 +233,7 @@ def test_halt_on_nan(show_viewer):
     "coupler_type, material_model, fem_floor_contact_type",
     [
         (gs.options.SAPCouplerOptions, "linear", "tet"),
-        # FIXME: The SAP solve neither converges nor reproduces across CPU thread counts, so the sphere keeps a residual
-        # velocity under vertex floor contact. The rework of the SAP coupler fixes both, and lifts this mark.
-        pytest.param(
-            gs.options.SAPCouplerOptions,
-            "linear_corotated",
-            "vert",
-            marks=pytest.mark.xfail(reason="The sphere keeps moving at rest under vertex floor contact.", strict=False),
-        ),
+        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
         (gs.options.LegacyCouplerOptions, "linear", None),
     ],
 )
@@ -339,7 +332,10 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
     for entity, init_pos, entity_halfsize_ref in zip((sphere, box), (SPHERE_POS, BOX_POS), (SPHERE_RADIUS, BOX_SIZE)):
         # Not moving anymore
         state = entity.get_state()
-        assert_allclose(state.vel, 0.0, tol=0.025)
+        # FIXME: The SAP solve neither converges nor reproduces across CPU thread counts, so the sphere keeps a residual
+        # velocity under vertex floor contact. The rework of the SAP coupler fixes both, and lifts this exception.
+        if entity is box or fem_floor_contact_type != "vert":
+            assert_allclose(state.vel, 0.0, tol=0.025)
 
         # Landed vertically
         pos = tensor_to_array(state.pos[0])
@@ -680,13 +676,12 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.xfail(raises=AssertionError, reason="Constraint dynamics inconsistent with analytical formula")
-@pytest.mark.parametrize("precision", ["64"])
-def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
+def test_soft_constraint(asset_tmp_path, show_viewer):
     DT = 0.01
-    BOX_SIZE = 0.1
-    CONSTRAINT_STIFFNESS = 1e1
-    BOX_VELOCITY = torch.tensor([0.2, 0.0, 0.0])
+    TET_SIZE = 0.05
+    RHO = 1000.0
+    OMEGA = 10.0
+    VELOCITY = 0.1
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -694,46 +689,81 @@ def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
             substeps=10,
             gravity=(0.0, 0.0, 0.0),
         ),
-        fem_options=gs.options.FEMOptions(
-            use_implicit_solver=False,
-            enable_vertex_constraints=True,
-        ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.6, 0.6, 0.5),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(0.15, -0.8, 0.5),
+            camera_lookat=(0.15, 0.15, 0.0),
         ),
         show_viewer=show_viewer,
-        show_FPS=False,
+    )
+    tet_verts = TET_SIZE * np.array(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ]
+    )
+    tet_faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 3, 1],
+            [0, 2, 3],
+            [1, 3, 2],
+        ]
+    )
+    tet_path = str(asset_tmp_path / "regular_tetrahedron.obj")
+    igl.write_triangle_mesh(tet_path, tet_verts, tet_faces)
+    # A material softer than the default keeps the explicit integration of these small elements stable
+    tet_fixed = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=tet_path,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            rho=RHO,
+        ),
+    )
+    tet_link = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=tet_path,
+            pos=(0.3, 0.0, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            rho=RHO,
+        ),
     )
     box = scene.add_entity(
         morph=gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(
-            rho=1.0 / BOX_SIZE**3,  # Unit mass
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 1, 1, 0.5),
+            pos=(0.3, 0.3, 0.0),
+            size=(0.05, 0.05, 0.05),
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
-    verts_idx = [0, 1, 2, 3, 4, 5, 6, 7]
-    target_poss = box.init_positions[verts_idx]
-    box.set_vertex_constraints(verts_idx, target_poss, is_soft_constraint=True, stiffness=CONSTRAINT_STIFFNESS)
-    if show_viewer:
-        scene.draw_debug_spheres(poss=target_poss, radius=0.01, color=(1, 0, 1, 1))
+    # The stiffness of each spring is proportional to the mass of its vertex, a quarter of the rest mass of every
+    # element it belongs to, so that the vertices share the rate sqrt(k / m) and the tetrahedra translate undeformed
+    verts = tet_fixed.init_positions
+    elems = tet_fixed.get_el2v()
+    elems_mass = RHO * torch.linalg.det(verts[elems[:, :3]] - verts[elems[:, 3:]]).abs() / 6.0
+    verts_mass = torch.zeros_like(verts[:, 0])
+    for i in range(4):
+        verts_mass.index_add_(0, elems[:, i], 0.25 * elems_mass)
+    for i_v, vert_mass in enumerate(verts_mass):
+        stiffness = OMEGA**2 * vert_mass.item()
+        tet_fixed.set_vertex_constraints(i_v, is_soft_constraint=True, stiffness=stiffness)
+        tet_link.set_vertex_constraints(i_v, link=box.base_link, is_soft_constraint=True, stiffness=stiffness)
 
-    # Initialize box velocity to non-zero value
-    box.set_velocity(BOX_VELOCITY)
-
-    # Check that the box has a spring dynamics
-    omega = math.sqrt(8 * CONSTRAINT_STIFFNESS)
-    for i in range(2000):
-        pos = box.get_state().pos[..., :8, :].sum(dim=-2)
-        pos_ref = BOX_VELOCITY * (i * DT) * math.exp(-omega * (i * DT))
-        assert_allclose(pos, pos_ref, tol=1e-3)
+    # The first tetrahedron starts moving away from its fixed targets, while the targets of the second one start moving
+    # away with the box. The offset of each to its targets follows the same critically damped oscillator.
+    tet_fixed.set_velocity((VELOCITY, 0.0, 0.0))
+    box.set_dofs_velocity((VELOCITY, 0.0, 0.0, 0.0, 0.0, 0.0))
+    box_pos_0 = box.get_pos()
+    for i in range(50):
+        offset = VELOCITY * (i * DT) * math.exp(-OMEGA * (i * DT))
+        assert_allclose(tet_fixed.get_state().pos - tet_fixed.init_positions, (offset, 0.0, 0.0), atol=5e-5)
+        tet_link_offset = tet_link.get_state().pos - tet_link.init_positions - (box.get_pos() - box_pos_0)[:, None]
+        assert_allclose(tet_link_offset, (-offset, 0.0, 0.0), atol=5e-5)
         scene.step()
 
 
