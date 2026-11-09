@@ -1,0 +1,19 @@
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_62727d4766255a 563-567
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "901278213493ccaa4525952db125e5053ac7ce0a",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
