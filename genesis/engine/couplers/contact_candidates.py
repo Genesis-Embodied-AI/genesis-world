@@ -116,6 +116,7 @@ def func_select_nearest(candidates: ContactCandidates, mpm_info: MpmInfo):
         i_cand = candidates.order.triplets_source_idx[i_t]
         i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
+        tie_tol = candidates.tie_ratio[()] * mpm_info.dx[()]
         if (
             score < qd.math.inf
             and score <= candidates.best_score[i_nz] + tie_tol
