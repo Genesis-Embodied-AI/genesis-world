@@ -16,9 +16,15 @@ def test_muscle(n_envs, muscle_material, show_viewer):
     )
     # The implicit MPM takes one large step, while the explicit FEM needs small substeps to stay stable
     if muscle_material is gs.materials.MPM.Muscle:
-        sim_options = gs.options.SimOptions(dt=1e-2, substeps=1)
+        sim_options = gs.options.SimOptions(
+            dt=1e-2,
+            substeps=1,
+        )
     else:
-        sim_options = gs.options.SimOptions(dt=5e-4, substeps=10)
+        sim_options = gs.options.SimOptions(
+            dt=5e-4,
+            substeps=10,
+        )
     scene = gs.Scene(
         sim_options=sim_options,
         mpm_options=mpm_options,
@@ -33,9 +39,8 @@ def test_muscle(n_envs, muscle_material, show_viewer):
         morph=gs.morphs.Plane(),
         material=plane_material,
     )
-    # The body rests on the plane from the start. The plane holds the MPM particles by their centers from its coupling
-    # softness on, and they lie half a particle size inside the surface of the body, so an MPM body starts lower by the
-    # difference of the two.
+    # The body rests on the plane from the start: the plane holds MPM particles, which lie half a particle size inside
+    # the surface of the body, by their centers at its coupling softness
     height = 0.05
     if muscle_material is gs.materials.MPM.Muscle:
         height -= 0.5 * mpm_options.particle_size - plane_material.coup_softness

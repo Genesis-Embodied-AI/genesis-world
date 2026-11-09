@@ -107,6 +107,7 @@ def test_mpm_on_terrain(show_viewer):
             subterrain_types="flat_terrain",
         ),
         material=gs.materials.Rigid(),
+        vis_mode="collision",
     )
     block = scene.add_entity(
         morph=gs.morphs.Box(
@@ -121,17 +122,32 @@ def test_mpm_on_terrain(show_viewer):
 
     for _ in range(60):
         scene.step()
-    pos = tensor_to_array(block.get_particles_pos())
-    assert np.isfinite(pos).all()
-    dx = 1.0 / 64
-    assert pos[..., 2].min() > -0.5 * dx
+    assert block.get_particles_pos()[..., 2].min() > -0.5 * scene.mpm_solver.dx
 
 
 @pytest.mark.required
 def test_reject_unsupported_mpm_coupling():
-    liquid = (gs.morphs.Box(pos=(0.0, 0.0, 0.3), size=(0.1, 0.1, 0.1)), gs.materials.MPM.Liquid())
-    box = (gs.morphs.Box(pos=(0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.Rigid())
-    soft = (gs.morphs.Box(pos=(-0.3, 0.0, 0.1), size=(0.1, 0.1, 0.1)), gs.materials.FEM.Elastic())
+    liquid = (
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 0.3),
+            size=(0.1, 0.1, 0.1),
+        ),
+        gs.materials.MPM.Liquid(),
+    )
+    box = (
+        gs.morphs.Box(
+            pos=(0.3, 0.0, 0.1),
+            size=(0.1, 0.1, 0.1),
+        ),
+        gs.materials.Rigid(),
+    )
+    soft = (
+        gs.morphs.Box(
+            pos=(-0.3, 0.0, 0.1),
+            size=(0.1, 0.1, 0.1),
+        ),
+        gs.materials.FEM.Elastic(),
+    )
     terrain = (gs.morphs.Terrain(), gs.materials.Rigid())
     for entities, options, requires_grad, match in (
         ((liquid, box), {"friction_cone": gs.friction_cone.elliptic}, False, "elliptic"),
@@ -142,12 +158,19 @@ def test_reject_unsupported_mpm_coupling():
         ((liquid, terrain), {}, True, "terrain"),
     ):
         scene = gs.Scene(
-            sim_options=gs.options.SimOptions(requires_grad=requires_grad),
-            rigid_options=gs.options.RigidOptions(**options),
+            sim_options=gs.options.SimOptions(
+                requires_grad=requires_grad,
+            ),
+            rigid_options=gs.options.RigidOptions(
+                **options,
+            ),
             show_viewer=False,
         )
         for morph, material in entities:
-            scene.add_entity(morph=morph, material=material)
+            scene.add_entity(
+                morph=morph,
+                material=material,
+            )
         with pytest.raises(gs.GenesisException, match=match):
             scene.build()
 
@@ -378,10 +401,12 @@ def test_deformable_parallel(show_viewer):
 
 @pytest.mark.required
 def test_fem_outside_mpm_grid(show_viewer):
-    # The joint solve of MPM and FEM moves the vertices together, so the FEM velocities hold its tolerance
+    # A body far from the grid moves in the joint solve of MPM and FEM as it does in the solve of FEM alone, within the
+    # tolerance of the solve. Which solvers take part is set at build, so each setup is a scene of its own.
     VELOCITY_TOL = 1e-3
 
-    def fall(with_mpm):
+    velocities = []
+    for is_mpm_in_scene in (True, False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=1e-2,
@@ -403,7 +428,7 @@ def test_fem_outside_mpm_grid(show_viewer):
             ),
             show_viewer=show_viewer,
         )
-        if with_mpm:
+        if is_mpm_in_scene:
             scene.add_entity(
                 morph=gs.morphs.Box(
                     pos=(0.0, 0.0, 0.1),
@@ -425,10 +450,8 @@ def test_fem_outside_mpm_grid(show_viewer):
         scene.build(n_envs=2)
         for _ in range(10):
             scene.step()
-        return fem.get_state().vel
-
-    # A body far from the grid moves in the joint solve as it does in the solve of FEM alone
-    assert_allclose(fall(with_mpm=True), fall(with_mpm=False), tol=VELOCITY_TOL)
+        velocities.append(fem.get_state().vel)
+    assert_allclose(*velocities, tol=VELOCITY_TOL)
 
 
 @pytest.mark.parametrize(
@@ -447,9 +470,15 @@ def test_fem_outside_mpm_grid(show_viewer):
 def test_fluid_emitter(n_envs, material_type, show_viewer):
     # The implicit MPM takes one large step, while SPH and PBD need small substeps
     if issubclass(material_type, gs.materials.MPM.Base):
-        sim_options = gs.options.SimOptions(dt=1e-2, substeps=1)
+        sim_options = gs.options.SimOptions(
+            dt=1e-2,
+            substeps=1,
+        )
     else:
-        sim_options = gs.options.SimOptions(dt=4e-3, substeps=10)
+        sim_options = gs.options.SimOptions(
+            dt=4e-3,
+            substeps=10,
+        )
     scene = gs.Scene(
         sim_options=sim_options,
         mpm_options=gs.options.MPMOptions(

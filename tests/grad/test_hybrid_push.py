@@ -1,5 +1,3 @@
-from typing import NamedTuple
-
 import numpy as np
 import pytest
 import torch
@@ -110,66 +108,11 @@ def test_mpm_rigid_push_grad(show_viewer):
     assert v_far_list[-1].grad is None
 
 
-class _FdCase(NamedTuple):
-    params: np.ndarray
-    i_loss: int
-    eps: float
-    # The entries whose finite difference is taken, every entry when None
-    idx: tuple[tuple[int, ...], ...] | None = None
-
-
-def _grads_and_fd(rollout, cases):
-    # The backward pass runs on the sum of the losses, which each depend on the cases of their own body alone. A
-    # rollout of the finite differences perturbs one entry of every loss at once, the bodies standing far apart, on the
-    # same scene without gradients, which simulates the same physics.
-    params_ana = [torch.tensor(case.params, dtype=gs.tc_float, device=gs.device, requires_grad=True) for case in cases]
-    torch.atleast_1d(rollout(params_ana)).sum().backward()
-    fd_grads = [np.zeros_like(case.params) for case in cases]
-    entries_by_loss = [[] for _ in range(max(case.i_loss for case in cases) + 1)]
-    for i_case, case in enumerate(cases):
-        idx_all = np.ndindex(case.params.shape) if case.idx is None else case.idx
-        entries_by_loss[case.i_loss].extend((i_case, idx) for idx in idx_all)
-    with torch.no_grad():
-        for i_entry in range(max(len(entries) for entries in entries_by_loss)):
-            entries = [entries[i_entry] for entries in entries_by_loss if i_entry < len(entries)]
-            losses = []
-            for sign in (+1, -1):
-                params = [case.params.copy() for case in cases]
-                for i_case, idx in entries:
-                    params[i_case][idx] += sign * cases[i_case].eps
-                losses.append(torch.atleast_1d(rollout(params)))
-            for i_case, idx in entries:
-                i_loss = cases[i_case].i_loss
-                fd_grads[i_case][idx] = float(losses[0][i_loss] - losses[1][i_loss]) / (2.0 * cases[i_case].eps)
-    return params_ana, fd_grads
-
-
-def _optimize(rollout, params, n_iters, lr):
-    # The gradients of the implicit MPM describe the motion where its Newton solve stops, so they are inexact at the
-    # default tolerance, which a descent method tolerates: what they must do is optimize the losses
-    params = [torch.tensor(param, dtype=gs.tc_float, device=gs.device, requires_grad=True) for param in params]
-    optimizer = torch.optim.Adam(params, lr=lr)
-    losses = []
-    for _ in range(n_iters):
-        optimizer.zero_grad()
-        loss = torch.atleast_1d(rollout(params))
-        loss.sum().backward()
-        losses.append(loss.detach())
-        optimizer.step()
-    with torch.no_grad():
-        losses.append(torch.atleast_1d(rollout(params)))
-    return params, torch.stack(losses)
-
-
 @pytest.mark.required
-def test_mpm_grad_descends(show_viewer):
-    # The bodies stand far apart in one scene, each driving a loss of its own through inputs of its own, so that one
-    # backward pass covers them all. The force fields act on the whole domain, hence on every body: the
-    # gradient of the initial velocity goes through their derivative with respect to the velocity (zero for the
-    # constant field, the drag's |v| v and the flow of the point attractor otherwise). The muscle drives its particles
-    # by its actuations. Each pair of blocks collides head-on and yields, so that the gradient of the initial velocity
-    # of the first goes through the reverse of the return map of every substep after the impact, and through the
-    # plastic volume ratio Jp for the snow and the sand.
+def test_mpm_grad_descends(optimize, show_viewer):
+    # Far apart, every body drives a loss of its own through inputs of its own, one backward pass covering them all.
+    # The gradients go through the velocity derivative of the force fields, the actuation of the muscle, and the
+    # return maps of the blocks yielding in their head-on collisions.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -309,7 +252,7 @@ def test_mpm_grad_descends(show_viewer):
     actus = np.array([[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]])
     vels_block = np.array([[0.3, -0.2, 0.4], [-0.5, 0.1, 0.2]])
     vels_blocks = np.array([[1.5, -0.2, 0.3], [1.2, 0.1, -0.2]])
-    params, losses = _optimize(
+    params, losses = optimize(
         rollout, [actus, np.array([0.1, -0.2, 0.3]), vels_block, *(vels_blocks,) * len(materials)], n_iters=20, lr=0.1
     )
     # Every body comes closer to its goal at every step of the optimization of its own inputs
@@ -324,9 +267,8 @@ def test_mpm_grad_descends(show_viewer):
 @pytest.mark.required
 @pytest.mark.precision("64")
 def test_fem_grad_matches_fd(precision, show_viewer):
-    # The muscle drives its elements by its actuations, and the FEM block follows the rigid box, its near end held at
-    # the box and its far end pulled toward it by springs, so the gradient also flows from the box pose to the block.
-    # The muscle stands far from the block, each driving a loss of its own.
+    # Far apart, the muscle drives its loss by its actuations and the FEM block its own through the rigid box, its near
+    # end held at the box and its far end pulled toward it by springs.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             # The explicit FEM integration needs small substeps
@@ -361,6 +303,7 @@ def test_fem_grad_matches_fd(precision, show_viewer):
             pos=(0.0, 0.01, 0.0),
             size=(0.08, 0.08, 0.08),
         ),
+        vis_mode="collision",
     )
     fem_block = scene.add_entity(
         morph=gs.morphs.Box(
@@ -398,18 +341,31 @@ def test_fem_grad_matches_fd(precision, show_viewer):
                 loss_muscle = ((muscle.get_state().pos - goal) ** 2).sum()
         return torch.stack([loss_muscle, (fem_block.get_state().pos ** 2).sum()])
 
-    cases = [
-        _FdCase(params=np.array([[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]), i_loss=0, eps=1e-5),
-        _FdCase(params=np.array([-0.2, 0.1, 0.2]), i_loss=0, eps=1e-5),
-        # The finite differences of the first environment, the second one running the same inputs apart
-        _FdCase(
-            params=np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1)),
-            i_loss=1,
-            eps=1e-6,
-            idx=tuple((0, j) for j in range(6)),
-        ),
+    EPS_MUSCLE, EPS_BOX = 1e-5, 1e-6
+    params = [
+        np.array([[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]),
+        np.array([-0.2, 0.1, 0.2]),
+        np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1)),
     ]
-    params_ana, fd_grads = _grads_and_fd(rollout, cases)
+    params_ana = [torch.tensor(param, dtype=gs.tc_float, device=gs.device, requires_grad=True) for param in params]
+    rollout(params_ana).sum().backward()
+    # A pair of rollouts perturbs an input of the muscle and one of the box at once, each driving its own loss. The box
+    # takes the finite differences of the first environment, the second one running the same inputs apart.
+    entries_muscle = [(i_param, idx) for i_param in (0, 1) for idx in np.ndindex(params[i_param].shape)]
+    entries_box = [(2, (0, j)) for j in range(params[2].shape[1])]
+    fd_grads = [np.zeros_like(param) for param in params]
+    with torch.no_grad():
+        for i_entry, entry_muscle in enumerate(entries_muscle):
+            entries = [entry_muscle, *entries_box[i_entry : i_entry + 1]]
+            losses = []
+            for sign in (+1, -1):
+                params_shifted = [param.copy() for param in params]
+                for i_param, idx in entries:
+                    params_shifted[i_param][idx] += sign * (EPS_BOX if i_param == 2 else EPS_MUSCLE)
+                losses.append(rollout(params_shifted))
+            for i_param, idx in entries:
+                i_loss, eps = (1, EPS_BOX) if i_param == 2 else (0, EPS_MUSCLE)
+                fd_grads[i_param][idx] = float(losses[0][i_loss] - losses[1][i_loss]) / (2.0 * eps)
     for param_ana, fd_grad in zip(params_ana[:2], fd_grads[:2]):
         assert (np.abs(fd_grad) > 1e-3).all()
         assert_allclose(param_ana.grad, fd_grad, tol=2e-10)
@@ -419,9 +375,9 @@ def test_fem_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-def test_hybrid_grad_descends(show_viewer):
-    # The links of a rigid arm drive the MPM muscle around them after the grid-to-particle (G2P) transfer, so the
-    # gradient goes from the soft particles to the dofs of the arm through that coupling and the implicit MPM solve
+def test_hybrid_grad_descends(optimize, show_viewer):
+    # The links of the arm drive its MPM muscle, so the gradient goes from the soft particles to the dofs of the arm
+    # through that coupling and the implicit MPM solve
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -471,7 +427,7 @@ def test_hybrid_grad_descends(show_viewer):
     # The goal is where the arm takes the soft part at another velocity, so that it is reachable
     with torch.no_grad():
         goal = centroid_after(torch.tensor((0.5, 0.5), dtype=gs.tc_float, device=gs.device)).clone()
-    _, losses = _optimize(
+    _, losses = optimize(
         lambda params: ((centroid_after(params[0]) - goal) ** 2).sum(), [np.array([1.5, -0.8])], n_iters=4, lr=0.3
     )
     assert (losses[1:] < losses[:-1]).all()
@@ -479,7 +435,7 @@ def test_hybrid_grad_descends(show_viewer):
 
 
 @pytest.mark.required
-def test_coupling_wrench_grad_descends(show_viewer):
+def test_coupling_wrench_grad_descends(optimize, show_viewer):
     # The block alone moves the box, which starts at rest, by its contact and the springs of its trailing end, so that
     # the gradient of the pose of the box with respect to the velocity of the block goes through the coupling alone
     scene = gs.Scene(
@@ -515,6 +471,7 @@ def test_coupling_wrench_grad_descends(show_viewer):
             pos=(0.0, 0.01, 0.0),
             size=(0.08, 0.08, 0.08),
         ),
+        vis_mode="collision",
     )
     scene.build(n_envs=2)
     block.set_particle_constraints(
@@ -538,6 +495,6 @@ def test_coupling_wrench_grad_descends(show_viewer):
     (grad_rerun,) = torch.autograd.grad(rollout([vel]).sum(), vel)
     assert_allclose(grad[1], grad[0], tol=1e-6)
     assert_allclose(grad_rerun, grad, tol=1e-6)
-    _, losses = _optimize(rollout, [vel_start], n_iters=3, lr=0.05)
+    _, losses = optimize(rollout, [vel_start], n_iters=3, lr=0.05)
     assert (losses[1:] < losses[:-1]).all()
     assert (losses[-1] < 0.25 * losses[0]).all()

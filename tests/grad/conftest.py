@@ -111,6 +111,28 @@ def step_overwrites(backend, monkeypatch):
     assert not overwrites, f"Overwrites the backward pass does not save: {sorted(overwrites)}"
 
 
+@pytest.fixture(scope="session")
+def optimize():
+    # The gradients of the implicit MPM describe the motion where its Newton solve stops, so they are inexact at the
+    # default tolerance, which a descent method tolerates: what they must do is optimize the losses. It returns the
+    # inputs after the iterations, and the losses before every iteration and after the last.
+    def optimize_by_adam(rollout, params, n_iters, lr):
+        params = [torch.tensor(param, dtype=gs.tc_float, device=gs.device, requires_grad=True) for param in params]
+        optimizer = torch.optim.Adam(params, lr=lr)
+        losses = []
+        for _ in range(n_iters):
+            optimizer.zero_grad()
+            loss = torch.atleast_1d(rollout(params))
+            loss.sum().backward()
+            losses.append(loss.detach())
+            optimizer.step()
+        with torch.no_grad():
+            losses.append(torch.atleast_1d(rollout(params)))
+        return params, torch.stack(losses)
+
+    return optimize_by_adam
+
+
 def _add_hinge_arm(parent, body_name, pos, axis="0 1 0", joint_pos=None, **joint_kwargs):
     """Add a 1-DOF hinge arm link (y-axis hinge by default, capsule geom, explicit inertia) and return its body
     element."""
