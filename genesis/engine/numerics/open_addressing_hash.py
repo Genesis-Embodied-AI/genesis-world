@@ -17,9 +17,7 @@ class OpenAddressingHashScratch(Data, kind=DataKind.SCRATCH):
 
 
 def open_addressing_hash_sizes(max_keys: int) -> dict[Size, int]:
-    """Return the sizes of a hash table.
-
-    `max_keys` is the number of keys a build inserts at most."""
+    """Return the sizes of a hash table."""
     return {HASH_SLOTS: 1 << max((max(2 * max_keys, 2) - 1).bit_length(), 1)}
 
 

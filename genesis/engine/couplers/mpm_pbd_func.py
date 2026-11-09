@@ -40,12 +40,8 @@ class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
 
 
 class PbdContactParams(Data, kind=DataKind.CONSTANT, shape=()):
-    """Scene values of the MPM-PBD contact pairs, as device scalars.
-
-    `radius` is the radius of the PBD particles and `thickness` the thickness added to it, in metres, `stiffness` the
-    penalty stiffness of a row in units of its effective mass and `friction` the friction. `obstacle_reach` is the reach
-    in contact distances of the start or predicted position of a PBD particle within which an MPM particle is one of
-    its obstacle candidates."""
+    """Scene values of the MPM-PBD contact pairs, as device scalars: lengths in metres, the penalty stiffness of a row
+    per unit of its effective mass, and the obstacle reach in contact distances."""
 
     radius: qd.Tensor = field(float, ndarray=True)
     thickness: qd.Tensor = field(float, ndarray=True)
@@ -57,10 +53,7 @@ class PbdContactParams(Data, kind=DataKind.CONSTANT, shape=()):
 @qd.data_oriented
 class PbdParticleQuery:
     """The linear bounding volume hierarchy (LBVH) over the position based dynamics (PBD) particles of every
-    environment, in PBD's reordered layout (see genesis.engine.bvh).
-
-    It holds the PBD participant, the values of the material point method (MPM) kernels `mpm_info` and the values of
-    the contact pairs `contact`."""
+    environment, in PBD's reordered layout (see genesis.engine.bvh)."""
 
     def __init__(self, pbd: PbdNewtonParticipant, mpm_info, contact: PbdContactParams, n_envs):
         self.pbd = pbd
@@ -107,10 +100,8 @@ class MpmObstaclesScratch(Data, kind=DataKind.SCRATCH):
 
 @qd.data_oriented
 class MpmParticleObstacles:
-    """The MPM particles at the start of the substep as immovable obstacles of the PBD particles.
-
-    The obstacles sit at the contact distance of the MPM-PBD rows, so that PBD's own projection does not push its
-    particles into the MPM material (see PBDSolver.set_particle_obstacles)."""
+    """The MPM particles at the start of the substep as immovable obstacles of the PBD particles, at the contact
+    distance of the MPM-PBD rows so that PBD's own projection keeps its particles out of the MPM material."""
 
     def __init__(self, mpm_solver, pbd, contact: PbdContactParams, n_envs):
         self.mpm_particles = mpm_solver.particles
@@ -144,9 +135,7 @@ class MpmParticleObstacles:
 @qd.func
 def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """Project a PBD particle out of an MPM particle to the contact distance, with the friction of Macklin et al. 2014
-    (Eq. 23-24) on its tangential displacement over the substep.
-
-    The PBD particle is i_q of environment i_t, and the MPM particle i_a."""
+    (Eq. 23-24) on its tangential displacement over the substep."""
     f = obstacles.scratch.frame[()]
     x_q = obstacles.pbd.particles_reordered[i_q, i_t].pos
     separation = x_q - obstacles.mpm_particles.pos[f, i_a, i_t]
@@ -170,9 +159,7 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
 
 @qd.func
 def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
-    """The non-penetration of a PBD particle at its start position with an MPM particle, for the pre-stabilization.
-
-    The PBD particle is i_q of environment i_t, and the MPM particle i_a."""
+    """The non-penetration of a PBD particle at its start position with an MPM particle, for the pre-stabilization."""
     f = obstacles.scratch.frame[()]
     separation = obstacles.pbd.particles_reordered[i_q, i_t].ipos - obstacles.mpm_particles.pos[f, i_a, i_t]
     distance = separation.norm()
@@ -187,9 +174,7 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
 @qd.func
 def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """Keep an MPM particle among the nearest OBSTACLE_NEIGHBORS obstacle candidates of a PBD particle if it lies within
-    its obstacle reach, in contact distances of its start or predicted position.
-
-    The PBD particle is i_q of environment i_t, and the MPM particle i_a."""
+    its obstacle reach, in contact distances of its start or predicted position."""
     f = obstacles.scratch.frame[()]
     x_m = obstacles.mpm_particles.pos[f, i_a, i_t]
     distance = qd.min(
@@ -284,10 +269,7 @@ class MpmPbdContact(CouplingPairs):
     @qd.func
     def candidate_score(self, f: int, i_b: int, i_q: int, i_ps: int):
         """Gap of a sorted particle to the sphere of a PBD particle at the substep start, infinite for a PBD particle at
-        the position of the particle.
-
-        The particle is `i_ps` and the PBD particle i_q, the gap being their distance minus the PBD radius and the
-        contact thickness."""
+        the position of the particle."""
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         distance = (self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos).norm()
         score = qd.math.inf
@@ -298,9 +280,7 @@ class MpmPbdContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_q: int, i_ps: int, phi: float):
         """Pair a sorted particle with a PBD particle if it lies within its contact range or short of it by less than
-        `contact_band_width`.
-
-        The particle is `i_ps` and the PBD particle i_q, `phi` being the gap candidate_score measured between them."""
+        `contact_band_width`."""
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         separation = self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos
         normal = separation / separation.norm()

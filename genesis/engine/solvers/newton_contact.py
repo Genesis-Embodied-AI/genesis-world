@@ -109,9 +109,7 @@ def append_pair(n_pairs: qd.template(), capacity: int):
 
 @qd.data_oriented
 class NewtonContact(NewtonDevice):
-    """The contacts of the joint Newton solve, over contact vertices and pair kinds.
-
-    The vertices are those of the vertex maps `linear_maps` and `rigid_map`, and the pairs those of `pair_kinds`."""
+    """The contacts of the joint Newton solve, over contact vertices and pair kinds."""
 
     def __init__(self, linear_maps: list, rigid_map, pair_kinds: list):
         self.linear_maps = participant_group("NewtonContactLinearMaps", linear_maps)
@@ -222,10 +220,7 @@ class NewtonContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_entry_layout(self):
         """Number the blocks of the linear system of every reduced Hessian entry, which hold over the substep, and
-        report their count in the share of the contacts.
-
-        A diagonal entry has the blocks of the upper triangle of its rows, the others those of every pair of their rows,
-        and an entry on a Rigid contact point none."""
+        report their count in the share of the contacts."""
         qd.loop_config(name="newton_contact_entry_blocks")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
             i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
@@ -253,10 +248,7 @@ class NewtonContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_contact_assemble(self, f: int, linear: NewtonLinearScratch):
         """Add the gradient and the Hessian of the contacts at the current iterate to the linear system and to Rigid,
-        once every participant assembled its own share.
-
-        A doublet adds w_a g to every row a of its vertex. A Hessian entry between vertices of the linear system writes
-        the blocks w_a w_b H of their rows, discarding the blocks of zero weight."""
+        once every participant assembled its own share."""
         self.func_terms(f)
         func_reduce_bcoo(self.matrices.gradient, block_scalars=3)
         func_reduce_bcoo(self.matrices.hessian, block_scalars=9)
@@ -308,10 +300,7 @@ class NewtonContact(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: PCGScalars):
-        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction.
-
-        B p_b adds to the image of vertex a and, off the diagonal, B^T p_a to that of the contact point b. The converged
-        environments are skipped."""
+        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction."""
         self.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
         qd.loop_config(name="newton_contact_rigid_product")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):

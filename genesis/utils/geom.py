@@ -767,11 +767,7 @@ def qd_orthogonals(a):
 
 @qd.func
 def qd_orthogonals_bw(a: qd.types.vector(3), g_b_cross_a: qd.types.vector(3), g_b: qd.types.vector(3)):
-    """Reverse of `qd_orthogonals`, from the adjoints of the two orthogonal vectors to that of the normal.
-
-    The vectors are b x a and b, b being the normalized branch vector of the normal `a`. Returns the adjoint of `a` from
-    `g_b_cross_a` and `g_b`, the adjoints of b x a and b.
-    """
+    """Reverse of `qd_orthogonals`, from the adjoints of the two orthogonal vectors to that of the normal."""
     is_branch_a = qd.abs(a[1]) < 0.5
     b_raw = qd.Vector.zero(gs.qd_float, 3)
     if is_branch_a:

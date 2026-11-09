@@ -168,9 +168,7 @@ def func_rigid_contact_adjoint(
     mpm_info: MpmInfo,
     config: qd.template(),
 ):
-    """Pull the MPM-Rigid pairs back into the adjoints of the particles and of Rigid's state.
-
-    The adjoints of the particles are those of frame `f`."""
+    """Pull the MPM-Rigid pairs back into the adjoints of the particles and of Rigid's state."""
     dt = mpm_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_contact_adjoint")
     for i_pair in range(pairs.n_pairs[()]):

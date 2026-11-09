@@ -99,10 +99,8 @@ def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.tem
 
 
 class FemContactParams(Data, kind=DataKind.CONSTANT, shape=()):
-    """Scene values of the MPM-FEM contact pairs, as device scalars.
-
-    `thickness` is the surface thickness in metres, and `stiffness` the penalty stiffness of a row in units of its
-    effective mass, the inverse of its inverse weight."""
+    """Scene values of the MPM-FEM contact pairs, as device scalars: the surface thickness in metres and the penalty
+    stiffness of a row per unit of its effective mass."""
 
     thickness: qd.Tensor = field(float, ndarray=True)
     stiffness: qd.Tensor = field(float, ndarray=True)
@@ -111,10 +109,7 @@ class FemContactParams(Data, kind=DataKind.CONSTANT, shape=()):
 @qd.data_oriented
 class FemTriangleQuery:
     """The linear bounding volume hierarchy (LBVH) over the finite element method (FEM) surface triangles of every
-    environment (see genesis.engine.bvh).
-
-    It holds the FEM solver, the values of the material point method (MPM) kernels `mpm_info` and the values of the
-    contact pairs `contact`."""
+    environment (see genesis.engine.bvh)."""
 
     def __init__(self, fem, mpm_info, contact: FemContactParams, n_envs):
         self.fem = fem
@@ -153,9 +148,7 @@ def kernel_fit_triangle_leaves(f: int, query: qd.template()):
 
 @qd.func
 def triangle_closest_point(f: int, i_b: int, i_s: int, x: qd.types.vector(3), fem: qd.template()):
-    """The closest point of a FEM surface triangle to a position.
-
-    The triangle is i_s at its vertex positions of frame `f`, and the position is `x`."""
+    """The closest point of a FEM surface triangle to a position."""
     tri2v = fem.solver.surface[i_s].tri2v
     a = fem.solver.elements_v[f, tri2v[0], i_b].pos
     b = fem.solver.elements_v[f, tri2v[1], i_b].pos
@@ -208,8 +201,8 @@ class MpmFemContact(CouplingPairs):
         """Unsigned distance of a sorted particle to a triangle, infinite for a triangle that cannot hold the particle,
         and the alignment of the normal of the triangle.
 
-        The particle is `i_ps` and the triangle i_s. The alignment breaks the ties (see triangle_closest_point), since
-        the sign of the distance to a triangle sharing the closest edge or vertex may be wrong on a closed surface."""
+        The alignment breaks the ties, since the sign of the distance to a triangle sharing the closest edge or vertex
+        may be wrong on a closed surface."""
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         is_valid, distance, align, signed_distance, barycentric, normal = triangle_closest_point(
@@ -223,9 +216,7 @@ class MpmFemContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_s: int, i_ps: int, score: float):
         """Pair a sorted particle with its nearest FEM surface triangle if it lies within its contact range or short of
-        it by less than `contact_band_width`.
-
-        The particle is `i_ps` and the triangle i_s, whose signed distance the pair measures again."""
+        it by less than `contact_band_width`."""
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         is_valid, distance, align, signed_distance, barycentric, normal = triangle_closest_point(

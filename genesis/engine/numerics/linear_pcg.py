@@ -76,8 +76,7 @@ def func_init_linear_pcg_residual(
 ):
     """Start a linear solve from a zero solution, its residual being the right-hand side.
 
-    The solution `x` is cleared, the residual set to the right-hand side `b` and the product Ap zeroed. With
-    `is_adjoint`, an environment left out by `is_env_active` keeps the solution of an earlier adjoint solve. The
+    With `is_adjoint`, an environment left out by `is_env_active` keeps the solution of an earlier adjoint solve. The
     preconditioner and func_init_linear_pcg_direction follow."""
     qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
@@ -131,9 +130,7 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGSca
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Update the solution and the residual of every running environment along its search direction.
-
-    The solution `x` takes x += alpha p, and the residual r -= alpha Ap."""
+    """Update the solution and the residual of every running environment along its search direction."""
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
         i_b = pcg_workspace.rows_env[i_r]
@@ -203,10 +200,7 @@ def func_pcg_arm(pcg_scalars: PCGScalars, is_adjoint: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pcg_step(pcg_scalars: PCGScalars):
-    """Take the step alpha = rz / p.Ap of every running environment, once every owner added its p.Ap.
-
-    The step clears rz_new, and a non-positive p.Ap along a non-zero direction flags has_breakdown when
-    is_curvature_checked is set."""
+    """Take the step alpha = rz / p.Ap of every running environment, once every owner added its p.Ap."""
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
             rz = pcg_scalars.rz[i_b]

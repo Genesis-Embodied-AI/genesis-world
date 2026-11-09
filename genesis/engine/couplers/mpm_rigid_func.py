@@ -137,10 +137,7 @@ class RigidGeomQuery:
 
 @qd.kernel
 def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
-    """Fit the leaf box of every coupled geom to the world box of its posed initial box.
-
-    The box grows by the contact margin of the geom and by twice the distance its points may travel over the substep. A
-    geom that an environment does not carry gets an empty box with a finite center."""
+    """Fit the leaf box of every coupled geom to the world box of its posed initial box."""
     dt = mpm_info.substep_dt[()]
     for i_b, i_a in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         i_g = query.coupled_geoms.idx[i_a]

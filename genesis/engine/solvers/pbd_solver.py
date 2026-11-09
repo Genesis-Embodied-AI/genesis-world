@@ -39,13 +39,7 @@ ELEMS = Size("elems")
 
 
 class PbdConstraintLoop(Data, kind=DataKind.SCRATCH):
-    """The data of the unified constraint loop of a substep.
-
-    It holds the condition of the loop, its number of iterations and the largest correction of the current one, the
-    extended position based dynamics (XPBD) Lagrange multipliers of the stretch, bending and volume constraints, and the
-    collision candidates of every particle with their count, indices and distances (see
-    kernel_gather_collision_neighbors). It also holds the number of stretch, bending and volume constraints of every
-    particle, over which XPBD splits its mass."""
+    """The data of the unified constraint loop of a substep."""
 
     is_running: qd.Tensor = field(int, ndarray=True)
     n_iterations: qd.Tensor = field(int, ndarray=True)
@@ -250,20 +244,17 @@ class PBDSolver(ParticleSolver):
         self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
 
     def build_newton_participant(self) -> tuple[NewtonHost, PbdNewtonParticipant]:
-        """Build the participant of the PBD particle positions in the joint Newton solve.
-
-        The solve takes the end positions of the projection of PBD's own substep as the target of the particles'
-        inertia (see PbdNewtonHost). The caller registers the returned host and participant."""
+        """Build the participant of the PBD particle positions in the joint Newton solve, whose inertia targets the end
+        positions of the projection of PBD's own substep (see PbdNewtonHost)."""
         participant = PbdNewtonParticipant(self, self._B)
         return PbdNewtonHost(participant), participant
 
     def set_particle_obstacles(self, obstacles):
         """Make the PBD particles collide with the particles of another solver as immovable obstacles.
 
-        The obstacles act in the contact group of the unified loop and in the pre-stabilization. `obstacles` provides
-        `build(f)`, called at the start of every substep, and the top-level funcs `func_project(f, pbd)` and
-        `func_stabilize(f, pbd)`, which accumulate the corrections of the PBD particles in `dpos` and `dcount` of the
-        reordered particles."""
+        `obstacles` provides `build(f)`, called at the start of every substep, and the top-level funcs
+        `func_project(f, pbd)` and `func_stabilize(f, pbd)`, which accumulate the corrections of the PBD particles in
+        `dpos` and `dcount` of the reordered particles."""
         self._particle_obstacles = obstacles
         self._has_particle_obstacles = True
 
@@ -687,10 +678,7 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        """One substep of the unified particle solver (Macklin et al. 2014, Algorithm 1).
-
-        The substep runs the prediction, the spatial hashing of the predicted positions, the contact pre-stabilization,
-        the unified constraint loop, the velocities from the displacements, and the sleeping."""
+        """One substep of the unified particle solver (Macklin et al. 2014, Algorithm 1)."""
         if self.is_active:
             self._kernel_store_initial_pos(f)
             if self._use_xpbd:
@@ -1355,11 +1343,7 @@ def func_solve_density(f: int, pbd_solver: qd.template()):
 @qd.kernel
 def kernel_gather_collision_neighbors(f: int, pbd_solver: qd.template()):
     """Gather the collision candidates of every particle for the substep, once the spatial hash holds the predicted
-    positions.
-
-    The candidates are the particles of the 27 hash cells around it that may collide with it, apart from its neighbors
-    in the rest shape, within the collision reach of the start or predicted positions. The nearest `COLLISION_NEIGHBORS`
-    of them are kept, and the constraint iterations reuse them."""
+    positions."""
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b] = 0
         if pbd_solver.particles_info_reordered[i_p, i_b].material_type != pbd_solver.MATERIAL.PARTICLE:
@@ -1486,11 +1470,8 @@ def kernel_solve_collision(f: int, pbd_solver: qd.template(), is_stabilization: 
 
 @qd.func(requires_top_level=True)
 def func_solve_collision(f: int, pbd_solver: qd.template(), is_stabilization: qd.template()):
-    """The particle contacts of every particle against its collision candidates of the substep, as a correction of the
-    particle.
-
-    The contacts carry friction (Macklin et al. 2014, Sec. 6.1). With `is_stabilization`, they reduce to the
-    non-penetration at the start positions, for the pre-stabilization."""
+    """The particle contacts of every particle against its collision candidates of the substep, with friction (Macklin
+    et al. 2014, Sec. 6.1), as a correction of the particle."""
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         for i_nb in range(pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b]):
             j_p = pbd_solver.constraint_loop.collision_neighbors_idx[i_p, i_nb, i_b]

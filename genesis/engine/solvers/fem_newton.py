@@ -151,10 +151,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
-        """Add FEM's incremental potential times dt^2 into the entry of every environment.
-
-        The potential sums the inertia and the linearized damping of the vertices and the elastic energy and damping of
-        the elements, at the end-of-substep positions of frame f + 1, into `energies`."""
+        """Add FEM's incremental potential times dt^2 into the entry of every environment."""
         dt_sq = self.substep_dt * self.substep_dt
         qd.loop_config(name="mpm_fem_energy_vertices")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
@@ -204,10 +201,7 @@ def kernel_fem_freeze(f: int, fem: qd.template(), control: NewtonControl):
 
 
 class FemNewtonHost(NewtonHost):
-    """Host stages of FEM around the joint solve.
-
-    Before the solve, they write the inertia and material data of its substep. After it, they derive its velocities
-    from the solved positions and run the part of the coupler's step on FEM (see LegacyCoupler.couple_fem)."""
+    """Host stages of FEM around the joint solve."""
 
     def __init__(self, fem_solver, device: FemNewtonParticipant):
         self._fem_solver = fem_solver

@@ -31,17 +31,13 @@ class DynamicRadixSortScratch(Data, kind=DataKind.SCRATCH):
 
 
 def radix_passes(key_bits: int) -> int:
-    """Return the number of radix passes of a sort, one per byte of its keys.
-
-    `key_bits` is the width of the keys, 32 or 64."""
+    """Return the number of radix passes of a sort, one per byte of its keys."""
     assert key_bits in (32, 64)
     return key_bits // 8
 
 
 def dynamic_radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
-    """Return the sizes of the scratch of a radix sort.
-
-    The sort runs over at most `capacity` keys of `key_bits` bits, 32 or 64."""
+    """Return the sizes of the scratch of a radix sort."""
     return {
         RADIX_PASSES: radix_passes(key_bits),
         RADIX_TILES: max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1),

@@ -31,9 +31,7 @@ from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf
 @qd.data_oriented
 class MpmRigidContact(CouplingPairs):
     """Pair kind of the contacts between the material point method (MPM) and Rigid, the pair of a particle and its
-    nearest coupled geom.
-
-    With `has_rigid_dofs`, it also holds the vertex map of their contact points on the links of `rigid`."""
+    nearest coupled geom."""
 
     pairs_type = MpmRigidPairs
 
@@ -71,10 +69,7 @@ class MpmRigidContact(CouplingPairs):
 
     @qd.func
     def candidate_score(self, f: int, i_b: int, i_a: int, i_ps: int):
-        """Gap of a sorted particle to the contact range of a coupled geom.
-
-        The particle is `i_ps` and the geom i_a, the gap being their signed distance minus the contact margin
-        `coup_softness` of the geom."""
+        """Gap of a sorted particle to the contact range of a coupled geom."""
         i_g = self.query.coupled_geoms.idx[i_a]
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
@@ -84,9 +79,7 @@ class MpmRigidContact(CouplingPairs):
     @qd.func
     def build_pair(self, f: int, i_b: int, i_a: int, i_ps: int, phi: float):
         """Pair a sorted particle with a coupled geom if it lies within its soft range or short of it by less than
-        `contact_band_width`.
-
-        The particle is `i_ps` and the geom i_a, `phi` being the gap candidate_score measured between them."""
+        `contact_band_width`."""
         i_g = self.query.coupled_geoms.idx[i_a]
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
@@ -210,9 +203,7 @@ class MpmRigidContact(CouplingPairs):
 
     @qd.func
     def func_vertex_add_force(self, f: int, i_v: int, y: qd.types.vector(3)):
-        """Add the spatial force of a vector on a contact point to its link, which func_vertex_end maps to the dofs.
-
-        The force of the vector `y` on contact point `i_v` is (y, r x y), r being the arm of the point."""
+        """Add the spatial force of a vector on a contact point to its link, which func_vertex_end maps to the dofs."""
         i_l, i_b, r = self.contact_point_arm(f, i_v)
         qd.atomic_add(self.rigid.rigid_data.links_force_vel[i_l, i_b], y)
         qd.atomic_add(self.rigid.rigid_data.links_force_ang[i_l, i_b], r.cross(y))

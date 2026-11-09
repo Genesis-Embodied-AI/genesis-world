@@ -563,9 +563,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @qd.func
     def func_compute_ele_energy_gradient(self, f: int):
         """Energy density and its gradient of every element at the end-of-substep positions, the gradient with the
-        stress of the Rayleigh stiffness damping.
-
-        The positions are those of frame f + 1."""
+        stress of the Rayleigh stiffness damping."""
         damping_beta_over_dt = self._damping_beta / self._substep_dt
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             if not self.batch_active[i_b]:
@@ -1046,10 +1044,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def build_newton_participant(self) -> tuple[NewtonHost, FemNewtonParticipant]:
         """Build the participant of the FEM vertex positions in the joint Newton solve and hand its implicit solve over
-        to it.
-
-        The joint solve then replaces the implicit solve of every substep, which solves it jointly with the solvers
-        coupled with FEM (see FemNewtonHost). The caller registers the returned host and participant."""
+        to it."""
         participant = FemNewtonParticipant(self, self._B)
         self._is_solve_deferred = True
         return FemNewtonHost(self, participant), participant

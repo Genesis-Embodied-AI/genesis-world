@@ -60,18 +60,13 @@ class MpmSphBoundary:
         kernel_scatter_boundary(self)
 
     def apply_impulse(self, f):
-        """Hand the MPM particles the impulses SPH's substep accumulated, before the MPM particle-to-grid transfer.
-
-        The impulses go to the velocities of frame `f`."""
+        """Hand the MPM particles the impulses SPH's substep accumulated, before the MPM particle-to-grid transfer."""
         kernel_apply_boundary_impulse(f, self)
 
 
 @qd.kernel
 def kernel_fit_mpm_particle_leaves(f: int, query: qd.template()):
-    """Fit a point leaf at every active MPM particle, and an empty box with a finite center at the others.
-
-    The leaves are those of the tree of `query` (MpmSphBoundary, MpmParticleObstacles), at the positions of frame `f`,
-    which the query records."""
+    """Fit a point leaf at every active MPM particle, and an empty box with a finite center at the others."""
     for _ in range(1):
         query.scratch.frame[()] = f
     for i_b, i_p in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
@@ -153,9 +148,7 @@ def kernel_scatter_boundary(boundary: qd.template()):
 
 @qd.kernel
 def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
-    """Add the impulses of the SPH particles to the velocity of every active MPM particle, and clear them.
-
-    The velocities are those of frame `f`."""
+    """Add the impulses of the SPH particles to the velocity of every active MPM particle, and clear them."""
     for i_p, i_b in qd.ndrange(boundary.scratch.impulse.shape[0], boundary.scratch.impulse.shape[1]):
         if boundary.mpm_particles_ng.active[f, i_p, i_b]:
             mass = boundary.mpm_particles_info.mass[i_p] / boundary.mpm_info.mass_scale[()]

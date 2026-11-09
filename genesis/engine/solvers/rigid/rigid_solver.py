@@ -1442,7 +1442,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         With `is_member`, the participant joins the solve, which runs the constraint solve of every substep (see
         `defer_constraint_solve`). Without it, the participant only holds the Rigid data that a coupling reads, and the
-        substep keeps its own constraint solve. The caller registers the returned host and participant."""
+        substep keeps its own constraint solve."""
         participant = RigidNewtonParticipant(self, self._B)
         if is_member:
             self.defer_constraint_solve()
@@ -1514,8 +1514,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         Without constraints, the acceleration is the smooth one alone. Otherwise, dL_dqacc is seeded from acc.grad, the
         adjoint solve runs, its outputs are folded back into the autodiff grad fields, then the constraint-row assembly
-        is reversed. A solve that solved the constraint rows jointly with its own unknowns (see
-        `defer_constraint_solve`) gives its adjoint solve as `solve_adjoint` (see 'ConstraintSolver.backward').
+        is reversed.
         """
         if self._disable_constraint and solve_adjoint is None:
             kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)

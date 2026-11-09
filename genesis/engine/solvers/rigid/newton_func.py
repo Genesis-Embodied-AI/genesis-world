@@ -162,9 +162,7 @@ def func_rigid_evaluate(
     config: qd.template(),
 ):
     """Evaluate Rigid's cost of qacc = x / dt^2, with its row activity, forces and qfrc_constraint, by Rigid's own
-    update of its constraint state.
-
-    The cost lands in `rigid_data.cost`."""
+    update of its constraint state."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])

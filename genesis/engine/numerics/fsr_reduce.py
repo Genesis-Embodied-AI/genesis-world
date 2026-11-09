@@ -41,9 +41,7 @@ def _key_runs(key: int):
 
 @qd.func
 def add_by_key(key: int, value, out: qd.template(), n_components: qd.template() = 0):
-    """Add the value of an entry into the entry of its key, an entry of key -1 adding nothing.
-
-    On GPU, the lanes of a warp holding the same key sum their values first, and one of them adds the sum into `out`."""
+    """Add the value of an entry into the entry of its key, an entry of key -1 adding nothing."""
     if qd.static(gs.backend == gs.cpu):
         if key >= 0:
             qd.atomic_add(out[key], value)

@@ -43,10 +43,8 @@ class ForceField(RBC):
         self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
     ):
         """
-        Return the velocity adjoint from the acceleration adjoint, for a solver differentiating through the velocity.
-
-        The result is (d acc / d vel)^T acc_bar, at the velocity where the solver evaluates the field (see
-        'differentiable').
+        Return the velocity adjoint (d acc / d vel)^T acc_bar from the acceleration adjoint, for a solver
+        differentiating through the velocity.
         """
         vel_bar = qd.Vector.zero(gs.qd_float, 3)
         if self._active[None]:
@@ -57,9 +55,6 @@ class ForceField(RBC):
     def differentiable(self):
         """
         Whether the field provides the velocity adjoint of 'get_acc_grad_vel'.
-
-        A field that draws random numbers differs on the replay of a backward pass, and a custom field gives no
-        derivative, so neither of them provides it.
         """
         return True
 

@@ -613,9 +613,8 @@ class MPMSolver(ParticleSolver):
         )
 
     def substep_post_coupling(self, f):
-        """Finish the substep with the check of the particle positions.
-
-        The grid-to-particle transfer of the substep ran earlier, in the substep of the Newton solver."""
+        """Finish the substep with the check of the particle positions, the grid-to-particle transfer having run in the
+        substep of the Newton solver."""
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim.cur_substep_global + 1) % self._substeps == 0:
             kernel_flag_non_finite_pos(f + 1, self.particles, self.mpm_errno)
@@ -683,10 +682,7 @@ class MPMSolver(ParticleSolver):
         pass
 
     def newton_backward(self, f, solve):
-        """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func).
-
-        The reverse runs the reverse of the grid-to-particle transfer, the adjoint solve `solve`, the pullback and the
-        reverse of the particle-to-grid transfer into frame `f`."""
+        """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func)."""
         kernel_adjoint_g2p(
             f,
             self.particles,
@@ -759,10 +755,8 @@ class MPMSolver(ParticleSolver):
 
     @property
     def data(self):
-        """Yield the state of the particles, then the particle and material parameters (see 'Solver.data').
-
-        A boundary checkpoint holds the frame 0 of the state. The grid, Newton and linear-system arrays of the implicit
-        step are those of its participant of the Newton solve (see MpmNewtonParticipant)."""
+        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds, then the particle and
+        material parameters (see 'Solver.data')."""
         yield from iter_data(self, "particles")
         yield from iter_data(self, "particles_ng")
         if not self.is_built or not self.is_active:

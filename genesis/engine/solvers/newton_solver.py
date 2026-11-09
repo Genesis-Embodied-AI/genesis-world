@@ -178,9 +178,7 @@ def func_pcg_start(
 
 @qd.func(requires_top_level=True)
 def func_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
-    """Run one preconditioned conjugate gradient iteration over all the rows (see PCGScalars).
-
-    It runs the product of the matrix and of Rigid with p . Ap, then the step, the preconditioner and the direction."""
+    """Run one preconditioned conjugate gradient iteration over all the rows (see PCGScalars)."""
     func_linear_pcg_spmv(participants.linear.pcg, pcg_scalars, participants.linear.matrix)
     if qd.static(participants.has_rigid):
         participants.rigid.func_matvec(pcg_scalars)
@@ -432,10 +430,7 @@ class NewtonSolver(Solver):
             host.newton_begin(f)
 
     def step(self, f):
-        """Run the Newton solve of a substep.
-
-        The solve runs the preparation of the participants, the start energy, the Newton iterations and the hand-back
-        of the solution."""
+        """Run the Newton solve of a substep."""
         if not self.is_active:
             return
         with custom_backward(self.backward, f):
@@ -503,9 +498,7 @@ class NewtonSolver(Solver):
                 )
 
     def backward(self, f):
-        """Reverse the Newton solve of a substep, from the state left by the replay of its forward pass.
-
-        Each participant wraps the adjoint solve in the reverse of the part of its substep that the solve takes over."""
+        """Reverse the Newton solve of a substep, from the state left by the replay of its forward pass."""
         if not all(host.is_differentiable for host in self._hosts):
             gs.raise_exception(
                 "The backward pass of the joint Newton solve supports the participants of Rigid alone besides MPM."

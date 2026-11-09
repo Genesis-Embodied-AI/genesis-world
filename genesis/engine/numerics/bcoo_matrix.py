@@ -49,9 +49,7 @@ class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
 
 
 def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
-    """Return the sizes of a block matrix, padded for its sort and scan.
-
-    The matrix holds at most `capacity` triplets of blocks of shape `block_shape`."""
+    """Return the sizes of a block matrix, padded for its sort and scan."""
     padded_capacity = max(((max(capacity, 1) + 63) // 64) * 64, 64)
     return {
         TRIPLETS: capacity,
@@ -63,9 +61,7 @@ def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
 
 
 def init_bcoo_matrix(matrix: BCOOMatrixScratch, n_triplets: int) -> None:
-    """Set the counts of a matrix just built, with no overflow and no reduced entry.
-
-    `n_triplets` is the number of its live triplets."""
+    """Set the counts of a matrix just built, with no overflow and no reduced entry."""
     matrix.n_triplets.fill(n_triplets)
     matrix.n_padded_triplets.fill(matrix.triplets_row.shape[0])
     matrix.has_triplet_overflow.fill(0)
@@ -126,10 +122,7 @@ def func_add_triplet(
 
 @qd.func
 def func_discard_triplet(i_t: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
-    """Discard a triplet slot as a zero block at (0, 0), which the reduction merges away.
-
-    No later pass tells the discarded slots apart, and a triplet past the capacity is dropped as `func_write_triplet`
-    drops it."""
+    """Discard a triplet slot as a zero block at (0, 0), which the reduction merges away."""
     if i_t < matrix.triplets_row.shape[0]:
         matrix.triplets_row[i_t] = 0
         matrix.triplets_col[i_t] = 0
@@ -214,9 +207,7 @@ def func_sort_bcoo(matrix: BCOOMatrixScratch):
 
 @qd.func(requires_top_level=True)
 def func_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
-    """Sum the values of the sorted triplets into the reduced block coordinate (BCOO) entries.
-
-    The triplets are those `func_sort_bcoo` sorted, of `block_scalars` scalars each."""
+    """Sum the values of the triplets that func_sort_bcoo sorted into the reduced block coordinate (BCOO) entries."""
     func_zero_bcoo_values(matrix, block_scalars)
     func_fsr_reduce(
         matrix.triplets_segment_idx,

@@ -58,10 +58,7 @@ def build_contact_candidates(max_candidates: int, tie_ratio: float) -> ContactCa
 
 @qd.func
 def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, candidates: ContactCandidates):
-    """Record the scores of a candidate of a sorted particle, an infinite score rejecting it.
-
-    `i_cand` is the candidate and `i_ps` its sorted particle, `score` its primary score and `secondary` the score that
-    breaks the ties."""
+    """Record the scores of a candidate of a sorted particle, an infinite score rejecting it."""
     candidates.order.triplets_row[i_cand] = i_ps
     candidates.order.triplets_col[i_cand] = 0
     candidates.order.triplets_val[i_cand] = score
@@ -71,9 +68,7 @@ def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, 
 @qd.func(requires_top_level=True)
 def func_select_nearest(candidates: ContactCandidates, mpm_info: MpmInfo):
     """Keep in `best_candidate` the nearest candidate of every particle, or the capacity if every candidate of the
-    particle was rejected, once the candidates are sorted by particle (see sort_bcoo).
-
-    Two scores closer than `tie_ratio` grid cells tie, and the secondary score breaks the tie."""
+    particle was rejected, once the candidates are sorted by particle (see sort_bcoo)."""
     # The unique entries leave the count of segments alone when there is no candidate
     for _ in range(1):
         candidates.order.bcoo_nnz[()] = 0
@@ -206,10 +201,7 @@ class CouplingPairs(NewtonDevice):
         stiffness: qd.types.vector(PYRAMID_ROWS),
         target: qd.types.vector(PYRAMID_ROWS),
     ):
-        """Append a pair with the rows of its friction pyramid, and return its slot, or -1 past the capacity.
-
-        The pair is that of sorted particle `i_ps` of environment `i_b`, along `normal` with the friction `friction`,
-        its rows of stiffness `stiffness` and target `target`."""
+        """Append a pair with the rows of its friction pyramid, and return its slot, or -1 past the capacity."""
         i_pair = append_pair(self.pairs.n_pairs, self.pairs.sorted_idx.shape[0])
         if i_pair >= 0:
             self.pairs.sorted_idx[i_pair] = i_ps

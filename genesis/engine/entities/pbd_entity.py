@@ -347,12 +347,8 @@ class PBD2DEntity(PBDTetEntity):
         )
 
     def _add_vverts_to_solver(self):
-        """Embed every vvert in its nearest triangle of the simulation mesh at rest, by its barycentric coordinates.
-
-        The vverts of a cloth follow the particles of that triangle alone, so that neighboring vverts, embedded in the
-        same or adjacent triangles, stay on one continuous surface as the cloth bends. The affine fit over the nearest
-        particles of `ParticleEntity` switches support sets between neighboring vverts and creases the rendered cloth.
-        The supports past the three of the triangle take zero weight."""
+        """Embed every vvert in its nearest triangle of the simulation mesh at rest, so that the rendered cloth stays
+        one continuous surface as it bends, which the affine fit of 'ParticleEntity' creases."""
         if self._solver.n_vvert_supports < 3:
             super()._add_vverts_to_solver()
             return

@@ -29,9 +29,7 @@ CAPACITY_GROW_FACTOR = 1.2
 
 
 def retire_scratch(scratch: Data, retired: list) -> None:
-    """Free the arrays of a struct that a larger one replaces, and keep the struct itself referenced.
-
-    `retired` is the list of the retired structs of the owner."""
+    """Free the arrays of a struct that a larger one replaces, and keep the struct itself referenced."""
     # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct could
     # take over from a dead one, so its owner keeps every retired struct referenced, with its arrays freed.
     for _, array in iter_state_arrays(scratch):
@@ -143,10 +141,8 @@ class BlockJacobiOwner:
 
 @qd.func(requires_top_level=True)
 def func_linear_layout(participants: qd.template()):
-    """Lay out the rows and triplets of every owner, then the triplets of the contacts, from the counts they reported.
-
-    The owners are those of `participants` (see NewtonParticipants). The layout reports the live rows and the triplet
-    demand of the matrix."""
+    """Lay out the rows and triplets of every owner, then the triplets of the contacts, from the counts they reported,
+    and report the live rows and the triplet demand of the matrix."""
     for _ in range(1):
         n_rows = gs.qd_int(0)
         n_triplets = gs.qd_int(0)

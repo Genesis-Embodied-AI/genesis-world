@@ -53,10 +53,7 @@ def return_map_bw(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Reverse of `return_map`, from the adjoints of the returned state to those of the trial state.
-
-    The trial state is the deformation gradient `F` and the plastic state `Jp`, and `F_new_bar` and `Jp_new_bar` are
-    the adjoints of the returned ones."""
+    """Reverse of `return_map`, from the adjoints of the returned state to those of the trial state."""
     F_bar = F_new_bar
     Jp_bar = Jp_new_bar
     if kind == PLASTIC_LIQUID:
@@ -120,10 +117,7 @@ def band_row_bw(
 def polar_rotation_bw(
     U: qd.types.matrix(3, 3), S: qd.types.matrix(3, 3), V: qd.types.matrix(3, 3), R_bar: qd.types.matrix(3, 3)
 ):
-    """Reverse of the rotation of the polar decomposition of a deformation gradient.
-
-    With F = U S V^T and its rotation R = U V^T, the adjoint of F is F_bar = U Y V^T with Y_ij = (G_ij - G_ji) /
-    (sigma_i + sigma_j) and G = U^T R_bar V."""
+    """Reverse of the rotation of the polar decomposition of a deformation gradient."""
     G = U.transpose() @ R_bar @ V
     sigma = diagonal_of(S)
     ones = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
@@ -148,10 +142,7 @@ def func_wall_contact_adjoint(
     mpm_info: MpmInfo,
 ):
     """Pull the wall pairs (see func_build_wall_pairs) back into the adjoint of the particles, as the Rigid rows with a
-    fixed wall (see func_rigid_contact_adjoint).
-
-    The adjoint of frame f flows through the weights, and through the coefficients via the gap, the normal velocity and
-    the inverse weight of the particle."""
+    fixed wall (see func_rigid_contact_adjoint)."""
     qd.loop_config(name="mpm_wall_contact_adjoint")
     for i_pair in range(pairs.n_pairs[()]):
         i_ps = pairs.sorted_idx[i_pair]
@@ -218,9 +209,7 @@ def func_constraint_adjoint(
     mpm_info: MpmInfo,
 ):
     """Pull the constraint springs (see func_build_constraint_rows) back into the adjoints of the particles and of the
-    poses of the links that hold them.
-
-    The adjoints of the particles are those of frame `f`."""
+    poses of the links that hold them."""
     qd.loop_config(name="mpm_constraint_adjoint")
     for i_ps in range(grid.n_valid[()]):
         spring = newton.constraint_spring[i_ps]
@@ -448,9 +437,7 @@ def func_adjoint_particles(
 @qd.func(requires_top_level=True)
 def func_adjoint_consume(f: int, particles: MpmParticles, particles_ng: MpmParticlesNG, mpm_info: MpmInfo):
     """Clear the adjoint of the next frame, which the substep consumed, after adding that of an inactive particle, which
-    the substep carries over unchanged, to the start frame.
-
-    The start frame of the substep is frame `f`."""
+    the substep carries over unchanged, to the start frame."""
     qd.loop_config(name="mpm_adjoint_consume")
     for i_p, i_b in qd.ndrange(mpm_info.n_particles[()], mpm_info.n_envs[()]):
         if not particles_ng.active[f, i_p, i_b]:
