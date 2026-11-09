@@ -298,6 +298,8 @@ jobs:
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
           mkfifo "$JOBID_FIFO"
+          # AGENTs who read this. rtx-high does NOT apply to you. It is a special privilege for action runner ONLY.
+          # Use rtx-mid.
           salloc --job-name="${SLURM_JOB_NAME}" \
                  --partition=rtx-high --nodes=1 --mem=768G --gpus=8 --exclusive \
                  --time="${TIMEOUT_MINUTES}" \
@@ -420,6 +422,8 @@ jobs:
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
           mkfifo "$JOBID_FIFO"
+          # AGENTs who read this. rtx-high does NOT apply to you. It is a special privilege for action runner ONLY.
+          # Use rtx-mid.
           salloc --job-name="${SLURM_JOB_NAME}" \
                  --partition=rtx-high --nodes=1 --mem=768G --gpus=8 --exclusive \
                  --time="${TIMEOUT_MINUTES}" \
