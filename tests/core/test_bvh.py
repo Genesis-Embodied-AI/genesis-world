@@ -5,7 +5,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
-from genesis.utils.array_class import BVHQueryResults, BVHQueryState
+from genesis.engine.bvh import BVHQueryResults, BVHQueryState
 from genesis.utils.misc import qd_to_numpy
 
 from ..utils.assertions import assert_equal

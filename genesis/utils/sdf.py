@@ -6,11 +6,48 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, DynInfo, DynState, GeomsInfo, GeomsState, RigidInfo, SDFInfo
-from genesis.utils.data import is_opted_in
+from genesis.engine.solvers.rigid.data import GEOMS, DynInfo, DynState, GeomsInfo, GeomsState, RigidInfo
+from genesis.utils.data import Data, DataKind, Size, field, is_opted_in
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
+
+
+# The nodes of the signed distance field (SDF) grids and of their coarse min-grids, all geoms together
+SDF_CELLS = Size("sdf_cells")
+SDF_COARSE_CELLS = Size("sdf_coarse_cells")
+
+
+class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
+    """
+    The signed distance field (SDF) grid of each geom: its frame, resolution, cell size, maximum distance and first
+    node, and the resolution and first cell of its coarse grid, whose block minima bound the signed distance from below.
+    """
+
+    T_mesh_to_sdf: qd.Tensor = field((float, (4, 4)))
+    sdf_res: qd.Tensor = field((int, 3))
+    sdf_max: qd.Tensor = field(float)
+    sdf_cell_size: qd.Tensor = field((float, 3))
+    sdf_cell_start: qd.Tensor = field(int)
+    # Coarse grid of the block minima of the nodes, a lower bound of the trilinear signed distance
+    sdf_coarse_res: qd.Tensor = field((int, 3))
+    sdf_coarse_cell_start: qd.Tensor = field(int)
+
+
+class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
+    """
+    The nodes of the signed distance field (SDF) grids: signed distance, gradient, closest vertex and coarse minima.
+    """
+
+    geoms_info: SDFGeomInfo
+    geoms_sdf_val: qd.Tensor = field(float)
+    geoms_sdf_grad: qd.Tensor = field(
+        (float, 3),
+        oversize_hint="Consider setting a larger 'sdf_cell_size', or a smaller 'sdf_max_res', in 'gs.materials.Rigid' "
+        "options.",
+    )
+    geoms_sdf_closest_vert: qd.Tensor = field(int)
+    geoms_sdf_coarse_val: qd.Tensor = field(float, shape=(SDF_COARSE_CELLS,))
 
 
 class SDF:
@@ -22,8 +59,10 @@ class SDF:
     """
 
     def __init__(self, rigid_solver):
-        # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in
+        # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in, the others
+        # holding placeholders the kernels never read
         if not is_opted_in(SDFInfo):
+            self.sdf_info = SDFInfo(unused=True)
             return
 
         geoms = rigid_solver.geoms
@@ -167,18 +206,18 @@ def sdf_func_world_local(
 
 
 @qd.func
-def sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, collider_info: ColliderInfo):
+def sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, sdf_info: SDFInfo):
     """
     Certified lower bound on the trilinear sd at an in-grid point: the minimum node value over the 4^3-cell node
     block containing its interpolation cell. Exact by convexity - the interpolant only combines nodes of that
     block - at the cost of a single load instead of the 8-node gather.
     """
-    res = collider_info.sdf.geoms_info.sdf_res[geom_idx]
+    res = sdf_info.geoms_info.sdf_res[geom_idx]
     base = qd.min(qd.floor(pos_sdf, gs.qd_int), res - 2)
     coarse_cell = base // 4
-    coarse_res = collider_info.sdf.geoms_info.sdf_coarse_res[geom_idx]
-    return collider_info.sdf.geoms_sdf_coarse_val[
-        collider_info.sdf.geoms_info.sdf_coarse_cell_start[geom_idx]
+    coarse_res = sdf_info.geoms_info.sdf_coarse_res[geom_idx]
+    return sdf_info.geoms_sdf_coarse_val[
+        sdf_info.geoms_info.sdf_coarse_cell_start[geom_idx]
         + (coarse_cell[0] * coarse_res[1] + coarse_cell[1]) * coarse_res[2]
         + coarse_cell[2]
     ]
@@ -192,7 +231,7 @@ def sdf_func_world_local_banded(
     geom_quat: qd.types.vector(4),
     band,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Band-gated variant of sdf_func_world_local, returning (is_in_band, sd).
@@ -217,17 +256,17 @@ def sdf_func_world_local_banded(
 
     else:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
-        pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[geom_idx])
-        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, collider_info.sdf):
-            sd = sdf_func_proxy_sdf(geom_idx, pos_sdf, collider_info.sdf)
+        pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
+        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
+            sd = sdf_func_proxy_sdf(geom_idx, pos_sdf, sdf_info)
             is_in_band = sd < band
         else:
-            coarse_lower_bound = sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, collider_info)
+            coarse_lower_bound = sdf_func_coarse_sd_lower_bound(geom_idx, pos_sdf, sdf_info)
             # The bound holds in exact arithmetic, but the floating-point evaluation of the trilinear sum can
             # round below the block minimum; the relative guard keeps a vertex whose exact interpolant clears the
             # band from being misclassified when its rounded value dips just inside.
             if not (coarse_lower_bound - 1e-6 * (1.0 + qd.abs(coarse_lower_bound)) >= band):
-                sd = sdf_func_true_sdf(geom_idx, pos_sdf, collider_info.sdf)
+                sd = sdf_func_true_sdf(geom_idx, pos_sdf, sdf_info)
                 is_in_band = sd < band
 
     return is_in_band, sd
@@ -243,14 +282,14 @@ def sdf_func_ray_exit_distance(
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
 ):
     """
     Distance from a point inside the geom to its surface along a unit direction, bisected down to tolerance.
     """
     dist = max_dist
     sd_end = sdf_func_world_local(
-        geom_idx, origin + max_dist * direction, geom_pos, geom_quat, dyn_info.geoms, collider_info.sdf
+        geom_idx, origin + max_dist * direction, geom_pos, geom_quat, dyn_info.geoms, sdf_info
     )
     if sd_end > 0.0:
         t_lo = gs.qd_float(0.0)
@@ -258,7 +297,7 @@ def sdf_func_ray_exit_distance(
         while t_hi - t_lo > tolerance:
             t_mid = 0.5 * (t_lo + t_hi)
             sd_mid = sdf_func_world_local(
-                geom_idx, origin + t_mid * direction, geom_pos, geom_quat, dyn_info.geoms, collider_info.sdf
+                geom_idx, origin + t_mid * direction, geom_pos, geom_quat, dyn_info.geoms, sdf_info
             )
             if sd_mid < 0.0:
                 t_lo = t_mid
@@ -343,14 +382,14 @@ def sdf_func_grad_world(
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
     collider_config: qd.template(),
 ):
     g_pos = dyn_state.geoms.pos[geom_idx, batch_idx]
     g_quat = dyn_state.geoms.quat[geom_idx, batch_idx]
 
     return sdf_func_grad_world_local(
-        geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, collider_info.sdf, collider_config
+        geom_idx, pos_world, g_pos, g_quat, dyn_info.geoms, rigid_info, sdf_info, collider_config
     )
 
 
@@ -433,7 +472,7 @@ def sdf_func_grad_world_local_consistent(
     geom_quat: qd.types.vector(4),
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
-    collider_info: ColliderInfo,
+    sdf_info: SDFInfo,
 ):
     """
     SDF gradient in world coordinates as the analytic gradient of the trilinear value interpolant, NOT the
@@ -454,20 +493,18 @@ def sdf_func_grad_world_local_consistent(
         grad_world = gu.qd_transform_by_quat(plane_normal, geom_quat)
     else:
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
-        pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[geom_idx])
+        pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
         grad_mesh = qd.Vector.zero(gs.qd_float, 3)
-        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, collider_info.sdf):
-            grad_mesh = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, collider_info.sdf)
+        if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, sdf_info):
+            grad_mesh = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, sdf_info)
         else:
-            geom_sdf_res = collider_info.sdf.geoms_info.sdf_res[geom_idx]
-            cs = collider_info.sdf.geoms_info.sdf_cell_size[geom_idx]
+            geom_sdf_res = sdf_info.geoms_info.sdf_res[geom_idx]
+            cs = sdf_info.geoms_info.sdf_cell_size[geom_idx]
             base = qd.min(qd.floor(pos_sdf, gs.qd_int), geom_sdf_res - 2)
             for offset in qd.grouped(qd.ndrange(2, 2, 2)):
                 pos_cell = base + offset
                 w_xyz = 1 - qd.abs(pos_sdf - pos_cell)
-                val = collider_info.sdf.geoms_sdf_val[
-                    sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, collider_info.sdf)
-                ]
+                val = sdf_info.geoms_sdf_val[sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, sdf_info)]
                 grad_mesh[0] += (2 * offset[0] - 1) * w_xyz[1] * w_xyz[2] * val / cs[0]
                 grad_mesh[1] += w_xyz[0] * (2 * offset[1] - 1) * w_xyz[2] * val / cs[1]
                 grad_mesh[2] += w_xyz[0] * w_xyz[1] * (2 * offset[2] - 1) * val / cs[2]
@@ -556,21 +593,17 @@ def sdf_func_grad_world_local(
 
 
 @qd.func
-def sdf_func_find_closest_vert(
-    geom_idx, i_b, pos_world, dyn_state: DynState, dyn_info: DynInfo, collider_info: ColliderInfo
-):
+def sdf_func_find_closest_vert(geom_idx, i_b, pos_world, dyn_state: DynState, dyn_info: DynInfo, sdf_info: SDFInfo):
     """
     Returns vert of geom that's closest to pos_world
     """
     g_pos = dyn_state.geoms.pos[geom_idx, i_b]
     g_quat = dyn_state.geoms.quat[geom_idx, i_b]
-    geom_sdf_res = collider_info.sdf.geoms_info.sdf_res[geom_idx]
+    geom_sdf_res = sdf_info.geoms_info.sdf_res[geom_idx]
     pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, g_pos, g_quat)
-    pos_sdf = gu.qd_transform_by_T(pos_mesh, collider_info.sdf.geoms_info.T_mesh_to_sdf[geom_idx])
+    pos_sdf = gu.qd_transform_by_T(pos_mesh, sdf_info.geoms_info.T_mesh_to_sdf[geom_idx])
     nearest_cell = qd.cast(qd.min(qd.max(pos_sdf, 0), geom_sdf_res - 1), gs.qd_int)
     return (
-        collider_info.sdf.geoms_sdf_closest_vert[
-            sdf_func_ravel_cell_idx(nearest_cell, geom_idx, geom_sdf_res, collider_info.sdf)
-        ]
+        sdf_info.geoms_sdf_closest_vert[sdf_func_ravel_cell_idx(nearest_cell, geom_idx, geom_sdf_res, sdf_info)]
         + dyn_info.geoms.vert_start[geom_idx]
     )

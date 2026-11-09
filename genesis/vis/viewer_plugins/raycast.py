@@ -6,17 +6,17 @@ import torch
 
 import genesis as gs
 from genesis.ext.pyrender.camera import OrthographicCamera
-from genesis.utils.array_class import RaycastResult
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, with_lock
 from genesis.utils.raycast import Ray, RayHit
+from genesis.utils.raycast_qd import RaycastResult
 
 from .base import ViewerPlugin
 
 if TYPE_CHECKING:
+    from genesis.engine.bvh import BVHState, BVHStaticConfig
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.node import Node
-    from genesis.utils.array_class import BVHState, BVHStaticConfig, RaycastResult
 
 
 class RaycastTarget(NamedTuple):
@@ -54,7 +54,7 @@ class Raycaster:
     """
 
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
-        # NOTE: delayed imports to avoid pulling in rigid_solver / array_class before gs is fully initialized.
+        # NOTE: delayed imports to avoid pulling in rigid_solver before gs is fully initialized.
         from genesis.engine.bvh import get_bvh_data
 
         self.scene = scene

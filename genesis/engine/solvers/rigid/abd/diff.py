@@ -8,7 +8,7 @@ These functions handle:
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.array_class import DynInfo, DynState, ErrorCode, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
 from genesis.utils.data import eoa
 from genesis.utils.misc import qd_isfinite
 
@@ -34,7 +34,7 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
         if i_dq < rigid_info.qpos.shape[0]:
             is_valid = is_valid and qd_isfinite(rigid_info.qpos_next[i_dq, i_b])
         if not is_valid:
-            errno[i_b] = errno[i_b] | ErrorCode.INVALID_ACC_NAN
+            errno[i_b] = errno[i_b] | RigidErrorCode.INVALID_ACC_NAN
 
     # The sizes are read in the loop ranges, since autodiff takes a top level made of loops alone
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
@@ -43,7 +43,7 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
         errno.shape[0],
         axes=qd.static(eoa(dyn_state.dofs.vel)),
     ):
-        if (errno[i_b] & ErrorCode.INVALID_ACC_NAN) == 0:
+        if (errno[i_b] & RigidErrorCode.INVALID_ACC_NAN) == 0:
             if i_dq < dyn_state.dofs.vel.shape[0]:
                 dyn_state.dofs.vel[i_dq, i_b] = dyn_state.dofs.vel_next[i_dq, i_b]
             if i_dq < rigid_info.qpos.shape[0]:

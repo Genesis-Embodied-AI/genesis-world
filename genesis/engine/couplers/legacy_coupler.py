@@ -1,16 +1,17 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
-
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import opt_in
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+from genesis.utils.sdf import SDFInfo
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -914,7 +915,7 @@ class LegacyCoupler(RBC):
                 f,
                 self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.collider.collider_info.sdf,
+                self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.collider_config,
             )
@@ -929,7 +930,7 @@ class LegacyCoupler(RBC):
                 geoms_info=self.rigid_solver.dyn_info.geoms,
                 links_state=self.rigid_solver.dyn_state.links,
                 rigid_info=self.rigid_solver.rigid_info,
-                sdf_info=self.rigid_solver.collider.collider_info.sdf,
+                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
                 collider_config=self.rigid_solver.collider.collider_config,
             )
 
@@ -942,7 +943,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_state.links,
                 self.rigid_solver.dyn_info.links,
                 self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.collider_info.sdf,
+                self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.collider.collider_config,
             )
 
@@ -952,7 +953,7 @@ class LegacyCoupler(RBC):
                 geoms_state=self.rigid_solver.dyn_state.geoms,
                 geoms_info=self.rigid_solver.dyn_info.geoms,
                 links_state=self.rigid_solver.dyn_state.links,
-                sdf_info=self.rigid_solver.collider.collider_info.sdf,
+                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
                 rigid_info=self.rigid_solver.rigid_info,
                 collider_config=self.rigid_solver.collider.collider_config,
             )
@@ -969,7 +970,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_state.links,
                 self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.collider_info.sdf,
+                self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.collider.collider_config,
             )
 

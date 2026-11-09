@@ -1,3 +1,4 @@
+from enum import auto
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,19 +12,27 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
+from genesis.engine.solvers.base_solver import ErrorCode
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksState, RigidInfo
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
-from genesis.utils.array_class import ErrorCode, GeomsInfo, GeomsState, LinksState, RigidInfo, SDFInfo
 from genesis.utils.data import ArrayItem, DataKind, opt_in
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
+from genesis.utils.sdf import SDFInfo
 
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+
+
+class MPMErrorCode(ErrorCode):
+    """The error flags the material point method (MPM) solver writes in its errno (see 'Solver.register_errors')."""
+
+    INVALID_VELOCITY_NAN = auto()
 
 
 @qd.data_oriented
@@ -145,7 +154,7 @@ class MPMSolver(ParticleSolver):
         self.register_errors(
             self.errno,
             {
-                ErrorCode.INVALID_VELOCITY_NAN: (
+                MPMErrorCode.INVALID_VELOCITY_NAN: (
                     "Invalid MPM particle velocities causing 'nan' or 'inf'. Please decrease the simulation timestep or "
                     "adjust the material parameters."
                 ),
@@ -522,7 +531,7 @@ class MPMSolver(ParticleSolver):
 
                 # A velocity that is not finite flags its env, whose state 'freeze_invalid_envs' then leaves as it was
                 if not qd_isfinite(new_vel):
-                    self.errno[i_b] = self.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
+                    self.errno[i_b] = self.errno[i_b] | MPMErrorCode.INVALID_VELOCITY_NAN
 
                 # compute actual new_pos with new_vel
                 new_pos = self.particles[f, i_p, i_b].pos + self.substep_dt * new_vel
@@ -550,7 +559,7 @@ class MPMSolver(ParticleSolver):
     @qd.kernel
     def _kernel_freeze_invalid_envs(self, f: int):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if (self.errno[i_b] & ErrorCode.INVALID_VELOCITY_NAN) != 0:
+            if (self.errno[i_b] & MPMErrorCode.INVALID_VELOCITY_NAN) != 0:
                 self.particles[f + 1, i_p, i_b].pos = self.particles[f, i_p, i_b].pos
                 self.particles[f + 1, i_p, i_b].vel = self.particles[f, i_p, i_b].vel
                 self.particles[f + 1, i_p, i_b].F = self.particles[f, i_p, i_b].F
@@ -581,7 +590,7 @@ class MPMSolver(ParticleSolver):
             self.sim.coupler.rigid_solver.dyn_info.geoms,
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.collider_info.sdf,
+            self.sim.coupler.rigid_solver.collider.sdf.sdf_info,
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
 

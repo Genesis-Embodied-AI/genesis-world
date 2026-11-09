@@ -19,8 +19,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
+from genesis.engine.solvers.rigid.constraint.data import ConstraintState
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
 from genesis.grad.bridge import reversed_with
-from genesis.utils.array_class import ConstraintState, DynInfo, DynState, LinksState, RigidInfo
 from genesis.utils.data import eoa
 
 from .forward_kinematics import (
@@ -178,7 +179,7 @@ def func_crb_fold(
     """Fold the composite-rigid-body inertia of one kinematic root, from its leaves up to its root link.
 
     One thread handles the whole root, walking its link span in descending order so that children fold before their
-    parent propagates, and gating each link on its root (see roots_link_idx in array_class.py). Mirrors the root walk of
+    parent propagates, and gating each link on its root (see roots_link_idx in rigid/data.py). Mirrors the root walk of
     func_COM_root. The links of a root sleep as a unit, so the root link tells whether they are awake. fold_link_force
     folds the link forces in the same walk.
     """
@@ -283,7 +284,7 @@ def func_mass_mat_assemble_tree_cooperative(
     sh_cdof_ang = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
     sh_cdof_vel = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
 
-    # Assemble each mass block of the tree over its full lower triangle (see dofs_mass_block_start in array_class.py).
+    # Assemble each mass block of the tree over its full lower triangle (see dofs_mass_block_start in rigid/data.py).
     # mass_parent_mask zeroes the within-block ancestor gaps.
     tree_dof_start = rigid_info.trees_dof_start[i_t]
     tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
@@ -340,7 +341,7 @@ def func_mass_mat_assemble_dof(
 
     Each entry is written by one thread alone, the row of its lower triangle, and none is read back, so the rows of a
     tree run in parallel and so does their reverse. The blocks partition the dof range of the trees (see
-    dofs_mass_block_start in array_class.py), so the padding slot of a scene without dofs gets an empty row. A
+    dofs_mass_block_start in rigid/data.py), so the padding slot of a scene without dofs gets an empty row. A
     hibernated dof is skipped (see func_mass_mat_add_diag).
     """
     is_awake = True
@@ -664,7 +665,7 @@ def func_factor_mass_tiled(
     """Factor the mass matrix of every environment by streaming tiles through registers (GPU forward only).
 
     Runs when the mass submatrix of a tree is too large for the shared memory the cooperative factor needs. M is
-    block-diagonal per mass block (see dofs_mass_block_start in array_class.py), so one warp of T lanes factors each
+    block-diagonal per mass block (see dofs_mass_block_start in rigid/data.py), so one warp of T lanes factors each
     block of the tree independently through the same qd.simt.TileNxN blocked Cholesky as the constraint Hessian.
 
     func_solve_mass_block consumes the LTDL form M = L^T D L (L unit-lower), which comes of eliminating DOFs
@@ -839,7 +840,7 @@ def func_factor_mass_tree(
         if is_factored:
             is_factored = func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
     if is_factored:
-        # The blocks partition the dof range of the tree (see dofs_mass_block_start in array_class.py), iterated flat
+        # The blocks partition the dof range of the tree (see dofs_mass_block_start in rigid/data.py), iterated flat
         # with per-DOF block bounds: elimination never leaves a block, so one descending scan over the independent
         # blocks stays exact.
         blocks_dof_start = rigid_info.trees_dof_start[i_t]
@@ -1030,7 +1031,7 @@ def func_factor_mass(
 
     func_factor_mass_masked factors a subset of them instead, out of the same per-tree functions. See
     func_compute_mass_matrix_and_link_force for why both passes come in two implementations. The smooth factor also
-    solves the smooth acceleration from the forces where enable_fused_smooth_acc_solve holds (see array_class.py).
+    solves the smooth acceleration from the forces where enable_fused_smooth_acc_solve holds (see rigid/data.py).
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     _B = rigid_info.mass_mat.shape[2]
@@ -1153,12 +1154,12 @@ def func_solve_mass_block(
 ):
     """Solve M x = y for the degrees of freedom in [blocks_dof_start, blocks_dof_end), leaving the other rows as is.
 
-    Both bounds must fall on a mass-block boundary (see dofs_mass_block_start in array_class.py), which holds for the
+    Both bounds must fall on a mass-block boundary (see dofs_mass_block_start in rigid/data.py), which holds for the
     degrees of freedom of a kinematic chain, so the substitutions never read a row outside the range. Restricting the
     range is what lets several chains share one pair of buffers: writing a row outside it would race with the chain
     that owns it.
     """
-    # The LDL^T factor couples a dof with the chain of its mass parents alone (see dofs_mass_parent in array_class.py),
+    # The LDL^T factor couples a dof with the chain of its mass parents alone (see dofs_mass_parent in rigid/data.py),
     # which is shorter than its block, so each substitution walks that chain, the backward one scattering each final
     # value to the ancestors of its dof, which the range holds since it starts on a mass block. This func is never
     # auto-reversed: the backward pass seeds mass_mat.grad directly via the implicit function theorem (see
@@ -1819,7 +1820,7 @@ def func_bias_force(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.tem
 def func_compute_qacc(dyn_state: DynState, rigid_info: RigidInfo, rigid_config: qd.template()):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
     # for what a block is), the blocks of the sleeping dofs left as they are. The fused mass factor solves it already
-    # where enable_fused_smooth_acc_solve holds (see array_class.py).
+    # where enable_fused_smooth_acc_solve holds (see rigid/data.py).
     if qd.static(not rigid_config.enable_fused_smooth_acc_solve):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_d, i_b in qd.ndrange(*dyn_state.dofs.acc_smooth.shape, axes=qd.static(eoa(dyn_state.dofs.is_hibernated))):
@@ -1848,9 +1849,9 @@ def func_midpoint_eligible(
     """Whether the link is a free rigid body eligible for midpoint integration this step.
 
     Eligible: a 6-DOF free-joint link that is its own whole kinematic tree (no parent, and no DOF-bearing descendant, so
-    its mass block holds its own DOFs alone, see dofs_mass_block_start in array_class.py), and unconstrained this step
+    its mass block holds its own DOFs alone, see dofs_mass_block_start in rigid/data.py), and unconstrained this step
     (no contact on the body, fixed children included, and no connect/weld/screw equality, per the involvement flag the
-    assembly writes, see is_constrained in array_class.py). The flag covers dynamically registered constraints, and
+    assembly writes, see is_constrained in rigid/data.py). The flag covers dynamically registered constraints, and
     entities merged at build time via attach fail the tree tests. A constrained body keeps the standard update: the
     solver resolves the constraint impulse at the current configuration, and the discrete free rigid-body equation would
     count it again. In the MuJoCo compatibility mode, the body is the link alone, without fixed children.
@@ -1934,7 +1935,7 @@ def func_midpoint_free_body(
     frame, and a linear augmentation couples the rotation to it through the origin.
 
     Autodiff cannot reverse the Newton iteration, so the solve stores the converged velocity and its residual (see
-    midpoint_ang in array_class.py), from which the variant selected by `is_backward` resumes. Both variants write the
+    midpoint_ang in rigid/data.py), from which the variant selected by `is_backward` resumes. Both variants write the
     same values.
 
     Writes acc[dofs] = (new - old) / h, from which the integration advances the velocity, and the position with the
@@ -2305,7 +2306,7 @@ def func_count_settled_step(
 ):
     """Count this substep in the settled-step counter of awake link i_l of env i_b.
 
-    The counter (see awake_steps in array_class.py) grows, up to hibernation_min_steps, while the largest dof speed of
+    The counter (see awake_steps in rigid/data.py) grows, up to hibernation_min_steps, while the largest dof speed of
     the link stays below the hibernation tolerance, and drops to zero the step it exceeds it. The speed of a dof is its
     next velocity scaled by dof_length (1 for translation, the swept radius for rotation), so the tolerance is one
     linear speed for every kind of dof: the rotational jitter of a small body is a tiny surface speed and counts as

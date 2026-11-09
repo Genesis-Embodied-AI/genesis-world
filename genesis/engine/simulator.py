@@ -6,26 +6,20 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ErrorCode
 from genesis.utils.data import ArrayItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers.rigid_mpm_hybrid import kernel_update_hybrid_soft_part
 from .entities import HybridEntity
 from .sensors import SensorManager
-from .solvers import (
-    FEMSolver,
-    KinematicSolver,
-    MPMSolver,
-    PBDSolver,
-    RigidSolver,
-    SPHSolver,
-)
+from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
 from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin, merge_errno
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
@@ -123,6 +117,8 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
+        # The hybrid entities whose soft part follows its rigid links, updated after the coupling of every substep
+        self._hybrid_entities: list[HybridEntity] = []
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -260,6 +256,8 @@ class Simulator(RBC):
         for entity in self._entities:
             if isinstance(entity, HybridEntity):
                 entity.build()
+                if entity.part_soft_info is not None:
+                    self._hybrid_entities.append(entity)
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
         # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
@@ -500,6 +498,26 @@ class Simulator(RBC):
         self.substep_pre_coupling(f)
         self._coupler.couple(f)
         self.substep_post_coupling(f)
+        # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
+        for entity in self._hybrid_entities:
+            soft_solver, rigid_solver = entity.solver_soft, entity.solver_rigid
+            kernel_update_hybrid_soft_part(
+                f,
+                entity.part_soft.particle_start,
+                soft_solver.substep_dt,
+                soft_solver.dt,
+                rigid_solver.dt,
+                soft_solver.particle_volume_scale,
+                entity.material.damping,
+                entity.material.soft_dv_coef,
+                soft_solver.particles,
+                soft_solver.particles_ng,
+                soft_solver.particles_info,
+                entity.part_soft_info,
+                entity.part_soft_init_positions,
+                rigid_solver.dyn_state.links,
+                rigid_solver.dyn_info.geoms,
+            )
 
     # -------------- pre coupling --------------
     def substep_pre_coupling(self, f):
@@ -681,7 +699,7 @@ class StepOperation(Operation):
             ]
             if grads:
                 envs_finite = torch.stack([grad.isfinite().all(dim=tuple(range(1, grad.ndim))) for grad in grads])
-                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
+                solver.flag_errno(BackwardErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
             solver.update_errno()
             solver.check_errno(
                 blocking=False, context=f"Backward pass of step {self._substep_start // self._sim._substeps}"

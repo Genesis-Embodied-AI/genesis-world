@@ -3,19 +3,21 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions
-from genesis.options.sensors import TemperatureProperties
-from genesis.utils.array_class import ColliderState, DynState
+from genesis.engine.solvers.rigid.collider.data import ColliderState
+from genesis.engine.solvers.rigid.data import DynState
+from genesis.options.sensors import TemperatureGrid as TemperatureGridOptions, TemperatureProperties
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 from genesis.utils.ring_buffer import TensorRingBuffer
 
-from .base_sensor import SimpleSensor, RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensorMetadata
+from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_link import RigidLink

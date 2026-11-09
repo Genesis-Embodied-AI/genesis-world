@@ -11,10 +11,10 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
 from . import support_field
-
 from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
+from .data import ColliderInfo, ColliderState
 
 
 @qd.func

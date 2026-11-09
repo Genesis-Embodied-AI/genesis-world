@@ -11,9 +11,95 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
-from genesis.utils.array_class import DynInfo, DynState, IKScratchFK, IKState, IKTargets, RigidInfo
-from genesis.utils.data import eoa
+from genesis.engine.solvers.rigid.data import (
+    ENTITY_DOFS,
+    ENTITY_JOINTS,
+    ENTITY_LINKS,
+    ENTITY_QS,
+    DynInfo,
+    DynState,
+    RigidInfo,
+)
+from genesis.utils.data import ENVS, Data, DataKind, Size, eoa, field
 from genesis.utils.misc import qd_isfinite
+
+
+# The cap of inverse-kinematics targets
+IK_TARGETS = Size("ik_targets")
+# The pose residuals of the targets stacked, six per target
+IK_ERRORS = 6 * IK_TARGETS
+
+
+class IKState(Data, kind=DataKind.SCRATCH):
+    """Damped-least-squares inverse-kinematics scratch, one column per environment or per restart of the planner."""
+
+    # Spatial Jacobian of one target, rebuilt per target link and copied into the stacked block
+    jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS))
+    # Jacobian of all targets stacked, and its transpose
+    jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, ENTITY_DOFS, ENVS))
+    jacobian_stacked_t: qd.Tensor = field(float, shape=(ENTITY_DOFS, IK_ERRORS, ENVS))
+    # Damped normal matrix J J^T + damping^2 I, its LU factors with their forward-substitution scratch, and its inverse
+    mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_upper: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_y: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    inv: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    # Pose residual of all targets stacked, the best one across restarts, and inv @ residual
+    err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    # Joint-space step, and the best configuration across restarts
+    delta_qpos: qd.Tensor = field(float, shape=(ENTITY_DOFS, ENVS))
+    qpos_best: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+
+
+class IKScratchFK(Data, kind=DataKind.SCRATCH):
+    """Forward kinematics of the inverse-kinematics solve of an entity, apart from the state of the solver.
+
+    It holds the configuration the solve iterates and the link and joint frames of that configuration, one column per
+    environment.
+    """
+
+    qpos: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+    # Written by func_forward_kinematics_scratch
+    links_pos: qd.Tensor = field((float, 3), shape=(ENTITY_LINKS, ENVS))
+    links_quat: qd.Tensor = field((float, 4), shape=(ENTITY_LINKS, ENVS))
+    joints_xanchor: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
+    joints_xaxis: qd.Tensor = field((float, 3), shape=(ENTITY_JOINTS, ENVS))
+
+
+class IKTargets(Data, kind=DataKind.SCRATCH):
+    """Targets and dofs of an inverse-kinematics solve, one column per environment or per restart of the planner.
+
+    The caller writes every field before the solve.
+    """
+
+    # Global indices of the target links, of the dofs to move and of the columns to solve
+    links_idx: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    dofs_idx: qd.Tensor = field(int, shape=(ENTITY_DOFS,))
+    envs_idx: qd.Tensor = field(int, shape=(ENVS,))
+    # Target pose per (link, column) in the world frame, and the link-local point it drives
+    pos: qd.Tensor = field((float, 3), shape=(IK_TARGETS, ENVS))
+    quat: qd.Tensor = field((float, 4), shape=(IK_TARGETS, ENVS))
+    local_point: qd.Tensor = field((float, 3), shape=(IK_TARGETS,))
+    # Initial configuration per column, read when custom_init_qpos is set
+    init_qpos: qd.Tensor = field(float, shape=(ENTITY_QS, ENVS))
+    # The position and rotation axes to solve for all links, and the position and rotation switches of each link
+    pos_mask: qd.Tensor = field(float, shape=(3,))
+    rot_mask: qd.Tensor = field(float, shape=(3,))
+    link_pos_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    link_rot_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
+
+
+class IKScratch(Data, kind=DataKind.SCRATCH):
+    """The scratch of the inverse-kinematics solves of every entity of a solver.
+
+    It spans the largest entity and the target cap, and a solve writes the leading rows its entity spans.
+    """
+
+    state: IKState
+    fk: IKScratchFK
+    targets: IKTargets
 
 
 @qd.func

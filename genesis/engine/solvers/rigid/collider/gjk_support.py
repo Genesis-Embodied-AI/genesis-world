@@ -8,8 +8,10 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.array_class import ColliderInfo, ColliderState, DynInfo, GJKState
+from genesis.engine.solvers.rigid.data import DynInfo
 from . import support_field
+from .data import ColliderState, GJKInfo, GJKState
+from .support_field import SupportFieldInfo
 
 
 @qd.func
@@ -22,7 +24,7 @@ def support_mesh(
     quat: qd.types.vector(4),
     gjk_state: GJKState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    gjk_info: GJKInfo,
 ):
     """
     Find the support point on a mesh in the given direction.
@@ -30,7 +32,7 @@ def support_mesh(
     d_mesh = gu.qd_transform_by_quat(direction, gu.qd_inv_quat(quat))
 
     # Exhaustively search for the vertex with maximum dot product
-    fmax = -collider_info.gjk.FLOAT_MAX[None]
+    fmax = -gjk_info.FLOAT_MAX[None]
     imax = 0
 
     vert_start = dyn_info.geoms.vert_start[i_g]
@@ -70,7 +72,8 @@ def support_driver(
     collider_state: ColliderState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -99,14 +102,14 @@ def support_driver(
     elif qd.static(rigid_config.enable_mujoco_compatibility):
         # If mujoco-compatible, do exhaustive search for the vertex
         if geom_type == gs.GEOM_TYPE.MESH:
-            v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, collider_info)
+            v, v_, vid = support_mesh(i_g, i_b, i_o, direction, pos, quat, gjk_state, dyn_info, gjk_info)
         else:
             v, v_, vid = support_field._func_support_world(
-                i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=True
+                i_g, direction, pos, quat, dyn_info, support_field_info, exhaustive=True
             )
     else:
         v, v_, vid = support_field._func_support_world(
-            i_g, direction, pos, quat, dyn_info, collider_info, exhaustive=False
+            i_g, direction, pos, quat, dyn_info, support_field_info, exhaustive=False
         )
     return v, v_, vid
 
@@ -124,7 +127,8 @@ def func_support(
     collider_state: ColliderState,
     gjk_state: GJKState,
     dyn_info: DynInfo,
-    collider_info: ColliderInfo,
+    gjk_info: GJKInfo,
+    support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
     shrink_sphere: bool,
@@ -160,7 +164,8 @@ def func_support(
             collider_state,
             gjk_state,
             dyn_info,
-            collider_info,
+            gjk_info,
+            support_field_info,
             rigid_config,
             collider_config,
             shrink_sphere,
