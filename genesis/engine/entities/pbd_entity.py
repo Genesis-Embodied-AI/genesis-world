@@ -11,6 +11,22 @@ import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
 
 
+@qd.kernel
+def kernel_add_vverts_weighted(
+    vvert_start: int,
+    particle_start: int,
+    support_idxs_local: qd.types.ndarray(),
+    support_weights: qd.types.ndarray(),
+    pbd_solver: qd.template(),
+):
+    """Bind the given vverts to their supporting particles by given weights (see 'ParticleSolver.add_vverts')."""
+    for i_vv_ in range(support_idxs_local.shape[0]):
+        i_vv = i_vv_ + vvert_start
+        for j in range(pbd_solver.n_vvert_supports):
+            pbd_solver.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + particle_start
+            pbd_solver.vverts_info.support_weights[i_vv][j] = support_weights[i_vv_, j]
+
+
 class PBDBaseEntity(ParticleEntity):
     """
     Base class for PBD entity.
@@ -350,7 +366,7 @@ class PBD2DEntity(PBDTetEntity):
         support_idxs[:, :3] = faces[tri_idx]
         support_idxs[:, 3:] = faces[tri_idx, :1]
         support_weights[:, :3] = bary
-        self._solver.add_vverts_weighted(self._vvert_start, self._particle_start, support_idxs, support_weights)
+        kernel_add_vverts_weighted(self._vvert_start, self._particle_start, support_idxs, support_weights, self._solver)
 
     @property
     def n_inner_edges(self):

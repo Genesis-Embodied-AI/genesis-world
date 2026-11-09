@@ -1,7 +1,7 @@
 """Contact pairs of the implicit material point method (MPM) with position based dynamics (PBD) in the joint Newton
 solve (see pbd_newton.py for the PBD unknown and its stages)."""
 
-import numpy as np
+from collections.abc import Iterator
 
 import quadrants as qd
 
@@ -11,9 +11,9 @@ from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, contact_band_width, contact_invweight, particle_of_sorted
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
-from genesis.engine.solvers.pbd_newton import PbdNewtonParticipant, is_moving
+from genesis.engine.solvers.pbd_newton import PBD_PARTICLES, PbdNewtonParticipant, is_moving
 from genesis.utils.array_class import BVHQueryResults
-from genesis.utils.data import Data, DataKind, field
+from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
 
 from .contact_candidates import CouplingPairs
 from .mpm_sph_func import kernel_fit_mpm_particle_leaves
@@ -40,18 +40,13 @@ class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
 # ============================================== Layer 1: broad phase ==============================================
 
 
-@qd.data_oriented
-class PbdContactParams:
+class PbdContactParams(Data, kind=DataKind.CONSTANT, shape=()):
     """Scene values of the MPM-PBD contact pairs, as device scalars: the thickness `thickness` added to the PBD radius
     in metres, the penalty stiffness `stiffness` of a row in units of its effective mass and the friction `friction`."""
 
-    def __init__(self, dx: float) -> None:
-        self.thickness = qd.ndarray(gs.qd_float, shape=())
-        self.thickness.from_numpy(np.array(0.5 * dx, dtype=gs.np_float))
-        self.stiffness = qd.ndarray(gs.qd_float, shape=())
-        self.stiffness.from_numpy(np.array(10.0, dtype=gs.np_float))
-        self.friction = qd.ndarray(gs.qd_float, shape=())
-        self.friction.from_numpy(np.array(0.15, dtype=gs.np_float))
+    thickness: qd.Tensor = field(float, ndarray=True)
+    stiffness: qd.Tensor = field(float, ndarray=True)
+    friction: qd.Tensor = field(float, ndarray=True)
 
 
 @qd.data_oriented
@@ -94,6 +89,16 @@ def kernel_fit_pbd_leaves(query: qd.template()):
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
 
 
+class MpmObstaclesScratch(Data, kind=DataKind.SCRATCH):
+    """The frame of the MPM particles in the tree of MpmParticleObstacles, and the number of obstacle candidates of
+    every PBD particle over the substep, with their indices and distances."""
+
+    frame: qd.Tensor = field(int, ndarray=True)
+    n_neighbors: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), ndarray=True)
+    neighbors_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, OBSTACLE_NEIGHBORS, ENVS), ndarray=True)
+    neighbors_dist: qd.Tensor = field(float, shape=(PBD_PARTICLES, OBSTACLE_NEIGHBORS, ENVS), ndarray=True)
+
+
 @qd.data_oriented
 class MpmParticleObstacles:
     """The MPM particles at the start of the substep as immovable obstacles of the PBD particles at the contact distance
@@ -106,11 +111,7 @@ class MpmParticleObstacles:
         self.pbd = pbd
         self.contact = contact
         self.radius = pbd.particle_radius
-        n_pbd = max(pbd.n_particles, 1)
-        self.frame = qd.ndarray(gs.qd_int, shape=())
-        self.neighbors_idx = qd.ndarray(gs.qd_int, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
-        self.neighbors_dist = qd.ndarray(gs.qd_float, shape=(n_pbd, OBSTACLE_NEIGHBORS, n_envs))
-        self.n_neighbors = qd.ndarray(gs.qd_int, shape=(n_pbd, n_envs))
+        self.scratch = MpmObstaclesScratch(sizes={PBD_PARTICLES: pbd.n_particles, ENVS: n_envs})
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -138,7 +139,7 @@ class MpmParticleObstacles:
 def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """Project PBD particle i_q of environment i_t out of MPM particle i_a to the contact distance, with the friction of
     Macklin et al. 2014 (Eq. 23-24) on its tangential displacement over the substep."""
-    f = obstacles.frame[()]
+    f = obstacles.scratch.frame[()]
     x_q = obstacles.pbd.particles_reordered[i_q, i_t].pos
     d_vec = x_q - obstacles.mpm_particles.pos[f, i_a, i_t]
     dist = d_vec.norm()
@@ -162,7 +163,7 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
 def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """The non-penetration of PBD particle i_q of environment i_t at its start position with MPM particle i_a, for the
     pre-stabilization."""
-    f = obstacles.frame[()]
+    f = obstacles.scratch.frame[()]
     d_vec = obstacles.pbd.particles_reordered[i_q, i_t].ipos - obstacles.mpm_particles.pos[f, i_a, i_t]
     dist = d_vec.norm()
     target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
@@ -176,7 +177,7 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
 def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """Keep MPM particle i_a among the nearest OBSTACLE_NEIGHBORS obstacle candidates of PBD particle i_q of environment
     i_t if it lies within OBSTACLE_REACH contact distances of its start or predicted position."""
-    f = obstacles.frame[()]
+    f = obstacles.scratch.frame[()]
     x_m = obstacles.mpm_particles.pos[f, i_a, i_t]
     dist = qd.min(
         (obstacles.pbd.particles_reordered[i_q, i_t].pos - x_m).norm(),
@@ -184,19 +185,19 @@ def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.temp
     )
     reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
     if dist < reach:
-        n = obstacles.n_neighbors[i_q, i_t]
+        n = obstacles.scratch.n_neighbors[i_q, i_t]
         if n < qd.static(OBSTACLE_NEIGHBORS):
-            obstacles.neighbors_idx[i_q, n, i_t] = i_a
-            obstacles.neighbors_dist[i_q, n, i_t] = dist
-            obstacles.n_neighbors[i_q, i_t] = n + 1
+            obstacles.scratch.neighbors_idx[i_q, n, i_t] = i_a
+            obstacles.scratch.neighbors_dist[i_q, n, i_t] = dist
+            obstacles.scratch.n_neighbors[i_q, i_t] = n + 1
         else:
             j_worst = 0
             for j in range(1, qd.static(OBSTACLE_NEIGHBORS)):
-                if obstacles.neighbors_dist[i_q, j, i_t] > obstacles.neighbors_dist[i_q, j_worst, i_t]:
+                if obstacles.scratch.neighbors_dist[i_q, j, i_t] > obstacles.scratch.neighbors_dist[i_q, j_worst, i_t]:
                     j_worst = j
-            if dist < obstacles.neighbors_dist[i_q, j_worst, i_t]:
-                obstacles.neighbors_idx[i_q, j_worst, i_t] = i_a
-                obstacles.neighbors_dist[i_q, j_worst, i_t] = dist
+            if dist < obstacles.scratch.neighbors_dist[i_q, j_worst, i_t]:
+                obstacles.scratch.neighbors_idx[i_q, j_worst, i_t] = i_a
+                obstacles.scratch.neighbors_dist[i_q, j_worst, i_t] = dist
     return True
 
 
@@ -207,7 +208,7 @@ def kernel_gather_obstacle_neighbors(obstacles: qd.template()):
     reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
     qd.loop_config(name="pbd_mpm_obstacle_neighbors")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        obstacles.n_neighbors[i_q, i_b] = 0
+        obstacles.scratch.n_neighbors[i_q, i_b] = 0
         if is_moving(i_q, i_b, obstacles.pbd):
             x0 = obstacles.pbd.particles_reordered[i_q, i_b].ipos
             x1 = obstacles.pbd.particles_reordered[i_q, i_b].pos
@@ -229,8 +230,8 @@ def func_pbd_obstacles(obstacles: qd.template(), is_stabilization: qd.template()
     its current or start position."""
     qd.loop_config(name="pbd_mpm_obstacles")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
-        for j in range(obstacles.n_neighbors[i_q, i_b]):
-            i_a = obstacles.neighbors_idx[i_q, j, i_b]
+        for j in range(obstacles.scratch.n_neighbors[i_q, i_b]):
+            i_a = obstacles.scratch.neighbors_idx[i_q, j, i_b]
             if qd.static(is_stabilization):
                 func_obstacle_start_filter(i_b, i_a, i_q, obstacles)
             else:
@@ -253,6 +254,11 @@ class MpmPbdContact(CouplingPairs):
         self.pbd = pbd
         self.query = query
         super().__init__(mpm)
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from super().data
+        yield from iter_data(self.query, "contact")
 
     def build_query(self, f: int) -> None:
         self.query.build()
@@ -291,6 +297,7 @@ class MpmPbdContact(CouplingPairs):
         i_vq = self.pairs.i_b[i_pair] * self.pbd.n_vertex_particles + self.pairs.particle[i_pair]
         r = self.mpm.func_vertex_value(f, self.pairs.s[i_pair]) - self.pbd.func_vertex_value(f, i_vq)
         verts = qd.Vector(
-            [self.mpm.vertex_offset[()] + self.pairs.s[i_pair], self.pbd.vertex_offset[()] + i_vq], dt=gs.qd_int
+            [self.mpm.vertex_range.offset[()] + self.pairs.s[i_pair], self.pbd.vertex_range.offset[()] + i_vq],
+            dt=gs.qd_int,
         )
         return verts, qd.Vector([1.0, -1.0], dt=gs.qd_float), r

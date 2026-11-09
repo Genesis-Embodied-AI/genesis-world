@@ -1,6 +1,7 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
 
 # Values of NewtonControl.failed
@@ -9,55 +10,33 @@ NEWTON_FAILED_NON_FINITE = 2
 NEWTON_FAILED_LINE_SEARCH = 3
 
 
-@qd.data_oriented
-class NewtonControl:
-    """Device-resident scalars steering a Newton solve with a backtracking line search inside one graph."""
+class NewtonControl(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """Device-resident scalars steering the Newton solves of the environments of a batch with a backtracking line
+    search inside one graph: the options of the solve, the flags of the batch, then the state of every environment."""
 
-    def __init__(
-        self,
-        value_type,
-        max_newton_iter: int,
-        max_ls_iter: int,
-        ls_shrink: float,
-        is_strict: bool = False,
-        n_envs: int = 1,
-    ) -> None:
-        self.value_type = value_type
-
-        def scalar(dtype, value):
-            array = qd.ndarray(dtype, shape=())
-            array.fill(value)
-            return array
-
-        def per_env(dtype, value):
-            array = qd.ndarray(dtype, shape=(n_envs,))
-            array.fill(value)
-            return array
-
-        self.is_newton_running = scalar(gs.qd_int, 0)
-        self.is_line_search_running = scalar(gs.qd_int, 0)
-        self.has_failed_iterations = scalar(gs.qd_int, 0)
-        self.max_newton_iter = scalar(gs.qd_int, max_newton_iter)
-        self.max_ls_iter = scalar(gs.qd_int, max_ls_iter)
-        self.ls_shrink = scalar(value_type, ls_shrink)
-        self.is_strict = scalar(gs.qd_int, int(is_strict))
-        self.disp_tol = scalar(value_type, 0.0)
-
-        self.is_env_running = per_env(gs.qd_int, 0)
-        self.is_env_line_search_running = per_env(gs.qd_int, 0)
-        self.is_converged = per_env(gs.qd_int, 0)
-        self.failed = per_env(gs.qd_int, 0)
-        self.has_failed_non_finite = per_env(gs.qd_int, 0)
-        self.newton_iter = per_env(gs.qd_int, 0)
-        self.ls_iter = per_env(gs.qd_int, 0)
-        self.alpha = per_env(value_type, 1.0)
-        self.energy_start = per_env(value_type, 0.0)
-        self.energy_trial = per_env(value_type, 0.0)
-        self.max_disp = per_env(value_type, 0.0)
+    max_newton_iter: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    max_ls_iter: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    ls_shrink: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    is_strict: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    disp_tol: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    is_newton_running: qd.Tensor = field(int, shape=(), ndarray=True)
+    is_line_search_running: qd.Tensor = field(int, shape=(), ndarray=True)
+    has_failed_iterations: qd.Tensor = field(int, shape=(), ndarray=True)
+    is_env_running: qd.Tensor = field(int, ndarray=True)
+    is_env_line_search_running: qd.Tensor = field(int, ndarray=True)
+    is_converged: qd.Tensor = field(int, ndarray=True)
+    failed: qd.Tensor = field(int, ndarray=True)
+    has_failed_non_finite: qd.Tensor = field(int, ndarray=True)
+    newton_iter: qd.Tensor = field(int, ndarray=True)
+    ls_iter: qd.Tensor = field(int, ndarray=True)
+    alpha: qd.Tensor = field(float, ndarray=True)
+    energy_start: qd.Tensor = field(float, ndarray=True)
+    energy_trial: qd.Tensor = field(float, ndarray=True)
+    max_disp: qd.Tensor = field(float, ndarray=True)
 
 
 @qd.func(requires_top_level=True)
-def func_reset_newton_control(control: qd.template()):
+def func_reset_newton_control(control: NewtonControl):
     """Start the solve of every environment but those stopped on a non-finite measure earlier in the step."""
     for _ in range(1):
         control.is_newton_running[()] = 0
@@ -71,21 +50,21 @@ def func_reset_newton_control(control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_clear_non_finite(control: qd.template()):
+def func_clear_non_finite(control: NewtonControl):
     """Clear the latch of the solves stopped on a non-finite measure, once the participants read it."""
     for i_b in range(control.has_failed_non_finite.shape[0]):
         control.has_failed_non_finite[i_b] = 0
 
 
 @qd.func(requires_top_level=True)
-def func_reset_newton_measures(control: qd.template()):
+def func_reset_newton_measures(control: NewtonControl):
     """Clear the largest displacement update, which the participants accumulate with their Newton direction."""
     for i_b in range(control.max_disp.shape[0]):
         control.max_disp[i_b] = 0.0
 
 
 @qd.func(requires_top_level=True)
-def func_reset_energy(control: qd.template(), is_trial: qd.template()):
+def func_reset_energy(control: NewtonControl, is_trial: qd.template()):
     """Clear the start or the trial energy, which the participants accumulate."""
     for i_b in range(control.energy_start.shape[0]):
         if is_trial:
@@ -95,7 +74,7 @@ def func_reset_energy(control: qd.template(), is_trial: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_check_convergence(control: qd.template()):
+def func_check_convergence(control: NewtonControl):
     """Judge the convergence of every running environment on its Newton direction, before the line search."""
     for i_b in range(control.failed.shape[0]):
         if control.is_env_running[i_b] != 0:
@@ -111,7 +90,7 @@ def func_check_convergence(control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_init_line_search(control: qd.template()):
+def func_init_line_search(control: NewtonControl):
     for _ in range(1):
         control.is_line_search_running[()] = 0
     for i_b in range(control.failed.shape[0]):
@@ -123,7 +102,7 @@ def func_init_line_search(control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_accept_or_backtrack(control: qd.template()):
+def func_accept_or_backtrack(control: NewtonControl):
     """Accept the trial step of every environment once its energy is at most the start energy, or shrink its alpha."""
     for _ in range(1):
         control.is_line_search_running[()] = 0
@@ -148,7 +127,7 @@ def func_accept_or_backtrack(control: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_update_convergence(control: qd.template()):
+def func_update_convergence(control: NewtonControl):
     """Stop every environment after a converged, a non-finite or a failed line-search iteration, and raise the failure
     flag at the iteration cap."""
     for _ in range(1):

@@ -3,8 +3,10 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.utils.data import StaticConfig, iter_data
 
+from .newton_contact import VertexRange
 from .newton_linear import (
     BlockJacobiOwner,
     BlockJacobiScratch,
@@ -45,10 +47,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         self.n_envs = n_envs
         self.n_vertices = fem.n_vertices
         # The vertices of every environment are contact vertices (see newton_contact.py)
-        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_offset.fill(0)
-        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_count.fill(n_envs * fem.n_vertices)
+        self.vertex_range = VertexRange(values={"offset": 0, "count": n_envs * fem.n_vertices})
         self.n_elements = fem.n_elements
         self.n_surfaces = fem.n_surfaces
         self.config = FemNewtonConfig(
@@ -66,6 +65,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
     @property
     def data(self):
+        yield from iter_data(self, "vertex_range")
         yield from iter_data(self, "linear_block")
         yield from iter_data(self, "jacobi")
 
@@ -133,7 +133,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
                         discard_block(i_t + i_block, self.linear)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f: int):
+    def func_start_line_search(self, control: NewtonControl, f: int):
         """Record the line-search start point, and add the largest component of the step into the Newton measure."""
         qd.loop_config(name="mpm_fem_start_line_search")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
@@ -141,7 +141,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             qd.atomic_max(control.max_disp[i_b], qd.abs(self.solution(i_b, i_v)).max())
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f: int):
+    def func_step_forward(self, control: NewtonControl, f: int):
         qd.loop_config(name="mpm_fem_step_forward")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
             x_prev = self.solver.linesearch_state_v[i_b, i_v].x_prev
@@ -193,7 +193,7 @@ def kernel_fem_begin(fem: qd.template()):
 
 
 @qd.kernel
-def kernel_fem_freeze(f: int, fem: qd.template(), control: qd.template()):
+def kernel_fem_freeze(f: int, fem: qd.template(), control: NewtonControl):
     for i_v, i_b in qd.ndrange(fem.n_vertices, fem.n_envs):
         if control.has_failed_non_finite[i_b] != 0:
             fem.solver.elements_v[f + 1, i_v, i_b].pos = fem.solver.elements_v[f, i_v, i_b].pos

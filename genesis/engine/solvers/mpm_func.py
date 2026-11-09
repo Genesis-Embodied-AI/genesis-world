@@ -6,6 +6,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_write_triplet
 from genesis.engine.numerics.fsr_reduce import add_by_key, head_segmented_reduce_add, max_by_key
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.numerics.open_addressing_hash import (
     EMPTY_KEY,
     func_insert_hash,
@@ -1670,7 +1671,7 @@ def func_contribute_newton_max_disp(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    control: qd.template(),
+    control: NewtonControl,
     mpm_info: MpmInfo,
 ):
     """Reduce into the Newton control of every environment the largest |du| component of its particles, sum_a w_a
@@ -1692,7 +1693,7 @@ def func_cap_inversion_step(
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
-    control: qd.template(),
+    control: NewtonControl,
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
@@ -1726,7 +1727,7 @@ def particle_max_disp(
 
 
 @qd.func(requires_top_level=True)
-def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, control: qd.template()):
+def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, control: NewtonControl):
     """Move the nodes of every environment to the trial point of its line-search step."""
     qd.loop_config(name="mpm_step_forward")
     for node in range(grid.n_blocks[()] * BLOCK_CELLS):

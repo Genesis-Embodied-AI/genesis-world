@@ -178,12 +178,13 @@ class LegacyCoupler(RBC):
         if self._mpm_fem:
             fem_host, fem_participant = fem.build_newton_participant()
             owners.append((fem_host, fem_participant))
-            query = FemTriangleQuery(fem_participant, mpm_participant.mpm_info, FemContactParams(mpm.dx), n_envs)
+            fem_contact = FemContactParams(values={"thickness": 0.5 * mpm.dx, "stiffness": 10.0})
+            query = FemTriangleQuery(fem_participant, mpm_participant.mpm_info, fem_contact, n_envs)
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((CouplingPairsHost(contact), contact))
             pair_kinds.append(contact)
         if self._mpm_pbd:
-            pbd_contact = PbdContactParams(mpm.dx)
+            pbd_contact = PbdContactParams(values={"thickness": 0.5 * mpm.dx, "stiffness": 10.0, "friction": 0.15})
             pbd_host, pbd_participant = pbd.build_newton_participant()
             owners.append((pbd_host, pbd_participant))
             query = PbdParticleQuery(pbd_participant, mpm_participant.mpm_info, pbd_contact, n_envs)

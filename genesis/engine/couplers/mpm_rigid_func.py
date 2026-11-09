@@ -12,7 +12,15 @@ from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 from genesis.utils.array_class import GeomsInfo, GeomsState, RigidInfo, SDFInfo
-from genesis.utils.data import Data, DataKind, field
+from genesis.utils.data import Data, DataKind, Size, field
+
+COUPLED_GEOMS = Size("coupled_geoms")
+
+
+class CoupledGeoms(Data, kind=DataKind.CONSTANT):
+    """The Rigid geoms coupled with the material point method (MPM), one leaf each in the tree of RigidGeomQuery."""
+
+    idx: qd.Tensor = field(int, shape=(COUPLED_GEOMS,), ndarray=True)
 
 
 class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
@@ -121,9 +129,9 @@ class RigidGeomQuery:
 
     def __init__(self, rigid: RigidNewtonParticipant, n_envs: int):
         self.n_coupled = len(rigid.coupled_geoms_idx)
-        self.coupled_geoms = qd.ndarray(gs.qd_int, shape=(max(self.n_coupled, 1),))
+        self.coupled_geoms = CoupledGeoms(sizes={COUPLED_GEOMS: self.n_coupled})
         if self.n_coupled:
-            self.coupled_geoms.from_numpy(rigid.coupled_geoms_idx)
+            self.coupled_geoms.idx.from_numpy(rigid.coupled_geoms_idx)
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(self.n_coupled, 1), is_active=self.n_coupled > 0)
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -148,7 +156,7 @@ def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
     empty box with a finite center."""
     dt = mpm_info.substep_dt[()]
     for i_b, i_a in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
-        i_g = query.coupled_geoms[i_a]
+        i_g = query.coupled_geoms.idx[i_a]
         i_l = query.geoms_info.link_idx[i_g]
         is_carried = True
         if qd.static(query.batch_links_info):

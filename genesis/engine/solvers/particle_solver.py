@@ -108,18 +108,3 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
             self.vverts_info.support_weights[i_vv][self._n_vvert_supports - 1] = 1.0 - b.sum()
             for j in range(self._n_vvert_supports):
                 self.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + particle_start
-
-    @qd.kernel
-    def add_vverts_weighted(
-        self,
-        vvert_start: int,
-        particle_start: int,
-        support_idxs_local: qd.types.ndarray(),
-        support_weights: qd.types.ndarray(),
-    ):
-        """Bind the given vverts to their supporting particles by given weights (see 'add_vverts')."""
-        for i_vv_ in range(support_idxs_local.shape[0]):
-            i_vv = i_vv_ + vvert_start
-            for j in range(self._n_vvert_supports):
-                self.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + particle_start
-                self.vverts_info.support_weights[i_vv][j] = support_weights[i_vv_, j]

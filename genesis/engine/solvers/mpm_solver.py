@@ -13,6 +13,7 @@ from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
 from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad
@@ -48,6 +49,7 @@ from .mpm_data import (
     build_wall_pairs,
     initial_block_capacity,
 )
+from .newton_contact import VertexRange
 from .newton_linear import (
     CAPACITY_GROW_FACTOR,
     MIN_SLOTS,
@@ -127,10 +129,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         # The linear system of the solve, bound by the NewtonSolver
         self.linear: NewtonLinearScratch | None = None
         self.linear_block: LinearBlock = build_linear_block(0, 0)
-        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_offset.fill(0)
-        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_count.fill(n_sort)
+        self.vertex_range = VertexRange(values={"offset": 0, "count": n_sort})
         self._scratches_replaced = []
 
     def replace_wall_pairs(self, wall_pairs: MpmWallPairs) -> None:
@@ -161,6 +160,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         yield from iter_data(self, "jacobi")
         yield from iter_data(self, "linear_block")
         yield from iter_data(self, "wall_pairs")
+        yield from iter_data(self, "vertex_range")
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int, is_exact: qd.template()):
@@ -179,7 +179,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f: int):
+    def func_start_line_search(self, control: NewtonControl, f: int):
         mpm_func.func_negate_du(self.grid, self.newton, self.linear, self.linear_block)
         mpm_func.func_record_start_point(self.grid, self.newton)
         mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.mpm_info)
@@ -188,7 +188,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f: int):
+    def func_step_forward(self, control: NewtonControl, f: int):
         mpm_func.func_step_forward(self.grid, self.newton, control)
 
     @qd.func(requires_top_level=True)
@@ -232,7 +232,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         qd.loop_config(name="mpm_wall_pair_terms")
         for i_pair in range(self.wall_pairs.n_pairs[()]):
             env, energy, g, H = self.wall_pair_terms(i_pair)
-            i_v = self.vertex_offset[()] + self.wall_pairs.s[i_pair]
+            i_v = self.vertex_range.offset[()] + self.wall_pairs.s[i_pair]
             contact.write_doublet(contact.matrices.doublet_offsets[i_kind] + i_pair, i_v, g)
             contact.write_triplet(contact.matrices.triplet_offsets[i_kind] + i_pair, i_v, i_v, H)
 
@@ -584,24 +584,6 @@ class MPMSolver(ParticleSolver):
         self._materials.append(material)
 
     # ------------------------------------------------------------------------------------
-    # ----------------------------------- simulation -------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @no_grad
-    @qd.kernel
-    def _kernel_flag_non_finite_pos(self, f: int):
-        for i_p, i_b in qd.ndrange(self.particles.pos.shape[1], self.particles.pos.shape[2]):
-            if not qd_isfinite(self.particles.pos[f, i_p, i_b]):
-                self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
-
-    @no_grad
-    @qd.kernel
-    def _kernel_flag_newton_non_finite(self, control: qd.template()):
-        for i_b in range(self.mpm_errno.errno.shape[0]):
-            if control.has_failed_non_finite[i_b] != 0:
-                self.mpm_errno.errno[i_b] = self.mpm_errno.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
-
-    # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
@@ -634,7 +616,7 @@ class MPMSolver(ParticleSolver):
         The grid-to-particle transfer of the substep ran earlier, in the substep of the Newton solver."""
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim.cur_substep_global + 1) % self._substeps == 0:
-            self._kernel_flag_non_finite_pos(f + 1)
+            kernel_flag_non_finite_pos(f + 1, self.particles, self.mpm_errno)
 
     # ------------------------------------------------------------------------------------
     # --------------------------- Newton solver participant ------------------------------
@@ -740,7 +722,7 @@ class MPMSolver(ParticleSolver):
         pass
 
     def newton_flag_non_finite(self, control):
-        self._kernel_flag_newton_non_finite(control)
+        kernel_flag_newton_non_finite(control, self.mpm_errno)
 
     @qd.kernel
     def copy_frame(self, source: int, target: int):
@@ -1293,6 +1275,22 @@ class MPMSolver(ParticleSolver):
     @property
     def grid_offset(self):
         return self._grid_offset
+
+
+@no_grad
+@qd.kernel
+def kernel_flag_non_finite_pos(f: int, particles: MpmParticles, mpm_errno: MpmErrno):
+    for i_p, i_b in qd.ndrange(particles.pos.shape[1], particles.pos.shape[2]):
+        if not qd_isfinite(particles.pos[f, i_p, i_b]):
+            mpm_errno.errno[i_b] = mpm_errno.errno[i_b] | ErrorCode.INVALID_VELOCITY_NAN
+
+
+@no_grad
+@qd.kernel
+def kernel_flag_newton_non_finite(control: NewtonControl, mpm_errno: MpmErrno):
+    for i_b in range(mpm_errno.errno.shape[0]):
+        if control.has_failed_non_finite[i_b] != 0:
+            mpm_errno.errno[i_b] = mpm_errno.errno[i_b] | ErrorCode.INVALID_MPM_SOLVE_NAN
 
 
 @qd.kernel

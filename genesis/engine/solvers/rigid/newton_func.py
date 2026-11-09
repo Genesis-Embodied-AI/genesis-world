@@ -4,6 +4,8 @@ Rigid."""
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.linear_pcg import PCGScalars
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.utils.array_class import ConstraintState, DofsState, DynInfo, DynState, LinksInfo, RigidInfo
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
@@ -307,7 +309,7 @@ def func_rigid_precondition(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars, is_adjoint: qd.template()):
     """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -323,7 +325,7 @@ def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init_direction(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
+def func_rigid_pcg_init_direction(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
     """Set the first search direction p = z over the Rigid dofs, and add r . z to rz."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -361,7 +363,7 @@ def func_rigid_matvec(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_matvec_dot(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
+def func_rigid_matvec_dot(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
     """Add p_r . Ap_r to p . Ap, once Ap_r holds the whole joint operator."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -372,7 +374,7 @@ def func_rigid_matvec_dot(rigid_data: RigidNewtonScratch, pcg_scalars: qd.templa
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
+def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
     """Update the solution and the residual over the Rigid dofs, x += alpha p and r -= alpha Ap."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -385,7 +387,7 @@ def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: qd.tem
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_dot_rz(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
+def func_rigid_pcg_dot_rz(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
     """Add r . z over the Rigid dofs to rz_new."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -396,7 +398,7 @@ def func_rigid_pcg_dot_rz(rigid_data: RigidNewtonScratch, pcg_scalars: qd.templa
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_direction(rigid_data: RigidNewtonScratch, pcg_scalars: qd.template()):
+def func_rigid_pcg_direction(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
     """Update the search direction p = z + beta p over the Rigid dofs, and clear Ap."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
@@ -411,7 +413,7 @@ def func_rigid_pcg_direction(rigid_data: RigidNewtonScratch, pcg_scalars: qd.tem
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: qd.template()):
+def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: NewtonControl):
     """Set the line-search direction dx = -solution and its start point, and take |dx| into the largest displacement of
     the Newton step, after the MPM rows."""
     n_dofs = rigid_data.x.shape[0]
@@ -424,7 +426,7 @@ def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: qd.tem
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_step_forward(rigid_data: RigidNewtonScratch, control: qd.template()):
+def func_rigid_step_forward(rigid_data: RigidNewtonScratch, control: NewtonControl):
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_step_forward")

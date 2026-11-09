@@ -7,6 +7,8 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.linear_pcg import PCGScalars
+from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.constraint.solver import func_hessian_and_cholesky_factor_direct
 from genesis.grad.bridge import no_grad
@@ -115,7 +117,7 @@ class RigidNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init(self, pcg_scalars: qd.template(), is_adjoint: qd.template()):
+    def func_pcg_init(self, pcg_scalars: PCGScalars, is_adjoint: qd.template()):
         newton_func.func_rigid_pcg_init(self.rigid_data, pcg_scalars, is_adjoint)
 
     @qd.func(requires_top_level=True)
@@ -125,37 +127,37 @@ class RigidNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, pcg_scalars: qd.template()):
+    def func_pcg_init_direction(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_pcg_init_direction(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_matvec(self, pcg_scalars: qd.template()):
+    def func_matvec(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_matvec(
             self.rigid_data, self.constraint_state, self.dyn_info, self.rigid_info, self.rigid_config, self.config
         )
 
     @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, pcg_scalars: qd.template()):
+    def func_matvec_dot(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_matvec_dot(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, pcg_scalars: qd.template()):
+    def func_pcg_update_xr(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_pcg_update_xr(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, pcg_scalars: qd.template()):
+    def func_pcg_dot_rz(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_pcg_dot_rz(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, pcg_scalars: qd.template()):
+    def func_pcg_direction(self, pcg_scalars: PCGScalars):
         newton_func.func_rigid_pcg_direction(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f: int):
+    def func_start_line_search(self, control: NewtonControl, f: int):
         newton_func.func_rigid_start_line_search(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f: int):
+    def func_step_forward(self, control: NewtonControl, f: int):
         newton_func.func_rigid_step_forward(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
@@ -184,7 +186,7 @@ def kernel_rigid_write_back(f: int, rigid: qd.template()):
 
 @no_grad
 @qd.kernel
-def kernel_rigid_freeze(rigid: qd.template(), control: qd.template()):
+def kernel_rigid_freeze(rigid: qd.template(), control: NewtonControl):
     for i_b in range(rigid.rigid_info.is_env_frozen.shape[0]):
         rigid.rigid_info.is_env_frozen[i_b] = control.has_failed_non_finite[i_b]
 

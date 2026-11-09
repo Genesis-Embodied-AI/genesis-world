@@ -1,7 +1,7 @@
 """Contact pairs of the material point method (MPM) with the implicit finite element method (FEM) in the joint Newton
 solve (see fem_newton.py for the FEM unknown and its stages)."""
 
-import numpy as np
+from collections.abc import Iterator
 
 import quadrants as qd
 
@@ -13,7 +13,7 @@ from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
-from genesis.utils.data import Data, DataKind, field
+from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 
 from .contact_candidates import CouplingPairs
 
@@ -103,16 +103,12 @@ def is_in_element(i_e: int, i_b: int, f: int, x: qd.types.vector(3), fem: qd.tem
 # ============================================== Layer 1: broad phase ==============================================
 
 
-@qd.data_oriented
-class FemContactParams:
+class FemContactParams(Data, kind=DataKind.CONSTANT, shape=()):
     """Scene values of the MPM-FEM contact pairs, as device scalars: the surface thickness `thickness` in metres, and
     the penalty stiffness `stiffness` of a row in units of its effective mass, the inverse of its inverse weight."""
 
-    def __init__(self, dx: float) -> None:
-        self.thickness = qd.ndarray(gs.qd_float, shape=())
-        self.thickness.from_numpy(np.array(0.5 * dx, dtype=gs.np_float))
-        self.stiffness = qd.ndarray(gs.qd_float, shape=())
-        self.stiffness.from_numpy(np.array(10.0, dtype=gs.np_float))
+    thickness: qd.Tensor = field(float, ndarray=True)
+    stiffness: qd.Tensor = field(float, ndarray=True)
 
 
 @qd.data_oriented
@@ -197,6 +193,11 @@ class MpmFemContact(CouplingPairs):
         self.query = query
         super().__init__(mpm)
 
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from super().data
+        yield from iter_data(self.query, "contact")
+
     def build_query(self, f: int) -> None:
         self.query.build(f)
 
@@ -248,8 +249,10 @@ class MpmFemContact(CouplingPairs):
         i_s = self.pairs.tri[i_pair]
         tri2v = self.fem.solver.surface[i_s].tri2v
         i_fv = qd.Vector([i_b * self.fem.n_vertices + tri2v[k] for k in qd.static(range(3))], dt=gs.qd_int)
-        i_vp = self.mpm.vertex_offset[()] + self.pairs.s[i_pair]
-        verts = qd.Vector([i_vp] + [self.fem.vertex_offset[()] + i_fv[k] for k in qd.static(range(3))], dt=gs.qd_int)
+        i_vp = self.mpm.vertex_range.offset[()] + self.pairs.s[i_pair]
+        verts = qd.Vector(
+            [i_vp] + [self.fem.vertex_range.offset[()] + i_fv[k] for k in qd.static(range(3))], dt=gs.qd_int
+        )
         weights = qd.Vector([1.0, -bary[0], -bary[1], -bary[2]], dt=gs.qd_float)
         r = self.mpm.func_vertex_value(f, self.pairs.s[i_pair])
         for k in range(3):

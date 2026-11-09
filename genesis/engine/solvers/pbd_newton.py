@@ -3,8 +3,10 @@
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import iter_data
+from genesis.engine.numerics.newton_control import NewtonControl
+from genesis.utils.data import ENVS, Data, DataKind, Size, field, iter_data
 
+from .newton_contact import VertexRange
 from .newton_linear import (
     BlockJacobiOwner,
     BlockJacobiScratch,
@@ -15,6 +17,18 @@ from .newton_linear import (
     write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
+
+PBD_PARTICLES = Size("pbd_particles")
+
+
+class PbdNewtonScratch(Data, kind=DataKind.SCRATCH, shape=(PBD_PARTICLES, ENVS)):
+    """The positions and velocities of the PBD particles at the substep start, in their own order, then the target of
+    their inertia and their positions at the start of the line search, in the reordered layout."""
+
+    pos_begin: qd.Tensor = field((float, 3), ndarray=True)
+    vel_begin: qd.Tensor = field((float, 3), ndarray=True)
+    target: qd.Tensor = field((float, 3), ndarray=True)
+    x_prev: qd.Tensor = field((float, 3), ndarray=True)
 
 
 @qd.func
@@ -33,16 +47,9 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     def __init__(self, pbd, n_envs: int):
         self.solver = pbd
         self.substep_dt = pbd.substep_dt
-        shape = (max(pbd.n_particles, 1), n_envs)
-        self.pos_begin = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.vel_begin = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.target = qd.ndarray(gs.qd_vec3, shape=shape)
-        self.x_prev = qd.ndarray(gs.qd_vec3, shape=shape)
+        self.scratch = PbdNewtonScratch(sizes={PBD_PARTICLES: pbd.n_particles, ENVS: n_envs})
         # The particles of every environment are contact vertices (see newton_contact.py)
-        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_offset.fill(0)
-        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_count.fill(n_envs * pbd.n_particles)
+        self.vertex_range = VertexRange(values={"offset": 0, "count": n_envs * pbd.n_particles})
         self.n_vertex_particles = max(pbd.n_particles, 1)
         # The linear system of the solve, bound by the NewtonSolver, and the rows of the particles in it
         self.linear: NewtonLinearScratch | None = None
@@ -52,6 +59,8 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
     @property
     def data(self):
+        yield from iter_data(self, "scratch")
+        yield from iter_data(self, "vertex_range")
         yield from iter_data(self, "linear_block")
         yield from iter_data(self, "jacobi")
 
@@ -70,7 +79,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             m = gs.qd_float(1.0)
             if is_moving(i_q, i_b, self.solver):
                 m = self.solver.particles_info_reordered[i_q, i_b].mass
-                grad = m * (self.solver.particles_reordered[i_q, i_b].pos - self.target[i_q, i_b])
+                grad = m * (self.solver.particles_reordered[i_q, i_b].pos - self.scratch.target[i_q, i_b])
             row = self.row(i_q, i_b)
             i_t = self.linear_block.triplet_start[()] + row - self.linear_block.row_start[()]
             write_block(i_t, row, row, m * qd.Matrix.identity(gs.qd_float, 3), self.linear)
@@ -78,19 +87,19 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             self.linear.pcg.row_env[row] = i_b
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template(), f: int):
+    def func_start_line_search(self, control: NewtonControl, f: int):
         """Record the line-search start point, and add the largest component of the step into the Newton measure."""
         qd.loop_config(name="mpm_pbd_start_line_search")
         for i_q, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
-            self.x_prev[i_q, i_b] = self.solver.particles_reordered[i_q, i_b].pos
+            self.scratch.x_prev[i_q, i_b] = self.solver.particles_reordered[i_q, i_b].pos
             qd.atomic_max(control.max_disp[i_b], qd.abs(self.linear.solution[self.row(i_q, i_b)]).max())
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template(), f: int):
+    def func_step_forward(self, control: NewtonControl, f: int):
         qd.loop_config(name="mpm_pbd_step_forward")
         for i_q, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
             step = control.alpha[i_b] * self.linear.solution[self.row(i_q, i_b)]
-            self.solver.particles_reordered[i_q, i_b].pos = self.x_prev[i_q, i_b] - step
+            self.solver.particles_reordered[i_q, i_b].pos = self.scratch.x_prev[i_q, i_b] - step
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
@@ -98,7 +107,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         qd.loop_config(name="mpm_pbd_energy")
         for i_q, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
             if is_moving(i_q, i_b, self.solver):
-                diff = self.solver.particles_reordered[i_q, i_b].pos - self.target[i_q, i_b]
+                diff = self.solver.particles_reordered[i_q, i_b].pos - self.scratch.target[i_q, i_b]
                 energy = 0.5 * self.solver.particles_info_reordered[i_q, i_b].mass * diff.dot(diff)
                 qd.atomic_add(energies[i_b], energy)
 
@@ -121,19 +130,19 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 @qd.kernel
 def kernel_pbd_save(pbd: qd.template()):
     for i_p, i_b in qd.ndrange(pbd.solver._n_particles, pbd.solver._B):
-        pbd.pos_begin[i_p, i_b] = pbd.solver.particles[i_p, i_b].pos
-        pbd.vel_begin[i_p, i_b] = pbd.solver.particles[i_p, i_b].vel
+        pbd.scratch.pos_begin[i_p, i_b] = pbd.solver.particles[i_p, i_b].pos
+        pbd.scratch.vel_begin[i_p, i_b] = pbd.solver.particles[i_p, i_b].vel
 
 
 @qd.kernel
 def kernel_pbd_begin(pbd: qd.template()):
     """Take the projection of PBD's substep as the target of the inertia, the end positions starting at it."""
     for i_q, i_b in qd.ndrange(pbd.solver._n_particles, pbd.solver._B):
-        pbd.target[i_q, i_b] = pbd.solver.particles_reordered[i_q, i_b].pos
+        pbd.scratch.target[i_q, i_b] = pbd.solver.particles_reordered[i_q, i_b].pos
 
 
 @qd.kernel
-def kernel_pbd_finish(dt: float, pbd: qd.template(), control: qd.template()):
+def kernel_pbd_finish(dt: float, pbd: qd.template(), control: NewtonControl):
     """Set the velocity of every moving PBD particle from its displacement over the substep, then the position and
     velocity of the substep start of every particle of an environment whose solve failed."""
     for i_q, i_b in qd.ndrange(pbd.solver._n_particles, pbd.solver._B):
@@ -143,8 +152,8 @@ def kernel_pbd_finish(dt: float, pbd: qd.template(), control: qd.template()):
     for i_p, i_b in qd.ndrange(pbd.solver._n_particles, pbd.solver._B):
         if control.has_failed_non_finite[i_b] != 0 and pbd.solver.particles_ng[i_p, i_b].active:
             i_q = pbd.solver.particles_ng[i_p, i_b].reordered_idx
-            pbd.solver.particles_reordered[i_q, i_b].pos = pbd.pos_begin[i_p, i_b]
-            pbd.solver.particles_reordered[i_q, i_b].vel = pbd.vel_begin[i_p, i_b]
+            pbd.solver.particles_reordered[i_q, i_b].pos = pbd.scratch.pos_begin[i_p, i_b]
+            pbd.solver.particles_reordered[i_q, i_b].vel = pbd.scratch.vel_begin[i_p, i_b]
 
 
 class PbdNewtonHost(NewtonHost):

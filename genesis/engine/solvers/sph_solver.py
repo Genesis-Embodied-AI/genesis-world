@@ -260,7 +260,7 @@ class SPHSolver(ParticleSolver):
                     i_p, self.particles_reordered.pos, self._support_radius, den, self._task_compute_rho, i_b
                 )
                 if qd.static(self._has_boundary):
-                    den += self._boundary.rho_sum[i_p, i_b]
+                    den += self._boundary.scratch.rho_sum[i_p, i_b]
                 self.particles_reordered[i_p, i_b].rho += den
 
                 self.particles_reordered[i_p, i_b].rho *= self.particles_info_reordered[i_p, i_b].rho
@@ -377,8 +377,8 @@ class SPHSolver(ParticleSolver):
                         * self.particles_reordered[i_p, i_b].p
                         / self.particles_reordered[i_p, i_b].rho ** 2
                     )
-                    acc += coef * self._boundary.grad_sum[i_p, i_b]
-                    self._boundary.s[i_p, i_b] += self._cycle_dt * coef
+                    acc += coef * self._boundary.scratch.grad_sum[i_p, i_b]
+                    self._boundary.scratch.s[i_p, i_b] += self._cycle_dt * coef
                 self.particles_reordered[i_p, i_b].acc += acc
 
     @qd.kernel
@@ -435,7 +435,7 @@ class SPHSolver(ParticleSolver):
                 for ii in qd.static(range(3)):
                     grad_p_i[ii] = ret[ii]
                 if qd.static(self._has_boundary):
-                    grad_p_i += self._boundary.grad_sum[i_p, i_b]
+                    grad_p_i += self._boundary.scratch.grad_sum[i_p, i_b]
                 sum_grad_p_k += grad_p_i.norm_sqr()
 
                 # Compute pressure stiffness denominator
@@ -477,10 +477,10 @@ class SPHSolver(ParticleSolver):
                 )
                 if qd.static(self._has_boundary):
                     ret.drho += (
-                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.grad_sum[i_p, i_b])
-                        - self._boundary.vel_grad_sum[i_p, i_b]
+                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.scratch.grad_sum[i_p, i_b])
+                        - self._boundary.scratch.vel_grad_sum[i_p, i_b]
                     )
-                    ret.num_neighbors += self._boundary.n_neighbors[i_p, i_b]
+                    ret.num_neighbors += self._boundary.scratch.n_neighbors[i_p, i_b]
 
                 # only correct positive divergence
                 drho = qd.max(ret.drho, 0.0)
@@ -530,8 +530,8 @@ class SPHSolver(ParticleSolver):
                 if qd.static(self._has_boundary):
                     # The boundary takes the fluid's stiffness alone: k_i sum_b V_b grad W_ib
                     if qd.abs(k_i) > self._df_eps:
-                        ret.dv += k_i * self._boundary.grad_sum[i_p, i_b]
-                        self._boundary.s[i_p, i_b] += k_i
+                        ret.dv += k_i * self._boundary.scratch.grad_sum[i_p, i_b]
+                        self._boundary.scratch.s[i_p, i_b] += k_i
                 self.particles_reordered.vel[i_p, i_b] = self.particles_reordered.vel[i_p, i_b] + ret.dv
 
     @qd.kernel
@@ -603,8 +603,8 @@ class SPHSolver(ParticleSolver):
                 )
                 if qd.static(self._has_boundary):
                     delta += (
-                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.grad_sum[i_p, i_b])
-                        - self._boundary.vel_grad_sum[i_p, i_b]
+                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.scratch.grad_sum[i_p, i_b])
+                        - self._boundary.scratch.vel_grad_sum[i_p, i_b]
                     )
                 drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._cycle_dt * delta
                 self.particles_reordered[i_p, i_b].drho = qd.max(drho, 1.0)  # - 1.0
@@ -644,8 +644,8 @@ class SPHSolver(ParticleSolver):
                 )
                 if qd.static(self._has_boundary):
                     if qd.abs(k_i) > self._df_eps:
-                        ret.dv += self._cycle_dt * k_i * self._boundary.grad_sum[i_p, i_b]
-                        self._boundary.s[i_p, i_b] += self._cycle_dt * k_i
+                        ret.dv += self._cycle_dt * k_i * self._boundary.scratch.grad_sum[i_p, i_b]
+                        self._boundary.scratch.s[i_p, i_b] += self._cycle_dt * k_i
                 self.particles_reordered[i_p, i_b].vel = self.particles_reordered[i_p, i_b].vel + ret.dv
 
                 # The stiffness k_i is the pressure this Jacobi iteration applies to cancel the current density

@@ -1,6 +1,8 @@
 """The contact pairs between the material point method (MPM) and Rigid as a pair kind of the NewtonSolver (see
 newton_contact.py), on the participants of MPM and Rigid (see RigidSolver.build_newton_participant)."""
 
+from collections.abc import Iterator
+
 import quadrants as qd
 
 import genesis as gs
@@ -13,11 +15,12 @@ from genesis.engine.solvers.mpm_func import (
     pyramid_dirs,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
-from genesis.engine.solvers.newton_contact import DST_GRADIENT, MAX_VERTICES, SRC_ITERATE
+from genesis.engine.solvers.newton_contact import DST_GRADIENT, MAX_VERTICES, SRC_ITERATE, VertexRange
 from genesis.engine.solvers.newton_linear import MIN_SLOTS
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
+from genesis.utils.data import DataItem, iter_data
 from genesis.utils.misc import qd_to_numpy
 
 from . import mpm_rigid_adjoint_func
@@ -42,30 +45,33 @@ class MpmRigidContact(CouplingPairs):
         self.n_doublets = 2 if has_rigid_dofs else 1
         self.n_triplets = 3 if has_rigid_dofs else 1
         # The contact point of every pair slot is a contact vertex
-        self.vertex_offset = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_offset.fill(0)
-        self.vertex_count = qd.ndarray(gs.qd_int, shape=())
-        self.vertex_count.fill(MIN_SLOTS)
+        self.vertex_range = VertexRange(values={"offset": 0, "count": MIN_SLOTS})
         super().__init__(mpm)
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from super().data
+        yield from iter_data(self, "vertex_range")
+        yield from iter_data(self.query, "coupled_geoms")
 
     def build_query(self, f: int) -> None:
         self.query.build(self.mpm.mpm_info)
 
     def grow_pairs(self, capacity: int) -> None:
         # The contact points come last in the vertices, so that their growth moves no other vertex map
-        if int(qd_to_numpy(self.vertex_offset)) + capacity > MAX_VERTICES:
+        if int(qd_to_numpy(self.vertex_range.offset)) + capacity > MAX_VERTICES:
             gs.raise_exception(
                 f"The contacts of the implicit solve need more than the {MAX_VERTICES} vertices that a 32-bit index "
                 "addresses: reduce the number of environments or of particles."
             )
         super().grow_pairs(capacity)
-        self.vertex_count.fill(capacity)
+        self.vertex_range.count.fill(capacity)
 
     @qd.func
     def candidate_score(self, f: int, i_b: int, i_a: int, s: int):
         """Gap of sorted particle `s` to the contact range of coupled geom i_a, its signed distance minus the contact
         margin `coup_softness` of the geom."""
-        i_g = self.query.coupled_geoms[i_a]
+        i_g = self.query.coupled_geoms.idx[i_a]
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         phi = geom_sdf(i_g, i_b, x_p, self.rigid.dyn_state.geoms, self.rigid.dyn_info.geoms, self.rigid.sdf_info)
@@ -75,7 +81,7 @@ class MpmRigidContact(CouplingPairs):
     def build_pair(self, f: int, i_b: int, i_a: int, s: int, phi: float):
         """Pair sorted particle `s` with coupled geom i_a at gap phi if it lies within its soft range or short of it by
         less than `contact_band_width`."""
-        i_g = self.query.coupled_geoms[i_a]
+        i_g = self.query.coupled_geoms.idx[i_a]
         i_p, i_b_sorted, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         dt = self.mpm.mpm_info.substep_dt[()]
@@ -122,11 +128,11 @@ class MpmRigidContact(CouplingPairs):
     def pair_vertices(self, f: int, i_pair: int):
         """The particle of a pair, of weight 1, and with Rigid dofs its contact point, of weight -1, with their relative
         displacement at the current iterate."""
-        i_vp = self.mpm.vertex_offset[()] + self.pairs.s[i_pair]
+        i_vp = self.mpm.vertex_range.offset[()] + self.pairs.s[i_pair]
         r = self.mpm.func_vertex_value(f, self.pairs.s[i_pair])
         if qd.static(self.has_rigid_dofs):
             r -= self.func_vertex_value(f, i_pair, SRC_ITERATE)
-            verts = qd.Vector([i_vp, self.vertex_offset[()] + i_pair], dt=gs.qd_int)
+            verts = qd.Vector([i_vp, self.vertex_range.offset[()] + i_pair], dt=gs.qd_int)
             return verts, qd.Vector([1.0, -1.0], dt=gs.qd_float), r
         else:
             return qd.Vector([i_vp], dt=gs.qd_int), qd.Vector([1.0], dt=gs.qd_float), r

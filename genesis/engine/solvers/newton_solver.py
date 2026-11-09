@@ -38,7 +38,7 @@ from genesis.engine.numerics.newton_control import (
     func_update_convergence,
 )
 from genesis.grad.bridge import custom_backward
-from genesis.utils.data import DataItem, DataKind, iter_data, iter_data_oriented
+from genesis.utils.data import ENVS, DataItem, DataKind, iter_data, iter_data_oriented
 from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
@@ -149,8 +149,8 @@ def func_assemble(f: int, participants: qd.template(), is_exact: qd.template()):
 @qd.func(requires_top_level=True)
 def func_pcg_start(
     f: int,
-    newton_control: qd.template(),
-    pcg_scalars: qd.template(),
+    newton_control: NewtonControl,
+    pcg_scalars: PCGScalars,
     participants: qd.template(),
     is_adjoint: qd.template(),
 ):
@@ -174,11 +174,11 @@ def func_pcg_start(
         participants.rigid.func_pcg_init(pcg_scalars, is_adjoint)
         participants.rigid.func_precondition()
         participants.rigid.func_pcg_init_direction(pcg_scalars)
-    func_pcg_arm(pcg_scalars)
+    func_pcg_arm(pcg_scalars, is_adjoint)
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.template()):
+def func_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
     """Run one preconditioned conjugate gradient iteration over all the rows: the product of the matrix and of Rigid
     with p . Ap, the step, the preconditioner and the direction (see PCGScalars)."""
     func_linear_pcg_spmv(participants.linear.pcg, pcg_scalars, participants.linear.matrix)
@@ -202,7 +202,7 @@ def func_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.temp
 
 
 @qd.func(requires_top_level=True)
-def func_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
+def func_start_line_search(f: int, newton_control: NewtonControl, participants: qd.template()):
     """Start the line search and set the Newton direction of every participant from the conjugate gradient solution."""
     func_reset_newton_measures(newton_control)
     func_init_line_search(newton_control)
@@ -212,14 +212,14 @@ def func_start_line_search(f: int, newton_control: qd.template(), participants: 
 
 
 @qd.func(requires_top_level=True)
-def func_step_forward(f: int, newton_control: qd.template(), participants: qd.template()):
+def func_step_forward(f: int, newton_control: NewtonControl, participants: qd.template()):
     """Move every participant to the trial point of the line-search step."""
     for member in qd.static(participants.members):
         member.func_step_forward(newton_control, f)
 
 
 @qd.func(requires_top_level=True)
-def func_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
+def func_energy(f: int, newton_control: NewtonControl, participants: qd.template(), is_trial: qd.template()):
     """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs to."""
     func_reset_energy(newton_control, is_trial)
     if qd.static(is_trial):
@@ -254,8 +254,8 @@ def kernel_linear_layout(participants: qd.template()):
 @qd.kernel
 def kernel_pcg_start(
     f: int,
-    newton_control: qd.template(),
-    pcg_scalars: qd.template(),
+    newton_control: NewtonControl,
+    pcg_scalars: PCGScalars,
     participants: qd.template(),
     is_adjoint: qd.template(),
 ):
@@ -263,29 +263,29 @@ def kernel_pcg_start(
 
 
 @qd.kernel(graph=True)
-def kernel_pcg_loop(f: int, pcg_scalars: qd.template(), participants: qd.template()):
+def kernel_pcg_loop(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
     """Run the conjugate gradient iterations after kernel_pcg_start as one graph, until convergence or the budget."""
     while qd.graph.do_while(pcg_scalars.is_running):
         func_pcg_iteration(f, pcg_scalars, participants)
 
 
 @qd.kernel
-def kernel_pcg_iteration(f: int, pcg_scalars: qd.template(), participants: qd.template()):
+def kernel_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
     func_pcg_iteration(f, pcg_scalars, participants)
 
 
 @qd.kernel
-def kernel_start_line_search(f: int, newton_control: qd.template(), participants: qd.template()):
+def kernel_start_line_search(f: int, newton_control: NewtonControl, participants: qd.template()):
     func_start_line_search(f, newton_control, participants)
 
 
 @qd.kernel
-def kernel_energy(f: int, newton_control: qd.template(), participants: qd.template(), is_trial: qd.template()):
+def kernel_energy(f: int, newton_control: NewtonControl, participants: qd.template(), is_trial: qd.template()):
     func_energy(f, newton_control, participants, is_trial)
 
 
 @qd.kernel
-def kernel_line_search_trial(f: int, newton_control: qd.template(), participants: qd.template()):
+def kernel_line_search_trial(f: int, newton_control: NewtonControl, participants: qd.template()):
     """Step every participant to the trial point, evaluate its energy, and accept it or halve the step."""
     func_step_forward(f, newton_control, participants)
     func_energy(f, newton_control, participants, is_trial=True)
@@ -293,22 +293,22 @@ def kernel_line_search_trial(f: int, newton_control: qd.template(), participants
 
 
 @qd.kernel
-def kernel_update_convergence(newton_control: qd.template()):
+def kernel_update_convergence(newton_control: NewtonControl):
     func_update_convergence(newton_control)
 
 
 @qd.kernel
-def kernel_reset_newton_control(newton_control: qd.template()):
+def kernel_reset_newton_control(newton_control: NewtonControl):
     func_reset_newton_control(newton_control)
 
 
 @qd.kernel
-def kernel_clear_non_finite(newton_control: qd.template()):
+def kernel_clear_non_finite(newton_control: NewtonControl):
     func_clear_non_finite(newton_control)
 
 
 @qd.kernel(graph=True)
-def kernel_newton_loop(f: int, newton_control: qd.template(), pcg_scalars: qd.template(), participants: qd.template()):
+def kernel_newton_loop(f: int, newton_control: NewtonControl, pcg_scalars: PCGScalars, participants: qd.template()):
     """Run the Newton iterations of a substep as one graph, after the evaluation of the start energy, the storage sized
     before the loop holding every assembly in it."""
     while qd.graph.do_while(newton_control.is_newton_running):
@@ -354,14 +354,23 @@ class NewtonSolver(Solver):
         participants = [*owners, *([] if rigid is None else [rigid])]
         options = self._options
         self.control = NewtonControl(
-            gs.qd_float,
-            options.max_iterations,
-            options.line_search_max_iterations,
-            options.line_search_shrink,
-            options.strict,
-            self._sim._B,
+            sizes={ENVS: self._sim._B},
+            values={
+                "max_newton_iter": options.max_iterations,
+                "max_ls_iter": options.line_search_max_iterations,
+                "ls_shrink": options.line_search_shrink,
+                "is_strict": int(options.strict),
+                "disp_tol": options.velocity_tol * self._sim._substep_dt,
+            },
         )
-        self.pcg_scalars = PCGScalars(gs.qd_float, options.pcg_max_iterations, options.pcg_tol, self._sim._B)
+        self.pcg_scalars = PCGScalars(
+            sizes={ENVS: self._sim._B},
+            values={
+                "max_iter": options.pcg_max_iterations,
+                "tol_rate": options.pcg_tol,
+                "adjoint_tol_rate": self._adjoint_pcg_tol,
+            },
+        )
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, which those of the participants
         # besides MPM do in a scene tracking gradients
         if self._is_loop_graph and self._requires_grad and (len(participants) > 1 or couplings):
@@ -369,9 +378,6 @@ class NewtonSolver(Solver):
                 "NewtonOptions(graph='newton') does not support a differentiable scene coupling MPM with another "
                 "solver."
             )
-        self.control.disp_tol.from_numpy(
-            np.array(self._options.velocity_tol * self._sim._substep_dt, dtype=gs.np_float)
-        )
         self._participant_hosts = [host for host, _ in participants]
         self._coupling_hosts = [host for host, _ in couplings]
         self._owner_devices = [device for _, device in owners]
@@ -396,8 +402,8 @@ class NewtonSolver(Solver):
         every substep rebuilds before reading them, so that no checkpoint reads them."""
         if self._participants is not None:
             yield from iter_data(self._participants, "linear")
-            yield from iter_data_oriented("control", self.control, DataKind.SCRATCH)
-            yield from iter_data_oriented("pcg_scalars", self.pcg_scalars, DataKind.SCRATCH)
+            yield from iter_data(self, "control")
+            yield from iter_data(self, "pcg_scalars")
             # One walk over both, so that an array the host-only devices share with the participants is yielded once
             yield from iter_data_oriented(
                 "participants", (self._participants, self._host_only_devices), DataKind.SCRATCH
@@ -533,10 +539,8 @@ class NewtonSolver(Solver):
 
     def _pcg_adjoint(self, f, check_curvature=False):
         pcg_scalars = self.pcg_scalars
-        pcg_scalars.tol_rate.from_numpy(np.array(self._adjoint_pcg_tol, dtype=gs.np_float))
         pcg_scalars.is_curvature_checked.from_numpy(np.array(int(check_curvature), dtype=gs.np_int))
         self._pcg(f, is_adjoint=True)
-        pcg_scalars.tol_rate.from_numpy(np.array(self._options.pcg_tol, dtype=gs.np_float))
         if not check_curvature:
             return None
         pcg_scalars.is_curvature_checked.from_numpy(np.array(0, dtype=gs.np_int))

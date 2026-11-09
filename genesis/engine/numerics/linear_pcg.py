@@ -1,50 +1,38 @@
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import Data, DataKind, Size, field
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
 
 from .bcoo_matrix import BCOOMatrixScratch, func_read_bcoo
 from .fsr_reduce import add_by_key, warp_padded
+from .newton_control import NewtonControl
 
 # Threads of a block of the preconditioned conjugate gradient (PCG) launches
 PCG_BLOCK = 256
 
 
-@qd.data_oriented
-class PCGScalars:
-    """Device-resident scalars of the preconditioned conjugate gradient (PCG) solves of the environments of a batch."""
+class PCGScalars(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """Device-resident scalars of the preconditioned conjugate gradient (PCG) solves of the environments of a batch:
+    the options of the forward and adjoint solves, the flags of the batch, then the state of every environment."""
 
-    def __init__(self, value_type, max_iter: int, tol_rate: float, n_envs: int = 1) -> None:
-        self.value_type = value_type
-
-        def scalar(dtype, value):
-            array = qd.ndarray(dtype, shape=())
-            array.fill(value)
-            return array
-
-        def per_env(dtype, value):
-            array = qd.ndarray(dtype, shape=(n_envs,))
-            array.fill(value)
-            return array
-
-        self.is_running = scalar(gs.qd_int, 0)
-        self.max_iter = scalar(gs.qd_int, max_iter)
-        self.iter_remaining = scalar(gs.qd_int, 0)
-        self.tol_rate = scalar(value_type, tol_rate)
-        self.is_curvature_checked = scalar(gs.qd_int, 0)
-
-        self.env_active = per_env(gs.qd_int, 1)
-        self.is_env_adjoint = per_env(gs.qd_int, 1)
-        # A direction of non-positive curvature (p.Ap <= 0) of an environment flags it, the operator being indefinite
-        self.has_breakdown = per_env(gs.qd_int, 0)
-        self.tol_sq = per_env(value_type, 0.0)
-        self.rz = per_env(value_type, 0.0)
-        self.rz_new = per_env(value_type, 0.0)
-        self.p_dot_ap = per_env(value_type, 0.0)
-        self.alpha = per_env(value_type, 0.0)
-        self.beta = per_env(value_type, 0.0)
-        self.is_converged = per_env(gs.qd_int, 0)
+    max_iter: qd.Tensor = field(int, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    tol_rate: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    adjoint_tol_rate: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
+    is_running: qd.Tensor = field(int, shape=(), ndarray=True)
+    iter_remaining: qd.Tensor = field(int, shape=(), ndarray=True)
+    is_curvature_checked: qd.Tensor = field(int, shape=(), ndarray=True)
+    env_active: qd.Tensor = field(int, ndarray=True)
+    is_env_adjoint: qd.Tensor = field(int, ndarray=True)
+    # A direction of non-positive curvature (p.Ap <= 0) of an environment flags it, the operator being indefinite
+    has_breakdown: qd.Tensor = field(int, ndarray=True)
+    tol_sq: qd.Tensor = field(float, ndarray=True)
+    rz: qd.Tensor = field(float, ndarray=True)
+    rz_new: qd.Tensor = field(float, ndarray=True)
+    p_dot_ap: qd.Tensor = field(float, ndarray=True)
+    alpha: qd.Tensor = field(float, ndarray=True)
+    beta: qd.Tensor = field(float, ndarray=True)
+    is_converged: qd.Tensor = field(int, ndarray=True)
 
 
 PCG_ROWS = Size("pcg_rows")
@@ -64,7 +52,7 @@ class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.func(requires_top_level=True)
-def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), is_new: qd.template()):
+def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars, is_new: qd.template()):
     if qd.static(is_new):
         _func_dot(pcg_scalars.rz_new, pcg_workspace, pcg_scalars)
     else:
@@ -72,7 +60,7 @@ def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(
 
 
 @qd.func(requires_top_level=True)
-def _func_dot(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+def _func_dot(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
     for i_r in range(warp_padded(pcg_workspace.n_rows[()])):
         i_b = gs.qd_int(-1)
@@ -90,7 +78,7 @@ def func_init_linear_pcg_residual(
     b: qd.template(),
     x: qd.template(),
     pcg_workspace: PCGWorkspaceScratch,
-    pcg_scalars: qd.template(),
+    pcg_scalars: PCGScalars,
     is_adjoint: qd.template(),
 ):
     """Start a solve of A x = b from x = 0, with r = b and Ap = 0. With `is_adjoint`, an environment left out by
@@ -108,7 +96,7 @@ def func_init_linear_pcg_residual(
 
 
 @qd.func(requires_top_level=True)
-def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Set the first search direction p = z, and add r . z to rz."""
     qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
@@ -117,7 +105,7 @@ def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scala
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template(), matrix: BCOOMatrixScratch):
+def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars, matrix: BCOOMatrixScratch):
     """Add the sparse matrix-vector product (SpMV) of the search direction to Ap, with p.Ap in energy form."""
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
     for i_nz in range(warp_padded(matrix.bcoo_nnz[()])):
@@ -151,7 +139,7 @@ def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix:
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Update the solution and the residual of every running environment along its search direction, x += alpha p and
     r -= alpha Ap."""
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
@@ -164,13 +152,13 @@ def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScrat
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_dot_rz(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+def func_linear_pcg_dot_rz(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Add r . z of the preconditioned residual to rz_new."""
     _func_dot_into(pcg_workspace, pcg_scalars, True)
 
 
 @qd.func(requires_top_level=True)
-def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: qd.template()):
+def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Update the search direction of every running environment, p = z + beta p, and zero Ap for the product of the
     next iteration."""
     qd.loop_config(name="pcg_update_p", block_dim=PCG_BLOCK)
@@ -185,7 +173,7 @@ def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: q
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_select_envs(pcg_scalars: qd.template(), newton_control: qd.template(), is_adjoint: qd.template()):
+def func_pcg_select_envs(pcg_scalars: PCGScalars, newton_control: NewtonControl, is_adjoint: qd.template()):
     """Take part in the next solve the environments whose Newton solve runs, or those of `is_env_adjoint` for an adjoint
     solve, which follows a converged forward solve."""
     for i_b in range(pcg_scalars.env_active.shape[0]):
@@ -196,7 +184,7 @@ def func_pcg_select_envs(pcg_scalars: qd.template(), newton_control: qd.template
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_reset(pcg_scalars: qd.template()):
+def func_pcg_reset(pcg_scalars: PCGScalars):
     """Reset the scalars of a solve before its owners start their rows, and re-arm the iteration budget."""
     for _ in range(1):
         pcg_scalars.iter_remaining[()] = pcg_scalars.max_iter[()]
@@ -209,19 +197,20 @@ def func_pcg_reset(pcg_scalars: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_arm(pcg_scalars: qd.template()):
-    """Set the convergence threshold tol_rate |rz0| of every environment once every owner set its first direction, and
-    arm the iterations if any environment takes part."""
+def func_pcg_arm(pcg_scalars: PCGScalars, is_adjoint: qd.template()):
+    """Set the convergence threshold of every environment, the tolerance rate of the solve times |rz0|, once every owner
+    set its first direction, and arm the iterations if any environment takes part."""
     for _ in range(1):
         pcg_scalars.is_running[()] = 0
     for i_b in range(pcg_scalars.rz.shape[0]):
-        pcg_scalars.tol_sq[i_b] = pcg_scalars.tol_rate[()] * qd.abs(pcg_scalars.rz[i_b])
+        tol_rate = pcg_scalars.adjoint_tol_rate[()] if qd.static(is_adjoint) else pcg_scalars.tol_rate[()]
+        pcg_scalars.tol_sq[i_b] = tol_rate * qd.abs(pcg_scalars.rz[i_b])
         if pcg_scalars.is_converged[i_b] == 0:
             qd.atomic_max(pcg_scalars.is_running[()], 1)
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_step(pcg_scalars: qd.template()):
+def func_pcg_step(pcg_scalars: PCGScalars):
     """Take the step alpha = rz / p.Ap of every running environment once every owner added its p.Ap, and zero rz_new.
     With is_curvature_checked set, a non-positive p.Ap along a non-zero direction flags has_breakdown."""
     for i_b in range(pcg_scalars.rz.shape[0]):
@@ -230,12 +219,12 @@ def func_pcg_step(pcg_scalars: qd.template()):
             p_dot_ap = pcg_scalars.p_dot_ap[i_b]
             if pcg_scalars.is_curvature_checked[()] != 0 and p_dot_ap <= 0.0 and qd.abs(rz) > 0.0:
                 pcg_scalars.has_breakdown[i_b] = 1
-            pcg_scalars.alpha[i_b] = rz / p_dot_ap if qd.abs(p_dot_ap) > 0.0 else pcg_scalars.value_type(0.0)
+            pcg_scalars.alpha[i_b] = rz / p_dot_ap if qd.abs(p_dot_ap) > 0.0 else gs.qd_float(0.0)
         pcg_scalars.rz_new[i_b] = 0.0
 
 
 @qd.func(requires_top_level=True)
-def func_pcg_decide(pcg_scalars: qd.template()):
+def func_pcg_decide(pcg_scalars: PCGScalars):
     """Take beta = rz_new / rz and the convergence decision of every running environment once every owner added its r .
     z, then roll rz over and zero p.Ap."""
     for _ in range(1):
@@ -251,6 +240,6 @@ def func_pcg_decide(pcg_scalars: qd.template()):
                 pcg_scalars.is_converged[i_b] = 1
             elif pcg_scalars.iter_remaining[()] > 0:
                 qd.atomic_max(pcg_scalars.is_running[()], 1)
-            pcg_scalars.beta[i_b] = rz_new / rz if qd.abs(rz) > 0.0 else pcg_scalars.value_type(0.0)
+            pcg_scalars.beta[i_b] = rz_new / rz if qd.abs(rz) > 0.0 else gs.qd_float(0.0)
             pcg_scalars.rz[i_b] = rz_new
         pcg_scalars.p_dot_ap[i_b] = 0.0

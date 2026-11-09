@@ -21,6 +21,7 @@ from genesis.engine.numerics.dynamic_exclusive_sum import (
     dynamic_exclusive_sum_sizes,
     func_dynamic_exclusive_sum,
 )
+from genesis.engine.numerics.linear_pcg import PCGScalars
 from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
 from genesis.utils.misc import qd_to_numpy
 
@@ -49,6 +50,13 @@ PAIR_KINDS = Size("pair_kinds")
 HESSIAN_ENTRIES = Size("hessian_entries")
 # The global vertex index is a 32-bit row or column of the vertex-space matrices
 MAX_VERTICES = 2**31 - 1
+
+
+class VertexRange(Data, kind=DataKind.CONSTANT, shape=()):
+    """The first contact vertex of a vertex map and the number of its vertices, laid out by NewtonContact."""
+
+    offset: qd.Tensor = field(int, ndarray=True)
+    count: qd.Tensor = field(int, ndarray=True)
 
 
 class NewtonContactScratch(Data, kind=DataKind.SCRATCH):
@@ -122,8 +130,8 @@ class NewtonContact(NewtonDevice):
         """Set the offset of every vertex map, in order, from the vertex counts of those before it."""
         offset = 0
         for vertex_map in [*self.linear_maps, *([] if self.rigid_map is None else [self.rigid_map])]:
-            vertex_map.vertex_offset.fill(offset)
-            offset += int(qd_to_numpy(vertex_map.vertex_count))
+            vertex_map.vertex_range.offset.fill(offset)
+            offset += int(qd_to_numpy(vertex_map.vertex_range.count))
         if offset > MAX_VERTICES:
             gs.raise_exception(
                 f"The contacts of the implicit solve span {offset} vertices, past the {MAX_VERTICES} that a 32-bit "
@@ -169,8 +177,8 @@ class NewtonContact(NewtonDevice):
         rows = qd.Vector.zero(gs.qd_int, MAX_VERTEX_ROWS)
         weights = qd.Vector.zero(gs.qd_float, MAX_VERTEX_ROWS)
         for vertex_map in qd.static(self.linear_maps):
-            i_v = i_vg - vertex_map.vertex_offset[()]
-            if 0 <= i_v and i_v < vertex_map.vertex_count[()]:
+            i_v = i_vg - vertex_map.vertex_range.offset[()]
+            if 0 <= i_v and i_v < vertex_map.vertex_range.count[()]:
                 n_map, rows_map, weights_map = vertex_map.func_vertex_rows(i_v)
                 n_rows = n_map
                 for a in qd.static(range(vertex_map.n_vertex_rows)):
@@ -182,7 +190,7 @@ class NewtonContact(NewtonDevice):
     def is_rigid_vertex(self, i_vg: int):
         is_rigid = False
         if qd.static(self.has_rigid_map):
-            is_rigid = self.rigid_map.vertex_offset[()] <= i_vg
+            is_rigid = self.rigid_map.vertex_range.offset[()] <= i_vg
         return is_rigid
 
     @qd.func(requires_top_level=True)
@@ -254,7 +262,7 @@ class NewtonContact(NewtonDevice):
             g = block[:, 0]
             if self.is_rigid_vertex(i_vg):
                 if qd.static(self.has_rigid_map):
-                    self.rigid_map.func_vertex_add_force(f, i_vg - self.rigid_map.vertex_offset[()], g)
+                    self.rigid_map.func_vertex_add_force(f, i_vg - self.rigid_map.vertex_range.offset[()], g)
             else:
                 n_rows, rows, weights = self.vertex_rows(i_vg)
                 for a in range(n_rows):
@@ -292,10 +300,10 @@ class NewtonContact(NewtonDevice):
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
             i_r, i_c, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
             if i_r == i_c and self.is_rigid_vertex(i_r):
-                self.rigid_map.func_vertex_visit_diag(f, i_r - self.rigid_map.vertex_offset[()], H)
+                self.rigid_map.func_vertex_visit_diag(f, i_r - self.rigid_map.vertex_range.offset[()], H)
 
     @qd.func(requires_top_level=True)
-    def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: qd.template()):
+    def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: PCGScalars):
         """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction: B p_c
         to the image of r and, off the diagonal, B^T p_r to that of the contact point c, skipping the converged
         environments."""
@@ -307,10 +315,10 @@ class NewtonContact(NewtonDevice):
             i_b = gs.qd_int(0)
             is_running = False
             if self.is_rigid_vertex(i_c):
-                i_b = self.rigid_map.func_vertex_env(i_c - self.rigid_map.vertex_offset[()])
+                i_b = self.rigid_map.func_vertex_env(i_c - self.rigid_map.vertex_range.offset[()])
                 is_running = pcg_scalars.is_converged[i_b] == 0
             if is_running:
-                i_vc = i_c - self.rigid_map.vertex_offset[()]
+                i_vc = i_c - self.rigid_map.vertex_range.offset[()]
                 y_c = B @ self.rigid_map.func_vertex_value(f, i_vc, SRC_DIRECTION)
                 if i_r != i_c:
                     n_rows, rows, weights = self.vertex_rows(i_r)
