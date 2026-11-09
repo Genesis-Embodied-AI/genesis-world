@@ -225,11 +225,11 @@ class NewtonContact(NewtonDevice):
         of rows of the others, and none for an entry on a Rigid contact point."""
         qd.loop_config(name="newton_contact_entry_blocks")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_va, i_vb, _ = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
+            i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
             n_blocks = gs.qd_int(0)
             if not self.is_rigid_vertex(i_vb):
-                n_rows_a, _, _ = self.vertex_rows(i_va)
-                n_rows_b, _, _ = self.vertex_rows(i_vb)
+                n_rows_a, rows_a, weights_a = self.vertex_rows(i_va)
+                n_rows_b, rows_b, weights_b = self.vertex_rows(i_vb)
                 n_blocks = n_rows_a * n_rows_b
                 if i_va == i_vb:
                     n_blocks = n_rows_a * (n_rows_a + 1) // 2
