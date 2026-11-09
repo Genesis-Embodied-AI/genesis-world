@@ -17,11 +17,6 @@ from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 
 from .contact_candidates import CouplingPairs
 
-# Smallest friction coefficient of a contact row, the lower bound of the Rigid contacts too
-MIN_FRICTION = 1e-2
-# Distances to two triangles within this fraction of the grid spacing are those to a closest point they share
-TIE_DIST_RATIO = 1e-6
-
 
 class MpmFemPairs(Data, kind=DataKind.SCRATCH):
     """The pairs of the particles with their nearest FEM surface triangle (see MpmFemContact.build_pair)."""
@@ -186,7 +181,8 @@ class MpmFemContact(CouplingPairs):
     n_doublets = 4
     n_triplets = 10
     pairs_type = MpmFemPairs
-    tie_ratio = TIE_DIST_RATIO
+    # Distances to two triangles within this fraction of the grid spacing are those to a closest point they share
+    tie_ratio = 1e-6
 
     def __init__(self, mpm: MpmNewtonParticipant, fem: FemNewtonParticipant, query: FemTriangleQuery):
         self.fem = fem
@@ -237,7 +233,7 @@ class MpmFemContact(CouplingPairs):
         if phi < contact_band_width(-normal.dot(v_rel), self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info):
             invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info) + inv_mass
             i_e = self.fem.solver.surface[i_s].tri2el
-            friction = qd.max(self.fem.solver.elements_i[i_e].friction_mu, MIN_FRICTION)
+            friction = qd.max(self.fem.solver.elements_i[i_e].friction_mu, self.mpm.mpm_info.contact_min_friction[()])
             stiffness = qd.Vector([self.query.contact.stiffness[()] / invweight] * PYRAMID_ROWS)
             i_pair = self.add_pair(i_ps, i_b, normal, friction, stiffness, qd.Vector([-phi] * PYRAMID_ROWS))
             if i_pair >= 0:

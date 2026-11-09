@@ -103,7 +103,9 @@ class MpmRigidContact(CouplingPairs):
             if phi < contact_band_width(-normal.dot(v_rel), dt, self.mpm.mpm_info):
                 I_l = [i_l, i_b] if qd.static(self.rigid.config.rigid_batch_links_info) else i_l
                 friction_ratio = self.rigid.dyn_state.geoms.friction_ratio[i_g, i_b]
-                friction = qd.max(self.rigid.dyn_info.geoms.friction[i_g] * friction_ratio, 1e-2)
+                friction = qd.max(
+                    self.rigid.dyn_info.geoms.friction[i_g] * friction_ratio, self.mpm.mpm_info.contact_min_friction[()]
+                )
                 friction_sq_reg = friction * friction / self.rigid.rigid_info.impratio[None]
                 invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info)
                 invweight += self.rigid.dyn_info.links.invweight[I_l][0]

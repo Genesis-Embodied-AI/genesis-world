@@ -234,7 +234,9 @@ def func_rigid_contact_adjoint(
             v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
             v_rel = v_p - v_r
             normal = geom_normal(i_g, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, config)
-            friction = qd.max(geoms_info.friction[i_g] * geoms_state.friction_ratio[i_g, i_b], 1e-2)
+            friction = qd.max(
+                geoms_info.friction[i_g] * geoms_state.friction_ratio[i_g, i_b], mpm_info.contact_min_friction[()]
+            )
             friction_sq_reg = friction * friction / rigid_info.impratio[None]
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
             R = U @ V.transpose()

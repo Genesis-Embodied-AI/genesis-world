@@ -67,23 +67,6 @@ PARAM_YIELD_STRESS = 5
 PARAM_SAND_ALPHA = 6
 N_MATERIAL_PARAMS = 7
 
-# Singular value below which the extended Hencky energy continues log(sigma) by its tangent line
-HENCKY_SIGMA_MIN = 0.05
-# Singular value below which the fixed corotated and Stable Neo-Hookean energies resist further compression, and the
-# stiffness of that resistance in units of the Young's modulus (Stomakhin et al. 2012, see compression_penalty)
-EXTENSION_SIGMA_MIN = 0.4
-EXTENSION_STIFFNESS = 20.0
-# Singular values below which the return maps clamp before taking a log, those of the explicit materials
-VON_MISES_SIGMA_MIN = 0.05
-SAND_SIGMA_MIN = 1e-4
-# Range of the volume ratio the liquid return map keeps
-LIQUID_J_MIN = 0.2
-# Fraction of the step to the first zero volume of a liquid particle along the Newton direction, beyond which the line
-# search does not start, so that every trial state keeps the volume ratio of the liquid positive
-INVERSION_STEP_SLACK = 0.9
-# Hardening exponent of snow, mu and lam scaled by exp(SNOW_HARDENING (1 - Jp))
-SNOW_HARDENING = 10.0
-
 # Pairs of principal axes, in the order of the twist and flip eigenvalues
 _PAIRS = ((0, 1), (0, 2), (1, 2))
 
@@ -300,13 +283,15 @@ def cell_segment(i_b: int, cell, i_lane: int, grid: MpmGridScratch):
 
 
 @qd.func
-def compression_penalty(sigma: qd.types.vector(3), mu: float, lam: float):
-    """Compression penalty of the fixed corotated and Stable Neo-Hookean energies, with its gradient and Hessian."""
-    sigma_min = gs.qd_float(EXTENSION_SIGMA_MIN)
+def compression_penalty(sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float, stiffness_ratio: float):
+    """Compression penalty of the fixed corotated and Stable Neo-Hookean energies, with its gradient and Hessian.
+
+    The penalty resists the singular values below `sigma_min`, with a stiffness of `stiffness_ratio` times the Young's
+    modulus."""
     young_modulus = gs.qd_float(0.0)
     if lam + mu > 0.0:
         young_modulus = mu * (3.0 * lam + 2.0 * mu) / (lam + mu)
-    stiffness = EXTENSION_STIFFNESS * young_modulus
+    stiffness = stiffness_ratio * young_modulus
     deficit = qd.min(sigma - sigma_min, 0.0)
     return (
         0.5 * stiffness * deficit.dot(deficit),
@@ -328,9 +313,10 @@ def stable_neohookean_parameters(mu: float, lam: float):
 
 
 @qd.func
-def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float):
-    """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy."""
-    sigma_min = qd.static(HENCKY_SIGMA_MIN)
+def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float):
+    """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy.
+
+    Below `sigma_min`, log(sigma) continues by its tangent line."""
     log_stretch = qd.Vector.zero(gs.qd_float, 3)
     dlog_stretch = qd.Vector.zero(gs.qd_float, 3)
     d2log_stretch = qd.Vector.zero(gs.qd_float, 3)
@@ -574,7 +560,7 @@ def material_params(i_mat: int, Jp: float, materials: MpmMaterialTable, mpm_info
     mu = material_param(i_mat, materials, mpm_info, PARAM_MU)
     lam = material_param(i_mat, materials, mpm_info, PARAM_LAM)
     if materials.materials_plastic[i_mat] == PLASTIC_SNOW:
-        hardening = qd.exp(qd.static(SNOW_HARDENING) * (1.0 - Jp))
+        hardening = qd.exp(mpm_info.snow_hardening[()] * (1.0 - Jp))
         mu *= hardening
         lam *= hardening
     return mu, lam
@@ -590,7 +576,7 @@ def elastic_principal(
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
     family = materials.materials_family[i_mat]
     if family == FAMILY_EXTENDED_HENCKY:
-        psi, g, A = extended_hencky_principal(sigma, mu, lam)
+        psi, g, A = extended_hencky_principal(sigma, mu, lam, mpm_info.hencky_sigma_min[()])
     elif family == FAMILY_LIQUID:
         psi, g, A = liquid_principal(sigma, mu, lam, mpm_info.liquid_band[()])
     else:
@@ -598,7 +584,9 @@ def elastic_principal(
             psi, g, A = stable_neohookean_principal(sigma, mu, lam)
         else:
             psi, g, A = fixed_corotated_principal(sigma, mu, lam)
-        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam)
+        penalty, g_penalty, A_penalty = compression_penalty(
+            sigma, mu, lam, mpm_info.extension_sigma_min[()], mpm_info.extension_stiffness[()]
+        )
         psi += penalty
         g += g_penalty
         A += diagonal(A_penalty)
@@ -645,7 +633,7 @@ def return_map_principal(
     eye = qd.Matrix.identity(gs.qd_float, 3)
     if kind == PLASTIC_VON_MISES:
         # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
-        eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
+        eps = qd.log(qd.max(sigma, mpm_info.von_mises_sigma_min[()]))
         eps_hat = eps - eps.sum() / 3.0
         eps_hat_norm = eps_hat.norm(gs.EPS)
         r = material_param(i_mat, materials, mpm_info, PARAM_YIELD_STRESS) / (2.0 * mu)
@@ -653,15 +641,15 @@ def return_map_principal(
         is_changed = delta_gamma > 0.0
         if is_changed:
             h = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
-            is_log = sigma > qd.static(VON_MISES_SIGMA_MIN)
+            is_log = sigma > mpm_info.von_mises_sigma_min[()]
             deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
             dlog = 1.0 / 3.0 + r * ((eye - 1.0 / 3.0) / eps_hat_norm - eps_hat.outer_product(eps_hat) / eps_hat_norm**3)
             dh = h.outer_product(deps) * dlog
     elif kind == PLASTIC_SAND:
         lam = material_param(i_mat, materials, mpm_info, PARAM_LAM)
-        is_log = qd.abs(sigma) > qd.static(SAND_SIGMA_MIN)
+        is_log = qd.abs(sigma) > mpm_info.sand_sigma_min[()]
         deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
-        eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
+        eps = qd.log(qd.max(qd.abs(sigma), mpm_info.sand_sigma_min[()]))
         trace = eps.sum() + Jp
         eps_hat = eps - trace / 3.0
         eps_hat_norm = eps_hat.norm(gs.EPS)
@@ -712,7 +700,7 @@ def return_map(
     F_new = F
     Jp_new = Jp
     if kind == PLASTIC_LIQUID:
-        J = qd.min(qd.max(F.determinant(), qd.static(LIQUID_J_MIN)), 1.0)
+        J = qd.min(qd.max(F.determinant(), mpm_info.liquid_j_min[()]), 1.0)
         F_new = qd.pow(J, 1.0 / 3.0) * qd.Matrix.identity(gs.qd_float, 3)
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
@@ -1730,7 +1718,6 @@ def func_cap_inversion_step(
 ):
     """Cap the start step of the line search below the first zero volume of a liquid particle along the Newton
     direction."""
-    t_max = 1.0 / INVERSION_STEP_SLACK
     qd.loop_config(name="mpm_cap_inversion_step")
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
@@ -1740,9 +1727,10 @@ def func_cap_inversion_step(
             F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
             c0, c1, c2, c3 = det_cubic(F_trial, stencil_gradient(slots, grad_w, newton.du) @ F)
             if c0 > 0.0:
+                t_max = 1.0 / mpm_info.inversion_step_slack[()]
                 root = cubic_first_root(c0, c1, c2, c3, t_max)
                 if root <= t_max:
-                    qd.atomic_min(control.alpha[i_b], INVERSION_STEP_SLACK * root)
+                    qd.atomic_min(control.alpha[i_b], mpm_info.inversion_step_slack[()] * root)
 
 
 @qd.func

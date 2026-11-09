@@ -18,10 +18,9 @@ from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
 from .contact_candidates import CouplingPairs
 from .mpm_sph_func import kernel_fit_mpm_particle_leaves
 
-# Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within
-# OBSTACLE_REACH contact distances of its start or predicted position
+# Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within its obstacle
+# reach (see PbdContactParams)
 OBSTACLE_NEIGHBORS = 32
-OBSTACLE_REACH = 1.5
 
 
 class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
@@ -41,12 +40,16 @@ class MpmPbdPairs(Data, kind=DataKind.SCRATCH):
 
 
 class PbdContactParams(Data, kind=DataKind.CONSTANT, shape=()):
-    """Scene values of the MPM-PBD contact pairs, as device scalars: the thickness `thickness` added to the PBD radius
-    in metres, the penalty stiffness `stiffness` of a row in units of its effective mass and the friction `friction`."""
+    """Scene values of the MPM-PBD contact pairs, as device scalars: the radius `radius` of the PBD particles and the
+    thickness `thickness` added to it in metres, the penalty stiffness `stiffness` of a row in units of its effective
+    mass, the friction `friction`, and the reach `obstacle_reach` in contact distances of the start or predicted
+    position of a PBD particle within which an MPM particle is one of its obstacle candidates."""
 
+    radius: qd.Tensor = field(float, ndarray=True)
     thickness: qd.Tensor = field(float, ndarray=True)
     stiffness: qd.Tensor = field(float, ndarray=True)
     friction: qd.Tensor = field(float, ndarray=True)
+    obstacle_reach: qd.Tensor = field(float, ndarray=True)
 
 
 @qd.data_oriented
@@ -59,7 +62,6 @@ class PbdParticleQuery:
         self.pbd = pbd
         self.mpm_info = mpm_info
         self.contact = contact
-        self.radius = pbd.solver.particle_radius
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.solver.n_particles, 1))
         self.tree = self.bvh_state.tree
         self.leaves = self.bvh_state.leaves
@@ -74,9 +76,9 @@ class PbdParticleQuery:
 def kernel_fit_pbd_leaves(query: qd.template()):
     """The box of every PBD particle over its sweep from its start to its projected end position, grown by its radius
     and the contact thickness."""
-    reach = qd.static(query.radius) + query.contact.thickness[()]
     for i_b, i_q in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
         if query.pbd.solver.particles_ng_reordered[i_q, i_b].active:
+            reach = query.contact.radius[()] + query.contact.thickness[()]
             x0 = query.pbd.solver.particles_reordered[i_q, i_b].ipos
             x1 = query.pbd.solver.particles_reordered[i_q, i_b].pos
             query.leaves.aabbs_min[i_b, i_q] = qd.min(x0, x1) - reach
@@ -110,7 +112,6 @@ class MpmParticleObstacles:
         self.mpm_particles_ng = mpm_solver.particles_ng
         self.pbd = pbd
         self.contact = contact
-        self.radius = pbd.particle_radius
         self.scratch = MpmObstaclesScratch(sizes={PBD_PARTICLES: pbd.n_particles, ENVS: n_envs})
         self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
         self.tree = self.bvh_state.tree
@@ -143,7 +144,7 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
     x_q = obstacles.pbd.particles_reordered[i_q, i_t].pos
     separation = x_q - obstacles.mpm_particles.pos[f, i_a, i_t]
     distance = separation.norm()
-    target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
+    target = obstacles.contact.radius[()] + obstacles.contact.thickness[()]
     if distance < target and distance > gs.EPS:
         normal = separation / distance
         depth = target - distance
@@ -167,7 +168,7 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
     f = obstacles.scratch.frame[()]
     separation = obstacles.pbd.particles_reordered[i_q, i_t].ipos - obstacles.mpm_particles.pos[f, i_a, i_t]
     distance = separation.norm()
-    target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
+    target = obstacles.contact.radius[()] + obstacles.contact.thickness[()]
     if distance < target and distance > gs.EPS:
         particle = obstacles.pbd.particles_reordered[i_q, i_t]
         obstacles.pbd.particles_reordered[i_q, i_t].dpos = particle.dpos + (target - distance) / distance * separation
@@ -178,14 +179,14 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
 @qd.func
 def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.template()) -> bool:
     """Keep MPM particle i_a among the nearest OBSTACLE_NEIGHBORS obstacle candidates of PBD particle i_q of environment
-    i_t if it lies within OBSTACLE_REACH contact distances of its start or predicted position."""
+    i_t if it lies within its obstacle reach, in contact distances of its start or predicted position."""
     f = obstacles.scratch.frame[()]
     x_m = obstacles.mpm_particles.pos[f, i_a, i_t]
     distance = qd.min(
         (obstacles.pbd.particles_reordered[i_q, i_t].pos - x_m).norm(),
         (obstacles.pbd.particles_reordered[i_q, i_t].ipos - x_m).norm(),
     )
-    reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
+    reach = obstacles.contact.obstacle_reach[()] * (obstacles.contact.radius[()] + obstacles.contact.thickness[()])
     if distance < reach:
         n_neighbors = obstacles.scratch.n_neighbors[i_q, i_t]
         if n_neighbors < qd.static(OBSTACLE_NEIGHBORS):
@@ -210,11 +211,13 @@ def func_obstacle_gather_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.temp
 def kernel_gather_obstacle_neighbors(obstacles: qd.template()):
     """The obstacle candidates of every free PBD particle for the substep, by a box query of the MPM trees around its
     start and predicted positions."""
-    reach = qd.static(OBSTACLE_REACH) * (qd.static(obstacles.radius) + obstacles.contact.thickness[()])
     qd.loop_config(name="pbd_mpm_obstacle_neighbors")
     for i_q, i_b in qd.ndrange(obstacles.pbd._n_particles, obstacles.pbd._B):
         obstacles.scratch.n_neighbors[i_q, i_b] = 0
         if is_moving(i_q, i_b, obstacles.pbd):
+            reach = obstacles.contact.obstacle_reach[()] * (
+                obstacles.contact.radius[()] + obstacles.contact.thickness[()]
+            )
             x0 = obstacles.pbd.particles_reordered[i_q, i_b].ipos
             x1 = obstacles.pbd.particles_reordered[i_q, i_b].pos
             func_bvh_query_aabb(
@@ -276,7 +279,7 @@ class MpmPbdContact(CouplingPairs):
         distance = (self.mpm.particles.pos[f, i_p, i_b] - self.pbd.solver.particles_reordered[i_q, i_b].ipos).norm()
         score = qd.math.inf
         if distance > gs.EPS:
-            score = distance - qd.static(self.query.radius) - self.query.contact.thickness[()]
+            score = distance - self.query.contact.radius[()] - self.query.contact.thickness[()]
         return score, 0.0
 
     @qd.func

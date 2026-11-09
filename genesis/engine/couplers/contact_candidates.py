@@ -36,16 +36,20 @@ class ContactCandidates(Data, kind=DataKind.SCRATCH):
     best_score: qd.Tensor = field(float, shape=(CANDIDATES,), ndarray=True)
     best_secondary: qd.Tensor = field(float, shape=(CANDIDATES,), ndarray=True)
     best_candidate: qd.Tensor = field(int, shape=(CANDIDATES,), ndarray=True)
+    # Fraction of the grid spacing within which the scores of two candidates tie, their secondary score breaking the tie
+    # (see func_select_nearest)
+    tie_ratio: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
 
 
-def build_contact_candidates(max_candidates: int) -> ContactCandidates:
-    """Build the candidates of a coupling at a capacity, with no candidate."""
+def build_contact_candidates(max_candidates: int, tie_ratio: float) -> ContactCandidates:
+    """Build the candidates of a coupling at a capacity, with no candidate, and the tie ratio of its scores."""
     candidates = ContactCandidates(
         sizes={
             CANDIDATES: max_candidates,
             ContactCandidates.results: {QUERY_RESULTS: max_candidates},
             ContactCandidates.order: bcoo_matrix_sizes(max_candidates, block_shape=(1, 1)),
-        }
+        },
+        values={"tie_ratio": tie_ratio},
     )
     candidates.results.count.fill(0)
     init_bcoo_matrix(candidates.order, n_triplets=0)
@@ -126,7 +130,7 @@ class CouplingPairs(NewtonDevice):
 
     def __init__(self, mpm):
         self.mpm = mpm
-        self.candidates = build_contact_candidates(MIN_SLOTS)
+        self.candidates = build_contact_candidates(MIN_SLOTS, self.tie_ratio)
         self.pairs = self.build_pairs(MIN_SLOTS)
         # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
         self.scratches_replaced = []
@@ -184,7 +188,7 @@ class CouplingPairs(NewtonDevice):
     def func_build_pairs(self, f: int):
         """Pair every valid particle with its nearest candidate (see build_pair), once the candidates are sorted by
         particle."""
-        func_select_nearest(self.tie_ratio * self.mpm.mpm_info.dx[()], self.candidates)
+        func_select_nearest(self.candidates.tie_ratio[()] * self.mpm.mpm_info.dx[()], self.candidates)
         for _ in range(1):
             self.pairs.n_pairs[()] = 0
         qd.loop_config(name="mpm_build_pairs")
@@ -262,7 +266,7 @@ class CouplingPairs(NewtonDevice):
         n_candidates = int(qd_to_numpy(self.candidates.results.count)[0])
         if n_candidates > self.candidates.secondary.shape[0]:
             retire_scratch(self.candidates, self.scratches_replaced)
-            self.candidates = build_contact_candidates(grown_capacity(n_candidates))
+            self.candidates = build_contact_candidates(grown_capacity(n_candidates), self.tie_ratio)
             kernel_query_candidates(f, self)
         kernel_score_candidates(f, self)
         sort_bcoo(self.candidates.order)

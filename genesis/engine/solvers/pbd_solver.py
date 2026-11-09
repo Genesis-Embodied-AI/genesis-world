@@ -28,10 +28,9 @@ from .pbd_newton import PbdNewtonHost, PbdNewtonParticipant
 if TYPE_CHECKING:
     from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 
-# Collision candidates of a particle over a substep: the nearest COLLISION_NEIGHBORS particles within COLLISION_REACH
-# particle sizes at the start or predicted positions, a reach the 27 hash cells around the particle cover
+# Collision candidates of a particle over a substep: the nearest COLLISION_NEIGHBORS particles within its collision
+# reach (see PbdConstraintLoop)
 COLLISION_NEIGHBORS = 16
-COLLISION_REACH = 1.25
 
 PARTICLES = Size("particles")
 EDGES = Size("edges")
@@ -55,6 +54,9 @@ class PbdConstraintLoop(Data, kind=DataKind.SCRATCH):
     n_collision_neighbors: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
     collision_neighbors_idx: qd.Tensor = field(int, shape=(PARTICLES, COLLISION_NEIGHBORS, ENVS))
     collision_neighbors_dist: qd.Tensor = field(float, shape=(PARTICLES, COLLISION_NEIGHBORS, ENVS))
+    # Distance of the start or predicted position of a particle within which another one is a collision candidate, a
+    # reach the 27 hash cells around the particle cover
+    collision_reach: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT, ndarray=True)
     constraint_counts: qd.Tensor = field((float, 3), shape=(PARTICLES,), kind=DataKind.CONSTANT)
 
 
@@ -289,7 +291,8 @@ class PBDSolver(ParticleSolver):
                     INNER_EDGES: self._n_inner_edges,
                     ELEMS: self._n_elems,
                     ENVS: self._B,
-                }
+                },
+                values={"collision_reach": 1.25 * self._particle_size},
             )
 
             for entity in self._entities:
@@ -1353,9 +1356,8 @@ def kernel_gather_collision_neighbors(f: int, pbd_solver: qd.template()):
     positions.
 
     The candidates are the particles of the 27 hash cells around it that may collide with it, apart from its neighbors
-    in the rest shape, within `COLLISION_REACH` particle sizes at the start or predicted positions. The nearest
-    `COLLISION_NEIGHBORS` of them are kept, and the constraint iterations reuse them."""
-    reach = qd.static(COLLISION_REACH * pbd_solver._particle_size)
+    in the rest shape, within the collision reach of the start or predicted positions. The nearest `COLLISION_NEIGHBORS`
+    of them are kept, and the constraint iterations reuse them."""
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b] = 0
         if pbd_solver.particles_info_reordered[i_p, i_b].material_type != pbd_solver.MATERIAL.PARTICLE:
@@ -1392,7 +1394,10 @@ def kernel_gather_collision_neighbors(f: int, pbd_solver: qd.template()):
                                 - pbd_solver.particles_reordered[j_p, i_b].ipos
                             ).norm(),
                         )
-                        if rest_distance > pbd_solver._particle_size and distance < reach:
+                        if (
+                            rest_distance > pbd_solver._particle_size
+                            and distance < pbd_solver.constraint_loop.collision_reach[()]
+                        ):
                             func_insert_collision_neighbor(i_p, i_b, j_p, distance, pbd_solver)
 
 

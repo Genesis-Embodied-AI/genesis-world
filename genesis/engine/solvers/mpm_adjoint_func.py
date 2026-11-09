@@ -18,11 +18,9 @@ from .mpm_data import (
     MpmWallPairs,
 )
 from .mpm_func import (
-    LIQUID_J_MIN,
     PLASTIC_LIQUID,
     PLASTIC_NONE,
     PLASTIC_SNOW,
-    SNOW_HARDENING,
     active_fibre_stiffness,
     diagonal,
     diagonal_of,
@@ -63,7 +61,7 @@ def return_map_bw(
     if kind == PLASTIC_LIQUID:
         det = F.determinant()
         F_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
-        if det > qd.static(LIQUID_J_MIN) and det < 1.0:
+        if det > mpm_info.liquid_j_min[()] and det < 1.0:
             # d det F / dF is its cofactor, det F F^-T
             J_bar = F_new_bar.trace() / (3.0 * qd.pow(det, 2.0 / 3.0))
             F_bar = (J_bar * det) * F.inverse().transpose()
@@ -381,11 +379,11 @@ def func_adjoint_particles(
         )
         lam_grad_F = lam_grad @ F
         dP = isotropic_first_piola_differential(U, V, sigma, g, A, lam_grad_F)
-        # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
-        # are proportional, so phi = V dt^2 P : (lam_grad F) moves by -SNOW_HARDENING phi with Jp
+        # Snow scales mu and lam by exp(snow_hardening (1 - Jp)), to which its elastic energy and compression penalty
+        # are proportional, so phi = V dt^2 P : (lam_grad F) moves by -snow_hardening phi with Jp
         Jp_bar = gs.qd_float(0.0)
         if materials.materials_plastic[i_mat] == PLASTIC_SNOW:
-            Jp_bar = qd.static(SNOW_HARDENING) * mpm_info.particle_volume[()] * dt * dt * (P * lam_grad_F).sum()
+            Jp_bar = mpm_info.snow_hardening[()] * mpm_info.particle_volume[()] * dt * dt * (P * lam_grad_F).sum()
         muscle_direction = particles_info.muscle_direction[i_p]
         active_stiffness, dactive_stiffness = active_fibre_stiffness(
             i_mat, particles.actu[f, i_p, i_b], materials, mpm_info

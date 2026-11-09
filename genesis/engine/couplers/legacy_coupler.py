@@ -184,7 +184,13 @@ class LegacyCoupler(RBC):
             pair_kinds.append(contact)
         if self._is_mpm_pbd_coupled:
             pbd_contact = PbdContactParams(
-                values={"thickness": 0.5 * self.mpm_solver.dx, "stiffness": 10.0, "friction": 0.15}
+                values={
+                    "radius": self.pbd_solver.particle_radius,
+                    "thickness": 0.5 * self.mpm_solver.dx,
+                    "stiffness": 10.0,
+                    "friction": 0.15,
+                    "obstacle_reach": 1.5,
+                }
             )
             pbd_host, pbd_participant = self.pbd_solver.build_newton_participant()
             owners.append((pbd_host, pbd_participant))

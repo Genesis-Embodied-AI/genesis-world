@@ -57,6 +57,25 @@ class MpmInfo(Data, kind=DataKind.CONSTANT, shape=()):
     # Width in volume ratio of the band below J = 1 over which the stiffness of the liquid rises (see
     # liquid_volume_terms)
     liquid_band: qd.Tensor = field(float, ndarray=True)
+    # Singular value below which the extended Hencky energy continues log(sigma) by its tangent line
+    hencky_sigma_min: qd.Tensor = field(float, ndarray=True)
+    # Singular value below which the fixed corotated and Stable Neo-Hookean energies resist further compression, and the
+    # stiffness of that resistance in units of the Young's modulus (Stomakhin et al. 2012, see compression_penalty)
+    extension_sigma_min: qd.Tensor = field(float, ndarray=True)
+    extension_stiffness: qd.Tensor = field(float, ndarray=True)
+    # Singular values below which the von Mises and sand return maps clamp before taking a log, those of the explicit
+    # materials
+    von_mises_sigma_min: qd.Tensor = field(float, ndarray=True)
+    sand_sigma_min: qd.Tensor = field(float, ndarray=True)
+    # Smallest volume ratio the liquid return map keeps
+    liquid_j_min: qd.Tensor = field(float, ndarray=True)
+    # Fraction of the step to the first zero volume of a liquid particle along the Newton direction, beyond which the
+    # line search does not start, so that every trial state keeps the volume ratio of the liquid positive
+    inversion_step_slack: qd.Tensor = field(float, ndarray=True)
+    # Hardening exponent of snow, mu and lam scaled by exp(snow_hardening (1 - Jp))
+    snow_hardening: qd.Tensor = field(float, ndarray=True)
+    # Smallest friction coefficient of a contact row of a particle with a partner of a coupling
+    contact_min_friction: qd.Tensor = field(float, ndarray=True)
     # The solref / solimp parameters of the wall rows, in Rigid's form: timeconst, dampratio, dmin, dmax, width, mid,
     # power
     wall_sol_params: qd.Tensor = field((float, 7), ndarray=True)
