@@ -1151,6 +1151,10 @@ def func_solve_bending(f: int, pbd_solver: qd.template()):
                 n1 = p2.cross(p3) / l23
                 n2 = p2.cross(p4) / l24
                 d = qd.math.clamp(n1.dot(n2), -1.0, 1.0)
+                # The angle between the normals by the arc tangent of its sine and cosine: at the flat state, where
+                # they are opposite, the arc cosine of d turns the rounding of their unit length into a bend of the
+                # square root of the precision
+                sin_angle = n1.cross(n2).norm()
 
                 # eq. (25), (26) and (27)
                 q3 = (p2.cross(n2) + n1.cross(p2) * d) / l23
@@ -1159,13 +1163,13 @@ def func_solve_bending(f: int, pbd_solver: qd.template()):
                 q1 = -q2 - q3 - q4
                 # eq. (29)
                 sum_wq = w1 * q1.norm_sqr() + w2 * q2.norm_sqr() + w3 * q3.norm_sqr() + w4 * q4.norm_sqr()
-                constraint = qd.acos(d) - qd.acos(-1.0)
+                constraint = qd.atan2(sin_angle, d) - qd.acos(-1.0)
 
                 alpha = pbd_solver.inner_edges_info[i_ie].bending_compliance / (pbd_solver._substep_dt**2)
                 if qd.static(pbd_solver._use_xpbd):
-                    # grad C_i = q_i / sqrt(g), g = 1 - d^2, so with S = sum n_i w_i |q_i|^2:
+                    # grad C_i = q_i / sin, so with g = sin^2 and S = sum n_i w_i |q_i|^2:
                     # Delta lambda = g (-C - alpha lambda) / (S + alpha g)
-                    # Delta x_i = w_i q_i Delta lambda / sqrt(g)
+                    # Delta x_i = w_i q_i Delta lambda / sin
                     counts = qd.Vector(
                         [
                             pbd_solver.constraint_loop.constraint_counts[info.v1][1],
@@ -1175,7 +1179,7 @@ def func_solve_bending(f: int, pbd_solver: qd.template()):
                         ],
                         dt=gs.qd_float,
                     )
-                    g = 1.0 - d**2
+                    g = sin_angle**2
                     sum_nwq = (
                         counts[0] * w1 * q1.norm_sqr()
                         + counts[1] * w2 * q2.norm_sqr()
@@ -1187,10 +1191,10 @@ def func_solve_bending(f: int, pbd_solver: qd.template()):
                     if sum_nwq + alpha * g > 0.0:
                         scale = (-constraint - alpha * lam) / (sum_nwq + alpha * g)
                     pbd_solver.constraint_loop.inner_edges_lambda[i_ie, i_b] = lam + g * scale
-                    constraint = qd.sqrt(g) * scale
+                    constraint = sin_angle * scale
                 else:
                     constraint = (
-                        -qd.sqrt(1 - d**2)
+                        -sin_angle
                         * constraint
                         / (sum_wq + alpha)
                         * pbd_solver.inner_edges_info[i_ie].bending_relaxation
