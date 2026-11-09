@@ -549,9 +549,11 @@ class FEMEntity(Entity):
                 Optional rigid link for the vertices to follow, maintaining relative position.
             is_soft_constraint: bool
                 By default, use a hard constraint directly sets position and zero velocity.
-                A soft constraint uses a spring force to pull the vertex towards the target position.
+                A soft constraint pulls the vertices toward their targets with critically damped springs under the
+                explicit solver, while the implicit solver holds them at their targets (see
+                'FEMSolver.set_vertex_constraints').
             stiffness : float
-                Specify a spring stiffness for a soft constraint. Critical damping is applied.
+                Stiffness of the springs of a soft constraint, in N/m.
             envs_idx : array_like, optional
                 List of environment indices to apply the constraints to. If None, applies to all environments.
         """

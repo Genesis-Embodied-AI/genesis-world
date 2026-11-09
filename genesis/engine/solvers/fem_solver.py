@@ -1672,9 +1672,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             Global index of the rigid link the vertices follow, keeping their offset to it, or -1 for none.
         is_soft_constraint : bool, optional
             Whether to pull the vertices toward their targets with critically damped springs, rather than setting their
-            position and zeroing their velocity. Defaults to False.
+            position and zeroing their velocity. A spring applies the force -k (x - x_t) - 2 sqrt(k m) (v - v_t) to a
+            vertex of mass m, x_t and v_t being the position and velocity of its target. The implicit solver holds the
+            vertices at their targets instead. Defaults to False.
         stiffness : float, optional
-            Stiffness of the springs of a soft constraint. Defaults to 0.0.
+            Stiffness k of the springs of a soft constraint, in N/m. Defaults to 0.0.
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
@@ -1938,18 +1940,32 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def apply_soft_constraints(self, f: qd.i32, links_state: LinksState):
-        """Apply soft constraints as spring forces for explicit solver."""
+        """Pull the vertices of the soft constraints toward their targets with critically damped springs."""
         for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
             vc = self.vertex_constraints[i_v, i_b]
             if vc.is_constrained and vc.is_soft_constraint:
                 target_pos = self._func_get_constraint_target(i_v, i_b, links_state)
-                pos_error = self.elements_v[f, i_v, i_b].pos - target_pos
-                vel_error = self.elements_v[f + 1, i_v, i_b].vel - self.elements_v[f, i_v, i_b].vel
-                spring_force = -vc.stiffness * pos_error
-                damping_force = -2.0 * qd.math.sqrt(vc.stiffness) * vel_error
+                target_vel = qd.Vector.zero(gs.qd_float, 3)
+                i_l = vc.link_idx
+                if i_l >= 0:
+                    target_vel = links_state.cd_vel[i_l, i_b] + links_state.cd_ang[i_l, i_b].cross(
+                        target_pos - links_state.root_COM[i_l, i_b]
+                    )
 
-                dv = self.substep_dt * (spring_force + damping_force)
-                self.elements_v[f + 1, i_v, i_b].vel += dv
+                # The spring is integrated by backward Euler, the position moving with the velocity it gives, which
+                # keeps it stable whatever its stiffness. The rigid solver has already stepped, so the link places the
+                # target at the end of the substep: m (v' - v) = dt (-k (x + dt v' - x_t) - c (v' - v_t)).
+                mass = self.elements_v_info[i_v].mass
+                damping = 2.0 * qd.math.sqrt(vc.stiffness * mass)
+                dt = self.substep_dt
+                dt_damping_stiffness = dt * damping + dt**2 * vc.stiffness
+                vel = self.elements_v[f + 1, i_v, i_b].vel
+                pos_error = self.elements_v[f, i_v, i_b].pos - target_pos
+                vel_delta = -(
+                    dt_damping_stiffness * vel + dt * vc.stiffness * pos_error - dt * damping * target_vel
+                ) / (mass + dt_damping_stiffness)
+                # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
+                qd.atomic_add(self.elements_v[f + 1, i_v, i_b].vel, vel_delta)
 
     @qd.kernel
     def _kernel_set_vertex_constraints(
