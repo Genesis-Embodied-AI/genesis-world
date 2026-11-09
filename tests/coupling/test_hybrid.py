@@ -15,9 +15,6 @@ def test_rigid_mpm_muscle(show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-        ),
         rigid_options=gs.options.RigidOptions(
             gravity=(0, 0, -9.8),
             constraint_timeconst=0.02,
@@ -91,9 +88,6 @@ def test_rigid_mpm_muscle(show_viewer):
 def test_mpm_on_terrain(show_viewer):
     # The terrain is the only Rigid geom, so it is in no Rigid collision pair
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-        ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(2.0, 2.0, 1.0),
@@ -184,10 +178,6 @@ def test_reject_unsupported_mpm_coupling():
 def test_rigid_mpm_legacy_coupling(tol, show_viewer):
     # The liquid collapsing against the rigid box pushes it
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-            substeps=1,
-        ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
@@ -282,15 +272,14 @@ def test_mesh_mpm_build(show_viewer):
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_deformable_parallel(show_viewer):
     scene = gs.Scene(
-        # The implicit MPM solver is stable at one substep per step, which the explicit SPH solver splits into subcycles
         sim_options=gs.options.SimOptions(
             dt=2e-3,
-            substeps=1,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.5, -0.1, -0.05),
             upper_bound=(0.7, 0.1, 0.3),
         ),
+        # The explicit SPH solver splits into subcycles the step that the implicit MPM solver takes at once
         sph_options=gs.options.SPHOptions(
             n_subcycles=10,
             lower_bound=(-0.03, -0.03, -0.08),
@@ -412,9 +401,6 @@ def test_fem_outside_mpm_grid(show_viewer):
     velocities = []
     for is_mpm_in_scene in (True, False):
         scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=1e-2,
-            ),
             mpm_options=gs.options.MPMOptions(
                 lower_bound=(-0.1, -0.1, 0.0),
                 upper_bound=(0.1, 0.1, 0.2),
@@ -474,10 +460,7 @@ def test_fem_outside_mpm_grid(show_viewer):
 def test_fluid_emitter(n_envs, material_type, show_viewer):
     # The implicit MPM takes one large step, while SPH and PBD need small substeps
     if issubclass(material_type, gs.materials.MPM.Base):
-        sim_options = gs.options.SimOptions(
-            dt=1e-2,
-            substeps=1,
-        )
+        sim_options = gs.options.SimOptions()
     else:
         sim_options = gs.options.SimOptions(
             dt=4e-3,

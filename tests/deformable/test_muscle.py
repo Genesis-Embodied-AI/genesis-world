@@ -16,10 +16,7 @@ def test_muscle(n_envs, muscle_material, show_viewer):
     )
     # The implicit MPM takes one large step, while the explicit FEM needs small substeps to stay stable
     if muscle_material is gs.materials.MPM.Muscle:
-        sim_options = gs.options.SimOptions(
-            dt=1e-2,
-            substeps=1,
-        )
+        sim_options = gs.options.SimOptions()
     else:
         sim_options = gs.options.SimOptions(
             dt=5e-4,

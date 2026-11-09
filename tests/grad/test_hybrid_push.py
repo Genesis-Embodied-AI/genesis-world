@@ -115,7 +115,6 @@ def test_mpm_grad_descends(optimize, show_viewer):
     # return maps of the blocks yielding in their head-on collisions.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             gravity=(0.0, 0.0, 0.0),
             requires_grad=True,
         ),
@@ -380,7 +379,6 @@ def test_hybrid_grad_descends(optimize, show_viewer):
     # through that coupling and the implicit MPM solve
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             requires_grad=True,
         ),
         mpm_options=gs.options.MPMOptions(
@@ -440,7 +438,6 @@ def test_coupling_wrench_grad_descends(optimize, show_viewer):
     # the gradient of the pose of the box with respect to the velocity of the block goes through the coupling alone
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
             gravity=(0.0, 0.0, 0.0),
             requires_grad=True,
         ),

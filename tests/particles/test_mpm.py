@@ -14,9 +14,6 @@ def test_particle_constraints(show_viewer, tol):
     RHO = 1000.1
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-        ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
             lower_bound=(-1.0, -1.0, 0.0),
@@ -123,9 +120,6 @@ def test_perf_dispatch(variant, show_viewer):
         liquid_viscous = False
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-        ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
             lower_bound=(-0.4, -0.4, -0.05),
@@ -191,9 +185,6 @@ def test_envs_solve_apart(precision, show_viewer):
     VELOCITIES = ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, -0.5))
     for i_b in (None, *range(len(VELOCITIES))):
         scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=1e-2,
-            ),
             mpm_options=gs.options.MPMOptions(
                 lower_bound=(-0.5, -0.5, -0.1),
                 upper_bound=(0.5, 0.5, 0.5),
@@ -377,9 +368,6 @@ def test_newton_graph_matches_split(show_viewer):
     positions = []
     for newton_graph in ("split", "newton"):
         scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=1e-2,
-            ),
             mpm_options=gs.options.MPMOptions(
                 lower_bound=(-0.5, -0.5, -0.1),
                 upper_bound=(0.5, 0.5, 0.6),
