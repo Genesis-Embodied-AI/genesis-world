@@ -33,6 +33,8 @@ tests/rigid/test_control.py
   s_89519fefaf9334::t_c78a19694fa4d3 143-145,154,159
   s_89519fefaf9334::t_c3ec314d0649a1 51-55
   s_89519fefaf9334::t_737181b900be87 150-153,155-158
+genesis/engine/solvers/rigid/data.py
+  s_188aacf5c3ac06::t_c80c46e530ee3e 190,225-227
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -40,6 +42,14 @@ tests/rigid/test_control.py
   "base_commit_sha": "51152439ee8ca227c0ac9e3b1632db9a3a350822",
   "prompts": {},
   "sessions": {
+    "s_188aacf5c3ac06": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "35d99d92-38dc-4797-a798-957ac6c04da9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
     "s_89519fefaf9334": {
       "agent_id": {
         "tool": "claude",
