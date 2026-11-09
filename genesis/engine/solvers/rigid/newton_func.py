@@ -196,7 +196,7 @@ def func_rigid_evaluate(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_energy(rigid_data: RigidNewtonScratch, energies: qd.template(), newton_info: RigidNewtonInfo):
+def func_rigid_energy(energies: qd.template(), rigid_data: RigidNewtonScratch, newton_info: RigidNewtonInfo):
     """Add Rigid's cost of every environment times dt^4 into the entry of the environment, after func_rigid_evaluate."""
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     for i_b in range(rigid_data.x.shape[1]):
@@ -258,8 +258,8 @@ def func_add_links_stiffness_island_batch(
     i_island: int,
     rigid_data: RigidNewtonScratch,
     dofs_state: DofsState,
-    links_info: LinksInfo,
     constraint_state: ConstraintState,
+    links_info: LinksInfo,
     rigid_config: qd.template(),
     config: qd.template(),
 ):

@@ -261,8 +261,8 @@ class PBDSolver(ParticleSolver):
         """Make the PBD particles collide with the particles of another solver as immovable obstacles.
 
         The obstacles act in the contact group of the unified loop and in the pre-stabilization. `obstacles` provides
-        `build(f)`, called at the start of every substep, and the top-level funcs `func_project(pbd, f)` and
-        `func_stabilize(pbd, f)`, which accumulate the corrections of the PBD particles in `dpos` and `dcount` of the
+        `build(f)`, called at the start of every substep, and the top-level funcs `func_project(f, pbd)` and
+        `func_stabilize(f, pbd)`, which accumulate the corrections of the PBD particles in `dpos` and `dcount` of the
         reordered particles."""
         self._particle_obstacles = obstacles
         self._has_particle_obstacles = True
@@ -1083,7 +1083,7 @@ def func_inv_mass(i_r: int, i_b: int, pbd_solver: qd.template()):
 
 
 @qd.func
-def func_within_budget(budget: qd.template(), pbd_solver: qd.template()):
+def func_within_budget(pbd_solver: qd.template(), budget: qd.template()):
     return pbd_solver.constraint_loop.n_iterations[()] < budget
 
 
@@ -1092,7 +1092,7 @@ def func_solve_stretch(f: int, pbd_solver: qd.template()):
     for i_e, i_b in qd.ndrange(pbd_solver._n_edges, pbd_solver._B):
         edge = pbd_solver.edges_info[i_e]
         is_constraint_active = (
-            func_within_budget(pbd_solver._max_stretch_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_stretch_solver_iterations)
             and pbd_solver.particles_ng[edge.v1, i_b].active
             and pbd_solver.particles_ng[edge.v2, i_b].active
         )
@@ -1129,7 +1129,7 @@ def func_solve_bending(f: int, pbd_solver: qd.template()):
     for i_ie, i_b in qd.ndrange(pbd_solver._n_inner_edges, pbd_solver._B):
         info = pbd_solver.inner_edges_info[i_ie]
         is_constraint_active = (
-            func_within_budget(pbd_solver._max_bending_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_bending_solver_iterations)
             and pbd_solver.particles_ng[info.v1, i_b].active
             and pbd_solver.particles_ng[info.v2, i_b].active
             and pbd_solver.particles_ng[info.v3, i_b].active
@@ -1216,7 +1216,7 @@ def func_solve_volume(f: int, pbd_solver: qd.template()):
     for i_el, i_b in qd.ndrange(pbd_solver._n_elems, pbd_solver._B):
         elem = pbd_solver.elems_info[i_el]
         is_constraint_active = (
-            func_within_budget(pbd_solver._max_volume_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_volume_solver_iterations)
             and pbd_solver.particles_ng[elem.v1, i_b].active
             and pbd_solver.particles_ng[elem.v2, i_b].active
             and pbd_solver.particles_ng[elem.v3, i_b].active
@@ -1282,7 +1282,7 @@ def func_solve_density(f: int, pbd_solver: qd.template()):
     # ---Calculate lambdas---
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         if (
-            func_within_budget(pbd_solver._max_density_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_density_solver_iterations)
             and pbd_solver.particles_info_reordered[i_p, i_b].material_type == pbd_solver.MATERIAL.LIQUID
         ):
             pos_i = pbd_solver.particles_reordered[i_p, i_b].pos
@@ -1310,7 +1310,7 @@ def func_solve_density(f: int, pbd_solver: qd.template()):
     # ---Calculate delta pos---
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         if (
-            func_within_budget(pbd_solver._max_density_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_density_solver_iterations)
             and pbd_solver.particles_info_reordered[i_p, i_b].material_type == pbd_solver.MATERIAL.LIQUID
         ):
             pos_i = pbd_solver.particles_reordered[i_p, i_b].pos
@@ -1342,7 +1342,7 @@ def func_solve_density(f: int, pbd_solver: qd.template()):
 
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
         if (
-            func_within_budget(pbd_solver._max_density_solver_iterations, pbd_solver)
+            func_within_budget(pbd_solver, pbd_solver._max_density_solver_iterations)
             and pbd_solver.particles_info_reordered[i_p, i_b].material_type == pbd_solver.MATERIAL.LIQUID
             and pbd_solver.particles_reordered[i_p, i_b].free
         ):
@@ -1503,9 +1503,9 @@ def func_solve_collision(f: int, pbd_solver: qd.template(), is_stabilization: qd
 @qd.kernel
 def kernel_solve_obstacles(f: int, pbd_solver: qd.template(), is_stabilization: qd.template()):
     if qd.static(is_stabilization):
-        pbd_solver._particle_obstacles.func_stabilize(pbd_solver, f)
+        pbd_solver._particle_obstacles.func_stabilize(f, pbd_solver)
     else:
-        pbd_solver._particle_obstacles.func_project(pbd_solver, f)
+        pbd_solver._particle_obstacles.func_project(f, pbd_solver)
 
 
 @qd.kernel
@@ -1547,11 +1547,13 @@ def func_apply_corrections(
 
 @qd.kernel(graph=True)
 def kernel_constraint_loop(f: int, pbd_solver: qd.template()):
-    pbd_solver.constraint_loop.n_iterations[()] = 0
-    pbd_solver.constraint_loop.is_running[()] = 1
+    for _ in range(1):
+        pbd_solver.constraint_loop.n_iterations[()] = 0
+        pbd_solver.constraint_loop.is_running[()] = 1
     while qd.graph.do_while(pbd_solver.constraint_loop.is_running):
         if qd.static(pbd_solver._position_tolerance > 0.0):
-            pbd_solver.constraint_loop.max_correction[()] = 0.0
+            for _ in range(1):
+                pbd_solver.constraint_loop.max_correction[()] = 0.0
         if qd.static(pbd_solver._n_edges > 0):
             func_solve_stretch(f, pbd_solver)
             func_apply_corrections(f, pbd_solver, is_average=False, is_stabilization=False)
@@ -1565,7 +1567,7 @@ def kernel_constraint_loop(f: int, pbd_solver: qd.template()):
             func_solve_density(f, pbd_solver)
         func_solve_collision(f, pbd_solver, is_stabilization=False)
         if qd.static(pbd_solver._has_particle_obstacles):
-            pbd_solver._particle_obstacles.func_project(pbd_solver, f)
+            pbd_solver._particle_obstacles.func_project(f, pbd_solver)
         func_apply_corrections(f, pbd_solver, is_average=True, is_stabilization=False)
         func_end_iteration(pbd_solver)
 

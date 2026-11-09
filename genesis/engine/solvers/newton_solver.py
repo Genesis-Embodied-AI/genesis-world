@@ -207,7 +207,7 @@ def func_start_line_search(f: int, newton_control: NewtonControl, participants: 
     func_reset_newton_measures(newton_control)
     func_init_line_search(newton_control)
     for member in qd.static(participants.members):
-        member.func_start_line_search(newton_control, f)
+        member.func_start_line_search(f, newton_control)
     func_check_convergence(newton_control)
 
 
@@ -215,7 +215,7 @@ def func_start_line_search(f: int, newton_control: NewtonControl, participants: 
 def func_step_forward(f: int, newton_control: NewtonControl, participants: qd.template()):
     """Move every participant to the trial point of the line-search step."""
     for member in qd.static(participants.members):
-        member.func_step_forward(newton_control, f)
+        member.func_step_forward(f, newton_control)
 
 
 @qd.func(requires_top_level=True)
@@ -223,13 +223,13 @@ def func_energy(f: int, newton_control: NewtonControl, participants: qd.template
     """Evaluate the total energy at the start or trial point, which every participant and the contacts add theirs to."""
     func_reset_energy(newton_control, is_trial)
     if qd.static(is_trial):
-        func_add_energies(f, participants, newton_control.energy_trial)
+        func_add_energies(f, newton_control.energy_trial, participants)
     else:
-        func_add_energies(f, participants, newton_control.energy_start)
+        func_add_energies(f, newton_control.energy_start, participants)
 
 
 @qd.func(requires_top_level=True)
-def func_add_energies(f: int, participants: qd.template(), energies: qd.template()):
+def func_add_energies(f: int, energies: qd.template(), participants: qd.template()):
     """Add the energy of every participant and of the contacts into the entry of every environment."""
     for member in qd.static(participants.members):
         member.func_energy(f, energies)

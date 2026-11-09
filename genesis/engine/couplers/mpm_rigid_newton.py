@@ -121,8 +121,8 @@ class MpmRigidContact(CouplingPairs):
                 directions = pyramid_directions(normal, friction)
                 stiffness = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
                 target = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
-                for k in qd.static(range(PYRAMID_ROWS)):
-                    direction = directions[k, :]
+                for k in range(PYRAMID_ROWS):
+                    direction = qd.Vector([directions[k, j] for j in qd.static(range(3))], dt=gs.qd_float)
                     stiffness_k, target_k = band_row(sol_params, phi, direction.dot(v_rel), diag_coef, dt)
                     stiffness[k] = stiffness_k
                     target[k] = target_k + dt * direction.dot(v_r)

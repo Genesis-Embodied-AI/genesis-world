@@ -39,7 +39,9 @@ class ForceField(RBC):
         return acc
 
     @qd.func
-    def get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         """
         Return the velocity adjoint from the acceleration adjoint, for a solver differentiating through the velocity.
 
@@ -97,7 +99,9 @@ class Constant(ForceField):
         return self._acc_qd
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -155,7 +159,9 @@ class Wind(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -221,7 +227,9 @@ class Point(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         radius = (pos - self._position_qd).norm(gs.EPS)
         falloff = 1 / (radius + 1.0) ** self._falloff_pow
         return -(falloff * self._flow) * acc_bar
@@ -258,7 +266,9 @@ class Drag(ForceField):
         return -self._linear * vel - self._quadratic * vel.norm() * vel
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         # d(|v| v) / dv = |v| I + v v^T / |v|, which vanishes with v
         speed = vel.norm()
         vel_bar = -self._linear * acc_bar - self._quadratic * speed * acc_bar
@@ -302,7 +312,9 @@ class Noise(ForceField):
         return noise * self._strength
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -391,7 +403,9 @@ class Vortex(ForceField):
         return acceleration
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         return -self._damping * acc_bar
 
     @property
@@ -471,7 +485,9 @@ class Turbulence(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(
+        self, pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i: int, acc_bar: qd.types.vector(3)
+    ):
         return -self._flow * acc_bar
 
     @property

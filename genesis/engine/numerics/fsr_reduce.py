@@ -4,13 +4,13 @@ import genesis as gs
 
 
 @qd.func
-def warp_padded(n):
+def warp_padded(n: int):
     """Round the extent of a loop up to whole warps, so that every warp takes part in the reductions by key."""
     return (n + 31) // 32 * 32
 
 
 @qd.func
-def head_segmented_reduce_add(value, tail_flag, is_max: qd.template() = False):
+def head_segmented_reduce_add(value, tail_flag: bool, is_max: qd.template() = False):
     """Sum the values of the run of lanes of every head lane of a warp.
 
     A run ends at its lane of `tail_flag`, and with `is_max` the reduction takes the maximum of the values instead."""
@@ -32,7 +32,7 @@ def head_segmented_reduce_add(value, tail_flag, is_max: qd.template() = False):
 
 
 @qd.func
-def _key_runs(key):
+def _key_runs(key: int):
     lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
     previous_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.max(lane - 1, 0)))
     next_key = qd.simt.subgroup.shuffle(key, qd.u32(qd.min(lane + 1, 31)))
@@ -40,7 +40,7 @@ def _key_runs(key):
 
 
 @qd.func
-def add_by_key(value, key, out: qd.template(), n_components: qd.template() = 0):
+def add_by_key(key: int, value, out: qd.template(), n_components: qd.template() = 0):
     """Add the value of an entry into the entry of its key, an entry of key -1 adding nothing.
 
     On GPU, the lanes of a warp holding the same key sum their values first, and one of them adds the sum into `out`."""
@@ -60,7 +60,7 @@ def add_by_key(value, key, out: qd.template(), n_components: qd.template() = 0):
 
 
 @qd.func
-def max_by_key(value, key, out: qd.template()):
+def max_by_key(key: int, value, out: qd.template()):
     """Maximum counterpart of add_by_key."""
     if qd.static(gs.backend == gs.cpu):
         if key >= 0:
@@ -101,4 +101,4 @@ def func_fsr_reduce(
             if segment >= 0:
                 value = values[source + component]
                 key = segment * n_block_scalars + component
-            add_by_key(value, key, output)
+            add_by_key(key, value, output)

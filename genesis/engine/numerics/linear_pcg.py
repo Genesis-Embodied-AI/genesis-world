@@ -71,7 +71,7 @@ def _func_dot(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalar
             if pcg_scalars.is_converged[i_b] == 0:
                 env_key = i_b
                 value = pcg_workspace.r[i_r].dot(pcg_workspace.z[i_r])
-        add_by_key(value, env_key, out)
+        add_by_key(env_key, value, out)
 
 
 @qd.func(requires_top_level=True)
@@ -91,7 +91,8 @@ def func_init_linear_pcg_residual(
     for i_r in range(pcg_workspace.n_rows[()]):
         is_kept = False
         if qd.static(is_adjoint):
-            is_kept = pcg_scalars.is_converged[pcg_workspace.rows_env[i_r]] != 0
+            i_b = pcg_workspace.rows_env[i_r]
+            is_kept = pcg_scalars.is_converged[i_b] != 0
         if not is_kept:
             x[i_r] = qd.Vector.zero(gs.qd_float, 3)
         pcg_workspace.r[i_r] = b[i_r]
@@ -123,8 +124,8 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGSca
                 row_key = i_r
                 env_key = i_b
                 product, energy = _spmv_entry(i_nz, i_r, pcg_workspace, matrix)
-        add_by_key(product, row_key, pcg_workspace.ap, n_components=3)
-        add_by_key(energy, env_key, pcg_scalars.p_dot_ap)
+        add_by_key(row_key, product, pcg_workspace.ap, n_components=3)
+        add_by_key(env_key, energy, pcg_scalars.p_dot_ap)
 
 
 @qd.func

@@ -111,8 +111,8 @@ class RigidNewtonParticipant(NewtonDevice):
             i_island,
             self.rigid_data,
             self.dyn_state.dofs,
-            self.dyn_info.links,
             constraint_state,
+            self.dyn_info.links,
             rigid_config,
             self.config,
         )
@@ -154,17 +154,17 @@ class RigidNewtonParticipant(NewtonDevice):
         newton_func.func_rigid_pcg_direction(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: NewtonControl, f: int):
+    def func_start_line_search(self, f: int, control: NewtonControl):
         newton_func.func_rigid_start_line_search(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: NewtonControl, f: int):
+    def func_step_forward(self, f: int, control: NewtonControl):
         newton_func.func_rigid_step_forward(self.rigid_data, control)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
         self.func_evaluate(f)
-        newton_func.func_rigid_energy(self.rigid_data, energies, self.newton_info)
+        newton_func.func_rigid_energy(energies, self.rigid_data, self.newton_info)
 
 
 @qd.kernel

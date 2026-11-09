@@ -131,12 +131,12 @@ class MpmParticleObstacles:
         kernel_gather_obstacle_neighbors(self)
 
     @qd.func(requires_top_level=True)
-    def func_project(self, pbd: qd.template(), f: int):
+    def func_project(self, f: int, pbd: qd.template()):
         """The contacts of every PBD particle at its current position with the MPM particles, with friction."""
         func_pbd_obstacles(self, is_stabilization=False)
 
     @qd.func(requires_top_level=True)
-    def func_stabilize(self, pbd: qd.template(), f: int):
+    def func_stabilize(self, f: int, pbd: qd.template()):
         """The non-penetration of every PBD particle at its start position with the MPM particles."""
         func_pbd_obstacles(self, is_stabilization=True)
 

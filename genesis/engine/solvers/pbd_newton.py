@@ -87,7 +87,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             self.linear.pcg.rows_env[row] = i_b
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: NewtonControl, f: int):
+    def func_start_line_search(self, f: int, control: NewtonControl):
         """Record the line-search start point, and add the largest component of the step into the Newton measure."""
         qd.loop_config(name="mpm_pbd_start_line_search")
         for i_rp, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
@@ -95,7 +95,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             qd.atomic_max(control.max_displacement[i_b], qd.abs(self.linear.solution[self.row(i_rp, i_b)]).max())
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: NewtonControl, f: int):
+    def func_step_forward(self, f: int, control: NewtonControl):
         qd.loop_config(name="mpm_pbd_step_forward")
         for i_rp, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
             step = control.alpha[i_b] * self.linear.solution[self.row(i_rp, i_b)]

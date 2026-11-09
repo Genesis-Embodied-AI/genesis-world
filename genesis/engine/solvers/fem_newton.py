@@ -80,7 +80,8 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @qd.func
     def solution(self, i_b: int, i_v: int):
         """The solution of the linear system on a vertex, minus its Newton direction."""
-        return self.linear.solution[self.linear_block.row_start[()] + i_b * self.n_vertices + i_v]
+        i_r = self.linear_block.row_start[()] + i_b * self.n_vertices + i_v
+        return self.linear.solution[i_r]
 
     @qd.func(requires_top_level=True)
     def func_assemble(self, f: int, is_exact: qd.template()):
@@ -110,30 +111,31 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             i_t = self.linear_block.triplet_start[()] + self.n_envs * self.n_vertices
             i_t += ELEMENT_BLOCKS * (i_b * self.n_elements + i_e)
             row_start = self.linear_block.row_start[()] + i_b * self.n_vertices
-            for k_c in qd.static(range(4)):
+            # Runtime loops over the vertices and the axes keep a single inlined instance of the product
+            for k_c in range(4):
                 vertex_unit = qd.Vector([gs.qd_float(k_c == i) for i in qd.static(range(4))])
                 # Row 3 k_r + a, column c: the force on vertex k_r along a of a unit displacement of vertex k_c along c
                 columns = qd.Matrix.zero(gs.qd_float, 12, 3)
-                # A runtime loop over the axes keeps a single inlined instance of the product per vertex
                 for c in range(3):
                     axis_unit = qd.Vector([gs.qd_float(c == i) for i in qd.static(range(3))])
                     _, dP = self.solver.compute_elastic_product(i_e, i_b, S, axis_unit.outer_product(vertex_unit))
                     forces = dP @ S.transpose()
                     column = qd.Vector([forces[a, k_r] for k_r in qd.static(range(4)) for a in qd.static(range(3))])
                     columns = columns + column.outer_product(axis_unit)
-                for k_r in qd.static(range(k_c + 1)):
-                    i_block = qd.static(4 * k_r - k_r * (k_r - 1) // 2 + k_c - k_r)
-                    if self.is_free(i_b, i_vs[k_r]) and self.is_free(i_b, i_vs[k_c]):
-                        block = qd.Matrix(
-                            [[columns[3 * k_r + a, c] for c in qd.static(range(3))] for a in qd.static(range(3))]
-                        )
-                        rows = row_start + i_vs
-                        write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
-                    else:
-                        discard_block(i_t + i_block, self.linear)
+                for k_r in qd.static(range(4)):
+                    if k_r <= k_c:
+                        i_block = qd.static(4 * k_r - k_r * (k_r - 1) // 2 - k_r) + k_c
+                        if self.is_free(i_b, i_vs[k_r]) and self.is_free(i_b, i_vs[k_c]):
+                            block = qd.Matrix(
+                                [[columns[3 * k_r + a, c] for c in qd.static(range(3))] for a in qd.static(range(3))]
+                            )
+                            rows = row_start + i_vs
+                            write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
+                        else:
+                            discard_block(i_t + i_block, self.linear)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: NewtonControl, f: int):
+    def func_start_line_search(self, f: int, control: NewtonControl):
         """Record the line-search start point, and add the largest component of the step into the Newton measure."""
         qd.loop_config(name="mpm_fem_start_line_search")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
@@ -141,7 +143,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             qd.atomic_max(control.max_displacement[i_b], qd.abs(self.solution(i_b, i_v)).max())
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: NewtonControl, f: int):
+    def func_step_forward(self, f: int, control: NewtonControl):
         qd.loop_config(name="mpm_fem_step_forward")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
             x_prev = self.solver.linesearch_state_v[i_b, i_v].x_prev

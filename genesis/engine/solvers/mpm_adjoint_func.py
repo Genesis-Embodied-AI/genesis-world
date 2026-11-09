@@ -158,11 +158,12 @@ def func_wall_contact_adjoint(
         i_ps = pairs.sorted_idx[i_pair]
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
         slots = stencil_node_slots(i_b, cell, grid)
+        rows_p = rows.row_start[()] + slots
         x_p = particles.pos[f, i_p, i_b]
         v_p = particles.vel[f, i_p, i_b]
         w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
         u_p = particle_node_sum(slots, w, newton.u)
-        lam_p = particle_node_sum(rows.row_start[()] + slots, w, linear.solution)
+        lam_p = particle_node_sum(rows_p, w, linear.solution)
         stiffness = pairs.stiffness[i_pair]
         direction = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
         gap = direction.dot(u_p) - pairs.target[i_pair]
@@ -192,8 +193,8 @@ def func_wall_contact_adjoint(
             x_bar = phi_bar * direction
             v_bar = vel_bar * direction
             R_bar = (2.0 * invweight_bar) * direction.outer_product(invweight_p @ n_rest)
-            weights_bar = stencil_dots(slots, newton.u, u_p_bar)
-            weights_bar += stencil_dots(rows.row_start[()] + slots, linear.solution, lam_p_bar)
+            weights_bar = stencil_dots(slots, u_p_bar, newton.u)
+            weights_bar += stencil_dots(rows_p, lam_p_bar, linear.solution)
             x_bar += grad_w.transpose() @ weights_bar
             # A particle has a pair per wall it nears, up to three
             qd.atomic_add(particles.pos.grad[f, i_p, i_b], x_bar)
@@ -204,6 +205,7 @@ def func_wall_contact_adjoint(
 @qd.func(requires_top_level=True)
 def func_constraint_adjoint(
     f: int,
+    constraints: qd.template(),
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
@@ -211,7 +213,6 @@ def func_constraint_adjoint(
     rows: LinearBlock,
     links_state: LinksState,
     mpm_info: MpmInfo,
-    constraints: qd.template(),
 ):
     """Pull the constraint springs (see func_build_constraint_rows) back into the adjoints of the particles and of the
     poses of the links that hold them.
@@ -223,14 +224,15 @@ def func_constraint_adjoint(
         if spring > 0.0:
             i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
             slots = stencil_node_slots(i_b, cell, grid)
+            rows_p = rows.row_start[()] + slots
             x_p = particles.pos[f, i_p, i_b]
             w, grad_w = q1_stencil(x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
             u_p = particle_node_sum(slots, w, newton.u)
-            lam_p = particle_node_sum(rows.row_start[()] + slots, w, linear.solution)
+            lam_p = particle_node_sum(rows_p, w, linear.solution)
             damping = newton.constraint_damping[i_ps]
             grad_spring = spring * (x_p + u_p - newton.constraint_target[i_ps]) + damping * u_p
-            weights_bar = stencil_dots(rows.row_start[()] + slots, linear.solution, grad_spring)
-            weights_bar += stencil_dots(slots, newton.u, (spring + damping) * lam_p)
+            weights_bar = stencil_dots(rows_p, grad_spring, linear.solution)
+            weights_bar += stencil_dots(slots, (spring + damping) * lam_p, newton.u)
             x_bar = -spring * lam_p - grad_w.transpose() @ weights_bar
             particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar
             i_l = constraints[i_p, i_b].link_idx
@@ -297,7 +299,7 @@ def func_adjoint_g2p(
             grad_w_a = grad_w[a, :]
             u_bar = (w[a] * v_bar + C_bar @ grad_w_a) / dt
             qd.atomic_add(newton.du[slots[a]], u_bar)
-            x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(fx, mpm_info.inv_dx[()], a) @ (
+            x_bar += v_a.dot(v_bar) * grad_w_a + q1_weight_hessian(a, fx, mpm_info.inv_dx[()]) @ (
                 C_bar.transpose() @ v_a
             )
 
@@ -317,7 +319,8 @@ def func_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: New
         value = newton.du[i_n]
         if grid.nodes_is_fixed[i_n] != 0:
             value = qd.Vector.zero(gs.qd_float, 3)
-        linear.b_rhs[rows.row_start[()] + i_n] = value
+        i_r = rows.row_start[()] + i_n
+        linear.b_rhs[i_r] = value
 
 
 @qd.func(requires_top_level=True)
@@ -339,7 +342,8 @@ def func_adjoint_nodes(
         mass_bar = gs.qd_float(0.0)
         momentum_bar = qd.Vector.zero(gs.qd_float, 3)
         if mass > 0.0 and grid.nodes_is_fixed[i_n] == 0:
-            lam = linear.solution[rows.row_start[()] + i_n]
+            i_r = rows.row_start[()] + i_n
+            lam = linear.solution[i_r]
             u = newton.u[i_n]
             v = grid.nodes_vel[i_n]
             v_free = grid.nodes_vel_free[i_n]
@@ -375,11 +379,12 @@ def func_adjoint_particles(
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
         slots = stencil_node_slots(i_b, cell, grid)
+        rows_p = rows.row_start[()] + slots
         x_p = particles.pos[f, i_p, i_b]
         fx = x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
         w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
         F_trial, _, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-        lam_grad = stencil_gradient(rows.row_start[()] + slots, grad_w, linear.solution)
+        lam_grad = stencil_gradient(rows_p, grad_w, linear.solution)
         F_increment = qd.Matrix.identity(gs.qd_float, 3) + stencil_gradient(slots, grad_w, newton.u)
 
         i_mat, U, sigma, V, g, A, P = particle_elastic_stress(
@@ -406,9 +411,9 @@ def func_adjoint_particles(
         actu_bar = -scale * dactive_stiffness * F_fibre.dot(lam_grad_F_fibre)
         x_bar = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(8)):
-            lam_a = linear.solution[rows.row_start[()] + slots[a]]
+            lam_a = linear.solution[rows_p[a]]
             u_a = newton.u[slots[a]]
-            H_a = q1_weight_hessian(fx, mpm_info.inv_dx[()], a)
+            H_a = q1_weight_hessian(a, fx, mpm_info.inv_dx[()])
             x_bar -= scale * (H_a @ (F @ (dP.transpose() @ u_a + P.transpose() @ lam_a)))
 
         # Reverse of the particle-to-grid transfer (P2G)

@@ -179,7 +179,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: NewtonControl, f: int):
+    def func_start_line_search(self, f: int, control: NewtonControl):
         mpm_func.func_negate_du(self.grid, self.newton, self.linear, self.linear_block)
         mpm_func.func_record_start_point(self.grid, self.newton)
         mpm_func.func_contribute_newton_max_displacement(
@@ -190,16 +190,16 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: NewtonControl, f: int):
+    def func_step_forward(self, f: int, control: NewtonControl):
         mpm_func.func_step_forward(self.grid, self.newton, control)
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
         dt = self.mpm_info.substep_dt[()]
         mpm_func.func_elastic_energy(
-            f, dt, self.particles, self.grid, self.newton, energies, self.particles_info, self.materials, self.mpm_info
+            f, dt, energies, self.particles, self.grid, self.newton, self.particles_info, self.materials, self.mpm_info
         )
-        mpm_func.func_kinetic_energy(dt, self.grid, self.newton, energies)
+        mpm_func.func_kinetic_energy(dt, energies, self.grid, self.newton)
 
     # ------------------------------------------- vertex map -------------------------------------------
 
@@ -647,12 +647,12 @@ class MPMSolver(ParticleSolver):
         self._predict(f, self._sim.cur_t)
         if self._constraints_initialized:
             kernel_constraint_rows(
+                self.particle_constraints,
                 self._newton_participant.grid,
                 self._newton_participant.newton,
                 self._sim.rigid_solver.dyn_state.links,
                 self.particles_info,
                 self.mpm_info,
-                self.particle_constraints,
             )
         kernel_report_extent(self._newton_participant.grid, self._newton_participant.linear_block)
         kernel_wall_pairs(
@@ -680,6 +680,7 @@ class MPMSolver(ParticleSolver):
         a non-finite measure keeping their state."""
         kernel_finalize(
             f,
+            control.has_failed_non_finite,
             self.particles,
             self.particles_ng,
             self._newton_participant.grid,
@@ -687,7 +688,6 @@ class MPMSolver(ParticleSolver):
             self.particles_info,
             self.mpm_materials,
             self.mpm_info,
-            control.has_failed_non_finite,
         )
 
     def newton_after(self, f):
@@ -714,6 +714,7 @@ class MPMSolver(ParticleSolver):
         if self._constraints_initialized:
             kernel_constraint_adjoint(
                 f,
+                self.particle_constraints,
                 self.particles,
                 self._newton_participant.grid,
                 self._newton_participant.newton,
@@ -721,7 +722,6 @@ class MPMSolver(ParticleSolver):
                 self._newton_participant.linear_block,
                 self._sim.rigid_solver.dyn_state.links,
                 self.mpm_info,
-                self.particle_constraints,
             )
         kernel_adjoint_pullback(
             f,
@@ -1426,19 +1426,20 @@ def kernel_wall_pairs(
 
 @qd.kernel
 def kernel_constraint_rows(
+    constraints: qd.template(),
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     links_state: LinksState,
     particles_info: MpmParticlesInfo,
     mpm_info: MpmInfo,
-    constraints: qd.template(),
 ):
-    mpm_func.func_build_constraint_rows(grid, newton, links_state, particles_info, mpm_info, constraints)
+    mpm_func.func_build_constraint_rows(constraints, grid, newton, links_state, particles_info, mpm_info)
 
 
 @qd.kernel
 def kernel_constraint_adjoint(
     f: int,
+    constraints: qd.template(),
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
@@ -1446,10 +1447,9 @@ def kernel_constraint_adjoint(
     rows: LinearBlock,
     links_state: LinksState,
     mpm_info: MpmInfo,
-    constraints: qd.template(),
 ):
     mpm_adjoint_func.func_constraint_adjoint(
-        f, particles, grid, newton, linear, rows, links_state, mpm_info, constraints
+        f, constraints, particles, grid, newton, linear, rows, links_state, mpm_info
     )
 
 
@@ -1474,6 +1474,7 @@ def kernel_report_extent(grid: MpmGridScratch, rows: LinearBlock):
 @qd.kernel
 def kernel_finalize(
     f: int,
+    is_env_frozen: qd.Tensor,
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
     grid: MpmGridScratch,
@@ -1481,10 +1482,11 @@ def kernel_finalize(
     particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
-    frozen: qd.types.ndarray(),
 ):
     dt = mpm_info.substep_dt[()]
-    mpm_func.func_g2p_advect(f, dt, particles, particles_ng, grid, newton, particles_info, materials, mpm_info, frozen)
+    mpm_func.func_g2p_advect(
+        f, dt, is_env_frozen, particles, particles_ng, grid, newton, particles_info, materials, mpm_info
+    )
 
 
 @qd.kernel

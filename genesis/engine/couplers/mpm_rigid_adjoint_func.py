@@ -212,7 +212,7 @@ def func_rigid_contact_adjoint(
                     lam_rel_bar -= stiffness * gap * direction
 
             # u_rel and lam_rel through the weights, the arm and the chain
-            weights_bar = stencil_dots(slots, newton.u, u_rel_bar) + stencil_dots(rows_p, linear.solution, lam_rel_bar)
+            weights_bar = stencil_dots(slots, u_rel_bar, newton.u) + stencil_dots(rows_p, lam_rel_bar, linear.solution)
             x_bar = grad_w.transpose() @ weights_bar - u_rel_bar.cross(u_ang) - lam_rel_bar.cross(lam_ang)
             com_bar = u_rel_bar.cross(u_ang) + lam_rel_bar.cross(lam_ang)
             r_cross_u_rel_bar = r.cross(u_rel_bar)
@@ -258,13 +258,14 @@ def func_rigid_contact_adjoint(
             diag_coef_bar = gs.qd_float(0.0)
             tangent1_bar = qd.Vector.zero(gs.qd_float, 3)
             tangent2_bar = qd.Vector.zero(gs.qd_float, 3)
-            for k in qd.static(range(PYRAMID_ROWS)):
+            for k in range(PYRAMID_ROWS):
+                is_second_tangent = k >= 2
                 tangent = tangent1
-                if qd.static(k >= 2):
+                if is_second_tangent:
                     tangent = tangent2
-                sign = qd.static(2 * (k % 2) - 1)
+                sign = gs.qd_float(2 * (k % 2) - 1)
                 direction = normal + (sign * friction) * tangent
-                direction_bar_k = direction_bar[k, :]
+                direction_bar_k = qd.Vector([direction_bar[k, j] for j in qd.static(range(3))], dt=gs.qd_float)
                 # target = target_soft + dt direction . v_r
                 direction_bar_k += dt * target_bar[k] * v_r
                 v_r_bar += dt * target_bar[k] * direction
@@ -276,7 +277,7 @@ def func_rigid_contact_adjoint(
                 direction_bar_k += vel_bar_k * v_rel
                 v_rel_bar += vel_bar_k * direction
                 n_bar += direction_bar_k
-                if qd.static(k >= 2):
+                if is_second_tangent:
                     tangent2_bar += (sign * friction) * direction_bar_k
                 else:
                     tangent1_bar += (sign * friction) * direction_bar_k

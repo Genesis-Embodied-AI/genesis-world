@@ -14,7 +14,7 @@ from genesis.engine.numerics.bcoo_matrix import (
     init_bcoo_matrix,
     sort_bcoo,
 )
-from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
+from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmInfo
 from genesis.engine.solvers.mpm_func import contact_band_width, particle_of_sorted, pyramid_terms
 from genesis.engine.solvers.newton_contact import append_pair
 from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
@@ -82,9 +82,11 @@ def func_report_candidates(candidates: ContactCandidates):
 
 
 @qd.func(requires_top_level=True)
-def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
+def func_select_nearest(candidates: ContactCandidates, mpm_info: MpmInfo):
     """Keep in `best_candidate` the nearest candidate of every particle, or the capacity if every candidate of the
-    particle was rejected, once the candidates are sorted by particle (see sort_bcoo)."""
+    particle was rejected, once the candidates are sorted by particle (see sort_bcoo).
+
+    Two scores closer than `tie_ratio` grid cells tie, and the secondary score breaks the tie."""
     # The unique entries leave the count of segments alone when there is no candidate
     for _ in range(1):
         candidates.order.bcoo_nnz[()] = 0
@@ -97,14 +99,16 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
     qd.loop_config(name="contact_candidates_score")
     for i_t in range(candidates.order.n_triplets[()]):
         i_cand = candidates.order.triplets_source_idx[i_t]
+        i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
         if score < qd.math.inf:
-            qd.atomic_min(candidates.best_score[candidates.order.triplets_segment_idx[i_t]], score)
+            qd.atomic_min(candidates.best_score[i_nz], score)
     qd.loop_config(name="contact_candidates_secondary")
     for i_t in range(candidates.order.n_triplets[()]):
         i_cand = candidates.order.triplets_source_idx[i_t]
         i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
+        tie_tol = candidates.tie_ratio[()] * mpm_info.dx[()]
         if score < qd.math.inf and score <= candidates.best_score[i_nz] + tie_tol:
             qd.atomic_max(candidates.best_secondary[i_nz], candidates.secondary[i_cand])
     qd.loop_config(name="contact_candidates_winner")
@@ -191,7 +195,7 @@ class CouplingPairs(NewtonDevice):
     def func_build_pairs(self, f: int):
         """Pair every valid particle with its nearest candidate (see build_pair), once the candidates are sorted by
         particle."""
-        func_select_nearest(self.candidates.tie_ratio[()] * self.mpm.mpm_info.dx[()], self.candidates)
+        func_select_nearest(self.candidates, self.mpm.mpm_info)
         for _ in range(1):
             self.pairs.n_pairs[()] = 0
         qd.loop_config(name="mpm_build_pairs")
@@ -243,8 +247,6 @@ class CouplingPairs(NewtonDevice):
     def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
         """Write the gradient w_k g of every vertex of every pair at the current iterate, and the upper blocks w_k w_l H
         between them."""
-        block_rows = qd.Vector(self.block_rows, dt=gs.qd_int)
-        block_cols = qd.Vector(self.block_cols, dt=gs.qd_int)
         qd.loop_config(name="mpm_pair_terms")
         for i_pair in range(self.pairs.n_pairs[()]):
             _, g, H, verts, weights = self.pair_terms(f, i_pair)
@@ -252,6 +254,8 @@ class CouplingPairs(NewtonDevice):
             i_t_start = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
             for i_v_ in range(qd.static(self.n_doublets)):
                 contact.write_doublet(i_db_start + i_v_, verts[i_v_], weights[i_v_] * g)
+            block_rows = qd.Vector(self.block_rows, dt=gs.qd_int)
+            block_cols = qd.Vector(self.block_cols, dt=gs.qd_int)
             for i_t_ in range(qd.static(self.n_triplets)):
                 i_v_ = block_rows[i_t_]
                 j_v_ = block_cols[i_t_]
@@ -263,7 +267,8 @@ class CouplingPairs(NewtonDevice):
         qd.loop_config(name="mpm_pair_energy")
         for i_pair in range(self.pairs.n_pairs[()]):
             energy, g, H, verts, weights = self.pair_terms(f, i_pair)
-            qd.atomic_add(energies[self.pairs.i_b[i_pair]], energy)
+            i_b = self.pairs.i_b[i_pair]
+            qd.atomic_add(energies[i_b], energy)
 
     def prepare(self, f: int) -> None:
         self.build_query(f)
