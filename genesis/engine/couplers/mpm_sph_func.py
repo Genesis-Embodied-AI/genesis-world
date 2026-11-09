@@ -90,10 +90,12 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
     if dist < qd.static(sph.support_radius):
         volume = boundary.mpm_info.particle_volume[()]
         grad = volume * sph.cubic_kernel_derivative(r)
-        boundary.scratch.rho_sum[i_q, i_t] += volume * sph.cubic_kernel(dist)
-        boundary.scratch.grad_sum[i_q, i_t] += grad
-        boundary.scratch.vel_grad_sum[i_q, i_t] += boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
-        boundary.scratch.n_neighbors[i_q, i_t] += 1
+        # The thread of the SPH particle alone accumulates its sums
+        boundary.scratch.rho_sum[i_q, i_t] = boundary.scratch.rho_sum[i_q, i_t] + volume * sph.cubic_kernel(dist)
+        boundary.scratch.grad_sum[i_q, i_t] = boundary.scratch.grad_sum[i_q, i_t] + grad
+        vel_grad = boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
+        boundary.scratch.vel_grad_sum[i_q, i_t] = boundary.scratch.vel_grad_sum[i_q, i_t] + vel_grad
+        boundary.scratch.n_neighbors[i_q, i_t] = boundary.scratch.n_neighbors[i_q, i_t] + 1
     return True
 
 

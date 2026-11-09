@@ -1121,7 +1121,7 @@ def func_node_diag(
             f, s, mpm_info.substep_dt[()], particles, grid, newton, particles_info, materials, mpm_info, False
         )
         for a in qd.static(range(8)):
-            grid.node_diag[slots[a]] += stencil_pair_block(a, a, r_frame, U, S_block, alp, bet, iso)
+            qd.atomic_add(grid.node_diag[slots[a]], stencil_pair_block(a, a, r_frame, U, S_block, alp, bet, iso))
 
 
 @qd.func(requires_top_level=True)

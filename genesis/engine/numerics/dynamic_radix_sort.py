@@ -342,7 +342,8 @@ def _func_cpu_pass(
             sorter.chunk_offsets[i_chunk, i_digit] = 0
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         for i_in in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
-            sorter.chunk_offsets[i_chunk, _func_digit(i_pass, keys_in[i_in], key_bits)] += 1
+            digit = _func_digit(i_pass, keys_in[i_in], key_bits)
+            sorter.chunk_offsets[i_chunk, digit] = sorter.chunk_offsets[i_chunk, digit] + 1
     for _ in range(1):
         running = gs.qd_int(0)
         for i_digit in range(_RADIX_DIGITS):

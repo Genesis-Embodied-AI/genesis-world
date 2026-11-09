@@ -198,7 +198,7 @@ def func_rigid_energy(rigid_data: RigidNewtonScratch, energies: qd.template(), n
     """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, into its entry in `energies`."""
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     for i_b in range(rigid_data.x.shape[1]):
-        energies[i_b] += dt_sq * dt_sq * rigid_data.cost[i_b]
+        energies[i_b] = energies[i_b] + dt_sq * dt_sq * rigid_data.cost[i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -285,7 +285,8 @@ def func_add_link_stiffness_island(
                                     value *= (
                                         constraint_state.nt_jacobi[i_d1, i_b] * constraint_state.nt_jacobi[i_d2, i_b]
                                     )
-                                constraint_state.nt_H[i_b, i_d1, i_d2] += value
+                                # The thread of the island alone writes its block
+                                constraint_state.nt_H[i_b, i_d1, i_d2] = constraint_state.nt_H[i_b, i_d1, i_d2] + value
                         i_c = links_info.parent_idx[I_c]
                 i_a = links_info.parent_idx[I_a]
 
@@ -359,7 +360,9 @@ def func_rigid_matvec(
                     D_jac_p = constraint_state.efc_D[i_c, i_b] * jac_p
                     for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
                         i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                        rigid_data.ap[i_d, i_b] += D_jac_p * constraint_state.jac[i_c, i_d, i_b]
+                        rigid_data.ap[i_d, i_b] = (
+                            rigid_data.ap[i_d, i_b] + D_jac_p * constraint_state.jac[i_c, i_d, i_b]
+                        )
 
 
 @qd.func(requires_top_level=True)
@@ -382,8 +385,8 @@ def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: PCGSca
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         if pcg_scalars.is_converged[i_b] == 0:
             alpha = pcg_scalars.alpha[i_b]
-            rigid_data.sol[i_d, i_b] += alpha * rigid_data.p[i_d, i_b]
-            rigid_data.r[i_d, i_b] -= alpha * rigid_data.ap[i_d, i_b]
+            rigid_data.sol[i_d, i_b] = rigid_data.sol[i_d, i_b] + alpha * rigid_data.p[i_d, i_b]
+            rigid_data.r[i_d, i_b] = rigid_data.r[i_d, i_b] - alpha * rigid_data.ap[i_d, i_b]
 
 
 @qd.func(requires_top_level=True)

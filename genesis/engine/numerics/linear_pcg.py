@@ -147,8 +147,8 @@ def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScrat
         i_b = pcg_workspace.row_env[i_r]
         if pcg_scalars.is_converged[i_b] == 0:
             alpha = pcg_scalars.alpha[i_b]
-            x[i_r] += alpha * pcg_workspace.p[i_r]
-            pcg_workspace.r[i_r] -= alpha * pcg_workspace.ap[i_r]
+            x[i_r] = x[i_r] + alpha * pcg_workspace.p[i_r]
+            pcg_workspace.r[i_r] = pcg_workspace.r[i_r] - alpha * pcg_workspace.ap[i_r]
 
 
 @qd.func(requires_top_level=True)
@@ -228,7 +228,7 @@ def func_pcg_decide(pcg_scalars: PCGScalars):
     """Take beta = rz_new / rz and the convergence decision of every running environment once every owner added its r .
     z, then roll rz over and zero p.Ap."""
     for _ in range(1):
-        pcg_scalars.iter_remaining[()] -= 1
+        pcg_scalars.iter_remaining[()] = pcg_scalars.iter_remaining[()] - 1
         pcg_scalars.is_running[()] = 0
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:

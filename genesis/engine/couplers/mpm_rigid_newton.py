@@ -247,7 +247,8 @@ def kernel_add_mpm_contact_force(contact: qd.template()):
     n_links = contact.rigid.rigid_data.link_force_vel.shape[0]
     for i_l, i_b in qd.ndrange(n_links, contact.rigid.rigid_data.link_force_vel.shape[1]):
         force = contact.rigid.rigid_data.link_force_vel[i_l, i_b]
-        contact.rigid.dyn_state.links.contact_force[i_l, i_b] += force / (dt * dt)
+        contact_force = contact.rigid.dyn_state.links.contact_force[i_l, i_b]
+        contact.rigid.dyn_state.links.contact_force[i_l, i_b] = contact_force + force / (dt * dt)
 
 
 @qd.kernel

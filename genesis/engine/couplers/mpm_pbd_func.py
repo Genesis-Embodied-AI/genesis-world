@@ -154,8 +154,9 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
         friction = -dx_t
         if dx_t.norm() >= mu_s * depth:
             friction = friction * qd.min(1.0, mu_k * depth / dx_t.norm(gs.EPS))
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos += depth * n + friction
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount += 1.0
+        particle = obstacles.pbd.particles_reordered[i_q, i_t]
+        obstacles.pbd.particles_reordered[i_q, i_t].dpos = particle.dpos + depth * n + friction
+        obstacles.pbd.particles_reordered[i_q, i_t].dcount = particle.dcount + 1.0
     return True
 
 
@@ -168,8 +169,9 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
     dist = d_vec.norm()
     target = qd.static(obstacles.radius) + obstacles.contact.thickness[()]
     if dist < target and dist > gs.EPS:
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos += (target - dist) / dist * d_vec
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount += 1.0
+        particle = obstacles.pbd.particles_reordered[i_q, i_t]
+        obstacles.pbd.particles_reordered[i_q, i_t].dpos = particle.dpos + (target - dist) / dist * d_vec
+        obstacles.pbd.particles_reordered[i_q, i_t].dcount = particle.dcount + 1.0
     return True
 
 

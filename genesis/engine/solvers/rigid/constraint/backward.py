@@ -105,7 +105,7 @@ def func_add_constraint_force_grad(constraint_state: ConstraintState, rigid_conf
             dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
                 i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
+                qd.atomic_add(constraint_state.dL_dqacc[i_d, i_b], constraint_state.jac[i_c, i_d, i_b] * dL_dJaref)
 
 
 @qd.kernel(fastcache=True)

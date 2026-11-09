@@ -111,12 +111,13 @@ def func_write_triplet(
 def func_add_triplet(
     i_t: int, i_r: int, i_c: int, block: qd.template(), matrix: BCOOMatrixScratch, is_symmetric: qd.template()
 ):
-    """Add one block, mirrored as func_write_triplet mirrors it, to a triplet written before for the same row and
-    column."""
+    """Add one block, mirrored as func_write_triplet mirrors it, to a triplet the same thread wrote before for the same
+    row and column."""
     if i_t < matrix.triplet_row.shape[0]:
         row, col, upper = _upper_block(i_r, i_c, block, is_symmetric)
         for k, j in qd.static(qd.ndrange(block.n, block.m)):
-            matrix.triplet_val[i_t * (block.n * block.m) + k * block.m + j] += upper[k, j]
+            i_val = i_t * (block.n * block.m) + k * block.m + j
+            matrix.triplet_val[i_val] = matrix.triplet_val[i_val] + upper[k, j]
 
 
 @qd.func

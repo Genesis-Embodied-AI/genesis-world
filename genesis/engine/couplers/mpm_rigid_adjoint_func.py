@@ -116,8 +116,8 @@ def geom_contact_bw(
         pos_bar = -x_bar
         quat_inv_bar = gu.qd_transform_by_quat_grad_quat(x - geom_pos, quat_inv, pos_mesh_bar)
         quat_bar += gu.qd_inv_quat(quat_inv_bar)
-    geoms_state.pos.grad[i_g, i_b] += pos_bar
-    geoms_state.quat.grad[i_g, i_b] += quat_bar
+    qd.atomic_add(geoms_state.pos.grad[i_g, i_b], pos_bar)
+    qd.atomic_add(geoms_state.quat.grad[i_g, i_b], quat_bar)
     return x_bar
 
 
@@ -220,8 +220,10 @@ def func_rigid_contact_adjoint(
                 for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
                     x_d = rigid_data.x[i_d, i_b]
                     lam_d = rigid_data.sol[i_d, i_b]
-                    dofs_state.cdof_vel.grad[i_d, i_b] += -(x_d * Delta_bar + lam_d * delta_bar)
-                    dofs_state.cdof_ang.grad[i_d, i_b] += -(x_d * r_cross_Delta_bar + lam_d * r_cross_delta_bar)
+                    qd.atomic_add(dofs_state.cdof_vel.grad[i_d, i_b], -(x_d * Delta_bar + lam_d * delta_bar))
+                    qd.atomic_add(
+                        dofs_state.cdof_ang.grad[i_d, i_b], -(x_d * r_cross_Delta_bar + lam_d * r_cross_delta_bar)
+                    )
                 i_a = links_info.parent_idx[I_a]
 
             # The row coefficients, replayed as MpmRigidContact.build_pair built them
@@ -285,15 +287,16 @@ def func_rigid_contact_adjoint(
             v_p_bar = v_rel_bar
             v_r_bar -= v_rel_bar
             cd_ang = links_state.cd_ang[i_l, i_b]
-            links_state.cd_vel.grad[i_l, i_b] += v_r_bar
-            links_state.cd_ang.grad[i_l, i_b] += r.cross(v_r_bar)
+            qd.atomic_add(links_state.cd_vel.grad[i_l, i_b], v_r_bar)
+            qd.atomic_add(links_state.cd_ang.grad[i_l, i_b], r.cross(v_r_bar))
             x_bar += v_r_bar.cross(cd_ang)
             com_bar -= v_r_bar.cross(cd_ang)
-            links_state.root_COM.grad[i_l, i_b] += com_bar
+            qd.atomic_add(links_state.root_COM.grad[i_l, i_b], com_bar)
 
             # The distance and the normal of the geom at the particle
             x_bar += geom_contact_bw(i_g, i_b, x_p, phi_bar, n_bar, geoms_state, geoms_info, rigid_info, sdf_info)
 
-            particles.pos.grad[f, i_p, i_b] += x_bar
-            particles.vel.grad[f, i_p, i_b] += v_p_bar
-            particles.F.grad[f, i_p, i_b] += F_bar
+            # A particle has one pair at most, whose thread alone adds to its adjoint
+            particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar
+            particles.vel.grad[f, i_p, i_b] = particles.vel.grad[f, i_p, i_b] + v_p_bar
+            particles.F.grad[f, i_p, i_b] = particles.F.grad[f, i_p, i_b] + F_bar

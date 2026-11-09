@@ -108,7 +108,7 @@ def func_accept_or_backtrack(control: NewtonControl):
         control.is_line_search_running[()] = 0
     for i_b in range(control.failed.shape[0]):
         if control.is_env_line_search_running[i_b] != 0:
-            control.ls_iter[i_b] += 1
+            control.ls_iter[i_b] = control.ls_iter[i_b] + 1
             is_accepted = (
                 control.is_converged[i_b] != 0
                 or control.failed[i_b] != 0
@@ -134,7 +134,7 @@ def func_update_convergence(control: NewtonControl):
         control.is_newton_running[()] = 0
     for i_b in range(control.failed.shape[0]):
         if control.is_env_running[i_b] != 0:
-            control.newton_iter[i_b] += 1
+            control.newton_iter[i_b] = control.newton_iter[i_b] + 1
             if control.failed[i_b] == NEWTON_FAILED_NON_FINITE:
                 control.is_env_running[i_b] = 0
                 control.has_failed_non_finite[i_b] = 1

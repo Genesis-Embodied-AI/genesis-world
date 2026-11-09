@@ -174,9 +174,10 @@ def func_wall_contact_adjoint(
             weights_bar = stencil_dots(slots, newton.u, Delta_bar)
             weights_bar += stencil_dots(rows.row_start[()] + slots, linear.solution, delta_bar)
             x_bar += grad_w.transpose() @ weights_bar
-            particles.pos.grad[f, i_p, i_b] += x_bar
-            particles.vel.grad[f, i_p, i_b] += v_bar
-            particles.F.grad[f, i_p, i_b] += polar_rotation_bw(U, S, V, R_bar)
+            # A particle has a pair per wall it nears, up to three
+            qd.atomic_add(particles.pos.grad[f, i_p, i_b], x_bar)
+            qd.atomic_add(particles.vel.grad[f, i_p, i_b], v_bar)
+            qd.atomic_add(particles.F.grad[f, i_p, i_b], polar_rotation_bw(U, S, V, R_bar))
 
 
 @qd.func(requires_top_level=True)
@@ -208,13 +209,16 @@ def func_constraint_adjoint(
             weights_bar = stencil_dots(rows.row_start[()] + slots, linear.solution, g)
             weights_bar += stencil_dots(slots, newton.u, (spring + damping) * delta)
             x_bar = -spring * delta - grad_w.transpose() @ weights_bar
-            particles.pos.grad[f, i_p, i_b] += x_bar
+            particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar
             i_l = constraints[i_p, i_b].link_idx
             if i_l >= 0:
                 target_bar = spring * delta
-                links_state.pos.grad[i_l, i_b] += target_bar
-                links_state.quat.grad[i_l, i_b] += gu.qd_transform_by_quat_grad_quat(
-                    constraints[i_p, i_b].link_local_pos, links_state.quat[i_l, i_b], target_bar
+                qd.atomic_add(links_state.pos.grad[i_l, i_b], target_bar)
+                qd.atomic_add(
+                    links_state.quat.grad[i_l, i_b],
+                    gu.qd_transform_by_quat_grad_quat(
+                        constraints[i_p, i_b].link_local_pos, links_state.quat[i_l, i_b], target_bar
+                    ),
                 )
 
 
@@ -274,10 +278,11 @@ def func_adjoint_g2p(
                 C_bar.transpose() @ v_a
             )
 
-        particles.pos.grad[f, i_p, i_b] += x_bar
-        particles.F.grad[f, i_p, i_b] += (qd.Matrix.identity(gs.qd_float, 3) + dt * C).transpose() @ F_trial_bar
-        particles.Jp.grad[f, i_p, i_b] += Jp_bar
-        particles.actu.grad[f, i_p, i_b] += particles.actu.grad[f + 1, i_p, i_b]
+        F_bar = (qd.Matrix.identity(gs.qd_float, 3) + dt * C).transpose() @ F_trial_bar
+        particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar
+        particles.F.grad[f, i_p, i_b] = particles.F.grad[f, i_p, i_b] + F_bar
+        particles.Jp.grad[f, i_p, i_b] = particles.Jp.grad[f, i_p, i_b] + Jp_bar
+        particles.actu.grad[f, i_p, i_b] = particles.actu.grad[f, i_p, i_b] + particles.actu.grad[f + 1, i_p, i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -399,12 +404,12 @@ def func_adjoint_particles(
             C_bar += (w[a] * m_p) * mom_bar.outer_product(x_a - x_p)
             x_bar += (m_p * (v_tilde.dot(mom_bar) + mass_bar)) * grad_w_a - (w[a] * m_p) * (C_p.transpose() @ mom_bar)
 
-        particles.pos.grad[f, i_p, i_b] += x_bar
-        particles.vel.grad[f, i_p, i_b] += v_bar
-        particles.C.grad[f, i_p, i_b] += C_bar
-        particles.F.grad[f, i_p, i_b] += F_bar
-        particles.Jp.grad[f, i_p, i_b] += Jp_bar
-        particles.actu.grad[f, i_p, i_b] += actu_bar
+        particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar
+        particles.vel.grad[f, i_p, i_b] = particles.vel.grad[f, i_p, i_b] + v_bar
+        particles.C.grad[f, i_p, i_b] = particles.C.grad[f, i_p, i_b] + C_bar
+        particles.F.grad[f, i_p, i_b] = particles.F.grad[f, i_p, i_b] + F_bar
+        particles.Jp.grad[f, i_p, i_b] = particles.Jp.grad[f, i_p, i_b] + Jp_bar
+        particles.actu.grad[f, i_p, i_b] = particles.actu.grad[f, i_p, i_b] + actu_bar
 
 
 @qd.func(requires_top_level=True)
@@ -414,12 +419,12 @@ def func_adjoint_consume(f: int, particles: MpmParticles, particles_ng: MpmParti
     qd.loop_config(name="mpm_adjoint_consume")
     for i_p, i_b in qd.ndrange(mpm_info.n_particles[()], mpm_info.n_envs[()]):
         if not particles_ng.active[f, i_p, i_b]:
-            particles.pos.grad[f, i_p, i_b] += particles.pos.grad[f + 1, i_p, i_b]
-            particles.vel.grad[f, i_p, i_b] += particles.vel.grad[f + 1, i_p, i_b]
-            particles.C.grad[f, i_p, i_b] += particles.C.grad[f + 1, i_p, i_b]
-            particles.F.grad[f, i_p, i_b] += particles.F.grad[f + 1, i_p, i_b]
-            particles.Jp.grad[f, i_p, i_b] += particles.Jp.grad[f + 1, i_p, i_b]
-            particles.actu.grad[f, i_p, i_b] += particles.actu.grad[f + 1, i_p, i_b]
+            particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + particles.pos.grad[f + 1, i_p, i_b]
+            particles.vel.grad[f, i_p, i_b] = particles.vel.grad[f, i_p, i_b] + particles.vel.grad[f + 1, i_p, i_b]
+            particles.C.grad[f, i_p, i_b] = particles.C.grad[f, i_p, i_b] + particles.C.grad[f + 1, i_p, i_b]
+            particles.F.grad[f, i_p, i_b] = particles.F.grad[f, i_p, i_b] + particles.F.grad[f + 1, i_p, i_b]
+            particles.Jp.grad[f, i_p, i_b] = particles.Jp.grad[f, i_p, i_b] + particles.Jp.grad[f + 1, i_p, i_b]
+            particles.actu.grad[f, i_p, i_b] = particles.actu.grad[f, i_p, i_b] + particles.actu.grad[f + 1, i_p, i_b]
         particles.pos.grad[f + 1, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
         particles.vel.grad[f + 1, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
         particles.C.grad[f + 1, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
