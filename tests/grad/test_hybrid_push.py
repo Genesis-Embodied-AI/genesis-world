@@ -125,8 +125,8 @@ def test_mpm_grad_descends(optimize, show_viewer):
             upper_bound=(1.5, 1.25, 0.5),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(2.5, -3.5, 2.0),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(1.2, -1.8, 1.15),
+            camera_lookat=(-0.15, -0.1, 0.05),
         ),
         show_viewer=show_viewer,
     )
@@ -282,8 +282,8 @@ def test_fem_grad_matches_fd(precision, show_viewer):
             rigid_fem=False,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.9, -0.7, 0.6),
-            camera_lookat=(0.2, 0.0, 0.15),
+            camera_pos=(0.65, -0.45, 0.45),
+            camera_lookat=(0.17, 0.0, 0.15),
         ),
         show_viewer=show_viewer,
     )
@@ -389,7 +389,7 @@ def test_hybrid_grad_descends(optimize, show_viewer):
             upper_bound=(1.0, 1.0, 1.0),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.65, -0.35, 0.6),
+            camera_pos=(0.65, -0.15, 0.5),
             camera_lookat=(0.65, 0.45, 0.2),
         ),
         show_viewer=show_viewer,
@@ -450,8 +450,8 @@ def test_coupling_wrench_grad_descends(optimize, show_viewer):
             grid_density=16,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.6, -0.6, 0.4),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(0.25, -0.3, 0.2),
+            camera_lookat=(-0.06, 0.0, 0.0),
         ),
         show_viewer=show_viewer,
     )

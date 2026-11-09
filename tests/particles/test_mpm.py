@@ -204,6 +204,10 @@ def test_envs_solve_apart(precision, show_viewer):
             newton_options=gs.options.NewtonOptions(
                 velocity_tol=1e-10,
             ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.35, -0.35, 0.25),
+                camera_lookat=(0.05, 0.0, 0.05),
+            ),
             show_viewer=show_viewer,
         )
         scene.add_entity(
@@ -247,8 +251,8 @@ def test_halt_on_nan(show_viewer):
             use_implicit_solver=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.0, -1.0, 0.7),
-            camera_lookat=(0.0, 0.0, 0.2),
+            camera_pos=(0.7, -0.7, 0.55),
+            camera_lookat=(0.0, 0.0, 0.25),
             camera_fov=32,
         ),
         show_viewer=show_viewer,
@@ -385,6 +389,10 @@ def test_newton_graph_matches_split(show_viewer):
                 # Converged far below its default tolerance, the solve stops at the same iteration on every path
                 velocity_tol=1e-10,
                 graph=newton_graph,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.35, -0.35, 0.3),
+                camera_lookat=(0.0, 0.0, 0.1),
             ),
             show_viewer=show_viewer,
         )

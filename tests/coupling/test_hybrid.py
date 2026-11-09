@@ -98,6 +98,10 @@ def test_mpm_on_terrain(show_viewer):
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(2.0, 2.0, 1.0),
         ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.6, 0.4, 0.6),
+            camera_lookat=(1.0, 1.0, 0.2),
+        ),
         show_viewer=show_viewer,
     )
     scene.add_entity(
