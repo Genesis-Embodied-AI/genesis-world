@@ -203,9 +203,10 @@ def kernel_rigid_adjoint_finish(rigid: qd.template()):
 
 
 class RigidNewtonHost(NewtonHost):
-    """Host stages of Rigid's dofs around the joint solve: the warm start, the hand-back of the converged qacc and the
-    integration of the deferred substep, and in the backward pass Rigid's reverse of its constraint solve, whose adjoint
-    solve is the joint one."""
+    """Host stages of Rigid's dofs around the joint solve.
+
+    They run the warm start, the hand-back of the converged qacc and the integration of the deferred substep, and in
+    the backward pass Rigid's reverse of its constraint solve, whose adjoint solve is the joint one."""
 
     is_differentiable = True
 

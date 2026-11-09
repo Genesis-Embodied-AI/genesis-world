@@ -31,13 +31,17 @@ class DynamicRadixSortScratch(Data, kind=DataKind.SCRATCH):
 
 
 def radix_passes(key_bits: int) -> int:
-    """Return the number of radix passes of a sort over keys of `key_bits` bits, 32 or 64, one per byte."""
+    """Return the number of radix passes of a sort, one per byte of its keys.
+
+    `key_bits` is the width of the keys, 32 or 64."""
     assert key_bits in (32, 64)
     return key_bits // 8
 
 
 def dynamic_radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
-    """Return the sizes of the scratch of a sort over at most `capacity` keys of `key_bits` bits, 32 or 64."""
+    """Return the sizes of the scratch of a radix sort.
+
+    The sort runs over at most `capacity` keys of `key_bits` bits, 32 or 64."""
     return {
         RADIX_PASSES: radix_passes(key_bits),
         RADIX_TILES: max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1),
@@ -426,6 +430,8 @@ def kernel_radix_sort(
 def dynamic_radix_sort(
     sorter: DynamicRadixSortScratch, keys_a, keys_b, permutation_a, permutation_b, n, key_bits: int
 ) -> None:
-    """Sort the first `n[()]` keys of `keys_a` stably together with their permutation `permutation_a` (see
-    func_dynamic_radix_sort)."""
+    """Sort keys stably together with their permutation in a launch of its own (see func_dynamic_radix_sort).
+
+    The first `n[()]` keys of `keys_a` are sorted together with `permutation_a`, `keys_b` and `permutation_b` serving as
+    buffers."""
     kernel_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)

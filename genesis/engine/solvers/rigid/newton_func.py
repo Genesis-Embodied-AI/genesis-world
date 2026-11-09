@@ -161,8 +161,10 @@ def func_rigid_evaluate(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Evaluate Rigid's cost of qacc = x / dt^2 into `rigid_data.cost`, with its row activity, forces and
-    qfrc_constraint, by Rigid's own update of its constraint state."""
+    """Evaluate Rigid's cost of qacc = x / dt^2, with its row activity, forces and qfrc_constraint, by Rigid's own
+    update of its constraint state.
+
+    The cost lands in `rigid_data.cost`."""
     n_dofs = rigid_data.x.shape[0]
     n_envs = rigid_data.x.shape[1]
     inv_dt_sq = 1.0 / (newton_info.substep_dt[()] * newton_info.substep_dt[()])
@@ -195,7 +197,7 @@ def func_rigid_evaluate(
 
 @qd.func(requires_top_level=True)
 def func_rigid_energy(rigid_data: RigidNewtonScratch, energies: qd.template(), newton_info: RigidNewtonInfo):
-    """Add Rigid's cost of every environment times dt^4, after func_rigid_evaluate, into its entry in `energies`."""
+    """Add Rigid's cost of every environment times dt^4 into the entry of the environment, after func_rigid_evaluate."""
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     for i_b in range(rigid_data.x.shape[1]):
         energies[i_b] = energies[i_b] + dt_sq * dt_sq * rigid_data.cost[i_b]
@@ -244,7 +246,7 @@ def func_rigid_solve_batch(
 
 @qd.func
 def cdof_spatial(i_d: int, i_b: int, dofs_state: DofsState):
-    """Spatial motion (linear, angular) of a link per unit velocity of dof `i_d`."""
+    """Spatial motion (linear, angular) of a link per unit velocity of a dof."""
     vel = dofs_state.cdof_vel[i_d, i_b]
     ang = dofs_state.cdof_ang[i_d, i_b]
     return qd.Vector([vel[0], vel[1], vel[2], ang[0], ang[1], ang[2]], dt=gs.qd_float)
@@ -300,7 +302,8 @@ def func_rigid_precondition(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """z = A^-1 r over the Rigid dofs, A being Rigid's Hessian plus the contact stiffness of the links in its factor."""
+    """Precondition the residual over the Rigid dofs, z = A^-1 r, A being Rigid's Hessian plus the contact stiffness of
+    the links in its factor."""
     qd.loop_config(name="mpm_rigid_precondition")
     for i_b in range(rigid_data.x.shape[1]):
         func_rigid_solve_batch(

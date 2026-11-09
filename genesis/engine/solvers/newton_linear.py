@@ -29,7 +29,9 @@ CAPACITY_GROW_FACTOR = 1.2
 
 
 def retire_scratch(scratch: Data, retired: list) -> None:
-    """Free the arrays of a struct that a larger one replaces, and keep the struct referenced in `retired`."""
+    """Free the arrays of a struct that a larger one replaces, and keep the struct itself referenced.
+
+    `retired` is the list of the retired structs of the owner."""
     # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct could
     # take over from a dead one, so its owner keeps every retired struct referenced, with its arrays freed.
     for _, array in iter_state_arrays(scratch):
@@ -129,7 +131,7 @@ class BlockJacobiOwner:
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
-        """z = M^-1 r over the rows of the owner, M^-1 being its inverted diagonal blocks."""
+        """Precondition the residual over the rows of the owner, z = M^-1 r, M^-1 being its inverted diagonal blocks."""
         qd.loop_config(name="newton_block_jacobi_apply")
         for i_r in range(self.linear_block.n_rows[()]):
             row = self.linear_block.row_start[()] + i_r
@@ -141,9 +143,10 @@ class BlockJacobiOwner:
 
 @qd.func(requires_top_level=True)
 def func_linear_layout(participants: qd.template()):
-    """Lay the rows and triplets of every owner of `participants` (see NewtonParticipants), then the triplets of the
-    contacts, out in order, from the counts they reported, and report the live rows and the triplet demand of the
-    matrix."""
+    """Lay out the rows and triplets of every owner, then the triplets of the contacts, from the counts they reported.
+
+    The owners are those of `participants` (see NewtonParticipants). The layout reports the live rows and the triplet
+    demand of the matrix."""
     for _ in range(1):
         n_rows = gs.qd_int(0)
         n_triplets = gs.qd_int(0)
@@ -177,13 +180,13 @@ def func_linear_visit(linear: NewtonLinearScratch, owners: qd.template()):
 
 @qd.func
 def write_block(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), linear: NewtonLinearScratch):
-    """Write a 3 x 3 block of the symmetric matrix into triplet slot `i_t`, mirrored into the upper triangle."""
+    """Write a 3 x 3 block of the symmetric matrix into a triplet slot, mirrored into the upper triangle."""
     func_write_triplet(i_t, i_r, i_c, H, linear.matrix, is_symmetric=True)
 
 
 @qd.func
 def discard_block(i_t: int, linear: NewtonLinearScratch):
-    """Discard triplet slot `i_t`, that of a block on an eliminated row.
+    """Discard a triplet slot, that of a block on an eliminated row.
 
     An owner eliminates the unknown of a row by an identity diagonal block and a zero right-hand side, and discards the
     other blocks on the row, so that the row decouples and its solution is exactly zero."""

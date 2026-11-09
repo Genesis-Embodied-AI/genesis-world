@@ -87,7 +87,9 @@ _WARP = 32
 
 @qd.func
 def node_offset(a: qd.template()):
-    """Offset of the a-th node of a cell from its lower corner, bits 2, 1 and 0 of a giving the x, y and z offsets."""
+    """Offset of a node of a cell from its lower corner.
+
+    Bits 2, 1 and 0 of the node index `a` give the x, y and z offsets."""
     return qd.Vector([(a >> 2) & 1, (a >> 1) & 1, a & 1], dt=gs.qd_int)
 
 
@@ -156,13 +158,13 @@ def flag_all_envs_error(grid: MpmGridScratch, mpm_info: MpmInfo, code: qd.templa
 
 @qd.func
 def cofactor(v: qd.types.vector(3)):
-    """Products of the two other components of every component, the gradient of v0 v1 v2."""
+    """Products of the two other components of every component of a vector, the gradient of the product of all three."""
     return qd.Vector([v[1] * v[2], v[0] * v[2], v[0] * v[1]], dt=gs.qd_float)
 
 
 @qd.func
 def cofactor_jacobian(v: qd.types.vector(3)):
-    """Jacobian of cofactor(v), the third component off the diagonal and zero on it."""
+    """Jacobian of cofactor, the third component off the diagonal and zero on it."""
     return qd.Matrix(
         [
             [0.0, v[2], v[1]],
@@ -192,16 +194,20 @@ def diagonal_of(matrix: qd.types.matrix(3, 3)):
 
 @qd.func
 def q1_axes(offset, fx: qd.types.vector(3), inv_dx: float):
-    """Weights and weight derivatives along the three axes of the node of offset `offset` in {0, 1}^3 of a cell, at the
-    point of offset `fx` from its lower corner in cell units."""
+    """Weights and weight derivatives along the three axes of a node of a cell, at a point inside the cell.
+
+    The node has offset `offset` in {0, 1}^3 and the point offset `fx` from the lower corner of the cell, in cell units,
+    `inv_dx` being the inverse cell size."""
     offset_float = offset.cast(gs.qd_float)
     return offset_float * fx + (1.0 - offset_float) * (1.0 - fx), (2.0 * offset_float - 1.0) * inv_dx
 
 
 @qd.func
 def q1_node_weight(offset, fx: qd.types.vector(3), inv_dx: float):
-    """Trilinear weight and weight gradient of the node of offset `offset` in {0, 1}^3 of a cell, at the point of offset
-    `fx` from its lower corner in cell units, in [0, 1)^3, `inv_dx` being the inverse cell size."""
+    """Trilinear weight and weight gradient of a node of a cell, at a point inside the cell.
+
+    The node has offset `offset` in {0, 1}^3 and the point offset `fx` from the lower corner of the cell, in cell units
+    and in [0, 1)^3, `inv_dx` being the inverse cell size."""
     axis_w, axis_dw = q1_axes(offset, fx, inv_dx)
     return axis_w[0] * axis_w[1] * axis_w[2], axis_dw * cofactor(axis_w)
 
@@ -221,8 +227,10 @@ def q1_stencil(fx: qd.types.vector(3), inv_dx: float):
 
 @qd.func
 def q1_weight_hessian(fx: qd.types.vector(3), inv_dx: float, a: qd.template()):
-    """Hessian of the trilinear weight of node `a` of a cell with respect to the particle position (see q1_stencil):
-    off the diagonal, the product of the axis derivatives along i and j and the axis weight along the third axis."""
+    """Hessian of the trilinear weight of a node of a cell with respect to the particle position (see q1_stencil).
+
+    Off the diagonal, the Hessian for node `a` is the product of the axis derivatives along i and j and the axis weight
+    along the third axis."""
     axis_w, axis_dw = q1_axes(node_offset(a), fx, inv_dx)
     return axis_dw.outer_product(axis_dw) * cofactor_jacobian(axis_w)
 
@@ -263,8 +271,9 @@ def lanes_max(value):
 
 @qd.func
 def cell_segment(i_b: int, cell, i_lane: int, grid: MpmGridScratch):
-    """Range of the sorted particles of cell `cell` of an environment, looked up by lane 0 and broadcast to the gather
-    lanes."""
+    """Range of the sorted particles of a cell, looked up by lane 0 and broadcast to the gather lanes.
+
+    `cell` is the cell of environment `i_b`, and `i_lane` the lane of the caller."""
     i_ps_start = 0
     i_ps_end = 0
     if i_lane == 0:
@@ -314,9 +323,10 @@ def stable_neohookean_parameters(mu: float, lam: float):
 
 @qd.func
 def extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float):
-    """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy.
+    """Energy density, gradient and Hessian of the extended Hencky energy in the signed singular values.
 
-    Below `sigma_min`, log(sigma) continues by its tangent line."""
+    The gradient is g = dpsi/dsigma and the Hessian A = d2psi/dsigma2. Below `sigma_min`, log(sigma) continues by its
+    tangent line."""
     log_stretch = qd.Vector.zero(gs.qd_float, 3)
     dlog_stretch = qd.Vector.zero(gs.qd_float, 3)
     d2log_stretch = qd.Vector.zero(gs.qd_float, 3)
@@ -355,7 +365,10 @@ def stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: float
 
 @qd.func
 def liquid_volume_terms(J: float, lam: float, band: float):
-    """Volume term of the liquid energy density and its first and second derivatives in J."""
+    """Volume term of the liquid energy density and its first and second derivatives in the volume ratio.
+
+    The term acts on the volume ratio `J` in compression only, with the Lame parameter `lam`, and a quintic blends it in
+    over the first `band` of 1 - J."""
     psi = gs.qd_float(0.0)
     dpsi = gs.qd_float(0.0)
     d2psi = gs.qd_float(0.0)
@@ -393,7 +406,10 @@ def liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band: flo
 
 @qd.func
 def det_cubic(F0: qd.types.matrix(3, 3), dF: qd.types.matrix(3, 3)):
-    """Coefficients c0, c1, c2, c3 of det(F0 + t dF) in powers of t, by the multilinear expansion over the columns."""
+    """Coefficients of the determinant of a matrix moved along a direction, in powers of the step.
+
+    The coefficients c0, c1, c2, c3 are those of det(F0 + t dF) in powers of t, by the multilinear expansion over the
+    columns."""
     a = [F0[:, c] for c in qd.static(range(3))]
     b = [dF[:, c] for c in qd.static(range(3))]
     c0 = a[0].dot(a[1].cross(a[2]))
@@ -405,7 +421,9 @@ def det_cubic(F0: qd.types.matrix(3, 3), dF: qd.types.matrix(3, 3)):
 
 @qd.func
 def cubic_first_root(c0: float, c1: float, c2: float, c3: float, t_max: float):
-    """Smallest root in (0, t_max] of c0 + c1 t + c2 t^2 + c3 t^3 given c0 > 0, or 2 t_max where it stays positive."""
+    """Smallest positive root of a cubic up to a bound, or twice the bound where the cubic stays positive.
+
+    The cubic is c0 + c1 t + c2 t^2 + c3 t^3 with c0 > 0, and the root is sought in (0, t_max]."""
     # Extrema in (0, t_max), the absent ones at t_max, in ascending order
     t_low = t_max
     t_high = t_max
@@ -494,8 +512,10 @@ def isotropic_first_piola_differential(
     A: qd.types.matrix(3, 3),
     dF: qd.types.matrix(3, 3),
 ):
-    """Unprojected differential dP = (dP/dF) : dF of the first Piola-Kirchhoff stress of an isotropic energy at F = U
-    diag(sigma) V^T, with `g` and `A` its principal gradient and Hessian."""
+    """Unprojected differential of the first Piola-Kirchhoff stress of an isotropic energy along a direction.
+
+    The differential is dP = (dP/dF) : dF along `dF`, at F = U diag(sigma) V^T, `g` and `A` being the principal
+    gradient and Hessian of the energy."""
     dF_hat = U.transpose() @ dF @ V
     twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
     dP_hat = diagonal(A @ qd.Vector([dF_hat[0, 0], dF_hat[1, 1], dF_hat[2, 2]], dt=gs.qd_float))
@@ -595,8 +615,9 @@ def elastic_principal(
 
 @qd.func
 def active_fibre_stiffness(i_mat: int, actu: float, materials: MpmMaterialTable, mpm_info: MpmInfo):
-    """Active stiffness of the muscle fibre term of a particle, its fibre stiffness times the positive part of the
-    actuation `actu`, and its derivative in `actu`."""
+    """Active stiffness of the muscle fibre term of a particle, and its derivative in the actuation.
+
+    The stiffness is the fibre stiffness of material `i_mat` times the positive part of the actuation `actu`."""
     stiffness = material_param(i_mat, materials, mpm_info, PARAM_FIBRE)
     return stiffness * qd.max(actu, 0.0), qd.select(actu > 0.0, stiffness, 0.0)
 
@@ -795,8 +816,9 @@ def pyramid_directions(normal: qd.types.vector(3), friction: float):
 
 @qd.func
 def soft_row_terms(direction: qd.types.vector(3), stiffness: float, target: float, u_rel: qd.types.vector(3)):
-    """Energy, gradient and Hessian in `u_rel` of a soft contact row, 1/2 stiffness min(0, gap)^2 of the gap
-    direction . u_rel - target."""
+    """Energy, gradient and Hessian of a soft contact row in the relative displacement.
+
+    The energy is 1/2 stiffness min(0, gap)^2 with the gap direction . u_rel - target."""
     energy = gs.qd_float(0.0)
     grad = qd.Vector.zero(gs.qd_float, 3)
     hess = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -816,8 +838,10 @@ def pyramid_terms(
     target: qd.types.vector(PYRAMID_ROWS),
     u_rel: qd.types.vector(3),
 ):
-    """Energy, gradient and Hessian in `u_rel` of the soft rows of a friction pyramid (see pyramid_directions and
-    soft_row_terms), row k taking `stiffness[k]` and `target[k]`."""
+    """Energy, gradient and Hessian of the soft rows of a friction pyramid in the relative displacement (see
+    pyramid_directions and soft_row_terms).
+
+    Row k takes `stiffness[k]` and `target[k]`, at the relative displacement `u_rel`."""
     directions = pyramid_directions(normal, friction)
     energy = gs.qd_float(0.0)
     grad = qd.Vector.zero(gs.qd_float, 3)
@@ -1103,7 +1127,10 @@ def publish_node_mass_velocity(
 
 @qd.func(requires_top_level=True)
 def func_apply_force_fields(t: float, dt: float, grid: MpmGridScratch, force_fields: qd.template(), mpm_info: MpmInfo):
-    """nodes_vel_free = nodes_vel + dt * the accelerations of the scene force fields at the node."""
+    """Add the accelerations of the scene force fields at every node to its free velocity over the substep.
+
+    The free velocity is nodes_vel_free = nodes_vel + dt * the accelerations at the time `t`, `dt` being the substep. A
+    fixed or massless node keeps its velocity as its free velocity."""
     qd.loop_config(name="mpm_apply_force_fields")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
@@ -1386,8 +1413,9 @@ def stencil_dots(slots, nodes: qd.template(), y: qd.types.vector(3)):
 
 @qd.func
 def stencil_gradient(slots, grad_w: qd.types.matrix(8, 3), nodes: qd.template()):
-    """Gradient sum_a v_a grad w_a^T of the node vectors of a stencil, with the weight gradients in the rows of
-    `grad_w`."""
+    """Gradient sum_a v_a grad w_a^T of the node vectors of a stencil.
+
+    Node a of the stencil is the entry `slots[a]` of `nodes`, its weight gradient being row a of `grad_w`."""
     gradient = qd.Matrix.zero(gs.qd_float, 3, 3)
     for a in qd.static(range(8)):
         gradient += nodes[slots[a]].outer_product(grad_w[a, :])
@@ -1396,14 +1424,18 @@ def stencil_gradient(slots, grad_w: qd.types.matrix(8, 3), nodes: qd.template())
 
 @qd.func
 def add_particle_node_vector(slots, w: qd.types.vector(8), y: qd.types.vector(3), nodes: qd.template()):
-    """Add w_a y to the vector of every node a of a stencil."""
+    """Add a weighted vector to the vector of every node of a stencil.
+
+    Node a of the stencil, the entry `slots[a]` of `nodes`, receives w_a y."""
     for a in qd.static(range(8)):
         qd.atomic_add(nodes[slots[a]], w[a] * y)
 
 
 @qd.func
 def wall_normal(axis: int, sign: float):
-    """Inward normal sign e_axis of a wall pair."""
+    """Inward normal of a wall pair.
+
+    The normal is `sign` e_axis, e_axis being the unit vector of `axis`."""
     return sign * qd.Vector([gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float)
 
 
@@ -1570,7 +1602,9 @@ def stencil_pair_block(
     beta: qd.types.vector(3),
     iso: qd.types.matrix(8, 2),
 ):
-    """Block (a, b) of the stencil of one particle from its terms (see particle_stencil_terms), zero on a fixed node."""
+    """Block of a node pair of a particle stencil from its terms (see particle_stencil_terms), zero on a fixed node.
+
+    The pair is that of nodes `a` and `b`."""
     r_a = qd.Vector([r_frame[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
     r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
     block = U @ isotropic_pair_block(r_a, r_b, S_block, alpha, beta) @ U.transpose()
@@ -1588,7 +1622,9 @@ def func_gradient_gather(
     rows: LinearBlock,
     mpm_info: MpmInfo,
 ):
-    """Gather the gradient b_rhs = m (u - dt v_free) + sum_p (G_p grad w + w g_spring_p) of every node."""
+    """Gather the gradient of the incremental potential at every node.
+
+    The gradient is b_rhs = m (u - dt v_free) + sum_p (G_p grad w + w g_spring_p), `dt` being the substep."""
     n_lanes = qd.static(gather_lanes())
     qd.loop_config(name="mpm_gradient_gather", block_dim=128)
     for i_th in range(grid.n_blocks[()] * BLOCK_CELLS * n_lanes):
@@ -1623,7 +1659,9 @@ def add_particle_node_gradient(
     newton: MpmNewtonScratch,
     mpm_info: MpmInfo,
 ):
-    """Add the gradient contribution G_p grad w + w g_spring_p of a sorted particle at one node of its stencil."""
+    """Add the gradient contribution of a sorted particle at one node of its stencil.
+
+    The contribution is G_p grad w + w g_spring_p, `grad` being the weight gradient grad w of the node."""
     i_flat = grid.sort_ids[i_ps]
     i_b = i_flat // mpm_info.n_particles[()]
     i_p = i_flat - i_b * mpm_info.n_particles[()]
@@ -1765,8 +1803,10 @@ def func_elastic_energy(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """Add V dt^2 psi(F_trial) and the constraint spring energy of the sorted particles into the entry of their
-    environment in `energies`, the particles being sorted by environment (see add_by_key)."""
+    """Add the elastic and constraint spring energies of every sorted particle into its environment.
+
+    The elastic energy enters as V dt^2 psi(F_trial), `dt` being the substep. The entries of `energies` add by
+    environment (see add_by_key), by which the particles are sorted."""
     qd.loop_config(name="mpm_elastic_energy", block_dim=REDUCE_BLOCK)
     for i_ps in range(grid.n_valid_chunks[()] * _WARP):
         energy = gs.qd_float(0.0)
@@ -1790,7 +1830,9 @@ def particle_energy(
     materials: MpmMaterialTable,
     mpm_info: MpmInfo,
 ):
-    """V dt^2 psi(F_trial) and the constraint spring energy of sorted particle `i_ps`."""
+    """Elastic and constraint spring energies of a sorted particle.
+
+    The elastic energy enters as V dt^2 psi(F_trial), `dt` being the substep."""
     i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
     slots = stencil_node_slots(i_b, cell, grid)
     F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
@@ -1809,8 +1851,10 @@ def particle_energy(
 
 @qd.func(requires_top_level=True)
 def func_kinetic_energy(dt: float, grid: MpmGridScratch, newton: MpmNewtonScratch, energies: qd.template()):
-    """Add 1/2 m |u - dt v_free|^2 of the free nodes into the entry of their environment in `energies`, reduced as in
-    func_elastic_energy. The nodes of a block, of one environment, fill whole warps."""
+    """Add the kinetic energy of the free nodes into the entry of their environment.
+
+    The energy of a node is 1/2 m |u - dt v_free|^2, `dt` being the substep. The entries of `energies` are reduced as in
+    func_elastic_energy, the nodes of a block, of one environment, filling whole warps."""
     qd.loop_config(name="mpm_kinetic_energy", block_dim=REDUCE_BLOCK)
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_b, _ = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
@@ -1819,7 +1863,9 @@ def func_kinetic_energy(dt: float, grid: MpmGridScratch, newton: MpmNewtonScratc
 
 @qd.func
 def node_kinetic_energy(i_n: int, dt: float, grid: MpmGridScratch, newton: MpmNewtonScratch):
-    """1/2 m |u - dt v_free|^2 of a node, zero for a fixed node."""
+    """Kinetic energy of a node, zero for a fixed node.
+
+    The energy is 1/2 m |u - dt v_free|^2, `dt` being the substep."""
     energy = gs.qd_float(0.0)
     if grid.nodes_is_fixed[i_n] == 0:
         u = newton.u[i_n]

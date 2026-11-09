@@ -200,8 +200,8 @@ def test_mpm_grad_descends(show_viewer):
             n_groups=2,
         ),
     )
-    # Every block stands off the faces of the grid cells, where the rounding of a position would pick the cell, and every
-    # shift of a body is a multiple of 0.25, whole cells
+    # Every block stands off the faces of the grid cells, where the rounding of a position would pick the cell, and
+    # every shift of a body is a multiple of 0.25, whole cells
     block = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.503, 0.002, 0.001),

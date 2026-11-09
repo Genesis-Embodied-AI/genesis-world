@@ -153,8 +153,8 @@ class LegacyCoupler(RBC):
             return
         mpm_host, mpm_participant = self.mpm_solver.build_newton_participant()
         # The participants owning rows of the linear system of the solve, whose vertices are contact vertices in the
-        # same order. The contact points of the Rigid links come last, since their count grows with the pairs (see
-        # NewtonContact.lay_out_vertices).
+        # same order. The contact points of the Rigid links come last (see NewtonContact.lay_out_vertices), since their
+        # count grows with the pairs.
         owners = [(mpm_host, mpm_participant)]
         rigid_member = None
         couplings = []

@@ -215,9 +215,11 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
 
 
 class MpmWallPairs(Data, kind=DataKind.SCRATCH):
-    """The contact pairs of the particles with the domain walls (see func_build_wall_pairs): a soft row on the trial
-    displacement of sorted particle `sorted_idx` along the inward normal `sign` e_axis, of stiffness `stiffness` and
-    target `target`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    """The contact pairs of the particles with the domain walls (see func_build_wall_pairs).
+
+    A pair is a soft row on the trial displacement of sorted particle `sorted_idx` along the inward normal `sign`
+    e_axis, of stiffness `stiffness` and target `target`. `n_pairs` counts the pairs asked for, and exceeds the capacity
+    on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     sorted_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
@@ -228,8 +230,10 @@ class MpmWallPairs(Data, kind=DataKind.SCRATCH):
 
 
 def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
-    """Build the grid of `n_sort` sorted particles and `max_blocks` blocks, with every counter at zero, the error flags
-    of the solver being bound from the entered namespace (see `requires`)."""
+    """Build the grid of the sorted particles, with every counter at zero.
+
+    The grid holds `n_sort` sorted particles and `max_blocks` blocks, the error flags of the solver being bound from the
+    entered namespace (see `requires`)."""
     n_sort_padded = _padded(n_sort)
     n_neighbors = 8 * max_blocks
     grid = MpmGridScratch(
@@ -262,8 +266,9 @@ def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:
 
 
 def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
-    """Build the Newton state of `n_sort` sorted particles and `max_blocks` blocks, with the particle constraints at
-    zero."""
+    """Build the Newton state of the sorted particles, with the particle constraints at zero.
+
+    The state holds `n_sort` sorted particles and `max_blocks` blocks."""
     newton = MpmNewtonScratch(sizes={SORT: _padded(n_sort), BLOCKS: max_blocks})
     for constraint in (newton.constraint_spring, newton.constraint_damping, newton.constraint_target):
         constraint.fill(0.0)

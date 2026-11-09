@@ -39,11 +39,13 @@ ELEMS = Size("elems")
 
 
 class PbdConstraintLoop(Data, kind=DataKind.SCRATCH):
-    """The data of the unified constraint loop of a substep: its condition, its number of iterations and the largest
-    correction of the current one, the extended position based dynamics (XPBD) Lagrange multipliers of the stretch,
-    bending and volume constraints, the number of collision candidates of every particle with their indices and
-    distances (see kernel_gather_collision_neighbors), and the number of stretch, bending and volume constraints of
-    every particle, over which XPBD splits its mass."""
+    """The data of the unified constraint loop of a substep.
+
+    It holds the condition of the loop, its number of iterations and the largest correction of the current one, the
+    extended position based dynamics (XPBD) Lagrange multipliers of the stretch, bending and volume constraints, and the
+    collision candidates of every particle with their count, indices and distances (see
+    kernel_gather_collision_neighbors). It also holds the number of stretch, bending and volume constraints of every
+    particle, over which XPBD splits its mass."""
 
     is_running: qd.Tensor = field(int, ndarray=True)
     n_iterations: qd.Tensor = field(int, ndarray=True)
@@ -1439,7 +1441,7 @@ def func_solve_collision_start(i: int, j: int, i_b: int, pbd_solver: qd.template
 
 @qd.func
 def func_solve_collision_pair(i: int, j: int, i_b: int, pbd_solver: qd.template()):
-    """j -> i"""
+    """The contact of two particles at their current positions, with friction, as a correction of the first."""
 
     cur_dist = (pbd_solver.particles_reordered[i, i_b].pos - pbd_solver.particles_reordered[j, i_b].pos).norm(gs.EPS)
     rest_dist = (

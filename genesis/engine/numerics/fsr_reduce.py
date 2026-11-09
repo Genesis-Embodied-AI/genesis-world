@@ -5,14 +5,15 @@ import genesis as gs
 
 @qd.func
 def warp_padded(n):
-    """`n` rounded up to whole warps, the extent of a loop whose every warp takes part in the reductions by key."""
+    """Round the extent of a loop up to whole warps, so that every warp takes part in the reductions by key."""
     return (n + 31) // 32 * 32
 
 
 @qd.func
 def head_segmented_reduce_add(value, tail_flag, is_max: qd.template() = False):
-    """Sum, or with `is_max` the maximum, of the values of the run of lanes of every head lane of a warp, a run ending
-    at its lane of `tail_flag`."""
+    """Sum the values of the run of lanes of every head lane of a warp.
+
+    A run ends at its lane of `tail_flag`, and with `is_max` the reduction takes the maximum of the values instead."""
     lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
     tail_mask = qd.u32(qd.simt.subgroup.ballot(gs.qd_int(tail_flag != 0))) | qd.u32(0x80000000)
     tails_at_or_above = tail_mask & (qd.u32(0xFFFFFFFF) << qd.u32(lane))
@@ -40,7 +41,9 @@ def _key_runs(key):
 
 @qd.func
 def add_by_key(value, key, out: qd.template(), n_components: qd.template() = 0):
-    """Add the value of an entry into the entry of its key in `out`, an entry of key -1 adding nothing."""
+    """Add the value of an entry into the entry of its key, an entry of key -1 adding nothing.
+
+    On GPU, the lanes of a warp holding the same key sum their values first, and one of them adds the sum into `out`."""
     if qd.static(gs.backend == gs.cpu):
         if key >= 0:
             qd.atomic_add(out[key], value)

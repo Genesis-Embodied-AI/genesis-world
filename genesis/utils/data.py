@@ -928,13 +928,13 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
 
 
 def iter_data_oriented(name: str, root: object, kind: DataKind) -> Iterator[ArrayItem]:
-    """Yield the quadrants arrays a data-oriented object holds, all of the given kind, named by 'name' and the attributes
-    reaching them, joined with dots.
+    """Yield the quadrants arrays of a given kind that a data-oriented object holds, each named by its path.
 
-    The walk enters the data-oriented objects, plain structs and sequences it reaches, and stops at the objects owning
-    their data, such as a solver, an entity, a force field, a material or a declared struct (see 'Data'), which their
-    owner yields. An array reached twice is yielded once, under the first name reaching it. A quadrants array carrying
-    gradients yields them as one more item named 'grad'.
+    The path of an array joins 'name' and the attributes reaching it with dots. The walk enters the data-oriented
+    objects, plain structs and sequences it reaches, and stops at the objects owning their data, such as a solver, an
+    entity, a force field, a material or a declared struct (see 'Data'), which their owner yields. An array reached
+    twice is yielded once, under the first name reaching it. A quadrants array carrying gradients yields them as one
+    more item named 'grad'.
     """
     seen = set()
     pending = [(name, root)]

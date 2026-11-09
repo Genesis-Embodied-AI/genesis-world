@@ -60,9 +60,10 @@ class VertexRange(Data, kind=DataKind.CONSTANT, shape=()):
 
 
 class NewtonContactScratch(Data, kind=DataKind.SCRATCH):
-    """Vertex-space gradient (doublets) and Hessian (upper triangular triplets) of the contact pairs, the offsets of
-    the slots of every pair kind in them, then their totals, and the first triplet of the linear system of every reduced
-    Hessian entry, then their total."""
+    """Vertex-space gradient (doublets) and Hessian (upper triangular triplets) of the contact pairs, with their layout.
+
+    The layout holds the offsets of the slots of every pair kind in them, then their totals, and the first triplet of
+    the linear system of every reduced Hessian entry, then their total."""
 
     gradient: BCOOMatrixScratch
     hessian: BCOOMatrixScratch
@@ -108,8 +109,9 @@ def append_pair(n_pairs: qd.template(), capacity: int):
 
 @qd.data_oriented
 class NewtonContact(NewtonDevice):
-    """The contacts of the joint Newton solve, over the vertices of `linear_maps` and `rigid_map` and the pairs of
-    `pair_kinds`."""
+    """The contacts of the joint Newton solve, over contact vertices and pair kinds.
+
+    The vertices are those of the vertex maps `linear_maps` and `rigid_map`, and the pairs those of `pair_kinds`."""
 
     def __init__(self, linear_maps: list, rigid_map, pair_kinds: list):
         self.linear_maps = participant_group("NewtonContactLinearMaps", linear_maps)
@@ -160,18 +162,17 @@ class NewtonContact(NewtonDevice):
 
     @qd.func
     def write_doublet(self, i_db: int, i_v: int, g: qd.types.vector(3)):
-        """Write the gradient `g` on contact vertex `i_v` into doublet slot `i_db`."""
+        """Write the gradient on a contact vertex into a doublet slot."""
         func_write_triplet(i_db, i_v, 0, qd.Matrix.cols([g]), self.matrices.gradient, is_symmetric=False)
 
     @qd.func
     def write_triplet(self, i_t: int, i_va: int, i_vb: int, H: qd.types.matrix(3, 3)):
-        """Write the Hessian block `H` of contact vertices (`i_va`, `i_vb`) into triplet slot `i_t`, mirrored into the
-        upper triangle."""
+        """Write the Hessian block of two contact vertices into a triplet slot, mirrored into the upper triangle."""
         func_write_triplet(i_t, i_va, i_vb, H, self.matrices.hessian, is_symmetric=True)
 
     @qd.func
     def vertex_rows(self, i_v: int):
-        """Rows of the linear system that contact vertex `i_v` moves, their weights and their count, zero for a Rigid
+        """Rows of the linear system that a contact vertex moves, their weights and their count, zero for a Rigid
         contact point."""
         n_rows = gs.qd_int(0)
         rows = qd.Vector.zero(gs.qd_int, MAX_VERTEX_ROWS)
@@ -221,8 +222,10 @@ class NewtonContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_entry_layout(self):
         """Number the blocks of the linear system of every reduced Hessian entry, which hold over the substep, and
-        report their count in the share of the contacts: the upper triangle of the rows of a diagonal entry, every pair
-        of rows of the others, and none for an entry on a Rigid contact point."""
+        report their count in the share of the contacts.
+
+        A diagonal entry has the blocks of the upper triangle of its rows, the others those of every pair of their rows,
+        and an entry on a Rigid contact point none."""
         qd.loop_config(name="newton_contact_entry_blocks")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
             i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
@@ -250,9 +253,10 @@ class NewtonContact(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_contact_assemble(self, f: int, linear: NewtonLinearScratch):
         """Add the gradient and the Hessian of the contacts at the current iterate to the linear system and to Rigid,
-        once every participant assembled its own share: a doublet adds w_a g to every row a of its vertex, and a Hessian
-        entry between vertices of the linear system writes the blocks w_a w_b H of their rows, discarding those of zero
-        weight."""
+        once every participant assembled its own share.
+
+        A doublet adds w_a g to every row a of its vertex. A Hessian entry between vertices of the linear system writes
+        the blocks w_a w_b H of their rows, discarding the blocks of zero weight."""
         self.func_terms(f)
         func_reduce_bcoo(self.matrices.gradient, block_scalars=3)
         func_reduce_bcoo(self.matrices.hessian, block_scalars=9)
@@ -304,9 +308,10 @@ class NewtonContact(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: PCGScalars):
-        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction: B p_b
-        to the image of vertex a and, off the diagonal, B^T p_a to that of the contact point b, skipping the converged
-        environments."""
+        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction.
+
+        B p_b adds to the image of vertex a and, off the diagonal, B^T p_a to that of the contact point b. The converged
+        environments are skipped."""
         self.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
         qd.loop_config(name="newton_contact_rigid_product")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
@@ -334,7 +339,7 @@ class NewtonContact(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_contact_energy(self, f: int, energies: qd.template()):
-        """Add the energy of every pair at the current iterate into the entry of its environment in `energies`."""
+        """Add the energy of every pair at the current iterate into the entry of its environment."""
         if qd.static(self.has_rigid_map):
             self.rigid_map.func_vertex_begin(f, SRC_ITERATE)
         for pair_kind in qd.static(self.pair_kinds):

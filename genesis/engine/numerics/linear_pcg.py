@@ -39,9 +39,10 @@ PCG_ROWS = Size("pcg_rows")
 
 
 class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
-    """Vectors of a preconditioned conjugate gradient (PCG), one 3-vector per block row, and `rows_env`, the environment
-    of every block row, the rows sorted by environment. The reductions add by the environment of the rows (see
-    add_by_key)."""
+    """Vectors of a preconditioned conjugate gradient (PCG), one 3-vector per block row.
+
+    `rows_env` holds the environment of every block row, the rows being sorted by environment, by which the reductions
+    add (see add_by_key)."""
 
     r: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
     z: qd.Tensor = field((float, 3), shape=(PCG_ROWS,), ndarray=True)
@@ -81,9 +82,11 @@ def func_init_linear_pcg_residual(
     pcg_scalars: PCGScalars,
     is_adjoint: qd.template(),
 ):
-    """Start a solve of A x = b from x = 0, with r = b and Ap = 0. With `is_adjoint`, an environment left out by
-    `is_env_active` keeps the solution of an earlier adjoint solve. The preconditioner and
-    func_init_linear_pcg_direction follow."""
+    """Start a linear solve from a zero solution, its residual being the right-hand side.
+
+    The solution `x` is cleared, the residual set to the right-hand side `b` and the product Ap zeroed. With
+    `is_adjoint`, an environment left out by `is_env_active` keeps the solution of an earlier adjoint solve. The
+    preconditioner and func_init_linear_pcg_direction follow."""
     qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
         is_kept = False
@@ -140,8 +143,9 @@ def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix:
 
 @qd.func(requires_top_level=True)
 def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Update the solution and the residual of every running environment along its search direction, x += alpha p and
-    r -= alpha Ap."""
+    """Update the solution and the residual of every running environment along its search direction.
+
+    The solution `x` takes x += alpha p, and the residual r -= alpha Ap."""
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
         i_b = pcg_workspace.rows_env[i_r]
@@ -211,8 +215,10 @@ def func_pcg_arm(pcg_scalars: PCGScalars, is_adjoint: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_pcg_step(pcg_scalars: PCGScalars):
-    """Take the step alpha = rz / p.Ap of every running environment once every owner added its p.Ap, and zero rz_new.
-    With is_curvature_checked set, a non-positive p.Ap along a non-zero direction flags has_breakdown."""
+    """Take the step alpha = rz / p.Ap of every running environment, once every owner added its p.Ap.
+
+    The step clears rz_new, and a non-positive p.Ap along a non-zero direction flags has_breakdown when
+    is_curvature_checked is set."""
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
             rz = pcg_scalars.rz[i_b]

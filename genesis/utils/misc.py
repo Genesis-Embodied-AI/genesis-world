@@ -1087,7 +1087,7 @@ def _kernel_reset_with_template_args(kernel):
     kernel.used_py_dataclass_parameters_by_key_enforcing = {}
     kernel._struct_ndarray_launch_info_by_key = {}
     kernel._struct_primitive_launch_info_by_key = {}
-    # The ndarray paths of the last launch are keyed by an instance id as well, which the new mapper numbers from 0 again
+    # The ndarray paths of the last launch are keyed by an instance id too, which the new mapper numbers from 0 again
     kernel._mutable_nd_cached_key = None
     kernel._mutable_nd_cached_val = []
 

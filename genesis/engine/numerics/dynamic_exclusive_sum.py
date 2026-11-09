@@ -24,7 +24,9 @@ class DynamicExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
 
 
 def dynamic_exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
-    """Return the sizes of the scratch of a sum over at most `capacity` values."""
+    """Return the sizes of the scratch of an exclusive sum.
+
+    `capacity` is the number of values the sum runs over at most."""
     n_tiles = max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1)
     return {SCAN_TILES: n_tiles, SCAN_PARTIALS: max(n_tiles, CPU_CHUNKS)}
 
@@ -146,8 +148,9 @@ def _func_scan_gpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
 def func_dynamic_exclusive_sum(
     values: qd.template(), output: qd.template(), n: qd.Tensor, scanner: DynamicExclusiveSumScratch
 ):
-    """Write the exclusive prefix sum of the first `n[()]` entries of `values` into `output`, `n` being a device
-    scalar."""
+    """Write the exclusive prefix sum of the first entries of an array into another.
+
+    The sum runs over the first `n[()]` entries of `values`, `n` being a device scalar, and lands in `output`."""
     if qd.static(gs.backend == gs.cpu):
         _func_scan_cpu(values, output, n, scanner)
     else:

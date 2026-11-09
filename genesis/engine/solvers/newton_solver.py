@@ -178,8 +178,9 @@ def func_pcg_start(
 
 @qd.func(requires_top_level=True)
 def func_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
-    """Run one preconditioned conjugate gradient iteration over all the rows: the product of the matrix and of Rigid
-    with p . Ap, the step, the preconditioner and the direction (see PCGScalars)."""
+    """Run one preconditioned conjugate gradient iteration over all the rows (see PCGScalars).
+
+    It runs the product of the matrix and of Rigid with p . Ap, then the step, the preconditioner and the direction."""
     func_linear_pcg_spmv(participants.linear.pcg, pcg_scalars, participants.linear.matrix)
     if qd.static(participants.has_rigid):
         participants.rigid.func_matvec(pcg_scalars)
@@ -229,7 +230,7 @@ def func_energy(f: int, newton_control: NewtonControl, participants: qd.template
 
 @qd.func(requires_top_level=True)
 def func_add_energies(f: int, participants: qd.template(), energies: qd.template()):
-    """Add the energy of every participant and of the contacts into the entry of every environment in `energies`."""
+    """Add the energy of every participant and of the contacts into the entry of every environment."""
     for member in qd.static(participants.members):
         member.func_energy(f, energies)
     if qd.static(participants.has_contact):
@@ -285,7 +286,7 @@ def kernel_energy(f: int, newton_control: NewtonControl, participants: qd.templa
 
 @qd.kernel
 def kernel_line_search_trial(f: int, newton_control: NewtonControl, participants: qd.template()):
-    """Step every participant to the trial point, evaluate its energy, and accept it or halve the step."""
+    """Step every participant to the trial point, evaluate its energy, and accept it or shrink the step."""
     func_step_forward(f, newton_control, participants)
     func_energy(f, newton_control, participants, is_trial=True)
     func_accept_or_backtrack(newton_control)
@@ -442,15 +443,17 @@ class NewtonSolver(Solver):
         return len(self._participant_hosts) > 1 or bool(self._coupling_hosts)
 
     def begin(self, f):
-        """Run the host stages that precede the pre-coupling phase of the solvers in substep `f`."""
+        """Run the host stages that precede the pre-coupling phase of the solvers in a substep."""
         if not self.is_active:
             return
         for host in self._hosts:
             host.newton_begin(f)
 
     def step(self, f):
-        """Run the Newton solve of substep `f`: the preparation of the participants, the start energy, the Newton
-        iterations and the hand-back of the solution."""
+        """Run the Newton solve of a substep.
+
+        The solve runs the preparation of the participants, the start energy, the Newton iterations and the hand-back
+        of the solution."""
         if not self.is_active:
             return
         with custom_backward(self.backward, f):
@@ -488,9 +491,9 @@ class NewtonSolver(Solver):
                 )
 
     def backward(self, f):
-        """Reverse the Newton solve of a substep, from the state left by the replay of its forward pass, each
-        participant wrapping the adjoint solve in its own reverse of the part of its substep that the solve takes
-        over."""
+        """Reverse the Newton solve of a substep, from the state left by the replay of its forward pass.
+
+        Each participant wraps the adjoint solve in the reverse of the part of its substep that the solve takes over."""
         if not all(host.is_differentiable for host in self._hosts):
             gs.raise_exception(
                 "The backward pass of the joint Newton solve supports the participants of Rigid alone besides MPM."

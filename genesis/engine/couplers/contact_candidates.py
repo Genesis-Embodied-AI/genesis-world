@@ -64,7 +64,10 @@ def func_reset_candidates(candidates: ContactCandidates):
 
 @qd.func
 def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, candidates: ContactCandidates):
-    """Record the scores of candidate `i_cand` of sorted particle `i_ps`, an infinite score rejecting it."""
+    """Record the scores of a candidate of a sorted particle, an infinite score rejecting it.
+
+    `i_cand` is the candidate and `i_ps` its sorted particle, `score` its primary score and `secondary` the score that
+    breaks the ties."""
     candidates.order.triplets_row[i_cand] = i_ps
     candidates.order.triplets_col[i_cand] = 0
     candidates.order.triplets_val[i_cand] = score
@@ -208,8 +211,10 @@ class CouplingPairs(NewtonDevice):
         stiffness: qd.types.vector(PYRAMID_ROWS),
         target: qd.types.vector(PYRAMID_ROWS),
     ):
-        """Append the pair of sorted particle `i_ps` of environment `i_b` with the rows of its friction pyramid, of
-        stiffness `stiffness` and target `target`, and return its slot, or -1 past the capacity."""
+        """Append a pair with the rows of its friction pyramid, and return its slot, or -1 past the capacity.
+
+        The pair is that of sorted particle `i_ps` of environment `i_b`, along `normal` with the friction `friction`,
+        its rows of stiffness `stiffness` and target `target`."""
         i_pair = append_pair(self.pairs.n_pairs, self.pairs.sorted_idx.shape[0])
         if i_pair >= 0:
             self.pairs.sorted_idx[i_pair] = i_ps

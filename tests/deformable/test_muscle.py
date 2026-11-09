@@ -35,7 +35,7 @@ def test_muscle(n_envs, muscle_material, show_viewer):
     )
     # The body rests on the plane from the start. The plane holds the MPM particles by their centers from its coupling
     # softness on, and they lie half a particle size inside the surface of the body, so an MPM body starts lower by the
-    # difference.
+    # difference of the two.
     height = 0.05
     if muscle_material is gs.materials.MPM.Muscle:
         height -= 0.5 * mpm_options.particle_size - plane_material.coup_softness

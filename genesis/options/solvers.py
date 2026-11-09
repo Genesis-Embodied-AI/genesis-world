@@ -404,11 +404,10 @@ class NewtonOptions(Options):
         accurate. Comparing the gradients against finite differences needs a much smaller value than the default, since
         the gradients describe the motion where the solve stopped. Defaults to 5e-2.
     graph : str, optional
-        How much of the solve runs as one GPU graph, which trades the compile time of the first steps for fewer launches
-        in the next ones, with the same motion. 'split' drives the Newton iterations from the host, each solve of their
-        linear systems running as one graph: it compiles fastest. 'newton' runs all the Newton iterations as one graph,
-        which compiles slower, and needs a scene without gradients when MPM is coupled with another solver. Defaults to
-        'split'.
+        How much of the solve compiles as one piece, which trades the compile time of the first steps against the speed
+        of the next ones, with the same motion. 'split' compiles fastest, the better choice for short simulations.
+        'newton' compiles slower but runs every step faster, the better choice for long ones, and does not support a
+        differentiable scene coupling MPM with another solver. Defaults to 'split'.
     adjoint_hessian : str, optional
         How exactly the gradients of a differentiable scene follow the response of the MPM materials through the solve.
         'projected' always succeeds, but its gradients are approximate wherever the solve has to stabilize the response
@@ -419,29 +418,33 @@ class NewtonOptions(Options):
         Newton iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning.
         Defaults to 1024.
     line_search_max_iterations : int, optional
-        Trial steps of the backtracking line search of a Newton iteration at most, the last one being kept unless
-        'strict' is set. Defaults to 12.
+        Trial steps of a Newton iteration at most along its direction, the last one being kept unless 'strict' is set.
+        More trials let an iteration recover from a poor direction, at the cost of the energy of the scene evaluated
+        once more per trial. Defaults to 12.
     strict : bool, optional
-        Raise an error at the substep of a Newton iteration whose line search finds no lower energy within
-        'line_search_max_iterations' trials, instead of keeping its last trial. The energy of the solve has no barrier,
-        so it decreases along every Newton direction of a consistent implementation within a few halvings of the step:
-        such a line search reveals an energy that disagrees with its gradient or with the curvature of the Newton
-        system. Every solve then waits for the device. Defaults to False.
+        Raise an error when a Newton iteration finds no lower energy within 'line_search_max_iterations' trials, instead
+        of keeping its last trial. Such a failure points at a material or a coupling whose forces disagree with its
+        energy, which this option catches at the substep where it occurs, at the cost of a slower simulation. Defaults
+        to False.
     line_search_shrink : float, optional
-        Factor of the step of the line search between two trials, strictly between 0 and 1. Defaults to 0.5.
+        Factor of the step of a Newton iteration between two trials, strictly between 0 and 1. A smaller factor reaches
+        an acceptable step in fewer trials, while a larger one keeps a longer step at the cost of more trials. Defaults
+        to 0.5.
     pcg_max_iterations : int, optional
-        Iterations of the preconditioned conjugate gradient (PCG) solving the linear system of a Newton iteration at
-        most. Defaults to 1024.
+        Iterations at most of the preconditioned conjugate gradient (PCG) that gives the direction of a Newton
+        iteration. A larger cap lets the direction of a stiff scene converge, at the cost of a longer worst-case
+        substep. Defaults to 1024.
     pcg_tol : float, optional
-        Reduction of r . z, the preconditioned squared residual, relative to its start value, at which the PCG of a
-        Newton iteration stops. The Newton iterations correct an inexact direction, so a loose value suffices. Defaults
+        Relative accuracy at which the PCG of a Newton iteration stops. A looser value makes every Newton iteration
+        cheaper, the next iterations correcting its inexact direction, at the cost of more Newton iterations. Defaults
         to 1e-4.
     adjoint_pcg_tol : float, optional
-        Reduction of r . z at which the PCG of the adjoint solve of a substep stops, tighter than 'pcg_tol' since the
-        error of the adjoint solve enters every gradient. Defaults to 1e-24 in 64-bit precision and 1e-12 in 32-bit.
+        Relative accuracy at which the PCG of the backward pass of a substep stops, whose error enters every gradient: a
+        tighter value gives more accurate gradients at the cost of a slower backward pass. If None, resolved based on
+        the precision: 1e-24 for 64-bit precision, 1e-12 for 32-bit precision. Defaults to None.
     failure_check_interval : int, optional
-        Substeps between two reads of whether a Newton solve reached 'max_iterations', each read waiting for the device.
-        Defaults to 32.
+        Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller
+        interval reports it sooner, at the cost of a slower simulation. Defaults to 32.
     """
 
     velocity_tol: PositiveFloat = 5e-2
@@ -720,14 +723,15 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
     wall_timeconst : float, optional
-        Time constant of the soft contact rows that keep the particles within the domain walls, in seconds, floored at
-        twice the substep. A smaller value gives stiffer walls. Defaults to 0.01.
+        Time constant in seconds over which the domain walls push back the particles that penetrate them, floored at
+        twice the substep. A smaller value gives stiffer walls that the particles penetrate less, at the cost of more
+        iterations of the solve near the walls. Defaults to 0.01.
     liquid_smoothing_velocity : float, optional
-        Velocity in m/s under which the resistance of a liquid to compression fades in: the stiffness of a liquid rises
-        from zero to its bulk modulus over the volume change that a cell undergoes at that velocity over a substep, so
-        that the Newton solve meets no jump of stiffness where the liquid starts being compressed. A larger value eases
-        the solve of a liquid near rest but softens it more. Defaults to None, the velocity tolerance of the Newton
-        solve ('NewtonOptions.velocity_tol'), under which the solve does not resolve the motion anyway.
+        Velocity in m/s under which the resistance of a liquid to compression fades in, its stiffness rising from zero
+        to its bulk modulus over the compression the liquid undergoes at that velocity over a substep. A larger value
+        lets the solve of a liquid near rest take fewer iterations, but softens the liquid more. If None, resolved based
+        on the tolerance of the solve: 'NewtonOptions.velocity_tol', under which the solve does not resolve the motion
+        anyway. Defaults to None.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -867,11 +871,9 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
     max_viscosity_solver_iterations : int, optional
         Maximum number of iterations for the solving viscosity constraints. Defaults to 1.
     solver_iterations : int, optional
-        Number of iterations of the unified constraint loop (Macklin et al. 2014, "Unified Particle Physics for
-        Real-Time Applications"). Every iteration processes the stretch, bending and volume constraints, each kind
-        within its own maximum number of iterations above, then the density constraints within theirs, then the
-        contacts. More iterations make the constraints and the contacts stiffer and more accurate, at a cost
-        proportional to their number. Defaults to 4.
+        Number of iterations over all the constraints and contacts of a substep, every kind of constraint taking part in
+        as many of them as its own maximum number of iterations above allows. More iterations make the constraints and
+        the contacts stiffer and more accurate, at a cost proportional to their number. Defaults to 4.
     sor_relaxation : float, optional
         Successive over-relaxation factor of the averaged contact corrections: every particle moves by this factor times
         the mean of the corrections of its contacts. A larger factor resolves the contacts in fewer iterations, and too
@@ -885,11 +887,10 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         Displacement over a substep in meters below which a particle stays at its start position, 0 to disable. A larger
         value removes the jitter of particles at rest, and also freezes the particles that move slowly. Defaults to 0.
     use_xpbd : bool, optional
-        Whether to solve the stretch, bending and volume constraints by extended position-based dynamics (XPBD, Macklin
-        et al. 2016, "XPBD: Position-Based Simulation of Compliant Constrained Dynamics"). With it, the stiffness of a
-        material follows its compliances whatever the number of iterations, and the relaxation factors of the materials
-        have no effect. Without it, the stiffness also depends on the number of iterations, and the relaxation factors
-        tune it. Defaults to True.
+        Whether to solve the stretch, bending and volume constraints by extended position-based dynamics (XPBD). With
+        it, the stiffness of a material follows its compliances whatever the number of iterations, and the relaxation
+        factors of the materials have no effect. Without it, the stiffness also depends on the number of iterations,
+        and the relaxation factors tune it. Defaults to True.
     position_tolerance : float, optional
         Correction in meters under which the constraint loop stops before `solver_iterations`, once no particle moves by
         more than this value in an iteration. A larger value saves iterations once the particles settle, at the cost of

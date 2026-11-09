@@ -103,7 +103,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_energy(self, f: int, energies: qd.template()):
-        """Add the inertia 1/2 m |x - x~|^2 of the PBD particles into the entry of every environment in `energies`."""
+        """Add the inertia 1/2 m |x - x~|^2 of the PBD particles into the entry of every environment."""
         qd.loop_config(name="mpm_pbd_energy")
         for i_rp, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
             if is_moving(i_rp, i_b, self.solver):
