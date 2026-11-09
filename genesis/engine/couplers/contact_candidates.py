@@ -59,9 +59,9 @@ def func_reset_candidates(candidates: ContactCandidates):
 
 
 @qd.func
-def set_candidate_score(i_cand: int, s: int, score: float, secondary: float, candidates: ContactCandidates):
-    """Record the scores of candidate `i_cand` of sorted particle `s`, an infinite score rejecting it."""
-    candidates.order.triplets_row[i_cand] = s
+def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, candidates: ContactCandidates):
+    """Record the scores of candidate `i_cand` of sorted particle `i_ps`, an infinite score rejecting it."""
+    candidates.order.triplets_row[i_cand] = i_ps
     candidates.order.triplets_col[i_cand] = 0
     candidates.order.triplets_val[i_cand] = score
     candidates.secondary[i_cand] = secondary
@@ -83,34 +83,34 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
         candidates.order.bcoo_nnz[()] = 0
     func_extract_unique_bcoo_entries(candidates.order)
     qd.loop_config(name="contact_candidates_reset")
-    for i_seg in range(candidates.order.bcoo_nnz[()]):
-        candidates.best_score[i_seg] = qd.math.inf
-        candidates.best_secondary[i_seg] = -qd.math.inf
-        candidates.best_candidate[i_seg] = candidates.secondary.shape[0]
+    for i_nz in range(candidates.order.bcoo_nnz[()]):
+        candidates.best_score[i_nz] = qd.math.inf
+        candidates.best_secondary[i_nz] = -qd.math.inf
+        candidates.best_candidate[i_nz] = candidates.secondary.shape[0]
     qd.loop_config(name="contact_candidates_score")
-    for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplets_source_idx[i_sorted]
+    for i_t in range(candidates.order.n_triplets[()]):
+        i_cand = candidates.order.triplets_source_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
         if score < qd.math.inf:
-            qd.atomic_min(candidates.best_score[candidates.order.triplets_segment_idx[i_sorted]], score)
+            qd.atomic_min(candidates.best_score[candidates.order.triplets_segment_idx[i_t]], score)
     qd.loop_config(name="contact_candidates_secondary")
-    for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplets_source_idx[i_sorted]
-        i_seg = candidates.order.triplets_segment_idx[i_sorted]
+    for i_t in range(candidates.order.n_triplets[()]):
+        i_cand = candidates.order.triplets_source_idx[i_t]
+        i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
-        if score < qd.math.inf and score <= candidates.best_score[i_seg] + tie_tol:
-            qd.atomic_max(candidates.best_secondary[i_seg], candidates.secondary[i_cand])
+        if score < qd.math.inf and score <= candidates.best_score[i_nz] + tie_tol:
+            qd.atomic_max(candidates.best_secondary[i_nz], candidates.secondary[i_cand])
     qd.loop_config(name="contact_candidates_winner")
-    for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplets_source_idx[i_sorted]
-        i_seg = candidates.order.triplets_segment_idx[i_sorted]
+    for i_t in range(candidates.order.n_triplets[()]):
+        i_cand = candidates.order.triplets_source_idx[i_t]
+        i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
         if (
             score < qd.math.inf
-            and score <= candidates.best_score[i_seg] + tie_tol
-            and candidates.secondary[i_cand] >= candidates.best_secondary[i_seg]
+            and score <= candidates.best_score[i_nz] + tie_tol
+            and candidates.secondary[i_cand] >= candidates.best_secondary[i_nz]
         ):
-            qd.atomic_min(candidates.best_candidate[i_seg], i_cand)
+            qd.atomic_min(candidates.best_candidate[i_nz], i_cand)
 
 
 @qd.data_oriented
@@ -130,8 +130,8 @@ class CouplingPairs(NewtonDevice):
         self.pairs = self.build_pairs(MIN_SLOTS)
         # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
         self.scratches_replaced = []
-        self.block_rows = tuple(k for k in range(self.n_doublets) for _ in range(k, self.n_doublets))
-        self.block_cols = tuple(l for k in range(self.n_doublets) for l in range(k, self.n_doublets))
+        self.block_rows = tuple(i_v_ for i_v_ in range(self.n_doublets) for _ in range(i_v_, self.n_doublets))
+        self.block_cols = tuple(j_v_ for i_v_ in range(self.n_doublets) for j_v_ in range(i_v_, self.n_doublets))
 
     def build_pairs(self, capacity: int):
         """Build the pairs of the coupling at a capacity, with no pair."""
@@ -154,13 +154,20 @@ class CouplingPairs(NewtonDevice):
         contact_band_width), the leaves spanning the motion of the partners over the substep."""
         func_reset_candidates(self.candidates)
         qd.loop_config(name="mpm_query_partners")
-        for s in range(self.mpm.grid.n_valid[()]):
-            i_p, i_b, env, cell = particle_of_sorted(s, self.mpm.grid, self.mpm.mpm_info)
+        for i_ps in range(self.mpm.grid.n_valid[()]):
+            i_p, i_b, cell = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
             x_p = self.mpm.particles.pos[f, i_p, i_b]
             speed = self.mpm.particles.vel[f, i_p, i_b].norm()
             reach = contact_band_width(speed, self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info)
             func_bvh_query_aabb(
-                i_b, s, x_p - reach, x_p + reach, self.query.tree, self.candidates.results, func_no_filter, self.query
+                i_b,
+                i_ps,
+                x_p - reach,
+                x_p + reach,
+                self.query.tree,
+                self.candidates.results,
+                func_no_filter,
+                self.query,
             )
 
     @qd.func(requires_top_level=True)
@@ -181,8 +188,8 @@ class CouplingPairs(NewtonDevice):
         for _ in range(1):
             self.pairs.n_pairs[()] = 0
         qd.loop_config(name="mpm_build_pairs")
-        for i_seg in range(self.candidates.order.bcoo_nnz[()]):
-            i_cand = self.candidates.best_candidate[i_seg]
+        for i_nz in range(self.candidates.order.bcoo_nnz[()]):
+            i_cand = self.candidates.best_candidate[i_nz]
             if i_cand < self.candidates.secondary.shape[0]:
                 triplet = self.candidates.results.triplets[i_cand]
                 self.build_pair(f, triplet[0], triplet[1], triplet[2], self.candidates.order.triplets_val[i_cand])
@@ -190,32 +197,36 @@ class CouplingPairs(NewtonDevice):
     @qd.func
     def add_pair(
         self,
-        s: int,
+        i_ps: int,
         i_b: int,
         normal: qd.types.vector(3),
         friction: float,
-        D: qd.types.vector(PYRAMID_ROWS),
-        t: qd.types.vector(PYRAMID_ROWS),
+        stiffness: qd.types.vector(PYRAMID_ROWS),
+        target: qd.types.vector(PYRAMID_ROWS),
     ):
-        """Append the pair of sorted particle `s` of environment `i_b` with the rows of its friction pyramid, of
+        """Append the pair of sorted particle `i_ps` of environment `i_b` with the rows of its friction pyramid, of
         stiffness D and target t, and return its slot, or -1 past the capacity."""
-        i_pair = append_pair(self.pairs.n_pairs, self.pairs.s.shape[0])
+        i_pair = append_pair(self.pairs.n_pairs, self.pairs.sorted_idx.shape[0])
         if i_pair >= 0:
-            self.pairs.s[i_pair] = s
+            self.pairs.sorted_idx[i_pair] = i_ps
             self.pairs.i_b[i_pair] = i_b
             self.pairs.normal[i_pair] = normal
             self.pairs.friction[i_pair] = friction
-            self.pairs.D[i_pair] = D
-            self.pairs.t[i_pair] = t
+            self.pairs.stiffness[i_pair] = stiffness
+            self.pairs.target[i_pair] = target
         return i_pair
 
     @qd.func
     def pair_terms(self, f: int, i_pair: int):
         """Energy, gradient and Hessian of the rows of a pair in its relative displacement at the current iterate, with
         its vertices and their weights in that displacement (see pair_vertices)."""
-        verts, weights, r = self.pair_vertices(f, i_pair)
+        verts, weights, u_rel = self.pair_vertices(f, i_pair)
         energy, g, H = pyramid_terms(
-            self.pairs.normal[i_pair], self.pairs.friction[i_pair], self.pairs.D[i_pair], self.pairs.t[i_pair], r
+            self.pairs.normal[i_pair],
+            self.pairs.friction[i_pair],
+            self.pairs.stiffness[i_pair],
+            self.pairs.target[i_pair],
+            u_rel,
         )
         return energy, g, H, verts, weights
 
@@ -228,14 +239,14 @@ class CouplingPairs(NewtonDevice):
         qd.loop_config(name="mpm_pair_terms")
         for i_pair in range(self.pairs.n_pairs[()]):
             _, g, H, verts, weights = self.pair_terms(f, i_pair)
-            i_d = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
-            i_t = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
-            for k in range(qd.static(self.n_doublets)):
-                contact.write_doublet(i_d + k, verts[k], weights[k] * g)
-            for i_block in range(qd.static(self.n_triplets)):
-                k = block_rows[i_block]
-                l = block_cols[i_block]
-                contact.write_triplet(i_t + i_block, verts[k], verts[l], (weights[k] * weights[l]) * H)
+            i_db_start = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
+            i_t_start = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
+            for i_v_ in range(qd.static(self.n_doublets)):
+                contact.write_doublet(i_db_start + i_v_, verts[i_v_], weights[i_v_] * g)
+            for i_t_ in range(qd.static(self.n_triplets)):
+                i_v_ = block_rows[i_t_]
+                j_v_ = block_cols[i_t_]
+                contact.write_triplet(i_t_start + i_t_, verts[i_v_], verts[j_v_], (weights[i_v_] * weights[j_v_]) * H)
 
     @qd.func(requires_top_level=True)
     def func_pair_energy(self, f: int, energies: qd.template()):
@@ -257,7 +268,7 @@ class CouplingPairs(NewtonDevice):
         sort_bcoo(self.candidates.order)
         kernel_build_pairs(f, self)
         n_pairs = int(qd_to_numpy(self.pairs.n_pairs))
-        if n_pairs > self.pairs.s.shape[0]:
+        if n_pairs > self.pairs.sorted_idx.shape[0]:
             self.grow_pairs(grown_capacity(n_pairs))
             kernel_build_pairs(f, self)
 

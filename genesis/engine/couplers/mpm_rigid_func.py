@@ -27,15 +27,15 @@ class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
     """The pairs of the particles with their nearest coupled Rigid geom (see MpmRigidContact.build_pair)."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
-    s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    sorted_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     i_b: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
-    geom: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
-    link: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    geom_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    link_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     phi: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
     normal: qd.Tensor = field((float, 3), shape=(PAIRS,), ndarray=True)
     friction: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    D: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
-    t: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
+    stiffness: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
+    target: qd.Tensor = field((float, PYRAMID_ROWS), shape=(PAIRS,), ndarray=True)
 
 
 # ============================================ Layer 0: spatial algebra =============================================
@@ -93,7 +93,7 @@ def geom_sdf(
     if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.PLANE or geom_type == gs.GEOM_TYPE.TERRAIN:
         signed_distance = sdf.sdf_func_world(i_g, i_b, x, geoms_state, geoms_info, sdf_info)
     else:
-        signed_distance, grad = geom_sdf_grid(i_g, i_b, x, geoms_state, sdf_info)
+        signed_distance, _ = geom_sdf_grid(i_g, i_b, x, geoms_state, sdf_info)
     return signed_distance
 
 
@@ -114,7 +114,7 @@ def geom_normal(
     if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.PLANE or geom_type == gs.GEOM_TYPE.TERRAIN:
         normal = sdf.sdf_func_normal_world(i_g, i_b, x, geoms_state, geoms_info, rigid_info, sdf_info, collider_config)
     else:
-        signed_distance, grad_mesh = geom_sdf_grid(i_g, i_b, x, geoms_state, sdf_info)
+        _, grad_mesh = geom_sdf_grid(i_g, i_b, x, geoms_state, sdf_info)
         normal = gu.qd_normalize(gu.qd_transform_by_quat(grad_mesh, geoms_state.quat[i_g, i_b]), rigid_info.EPS[None])
     return normal
 

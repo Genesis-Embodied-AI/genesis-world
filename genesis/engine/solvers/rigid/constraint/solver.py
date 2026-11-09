@@ -3722,9 +3722,9 @@ def func_hessian_and_cholesky_factor_direct(
     compute_envelope computes each island's structural skyline envelope before factoring; it is structural, so callers
     set it once per step (func_solve_init) and leave it False for the per-iteration re-factorizations. An
     `extra_hessian` whose `has_extra_hessian` is set adds a stiffness of its own to the block of every island between
-    its assembly and its factorization, by `func_add_island_hessian(i_b, i_island, constraint_state, rigid_config)` on
-    the lower triangle of `nt_H` (see func_hessian_direct_batch), within the dofs of the island and the skyline envelope
-    of its block.
+    its assembly and its factorization, by `func_add_island_hessian_batch(i_b, i_island, constraint_state,
+    rigid_config)` on the lower triangle of `nt_H` (see func_hessian_direct_batch), within the dofs of the island and
+    the skyline envelope of its block.
     """
     _B = constraint_state.jac.shape[2]
 
@@ -3744,7 +3744,7 @@ def func_hessian_and_cholesky_factor_direct(
                     func_compute_island_envelope(i_b, i_island, constraint_state, rigid_info, rigid_config)
                 func_hessian_direct_batch(i_b, i_island, constraint_state, rigid_info, rigid_config)
                 if qd.static(extra_hessian.has_extra_hessian):
-                    extra_hessian.func_add_island_hessian(i_b, i_island, constraint_state, rigid_config)
+                    extra_hessian.func_add_island_hessian_batch(i_b, i_island, constraint_state, rigid_config)
                 func_cholesky_factor_direct_batch(i_b, i_island, constraint_state, rigid_info, rigid_config)
 
 

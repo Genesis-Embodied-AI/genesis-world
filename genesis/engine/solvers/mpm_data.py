@@ -22,7 +22,8 @@ REDUCE_BLOCK = 256
 # Every assembled elastic task emits the upper triangle of the 8 x 8 node stencil of its cell
 STENCIL_BLOCKS = 36
 
-# Rows of the friction pyramid of a contact pair: n +- mu d1 and n +- mu d2 (see pyramid_dirs)
+# Rows of the friction pyramid of a contact pair: n +- mu t1 and n +- mu t2, t1 and t2 two tangents of the normal n
+# (see pyramid_directions)
 PYRAMID_ROWS = 4
 
 # Sizes of the data of the implicit step that grows: the sorted particle keys, the blocks of the grid and its particle
@@ -196,15 +197,15 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
 
 class MpmWallPairs(Data, kind=DataKind.SCRATCH):
     """The contact pairs of the particles with the domain walls (see func_build_wall_pairs): a soft row on the trial
-    displacement of sorted particle `s` along the inward normal `sign` e_axis, of stiffness `D` and target `t`.
+    displacement of sorted particle `i_ps` along the inward normal `sign` e_axis, of stiffness `D` and target `t`.
     `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
-    s: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
+    sorted_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     axis: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)
     sign: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    D: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
-    t: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    stiffness: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
+    target: qd.Tensor = field(float, shape=(PAIRS,), ndarray=True)
 
 
 def build_mpm_grid(n_sort: int, max_blocks: int) -> MpmGridScratch:

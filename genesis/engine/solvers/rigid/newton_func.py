@@ -45,13 +45,13 @@ class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
     ap: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     sol: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     cost: qd.Tensor = field(float, shape=(ENVS,), ndarray=True)
-    link_motion_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
-    link_motion_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
-    link_force_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
-    link_force_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    links_motion_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    links_motion_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    links_force_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
+    links_force_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
     # The 6 x 6 spatial stiffness K_l the couplings put on every link, which the preconditioner adds to Rigid's
-    # Hessian (see func_add_link_stiffness_island)
-    link_K: qd.Tensor = field((float, (6, 6)), shape=(LINKS, ENVS), ndarray=True)
+    # Hessian (see func_add_links_stiffness_island_batch)
+    links_stiffness: qd.Tensor = field((float, (6, 6)), shape=(LINKS, ENVS), ndarray=True)
 
 
 # ============================================ Layer 1: link kinematics =============================================
@@ -66,23 +66,23 @@ def func_link_spatial_disp(
     config: qd.template(),
 ):
     """Set the spatial displacement of every link from a dof vector, and clear the spatial force of the link."""
-    n_links = rigid_data.link_motion_vel.shape[0]
-    n_envs = rigid_data.link_motion_vel.shape[1]
+    n_links = rigid_data.links_motion_vel.shape[0]
+    n_envs = rigid_data.links_motion_vel.shape[1]
     qd.loop_config(name="mpm_link_spatial_disp")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
         motion_vel = qd.Vector.zero(gs.qd_float, 3)
         motion_ang = qd.Vector.zero(gs.qd_float, 3)
-        i_a = i_l
-        while i_a >= 0:
-            I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
-            for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
+        j_l = i_l
+        while j_l >= 0:
+            J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
+            for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
                 motion_vel += dofs_state.cdof_vel[i_d, i_b] * src[i_d, i_b]
                 motion_ang += dofs_state.cdof_ang[i_d, i_b] * src[i_d, i_b]
-            i_a = links_info.parent_idx[I_a]
-        rigid_data.link_motion_vel[i_l, i_b] = motion_vel
-        rigid_data.link_motion_ang[i_l, i_b] = motion_ang
-        rigid_data.link_force_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        rigid_data.link_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            j_l = links_info.parent_idx[J_l]
+        rigid_data.links_motion_vel[i_l, i_b] = motion_vel
+        rigid_data.links_motion_ang[i_l, i_b] = motion_ang
+        rigid_data.links_force_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        rigid_data.links_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
@@ -95,28 +95,28 @@ def func_link_force_to_dofs(
     config: qd.template(),
 ):
     """Add the generalized force of the spatial forces accumulated on the links to a dof vector."""
-    n_links = rigid_data.link_force_vel.shape[0]
-    n_envs = rigid_data.link_force_vel.shape[1]
+    n_links = rigid_data.links_force_vel.shape[0]
+    n_envs = rigid_data.links_force_vel.shape[1]
     qd.loop_config(name="mpm_link_force_to_dofs")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        force_vel = rigid_data.link_force_vel[i_l, i_b]
-        force_ang = rigid_data.link_force_ang[i_l, i_b]
+        force_vel = rigid_data.links_force_vel[i_l, i_b]
+        force_ang = rigid_data.links_force_ang[i_l, i_b]
         if force_vel.norm_sqr() + force_ang.norm_sqr() > 0.0:
-            i_a = i_l
-            while i_a >= 0:
-                I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
-                for i_d in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
+            j_l = i_l
+            while j_l >= 0:
+                J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
+                for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
                     value = dofs_state.cdof_vel[i_d, i_b].dot(force_vel) + dofs_state.cdof_ang[i_d, i_b].dot(force_ang)
                     qd.atomic_add(out[i_d, i_b], scale * value)
-                i_a = links_info.parent_idx[I_a]
+                j_l = links_info.parent_idx[J_l]
 
 
 @qd.func(requires_top_level=True)
-def func_clear_link_stiffness(rigid_data: RigidNewtonScratch):
+def func_clear_links_stiffness(rigid_data: RigidNewtonScratch):
     """Clear the contact stiffness of every link, before the contacts add theirs to the preconditioner."""
-    qd.loop_config(name="mpm_rigid_link_K_clear")
-    for i_l, i_b in qd.ndrange(rigid_data.link_K.shape[0], rigid_data.link_K.shape[1]):
-        rigid_data.link_K[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
+    qd.loop_config(name="mpm_rigid_links_stiffness_clear")
+    for i_l, i_b in qd.ndrange(rigid_data.links_stiffness.shape[0], rigid_data.links_stiffness.shape[1]):
+        rigid_data.links_stiffness[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
 
 
 # ============================================== Layer 1: Rigid block ===============================================
@@ -222,7 +222,7 @@ def func_rigid_gradient(
 
 
 @qd.func
-def rigid_solve(
+def func_rigid_solve_batch(
     i_b: int,
     rhs: qd.template(),
     out: qd.template(),
@@ -251,7 +251,7 @@ def cdof_spatial(i_d: int, i_b: int, dofs_state: DofsState):
 
 
 @qd.func
-def func_add_link_stiffness_island(
+def func_add_links_stiffness_island_batch(
     i_b: int,
     i_island: int,
     rigid_data: RigidNewtonScratch,
@@ -262,33 +262,33 @@ def func_add_link_stiffness_island(
     config: qd.template(),
 ):
     """Add the contact stiffness J_l^T K_l J_l of every link of an island to the lower triangle of its Hessian block,
-    J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see link_K)."""
-    for i_l in range(rigid_data.link_K.shape[0]):
-        K = rigid_data.link_K[i_l, i_b]
-        if K.norm_sqr() > 0.0:
-            i_a = i_l
-            while i_a >= 0:
-                I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
-                for i_d1 in range(links_info.dof_start[I_a], links_info.dof_end[I_a]):
+    J_l being the cdofs of the chain of link l and K_l its spatial stiffness (see links_stiffness)."""
+    for i_l in range(rigid_data.links_stiffness.shape[0]):
+        stiffness = rigid_data.links_stiffness[i_l, i_b]
+        if stiffness.norm_sqr() > 0.0:
+            i_l1 = i_l
+            while i_l1 >= 0:
+                I_l1 = [i_l1, i_b] if qd.static(config.rigid_batch_links_info) else i_l1
+                for i_d1 in range(links_info.dof_start[I_l1], links_info.dof_end[I_l1]):
                     if constraint_state.island.dofs_island_idx[i_d1, i_b] != i_island:
                         continue
-                    K_J1 = K @ cdof_spatial(i_d1, i_b, dofs_state)
+                    stiffness_cdof1 = stiffness @ cdof_spatial(i_d1, i_b, dofs_state)
                     pos1 = constraint_state.island.dof_local_pos[i_d1, i_b]
-                    i_c = i_l
-                    while i_c >= 0:
-                        I_c = [i_c, i_b] if qd.static(config.rigid_batch_links_info) else i_c
-                        for i_d2 in range(links_info.dof_start[I_c], links_info.dof_end[I_c]):
+                    i_l2 = i_l
+                    while i_l2 >= 0:
+                        I_l2 = [i_l2, i_b] if qd.static(config.rigid_batch_links_info) else i_l2
+                        for i_d2 in range(links_info.dof_start[I_l2], links_info.dof_end[I_l2]):
                             # The lower triangle in the island-local order of the dofs
                             if pos1 >= constraint_state.island.dof_local_pos[i_d2, i_b]:
-                                value = cdof_spatial(i_d2, i_b, dofs_state).dot(K_J1)
+                                value = cdof_spatial(i_d2, i_b, dofs_state).dot(stiffness_cdof1)
                                 if qd.static(rigid_config.enable_jacobi_equilibration):
                                     value *= (
                                         constraint_state.nt_jacobi[i_d1, i_b] * constraint_state.nt_jacobi[i_d2, i_b]
                                     )
                                 # The thread of the island alone writes its block
                                 constraint_state.nt_H[i_b, i_d1, i_d2] = constraint_state.nt_H[i_b, i_d1, i_d2] + value
-                        i_c = links_info.parent_idx[I_c]
-                i_a = links_info.parent_idx[I_a]
+                        i_l2 = links_info.parent_idx[I_l2]
+                i_l1 = links_info.parent_idx[I_l1]
 
 
 @qd.func(requires_top_level=True)
@@ -303,7 +303,9 @@ def func_rigid_precondition(
     """z = A^-1 r over the Rigid dofs, A being Rigid's Hessian plus the contact stiffness of the links in its factor."""
     qd.loop_config(name="mpm_rigid_precondition")
     for i_b in range(rigid_data.x.shape[1]):
-        rigid_solve(i_b, rigid_data.r, rigid_data.z, dyn_state, constraint_state, rigid_info, rigid_config, config)
+        func_rigid_solve_batch(
+            i_b, rigid_data.r, rigid_data.z, dyn_state, constraint_state, rigid_info, rigid_config, config
+        )
 
 
 # ========================================= Layer 1: joint PCG over (u, x) ==========================================

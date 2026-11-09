@@ -89,7 +89,7 @@ class RigidNewtonParticipant(NewtonDevice):
 
     @qd.func(requires_top_level=True)
     def func_factor_begin(self):
-        newton_func.func_clear_link_stiffness(self.rigid_data)
+        newton_func.func_clear_links_stiffness(self.rigid_data)
 
     @qd.func(requires_top_level=True)
     def func_factor(self):
@@ -103,10 +103,10 @@ class RigidNewtonParticipant(NewtonDevice):
     has_extra_hessian = True
 
     @qd.func
-    def func_add_island_hessian(
+    def func_add_island_hessian_batch(
         self, i_b: int, i_island: int, constraint_state: ConstraintState, rigid_config: qd.template()
     ):
-        newton_func.func_add_link_stiffness_island(
+        newton_func.func_add_links_stiffness_island_batch(
             i_b,
             i_island,
             self.rigid_data,

@@ -121,16 +121,16 @@ def kernel_gather_boundary(boundary: qd.template()):
     boundary velocity coefficient cleared for the step."""
     h = qd.static(boundary.sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_gather")
-    for i_s, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
-        boundary.scratch.rho_sum[i_s, i_b] = 0.0
-        boundary.scratch.grad_sum[i_s, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        boundary.scratch.vel_grad_sum[i_s, i_b] = 0.0
-        boundary.scratch.n_neighbors[i_s, i_b] = 0
-        boundary.scratch.impulse_coef[i_s, i_b] = 0.0
-        if boundary.sph.particles_ng_reordered[i_s, i_b].active:
-            x = boundary.sph.particles_reordered[i_s, i_b].pos
+    for i_p, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
+        boundary.scratch.rho_sum[i_p, i_b] = 0.0
+        boundary.scratch.grad_sum[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        boundary.scratch.vel_grad_sum[i_p, i_b] = 0.0
+        boundary.scratch.n_neighbors[i_p, i_b] = 0
+        boundary.scratch.impulse_coef[i_p, i_b] = 0.0
+        if boundary.sph.particles_ng_reordered[i_p, i_b].active:
+            x = boundary.sph.particles_reordered[i_p, i_b].pos
             func_bvh_query_aabb(
-                i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_gather_filter, boundary
+                i_b, i_p, x - h, x + h, boundary.tree, boundary.results, func_boundary_gather_filter, boundary
             )
 
 
@@ -139,11 +139,11 @@ def kernel_scatter_boundary(boundary: qd.template()):
     """The impulse of every SPH particle on the MPM particles of its support, which the gather counted."""
     h = qd.static(boundary.sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_scatter")
-    for i_s, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
-        if boundary.sph.particles_ng_reordered[i_s, i_b].active and boundary.scratch.n_neighbors[i_s, i_b] > 0:
-            x = boundary.sph.particles_reordered[i_s, i_b].pos
+    for i_p, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
+        if boundary.sph.particles_ng_reordered[i_p, i_b].active and boundary.scratch.n_neighbors[i_p, i_b] > 0:
+            x = boundary.sph.particles_reordered[i_p, i_b].pos
             func_bvh_query_aabb(
-                i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary
+                i_b, i_p, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary
             )
 
 

@@ -182,7 +182,9 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     def func_start_line_search(self, control: NewtonControl, f: int):
         mpm_func.func_negate_du(self.grid, self.newton, self.linear, self.linear_block)
         mpm_func.func_record_start_point(self.grid, self.newton)
-        mpm_func.func_contribute_newton_max_disp(f, self.particles, self.grid, self.newton, control, self.mpm_info)
+        mpm_func.func_contribute_newton_max_displacement(
+            f, self.particles, self.grid, self.newton, control, self.mpm_info
+        )
         mpm_func.func_cap_inversion_step(
             f, self.particles, self.grid, self.newton, control, self.particles_info, self.materials, self.mpm_info
         )
@@ -203,12 +205,12 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
 
     @qd.func
     def func_vertex_value(self, f: int, i_v: int):
-        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        _, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
         return mpm_func.particle_node_sum(slots, w, self.newton.u)
 
     @qd.func
     def func_vertex_rows(self, i_v: int):
-        env, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
+        _, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
         return 8, self.linear_block.row_start[()] + slots, w
 
     # ------------------------------------------- wall pairs -------------------------------------------
@@ -220,19 +222,23 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @qd.func
     def wall_pair_terms(self, i_pair: int):
         """Environment, energy, gradient and Hessian of the row of a wall pair at the current iterate."""
-        env, slots, w = mpm_func.particle_stencil(self.wall_pairs.s[i_pair], self.grid, self.newton, self.mpm_info)
-        dx = mpm_func.particle_node_sum(slots, w, self.newton.u)
-        J = mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair])
-        energy, g, H = mpm_func.soft_row_terms(J, self.wall_pairs.D[i_pair], self.wall_pairs.t[i_pair], dx)
-        return env, energy, g, H
+        i_b, slots, w = mpm_func.particle_stencil(
+            self.wall_pairs.sorted_idx[i_pair], self.grid, self.newton, self.mpm_info
+        )
+        u_p = mpm_func.particle_node_sum(slots, w, self.newton.u)
+        direction = mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair])
+        energy, g, H = mpm_func.soft_row_terms(
+            direction, self.wall_pairs.stiffness[i_pair], self.wall_pairs.target[i_pair], u_p
+        )
+        return i_b, energy, g, H
 
     @qd.func(requires_top_level=True)
     def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
         """Write the gradient and Hessian of the row of every wall pair at the current iterate on its particle."""
         qd.loop_config(name="mpm_wall_pair_terms")
         for i_pair in range(self.wall_pairs.n_pairs[()]):
-            env, energy, g, H = self.wall_pair_terms(i_pair)
-            i_v = self.vertex_range.offset[()] + self.wall_pairs.s[i_pair]
+            i_b, energy, g, H = self.wall_pair_terms(i_pair)
+            i_v = self.vertex_range.offset[()] + self.wall_pairs.sorted_idx[i_pair]
             contact.write_doublet(contact.matrices.doublet_offsets[i_kind] + i_pair, i_v, g)
             contact.write_triplet(contact.matrices.triplet_offsets[i_kind] + i_pair, i_v, i_v, H)
 
@@ -241,8 +247,8 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         """Add the energy of the row of every wall pair at the current iterate into the entry of its environment."""
         qd.loop_config(name="mpm_wall_pair_energy")
         for i_pair in range(self.wall_pairs.n_pairs[()]):
-            env, energy, g, H = self.wall_pair_terms(i_pair)
-            qd.atomic_add(energies[env], energy)
+            i_b, energy, g, H = self.wall_pair_terms(i_pair)
+            qd.atomic_add(energies[i_b], energy)
 
 
 @qd.data_oriented
@@ -649,7 +655,7 @@ class MPMSolver(ParticleSolver):
             self.mpm_info,
         )
         n_pairs = int(qd_to_numpy(self._newton_participant.wall_pairs.n_pairs))
-        if n_pairs > self._newton_participant.wall_pairs.s.shape[0]:
+        if n_pairs > self._newton_participant.wall_pairs.sorted_idx.shape[0]:
             self._newton_participant.replace_wall_pairs(build_wall_pairs(grown_capacity(n_pairs)))
             kernel_wall_pairs(
                 f,
