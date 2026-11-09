@@ -235,7 +235,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, precision, show_viewer):
+def test_per_step_pid_target_grad_matches_fd(n_envs, grad_free_with_revolute, precision, show_viewer):
     # The setters take turns every other step, each target holding over the step in between: position-velocity, then
     # position, then velocity on the hinge alone, then position-velocity again. A target loses its gradient from the
     # steps after the next setter, which overwrites it or switches its dof to a mode that ignores it. The last dimension
