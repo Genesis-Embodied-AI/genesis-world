@@ -892,7 +892,7 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         et al. 2016, "XPBD: Position-Based Simulation of Compliant Constrained Dynamics"). With it, the stiffness of a
         material follows its compliances whatever the number of iterations, and the relaxation factors of the materials
         have no effect. Without it, the stiffness also depends on the number of iterations, and the relaxation factors
-        tune it. Defaults to False.
+        tune it. Defaults to True.
     position_tolerance : float, optional
         Correction in meters under which the constraint loop stops before `solver_iterations`, once no particle moves by
         more than this value in an iteration. A larger value saves iterations once the particles settle, at the cost of
@@ -919,7 +919,7 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
     sor_relaxation: PositiveFloat = 1.5
     stabilization_iterations: NonNegativeInt = 1
     sleep_threshold: NonNegativeFloat = 0.0
-    use_xpbd: bool = False
+    use_xpbd: bool = True
     position_tolerance: NonNegativeFloat = 0.0
 
     # self collision

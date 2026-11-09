@@ -145,12 +145,13 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
     vels = cloth_2.get_particles_vel()
     assert_allclose(vels, 0.0, tol=tol)
 
-    # Attach top-left corner and simulate for a while
+    # Attach top-left corner and simulate for a while. The cloth hardly stretches, so the lifted corner drags it over the
+    # ground before it settles, here and after its release.
     particle_idx = cloth_2.find_closest_particle((-1, -1, 0))
     particle_pos_ref = (-0.5, -0.5, 0.05)
     cloth_2.set_particles_pos(particle_pos_ref, particle_idx)
     cloth_2.fix_particles(particle_idx)
-    for i in range(60):
+    for i in range(100):
         scene.step()
 
     # Make sure that the corner is at the target position, some points are still on the ground, and none are moving
@@ -166,7 +167,7 @@ def test_cloth_attach_fixed_point(n_envs, material_type, show_viewer, tol):
 
     # Release cloth
     cloth_2.release_particle(particle_idx)
-    for i in range(30):
+    for i in range(60):
         scene.step()
 
     # Make sure that the cloth is laying on the ground without moving
