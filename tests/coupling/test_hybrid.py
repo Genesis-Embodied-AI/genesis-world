@@ -301,10 +301,11 @@ def test_deformable_parallel(show_viewer):
 
 
 @pytest.mark.required
-def test_fem_outside_mpm_grid(precision, show_viewer, tol):
+def test_fem_mpm_coupling(precision, show_viewer, tol):
     GRAVITY = -9.81
     DT = 2e-3
-    N_STEPS = 10
+    N_STEPS_FREE_FALL = 10
+    N_STEPS = 100
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -322,10 +323,10 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
+    block = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
-            size=(0.05, 0.05, 0.05),
+            pos=(0.0, 0.0, 0.0675),
+            size=(0.1, 0.1, 0.035),
         ),
         material=gs.materials.MPM.Elastic(),
     )
@@ -334,6 +335,15 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     # lambda = E * nu / ((1 + nu) * (1 - 2 * nu)) and mu = E / (2 * (1 + nu)). The rest shape of a body accumulates
     # a velocity noise of the order of t * E * eps / (rho * h) after a time t, with eps the machine epsilon, which must
     # stay under the tolerance. Meanwhile, single precision takes a softer material.
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.12),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e6 if precision == "64" else 1e5,
+        ),
+    )
     fem = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.4, 0.0, 0.5),
@@ -345,11 +355,21 @@ def test_fem_outside_mpm_grid(precision, show_viewer, tol):
     )
     scene.build(n_envs=2)
 
-    for _ in range(N_STEPS):
+    for _ in range(N_STEPS_FREE_FALL):
         scene.step()
 
     # An unstressed body far from the grid falls freely, every vertex at the same velocity
-    assert_allclose(fem.get_state().vel, (0.0, 0.0, GRAVITY * DT * N_STEPS), tol=tol)
+    assert_allclose(fem.get_state().vel, (0.0, 0.0, GRAVITY * DT * N_STEPS_FREE_FALL), tol=tol)
+
+    for _ in range(N_STEPS - N_STEPS_FREE_FALL):
+        scene.step()
+
+    # The box dropped on the block comes to rest on top of it. Its surface stands off the topmost particles by less
+    # than one grid cell, the reach of the coupling.
+    box_state = box.get_state()
+    assert_allclose(box_state.vel, 0.0, atol=5e-3)
+    gap = box_state.pos[..., 2].min(dim=-1).values - block.get_particles_pos()[..., 2].max(dim=-1).values
+    assert ((gap > 0.0) & (gap < scene.mpm_solver.dx)).all()
 
 
 @pytest.mark.parametrize(
