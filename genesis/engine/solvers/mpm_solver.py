@@ -1024,7 +1024,9 @@ class MPMSolver(ParticleSolver):
         """
         Attach some particles to a rigid link with critically damped springs.
 
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
+        Each particle is pulled toward the position it holds now, expressed in the frame of the link. A spring applies the
+        force -k (x - x_t) - 2 sqrt(k m) (v - v_t) to a particle of mass m, x_t and v_t being the position and velocity
+        of its target.
 
         Parameters
         ----------
@@ -1133,15 +1135,21 @@ class MPMSolver(ParticleSolver):
                 # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
                 # reverse a field read back after it is overwritten in the same kernel.
                 target_pos = self.particle_constraints[i_p, i_b].target_pos
+                target_vel = qd.Vector.zero(gs.qd_float, 3)
                 i_l = self.particle_constraints[i_p, i_b].link_idx
                 if i_l >= 0:
                     link_pos = links_state.pos[i_l, i_b]
                     link_quat = links_state.quat[i_l, i_b]
                     local_pos = self.particle_constraints[i_p, i_b].link_local_pos
                     target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
+                    target_vel = links_state.cd_vel[i_l, i_b] + links_state.cd_ang[i_l, i_b].cross(
+                        target_pos - links_state.root_COM[i_l, i_b]
+                    )
 
-                # The critically damped spring is integrated by backward Euler, the position moving with the velocity it
-                # gives, which keeps it stable whatever its stiffness: m (v' - v) = dt (-k (x + dt v' - x_t) - c v').
+                # The spring is integrated by backward Euler on the offset to the target, the offset moving with the
+                # relative velocity it gives, which keeps it stable whatever its stiffness. The rigid solver has already
+                # stepped and g2p has already advected the particle, so both offset and relative velocity are taken at
+                # the end of the substep: m (v' - v) = -dt (k (x - x_t + dt (v' - v_t)) + c (v' - v_t)).
                 stiffness = self.particle_constraints[i_p, i_b].stiffness
                 mass = self.particles_info[i_p].mass / self._particle_volume_scale
                 damping = 2.0 * qd.math.sqrt(stiffness * mass)
@@ -1151,10 +1159,13 @@ class MPMSolver(ParticleSolver):
                 pos = self.particles[f + 1, i_p, i_b].pos
                 vel = self.particles[f + 1, i_p, i_b].vel
                 pos_error = pos - target_pos
+                vel_error = vel - target_vel
 
-                vel_delta = -(dt_damping_stiffness * vel + dt * stiffness * pos_error) / (mass + dt_damping_stiffness)
+                vel_delta = -(dt_damping_stiffness * vel_error + dt * stiffness * pos_error) / (
+                    mass + dt_damping_stiffness
+                )
                 # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
-                self.particles[f + 1, i_p, i_b].vel += vel_delta
+                qd.atomic_add(self.particles[f + 1, i_p, i_b].vel, vel_delta)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
