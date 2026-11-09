@@ -228,12 +228,12 @@ def test_halt_on_nan(show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
     "coupler_type, material_model, fem_floor_contact_type",
     [
-        (gs.options.SAPCouplerOptions, "linear", "tet"),
-        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
+        # The SAP coupler supports 64 bits precision alone
+        pytest.param(gs.options.SAPCouplerOptions, "linear", "tet", marks=pytest.mark.precision("64")),
+        pytest.param(gs.options.SAPCouplerOptions, "linear_corotated", "vert", marks=pytest.mark.precision("64")),
         (gs.options.LegacyCouplerOptions, "linear", None),
     ],
 )
@@ -362,14 +362,14 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
     # Without Poisson contraction, the bar stretches uniaxially under its own weight, and its free end comes to rest
     # rho * g * L^2 / (2 * E) below its initial height.
     bar_state = bar.get_state()
-    assert_allclose(bar_state.vel, 0.0, atol=2e-14)
+    assert_allclose(bar_state.vel, 0.0, atol=2e-14 if gs.np_float == np.float64 else 2e-5)
     is_bottom = bar_pos_0[:, 2] < bar_pos_0[:, 2].min() + gs.EPS
     bar_sag = (bar_pos_0[is_bottom, 2] - bar_state.pos[..., is_bottom, 2]).mean()
-    assert_allclose(bar_sag, BAR_RHO * GRAVITY * BAR_LENGTH**2 / (2 * BAR_E), rtol=2e-3)
+    rtol = 2e-3 if gs.np_float == np.float64 else 1e-2
+    assert_allclose(bar_sag, BAR_RHO * GRAVITY * BAR_LENGTH**2 / (2 * BAR_E), rtol=rtol)
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_legacy_coupler_rigid_velocity_correction(show_viewer):
     DT = 0.01
@@ -450,11 +450,11 @@ def test_legacy_coupler_rigid_velocity_correction(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("use_implicit_solver", [False, True])
-@pytest.mark.parametrize("precision", ["64"])
 def test_hard_constraint(use_implicit_solver, show_viewer):
     DT = 0.01
     GRAVITY = 9.81
-    DAMPING_ALPHA = 0.5
+    DAMPING = 0.5
+    DAMPING_BETA = 5e-4
     N_SUBSTEPS = 2 if use_implicit_solver else 6
     # The free fall at the end crosses z=0, where a scene without ground plane has no floor to stop it
     HEIGHT = 0.5
@@ -463,6 +463,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     MOTION_RADIUS = 0.1
     MOTION_SPEED = 0.005
     VERTICES_IDX = [5, 7]
+    MODE_AMPLITUDE = 1e-3
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -473,7 +474,10 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=use_implicit_solver,
             pcg_threshold=1e-20,
-            damping_alpha=DAMPING_ALPHA,
+            # Each solver reads its own damping option
+            damping=DAMPING,
+            damping_alpha=DAMPING,
+            damping_beta=DAMPING_BETA,
             enable_vertex_constraints=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -513,6 +517,13 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
             model="linear_corotated" if use_implicit_solver else "stable_neohookean",
         ),
     )
+    vibrating_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.5, 0.0, HEIGHT + BOX_SIZE / 2),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        ),
+        material=free_material,
+    )
     anchor = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(10.0, 0.0, HEIGHT),
@@ -523,6 +534,42 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     )
     scene.build(n_envs=2)
     free_boxes_pos_0 = torch.stack([free_box.get_state().pos for free_box in free_boxes])
+    substep_dt = DT / N_SUBSTEPS
+
+    # Each vertex carries a quarter of the rest mass of every element it belongs to
+    boxes_elems = torch.stack([entity.get_el2v() for entity in (box, vibrating_box)])
+    boxes_verts_rest = torch.stack([entity.init_positions for entity in (box, vibrating_box)])
+    boxes_elems_verts = torch.eye(box.n_vertices, dtype=gs.tc_float, device=gs.device)[boxes_elems]
+    boxes_elems_pos = boxes_elems_verts @ boxes_verts_rest[:, None]
+    boxes_edges_rest = boxes_elems_pos[..., :3, :] - boxes_elems_pos[..., 3:, :]
+    boxes_elems_vol = torch.linalg.det(boxes_edges_rest).abs() / 6.0
+    boxes_verts_mass = torch.einsum("beam,be->bm", boxes_elems_verts, 0.25 * RHO * boxes_elems_vol)
+    elems, _ = boxes_elems
+    edges_rest, vibrating_edges_rest = boxes_edges_rest
+    elems_vol, vibrating_elems_vol = boxes_elems_vol
+    verts_mass, vibrating_verts_mass = boxes_verts_mass
+
+    # The stiffness matrix of the linear model assembles V * (lam * g_a g_b^T + mu * g_b g_a^T + mu * (g_a . g_b) * I)
+    # over the vertices a and b of each element, g_a being the gradient of the shape function of vertex a.
+    shape_grads = torch.linalg.inv(vibrating_edges_rest)
+    shape_grads = torch.cat((shape_grads, -shape_grads.sum(dim=-1, keepdim=True)), dim=-1)
+    elems_grads_outer = torch.einsum("eia,ejb->eabij", shape_grads, shape_grads)
+    elems_grads_dot = elems_grads_outer.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+    elems_stiffness = vibrating_elems_vol[:, None, None, None, None] * (
+        free_material.lam * elems_grads_outer
+        + free_material.mu * elems_grads_outer.transpose(-1, -2)
+        + free_material.mu * elems_grads_dot[..., None, None] * torch.eye(3, dtype=gs.tc_float, device=gs.device)
+    )
+    stiffness = torch.einsum("eam,ebn,eabij->minj", boxes_elems_verts[1], boxes_elems_verts[1], elems_stiffness)
+
+    # The lowest elastic mode follows the six rigid modes, normalized to a unit modal mass
+    dofs_mass_inv_sqrt = vibrating_verts_mass.repeat_interleave(3).rsqrt()
+    stiffness = stiffness.reshape(3 * vibrating_box.n_vertices, 3 * vibrating_box.n_vertices)
+    omegas_sqr, modes = np.linalg.eigh(tensor_to_array(dofs_mass_inv_sqrt[:, None] * stiffness * dofs_mass_inv_sqrt))
+    omega_sqr = omegas_sqr[6]
+    mode = dofs_mass_inv_sqrt * torch.tensor(modes[:, 6], dtype=gs.tc_float, device=gs.device)
+    mode = mode.reshape(vibrating_box.n_vertices, 3)
+    vibrating_box.set_position(vibrating_box.init_positions + MODE_AMPLITUDE * mode)
 
     assert_equal(box.get_el2v(), box.elems)
 
@@ -530,6 +577,23 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     box.set_vertex_constraints(VERTICES_IDX)
     scene.step()
     assert_allclose(box.get_state().pos[..., VERTICES_IDX, :], target_poss, tol=1e-8)
+
+    if use_implicit_solver:
+        # The box released in its lowest elastic mode keeps vibrating in it, the gravity moving its translation alone.
+        # Each substep of the implicit solver solves (1 + h * c + h^2 * omega^2) * v' = v - h * omega^2 * q for the
+        # modal velocity, with c = alpha + beta * omega^2 the Rayleigh damping of the mode, then q' = q + h * v'.
+        mode_pos, mode_vel = MODE_AMPLITUDE, 0.0
+        for _ in range(N_SUBSTEPS):
+            mode_vel = (mode_vel - substep_dt * omega_sqr * mode_pos) / (
+                1.0 + substep_dt * (DAMPING + DAMPING_BETA * omega_sqr) + substep_dt**2 * omega_sqr
+            )
+            mode_pos = mode_pos + substep_dt * mode_vel
+        vibrating_box_state = vibrating_box.get_state()
+        modal_mass = vibrating_verts_mass[:, None] * mode
+        vibrating_box_disp = vibrating_box_state.pos - vibrating_box.init_positions
+        rtol = 1e-12 if gs.np_float == np.float64 else 2e-4
+        assert_allclose((vibrating_box_disp * modal_mass).sum((-2, -1)), mode_pos, rtol=rtol)
+        assert_allclose((vibrating_box_state.vel * modal_mass).sum((-2, -1)), mode_vel, rtol=rtol)
 
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)
@@ -582,36 +646,33 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     com_pos_delta = -0.5 * GRAVITY * (n_steps * DT) ** 2
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
 
-    # The undeformed boxes follow the discrete free fall exactly: the gravity kick of each substep, damped by the
-    # Rayleigh mass damping under the implicit solver, then the position update by the new velocity.
-    substep_dt = DT / N_SUBSTEPS
+    # The undeformed boxes follow the discrete free fall exactly: the gravity kick of each substep, followed by the
+    # Rayleigh mass damping under the implicit solver and preceded by the exponential velocity decay under the explicit
+    # one, then the position update by the new velocity.
     vel_z, pos_z = 0.0, 0.0
     for _ in range((1 + int(0.5 * math.pi / MOTION_SPEED) + n_steps) * N_SUBSTEPS):
-        vel_z = vel_z - GRAVITY * substep_dt
         if use_implicit_solver:
-            vel_z = vel_z / (1.0 + DAMPING_ALPHA * substep_dt)
+            vel_z = (vel_z - GRAVITY * substep_dt) / (1.0 + DAMPING * substep_dt)
+        else:
+            vel_z = vel_z * math.exp(-DAMPING * substep_dt) - GRAVITY * substep_dt
         pos_z = pos_z + substep_dt * vel_z
     free_boxes_pos = torch.stack([free_box.get_state().pos for free_box in free_boxes])
-    assert_allclose(free_boxes_pos - free_boxes_pos_0, (0.0, 0.0, pos_z), tol=5e-10)
+    tol = 5e-10 if gs.np_float == np.float64 else (1e-3 if use_implicit_solver else 1e-4)
+    assert_allclose(free_boxes_pos - free_boxes_pos_0, (0.0, 0.0, pos_z), tol=tol)
 
-    # The internal forces of the deformed box add up to zero, so its center of mass falls like the free boxes. Each
-    # vertex carries a quarter of the rest mass of every element it belongs to.
-    verts = box.init_positions
-    elems = box.get_el2v()
-    edges_rest = verts[elems[:, :3]] - verts[elems[:, 3:]]
-    elems_vol = torch.linalg.det(edges_rest).abs() / 6.0
-    elems_mass = RHO * elems_vol
-    verts_mass = torch.zeros_like(verts[:, 0])
-    for i in range(4):
-        verts_mass.index_add_(0, elems[:, i], 0.25 * elems_mass)
+    # The internal forces of the deformed box add up to zero, so its center of mass falls like the free boxes
     com_vel = verts_mass @ box_state_0.vel / verts_mass.sum()
     com_pos = verts_mass @ box_state_0.pos / verts_mass.sum()
     for _ in range(n_steps * N_SUBSTEPS):
-        com_vel[..., 2] -= GRAVITY * substep_dt
         if use_implicit_solver:
-            com_vel /= 1.0 + DAMPING_ALPHA * substep_dt
+            com_vel[..., 2] -= GRAVITY * substep_dt
+            com_vel /= 1.0 + DAMPING * substep_dt
+        else:
+            com_vel *= math.exp(-DAMPING * substep_dt)
+            com_vel[..., 2] -= GRAVITY * substep_dt
         com_pos += substep_dt * com_vel
-    assert_allclose(verts_mass @ box.get_state().pos / verts_mass.sum(), com_pos, atol=5e-12)
+    atol = 5e-12 if gs.np_float == np.float64 else (2e-5 if use_implicit_solver else 2e-6)
+    assert_allclose(verts_mass @ box.get_state().pos / verts_mass.sum(), com_pos, atol=atol)
 
     # The internal forces are the opposite of the gradient of the elastic energy of the box with respect to the
     # positions of its vertices. The linear corotated model takes the rotation of each element as given.
@@ -629,7 +690,8 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         energy_density = 0.5 * mu * (F_norm_sqr - 3.0 - (F_norm_sqr + 1.0).log()) + 0.5 * lam * J_shift**2
     energy = (elems_vol * energy_density).sum()
     forces = scene.fem_solver.get_forces()[:, box.v_start : box.v_start + box.n_vertices]
-    assert_allclose(forces, -torch.autograd.grad(energy, pos)[0], tol=1e-11)
+    tol = 1e-11 if gs.np_float == np.float64 else (5e-3 if use_implicit_solver else 5e-4)
+    assert_allclose(forces, -torch.autograd.grad(energy, pos)[0], tol=tol)
 
     if use_implicit_solver:
         # Replaying the free fall reproduces it bitwise
@@ -652,7 +714,8 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     box.remove_vertex_constraints(envs_idx=[1])
     box.set_vertex_constraints(VERTICES_IDX, link=anchor.base_link, envs_idx=[1])
     scene.step()
-    assert_allclose(box.get_state().pos[1, VERTICES_IDX, :], target_poss[1], tol=1e-8)
+    tol = 1e-8 if gs.np_float == np.float64 else 2e-6
+    assert_allclose(box.get_state().pos[1, VERTICES_IDX, :], target_poss[1], tol=tol)
 
     box.remove_vertex_constraints(envs_idx=[1])
     box.set_position((0.0, 0.0, 0.0))
