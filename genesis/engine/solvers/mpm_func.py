@@ -180,12 +180,26 @@ def cofactor(v: qd.types.vector(3)):
 @qd.func
 def cofactor_jacobian(v: qd.types.vector(3)):
     """Jacobian of cofactor(v), the third component off the diagonal and zero on it."""
-    return qd.Matrix([[0.0, v[2], v[1]], [v[2], 0.0, v[0]], [v[1], v[0], 0.0]], dt=gs.qd_float)
+    return qd.Matrix(
+        [
+            [0.0, v[2], v[1]],
+            [v[2], 0.0, v[0]],
+            [v[1], v[0], 0.0],
+        ],
+        dt=gs.qd_float,
+    )
 
 
 @qd.func
 def diagonal(v: qd.types.vector(3)):
-    return qd.Matrix([[v[0], 0.0, 0.0], [0.0, v[1], 0.0], [0.0, 0.0, v[2]]], dt=gs.qd_float)
+    return qd.Matrix(
+        [
+            [v[0], 0.0, 0.0],
+            [0.0, v[1], 0.0],
+            [0.0, 0.0, v[2]],
+        ],
+        dt=gs.qd_float,
+    )
 
 
 @qd.func
@@ -562,12 +576,7 @@ def material_params(slot: int, Jp: float, materials: MpmMaterialTable, mpm_info:
 
 @qd.func
 def elastic_principal(
-    slot: int,
-    sigma: qd.types.vector(3),
-    mu: float,
-    lam: float,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
+    slot: int, sigma: qd.types.vector(3), mu: float, lam: float, materials: MpmMaterialTable, mpm_info: MpmInfo
 ):
     """Energy density, principal gradient and Hessian of the energy family of a material slot."""
     psi = gs.qd_float(0.0)

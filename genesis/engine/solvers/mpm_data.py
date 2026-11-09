@@ -2,6 +2,7 @@
 and the Newton state over the grid displacement."""
 
 import numpy as np
+
 import quadrants as qd
 
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSumScratch, dynamic_exclusive_sum_sizes

@@ -14,7 +14,6 @@ from genesis.engine.solvers.mpm_data import (
     MpmParticles,
     MpmParticlesInfo,
 )
-from genesis.engine.solvers.newton_linear import LinearBlock, NewtonLinearScratch
 from genesis.engine.solvers.mpm_func import (
     cofactor,
     cofactor_jacobian,
@@ -25,6 +24,7 @@ from genesis.engine.solvers.mpm_func import (
     stencil_dots,
     stencil_node_slots,
 )
+from genesis.engine.solvers.newton_linear import LinearBlock, NewtonLinearScratch
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo

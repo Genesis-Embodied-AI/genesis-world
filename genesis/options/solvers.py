@@ -426,8 +426,7 @@ class NewtonOptions(Options):
         'line_search_max_iterations' trials, instead of keeping its last trial. The energy of the solve has no barrier,
         so it decreases along every Newton direction of a consistent implementation within a few halvings of the step:
         such a line search reveals an energy that disagrees with its gradient or with the curvature of the Newton
-        system. Every solve then waits for the device.
-        Defaults to False.
+        system. Every solve then waits for the device. Defaults to False.
     line_search_shrink : float, optional
         Factor of the step of the line search between two trials, strictly between 0 and 1. Defaults to 0.5.
     pcg_max_iterations : int, optional

@@ -763,15 +763,12 @@ class SPHSolver(ParticleSolver):
         """The SPH integration steps of the substep except the advection of the last one, which follows the couplings in
         substep_post_coupling."""
         if self.is_active:
-            from genesis.engine.couplers import LegacyCoupler
-
             if self._has_boundary:
                 self._boundary.build(f)
             for _ in range(self._n_subcycles - 1):
                 self._advance_velocity(f)
                 # The coupler collides the last step with Rigid itself
-                if isinstance(self._coupler, LegacyCoupler):
-                    self._coupler.couple_sph_rigid(f)
+                self._coupler.couple_sph_rigid(f)
                 self._kernel_advect_position(f)
                 self._kernel_copy_from_reordered(f)
             self._advance_velocity(f)

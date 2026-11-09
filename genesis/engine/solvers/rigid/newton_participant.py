@@ -4,6 +4,7 @@ scene (see RigidSolver.build_newton_participant)."""
 from collections.abc import Iterator
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs

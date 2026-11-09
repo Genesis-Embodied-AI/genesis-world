@@ -45,7 +45,11 @@ class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
 def link_point_jacobian(r: qd.types.vector(3)):
     """Map P = [I, -[r]x] of the spatial displacement of a link to the displacement of its point at arm r."""
     return qd.Matrix(
-        [[1.0, 0.0, 0.0, 0.0, r[2], -r[1]], [0.0, 1.0, 0.0, -r[2], 0.0, r[0]], [0.0, 0.0, 1.0, r[1], -r[0], 0.0]],
+        [
+            [1.0, 0.0, 0.0, 0.0, r[2], -r[1]],
+            [0.0, 1.0, 0.0, -r[2], 0.0, r[0]],
+            [0.0, 0.0, 1.0, r[1], -r[0], 0.0],
+        ],
         dt=gs.qd_float,
     )
 
@@ -81,12 +85,7 @@ def geom_sdf_grid(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsS
 
 @qd.func
 def geom_sdf(
-    i_g: int,
-    i_b: int,
-    x: qd.types.vector(3),
-    geoms_state: GeomsState,
-    geoms_info: GeomsInfo,
-    sdf_info: SDFInfo,
+    i_g: int, i_b: int, x: qd.types.vector(3), geoms_state: GeomsState, geoms_info: GeomsInfo, sdf_info: SDFInfo
 ):
     """Signed distance of a world point to a geom, by `geom_sdf_grid` for the geoms with a distance grid."""
     signed_distance = gs.qd_float(0.0)

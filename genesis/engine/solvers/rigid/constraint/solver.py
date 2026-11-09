@@ -2,8 +2,9 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -32,7 +33,6 @@ from genesis.utils.data import DataItem, eoa, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
-from . import backward as backward_constraint_solver, linesearch, noslip as constraint_noslip
 from .island import (
     func_build_islands,
     func_build_islands_coop,
@@ -44,6 +44,9 @@ from .island import (
     func_sort_contacts,
     func_sort_contacts_coop,
 )
+from . import backward as backward_constraint_solver
+from . import linesearch
+from . import noslip as constraint_noslip
 
 
 @qd.func

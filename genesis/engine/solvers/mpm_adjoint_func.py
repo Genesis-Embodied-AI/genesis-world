@@ -6,7 +6,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.array_class import LinksState
 
-from .newton_linear import LinearBlock, NewtonLinearScratch
 from .mpm_data import (
     BLOCK_CELLS,
     MpmGridScratch,
@@ -43,6 +42,7 @@ from .mpm_func import (
     unpack_block,
     wall_normal,
 )
+from .newton_linear import LinearBlock, NewtonLinearScratch
 
 
 @qd.func

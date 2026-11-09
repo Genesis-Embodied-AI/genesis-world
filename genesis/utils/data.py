@@ -23,6 +23,7 @@ import quadrants as qd
 from quadrants.lang.util import is_data_oriented, to_numpy_type
 
 import genesis as gs
+from genesis.repr_base import RBC
 from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array, get_own_annotations
 
@@ -935,8 +936,6 @@ def iter_data_oriented(name: str, root: object, kind: DataKind) -> Iterator[Arra
     owner yields. An array reached twice is yielded once, under the first name reaching it. A quadrants array carrying
     gradients yields them as one more item named 'grad'.
     """
-    from genesis.repr_base import RBC
-
     seen = set()
     pending = [(name, root)]
     while pending:
