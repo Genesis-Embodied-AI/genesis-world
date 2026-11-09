@@ -240,9 +240,9 @@ def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, pre
     # position, then velocity on the hinge alone, then position-velocity again. A target loses its gradient from the
     # steps after the next setter, which overwrites it or switches its dof to a mode that ignores it. The last dimension
     # of a target selects its setter, and the free joint drives its rotation from Euler angle targets. A plain target
-    # finally overwrites those of the free joint, while the hinge keeps its last tracked one. Between steps, the loss
-    # reads the forces and the acceleration of the dofs over the last step, the control force depending on the targets
-    # directly.
+    # finally overwrites those of the free joint, while the hinge keeps its last tracked one. Zeroing the velocity of the
+    # hinge midway restarts the integral of its velocity error. Between steps, the loss reads the forces and the
+    # acceleration of the dofs over the last step, the control force depending on the targets directly.
     pair = make_diff_scene_pair(
         grad_free_with_revolute,
         n_envs=n_envs,
@@ -281,6 +281,8 @@ def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, pre
                     entity.get_dofs_acc(),
                 ]
             )
+        if i_step == 5:
+            entity.set_dofs_velocity(None, dofs_idx_local=[n_dofs - 1])
         if i_step == len(inputs):
             entity.control_dofs_position(0.1, dofs_idx_local=range(n_dofs - 1))
 
