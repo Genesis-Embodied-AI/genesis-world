@@ -122,9 +122,9 @@ def test_robot_grasp_fem(coup_type, show_viewer):
         assert franka_finger_links_idx.issubset(franka_ipc_links_idx)
 
     ipc_positions_0 = get_ipc_positions(scene, solver_type="fem", idx=box_entity_idx, envs_idx=envs_idx)
-    gs_positions_0 = tensor_to_array(box.get_state().pos)
+    gs_positions_0 = tensor_to_array(box.get_verts_pos())
     assert_allclose(ipc_positions_0, gs_positions_0, atol=TOL_SINGLE)
-    gs_centroid_0 = gs_positions_0.mean(axis=1)
+    gs_centroid_0 = gs_positions_0.mean(axis=-2)
     assert_allclose(gs_centroid_0, BOX_POS, atol=1e-4)
 
     def run_stage(target_qpos, finger_pos, duration):
@@ -161,7 +161,7 @@ def test_robot_grasp_fem(coup_type, show_viewer):
     run_stage(qpos, finger_pos=0.0, duration=0.5)
 
     ipc_positions_f = get_ipc_positions(scene, solver_type="fem", idx=box_entity_idx, envs_idx=envs_idx)
-    gs_positions_f = tensor_to_array(box.get_state().pos)
+    gs_positions_f = tensor_to_array(box.get_verts_pos())
     assert_allclose(ipc_positions_f, gs_positions_f, atol=TOL_SINGLE)
     assert (gs_positions_f[..., 2] - gs_positions_0[..., 2] >= 0.2).all()
     finger_aabb = tensor_to_array(franka.get_link("right_finger").get_AABB())
@@ -243,15 +243,16 @@ def test_cloth_corner_drag(n_envs, show_viewer):
         box.control_dofs_position(init_dof)
 
     # Find corner vertices: closest to the gripped corner
-    cloth_positions = tensor_to_array(cloth.get_state().pos)
-    corner_idx = np.argmin(np.linalg.norm(cloth_positions, axis=-1), axis=-1)
+    # The environments start alike, so the corner vertex is the same in all of them
+    cloth_positions = tensor_to_array(cloth.get_verts_pos())
+    corner_idx = np.argmin(np.linalg.norm(cloth_positions, axis=-1), axis=-1).flat[0]
 
     # Settle: let cloth conform to grip
     for _ in range(40):
         scene.step()
 
     # Make sure that the cloth did not fall
-    cloth_pos = cloth.get_state().pos[range(scene.sim._B), corner_idx]
+    cloth_pos = cloth.get_verts_pos(verts_idx_local=corner_idx)
     assert_allclose(cloth_pos, 0.0, tol=5e-3)
 
     # Drag phase
@@ -268,7 +269,7 @@ def test_cloth_corner_drag(n_envs, show_viewer):
                 (x - BOX_SIZE, y, z - BOX_SIZE), (dx, dy, dz), dofs_idx_local=slice(0, 3)
             )
         scene.step()
-        assert_allclose(cloth.get_state().pos[range(scene.sim._B), corner_idx], (x, y, z), tol=0.01)
+        assert_allclose(cloth.get_verts_pos(verts_idx_local=corner_idx), (x, y, z), tol=0.01)
 
 
 @pytest.mark.required
@@ -353,10 +354,10 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
         box.control_dofs_position(init_dof)
 
     # Wait for steady state
-    cloth_positions_0 = tensor_to_array(cloth.get_state().pos)
+    cloth_positions_0 = tensor_to_array(cloth.get_verts_pos())
     for _ in range(20):
         scene.step()
-    cloth_positions_f = tensor_to_array(cloth.get_state().pos)
+    cloth_positions_f = tensor_to_array(cloth.get_verts_pos())
     assert_allclose(cloth_positions_f, cloth_positions_0, atol=0.005)
     assert_allclose(cloth_positions_f[..., 2], cloth_positions_0[..., 2], tol=5e-3)
 
@@ -367,7 +368,7 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
         box.control_dofs_position(init_dof)
     for _ in range(80):
         scene.step()
-    cloth_positions_f = tensor_to_array(cloth.get_state().pos)
+    cloth_positions_f = tensor_to_array(cloth.get_verts_pos())
     for box in boxes:
         init_dof = tensor_to_array(box.get_dofs_position())
         dist_vertices = np.linalg.norm(cloth_positions_f[..., :2] - init_dof[..., None, :2], axis=-1).min(axis=-1)
@@ -411,7 +412,7 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
         scene.step()
 
     # Lost grip
-    cloth_positions_f = tensor_to_array(cloth.get_state().pos)
+    cloth_positions_f = tensor_to_array(cloth.get_verts_pos())
     cloth_aabb_min, cloth_aabb_max = cloth_positions_f.min(axis=-2), cloth_positions_f.max(axis=-2)
     cloth_aabb_extent = cloth_aabb_max - cloth_aabb_min
     assert (cloth_aabb_extent[..., :2] < STRETCH_RATIO_1 * (2.0 * CLOTH_HALF)).all()

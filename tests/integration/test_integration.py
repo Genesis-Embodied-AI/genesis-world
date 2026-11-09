@@ -300,7 +300,7 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
 
     # init
     franka.set_qpos((-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04))
-    box_pos_0 = obj.get_state().pos.mean(dim=-2)
+    box_pos_0 = obj.get_verts_pos().mean(dim=-2)
 
     # hold
     qpos = franka.inverse_kinematics(link=end_effector, pos=GRAPPER_POS_START, quat=(0, 1, 0, 0))
@@ -321,12 +321,12 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
         scene.step()
 
     # Check that the box has moved by the expected delta, without slipping
-    box_pos_f = obj.get_state().pos.mean(dim=-2)
+    box_pos_f = obj.get_verts_pos().mean(dim=-2)
     assert_allclose(box_pos_f - box_pos_0, np.array(GRAPPER_POS_END) - np.array(GRAPPER_POS_START), tol=5e-3)
 
     # wait for a while
     for i in range(25):
         franka.control_dofs_force(np.array([-1.0, -1.0]), fingers_dof)
         scene.step()
-    box_pos_post = obj.get_state().pos.mean(dim=-2)
+    box_pos_post = obj.get_verts_pos().mean(dim=-2)
     assert_allclose(box_pos_f, box_pos_post, atol=1e-3)

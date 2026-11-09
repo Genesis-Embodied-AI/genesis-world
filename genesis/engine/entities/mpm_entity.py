@@ -5,7 +5,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
@@ -88,39 +87,7 @@ class MPMEntity(ParticleEntity):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(
-            self._sim.cur_substep_local,
-            self.active,
-            self._particle_start,
-            self._n_particles,
-            self._material.idx,
-            self._material._default_Jp,
-            self._material.rho,
-            self._particles,
-        )
-
-    @gs.assert_built
-    def get_state(self):
-        """
-        Get the current physical state of the particle entity.
-
-        Returns
-        -------
-        state : MPMEntityState
-            The current state of all physical properties of the entity, a view of the state of the solver.
-        """
-        solver_state = self._solver.get_state(self._sim.cur_substep_local)
-        particles_slice = slice(self._particle_start, self._particle_start + self._n_particles)
-        return MPMEntityState(
-            self,
-            self._sim.cur_step_global,
-            solver_state.pos[:, particles_slice],
-            solver_state.vel[:, particles_slice],
-            solver_state.C[:, particles_slice],
-            solver_state.F[:, particles_slice],
-            solver_state.Jp[:, particles_slice],
-            solver_state.active[:, particles_slice],
-        )
+        self._solver.add_particles(self.active, self._particle_start, self._material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

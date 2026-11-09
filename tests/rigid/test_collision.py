@@ -2087,16 +2087,16 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     #   - contact set    -> narrowphase / pruning
     #   - contact order  -> contact sort
     #   - dofs velocity  -> constraint solve
-    from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
+    from genesis.engine.solvers.rigid.data import RigidConfig
 
     if prefer_decomposed_solver is not None:
-        init_orig = RigidSimStaticConfig.__init__
+        init_orig = RigidConfig.__init__
 
         def init_forced(self, *args, **kwargs):
             kwargs["prefer_decomposed_solver"] = int(prefer_decomposed_solver)
             init_orig(self, *args, **kwargs)
 
-        monkeypatch.setattr(RigidSimStaticConfig, "__init__", init_forced)
+        monkeypatch.setattr(RigidConfig, "__init__", init_forced)
 
     N_TRIALS = 4
     N_STEPS = 25

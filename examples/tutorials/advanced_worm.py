@@ -62,10 +62,10 @@ scene.build(n_envs=3)
 
 
 if isinstance(worm.material, gs.materials.MPM.Muscle):
-    pos = worm.get_state().pos[0]
+    pos = worm.get_particles_pos()[0]
     n_units = worm.n_particles
 elif isinstance(worm.material, gs.materials.FEM.Muscle):
-    pos = worm.get_state().pos[0, worm.get_el2v()].mean(dim=1)
+    pos = worm.get_verts_pos()[0, worm.get_el2v()].mean(dim=1)
     n_units = worm.n_elements
 else:
     raise NotImplementedError

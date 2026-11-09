@@ -91,11 +91,10 @@ def test_mpm_rigid_push_grad(show_viewer):
         v_far_list.append(v_far_i)
         scene.step()
         if i == HORIZON // 2:
-            mpm_particles = scene.get_state().solvers_state[scene.solvers.index(scene.mpm_solver)]
-            loss += torch.pow(mpm_particles.pos[mpm_particles.active == 1] - goal, 2).sum()
+            loss += torch.pow(obj.get_particles_pos()[obj.get_particles_active()] - goal, 2).sum()
         if i == HORIZON - 2:
-            loss += torch.pow(obj.get_state().pos - goal, 2).sum()
-            loss += stick_far.get_state().pos.sum()
+            loss += torch.pow(obj.get_particles_pos() - goal, 2).sum()
+            loss += stick_far.get_pos().sum()
     loss.backward()
 
     # Every step but the last must move the object (non-zero velocity gradient). The last step comes after every state
@@ -187,9 +186,10 @@ def test_deformable_inputs_grad_matches_fd(use_implicit_solver, precision, show_
         # The loss of each box, which alone depends on its inputs since the boxes are uncoupled. The goal of the FEM box
         # keeps the gradient of each of its inputs clear of the noise of the finite differences under both solvers.
         goals = ((-0.15, -0.05, 0.0), (0.35, -0.05, 0.0))
+        boxes_pos = (mpm_box.get_particles_pos(), fem_box.get_verts_pos())
         return tuple(
-            ((box.get_state().pos - torch.tensor(goal, dtype=gs.tc_float, device=gs.device)) ** 2).sum()
-            for box, goal in zip(boxes, goals)
+            ((box_pos - torch.tensor(goal, dtype=gs.tc_float, device=gs.device)) ** 2).sum()
+            for box_pos, goal in zip(boxes_pos, goals)
         )
 
     # Actuations of each box (MPM, FEM) at steps 0, 1 and 3, then their initial velocities
@@ -208,7 +208,9 @@ def test_deformable_inputs_grad_matches_fd(use_implicit_solver, precision, show_
             [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]] * 2, dtype=gs.tc_float, device=gs.device, requires_grad=True
         )
         mpm_box.set_particles_vel(vels_repeated, particles_idx_local=particles_idx_local)
-        vel = mpm_box.get_state().vel[[0, 1], np.array(particles_idx_local).reshape(-1, 2)[:, 0]]
+        # Each environment reads the particle of the last occurrence in its own row
+        particles_idx_last = torch.tensor(particles_idx_local, device=gs.device).expand(2, 2)[:, 1]
+        vel = mpm_box.get_particles_vel()[torch.arange(2, device=gs.device), particles_idx_last]
         assert_allclose(vel, vels_repeated[:, 1], tol=gs.EPS)
         (vels_grad,) = torch.autograd.grad(vel.sum(), vels_repeated)
         assert_allclose(vels_grad[:, 0], 0.0, tol=gs.EPS)
@@ -317,8 +319,8 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
         box.set_dofs_velocity(vel)
         for _ in range(20):
             scene.step()
-        box_loss = (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
-        return box_loss, (fem_block.get_state().pos ** 2).sum()
+        box_loss = (box.get_pos() ** 2).sum() + (box.get_quat()[..., 1:] ** 2).sum()
+        return box_loss, (fem_block.get_verts_pos() ** 2).sum()
 
     tol = 2e-10 if precision == "64" else 1e-4
     # In single precision, the implicit solve rounds the displacement of each substep against the positions, which

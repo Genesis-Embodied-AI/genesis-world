@@ -1,6 +1,8 @@
-import pytest
 import numpy as np
+import pytest
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 
@@ -264,3 +266,49 @@ def test_cloth_attach_rigid_link(show_viewer):
     link_disp = link_pos2 - link_pos1
     cloth_disp = cloth_pos2 - cloth_pos1
     assert ((cloth_disp.movedim(0, -2) - link_disp).norm(dim=-1) > 0.2).all()
+
+
+@pytest.mark.required
+def test_force_field_reads_time_of_each_env(show_viewer, tol):
+    DT, SUBSTEPS, N_STEPS = 1e-2, 2, 10
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, 1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.4),
+        ),
+        show_viewer=show_viewer,
+    )
+    particles = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+
+    @qd.func
+    def acc_growing_with_time(pos, vel, t, i):
+        return qd.Vector([t, 0.0, 0.0], dt=gs.qd_float)
+
+    scene.add_force_field(gs.force_fields.Custom(acc_growing_with_time))
+    scene.build(n_envs=2)
+
+    # An environment reset mid-run restarts its clock, which the force fields read, while the other one carries on
+    init_state = scene.get_state()
+    for _ in range(N_STEPS):
+        scene.step()
+    particles_vel_0 = particles.get_particles_vel()
+    # The velocity after n substeps, each reading the time at its start, and n spanning one run then two
+    substep_dt = DT / SUBSTEPS
+    vels_x_ana = [substep_dt**2 * n * (n - 1) / 2 for n in (N_STEPS * SUBSTEPS, 2 * N_STEPS * SUBSTEPS)]
+    assert_allclose(particles_vel_0[..., 0], vels_x_ana[0], tol=tol)
+    scene.reset(init_state, envs_idx=[1])
+    for _ in range(N_STEPS):
+        scene.step()
+    particles_vel = particles.get_particles_vel()
+    assert_allclose(particles_vel[1], particles_vel_0[0], tol=gs.EPS)
+    assert_allclose(particles_vel[0, :, 0], vels_x_ana[1], tol=tol)

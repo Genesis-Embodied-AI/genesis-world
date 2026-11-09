@@ -34,7 +34,7 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization
-from genesis.utils.data import ArrayItem, ConfigItem, DataKind, ScalarItem, StaticConfig
+from genesis.utils.data import ArrayItem, Config, ConfigItem, DataKind, ScalarItem
 from genesis.utils.misc import data_to_array, tensor_to_array
 from genesis.utils.tools import Rate
 
@@ -173,7 +173,7 @@ def _json_value(value):
     while pending:
         container, key = pending.pop()
         item = container[key]
-        if isinstance(item, StaticConfig):
+        if isinstance(item, Config):
             item = {name: config_value for name, config_value in vars(item).items() if not name.startswith("_")}
             pending += [(item, name) for name in item]
         elif isinstance(item, tuple):

@@ -53,10 +53,11 @@ def test_muscle(n_envs, muscle_material, use_implicit_solver, show_viewer):
     )
     scene.build(n_envs=n_envs)
 
-    if isinstance(box.material, gs.materials.MPM.Muscle):
-        pos = box.get_state().pos[0]
-    else:  # isinstance(box.material, gs.materials.FEM.Muscle):
-        pos = box.get_state().pos[0, box.get_el2v()].mean(1)
+    is_mpm = isinstance(box.material, gs.materials.MPM.Muscle)
+    get_pos = box.get_particles_pos if is_mpm else box.get_verts_pos
+    pos = get_pos() if n_envs == 0 else get_pos()[0]
+    if not is_mpm:
+        pos = pos[box.get_el2v()].mean(1)
 
     # Four groups: upper or lower part of the body, fore or hind part
     pos_min, pos_max = pos.amin(0), pos.amax(0)
@@ -64,11 +65,11 @@ def test_muscle(n_envs, muscle_material, use_implicit_solver, show_viewer):
     is_hind = pos[:, 1] >= pos_min[1] + 0.6 * (pos_max[1] - pos_min[1])
     box.set_muscle(muscle_group=2 * is_lower + is_hind, muscle_direction=(0.0, 1.0, 0.0))
 
-    pos_init = box.get_state().pos.clone()
+    pos_init = get_pos()
     for i in range(50):
         box.set_actuation([0.0, 0.0, 0.0, 0.5 + np.sin(0.005 * np.pi * i)])
         scene.step()
-    pos = box.get_state().pos
+    pos = get_pos()
 
     # Contracting the lower hind fibers along the body axis shortens the body, and bends its hind part upward off the
     # plane, which raises its center of mass

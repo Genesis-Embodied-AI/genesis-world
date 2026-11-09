@@ -1,251 +1,276 @@
 import math
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.entities import (
-    PBD2DEntity,
-    PBD3DEntity,
-    PBDFreeParticleEntity,
-    PBDParticleEntity,
-)
+from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
+from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
-from genesis.engine.states.solvers import PBDSolverState
-from genesis.utils.geom import SpatialHasher
+from genesis.options.solvers import PBDOptions
+from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, Size, eoa, field, iter_data
+from genesis.utils.geom import (
+    PARTICLES,
+    SpatialHashGrid,
+    func_hash_grid_to_slot,
+    func_hash_pos_to_grid,
+    func_hash_sort_particles,
+)
 
+from .base_solver import VFACES, VVERTS, SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
-    from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
+    from genesis.engine.scene import Scene
+    from genesis.engine.simulator import Simulator
 
 
-@qd.data_oriented
+EDGES = Size("edges")
+INNER_EDGES = Size("inner_edges")
+ELEMS = Size("elems")
+
+
+class PBDParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
+    """
+    Runtime state of the position-based dynamics (PBD) particles, one value per particle and environment.
+
+    `ipos` is the position at the start of the substep, `dpos` the correction of the position a constraint projection
+    accumulates, and `lam` the Lagrange multiplier of the density constraint. A particle that is not free takes no
+    correction, and follows what the user or a rigid link imposes.
+    """
+
+    pos: qd.Tensor = field((float, 3))
+    vel: qd.Tensor = field((float, 3))
+    ipos: qd.Tensor = field((float, 3))
+    dpos: qd.Tensor = field((float, 3))
+    lam: qd.Tensor = field(float)
+    is_free: qd.Tensor = field(bool)
+    is_active: qd.Tensor = field(bool)
+
+
+class PBDParticlesInfo(Data, kind=DataKind.CONSTANT, shape=(PARTICLES,)):
+    """
+    Model parameters of the position-based dynamics (PBD) particles, one value per particle.
+
+    `pos_rest` is the position at rest, `rho_rest` the rest density of a liquid, `mu_s` and `mu_k` the static and
+    kinetic friction coefficients, and the relaxations scale the corrections of the density and viscosity constraints.
+    """
+
+    mass: qd.Tensor = field(float)
+    pos_rest: qd.Tensor = field((float, 3))
+    rho_rest: qd.Tensor = field(float)
+    material_type: qd.Tensor = field(int)
+    mu_s: qd.Tensor = field(float)
+    mu_k: qd.Tensor = field(float)
+    air_resistance: qd.Tensor = field(float)
+    density_relaxation: qd.Tensor = field(float)
+    viscosity_relaxation: qd.Tensor = field(float)
+
+
+class PBDEdgesInfo(Data, kind=DataKind.CONSTANT, shape=(EDGES,)):
+    """The stretch constraints, one per edge between the two particles `particles_idx`."""
+
+    len_rest: qd.Tensor = field(float)
+    stretch_compliance: qd.Tensor = field(float)
+    stretch_relaxation: qd.Tensor = field(float)
+    particles_idx: qd.Tensor = field((int, 2))
+
+
+class PBDInnerEdgesInfo(Data, kind=DataKind.CONSTANT, shape=(INNER_EDGES,)):
+    """
+    The bending constraints, one per inner edge.
+
+    The edge joins the first two particles of `particles_idx`, its adjacent faces closing on the last two.
+    """
+
+    len_rest: qd.Tensor = field(float)
+    bending_compliance: qd.Tensor = field(float)
+    bending_relaxation: qd.Tensor = field(float)
+    particles_idx: qd.Tensor = field((int, 4))
+
+
+class PBDElemsInfo(Data, kind=DataKind.CONSTANT, shape=(ELEMS,)):
+    """The volume constraints, one per tetrahedron of the four particles `particles_idx`."""
+
+    vol_rest: qd.Tensor = field(float)
+    volume_compliance: qd.Tensor = field(float)
+    volume_relaxation: qd.Tensor = field(float)
+    particles_idx: qd.Tensor = field((int, 4))
+
+
+class PBDState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the position-based dynamics (PBD) solver.
+
+    The constraints of the topology run on the particles, those of their neighborhood on the copy of the particles
+    sorted by hash grid cell, `particles_reordered`, which the particles take back at the end of the substep.
+    """
+
+    particles: PBDParticles
+    particles_reordered: PBDParticles = field(kind=DataKind.SCRATCH)
+    hash_grid: SpatialHashGrid
+
+
+class PBDInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the position-based dynamics (PBD) solver.
+
+    The smoothing kernels of the density and viscosity constraints take the distances between particles divided by
+    `dist_scale`, which gives them a support radius of one, and `poly6_coef` and `spiky_coef` normalize them.
+    `lambda_eps` regularizes the Lagrange multiplier of the density constraint, and `s_corr_delta_q` and `s_corr_k`
+    shape its artificial pressure. `vvert_uvs` and `vfaces_vverts_idx` are the texture coordinates (UVs) of the visual
+    vertices and the visual vertices of the faces.
+    """
+
+    particles: PBDParticlesInfo
+    edges: PBDEdgesInfo
+    inner_edges: PBDInnerEdgesInfo
+    elems: PBDElemsInfo
+    boundary: CubeBoundary
+    vverts_uvs: qd.Tensor = field((float, 2), shape=(VVERTS,))
+    vfaces_vverts_idx: qd.Tensor = field((int, 3), shape=(VFACES,))
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
+    substep_dt: qd.Tensor = field(float, shape=())
+    substep_dt_sq: qd.Tensor = field(float, shape=())
+    particle_size: qd.Tensor = field(float, shape=())
+    dist_scale: qd.Tensor = field(float, shape=())
+    poly6_coef: qd.Tensor = field(float, shape=())
+    spiky_coef: qd.Tensor = field(float, shape=())
+    lambda_eps: qd.Tensor = field(float, shape=())
+    s_corr_delta_q: qd.Tensor = field(float, shape=())
+    s_corr_k: qd.Tensor = field(float, shape=())
+    EPS: qd.Tensor = field(float, shape=())
+
+
+class PBDConfig(Config):
+    """
+    The iterations of the constraint projections of the position-based dynamics (PBD) solver.
+
+    Its kernels unroll them.
+    """
+
+    n_stretch_iterations: int
+    n_bending_iterations: int
+    n_volume_iterations: int
+    n_density_iterations: int
+    n_viscosity_iterations: int
+
+
 class PBDSolver(ParticleSolver):
     material_cls = PBD.Base
-    # ------------------------------------------------------------------------------------
-    # --------------------------------- Initialization -----------------------------------
-    # ------------------------------------------------------------------------------------
 
     class MATERIAL(gs.IntEnum):
         CLOTH = 0
         ELASTIC = 1
         LIQUID = 2
-        PARTICLE = 3  # non-physics particles
+        # Particles following no physics
+        PARTICLE = 3
 
-    def __init__(self, scene, sim, options):
+    # ------------------------------------------------------------------------------------
+    # --------------------------------- Initialization -----------------------------------
+    # ------------------------------------------------------------------------------------
+
+    def __init__(self, scene: "Scene", sim: "Simulator", options: PBDOptions) -> None:
         super().__init__(scene, sim, options)
 
-        # options
-        self._upper_bound = np.array(options.upper_bound)
-        self._lower_bound = np.array(options.lower_bound)
-        self._particle_size = options.particle_size
         self._max_stretch_solver_iterations = options.max_stretch_solver_iterations
         self._max_bending_solver_iterations = options.max_bending_solver_iterations
         self._max_volume_solver_iterations = options.max_volume_solver_iterations
         self._max_density_solver_iterations = options.max_density_solver_iterations
         self._max_viscosity_solver_iterations = options.max_viscosity_solver_iterations
 
-        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
+        self._hash_grid_cell_size = options.hash_grid_cell_size
+        self._hash_grid_res = options._hash_grid_res
 
-        # -Neighbours_Setting-
-        self.dist_scale = self.particle_radius / 0.4  # @Zhenjia: double check this
-        self.h = 1.0
-        self.h_2 = self.h**2
-        self.h_6 = self.h**6
-        self.h_9 = self.h**9
+        self._n_edges: int | None = None
+        self._n_inner_edges: int | None = None
+        self._n_elems: int | None = None
 
-        # -POLY6_KERNEL-
-        self.poly6_Coe = 315.0 / (64 * math.pi)
+        self.pbd_state: PBDState | None = None
+        self.pbd_info: PBDInfo | None = None
+        self.pbd_config: PBDConfig | None = None
 
-        # -SPIKY_KERNEL-
-        self.spiky_Coe = -45.0 / math.pi
-
-        # -LAMBDAS-
-        self.lambda_epsilon = 100.0
-
-        # -S_CORR-
-        self.S_Corr_delta_q = 0.3
-        self.S_Corr_k = 0.0001
-
-        # -Gradient Approx. delta difference-
-        self.g_del = 0.01
-
-        self.vorqd_epsilon = 0.01
-
-        # spatial hasher
-        self.sh = SpatialHasher(
-            cell_size=options.hash_grid_cell_size,
-            grid_res=options._hash_grid_res,
-        )
-
-        # boundary
-        self.setup_boundary()
-
-    def setup_boundary(self):
-        self.boundary = CubeBoundary(
-            lower=self._lower_bound,
-            upper=self._upper_bound,
-        )
-
-    def init_vvert_fields(self):
-        struct_vvert_info = qd.types.struct(
-            support_idxs=qd.types.vector(self._n_vvert_supports, gs.qd_int),
-            support_weights=qd.types.vector(self._n_vvert_supports, gs.qd_float),
-        )
-        self.vverts_info = struct_vvert_info.field(shape=(max(self._n_vverts, 1),), layout=qd.Layout.SOA)
-
-        struct_vvert_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
-        self.vverts_render = struct_vvert_state_render.field(
-            shape=(max(self._n_vverts, 1), self._B), layout=qd.Layout.SOA
-        )
-
-        # UV coordinates for visual vertices (static, same across all batch envs)
-        self.vverts_uvs = qd.field(dtype=gs.qd_vec2, shape=(max(self._n_vverts, 1),))
-
-        # Triangle face indices for visual mesh (static)
-        self.vfaces_indices = qd.field(dtype=gs.qd_ivec3, shape=(max(self._n_vfaces, 1),))
-
-    def init_particle_fields(self):
-        # particles information (static)
-        struct_particle_info = qd.types.struct(
-            mass=gs.qd_float,
-            pos_rest=gs.qd_vec3,
-            rho_rest=gs.qd_float,
-            material_type=gs.qd_int,
-            mu_s=gs.qd_float,
-            mu_k=gs.qd_float,
-            air_resistance=gs.qd_float,
-            density_relaxation=gs.qd_float,
-            viscosity_relaxation=gs.qd_float,
-        )
-        # particles state (dynamic)
-        struct_particle_state = qd.types.struct(
-            free=gs.qd_bool,  # if not free, the particle is not affected by internal forces and solely controlled by external user until released
-            pos=gs.qd_vec3,  # position
-            ipos=gs.qd_vec3,  # initial position
-            dpos=gs.qd_vec3,  # delta position
-            vel=gs.qd_vec3,  # velocity
-            lam=gs.qd_float,
-            rho=gs.qd_float,
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(
-            reordered_idx=gs.qd_int,
-            active=gs.qd_bool,
-        )
-
-        # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            vel=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
-
-        self.particles_info = struct_particle_info.field(shape=(self._n_particles,), layout=qd.Layout.SOA)
-        self.particles_info_reordered = struct_particle_info.field(
-            shape=(self._n_particles, self._B), layout=qd.Layout.SOA
-        )
-        self.particles = struct_particle_state.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_reordered = struct_particle_state.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_ng = struct_particle_state_ng.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_ng_reordered = struct_particle_state_ng.field(
-            shape=(self._n_particles, self._B), layout=qd.Layout.SOA
-        )
-        self.particles_render = struct_particle_state_render.field(
-            shape=(self._n_particles, self._B), layout=qd.Layout.SOA
-        )
-
-    def init_edge_fields(self):
-        # edges information for stretch. edge: (v1, v2)
-        struct_edge_info = qd.types.struct(
-            len_rest=gs.qd_float,
-            stretch_compliance=gs.qd_float,
-            stretch_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-        )
-        self.edges_info = struct_edge_info.field(shape=(max(1, self._n_edges),), layout=qd.Layout.SOA)
-
-        # inner edges information for bending. edge: (v1, v2), adjacent faces: (v1, v2, v3) and (v1, v2, v4)
-        struct_inner_edge_info = qd.types.struct(
-            len_rest=gs.qd_float,
-            bending_compliance=gs.qd_float,
-            bending_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-            v3=gs.qd_int,
-            v4=gs.qd_int,
-        )
-        self.inner_edges_info = struct_inner_edge_info.field(shape=(max(self._n_inner_edges, 1),), layout=qd.Layout.SOA)
-
-    def init_elem_fields(self):
-        struct_elem_info = qd.types.struct(
-            vol_rest=gs.qd_float,
-            volume_compliance=gs.qd_float,
-            volume_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-            v3=gs.qd_int,
-            v4=gs.qd_int,
-        )
-        self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
-
-    def build(self):
+    def build(self) -> None:
         super().build()
 
-        self._B = self._sim._B
-        self._n_particles = self.n_particles
-        self._n_fluid_particles = self.n_fluid_particles
         self._n_edges = self.n_edges
         self._n_inner_edges = self.n_inner_edges
         self._n_elems = self.n_elems
-        self._n_vverts = self.n_vverts
-        self._n_vfaces = self.n_vfaces
+
+        is_unused = not self.is_active
+        sizes = dict(envs=self._B, particles=self._n_particles)
+        self.pbd_state = PBDState(
+            sizes=dict(sizes, hash_slots=np.prod(self._hash_grid_res)),
+            values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
+            env_first=False,
+            unused=is_unused,
+        )
+        info_values = {}
+        if self.is_active:
+            # The kernels of the density and viscosity constraints have a support radius of one once the distances are
+            # divided by the scale.
+            info_values = dict(
+                boundary=dict(lower=self.boundary_lower, upper=self.boundary_upper, restitution=0.0),
+                substep_dt=self.substep_dt,
+                substep_dt_sq=self.substep_dt**2,
+                particle_size=self._particle_size,
+                dist_scale=self.particle_radius / 0.4,
+                poly6_coef=315.0 / (64 * math.pi),
+                spiky_coef=-45.0 / math.pi,
+                lambda_eps=100.0,
+                s_corr_delta_q=0.3,
+                s_corr_k=0.0001,
+                EPS=gs.EPS,
+            )
+        self.pbd_info = PBDInfo(
+            sizes=dict(
+                sizes,
+                edges=self._n_edges,
+                inner_edges=self._n_inner_edges,
+                elems=self._n_elems,
+                vverts=self._n_vverts,
+                vfaces=self._n_vfaces,
+            ),
+            values=info_values,
+            unused=is_unused,
+        )
+        self.pbd_config = PBDConfig(
+            n_stretch_iterations=self._max_stretch_solver_iterations,
+            n_bending_iterations=self._max_bending_solver_iterations,
+            n_volume_iterations=self._max_volume_solver_iterations,
+            n_density_iterations=self._max_density_solver_iterations,
+            n_viscosity_iterations=self._max_viscosity_solver_iterations,
+        )
+        self._particles_pos = self.pbd_state.particles.pos
+        self._particles_vel = self.pbd_state.particles.vel
+        self._particles_is_active = self.pbd_state.particles.is_active
+        self._particles_mass = self.pbd_info.particles.mass
+        self._build_render(has_vverts=True)
 
         if self.is_active:
-            self.sh.build(self._n_particles, self._B)
-
-            self.init_particle_fields()
-            self.init_edge_fields()
-            self.init_elem_fields()
-            self.init_vvert_fields()
-
             for entity in self._entities:
                 entity._add_to_solver()
 
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity()
+        self._build_gravity(self.pbd_info.gravity)
 
-    @qd.kernel
-    def add_uvs_and_faces(
-        self,
-        vvert_start: int,
-        vface_start: int,
-        uvs: qd.types.ndarray(element_dim=1),
-        faces: qd.types.ndarray(element_dim=1),
-    ):
-        """Add the render UVs and faces of an entity, an empty `uvs` leaving its slice of the UV buffer zeroed."""
-        for i_vv_ in range(uvs.shape[0]):
-            self.vverts_uvs[i_vv_ + vvert_start] = uvs[i_vv_]
-        for i_vf_ in range(faces.shape[0]):
-            self.vfaces_indices[i_vf_ + vface_start] = faces[i_vf_] + vvert_start
+    def add_uvs_and_faces(self, vvert_start: int, vface_start: int, uvs: np.ndarray, faces: np.ndarray) -> None:
+        """
+        Add the render texture coordinates (UVs) and faces of an entity.
 
-    @qd.kernel
+        An empty `uvs` leaves the slice of the entity in the UV buffer zeroed.
+        """
+        kernel_add_uvs_and_faces(vvert_start, vface_start, uvs, faces, self.pbd_info)
+
     def add_particles(
         self,
-        f: int,
         particle_start: int,
-        active: int,
+        is_active: bool,
         material_type: int,
         mass: float,
         rho_rest: float,
@@ -254,99 +279,76 @@ class PBDSolver(ParticleSolver):
         air_resistance: float,
         density_relaxation: float,
         viscosity_relaxation: float,
-        particles: qd.types.ndarray(),
-    ):
+        particles: np.ndarray,
+    ) -> None:
         """Add the particles of an entity at rest, each property a material leaves out being given zero."""
-        for i_p_ in range(particles.shape[0]):
-            i_p = i_p_ + particle_start
-            for j in qd.static(range(3)):
-                self.particles_info[i_p].pos_rest[j] = particles[i_p_, j]
-            self.particles_info[i_p].material_type = material_type
-            self.particles_info[i_p].mass = mass
-            self.particles_info[i_p].rho_rest = rho_rest
-            self.particles_info[i_p].mu_s = mu_s
-            self.particles_info[i_p].mu_k = mu_k
-            self.particles_info[i_p].air_resistance = air_resistance
-            self.particles_info[i_p].density_relaxation = density_relaxation
-            self.particles_info[i_p].viscosity_relaxation = viscosity_relaxation
+        kernel_add_particles(
+            particle_start,
+            is_active,
+            material_type,
+            mass,
+            rho_rest,
+            mu_s,
+            mu_k,
+            air_resistance,
+            density_relaxation,
+            viscosity_relaxation,
+            particles,
+            self.pbd_state,
+            self.pbd_info,
+        )
 
-        for i_p_, i_b in qd.ndrange(particles.shape[0], self._B):
-            i_p = i_p_ + particle_start
-            for j in qd.static(range(3)):
-                self.particles[i_p, i_b].pos[j] = particles[i_p_, j]
-            self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-            self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-            self.particles[i_p, i_b].free = True
-            self.particles_ng[i_p, i_b].active = qd.cast(active, gs.qd_bool)
-
-    @qd.kernel
     def add_edges(
         self,
         edge_start: int,
         particle_start: int,
         stretch_compliance: float,
         stretch_relaxation: float,
-        edges: qd.types.ndarray(),
-        edges_len_rest: qd.types.ndarray(),
-    ):
+        edges: np.ndarray,
+        edges_len_rest: np.ndarray,
+    ) -> None:
         """Add the stretch constraints of the edges of an entity, given by the local indices of their particles."""
-        for i_e_ in range(edges.shape[0]):
-            i_e = i_e_ + edge_start
-            self.edges_info[i_e].stretch_compliance = stretch_compliance
-            self.edges_info[i_e].stretch_relaxation = stretch_relaxation
-            self.edges_info[i_e].len_rest = edges_len_rest[i_e_]
-            self.edges_info[i_e].v1 = particle_start + edges[i_e_, 0]
-            self.edges_info[i_e].v2 = particle_start + edges[i_e_, 1]
+        kernel_add_edges(
+            edge_start, particle_start, stretch_compliance, stretch_relaxation, edges, edges_len_rest, self.pbd_info
+        )
 
-    @qd.kernel
     def add_inner_edges(
         self,
         inner_edge_start: int,
         particle_start: int,
         bending_compliance: float,
         bending_relaxation: float,
-        inner_edges: qd.types.ndarray(),
-        inner_edges_len_rest: qd.types.ndarray(),
-    ):
-        """Add the bending constraints of the inner edges of an entity, given by the local indices of their particles."""
-        for i_ie_ in range(inner_edges.shape[0]):
-            i_ie = i_ie_ + inner_edge_start
-            self.inner_edges_info[i_ie].bending_compliance = bending_compliance
-            self.inner_edges_info[i_ie].bending_relaxation = bending_relaxation
-            self.inner_edges_info[i_ie].len_rest = inner_edges_len_rest[i_ie_]
-            self.inner_edges_info[i_ie].v1 = particle_start + inner_edges[i_ie_, 0]
-            self.inner_edges_info[i_ie].v2 = particle_start + inner_edges[i_ie_, 1]
-            self.inner_edges_info[i_ie].v3 = particle_start + inner_edges[i_ie_, 2]
-            self.inner_edges_info[i_ie].v4 = particle_start + inner_edges[i_ie_, 3]
+        inner_edges: np.ndarray,
+        inner_edges_len_rest: np.ndarray,
+    ) -> None:
+        """Add the bending constraints of the inner edges of an entity, given by the local indices of its particles."""
+        kernel_add_inner_edges(
+            inner_edge_start,
+            particle_start,
+            bending_compliance,
+            bending_relaxation,
+            inner_edges,
+            inner_edges_len_rest,
+            self.pbd_info,
+        )
 
-    @qd.kernel
     def add_elems(
         self,
         elem_start: int,
         particle_start: int,
         volume_compliance: float,
         volume_relaxation: float,
-        elems: qd.types.ndarray(),
-        elems_vol_rest: qd.types.ndarray(),
-    ):
+        elems: np.ndarray,
+        elems_vol_rest: np.ndarray,
+    ) -> None:
         """Add the volume constraints of the tetrahedra of an entity, given by the local indices of their particles."""
-        for i_el_ in range(elems.shape[0]):
-            i_el = i_el_ + elem_start
-            self.elems_info[i_el].volume_compliance = volume_compliance
-            self.elems_info[i_el].volume_relaxation = volume_relaxation
-            self.elems_info[i_el].vol_rest = elems_vol_rest[i_el_]
-            self.elems_info[i_el].v1 = particle_start + elems[i_el_, 0]
-            self.elems_info[i_el].v2 = particle_start + elems[i_el_, 1]
-            self.elems_info[i_el].v3 = particle_start + elems[i_el_, 2]
-            self.elems_info[i_el].v4 = particle_start + elems[i_el_, 3]
+        kernel_add_elems(
+            elem_start, particle_start, volume_compliance, volume_relaxation, elems, elems_vol_rest, self.pbd_info
+        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @property
-    def is_active(self):
-        return self.n_particles > 0
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
@@ -367,7 +369,6 @@ class PBDSolver(ParticleSolver):
                 vface_start=self.n_vfaces,
                 name=name,
             )
-
         elif isinstance(material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
                 scene=self.scene,
@@ -384,7 +385,6 @@ class PBDSolver(ParticleSolver):
                 vface_start=self.n_vfaces,
                 name=name,
             )
-
         elif isinstance(material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
                 scene=self.scene,
@@ -397,7 +397,6 @@ class PBDSolver(ParticleSolver):
                 particle_start=self.n_particles,
                 name=name,
             )
-
         elif isinstance(material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
                 scene=self.scene,
@@ -410,519 +409,53 @@ class PBDSolver(ParticleSolver):
                 particle_start=self.n_particles,
                 name=name,
             )
-
         else:
             raise NotImplementedError()
 
         self._entities.append(entity)
-
         return entity
-
-    # ------------------------------------------------------------------------------------
-    # ------------------------------------- utils ----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    @qd.func
-    def poly6(self, dist):
-        # dist is a VECTOR
-        result = gs.qd_float(0.0)
-        d = dist.norm() / self.dist_scale
-        if 0 < d < self.h:
-            rhs = (self.h_2 - d * d) * (self.h_2 - d * d) * (self.h_2 - d * d)
-            result = self.poly6_Coe * rhs / self.h_9
-        return result
-
-    @qd.func
-    def poly6_scalar(self, dist):
-        # dist is a SCALAR
-        result = gs.qd_float(0.0)
-        d = dist
-        if 0 < d < self.h:
-            rhs = (self.h_2 - d * d) * (self.h_2 - d * d) * (self.h_2 - d * d)
-            result = self.poly6_Coe * rhs / self.h_9
-        return result
-
-    @qd.func
-    def spiky(self, dist):
-        # dist is a VECTOR
-        result = qd.Vector.zero(gs.qd_float, 3)
-        d = dist.norm() / self.dist_scale
-        if 0 < d < self.h:
-            m = (self.h - d) * (self.h - d)
-            result = (self.spiky_Coe * m / (self.h_6 * d)) * dist / self.dist_scale
-        return result
-
-    @qd.func
-    def S_Corr(self, dist):
-        upper = self.poly6(dist)
-        lower = self.poly6_scalar(self.S_Corr_delta_q)
-        m = upper / lower
-        return -1.0 * self.S_Corr_k * m * m * m * m
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- simulation -------------------------------------
-    # ------------------------------------------------------------------------------------
-    @qd.kernel
-    def _kernel_store_initial_pos(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles[i_p, i_b].ipos = self.particles[i_p, i_b].pos
-
-    @qd.kernel
-    def _kernel_reorder_particles(self, f: qd.i32):
-        self.sh.compute_reordered_idx(
-            self._n_particles, self.particles.pos, self.particles_ng.active, self.particles_ng.reordered_idx
-        )
-
-        # Copy to reordered, the active particles taking the first sorted indices (see compute_reordered_idx).
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles_ng_reordered[i_p, i_b].active = i_p < self.sh.cur_cnt[i_b]
-            if self.particles_ng[i_p, i_b].active:
-                reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
-
-                self.particles_reordered[reordered_idx, i_b] = self.particles[i_p, i_b]
-                self.particles_info_reordered[reordered_idx, i_b] = self.particles_info[i_p]
-
-    @qd.kernel
-    def _kernel_apply_external_force(self, f: qd.i32, t: float):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles[i_p, i_b].free:
-                # gravity
-                self.particles[i_p, i_b].vel = self.particles[i_p, i_b].vel + self._gravity[i_b] * self._substep_dt
-
-                # external force fields
-                acc = qd.Vector.zero(gs.qd_float, 3)
-                for i_ff in qd.static(range(len(self._ffs))):
-                    acc += self._ffs[i_ff].get_acc(self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel, t, i_p)
-                self.particles[i_p, i_b].vel = self.particles[i_p, i_b].vel + acc * self._substep_dt
-
-                if self.particles_info[i_p].material_type == self.MATERIAL.CLOTH:
-                    f_air_resistance = (
-                        self.particles_info[i_p].air_resistance
-                        * self.particles[i_p, i_b].vel.norm()
-                        * self.particles[i_p, i_b].vel
-                    )
-                    self.particles[i_p, i_b].vel = (
-                        self.particles[i_p, i_b].vel
-                        - f_air_resistance / self.particles_info[i_p].mass * self._substep_dt
-                    )
-
-            # attached particles are not free but still need to update position to follow the link
-            self.particles[i_p, i_b].pos = (
-                self.particles[i_p, i_b].pos + self.particles[i_p, i_b].vel * self._substep_dt
-            )
-
-    @qd.kernel
-    def _kernel_solve_stretch(self, f: qd.i32):
-        for _ in qd.static(range(self._max_stretch_solver_iterations)):
-            for i_e, i_b in qd.ndrange(self._n_edges, self._B):
-                v1 = self.edges_info[i_e].v1
-                v2 = self.edges_info[i_e].v2
-
-                w1 = self.particles[v1, i_b].free / self.particles_info[v1].mass
-                w2 = self.particles[v2, i_b].free / self.particles_info[v2].mass
-                n = self.particles[v1, i_b].pos - self.particles[v2, i_b].pos
-                C = n.norm() - self.edges_info[i_e].len_rest
-                alpha = self.edges_info[i_e].stretch_compliance / (self._substep_dt**2)
-                dp = -C / (w1 + w2 + alpha) * n / n.norm(gs.EPS) * self.edges_info[i_e].stretch_relaxation
-                self.particles[v1, i_b].dpos += dp * w1
-                self.particles[v2, i_b].dpos -= dp * w2
-
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
-                    self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_solve_bending(self, f: qd.i32):
-        for _ in qd.static(range(self._max_bending_solver_iterations)):
-            for i_ie, i_b in qd.ndrange(self._n_inner_edges, self._B):  # 140 - 142
-                v1 = self.inner_edges_info[i_ie].v1
-                v2 = self.inner_edges_info[i_ie].v2
-                v3 = self.inner_edges_info[i_ie].v3
-                v4 = self.inner_edges_info[i_ie].v4
-
-                w1 = self.particles[v1, i_b].free / self.particles_info[v1].mass
-                w2 = self.particles[v2, i_b].free / self.particles_info[v2].mass
-                w3 = self.particles[v3, i_b].free / self.particles_info[v3].mass
-                w4 = self.particles[v4, i_b].free / self.particles_info[v4].mass
-
-                if w1 + w2 + w3 + w4 > 0.0:
-                    # https://matthias-research.github.io/pages/publications/posBasedDyn.pdf
-                    # Appendix A: Bending Constraint Projection
-                    p2 = self.particles[v2, i_b].pos - self.particles[v1, i_b].pos
-                    p3 = self.particles[v3, i_b].pos - self.particles[v1, i_b].pos
-                    p4 = self.particles[v4, i_b].pos - self.particles[v1, i_b].pos
-                    l23 = p2.cross(p3).norm()
-                    l24 = p2.cross(p4).norm()
-                    n1 = p2.cross(p3) / l23
-                    n2 = p2.cross(p4) / l24
-                    d = qd.math.clamp(n1.dot(n2), -1.0, 1.0)
-
-                    q3 = (p2.cross(n2) + n1.cross(p2) * d) / l23  # eq. (25)
-                    q4 = (p2.cross(n1) + n2.cross(p2) * d) / l24  # eq. (26)
-                    q2 = -(p3.cross(n2) + n1.cross(p3) * d) / l23 - (p4.cross(n1) + n2.cross(p4) * d) / l24  # eq. (27)
-                    q1 = -q2 - q3 - q4
-                    # eq. (29)
-                    sum_wq = w1 * q1.norm_sqr() + w2 * q2.norm_sqr() + w3 * q3.norm_sqr() + w4 * q4.norm_sqr()
-                    constraint = qd.acos(d) - qd.acos(-1.0)
-
-                    # XPBD
-                    alpha = self.inner_edges_info[i_ie].bending_compliance / (self._substep_dt**2)
-                    constraint = (
-                        -qd.sqrt(1 - d**2)
-                        * constraint
-                        / (sum_wq + alpha)
-                        * self.inner_edges_info[i_ie].bending_relaxation
-                    )
-
-                    self.particles[v1, i_b].dpos += w1 * constraint * q1
-                    self.particles[v2, i_b].dpos += w2 * constraint * q2
-                    self.particles[v3, i_b].dpos += w3 * constraint * q3
-                    self.particles[v4, i_b].dpos += w4 * constraint * q4
-
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
-                    self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_solve_volume(self, f: qd.i32):
-        for _ in qd.static(range(self._max_volume_solver_iterations)):
-            for i_el, i_b in qd.ndrange(self._n_elems, self._B):
-                v1 = self.elems_info[i_el].v1
-                v2 = self.elems_info[i_el].v2
-                v3 = self.elems_info[i_el].v3
-                v4 = self.elems_info[i_el].v4
-
-                p1 = self.particles[v1, i_b].pos
-                p2 = self.particles[v2, i_b].pos
-                p3 = self.particles[v3, i_b].pos
-                p4 = self.particles[v4, i_b].pos
-
-                grad1 = (p4 - p2).cross(p3 - p2) / 6.0
-                grad2 = (p3 - p1).cross(p4 - p1) / 6.0
-                grad3 = (p4 - p1).cross(p2 - p1) / 6.0
-                grad4 = (p2 - p1).cross(p3 - p1) / 6.0
-
-                w1 = self.particles[v1, i_b].free / self.particles_info[v1].mass * grad1.norm_sqr()
-                w2 = self.particles[v2, i_b].free / self.particles_info[v2].mass * grad2.norm_sqr()
-                w3 = self.particles[v3, i_b].free / self.particles_info[v3].mass * grad3.norm_sqr()
-                w4 = self.particles[v4, i_b].free / self.particles_info[v4].mass * grad4.norm_sqr()
-
-                if w1 + w2 + w3 + w4 > 0.0:
-                    vol = gu.qd_tet_vol(p1, p2, p3, p4)
-                    C = vol - self.elems_info[i_el].vol_rest
-                    alpha = self.elems_info[i_el].volume_compliance / (self._substep_dt**2)
-                    s = -C / (w1 + w2 + w3 + w4 + alpha) * self.elems_info[i_el].volume_relaxation
-
-                    self.particles[v1, i_b].dpos += s * w1 * grad1
-                    self.particles[v2, i_b].dpos += s * w2 * grad2
-                    self.particles[v3, i_b].dpos += s * w3 * grad3
-                    self.particles[v4, i_b].dpos += s * w4 * grad4
-
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type != self.MATERIAL.PARTICLE:
-                    self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
-                    self.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.func
-    def _func_solve_collision(self, i, j, i_b):
-        """j -> i"""
-
-        cur_dist = (self.particles_reordered[i, i_b].pos - self.particles_reordered[j, i_b].pos).norm(gs.EPS)
-        rest_dist = (
-            self.particles_info_reordered[i, i_b].pos_rest - self.particles_info_reordered[j, i_b].pos_rest
-        ).norm(gs.EPS)
-        target_dist = self._particle_size  # target particle distance is 2 * particle radius, i.e. particle_size
-        if cur_dist < target_dist and rest_dist > target_dist:
-            wi = self.particles_reordered[i, i_b].free / self.particles_info_reordered[i, i_b].mass
-            wj = self.particles_reordered[j, i_b].free / self.particles_info_reordered[j, i_b].mass
-            n = (self.particles_reordered[i, i_b].pos - self.particles_reordered[j, i_b].pos) / cur_dist
-
-            ### resolve collision ###
-            self.particles_reordered[i, i_b].dpos += wi / (wi + wj) * (target_dist - cur_dist) * n
-
-            ### apply friction ###
-            # https://mmacklin.com/uppfrta_preprint.pdf
-            # equation (23)
-            dv = (self.particles_reordered[i, i_b].pos - self.particles_reordered[i, i_b].ipos) - (
-                self.particles_reordered[j, i_b].pos - self.particles_reordered[j, i_b].ipos
-            )
-            dpos = -(dv - n * n.dot(dv))
-            # equation (24)
-            d = target_dist - cur_dist
-            mu_s = qd.max(self.particles_info_reordered[i, i_b].mu_s, self.particles_info_reordered[j, i_b].mu_s)
-            mu_k = qd.max(self.particles_info_reordered[i, i_b].mu_k, self.particles_info_reordered[j, i_b].mu_k)
-            if dpos.norm() < mu_s * d:
-                self.particles_reordered[i, i_b].dpos += wi / (wi + wj) * dpos
-            else:
-                self.particles_reordered[i, i_b].dpos += (
-                    wi / (wi + wj) * dpos * qd.min(1.0, mu_k * d / dpos.norm(gs.EPS))
-                )
-
-    @qd.kernel
-    def _kernel_solve_collision(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_info_reordered[i_p, i_b].material_type != self.MATERIAL.PARTICLE:
-                base = self.sh.pos_to_grid(self.particles_reordered[i_p, i_b].pos)
-                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                    slot_idx = self.sh.grid_to_slot(base + offset)
-                    for j in range(
-                        self.sh.slot_start[slot_idx, i_b],
-                        self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
-                    ):
-                        if (
-                            i_p != j
-                            and (self.particles_reordered[i_p, i_b].free or self.particles_reordered[j, i_b].free)
-                            and not (
-                                self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID
-                                and self.particles_info_reordered[j, i_b].material_type == self.MATERIAL.LIQUID
-                            )
-                        ):
-                            self._func_solve_collision(i_p, j, i_b)
-
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if (
-                self.particles_reordered[i_p, i_b].free
-                and self.particles_info_reordered[i_p, i_b].material_type != self.MATERIAL.PARTICLE
-            ):
-                self.particles_reordered[i_p, i_b].pos = (
-                    self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
-                )
-                self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_solve_boundary_collision(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            # boundary is enforced regardless of whether free
-            pos_new, vel_new = self.boundary.impose_pos_vel(self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel)
-            self.particles[i_p, i_b].pos = pos_new
-            self.particles[i_p, i_b].vel = vel_new
-
-    @qd.kernel
-    def _kernel_solve_density(self, f: qd.i32):
-        for _ in qd.static(range(self._max_density_solver_iterations)):
-            # ---Calculate lambdas---
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID:
-                    pos_i = self.particles_reordered[i_p, i_b].pos
-                    base = self.sh.pos_to_grid(pos_i)
-                    lower_sum = gs.qd_float(0.0)
-                    rho = gs.qd_float(0.0)
-                    spiky_i = qd.Vector.zero(gs.qd_float, 3)
-                    for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                        slot_idx = self.sh.grid_to_slot(base + offset)
-                        for j in range(
-                            self.sh.slot_start[slot_idx, i_b],
-                            self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
-                        ):
-                            pos_j = self.particles_reordered[j, i_b].pos
-                            # ---Poly6---
-                            rho += self.poly6(pos_i - pos_j) * self.particles_info_reordered[j, i_b].mass
-                            # ---Spiky---
-                            s = self.spiky(pos_i - pos_j) / self.particles_info_reordered[i_p, i_b].rho_rest
-                            spiky_i += s
-                            lower_sum += s.dot(s)
-                    constraint = (rho / self.particles_info_reordered[i_p, i_b].rho_rest) - 1.0
-                    lower_sum += spiky_i.dot(spiky_i)
-                    self.particles_reordered[i_p, i_b].lam = -1.0 * (constraint / (lower_sum + self.lambda_epsilon))
-
-            # ---Calculate delta pos---
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID:
-                    pos_i = self.particles_reordered[i_p, i_b].pos
-                    base = self.sh.pos_to_grid(pos_i)
-                    for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                        slot_idx = self.sh.grid_to_slot(base + offset)
-                        for j in range(
-                            self.sh.slot_start[slot_idx, i_b],
-                            self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
-                        ):
-                            if i_p != j:
-                                pos_j = self.particles_reordered[j, i_b].pos
-                                # ---S_Corr---
-                                scorr = self.S_Corr(pos_i - pos_j)
-                                left = (
-                                    self.particles_reordered[i_p, i_b].lam
-                                    + self.particles_reordered[j, i_b].lam
-                                    + scorr
-                                )
-                                right = self.spiky(pos_i - pos_j)
-                                self.particles_reordered[i_p, i_b].dpos = (
-                                    self.particles_reordered[i_p, i_b].dpos
-                                    + left
-                                    * right
-                                    / self.particles_info_reordered[i_p, i_b].rho_rest
-                                    * self.dist_scale
-                                    * self.particles_info_reordered[i_p, i_b].density_relaxation
-                                )
-
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if (
-                    self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID
-                    and self.particles_reordered[i_p, i_b].free
-                ):
-                    self.particles_reordered[i_p, i_b].pos = (
-                        self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
-                    )
-                    self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_solve_viscosity(self, f: qd.i32):
-        for _ in qd.static(range(self._max_viscosity_solver_iterations)):
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID:
-                    pos_i = self.particles_reordered[i_p, i_b].pos
-                    base = self.sh.pos_to_grid(pos_i)
-                    xsph_sum = qd.Vector.zero(gs.qd_float, 3)
-                    omega_sum = qd.Vector.zero(gs.qd_float, 3)
-                    # -For Gradient Approx.-
-                    dx_sum = qd.Vector.zero(gs.qd_float, 3)
-                    dy_sum = qd.Vector.zero(gs.qd_float, 3)
-                    dz_sum = qd.Vector.zero(gs.qd_float, 3)
-                    n_dx_sum = qd.Vector.zero(gs.qd_float, 3)
-                    n_dy_sum = qd.Vector.zero(gs.qd_float, 3)
-                    n_dz_sum = qd.Vector.zero(gs.qd_float, 3)
-                    dx = qd.Vector([self.g_del, 0.0, 0.0], dt=gs.qd_float)
-                    dy = qd.Vector([0.0, self.g_del, 0.0], dt=gs.qd_float)
-                    dz = qd.Vector([0.0, 0.0, self.g_del], dt=gs.qd_float)
-
-                    for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                        slot_idx = self.sh.grid_to_slot(base + offset)
-                        for j in range(
-                            self.sh.slot_start[slot_idx, i_b],
-                            self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
-                        ):
-                            pos_j = self.particles_reordered[j, i_b].pos
-                            v_ij = (self.particles_reordered[j, i_b].pos - self.particles_reordered[j, i_b].ipos) - (
-                                self.particles_reordered[i_p, i_b].pos - self.particles_reordered[i_p, i_b].ipos
-                            )
-
-                            dist = pos_i - pos_j
-                            # ---Vorticity---
-                            omega_sum += v_ij.cross(self.spiky(dist))
-                            # -Gradient Approx.-
-                            dx_sum += v_ij.cross(self.spiky(dist + dx))
-                            dy_sum += v_ij.cross(self.spiky(dist + dy))
-                            dz_sum += v_ij.cross(self.spiky(dist + dz))
-                            n_dx_sum += v_ij.cross(self.spiky(dist - dx))
-                            n_dy_sum += v_ij.cross(self.spiky(dist - dy))
-                            n_dz_sum += v_ij.cross(self.spiky(dist - dz))
-                            # ---Viscosity---
-                            poly = self.poly6(dist)
-                            xsph_sum += poly * v_ij
-
-                    # # ---Vorticity---
-                    # n_x = (dx_sum.norm() - n_dx_sum.norm()) / (2 * self.g_del)
-                    # n_y = (dy_sum.norm() - n_dy_sum.norm()) / (2 * self.g_del)
-                    # n_z = (dz_sum.norm() - n_dz_sum.norm()) / (2 * self.g_del)
-                    # n = qd.Vector([n_x, n_y, n_z])
-                    # big_n = n.normalized()
-                    # if not omega_sum.norm() == 0.0:
-                    #     vorticity[p] = vorqd_epsilon * big_n.cross(omega_sum)
-
-                    # ---Viscosity---
-                    self.particles_reordered[i_p, i_b].dpos = (
-                        self.particles_reordered[i_p, i_b].dpos
-                        + xsph_sum * self.particles_info_reordered[i_p, i_b].viscosity_relaxation
-                    )
-
-            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-                if (
-                    self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID
-                    and self.particles_reordered[i_p, i_b].free
-                ):
-                    self.particles_reordered[i_p, i_b].pos = (
-                        self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
-                    )
-                    self.particles_reordered[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_compute_velocity(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles_reordered[i_p, i_b].vel = (
-                self.particles_reordered[i_p, i_b].pos - self.particles_reordered[i_p, i_b].ipos
-            ) / self._substep_dt
-
-    @qd.kernel
-    def _kernel_copy_from_reordered(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
-                reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
-                self.particles[i_p, i_b] = self.particles_reordered[reordered_idx, i_b]
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        if self.is_active:
-            self._kernel_store_initial_pos(f)
-            self._kernel_apply_external_force(f, self._sim.cur_t)
+        if not self.is_active:
+            return
+        kernel_apply_external_force(self._sim.sim_state, self.pbd_state, self.pbd_info, self._force_fields)
 
-            # topology constraints (doesn't require spatial hashing)
-            if self._n_edges > 0:
-                self._kernel_solve_stretch(f)
+        # The constraints of the topology need no spatial hashing
+        if self._n_edges > 0:
+            kernel_solve_stretch(self.pbd_state, self.pbd_info, self.pbd_config)
+        if self._n_inner_edges > 0:
+            kernel_solve_bending(self.pbd_state, self.pbd_info, self.pbd_config)
+        if self._n_elems > 0:
+            kernel_solve_volume(self.pbd_state, self.pbd_info, self.pbd_config)
 
-            if self._n_inner_edges > 0:
-                self._kernel_solve_bending(f)
-
-            if self._n_elems > 0:
-                self._kernel_solve_volume(f)
-
-            # perform spatial hashing
-            self._kernel_reorder_particles(f)
-
-            # spatial constraints
-            if self._n_particles > 0:
-                self._kernel_solve_density(f)
-                self._kernel_solve_viscosity(f)
-
-            self._kernel_solve_collision(f)
-
-            # compute effective velocity
-            self._kernel_compute_velocity(f)
+        kernel_reorder_particles(self.pbd_state)
+        kernel_solve_density(self.pbd_state, self.pbd_info, self.pbd_config)
+        kernel_solve_viscosity(self.pbd_state, self.pbd_info, self.pbd_config)
+        kernel_solve_collision(self.pbd_state, self.pbd_info)
+        kernel_compute_velocity(self.pbd_state, self.pbd_info)
 
     def substep_post_coupling(self, f):
         if self.is_active:
-            self._kernel_copy_from_reordered(f)
+            kernel_copy_from_reordered(self.pbd_state)
+            kernel_solve_boundary_collision(self.pbd_state, self.pbd_info)
 
-            # boundary collision
-            self._kernel_solve_boundary_collision(f)
+    @property
+    def data(self) -> Iterator[DataItem | ConfigItem]:
+        yield from iter_data(self, "pbd_info")
+        yield from iter_data(self, "pbd_state")
+        yield from iter_data(self, "pbd_config")
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def set_state(self, f, state, envs_idx=None):
-        if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.free)
-
-    @qd.kernel
-    def _kernel_set_state(
-        self,
-        f: qd.i32,
-        pos: qd.types.ndarray(),  # shape [B, _n_particles, 3]
-        vel: qd.types.ndarray(),  # shape [B, _n_particles, 3]
-        free: qd.types.ndarray(),  # shape [B, _n_particles]
-    ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            for j in qd.static(range(3)):
-                self.particles[i_p, i_b].pos[j] = pos[i_b, i_p, j]
-                self.particles[i_p, i_b].vel[j] = vel[i_b, i_p, j]
-            self.particles[i_p, i_b].free = free[i_b, i_p]
-
-    def get_state(self, f):
-        if self.is_active:
-            state = PBDSolverState(self.scene)
-            self._kernel_get_state(f, state.pos, state.vel, state.free)
-        else:
-            state = None
-        return state
-
     def get_state_render(self):
         """
-        Get visual vertex positions, UVs, and face indices for rendering.
+        Get visual vertex positions, texture coordinates (UVs), and face indices for rendering.
 
         Returns
         -------
@@ -935,47 +468,7 @@ class PBDSolver(ParticleSolver):
         # Make sure render fields are up to date
         self.update_render_fields()
 
-        # Return the Quadrants fields directly for GPU access
-        return self.vverts_render.pos, self.vverts_uvs, self.vfaces_indices
-
-    @qd.kernel
-    def _kernel_get_state(
-        self,
-        f: qd.i32,
-        pos: qd.types.ndarray(),  # shape [B, _n_particles, 3]
-        vel: qd.types.ndarray(),  # shape [B, _n_particles, 3]
-        free: qd.types.ndarray(),  # shape [B, _n_particles]
-    ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            for j in qd.static(range(3)):
-                pos[i_b, i_p, j] = self.particles[i_p, i_b].pos[j]
-                vel[i_b, i_p, j] = self.particles[i_p, i_b].vel[j]
-            free[i_b, i_p] = qd.cast(self.particles[i_p, i_b].free, gs.qd_bool)
-
-    def update_render_fields(self):
-        self._kernel_update_render_fields(self.sim.cur_substep_local)
-
-    @qd.kernel
-    def _kernel_update_render_fields(self, f: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
-                self.particles_render[i_p, i_b].pos = self.particles[i_p, i_b].pos
-                self.particles_render[i_p, i_b].vel = self.particles[i_p, i_b].vel
-            else:
-                self.particles_render[i_p, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i_p, i_b].active = self.particles_ng[i_p, i_b].active
-
-        for i_v, i_b in qd.ndrange(self._n_vverts, self._B):
-            vvert_pos = qd.Vector.zero(gs.qd_float, 3)
-            for j in range(self._n_vvert_supports):
-                vvert_pos += (
-                    self.particles[self.vverts_info.support_idxs[i_v][j], i_b].pos
-                    * self.vverts_info.support_weights[i_v][j]
-                )
-            self.vverts_render[i_v, i_b].pos = vvert_pos
-            self.vverts_render[i_v, i_b].active = self.particles_render[
-                self.vverts_info.support_idxs[i_v][0], i_b
-            ].active
+        return self.vverts_render.pos, self.pbd_info.vverts_uvs, self.pbd_info.vfaces_vverts_idx
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
@@ -993,7 +486,7 @@ class PBDSolver(ParticleSolver):
         _, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
-        self._kernel_fix_particles(particles_idx, envs_idx)
+        kernel_set_particles_free(particles_idx, envs_idx, is_free=False, pbd_state=self.pbd_state)
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
@@ -1011,189 +504,620 @@ class PBDSolver(ParticleSolver):
         _, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
-        self._sim._coupler.kernel_attach_pbd_to_rigid_link(
-            particles_idx, envs_idx, link_idx, self._sim.rigid_solver.dyn_state.links
-        )
+        self._sim.coupler.attach_pbd_particles_to_link(particles_idx, envs_idx, link_idx)
 
     @gs.assert_built
     @mutates(StateChange.DYNAMICS, differentiable=False)
     def release_particles(self, particles_idx=None, envs_idx=None):
-        """Release some particles fixed in place or to a rigid link, which then move freely again (see 'fix_particles')."""
+        """Release some particles fixed in place or to a rigid link, which move freely again (see 'fix_particles')."""
         _, particles_idx, envs_idx = self._sanitize_io_variables(
             None, particles_idx, self.n_particles, "particles_idx", envs_idx, batched_idx=True, skip_allocation=True
         )
-        self._kernel_release_particles(particles_idx, envs_idx)
-        self._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
-
-    @qd.kernel
-    def _kernel_set_particles_pos(
-        self,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        poss: qd.types.ndarray(),
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
-            if i_p >= 0:
-                for i in qd.static(range(3)):
-                    self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
-                self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-
-    @qd.kernel
-    def _kernel_get_particles_pos(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), poss: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                poss[i_b_, i_p_, i] = self.particles[i_p, i_b].pos[i]
-
-    @qd.kernel
-    def _kernel_set_particles_vel(
-        self,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        vels: qd.types.ndarray(),
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                for i in qd.static(range(3)):
-                    self.particles[i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
-
-    @qd.kernel
-    def _kernel_get_particles_vel(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), vels: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                vels[i_b_, i_p_, i] = self.particles[i_p, i_b].vel[i]
-
-    @qd.kernel
-    def _kernel_set_particles_active(
-        self,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        actives: qd.types.ndarray(),  # shape [B, n_particles]
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            # See '_kernel_set_particles_pos'
-            if i_p >= 0:
-                self.particles_ng[i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
-
-    @qd.kernel
-    def _kernel_get_particles_active(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), actives: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            actives[i_b_, i_p_] = self.particles_ng[i_p, i_b].active
-
-    @qd.kernel
-    def _kernel_fix_particles(self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray()):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            self.particles[i_p, i_b].free = False
-
-    @qd.kernel
-    def _kernel_release_particles(self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray()):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            self.particles[i_p, i_b].free = True
-
-    @qd.kernel
-    def _kernel_get_particles_mass(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), masses: qd.types.ndarray()
-    ):
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            masses[i_b_, i_p_] = self.particles_info[i_p].mass
+        kernel_set_particles_free(particles_idx, envs_idx, is_free=True, pbd_state=self.pbd_state)
+        self._sim.coupler.detach_pbd_particles(particles_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
 
     @property
-    def n_particles(self):
-        if self.is_built:
-            return self._n_particles
-        return sum([entity.n_particles for entity in self._entities])
+    def n_fluid_particles(self) -> int:
+        return sum([entity.n_fluid_particles for entity in self._entities if isinstance(entity, PBDParticleEntity)])
 
     @property
-    def n_fluid_particles(self):
-        if self.is_built:
-            return self._n_fluid_particles
-        return sum(entity.n_fluid_particles for entity in self._entities if isinstance(entity, PBDParticleEntity))
-
-    @property
-    def n_edges(self):
+    def n_edges(self) -> int:
         if self.is_built:
             return self._n_edges
-        return sum(entity.n_edges for entity in self._entities if isinstance(entity, PBDTetEntity))
+        return sum([entity.n_edges for entity in self._entities if isinstance(entity, PBDTetEntity)])
 
     @property
-    def n_inner_edges(self):
+    def n_inner_edges(self) -> int:
         if self.is_built:
             return self._n_inner_edges
-        return sum(entity.n_inner_edges for entity in self._entities if isinstance(entity, PBD2DEntity))
+        return sum([entity.n_inner_edges for entity in self._entities if isinstance(entity, PBD2DEntity)])
 
     @property
-    def n_elems(self):
+    def n_elems(self) -> int:
         if self.is_built:
             return self._n_elems
-        return sum(entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity))
+        return sum([entity.n_elems for entity in self._entities if isinstance(entity, PBD3DEntity)])
 
     @property
-    def n_vvert_supports(self):
-        """
-        Number of particles supporting each visual vertex.
-        """
-        return self._n_vvert_supports
+    def hash_grid_res(self) -> tuple[int, int, int]:
+        return self._hash_grid_res
 
     @property
-    def n_vverts(self):
-        if self.is_built:
-            return self._n_vverts
-        return sum(entity.n_vverts for entity in self._entities)
+    def hash_grid_cell_size(self) -> float:
+        return self._hash_grid_cell_size
 
-    @property
-    def n_vfaces(self):
-        if self.is_built:
-            return self._n_vfaces
-        return sum(entity.n_vfaces for entity in self._entities)
 
-    @property
-    def particle_size(self):
-        return self._particle_size
+# ------------------------------------------------------------------------------------
+# ------------------------------------- kernels --------------------------------------
+# ------------------------------------------------------------------------------------
 
-    @property
-    def particle_radius(self):
-        return self._particle_size / 2.0
 
-    @property
-    def hash_grid_res(self):
-        return self.sh.grid_res
+@qd.func
+def func_poly6(dist: float, pbd_info: PBDInfo):
+    """Return the poly6 smoothing kernel at a distance divided by the scale of the distances (see PBDInfo)."""
+    result = gs.qd_float(0.0)
+    if 0 < dist < 1.0:
+        rhs = (1.0 - dist * dist) * (1.0 - dist * dist) * (1.0 - dist * dist)
+        result = pbd_info.poly6_coef[None] * rhs
+    return result
 
-    @property
-    def hash_grid_cell_size(self):
-        return self.sh.cell_size
 
-    @property
-    def upper_bound(self):
-        return self._upper_bound
+@qd.func
+def func_spiky(r: qd.types.vector(3), pbd_info: PBDInfo):
+    """Return the gradient of the spiky smoothing kernel at a vector (see PBDInfo)."""
+    result = qd.Vector.zero(gs.qd_float, 3)
+    dist_scale = pbd_info.dist_scale[None]
+    dist = r.norm() / dist_scale
+    if 0 < dist < 1.0:
+        m = (1.0 - dist) * (1.0 - dist)
+        result = (pbd_info.spiky_coef[None] * m / dist) * r / dist_scale
+    return result
 
-    @property
-    def lower_bound(self):
-        return self._lower_bound
+
+@qd.func
+def func_s_corr(r: qd.types.vector(3), poly6_ref: float, pbd_info: PBDInfo):
+    """
+    Return the artificial pressure of the density constraint between two particles at a vector.
+
+    `poly6_ref` is the poly6 smoothing kernel at the reference distance of the artificial pressure (see PBDInfo).
+    """
+    m = func_poly6(r.norm() / pbd_info.dist_scale[None], pbd_info) / poly6_ref
+    return -1.0 * pbd_info.s_corr_k[None] * m * m * m * m
+
+
+@qd.func
+def func_apply_dpos(i_p: int, i_b: int, particles: PBDParticles):
+    """Apply the correction a constraint projection accumulated on a particle, then clear it."""
+    particles.pos[i_p, i_b] = particles.pos[i_p, i_b] + particles.dpos[i_p, i_b]
+    particles.dpos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel
+def kernel_apply_external_force(
+    sim_state: SimulatorState, pbd_state: PBDState, pbd_info: PBDInfo, force_fields: qd.template()
+):
+    """
+    Advance the free particles by gravity, the force fields and the air resistance of a cloth, from where they start.
+
+    The particles that are not free still move by their velocity, which carries those attached to a rigid link.
+    """
+    dt = pbd_info.substep_dt[None]
+    for i_p, i_b in qd.ndrange(*pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles.ipos))):
+        pbd_state.particles.ipos[i_p, i_b] = pbd_state.particles.pos[i_p, i_b]
+        if pbd_state.particles.is_free[i_p, i_b]:
+            vel = pbd_state.particles.vel[i_p, i_b] + pbd_info.gravity[i_b] * dt
+            pos = pbd_state.particles.pos[i_p, i_b]
+            acc = force_fields.add_acc(
+                acc=qd.Vector.zero(gs.qd_float, 3), pos=pos, vel=vel, t=sim_state.t[i_b], i_p=i_p
+            )
+            vel = vel + acc * dt
+            if pbd_info.particles.material_type[i_p] == PBDSolver.MATERIAL.CLOTH:
+                f_air_resistance = pbd_info.particles.air_resistance[i_p] * vel.norm() * vel
+                vel = vel - f_air_resistance / pbd_info.particles.mass[i_p] * dt
+            pbd_state.particles.vel[i_p, i_b] = vel
+        pbd_state.particles.pos[i_p, i_b] = pbd_state.particles.pos[i_p, i_b] + pbd_state.particles.vel[i_p, i_b] * dt
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_stretch(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.template()):
+    """Project the stretch constraints of the edges on the particles, the given number of times."""
+    for _ in qd.static(range(pbd_config.n_stretch_iterations)):
+        for i_e, i_b in qd.ndrange(
+            pbd_info.edges.len_rest.shape[0],
+            pbd_state.particles.pos.shape[1],
+            axes=qd.static(eoa(pbd_state.particles.pos)),
+        ):
+            i_v1, i_v2 = pbd_info.edges.particles_idx[i_e]
+            w1 = pbd_state.particles.is_free[i_v1, i_b] / pbd_info.particles.mass[i_v1]
+            w2 = pbd_state.particles.is_free[i_v2, i_b] / pbd_info.particles.mass[i_v2]
+            n = pbd_state.particles.pos[i_v1, i_b] - pbd_state.particles.pos[i_v2, i_b]
+            C = n.norm() - pbd_info.edges.len_rest[i_e]
+            alpha = pbd_info.edges.stretch_compliance[i_e] / pbd_info.substep_dt_sq[None]
+            dp = -C / (w1 + w2 + alpha) * n / n.norm(pbd_info.EPS[None]) * pbd_info.edges.stretch_relaxation[i_e]
+            qd.atomic_add(pbd_state.particles.dpos[i_v1, i_b], dp * w1)
+            qd.atomic_add(pbd_state.particles.dpos[i_v2, i_b], -dp * w2)
+        func_apply_topology_dpos(pbd_state, pbd_info)
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_bending(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.template()):
+    """
+    Project the bending constraints of the inner edges on the particles, the given number of times.
+
+    It follows the bending constraint projection of position based dynamics, extended by its compliance (XPBD).
+    """
+    for _ in qd.static(range(pbd_config.n_bending_iterations)):
+        for i_ie, i_b in qd.ndrange(
+            pbd_info.inner_edges.len_rest.shape[0],
+            pbd_state.particles.pos.shape[1],
+            axes=qd.static(eoa(pbd_state.particles.pos)),
+        ):
+            i_vs = pbd_info.inner_edges.particles_idx[i_ie]
+            w = qd.Vector(
+                [
+                    pbd_state.particles.is_free[i_vs[k], i_b] / pbd_info.particles.mass[i_vs[k]]
+                    for k in qd.static(range(4))
+                ]
+            )
+            if w.sum() > 0.0:
+                p1 = pbd_state.particles.pos[i_vs[0], i_b]
+                p2 = pbd_state.particles.pos[i_vs[1], i_b] - p1
+                p3 = pbd_state.particles.pos[i_vs[2], i_b] - p1
+                p4 = pbd_state.particles.pos[i_vs[3], i_b] - p1
+                l23 = p2.cross(p3).norm()
+                l24 = p2.cross(p4).norm()
+                n1 = p2.cross(p3) / l23
+                n2 = p2.cross(p4) / l24
+                d = qd.math.clamp(n1.dot(n2), -1.0, 1.0)
+
+                q3 = (p2.cross(n2) + n1.cross(p2) * d) / l23
+                q4 = (p2.cross(n1) + n2.cross(p2) * d) / l24
+                q2 = -(p3.cross(n2) + n1.cross(p3) * d) / l23 - (p4.cross(n1) + n2.cross(p4) * d) / l24
+                q1 = -q2 - q3 - q4
+                sum_wq = w[0] * q1.norm_sqr() + w[1] * q2.norm_sqr() + w[2] * q3.norm_sqr() + w[3] * q4.norm_sqr()
+                constraint = qd.acos(d) - qd.acos(-1.0)
+
+                alpha = pbd_info.inner_edges.bending_compliance[i_ie] / pbd_info.substep_dt_sq[None]
+                constraint = (
+                    -qd.sqrt(1 - d**2) * constraint / (sum_wq + alpha) * pbd_info.inner_edges.bending_relaxation[i_ie]
+                )
+
+                qs = qd.Matrix.cols([q1, q2, q3, q4])
+                for k in qd.static(range(4)):
+                    qd.atomic_add(pbd_state.particles.dpos[i_vs[k], i_b], w[k] * constraint * qs[:, k])
+        func_apply_topology_dpos(pbd_state, pbd_info)
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_volume(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.template()):
+    """Project the volume constraints of the tetrahedra on the particles, the given number of times."""
+    for _ in qd.static(range(pbd_config.n_volume_iterations)):
+        for i_el, i_b in qd.ndrange(
+            pbd_info.elems.vol_rest.shape[0],
+            pbd_state.particles.pos.shape[1],
+            axes=qd.static(eoa(pbd_state.particles.pos)),
+        ):
+            i_vs = pbd_info.elems.particles_idx[i_el]
+            p1 = pbd_state.particles.pos[i_vs[0], i_b]
+            p2 = pbd_state.particles.pos[i_vs[1], i_b]
+            p3 = pbd_state.particles.pos[i_vs[2], i_b]
+            p4 = pbd_state.particles.pos[i_vs[3], i_b]
+
+            grads = qd.Matrix.cols(
+                [
+                    (p4 - p2).cross(p3 - p2) / 6.0,
+                    (p3 - p1).cross(p4 - p1) / 6.0,
+                    (p4 - p1).cross(p2 - p1) / 6.0,
+                    (p2 - p1).cross(p3 - p1) / 6.0,
+                ]
+            )
+            w = qd.Vector(
+                [
+                    pbd_state.particles.is_free[i_vs[k], i_b]
+                    / pbd_info.particles.mass[i_vs[k]]
+                    * grads[:, k].norm_sqr()
+                    for k in qd.static(range(4))
+                ]
+            )
+            if w.sum() > 0.0:
+                C = gu.qd_tet_vol(p1, p2, p3, p4) - pbd_info.elems.vol_rest[i_el]
+                alpha = pbd_info.elems.volume_compliance[i_el] / pbd_info.substep_dt_sq[None]
+                s = -C / (w.sum() + alpha) * pbd_info.elems.volume_relaxation[i_el]
+                for k in qd.static(range(4)):
+                    qd.atomic_add(pbd_state.particles.dpos[i_vs[k], i_b], s * w[k] * grads[:, k])
+        func_apply_topology_dpos(pbd_state, pbd_info)
+
+
+@qd.func
+def func_apply_topology_dpos(pbd_state: PBDState, pbd_info: PBDInfo):
+    """Apply the corrections of a projection of the constraints of the topology to the free physical particles."""
+    for i_p, i_b in qd.ndrange(*pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles.is_free))):
+        if (
+            pbd_state.particles.is_free[i_p, i_b]
+            and pbd_info.particles.material_type[i_p] != PBDSolver.MATERIAL.PARTICLE
+        ):
+            func_apply_dpos(i_p, i_b, pbd_state.particles)
+
+
+@qd.func
+def func_copy_particle(i_p_src: int, i_p_dst: int, i_b: int, particles_src: PBDParticles, particles_dst: PBDParticles):
+    """Copy the state of a particle onto a slot of the same environment, its activity aside."""
+    particles_dst.pos[i_p_dst, i_b] = particles_src.pos[i_p_src, i_b]
+    particles_dst.vel[i_p_dst, i_b] = particles_src.vel[i_p_src, i_b]
+    particles_dst.ipos[i_p_dst, i_b] = particles_src.ipos[i_p_src, i_b]
+    particles_dst.dpos[i_p_dst, i_b] = particles_src.dpos[i_p_src, i_b]
+    particles_dst.lam[i_p_dst, i_b] = particles_src.lam[i_p_src, i_b]
+    particles_dst.is_free[i_p_dst, i_b] = particles_src.is_free[i_p_src, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_reorder_particles(pbd_state: PBDState):
+    """Sort the particles by hash grid cell, into the copies that the neighborhood constraints run on."""
+    func_hash_sort_particles(pbd_state.particles.pos, pbd_state.particles.is_active, pbd_state.hash_grid)
+
+    # The active particles take the first sorted indices (see func_hash_sort_particles)
+    for i_r, i_b in qd.ndrange(
+        *pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.is_active))
+    ):
+        is_active = i_r < pbd_state.hash_grid.n_particles[i_b]
+        pbd_state.particles_reordered.is_active[i_r, i_b] = is_active
+        if is_active:
+            i_p = pbd_state.hash_grid.particles_idx[i_r, i_b]
+            func_copy_particle(i_p, i_r, i_b, pbd_state.particles, pbd_state.particles_reordered)
+
+
+@qd.kernel(fastcache=True)
+def kernel_copy_from_reordered(pbd_state: PBDState):
+    """Give the active particles back the state of their sorted copy."""
+    for i_r, i_b in qd.ndrange(
+        *pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.is_active))
+    ):
+        if pbd_state.particles_reordered.is_active[i_r, i_b]:
+            i_p = pbd_state.hash_grid.particles_idx[i_r, i_b]
+            func_copy_particle(i_r, i_p, i_b, pbd_state.particles_reordered, pbd_state.particles)
+
+
+@qd.func
+def func_solve_collision(i_p: int, j_p: int, i_b: int, pbd_state: PBDState, pbd_info: PBDInfo):
+    """Accumulate the correction of a sorted particle colliding with another one, friction included."""
+    i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+    j_o = pbd_state.hash_grid.particles_idx[j_p, i_b]
+    eps = pbd_info.EPS[None]
+    pos_ij = pbd_state.particles_reordered.pos[i_p, i_b] - pbd_state.particles_reordered.pos[j_p, i_b]
+    cur_dist = pos_ij.norm(eps)
+    rest_dist = (pbd_info.particles.pos_rest[i_o] - pbd_info.particles.pos_rest[j_o]).norm(eps)
+    # The particles touch at twice their radius
+    target_dist = pbd_info.particle_size[None]
+    if cur_dist < target_dist and rest_dist > target_dist:
+        wi = pbd_state.particles_reordered.is_free[i_p, i_b] / pbd_info.particles.mass[i_o]
+        wj = pbd_state.particles_reordered.is_free[j_p, i_b] / pbd_info.particles.mass[j_o]
+        n = pos_ij / cur_dist
+        dpos = pbd_state.particles_reordered.dpos[i_p, i_b] + wi / (wi + wj) * (target_dist - cur_dist) * n
+
+        # Friction of unified particle physics, from the tangential displacements of the particles over the substep
+        dv = (pbd_state.particles_reordered.pos[i_p, i_b] - pbd_state.particles_reordered.ipos[i_p, i_b]) - (
+            pbd_state.particles_reordered.pos[j_p, i_b] - pbd_state.particles_reordered.ipos[j_p, i_b]
+        )
+        dpos_tan = -(dv - n * n.dot(dv))
+        d = target_dist - cur_dist
+        mu_s = qd.max(pbd_info.particles.mu_s[i_o], pbd_info.particles.mu_s[j_o])
+        mu_k = qd.max(pbd_info.particles.mu_k[i_o], pbd_info.particles.mu_k[j_o])
+        if dpos_tan.norm() < mu_s * d:
+            dpos = dpos + wi / (wi + wj) * dpos_tan
+        else:
+            dpos = dpos + wi / (wi + wj) * dpos_tan * qd.min(1.0, mu_k * d / dpos_tan.norm(eps))
+        pbd_state.particles_reordered.dpos[i_p, i_b] = dpos
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_collision(pbd_state: PBDState, pbd_info: PBDInfo):
+    """Project the collisions of the sorted particles with their neighbors, two liquid particles never colliding."""
+    for i_p, i_b in qd.ndrange(
+        *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.is_active))
+    ):
+        if pbd_state.particles_reordered.is_active[i_p, i_b]:
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            material_type_i = pbd_info.particles.material_type[i_o]
+            if material_type_i != PBDSolver.MATERIAL.PARTICLE:
+                base = func_hash_pos_to_grid(pbd_state.particles_reordered.pos[i_p, i_b], pbd_state.hash_grid)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                    slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
+                    for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
+                        j_o = pbd_state.hash_grid.particles_idx[j_p, i_b]
+                        is_liquid_pair = (
+                            material_type_i == PBDSolver.MATERIAL.LIQUID
+                            and pbd_info.particles.material_type[j_o] == PBDSolver.MATERIAL.LIQUID
+                        )
+                        is_any_free = (
+                            pbd_state.particles_reordered.is_free[i_p, i_b]
+                            or pbd_state.particles_reordered.is_free[j_p, i_b]
+                        )
+                        if i_p != j_p and is_any_free and not is_liquid_pair:
+                            func_solve_collision(i_p, j_p, i_b, pbd_state, pbd_info)
+
+    for i_p, i_b in qd.ndrange(
+        *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.is_active))
+    ):
+        if pbd_state.particles_reordered.is_active[i_p, i_b]:
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            if (
+                pbd_state.particles_reordered.is_free[i_p, i_b]
+                and pbd_info.particles.material_type[i_o] != PBDSolver.MATERIAL.PARTICLE
+            ):
+                func_apply_dpos(i_p, i_b, pbd_state.particles_reordered)
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_boundary_collision(pbd_state: PBDState, pbd_info: PBDInfo):
+    """Keep every particle inside the boundary, whether free or not."""
+    for i_p, i_b in qd.ndrange(*pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles.pos))):
+        pos, vel = func_impose_cube_boundary(
+            pbd_state.particles.pos[i_p, i_b], pbd_state.particles.vel[i_p, i_b], pbd_info.boundary
+        )
+        pbd_state.particles.pos[i_p, i_b] = pos
+        pbd_state.particles.vel[i_p, i_b] = vel
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_density(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.template()):
+    """
+    Project the density constraints of the sorted liquid particles, the given number of times.
+
+    It follows position based fluids: a Lagrange multiplier per particle, then the correction of its position, with an
+    artificial pressure that keeps the particles from clustering.
+    """
+    for _ in qd.static(range(pbd_config.n_density_iterations)):
+        for i_p, i_b in qd.ndrange(
+            *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.pos))
+        ):
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            if (
+                pbd_state.particles_reordered.is_active[i_p, i_b]
+                and pbd_info.particles.material_type[i_o] == PBDSolver.MATERIAL.LIQUID
+            ):
+                pos_i = pbd_state.particles_reordered.pos[i_p, i_b]
+                rho_rest = pbd_info.particles.rho_rest[i_o]
+                dist_scale = pbd_info.dist_scale[None]
+                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                lower_sum = gs.qd_float(0.0)
+                rho = gs.qd_float(0.0)
+                spiky_i = qd.Vector.zero(gs.qd_float, 3)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                    slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
+                    for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
+                        j_o = pbd_state.hash_grid.particles_idx[j_p, i_b]
+                        r = pos_i - pbd_state.particles_reordered.pos[j_p, i_b]
+                        rho += func_poly6(r.norm() / dist_scale, pbd_info) * pbd_info.particles.mass[j_o]
+                        s = func_spiky(r, pbd_info) / rho_rest
+                        spiky_i += s
+                        lower_sum += s.dot(s)
+                constraint = (rho / rho_rest) - 1.0
+                lower_sum += spiky_i.dot(spiky_i)
+                pbd_state.particles_reordered.lam[i_p, i_b] = -1.0 * (
+                    constraint / (lower_sum + pbd_info.lambda_eps[None])
+                )
+
+        for i_p, i_b in qd.ndrange(
+            *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.pos))
+        ):
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            if (
+                pbd_state.particles_reordered.is_active[i_p, i_b]
+                and pbd_info.particles.material_type[i_o] == PBDSolver.MATERIAL.LIQUID
+            ):
+                # What the particle contributes to the correction it takes from each neighbor, read once for all of them
+                pos_i = pbd_state.particles_reordered.pos[i_p, i_b]
+                lam_i = pbd_state.particles_reordered.lam[i_p, i_b]
+                rho_rest = pbd_info.particles.rho_rest[i_o]
+                dist_scale = pbd_info.dist_scale[None]
+                density_relaxation = pbd_info.particles.density_relaxation[i_o]
+                poly6_ref = func_poly6(pbd_info.s_corr_delta_q[None], pbd_info)
+                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                dpos = pbd_state.particles_reordered.dpos[i_p, i_b]
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                    slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
+                    for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
+                        if i_p != j_p:
+                            r = pos_i - pbd_state.particles_reordered.pos[j_p, i_b]
+                            lam_sum = (
+                                lam_i
+                                + pbd_state.particles_reordered.lam[j_p, i_b]
+                                + func_s_corr(r, poly6_ref, pbd_info)
+                            )
+                            dpos = dpos + lam_sum * func_spiky(r, pbd_info) / rho_rest * dist_scale * density_relaxation
+                pbd_state.particles_reordered.dpos[i_p, i_b] = dpos
+
+        func_apply_liquid_dpos(pbd_state, pbd_info)
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_viscosity(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.template()):
+    """Project the viscosity of the sorted liquid particles, the given number of times, smoothing their velocity."""
+    for _ in qd.static(range(pbd_config.n_viscosity_iterations)):
+        for i_p, i_b in qd.ndrange(
+            *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.pos))
+        ):
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            if (
+                pbd_state.particles_reordered.is_active[i_p, i_b]
+                and pbd_info.particles.material_type[i_o] == PBDSolver.MATERIAL.LIQUID
+            ):
+                # The displacement of the particle over the substep, read once for all its neighbors
+                pos_i = pbd_state.particles_reordered.pos[i_p, i_b]
+                dpos_i = pos_i - pbd_state.particles_reordered.ipos[i_p, i_b]
+                dist_scale = pbd_info.dist_scale[None]
+                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                xsph_sum = qd.Vector.zero(gs.qd_float, 3)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                    slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
+                    for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
+                        pos_j = pbd_state.particles_reordered.pos[j_p, i_b]
+                        v_ij = (pos_j - pbd_state.particles_reordered.ipos[j_p, i_b]) - dpos_i
+                        xsph_sum += func_poly6((pos_i - pos_j).norm() / dist_scale, pbd_info) * v_ij
+                pbd_state.particles_reordered.dpos[i_p, i_b] = (
+                    pbd_state.particles_reordered.dpos[i_p, i_b]
+                    + xsph_sum * pbd_info.particles.viscosity_relaxation[i_o]
+                )
+
+        func_apply_liquid_dpos(pbd_state, pbd_info)
+
+
+@qd.func
+def func_apply_liquid_dpos(pbd_state: PBDState, pbd_info: PBDInfo):
+    """Apply the corrections of a projection of the constraints of the liquids to the free sorted liquid particles."""
+    for i_p, i_b in qd.ndrange(
+        *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.hash_grid.particles_idx))
+    ):
+        i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+        if (
+            pbd_state.particles_reordered.is_active[i_p, i_b]
+            and pbd_state.particles_reordered.is_free[i_p, i_b]
+            and pbd_info.particles.material_type[i_o] == PBDSolver.MATERIAL.LIQUID
+        ):
+            func_apply_dpos(i_p, i_b, pbd_state.particles_reordered)
+
+
+@qd.kernel(fastcache=True)
+def kernel_compute_velocity(pbd_state: PBDState, pbd_info: PBDInfo):
+    """Set the velocity of the sorted particles to their displacement over the substep."""
+    for i_p, i_b in qd.ndrange(
+        *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.vel))
+    ):
+        if pbd_state.particles_reordered.is_active[i_p, i_b]:
+            pbd_state.particles_reordered.vel[i_p, i_b] = (
+                pbd_state.particles_reordered.pos[i_p, i_b] - pbd_state.particles_reordered.ipos[i_p, i_b]
+            ) / pbd_info.substep_dt[None]
+
+
+# ------------------------------------------------------------------------------------
+# --------------------------------------- io -----------------------------------------
+# ------------------------------------------------------------------------------------
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_uvs_and_faces(
+    vvert_start: int,
+    vface_start: int,
+    uvs: qd.types.ndarray(element_dim=1),
+    faces: qd.types.ndarray(element_dim=1),
+    pbd_info: PBDInfo,
+):
+    for i_vv_ in range(uvs.shape[0]):
+        pbd_info.vverts_uvs[i_vv_ + vvert_start] = uvs[i_vv_]
+    for i_vf_ in range(faces.shape[0]):
+        pbd_info.vfaces_vverts_idx[i_vf_ + vface_start] = faces[i_vf_] + vvert_start
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_particles(
+    particle_start: int,
+    is_active: bool,
+    material_type: int,
+    mass: float,
+    rho_rest: float,
+    mu_s: float,
+    mu_k: float,
+    air_resistance: float,
+    density_relaxation: float,
+    viscosity_relaxation: float,
+    particles: qd.types.ndarray(),
+    pbd_state: PBDState,
+    pbd_info: PBDInfo,
+):
+    for i_p_ in range(particles.shape[0]):
+        i_p = i_p_ + particle_start
+        pbd_info.particles.pos_rest[i_p] = qd.Vector([particles[i_p_, 0], particles[i_p_, 1], particles[i_p_, 2]])
+        pbd_info.particles.material_type[i_p] = material_type
+        pbd_info.particles.mass[i_p] = mass
+        pbd_info.particles.rho_rest[i_p] = rho_rest
+        pbd_info.particles.mu_s[i_p] = mu_s
+        pbd_info.particles.mu_k[i_p] = mu_k
+        pbd_info.particles.air_resistance[i_p] = air_resistance
+        pbd_info.particles.density_relaxation[i_p] = density_relaxation
+        pbd_info.particles.viscosity_relaxation[i_p] = viscosity_relaxation
+
+    for i_p_, i_b in qd.ndrange(
+        particles.shape[0], pbd_state.particles.pos.shape[1], axes=qd.static(eoa(pbd_state.particles.pos))
+    ):
+        i_p = i_p_ + particle_start
+        pbd_state.particles.pos[i_p, i_b] = qd.Vector([particles[i_p_, 0], particles[i_p_, 1], particles[i_p_, 2]])
+        pbd_state.particles.vel[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        pbd_state.particles.dpos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        pbd_state.particles.is_free[i_p, i_b] = True
+        pbd_state.particles.is_active[i_p, i_b] = is_active
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_edges(
+    edge_start: int,
+    particle_start: int,
+    stretch_compliance: float,
+    stretch_relaxation: float,
+    edges: qd.types.ndarray(),
+    edges_len_rest: qd.types.ndarray(),
+    pbd_info: PBDInfo,
+):
+    for i_e_ in range(edges.shape[0]):
+        i_e = i_e_ + edge_start
+        pbd_info.edges.stretch_compliance[i_e] = stretch_compliance
+        pbd_info.edges.stretch_relaxation[i_e] = stretch_relaxation
+        pbd_info.edges.len_rest[i_e] = edges_len_rest[i_e_]
+        pbd_info.edges.particles_idx[i_e] = qd.Vector([edges[i_e_, 0], edges[i_e_, 1]]) + particle_start
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_inner_edges(
+    inner_edge_start: int,
+    particle_start: int,
+    bending_compliance: float,
+    bending_relaxation: float,
+    inner_edges: qd.types.ndarray(),
+    inner_edges_len_rest: qd.types.ndarray(),
+    pbd_info: PBDInfo,
+):
+    for i_ie_ in range(inner_edges.shape[0]):
+        i_ie = i_ie_ + inner_edge_start
+        pbd_info.inner_edges.bending_compliance[i_ie] = bending_compliance
+        pbd_info.inner_edges.bending_relaxation[i_ie] = bending_relaxation
+        pbd_info.inner_edges.len_rest[i_ie] = inner_edges_len_rest[i_ie_]
+        pbd_info.inner_edges.particles_idx[i_ie] = (
+            qd.Vector([inner_edges[i_ie_, k] for k in qd.static(range(4))]) + particle_start
+        )
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_elems(
+    elem_start: int,
+    particle_start: int,
+    volume_compliance: float,
+    volume_relaxation: float,
+    elems: qd.types.ndarray(),
+    elems_vol_rest: qd.types.ndarray(),
+    pbd_info: PBDInfo,
+):
+    for i_el_ in range(elems.shape[0]):
+        i_el = i_el_ + elem_start
+        pbd_info.elems.volume_compliance[i_el] = volume_compliance
+        pbd_info.elems.volume_relaxation[i_el] = volume_relaxation
+        pbd_info.elems.vol_rest[i_el] = elems_vol_rest[i_el_]
+        pbd_info.elems.particles_idx[i_el] = qd.Vector([elems[i_el_, k] for k in qd.static(range(4))]) + particle_start
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_particles_free(
+    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), is_free: bool, pbd_state: PBDState
+):
+    for i_p_, i_b_ in qd.ndrange(
+        particles_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(pbd_state.particles.is_free))
+    ):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        pbd_state.particles.is_free[i_p, i_b] = is_free

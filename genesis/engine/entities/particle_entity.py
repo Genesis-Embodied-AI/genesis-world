@@ -1,4 +1,5 @@
 import functools
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,29 @@ from .base_entity import Entity
 # Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
 # vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
 VVERTS_DIST2_MAX_SIZE = 2**20
+
+
+def check_particles_inside_boundary(
+    particles_pos: np.ndarray, boundary_lower: np.ndarray, boundary_upper: np.ndarray
+) -> None:
+    """Raise if any of the given particle positions lies outside the boundary of a particle solver."""
+    is_inside = (particles_pos > boundary_lower) & (particles_pos < boundary_upper)
+    if not is_inside.all():
+        gs.raise_exception(
+            textwrap.dedent(
+                f"""\
+                Particles outside the solver boundary. Note that for MPMSolver, boundary is slightly tighter than the
+                specified domain due to safety padding.
+
+                Current boundary:
+                lower: {boundary_lower}
+                upper: {boundary_upper}
+
+                Particles to be added:
+                min: {particles_pos.min(0)}
+                max: {particles_pos.max(0)}"""
+            )
+        )
 
 
 def assert_active(method):
@@ -219,13 +243,6 @@ class ParticleEntity(Entity):
                 [np.full((len(v),), fill_value=i, dtype=gs.np_int) for i, v in enumerate(particles)]
             )
             particles = np.concatenate(particles, dtype=gs.np_float)
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\nCurrent boundary:\n"
-                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
-                )
-
             combined_verts, combined_faces = trimesh.util.append_faces(
                 [v.verts for v in self._vmesh],
                 [v.faces for v in self._vmesh],
@@ -257,14 +274,6 @@ class ParticleEntity(Entity):
             # transform particles
             particles = gu.transform_by_trans_quat(particles, pos, quat)
 
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\n"
-                    f"Current boundary:\n{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
-                    f"max: {particles.max(0)}\n"
-                )
-
             if self._need_skinning:
                 self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
                 self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
@@ -272,6 +281,9 @@ class ParticleEntity(Entity):
                 self._vverts = np.zeros((0, 3), dtype=gs.np_float)
                 self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
             origin = pos
+
+        if not isinstance(self._morph, gs.options.morphs.Nowhere):
+            check_particles_inside_boundary(particles, self._solver.boundary_lower, self._solver.boundary_upper)
 
         self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
         self._init_particles_offset = torch.tensor(self._particles - origin, dtype=gs.tc_float, device=gs.device)

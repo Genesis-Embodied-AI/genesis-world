@@ -402,7 +402,7 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
             robot.get_contacts(is_padded=True)
 
             # TODO: Entire scene reset is still slow currently because 'partial=False' by default.
-            scene.rigid_solver.set_state(0, state_rigid_0, envs_idx=reset_envs_mask, partial=True)
+            scene.rigid_solver.set_state(state_rigid_0, envs_idx=reset_envs_mask, partial=True)
 
             robot.set_dofs_stiffness(dofs_stiffness)
             robot.set_dofs_damping(dofs_damping)

@@ -547,6 +547,7 @@ def _func_query_contact_depth_penetration_bvh(
     dyn_state: DynState,
     bvh_tree_state: BVHTreeState,
     dyn_info: DynInfo,
+    eps: float,
 ):
     """
     BVH-based dual-radius probe penetration.
@@ -597,7 +598,7 @@ def _func_query_contact_depth_penetration_bvh(
             d_sq = diff.dot(diff)
             if d_sq < best_dist_sq:
                 d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2)
+                fn = triangle_face_normal(v0, v1, v2, eps)
                 sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
                 best_signed = d * sign_v
                 best_dist_sq = d_sq
@@ -624,6 +625,7 @@ def _func_query_contact_depth_bvh(
     dyn_state: DynState,
     bvh_tree_state: BVHTreeState,
     dyn_info: DynInfo,
+    eps: float,
 ):
     """
     BVH-based dual-radius probe query with contact normal and link, mirroring ``_func_query_contact_depth``'s return.
@@ -674,7 +676,7 @@ def _func_query_contact_depth_bvh(
             d_sq = diff.dot(diff)
             if d_sq < best_dist_sq:
                 d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2)
+                fn = triangle_face_normal(v0, v1, v2, eps)
                 sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
                 best_signed = d * sign_v
                 best_dist_sq = d_sq
@@ -759,6 +761,7 @@ def _kernel_contact_depth_probe_bvh(
             dyn_state,
             bvh_tree_state_a,
             dyn_info,
+            eps,
         )
         if is_split:
             # The collision faces are partitioned over two trees (see RaycastContext.activate). Each query answers
@@ -776,6 +779,7 @@ def _kernel_contact_depth_probe_bvh(
                 dyn_state,
                 bvh_tree_state_b,
                 dyn_info,
+                eps,
             )
             if qd.abs(signed_dist_b) < qd.abs(signed_dist):
                 max_penetration_gt = max_penetration_gt_b
@@ -870,6 +874,7 @@ def _kernel_kinematic_taxel_bvh(
             dyn_state,
             bvh_tree_state_a,
             dyn_info,
+            eps,
         )
         if is_split:
             # See _kernel_contact_depth_probe_bvh for the two-tree fold: the globally nearest answer is the one
@@ -893,6 +898,7 @@ def _kernel_kinematic_taxel_bvh(
                 dyn_state,
                 bvh_tree_state_b,
                 dyn_info,
+                eps,
             )
             if qd.abs(signed_dist_b) < qd.abs(signed_dist):
                 max_penetration_gt = max_penetration_gt_b

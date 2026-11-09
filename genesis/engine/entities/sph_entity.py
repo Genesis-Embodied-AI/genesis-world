@@ -1,7 +1,6 @@
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.states.entities import SPHEntityState
 
 from .particle_entity import ParticleEntity
 
@@ -66,34 +65,7 @@ class SPHEntity(ParticleEntity):
                 )
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(
-            self._sim.cur_substep_local,
-            self.active,
-            self._particle_start,
-            self._n_particles,
-            self._material.rho,
-            self._material.stiffness,
-            self._material.exponent,
-            self._material.mu,
-            self._material.gamma,
-            self._particles,
-        )
-
-    @gs.assert_built
-    def get_state(self):
-        """
-        Get the current state of the SPHEntity, a view of the state of the solver.
-
-        Returns
-        -------
-        state : SPHEntityState
-            The current particle state for the entity.
-        """
-        solver_state = self._solver.get_state(self._sim.cur_substep_local)
-        particles_slice = slice(self._particle_start, self._particle_start + self._n_particles)
-        return SPHEntityState(
-            self, self._sim.cur_step_global, solver_state.pos[:, particles_slice], solver_state.vel[:, particles_slice]
-        )
+        self._solver.add_particles(self.active, self._particle_start, self._material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

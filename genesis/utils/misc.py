@@ -742,7 +742,12 @@ def has_display() -> bool:
 
 
 def indices_to_mask(
-    *indices: Any, keepdim: bool = True, to_torch: bool = True, boolean_mask: bool = True, raise_if_fancy: bool = False
+    *indices: Any,
+    keepdim: bool = True,
+    to_torch: bool = True,
+    boolean_mask: bool = True,
+    raise_if_fancy: bool = False,
+    pair_rows: bool = False,
 ) -> tuple[slice | int | torch.Tensor, ...]:
     """Converts a sequence of slice-like objects into a multi-dimensional mask corresponding to their cross-product.
 
@@ -762,6 +767,9 @@ def indices_to_mask(
         once is always converted, because the cross-product needs one index per axis.
         raise_if_fancy (bool): Whether to raise if the resulting mask requires advanced indexing (aka. fancy
         indexing), which would make extracting a slice copy.
+        pair_rows (bool): Whether an index of two dimensions selects one row of entries per entry of the index before
+        it, such as one row of items per environment, instead of taking part in the cross-product. A single row is
+        shared by all of them. Defaults to False.
     """
     mask: list[slice | int | torch.Tensor] = []
 
@@ -797,7 +805,7 @@ def indices_to_mask(
                         is_scalar_ = arg.size == 1
                         is_numpy_ = True
                     else:
-                        is_scalar_ = len(arg) == 1
+                        is_scalar_ = len(arg) == 1 and not isinstance(arg[0], (list, tuple, np.ndarray, torch.Tensor))
                     if is_scalar_:
                         idx = arg.item() if is_torch_ or is_numpy_ else arg[0]
                         arg = slice(idx, idx + 1 if idx != -1 else None)
@@ -820,6 +828,31 @@ def indices_to_mask(
                     if keepdim:
                         arg = slice(arg, arg + 1 if arg != -1 else None)
         mask.insert(0, arg)
+
+    # A row of entries per entry of the previous index pairs both indices, the previous one broadcast along the rows
+    for i in range(1, len(mask) if pair_rows else 0):
+        if is_tensor[i] and np.ndim(mask[i]) == 2:
+            rows = mask[i] if isinstance(mask[i], torch.Tensor) else np.asarray(mask[i])
+            if len(rows) == 1:
+                mask[i] = rows[0]
+                continue
+            prev = mask[i - 1]
+            if isinstance(prev, slice):
+                start, step = prev.start or 0, prev.step or 1
+                prev = range(start, start + len(rows) * step, step)
+            elif isinstance(prev, int):
+                prev = (prev,)
+            if isinstance(rows, torch.Tensor):
+                prev = torch.as_tensor(prev, device=rows.device)
+                if prev.dtype == torch.bool:
+                    prev = prev.nonzero()[:, 0]
+            else:
+                prev = np.asarray(prev)
+                if prev.dtype == np.bool_:
+                    prev = prev.nonzero()[0]
+            assert num_tensors == 1 + is_tensor[i - 1]
+            mask[i - 1], mask[i] = prev.reshape((-1, 1)), rows
+            num_tensors = 0
 
     if num_tensors > 1:
         tensor_idx = 0

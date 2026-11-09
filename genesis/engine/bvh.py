@@ -18,7 +18,7 @@ from quadrants.algorithms import sort as radix_sort
 from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
-from genesis.utils.data import Data, DataKind, Size, StaticConfig, field
+from genesis.utils.data import Config, Data, DataKind, Size, field
 from genesis.utils.misc import get_gpu_core_count
 
 
@@ -44,7 +44,7 @@ class BVH_FIT_KIND(IntEnum):
     BLOCK_SWEEP = 2
 
 
-class BVHStaticConfig(StaticConfig):
+class BVHConfig(Config):
     """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
 
     A leaf key packs the tree, the morton code and the leaf index in that order, so one flat sort orders every tree.
@@ -162,7 +162,7 @@ class BVHData(NamedTuple):
     """A set of linear bounding volume hierarchies (LBVH): its state and the static config of its kernels."""
 
     state: BVHState
-    config: BVHStaticConfig
+    config: BVHConfig
 
 
 def is_rank_sort(n_trees_built: int, n_leaves: int) -> bool:
@@ -176,7 +176,7 @@ def is_rank_sort(n_trees_built: int, n_leaves: int) -> bool:
     return n_trees_built * n_leaves**3 <= max_leaves**3
 
 
-def get_bvh_config(n_trees: int, n_leaves: int, n_trees_built: int | None = None) -> BVHStaticConfig:
+def get_bvh_config(n_trees: int, n_leaves: int, n_trees_built: int | None = None) -> BVHConfig:
     """Return the static config of a build of the first trees of a set of BVH trees.
 
     The set holds n_trees trees over n_leaves leaves each, and the build covers its first n_trees_built trees. If None,
@@ -216,7 +216,7 @@ def get_bvh_config(n_trees: int, n_leaves: int, n_trees_built: int | None = None
         fit_kind = BVH_FIT_KIND.BLOCK_SWEEP
     else:
         fit_kind = BVH_FIT_KIND.FENCED_LEAF_WALK
-    return BVHStaticConfig(
+    return BVHConfig(
         morton_bits=MORTON_BITS,
         end_bit=end_bit,
         log256_max_n=log256_max_n,

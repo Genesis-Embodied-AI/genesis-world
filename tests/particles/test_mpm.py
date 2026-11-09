@@ -10,6 +10,8 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 @pytest.mark.required
 def test_particle_constraints(show_viewer, tol):
+    GRAVITY = 9.81
+    N_STEPS = 5
     # A density that single precision cannot represent
     RHO = 1000.1
 
@@ -17,6 +19,7 @@ def test_particle_constraints(show_viewer, tol):
         sim_options=gs.options.SimOptions(
             dt=2e-3,
             substeps=20,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=64,
@@ -109,6 +112,9 @@ def test_particle_constraints(show_viewer, tol):
     assert mask.any(), "bbox should select some particles"
     assert not mask.all(), "bbox should not select all particles"
 
+    # A checkpoint made before any particle is constrained
+    checkpoint_unconstrained = scene.sim.__getstate__()
+
     # Attach and test following
     link_idx = rigid_box.links[0].idx
     mpm_cube.set_particle_constraints(mask, link_idx, stiffness=1e5)
@@ -129,7 +135,7 @@ def test_particle_constraints(show_viewer, tol):
         scene.step()
 
     # The attached particles follow the link, the springs keeping every particle finite whatever their stiffness
-    assert mpm_cube.get_state().vel.isfinite().all()
+    assert mpm_cube.get_particles_vel().isfinite().all()
     mpm_diff = mpm_cube.get_particles_pos()[:, mask[0], 0].mean() - initial_mpm_x
     # The springs deflect under the pull of the rest of the block, so the attached particles lag the link by a physical
     # offset that precision does not bound
@@ -140,6 +146,12 @@ def test_particle_constraints(show_viewer, tol):
     assert_allclose(moving_box_disp, (30 * scene.dt, 0.0, 0.0), tol=tol)
     follower_offset = mpm_follower.get_particles_pos() - follower_pos_0 - moving_box_disp[:, None]
     assert_allclose(follower_offset[..., :2], 0.0, tol=tol)
+
+    # Restoring the checkpoint brings back unconstrained particles, which fall freely
+    scene.sim.__setstate__(checkpoint_unconstrained)
+    for _ in range(N_STEPS):
+        scene.step()
+    assert_allclose(mpm_follower.get_particles_vel()[..., 2], -GRAVITY * N_STEPS * scene.dt, tol=1e-3)
 
 
 @pytest.mark.required
@@ -191,7 +203,7 @@ def test_perf_dispatch(variant, show_viewer):
     scene.build(n_envs=2)
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
-    assert scene.sim.mpm_solver.needs_svd == (variant == "svd")
+    assert scene.sim.mpm_solver.mpm_config.is_svd_needed == (variant == "svd")
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
@@ -242,7 +254,7 @@ def test_halt_on_nan(show_viewer):
     block.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -5.0)))
     for _ in range(10):
         scene.step()
-        assert block.get_state().pos.isfinite().all()
+        assert block.get_particles_pos().isfinite().all()
         if scene.get_error_envs_mask().any():
             break
     assert_equal(scene.get_error_envs_mask(), (False, True))
@@ -255,5 +267,5 @@ def test_halt_on_nan(show_viewer):
     # Resetting the scene clears the error, so the simulation proceeds
     scene.reset()
     scene.step()
-    assert block.get_state().pos.isfinite().all()
+    assert block.get_particles_pos().isfinite().all()
     assert not scene.get_error_envs_mask().any()

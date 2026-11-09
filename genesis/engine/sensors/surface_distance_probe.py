@@ -186,6 +186,7 @@ def _kernel_surface_distance_probe_bvh(
     output_measured: qd.types.ndarray(),
     dyn_state: DynState,
     eps: float,
+    bvh_stack_size: qd.template(),
 ):
     """
     BVH-accelerated surface-distance query.
@@ -230,7 +231,7 @@ def _kernel_surface_distance_probe_bvh(
             # BVH lives in the tracked link's local frame; bring the probe over.
             probe_link = gu.qd_inv_transform_by_trans_quat(probe_world, track_pos, track_quat)
 
-            stack = qd.Vector.zero(gs.qd_int, qd.static(BVH_STACK_SIZE))
+            stack = qd.Vector.zero(gs.qd_int, qd.static(bvh_stack_size))
             stack[0] = bvh.chunk_node_start[i_c]
             stack_idx = 1
 
@@ -277,7 +278,7 @@ def _kernel_surface_distance_probe_bvh(
                     right = bvh.node_right[n]
                     # Median split bounds depth at log2(N / leaf_size) << BVH_STACK_SIZE; the guard mirrors the
                     # global rigid-BVH kernel so a future build strategy can't silently overflow the stack.
-                    if stack_idx < qd.static(BVH_STACK_SIZE - 2):
+                    if stack_idx < qd.static(bvh_stack_size - 2):
                         stack[stack_idx] = left
                         stack[stack_idx + 1] = right
                         stack_idx += 2
@@ -416,6 +417,7 @@ class SurfaceDistanceProbeSensor(
             measured_cols_b,
             solver.dyn_state,
             eps=gs.EPS,
+            bvh_stack_size=BVH_STACK_SIZE,
         )
         if ground_truth_data_timeline is not None:
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)

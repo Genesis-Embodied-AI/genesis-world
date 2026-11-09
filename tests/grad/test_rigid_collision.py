@@ -137,9 +137,9 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     def _losses(scene, entities):
         # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
         # magnitude of a single entity at the origin, whose finite differences resolve its small gradient in fp32
-        qpos = scene.rigid_solver.get_state().qpos
+        qpos = scene.rigid_solver.get_qpos()
         return [
-            ((qpos[0, entity.q_start : entity.q_start + 3] - qpos.new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
+            ((qpos[entity.q_start : entity.q_start + 3] - qpos.new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
             for entity in entities
         ]
 

@@ -4,6 +4,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
+from genesis.engine.entities.particle_entity import check_particles_inside_boundary
 from genesis.repr_base import RBC
 
 
@@ -152,8 +153,7 @@ class Emitter(RBC):
                 gu.z_up_to_R(direction) @ gu.axis_angle_to_R(np.array([0.0, 0.0, 1.0], dtype=gs.np_float), theta),
             )
 
-            if not self._solver.boundary.is_inside(positions):
-                gs.raise_exception("Emitted particles are outside the boundary.")
+            check_particles_inside_boundary(positions, self._solver.boundary_lower, self._solver.boundary_upper)
 
             n_particles = len(positions)
 
@@ -219,8 +219,7 @@ class Emitter(RBC):
         )
         positions = pos + positions_
 
-        if not self._solver.boundary.is_inside(positions):
-            gs.raise_exception("Emitted particles are outside the boundary.")
+        check_particles_inside_boundary(positions, self._solver.boundary_lower, self._solver.boundary_upper)
 
         dists = np.linalg.norm(positions_, axis=1)
         positions[dists < gs.EPS] = gs.EPS

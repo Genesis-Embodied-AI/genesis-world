@@ -13,7 +13,7 @@ from genesis.utils.raycast_qd import RaycastResult
 from .base import ViewerPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.bvh import BVHState, BVHStaticConfig
+    from genesis.engine.bvh import BVHConfig, BVHState
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.node import Node
@@ -24,7 +24,7 @@ class RaycastTarget(NamedTuple):
 
     solver: "KinematicSolver"
     bvh_state: "BVHState"
-    bvh_config: "BVHStaticConfig"
+    bvh_config: "BVHConfig"
     result: "RaycastResult"
     # (n_vfaces,) opt-in mask for a visual BVH; None for a collision BVH, which covers every face.
     vfaces_mask: torch.Tensor | None

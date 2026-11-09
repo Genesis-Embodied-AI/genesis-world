@@ -179,7 +179,7 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     for obj in objs_kwargs.keys():
         # Validate centroid consistency
         ipc_centroid = p_prev[obj].mean(axis=-2)
-        gs_centroid = obj.get_state().pos.mean(axis=-2)
+        gs_centroid = obj.get_pos() if obj is box else obj.get_verts_pos().mean(axis=-2)
         assert_allclose(ipc_centroid, gs_centroid, atol=TOL_SINGLE)
 
         # Validate centroidal total displacement: 0.5 * GRAVITY * t * (t + DT)

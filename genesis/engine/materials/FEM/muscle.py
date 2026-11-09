@@ -1,18 +1,14 @@
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from pydantic import Field
 
 import quadrants as qd
-from pydantic import Field, PrivateAttr
 
-import genesis as gs
 from genesis.typing import PositiveInt, ValidFloat
 
 from .elastic import Elastic
 
-if TYPE_CHECKING:
-    from genesis.engine.solvers.fem_solver import FEMSolver
 
-
-@qd.data_oriented
 class Muscle(Elastic):
     """
     The muscle material class for FEM.
@@ -26,7 +22,7 @@ class Muscle(Elastic):
     rho : float, optional
         Material density (kg/m^3). Default is 1000.
     model : str, optional
-        Constitutive model ('linear' or 'stable_neohookean'). Default is 'linear'.
+        Constitutive model ('linear', 'stable_neohookean' or 'linear_corotated'). Default is 'linear'.
     n_groups : int, optional
         Number of muscle groups. Default is 1.
     friction_mu : float, optional
@@ -40,121 +36,66 @@ class Muscle(Elastic):
     # Auto-generated, equal to E.
     stiffness: ValidFloat = Field(default=0.0, exclude=True)
 
-    # The small number added to the squared length of a fiber before taking its root, which keeps it positive
-    _fiber_length_eps: Any = PrivateAttr(default=None)
-    # The implicit solver applies the active stress of the fibers along their direction at the start of a substep, as
-    # the explicit one does, which leaves the energy quadratic in the positions at its end
-    _fibers_dir: Any = PrivateAttr(default=None)
-
-    _update_stress_without_actuation: Any = PrivateAttr(default=None)
-    _build_without_actuation: Any = PrivateAttr(default=None)
-    _pre_compute_without_actuation: Any = PrivateAttr(default=None)
-    _pre_compute_grad_without_actuation: Any = PrivateAttr(default=None)
-    _compute_energy_gradient_without_actuation: Any = PrivateAttr(default=None)
-    _compute_energy_without_actuation: Any = PrivateAttr(default=None)
-
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-
         self.stiffness = self.E
-        self._update_stress_without_actuation = self.update_stress
-        self.update_stress = self._update_stress_with_actuation
-        self._build_without_actuation = self.build
-        self.build = self._build_with_actuation
-        self._pre_compute_without_actuation = self.pre_compute
-        self.pre_compute = self._pre_compute_with_actuation
-        self._pre_compute_grad_without_actuation = self.pre_compute_grad
-        self.pre_compute_grad = self._pre_compute_grad_with_actuation
-        self._compute_energy_gradient_without_actuation = self.compute_energy_gradient
-        self.compute_energy_gradient = self._compute_energy_gradient_with_actuation
-        self._compute_energy_without_actuation = self.compute_energy
-        self.compute_energy = self._compute_energy_with_actuation
 
-    def _build_with_actuation(self, fem_solver: "FEMSolver") -> None:
-        self._build_without_actuation(fem_solver)
-        self._fiber_length_eps = qd.field(dtype=gs.qd_float, shape=())
-        self._fiber_length_eps[None] = 1e-12
-        if fem_solver._use_implicit_solver:
-            self._fibers_dir = qd.field(dtype=gs.qd_vec3, shape=(fem_solver._B, fem_solver.n_elements))
 
-    @qd.func
-    def _pre_compute_with_actuation(
-        self, i_e: int, i_b: int, J: float, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3)
-    ):
-        self._pre_compute_without_actuation(i_e, i_b, J, F, m_dir)
-        fiber = F @ m_dir
-        self._fibers_dir[i_b, i_e] = fiber / fiber.norm(self._fiber_length_eps[None])
+# The active stress of the fibers of a muscle adds to the stress of its elastic model. The explicit solver applies it
+# along the fibers as they deform, while the implicit one applies it along their direction at the start of a substep,
+# which leaves the energy quadratic in the positions at its end.
 
-    @qd.func
-    def _pre_compute_grad_with_actuation(
-        self,
-        i_e: int,
-        i_b: int,
-        mu: float,
-        lam: float,
-        F_start: qd.types.matrix(3, 3),
-        F: qd.types.matrix(3, 3),
-        dF_damping: qd.types.matrix(3, 3),
-        gradient_grad: qd.types.matrix(3, 3),
-        actu: float,
-        m_dir: qd.types.vector(3),
-    ):
-        F_start_grad = self._pre_compute_grad_without_actuation(
-            i_e, i_b, mu, lam, F_start, F, dF_damping, gradient_grad, actu, m_dir
-        )
-        # The fiber direction enters the energy gradient through the active stress stiffness * actu * fiber_dir m^T
-        fiber_dir_grad = self.stiffness * actu * gradient_grad @ m_dir
-        fiber = F_start @ m_dir
-        fiber_length = fiber.norm(self._fiber_length_eps[None])
-        fiber_dir = fiber / fiber_length
-        fiber_grad = (fiber_dir_grad - fiber_dir.dot(fiber_dir_grad) * fiber_dir) / fiber_length
-        return F_start_grad + fiber_grad.outer_product(m_dir)
 
-    @qd.func
-    def _compute_energy_gradient_with_actuation(
-        self,
-        i_e: int,
-        i_b: int,
-        mu: float,
-        lam: float,
-        J: float,
-        F: qd.types.matrix(3, 3),
-        actu: float,
-        m_dir: qd.types.vector(3),
-    ):
-        energy, gradient = self._compute_energy_gradient_without_actuation(i_e, i_b, mu, lam, J, F, actu, m_dir)
-        stress = self.stiffness * actu * self._fibers_dir[i_b, i_e].outer_product(m_dir)
-        return energy + (stress * F).sum(), gradient + stress
+@qd.func
+def func_muscle_fiber_dir(F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3), fiber_length_eps: float):
+    """
+    Return the direction of the fibers of a muscle element once deformed.
 
-    @qd.func
-    def _compute_energy_with_actuation(
-        self,
-        i_e: int,
-        i_b: int,
-        mu: float,
-        lam: float,
-        J: float,
-        F: qd.types.matrix(3, 3),
-        actu: float,
-        m_dir: qd.types.vector(3),
-    ):
-        energy = self._compute_energy_without_actuation(i_e, i_b, mu, lam, J, F, actu, m_dir)
-        return energy + self.stiffness * actu * self._fibers_dir[i_b, i_e].dot(F @ m_dir)
+    `m_dir` is the rest direction of the fibers. `fiber_length_eps` is added to the squared length of a fiber before
+    taking its root, which keeps it positive.
+    """
+    fiber = F @ m_dir
+    return fiber / fiber.norm(fiber_length_eps)
 
-    @qd.func
-    def _update_stress_with_actuation(
-        self,
-        mu: float,
-        lam: float,
-        J: float,
-        F: qd.types.matrix(3, 3),
-        actu: float,
-        m_dir: qd.types.vector(3),
-    ):
-        stress = self._update_stress_without_actuation(mu, lam, J, F, actu, m_dir)
 
-        l = (F @ m_dir).norm(self._fiber_length_eps[None])
-        mmT = m_dir.outer_product(m_dir)
-        stress += self.stiffness * (actu / l) * F @ mmT
+@qd.func
+def func_muscle_stress(
+    stiffness: float, actu: float, F: qd.types.matrix(3, 3), m_dir: qd.types.vector(3), fiber_length_eps: float
+):
+    """Return the active stress of the fibers of a muscle element along their deformed direction."""
+    l = (F @ m_dir).norm(fiber_length_eps)
+    return stiffness * (actu / l) * F @ m_dir.outer_product(m_dir)
 
-        return stress
+
+@qd.func
+def func_muscle_fiber_stress(stiffness: float, actu: float, m_dir: qd.types.vector(3), fiber_dir: qd.types.vector(3)):
+    """
+    Return the active stress of the fibers of a muscle element along their direction at the start of a substep.
+
+    It adds to the gradient of the energy density, the energy density gaining its scalar product with the deformation
+    gradient.
+    """
+    return stiffness * actu * fiber_dir.outer_product(m_dir)
+
+
+@qd.func
+def func_muscle_fiber_dir_grad(
+    stiffness: float,
+    actu: float,
+    F_start: qd.types.matrix(3, 3),
+    m_dir: qd.types.vector(3),
+    gradient_grad: qd.types.matrix(3, 3),
+    fiber_length_eps: float,
+):
+    """
+    Return the adjoint of the deformation gradient at the start of a substep that the direction of the fibers carries.
+
+    The direction enters the gradient of the energy density through the active stress stiffness * actu * fiber_dir m^T,
+    whose adjoint `gradient_grad` is.
+    """
+    fiber_dir_grad = stiffness * actu * gradient_grad @ m_dir
+    fiber = F_start @ m_dir
+    fiber_length = fiber.norm(fiber_length_eps)
+    fiber_dir = fiber / fiber_length
+    fiber_grad = (fiber_dir_grad - fiber_dir.dot(fiber_dir_grad) * fiber_dir) / fiber_length
+    return fiber_grad.outer_product(m_dir)

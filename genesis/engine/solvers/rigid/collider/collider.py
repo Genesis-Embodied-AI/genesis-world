@@ -48,15 +48,7 @@ from .contact import (
     kernel_collider_clear,
     kernel_masked_collider_clear,
 )
-from .data import (
-    ColliderInfo,
-    ColliderState,
-    ColliderStaticConfig,
-    DiffContactInput,
-    GJKInfo,
-    GJKScratch,
-    GJKState,
-)
+from .data import ColliderConfig, ColliderInfo, ColliderState, DiffContactInput, GJKInfo, GJKScratch, GJKState
 from .mpr import MPRInfo, MPRScratch, MPRState
 from .narrowphase import (
     func_fill_diff_contact_input_plane,
@@ -91,7 +83,7 @@ class Collider:
         self._prune_max_contacts_per_link_pair = 32
         self._prune_max_contacts_floor = 512
 
-        self._init_static_config()
+        self._init_config()
         self._use_split_narrowphase = (
             self.collider_config.has_non_box_plane_convex_convex
             and gs.backend != gs.cpu
@@ -180,7 +172,7 @@ class Collider:
         for owner, name in structs:
             yield from iter_data(owner, name)
 
-    def _init_static_config(self) -> None:
+    def _init_config(self) -> None:
         # The contact patch (polygon clipping over the touching faces) skips perturbation whenever it ran (see
         # multi_contact_flag). It defaults on under MuJoCo compatibility with GJK because the reference engine builds
         # its manifolds that way inside its GJK/EPA and runs its perturbation scheme only in its legacy fallback
@@ -262,7 +254,7 @@ class Collider:
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
-        self.collider_config = ColliderStaticConfig(
+        self.collider_config = ColliderConfig(
             gpu_cores=get_gpu_core_count(),
             has_terrain=has_terrain,
             # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
@@ -884,11 +876,15 @@ class Collider:
             envs_idx, self.collider_state, self._solver.rigid_config, self.collider_config, cache_only
         )
 
-    def clear(self, envs_idx=None):
+    def clear(self, envs_idx=None, *, reset_warm_start: bool = True):
         """Remove the contacts of the environments 'envs_idx' (None for all of them), with their forces.
 
         A hibernated entity keeps the contacts it rests on, with the forces of the last solve it took part in, for as
         long as it sleeps. The contact force of every link is then the sum of the forces of the contacts it keeps.
+
+        `reset_warm_start` also resets the warm start of the detection, its contact cache and its first-step flag. A
+        reset of the scene to its initial state asks for it, while the restore of a saved state ('set_state') keeps
+        the warm start the state holds, so that the restored environments step on exactly as they did when saved.
         """
         self._contact_data_cache.clear()
         # A kernel wipes the live contacts alone, while views over the contact buffers would wipe every slot of them
@@ -906,6 +902,7 @@ class Collider:
             self._solver.rigid_info,
             self._solver.rigid_config,
             self.collider_config,
+            reset_warm_start,
         )
 
     def detection(self) -> None:

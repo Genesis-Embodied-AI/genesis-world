@@ -12,6 +12,13 @@ import quadrants as qd
 import genesis as gs
 from genesis.typing import Vec3FType
 from genesis.utils.cache import register_cache_clear
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+
+
+# The particles of the particle solvers, which every per-particle array spans
+PARTICLES = Size("particles")
+# The slots of a spatial hash grid (see SpatialHashGrid)
+HASH_SLOTS = Size("hash_slots")
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- Quadrants ----------------------------------------
@@ -2545,125 +2552,93 @@ def default_dofs_kv(n=6):
     return np.full((n,), fill_value=10.0, dtype=gs.np_float)
 
 
-@qd.data_oriented
-class SpatialHasher:
-    def __init__(self, cell_size, grid_res, n_slots=None):
-        self.cell_size = cell_size
-        self.grid_res = grid_res
+class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
+    """
+    The particles of every environment sorted by the cell of a uniform grid they lie in, for neighbour queries.
 
-        if n_slots is None:
-            self.n_slots = np.prod(grid_res)
-        else:
-            self.n_slots = n_slots
+    A cell of integer coordinates hashes to one of the slots, whose particles take the sorted indices from `slot_start`
+    to `slot_start + slot_size` (see func_hash_sort_particles). `particles_idx` is the particle each sorted index holds,
+    and `n_particles` the number of active particles of each environment, which take the first sorted indices.
+    """
 
-    def build(self, n_elems, n_batch):
-        self._B = n_batch
-        # number of elements in each slot
-        self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        # element index offset in each slot
-        self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        # index of the element each sorted index holds, before the elements of each slot are put in ascending order
-        self.elems_idx = qd.field(gs.qd_int, shape=(n_elems, self._B))
-        self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
+    slot_size: qd.Tensor = field(int)
+    slot_start: qd.Tensor = field(int)
+    particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
+    n_particles: qd.Tensor = field(int, shape=(ENVS,))
+    # The particle each sorted index holds before the particles of each slot are put in ascending order of index
+    slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
+    cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
+    grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
 
-    @qd.func
-    def compute_reordered_idx(self, n, pos, active, reordered_idx):
-        """
-        Reordered element idx based on the given positions and active flags.
 
-        The active elements of an environment take the sorted indices 0 to cur_cnt - 1, those of a slot in ascending
-        order of element index.
+@qd.func
+def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.Tensor, hash_grid: SpatialHashGrid):
+    """
+    Sort the active particles of every environment by the slot of the hash grid their position falls in.
 
-        Parameters:
-            n (int)       : The number of elements in the positions and active arrays.
-            pos           : The array of positions.
-            active        : The array of active flags.
-            reordered_idx : The array to store the computed reordered indices.
+    The active particles of an environment take the sorted indices 0 to `n_particles - 1`, those of a slot following
+    each other in ascending order of index, and `particles_idx` receives the particle of each sorted index. Called at
+    the top level of a kernel, whose loops it runs in parallel.
+    """
+    n_slots, _B = hash_grid.slot_size.shape[0], hash_grid.slot_size.shape[1]
+    # The slot starts are all written before they are read, so the counts alone start from zero
+    for i_s, i_b in qd.ndrange(n_slots, _B):
+        hash_grid.slot_size[i_s, i_b] = 0
+        if i_s == 0:
+            hash_grid.n_particles[i_b] = 0
 
-        Returns:
-            None
-        """
+    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
+        if particles_is_active[i_p, i_b]:
+            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+            qd.atomic_add(hash_grid.slot_size[i_s, i_b], 1)
 
-        # The slot starts are all written before they are read, so the counts alone start from zero.
-        for i_s, i_b in qd.ndrange(self.n_slots, self._B):
-            self.slot_size[i_s, i_b] = 0
-            if i_s == 0:
-                self.cur_cnt[i_b] = 0
+    for i_s in range(n_slots):
+        for i_b in range(_B):
+            hash_grid.slot_start[i_s, i_b] = qd.atomic_add(hash_grid.n_particles[i_b], hash_grid.slot_size[i_s, i_b])
 
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                qd.atomic_add(self.slot_size[slot_idx, i_b], 1)
+    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
+        if particles_is_active[i_p, i_b]:
+            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+            i_r = qd.atomic_add(hash_grid.slot_start[i_s, i_b], 1)
+            hash_grid.slots_particles_idx[i_r, i_b] = i_p
 
-        for i_n in range(self.n_slots):
-            for i_b in range(self._B):
-                self.slot_start[i_n, i_b] = qd.atomic_add(self.cur_cnt[i_b], self.slot_size[i_n, i_b])
+    # The atomic increments above left every slot start at the end of its range
+    for i_s, i_b in qd.ndrange(n_slots, _B):
+        hash_grid.slot_start[i_s, i_b] = hash_grid.slot_start[i_s, i_b] - hash_grid.slot_size[i_s, i_b]
 
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                i_r = qd.atomic_add(self.slot_start[slot_idx, i_b], 1)
-                self.elems_idx[i_r, i_b] = i_n
+    # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
+    # Ranking the particles of a slot by index fixes the order in which the neighbour queries sum over them, so that
+    # the same state steps on bit-identically.
+    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
+        if particles_is_active[i_p, i_b]:
+            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+            slot_start = hash_grid.slot_start[i_s, i_b]
+            rank = 0
+            for i_r in range(slot_start, slot_start + hash_grid.slot_size[i_s, i_b]):
+                if hash_grid.slots_particles_idx[i_r, i_b] < i_p:
+                    rank += 1
+            hash_grid.particles_idx[slot_start + rank, i_b] = i_p
 
-        # recover slot_start
-        for i_s, i_b in qd.ndrange(self.n_slots, self._B):
-            self.slot_start[i_s, i_b] -= self.slot_size[i_s, i_b]
 
-        # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
-        # Ranking the elements of a slot by index fixes the order in which the neighbour queries sum over them, so that
-        # the same state steps on bit-identically.
-        for i_n, i_b in qd.ndrange(n, self._B):
-            if active[i_n, i_b]:
-                slot_idx = self.pos_to_slot(pos[i_n, i_b])
-                slot_start = self.slot_start[slot_idx, i_b]
-                rank = 0
-                for i_r in range(slot_start, slot_start + self.slot_size[slot_idx, i_b]):
-                    if self.elems_idx[i_r, i_b] < i_n:
-                        rank += 1
-                reordered_idx[i_n, i_b] = slot_start + rank
+@qd.func
+def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
+    """Return the integer coordinates of the cell of the hash grid a position lies in."""
+    return qd.floor(pos / hash_grid.cell_size[None], gs.qd_int)
 
-    @qd.func
-    def for_all_neighbors(self, i_p, pos, task_range, ret: qd.template(), task: qd.template(), i_b):
-        """
-        Iterates over all neighbors of a given position and performs a task on each neighbor.
-        Elements are considered neighbors if they are within task_range.
 
-        Parameters:
-            i_p (int)  : Index of the querying particle.
-            pos        : Template for the positions of all particles.
-            task       : Template for the task to be performed on each neighbor of the querying particle.
-            task_range : Range within which the task should be performed.
-            ret        : Template for the return value of the task.
+# The integer dtype is spelled out since the Genesis integer vector types only exist once Genesis is initialized
+@qd.func
+def func_hash_grid_to_slot(grid_id, hash_grid: SpatialHashGrid):
+    """Return the slot of the hash grid a cell of integer coordinates hashes to."""
+    grid_res = hash_grid.grid_res[None]
+    n_slots = hash_grid.slot_size.shape[0]
+    return (grid_id[0] * grid_res[1] * grid_res[2] + grid_id[1] * grid_res[2] + grid_id[2]) % n_slots
 
-        Returns:
-            None
-        """
-        base = self.pos_to_grid(pos[i_p, i_b])
-        for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-            slot_idx = self.grid_to_slot(base + offset)
-            for j_p in range(
-                self.slot_start[slot_idx, i_b], self.slot_size[slot_idx, i_b] + self.slot_start[slot_idx, i_b]
-            ):
-                if i_p != j_p and (pos[i_p, i_b] - pos[j_p, i_b]).norm() < task_range:
-                    task(i_p, j_p, ret, i_b)
 
-    @qd.func
-    def pos_to_grid(self, pos):
-        return qd.floor(pos / self.cell_size, gs.qd_int)
-
-    @qd.func
-    def grid_to_pos(self, grid_id):
-        return (grid_id + 0.5) * self.cell_size
-
-    @qd.func
-    def grid_to_slot(self, grid_id):
-        return (
-            grid_id[0] * self.grid_res[1] * self.grid_res[2] + grid_id[1] * self.grid_res[2] + grid_id[2]
-        ) % self.n_slots
-
-    @qd.func
-    def pos_to_slot(self, pos):
-        return self.grid_to_slot(self.pos_to_grid(pos))
+@qd.func
+def func_hash_pos_to_slot(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
+    """Return the slot of the hash grid a position falls in."""
+    return func_hash_grid_to_slot(func_hash_pos_to_grid(pos, hash_grid), hash_grid)
 
 
 @nb.jit(nopython=True, cache=True)
