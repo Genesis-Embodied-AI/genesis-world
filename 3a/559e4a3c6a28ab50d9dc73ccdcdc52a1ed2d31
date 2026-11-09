@@ -1,0 +1,21 @@
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_89519fefaf9334::t_bc4f177599fab2 2474-2481
+genesis/engine/solvers/rigid/abd/forward_dynamics.py
+  s_89519fefaf9334::t_96b69402a2d055 1705-1706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3a559e4a3c6a28ab50d9dc73ccdcdc52a1ed2d31",
+  "prompts": {},
+  "sessions": {
+    "s_89519fefaf9334": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2a1f18c-7a3c-4261-abbd-cb0686eb33c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
