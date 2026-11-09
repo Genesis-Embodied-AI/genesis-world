@@ -89,8 +89,7 @@ def participant_group(name: str, devices: list):
     iterates."""
     fields = [f"member_{i}" for i in range(len(devices))]
     # FIXME: quadrants#1040 - the walk of the arguments reads the members of a data-oriented object through vars(),
-    # which a NamedTuple has none of. A subclass without __slots__ carries a __dict__, which holds the members under
-    # their field names as well, so that the walk declares their arrays.
+    # which a NamedTuple has none of, so a subclass without __slots__ holds them in its __dict__ as well.
     group_type = qd.data_oriented(type(name, (collections.namedtuple(name, fields),), {}))
     group = group_type(*devices)
     group.__dict__.update(zip(fields, devices))
@@ -560,8 +559,8 @@ class NewtonSolver(Solver):
         kernel_reset_newton_control(control)
         kernel_energy(f, control, participants, is_trial=False)
 
-        # FIXME: The compile time of a graph grows faster than its size, so the Newton graph compiles much slower than
-        # its stages as separate kernels, and a change of any stage in it recompiles it whole
+        # FIXME: quadrants#945 - the compile time of a graph grows faster than its size, so by default the host drives
+        # the Newton iterations, at a device read per iteration and per line-search trial.
         if self._is_loop_graph:
             kernel_newton_loop(f, control, self.pcg_scalars, participants)
         else:

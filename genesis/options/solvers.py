@@ -445,8 +445,6 @@ class NewtonOptions(Options):
     """
 
     velocity_tol: PositiveFloat = 5e-2
-    # FIXME: A whole substep as one graph, the final target, is a mode of the Newton solver that composes the
-    # preparation, the Newton iterations and the end of the substep of every participant alike
     graph: Literal["split", "newton"] = "split"
     adjoint_hessian: Literal["projected", "exact", "auto"] = "projected"
     max_iterations: PositiveInt = 1024

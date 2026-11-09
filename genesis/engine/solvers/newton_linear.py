@@ -30,8 +30,8 @@ CAPACITY_GROW_FACTOR = 1.2
 
 def retire_scratch(scratch: Data, retired: list) -> None:
     """Free the arrays of a struct that a larger one replaces, and keep the struct referenced in `retired`."""
-    # FIXME: quadrants#1074 - the launch of a kernel is cached under the identity of its struct arguments, and the
-    # entry outlives the struct, so a new struct taking the identity of a dead one would run on its arrays
+    # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct could
+    # take over from a dead one, so its owner keeps every retired struct referenced, with its arrays freed.
     for _, array in iter_state_arrays(scratch):
         qd_destroy_data(array)
     retired.append(scratch)

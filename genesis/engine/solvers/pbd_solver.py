@@ -1434,7 +1434,8 @@ def func_solve_collision_pair(i: int, j: int, i_b: int, pbd_solver: qd.template(
     rest_dist = (
         pbd_solver.particles_info_reordered[i, i_b].pos_rest - pbd_solver.particles_info_reordered[j, i_b].pos_rest
     ).norm(gs.EPS)
-    target_dist = pbd_solver._particle_size  # target particle distance is 2 * particle radius, i.e. particle_size
+    # target particle distance is 2 * particle radius, i.e. particle_size
+    target_dist = pbd_solver._particle_size
     if cur_dist < target_dist and rest_dist > target_dist:
         wi = pbd_solver.particles_reordered[i, i_b].free / pbd_solver.particles_info_reordered[i, i_b].mass
         wj = pbd_solver.particles_reordered[j, i_b].free / pbd_solver.particles_info_reordered[j, i_b].mass

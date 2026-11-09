@@ -9,7 +9,7 @@ from ..utils.assertions import assert_allclose
 from ..utils.assets import get_hf_dataset
 
 
-@pytest.mark.slow  # ~60s
+@pytest.mark.slow
 @pytest.mark.required
 def test_rigid_mpm_muscle(show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)

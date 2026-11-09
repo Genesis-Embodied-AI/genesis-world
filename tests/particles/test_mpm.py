@@ -221,8 +221,7 @@ def _falling_block(n_envs, show_viewer):
 @pytest.mark.precision("64")
 def test_envs_solve_apart(precision, show_viewer):
     # The environments of a batch run their own Newton solves: thrown at different speeds, the block of each one moves
-    # as it does alone, the solves of the block hitting the plane running up to four times as many iterations as those
-    # of the block at rest
+    # as it does alone, while the solves of the block hitting the plane run more iterations than those at rest
     velocities = ((0.0, 0.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, -0.5))
     scene, block = _falling_block(len(velocities), show_viewer)
     block.set_velocity(velocities)
@@ -345,7 +344,7 @@ def test_reject_unsupported_configurations():
             scene.build()
 
 
-@pytest.mark.slow  # ~300s from a cold cache, the Newton graph compiling in ~200s
+@pytest.mark.slow
 @pytest.mark.required
 @pytest.mark.precision("64")
 def test_newton_graph_matches_split(show_viewer):
