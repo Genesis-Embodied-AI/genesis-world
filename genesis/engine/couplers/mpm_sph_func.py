@@ -23,7 +23,7 @@ class MpmSphBoundaryScratch(Data, kind=DataKind.SCRATCH):
     grad_sum: qd.Tensor = field((float, 3), shape=(SPH_PARTICLES, ENVS), ndarray=True)
     vel_grad_sum: qd.Tensor = field(float, shape=(SPH_PARTICLES, ENVS), ndarray=True)
     n_neighbors: qd.Tensor = field(int, shape=(SPH_PARTICLES, ENVS), ndarray=True)
-    s: qd.Tensor = field(float, shape=(SPH_PARTICLES, ENVS), ndarray=True)
+    impulse_coef: qd.Tensor = field(float, shape=(SPH_PARTICLES, ENVS), ndarray=True)
     impulse: qd.Tensor = field((float, 3), shape=(MPM_PARTICLES, ENVS), ndarray=True)
 
 
@@ -84,14 +84,15 @@ def kernel_fit_mpm_particle_leaves(f: int, query: qd.template()):
 def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
     """Add an MPM particle to the boundary sums of an SPH particle if it lies within the kernel support."""
     f = boundary.scratch.frame[()]
-    sph = boundary.sph
-    r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
+    r = boundary.sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
     dist = r.norm()
-    if dist < qd.static(sph.support_radius):
+    if dist < qd.static(boundary.sph.support_radius):
         volume = boundary.mpm_info.particle_volume[()]
-        grad = volume * sph.cubic_kernel_derivative(r)
+        grad = volume * boundary.sph.cubic_kernel_derivative(r)
         # The thread of the SPH particle alone accumulates its sums
-        boundary.scratch.rho_sum[i_q, i_t] = boundary.scratch.rho_sum[i_q, i_t] + volume * sph.cubic_kernel(dist)
+        boundary.scratch.rho_sum[i_q, i_t] = boundary.scratch.rho_sum[i_q, i_t] + volume * boundary.sph.cubic_kernel(
+            dist
+        )
         boundary.scratch.grad_sum[i_q, i_t] = boundary.scratch.grad_sum[i_q, i_t] + grad
         vel_grad = boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
         boundary.scratch.vel_grad_sum[i_q, i_t] = boundary.scratch.vel_grad_sum[i_q, i_t] + vel_grad
@@ -103,15 +104,14 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
 def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
     """Give an MPM particle within the kernel support of an SPH particle its impulse -m_i s_i V_b grad W_ib."""
     f = boundary.scratch.frame[()]
-    sph = boundary.sph
-    r = sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
-    if r.norm() < qd.static(sph.support_radius):
+    r = boundary.sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
+    if r.norm() < qd.static(boundary.sph.support_radius):
         coef = (
-            -sph.particles_info_reordered[i_q, i_t].mass
-            * boundary.scratch.s[i_q, i_t]
+            -boundary.sph.particles_info_reordered[i_q, i_t].mass
+            * boundary.scratch.impulse_coef[i_q, i_t]
             * boundary.mpm_info.particle_volume[()]
         )
-        qd.atomic_add(boundary.scratch.impulse[i_a, i_t], coef * sph.cubic_kernel_derivative(r))
+        qd.atomic_add(boundary.scratch.impulse[i_a, i_t], coef * boundary.sph.cubic_kernel_derivative(r))
     return True
 
 
@@ -119,17 +119,16 @@ def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.temp
 def kernel_gather_boundary(boundary: qd.template()):
     """The boundary sums of every active SPH particle by a box query of the MPM trees over its kernel support, and its
     boundary velocity coefficient cleared for the step."""
-    sph = boundary.sph
-    h = qd.static(sph.support_radius)
+    h = qd.static(boundary.sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_gather")
-    for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
+    for i_s, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
         boundary.scratch.rho_sum[i_s, i_b] = 0.0
         boundary.scratch.grad_sum[i_s, i_b] = qd.Vector.zero(gs.qd_float, 3)
         boundary.scratch.vel_grad_sum[i_s, i_b] = 0.0
         boundary.scratch.n_neighbors[i_s, i_b] = 0
-        boundary.scratch.s[i_s, i_b] = 0.0
-        if sph.particles_ng_reordered[i_s, i_b].active:
-            x = sph.particles_reordered[i_s, i_b].pos
+        boundary.scratch.impulse_coef[i_s, i_b] = 0.0
+        if boundary.sph.particles_ng_reordered[i_s, i_b].active:
+            x = boundary.sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
                 i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_gather_filter, boundary
             )
@@ -138,12 +137,11 @@ def kernel_gather_boundary(boundary: qd.template()):
 @qd.kernel
 def kernel_scatter_boundary(boundary: qd.template()):
     """The impulse of every SPH particle on the MPM particles of its support, which the gather counted."""
-    sph = boundary.sph
-    h = qd.static(sph.support_radius)
+    h = qd.static(boundary.sph.support_radius)
     qd.loop_config(name="sph_mpm_boundary_scatter")
-    for i_s, i_b in qd.ndrange(sph._n_particles, sph._B):
-        if sph.particles_ng_reordered[i_s, i_b].active and boundary.scratch.n_neighbors[i_s, i_b] > 0:
-            x = sph.particles_reordered[i_s, i_b].pos
+    for i_s, i_b in qd.ndrange(boundary.sph._n_particles, boundary.sph._B):
+        if boundary.sph.particles_ng_reordered[i_s, i_b].active and boundary.scratch.n_neighbors[i_s, i_b] > 0:
+            x = boundary.sph.particles_reordered[i_s, i_b].pos
             func_bvh_query_aabb(
                 i_b, i_s, x - h, x + h, boundary.tree, boundary.results, func_boundary_scatter_filter, boundary
             )

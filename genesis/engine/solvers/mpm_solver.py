@@ -472,10 +472,10 @@ class MPMSolver(ParticleSolver):
                     "the materials of genesis.materials.MPM."
                 )
         # The legacy coupler registers the Newton solve of every substep (see LegacyCoupler)
-        coupler_options = self._sim.coupler.options
-        if not isinstance(coupler_options, LegacyCouplerOptions):
+        if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
             gs.raise_exception(
-                f"The implicit MPM solver requires LegacyCouplerOptions, got {type(coupler_options).__name__}."
+                "The implicit MPM solver requires LegacyCouplerOptions, got "
+                f"{type(self._sim.coupler.options).__name__}."
             )
         if self._requires_grad:
             for force_field in self._ffs:
@@ -509,13 +509,12 @@ class MPMSolver(ParticleSolver):
             self._init_contact_invweight()
 
     def _init_contact_invweight(self):
-        participant = self._newton_participant
         self._predict(0, t=0.0)
         kernel_contact_invweight(
             0,
             self.particles,
-            participant.grid,
-            participant.newton,
+            self._newton_participant.grid,
+            self._newton_participant.newton,
             self.particles_info,
             self.mpm_materials,
             self.mpm_info,
@@ -524,18 +523,17 @@ class MPMSolver(ParticleSolver):
     def _predict(self, f, t):
         if not self._is_mpm_sized:
             self._size_to_particles(f)
-        participant = self._newton_participant
-        build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
-        while int(qd_to_numpy(participant.grid.has_grid_overflow)):
+        build_grid(self.particles, self.particles_ng, self._newton_participant.grid, self.mpm_info, f)
+        while int(qd_to_numpy(self._newton_participant.grid.has_grid_overflow)):
             self._grow_grid()
-            build_grid(self.particles, self.particles_ng, participant.grid, self.mpm_info, f)
+            build_grid(self.particles, self.particles_ng, self._newton_participant.grid, self.mpm_info, f)
         kernel_predict(
             f,
             t,
             self._gravity,
             self.particles,
-            participant.grid,
-            participant.newton,
+            self._newton_participant.grid,
+            self._newton_participant.newton,
             self.particles_info,
             self._mpm_force_fields,
             self.mpm_info,
@@ -604,10 +602,13 @@ class MPMSolver(ParticleSolver):
         self._is_mpm_sized = True
 
     def _grow_grid(self):
-        participant = self._newton_participant
-        grid = participant.grid
-        demand = max(int(qd_to_numpy(grid.grid_demand)), int(qd_to_numpy(grid.n_particle_blocks)))
-        max_blocks = max(int(np.ceil(demand * CAPACITY_GROW_FACTOR)), grid.block_coords.shape[0] + 1)
+        demand = max(
+            int(qd_to_numpy(self._newton_participant.grid.grid_demand)),
+            int(qd_to_numpy(self._newton_participant.grid.n_particle_blocks)),
+        )
+        max_blocks = max(
+            int(np.ceil(demand * CAPACITY_GROW_FACTOR)), self._newton_participant.grid.block_coords.shape[0] + 1
+        )
         self._resize_blocks(max_blocks)
 
     def substep_post_coupling(self, f):
@@ -628,24 +629,35 @@ class MPMSolver(ParticleSolver):
     def newton_prepare(self, f):
         """Run the substep up to the Newton solve: the grid, the particle-to-grid transfer with the force fields, the
         physical Hessian at u = 0 and the wall pairs."""
-        participant, mpm_info = self._newton_participant, self.mpm_info
         self._predict(f, self._sim.cur_t)
         if self._constraints_initialized:
             kernel_constraint_rows(
-                participant.grid,
-                participant.newton,
+                self._newton_participant.grid,
+                self._newton_participant.newton,
                 self._sim.rigid_solver.dyn_state.links,
                 self.particles_info,
-                mpm_info,
+                self.mpm_info,
                 self.particle_constraints,
             )
-        kernel_report_extent(participant.grid, participant.linear_block)
-        kernel_wall_pairs(f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info)
-        n_pairs = int(qd_to_numpy(participant.wall_pairs.n_pairs))
-        if n_pairs > participant.wall_pairs.s.shape[0]:
-            participant.replace_wall_pairs(build_wall_pairs(grown_capacity(n_pairs)))
+        kernel_report_extent(self._newton_participant.grid, self._newton_participant.linear_block)
+        kernel_wall_pairs(
+            f,
+            self.particles,
+            self._newton_participant.grid,
+            self._newton_participant.wall_pairs,
+            self.particles_info,
+            self.mpm_info,
+        )
+        n_pairs = int(qd_to_numpy(self._newton_participant.wall_pairs.n_pairs))
+        if n_pairs > self._newton_participant.wall_pairs.s.shape[0]:
+            self._newton_participant.replace_wall_pairs(build_wall_pairs(grown_capacity(n_pairs)))
             kernel_wall_pairs(
-                f, self.particles, participant.grid, participant.wall_pairs, self.particles_info, mpm_info
+                f,
+                self.particles,
+                self._newton_participant.grid,
+                self._newton_participant.wall_pairs,
+                self.particles_info,
+                self.mpm_info,
             )
 
     def newton_finish(self, f, control):
@@ -673,12 +685,11 @@ class MPMSolver(ParticleSolver):
         """Reverse a substep from the state left by the replay of its forward pass (see mpm_adjoint_func): the reverse
         of the grid-to-particle transfer, the adjoint solve `solve`, the pullback and the reverse of the
         particle-to-grid transfer into frame `f`."""
-        participant = self._newton_participant
         kernel_adjoint_g2p(
             f,
             self.particles,
-            participant.grid,
-            participant.newton,
+            self._newton_participant.grid,
+            self._newton_participant.newton,
             self.particles_info,
             self.mpm_materials,
             self.mpm_info,
@@ -688,10 +699,10 @@ class MPMSolver(ParticleSolver):
             kernel_constraint_adjoint(
                 f,
                 self.particles,
-                participant.grid,
-                participant.newton,
-                participant.linear,
-                participant.linear_block,
+                self._newton_participant.grid,
+                self._newton_participant.newton,
+                self._newton_participant.linear,
+                self._newton_participant.linear_block,
                 self._sim.rigid_solver.dyn_state.links,
                 self.mpm_info,
                 self.particle_constraints,
@@ -702,11 +713,11 @@ class MPMSolver(ParticleSolver):
             self._gravity,
             self.particles,
             self.particles_ng,
-            participant.grid,
-            participant.newton,
-            participant.linear,
-            participant.linear_block,
-            participant.wall_pairs,
+            self._newton_participant.grid,
+            self._newton_participant.newton,
+            self._newton_participant.linear,
+            self._newton_participant.linear_block,
+            self._newton_participant.wall_pairs,
             self.particles_info,
             self.mpm_materials,
             self._mpm_force_fields,
@@ -715,8 +726,12 @@ class MPMSolver(ParticleSolver):
 
     def newton_adjoint_rhs(self, f):
         """Stage the adjoint of u* left by the reverse of the grid-to-particle transfer as the right-hand side."""
-        participant = self._newton_participant
-        kernel_adjoint_rhs(participant.grid, participant.newton, participant.linear, participant.linear_block)
+        kernel_adjoint_rhs(
+            self._newton_participant.grid,
+            self._newton_participant.newton,
+            self._newton_participant.linear,
+            self._newton_participant.linear_block,
+        )
 
     def newton_adjoint_finish(self, f):
         pass

@@ -353,19 +353,19 @@ class PBD2DEntity(PBDTetEntity):
         same or adjacent triangles, stay on one continuous surface as the cloth bends. The affine fit over the nearest
         particles of `ParticleEntity` switches support sets between neighboring vverts and creases the rendered cloth.
         The supports past the three of the triangle take zero weight."""
-        n_supports = self.solver.n_vvert_supports
-        if n_supports < 3:
+        if self._solver.n_vvert_supports < 3:
             super()._add_vverts_to_solver()
             return
-        faces = self._mesh.faces
-        mesh = trimesh.Trimesh(vertices=self._particles, faces=faces, process=False)
-        closest, _, tri_idx = trimesh.proximity.closest_point(mesh, self._vverts)
-        bary = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_idx], closest)
-        support_idxs = np.zeros((len(self._vverts), n_supports), dtype=gs.np_int)
-        support_weights = np.zeros((len(self._vverts), n_supports), dtype=gs.np_float)
-        support_idxs[:, :3] = faces[tri_idx]
-        support_idxs[:, 3:] = faces[tri_idx, :1]
-        support_weights[:, :3] = bary
+        mesh = trimesh.Trimesh(vertices=self._particles, faces=self._mesh.faces, process=False)
+        vverts_closest_pos, _, vverts_face_idx = trimesh.proximity.closest_point(mesh, self._vverts)
+        vverts_barycentric = trimesh.triangles.points_to_barycentric(
+            mesh.triangles[vverts_face_idx], vverts_closest_pos
+        )
+        support_idxs = np.zeros((len(self._vverts), self._solver.n_vvert_supports), dtype=gs.np_int)
+        support_weights = np.zeros((len(self._vverts), self._solver.n_vvert_supports), dtype=gs.np_float)
+        support_idxs[:, :3] = self._mesh.faces[vverts_face_idx]
+        support_idxs[:, 3:] = self._mesh.faces[vverts_face_idx, :1]
+        support_weights[:, :3] = vverts_barycentric
         kernel_add_vverts_weighted(self._vvert_start, self._particle_start, support_idxs, support_weights, self._solver)
 
     @property

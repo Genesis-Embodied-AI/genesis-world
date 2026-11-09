@@ -378,7 +378,9 @@ class SPHSolver(ParticleSolver):
                         / self.particles_reordered[i_p, i_b].rho ** 2
                     )
                     acc += coef * self._boundary.scratch.grad_sum[i_p, i_b]
-                    self._boundary.scratch.s[i_p, i_b] = self._boundary.scratch.s[i_p, i_b] + self._cycle_dt * coef
+                    self._boundary.scratch.impulse_coef[i_p, i_b] = (
+                        self._boundary.scratch.impulse_coef[i_p, i_b] + self._cycle_dt * coef
+                    )
                 self.particles_reordered[i_p, i_b].acc += acc
 
     @qd.kernel
@@ -532,7 +534,9 @@ class SPHSolver(ParticleSolver):
                     # The boundary takes the fluid's stiffness alone: k_i sum_b V_b grad W_ib
                     if qd.abs(k_i) > self._df_eps:
                         ret.dv += k_i * self._boundary.scratch.grad_sum[i_p, i_b]
-                        self._boundary.scratch.s[i_p, i_b] = self._boundary.scratch.s[i_p, i_b] + k_i
+                        self._boundary.scratch.impulse_coef[i_p, i_b] = (
+                            self._boundary.scratch.impulse_coef[i_p, i_b] + k_i
+                        )
                 self.particles_reordered.vel[i_p, i_b] = self.particles_reordered.vel[i_p, i_b] + ret.dv
 
     @qd.kernel
@@ -647,7 +651,9 @@ class SPHSolver(ParticleSolver):
                 if qd.static(self._has_boundary):
                     if qd.abs(k_i) > self._df_eps:
                         ret.dv += self._cycle_dt * k_i * self._boundary.scratch.grad_sum[i_p, i_b]
-                        self._boundary.scratch.s[i_p, i_b] = self._boundary.scratch.s[i_p, i_b] + self._cycle_dt * k_i
+                        self._boundary.scratch.impulse_coef[i_p, i_b] = (
+                            self._boundary.scratch.impulse_coef[i_p, i_b] + self._cycle_dt * k_i
+                        )
                 self.particles_reordered[i_p, i_b].vel = self.particles_reordered[i_p, i_b].vel + ret.dv
 
                 # The stiffness k_i is the pressure this Jacobi iteration applies to cancel the current density
