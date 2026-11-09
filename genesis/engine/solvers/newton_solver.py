@@ -339,6 +339,7 @@ class NewtonSolver(Solver):
         self._adjoint_pcg_tol = options.adjoint_pcg_tol or DEFAULT_ADJOINT_PCG_TOL[bits]
         self._participant_hosts = []
         self._coupling_hosts = []
+        self._hosts = []
         self._participants = None
         self._owner_devices = []
         self._contact = None
@@ -382,6 +383,7 @@ class NewtonSolver(Solver):
             )
         self._participant_hosts = [host for host, _ in participants]
         self._coupling_hosts = [host for host, _ in couplings]
+        self._hosts = [*self._participant_hosts, *self._coupling_hosts]
         self._owner_devices = [device for _, device in owners]
         self._participants = NewtonParticipants(self._owner_devices, None if rigid is None else rigid[1], contact, None)
         self._bind_linear(build_newton_linear(self._max_linear_rows, MIN_SLOTS))
@@ -417,30 +419,10 @@ class NewtonSolver(Solver):
     def _max_linear_rows(self):
         return sum(device.max_linear_rows for device in self._owner_devices)
 
-    def _prepare_linear(self):
-        kernel_linear_layout(self._participants)
-        is_overflow = bool(int(qd_to_numpy(self._participants.linear.matrix.has_triplet_overflow)))
-        if is_overflow or self._max_linear_rows > self._participants.linear.pcg.rows_env.shape[0]:
-            max_triplets = self._participants.linear.matrix.triplets_row.shape[0]
-            if is_overflow:
-                n_triplets_demanded = int(qd_to_numpy(self._participants.linear.matrix.n_triplets_demanded))
-                max_triplets = max(grown_capacity(n_triplets_demanded), max_triplets)
-            retire_scratch(self._participants.linear, self._linears_replaced)
-            self._bind_linear(build_newton_linear(self._max_linear_rows, max_triplets))
-            kernel_linear_layout(self._participants)
-
     def _bind_linear(self, linear: NewtonLinearScratch):
         self._participants.linear = linear
         for device in self._owner_devices:
             device.linear = linear
-
-    @property
-    def _hosts(self):
-        return [*self._participant_hosts, *self._coupling_hosts]
-
-    @property
-    def _is_joint(self):
-        return len(self._participant_hosts) > 1 or bool(self._coupling_hosts)
 
     def begin(self, f):
         """Run the host stages that precede the pre-coupling phase of the solvers in a substep."""
@@ -457,27 +439,57 @@ class NewtonSolver(Solver):
         if not self.is_active:
             return
         with custom_backward(self.backward, f):
-            self._step(f)
+            for host in self._hosts:
+                host.newton_prepare(f)
+            if self._contact is not None:
+                self._contact.prepare(f)
+            kernel_linear_layout(self._participants)
+            is_overflow = bool(int(qd_to_numpy(self._participants.linear.matrix.has_triplet_overflow)))
+            if is_overflow or self._max_linear_rows > self._participants.linear.pcg.rows_env.shape[0]:
+                max_triplets = self._participants.linear.matrix.triplets_row.shape[0]
+                if is_overflow:
+                    n_triplets_demanded = int(qd_to_numpy(self._participants.linear.matrix.n_triplets_demanded))
+                    max_triplets = max(grown_capacity(n_triplets_demanded), max_triplets)
+                retire_scratch(self._participants.linear, self._linears_replaced)
+                self._bind_linear(build_newton_linear(self._max_linear_rows, max_triplets))
+                kernel_linear_layout(self._participants)
+            kernel_reset_newton_control(self.control)
+            kernel_energy(f, self.control, self._participants, is_trial=False)
+
+            # FIXME: quadrants#945 - the compile time of a graph grows faster than its size, so by default the host
+            # drives the Newton iterations, at a device read per iteration and per line-search trial.
+            if self._is_loop_graph:
+                kernel_newton_loop(f, self.control, self.pcg_scalars, self._participants)
+            else:
+                while True:
+                    self._assemble(f)
+                    self._pcg(f)
+                    kernel_start_line_search(f, self.control, self._participants)
+                    while True:
+                        kernel_line_search_trial(f, self.control, self._participants)
+                        if not int(qd_to_numpy(self.control.is_line_search_running)):
+                            break
+                    kernel_update_convergence(self.control)
+                    if not int(qd_to_numpy(self.control.is_newton_running)):
+                        break
+
+            for host in self._hosts:
+                host.newton_finish(f, self.control)
+            for host in self._hosts:
+                host.newton_after(f)
         if self._options.strict:
-            self._check_line_search(f)
+            for i_b in np.flatnonzero(qd_to_numpy(self.control.failure_code) == NEWTON_FAILED_LINE_SEARCH):
+                gs.raise_exception(
+                    "Strict Newton solve: the line search of Newton iteration "
+                    f"{int(qd_to_numpy(self.control.n_iterations)[i_b])} of substep {self._sim.cur_substep_global} in "
+                    f"environment {i_b} found no energy below {float(qd_to_numpy(self.control.energy_start)[i_b])} "
+                    f"within {self._options.line_search_max_iterations} trials, the last one giving "
+                    f"{float(qd_to_numpy(self.control.energy_trial)[i_b])}. The energy disagrees with its gradient "
+                    "or with the curvature of its Newton system."
+                )
         # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
         for host in self._hosts:
             host.newton_end(f, self.control)
-        self._check_failures()
-
-    def _check_line_search(self, f):
-        failure_codes = qd_to_numpy(self.control.failure_code)
-        for i_b in np.flatnonzero(failure_codes == NEWTON_FAILED_LINE_SEARCH):
-            gs.raise_exception(
-                "Strict Newton solve: the line search of Newton iteration "
-                f"{int(qd_to_numpy(self.control.n_iterations)[i_b])} of substep {self._sim.cur_substep_global} in "
-                f"environment {i_b} found no energy below {float(qd_to_numpy(self.control.energy_start)[i_b])} "
-                f"within {self._options.line_search_max_iterations} trials, the last one giving "
-                f"{float(qd_to_numpy(self.control.energy_trial)[i_b])}. The energy disagrees with its gradient or with "
-                "the curvature of its Newton system."
-            )
-
-    def _check_failures(self):
         if (self._sim.cur_substep_global + 1) % self._sim._substeps == 0:
             for host in self._participant_hosts:
                 host.newton_flag_non_finite(self.control)
@@ -543,27 +555,6 @@ class NewtonSolver(Solver):
         self.pcg_scalars.is_curvature_checked.from_numpy(np.array(0, dtype=gs.np_int))
         return qd_to_numpy(self.pcg_scalars.has_breakdown)
 
-    def _step(self, f):
-        for host in self._hosts:
-            host.newton_prepare(f)
-        if self._contact is not None:
-            self._contact.prepare(f)
-        self._prepare_linear()
-        kernel_reset_newton_control(self.control)
-        kernel_energy(f, self.control, self._participants, is_trial=False)
-
-        # FIXME: quadrants#945 - the compile time of a graph grows faster than its size, so by default the host drives
-        # the Newton iterations, at a device read per iteration and per line-search trial.
-        if self._is_loop_graph:
-            kernel_newton_loop(f, self.control, self.pcg_scalars, self._participants)
-        else:
-            self._newton_loop_launches(f)
-
-        for host in self._hosts:
-            host.newton_finish(f, self.control)
-        for host in self._hosts:
-            host.newton_after(f)
-
     def _assemble(self, f, is_exact=False):
         kernel_assemble_terms(f, self._participants, is_exact)
         sort_reduce_bcoo(self._participants.linear.matrix, block_scalars=9)
@@ -572,23 +563,10 @@ class NewtonSolver(Solver):
         kernel_pcg_start(f, self.control, self.pcg_scalars, self._participants, is_adjoint)
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one,
         # with a device read each, when other participants take part in a scene tracking gradients
-        if not (self._requires_grad and self._is_joint):
+        if not (self._requires_grad and (len(self._participant_hosts) > 1 or self._coupling_hosts)):
             kernel_pcg_loop(f, self.pcg_scalars, self._participants)
             return
         while True:
             kernel_pcg_iteration(f, self.pcg_scalars, self._participants)
             if not int(qd_to_numpy(self.pcg_scalars.is_running)):
-                break
-
-    def _newton_loop_launches(self, f):
-        while True:
-            self._assemble(f)
-            self._pcg(f)
-            kernel_start_line_search(f, self.control, self._participants)
-            while True:
-                kernel_line_search_trial(f, self.control, self._participants)
-                if not int(qd_to_numpy(self.control.is_line_search_running)):
-                    break
-            kernel_update_convergence(self.control)
-            if not int(qd_to_numpy(self.control.is_newton_running)):
                 break

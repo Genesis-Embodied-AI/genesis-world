@@ -56,12 +56,6 @@ def build_contact_candidates(max_candidates: int, tie_ratio: float) -> ContactCa
     return candidates
 
 
-@qd.func(requires_top_level=True)
-def func_reset_candidates(candidates: ContactCandidates):
-    for _ in range(1):
-        candidates.results.count[0] = 0
-
-
 @qd.func
 def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, candidates: ContactCandidates):
     """Record the scores of a candidate of a sorted particle, an infinite score rejecting it.
@@ -72,13 +66,6 @@ def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, 
     candidates.order.triplets_col[i_cand] = 0
     candidates.order.triplets_val[i_cand] = score
     candidates.secondary[i_cand] = secondary
-
-
-@qd.func(requires_top_level=True)
-def func_report_candidates(candidates: ContactCandidates):
-    """Set the count of the candidates to sort, those the results hold."""
-    for _ in range(1):
-        func_report_triplet_demand(candidates.results.count[0], candidates.order)
 
 
 @qd.func(requires_top_level=True)
@@ -164,7 +151,8 @@ class CouplingPairs(NewtonDevice):
     def func_query(self, f: int):
         """Record as candidates the partners whose leaf box meets the band of every valid particle at its own speed (see
         contact_band_width), the leaves spanning the motion of the partners over the substep."""
-        func_reset_candidates(self.candidates)
+        for _ in range(1):
+            self.candidates.results.count[0] = 0
         qd.loop_config(name="mpm_query_partners")
         for i_ps in range(self.mpm.grid.n_valid[()]):
             i_p, i_b, cell = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
@@ -185,7 +173,9 @@ class CouplingPairs(NewtonDevice):
     @qd.func(requires_top_level=True)
     def func_score(self, f: int):
         """Score every candidate by the narrow phase of the coupling (see candidate_score)."""
-        func_report_candidates(self.candidates)
+        # The candidates to sort are those the results hold
+        for _ in range(1):
+            func_report_triplet_demand(self.candidates.results.count[0], self.candidates.order)
         qd.loop_config(name="mpm_score_partners")
         for i_cand in range(self.candidates.order.n_triplets[()]):
             triplet = self.candidates.results.triplets[i_cand]

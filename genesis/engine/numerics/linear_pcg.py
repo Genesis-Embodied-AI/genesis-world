@@ -53,14 +53,6 @@ class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.func(requires_top_level=True)
-def _func_dot_into(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars, is_new: qd.template()):
-    if qd.static(is_new):
-        _func_dot(pcg_scalars.rz_new, pcg_workspace, pcg_scalars)
-    else:
-        _func_dot(pcg_scalars.rz, pcg_workspace, pcg_scalars)
-
-
-@qd.func(requires_top_level=True)
 def _func_dot(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
     for i_r in range(warp_padded(pcg_workspace.n_rows[()])):
@@ -105,7 +97,7 @@ def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scala
     qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
         pcg_workspace.p[i_r] = pcg_workspace.z[i_r]
-    _func_dot_into(pcg_workspace, pcg_scalars, False)
+    _func_dot(out=pcg_scalars.rz, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
 
 
 @qd.func(requires_top_level=True)
@@ -123,23 +115,18 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGSca
             if pcg_scalars.is_converged[i_b] == 0:
                 row_key = i_r
                 env_key = i_b
-                product, energy = _spmv_entry(i_nz, i_r, pcg_workspace, matrix)
+                i_c = matrix.bcoo_col[i_nz]
+                block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
+                p_col = pcg_workspace.p[i_c]
+                product = block @ p_col
+                energy = p_col.dot(product)
+                # The upper triangle stores a block off the diagonal for its transpose as well
+                if i_r != i_c:
+                    p_row = pcg_workspace.p[i_r]
+                    qd.atomic_add(pcg_workspace.ap[i_c], block.transpose() @ p_row)
+                    energy = 2.0 * p_row.dot(product)
         add_by_key(row_key, product, pcg_workspace.ap, n_components=3)
         add_by_key(env_key, energy, pcg_scalars.p_dot_ap)
-
-
-@qd.func
-def _spmv_entry(i_nz: int, i_r: int, pcg_workspace: PCGWorkspaceScratch, matrix: BCOOMatrixScratch):
-    i_c = matrix.bcoo_col[i_nz]
-    block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
-    p_col = pcg_workspace.p[i_c]
-    product = block @ p_col
-    energy = p_col.dot(product)
-    if i_r != i_c:
-        p_row = pcg_workspace.p[i_r]
-        qd.atomic_add(pcg_workspace.ap[i_c], block.transpose() @ p_row)
-        energy = 2.0 * p_row.dot(product)
-    return product, energy
 
 
 @qd.func(requires_top_level=True)
@@ -159,7 +146,7 @@ def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScrat
 @qd.func(requires_top_level=True)
 def func_linear_pcg_dot_rz(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Add r . z of the preconditioned residual to rz_new."""
-    _func_dot_into(pcg_workspace, pcg_scalars, True)
+    _func_dot(out=pcg_scalars.rz_new, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
 
 
 @qd.func(requires_top_level=True)

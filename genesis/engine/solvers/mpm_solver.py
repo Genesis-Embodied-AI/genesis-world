@@ -226,7 +226,11 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             self.wall_pairs.sorted_idx[i_pair], self.grid, self.newton, self.mpm_info
         )
         u_p = mpm_func.particle_node_sum(slots, w, self.newton.u)
-        direction = mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair])
+        # The inward normal of the wall, sign e_axis
+        axis = self.wall_pairs.axis[i_pair]
+        direction = self.wall_pairs.sign[i_pair] * qd.Vector(
+            [gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float
+        )
         energy, g, H = mpm_func.soft_row_terms(
             direction, self.wall_pairs.stiffness[i_pair], self.wall_pairs.target[i_pair], u_p
         )
@@ -356,6 +360,18 @@ class MPMSolver(ParticleSolver):
         plastic = np.zeros(n_materials, dtype=gs.np_int)
         for idx, material in materials.items():
             table[:, idx], family[idx], plastic[idx] = material_table_column(material)
+        velocity = self._options.liquid_smoothing_velocity
+        if velocity is None:
+            velocity = self._scene.options.newton.velocity_tol
+        liquid_band = velocity * self.substep_dt / self._dx
+        if liquid_band >= 0.5:
+            gs.raise_exception(
+                f"The smoothing band of the liquid energy, {liquid_band:.3g} in volume ratio, would soften the liquid "
+                "down to half its volume: lower MPMOptions(liquid_smoothing_velocity), NewtonOptions(velocity_tol) or "
+                "the substep."
+            )
+        wall_sol_params = gu.default_solver_params()
+        wall_sol_params[0] = max(self._options.wall_timeconst, 2.0 * self.substep_dt)
 
         self.mpm_info = MpmInfo(
             values=dict(
@@ -367,7 +383,7 @@ class MPMSolver(ParticleSolver):
                 particle_volume=self._particle_volume_real,
                 mass_scale=self._particle_volume_scale,
                 n_materials=n_materials,
-                liquid_band=self._liquid_band(),
+                liquid_band=liquid_band,
                 hencky_sigma_min=0.05,
                 extension_sigma_min=0.4,
                 extension_stiffness=20.0,
@@ -377,7 +393,7 @@ class MPMSolver(ParticleSolver):
                 inversion_step_slack=0.9,
                 snow_hardening=10.0,
                 contact_min_friction=1e-2,
-                wall_sol_params=self._wall_sol_params(),
+                wall_sol_params=tuple(float(p) for p in wall_sol_params),
                 wall_lower=tuple(self.boundary.lower),
                 wall_upper=tuple(self.boundary.upper),
             )
@@ -407,24 +423,6 @@ class MPMSolver(ParticleSolver):
         """Build the participant of the grid displacement in the joint Newton solve, with this solver as its host (see
         LegacyCoupler)."""
         return self, self._newton_participant
-
-    def _liquid_band(self):
-        velocity = self._options.liquid_smoothing_velocity
-        if velocity is None:
-            velocity = self._scene.options.newton.velocity_tol
-        band = velocity * self.substep_dt / self._dx
-        if band >= 0.5:
-            gs.raise_exception(
-                f"The smoothing band of the liquid energy, {band:.3g} in volume ratio, would soften the liquid down to "
-                "half its volume: lower MPMOptions(liquid_smoothing_velocity), NewtonOptions(velocity_tol) or the "
-                "substep."
-            )
-        return band
-
-    def _wall_sol_params(self):
-        params = gu.default_solver_params()
-        params[0] = max(self._options.wall_timeconst, 2.0 * self.substep_dt)
-        return tuple(float(p) for p in params)
 
     def init_vvert_fields(self):
         struct_vvert_info = qd.types.struct(
@@ -471,34 +469,6 @@ class MPMSolver(ParticleSolver):
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
 
-    def _check_supported(self):
-        if self._B > mpm_func.MAX_KEY_ENVS:
-            gs.raise_exception(f"The implicit MPM solver supports {mpm_func.MAX_KEY_ENVS} environments at most.")
-        cells = np.concatenate([self._lower_bound, self._upper_bound]) * self._grid_density
-        if cells.min() < mpm_func.CELL_MIN or cells.max() >= mpm_func.CELL_END:
-            gs.raise_exception(
-                f"The MPM domain spans the cells [{cells.min():.0f}, {cells.max():.0f}], past the range "
-                f"[{mpm_func.CELL_MIN}, {mpm_func.CELL_END}) the sparse grid of the implicit solver indexes."
-            )
-        for material in self._materials:
-            if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
-                gs.raise_exception(
-                    f"The implicit MPM solver has no energy for the material {type(material).__name__}. It supports "
-                    "the materials of genesis.materials.MPM."
-                )
-        # The legacy coupler registers the Newton solve of every substep (see LegacyCoupler)
-        if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
-            gs.raise_exception(
-                "The implicit MPM solver requires LegacyCouplerOptions, got "
-                f"{type(self._sim.coupler.options).__name__}."
-            )
-        if self._requires_grad:
-            for force_field in self._ffs:
-                if not force_field.differentiable:
-                    gs.raise_exception(
-                        f"Differentiable simulation does not support the force field {type(force_field).__name__}."
-                    )
-
     def build(self):
         super().build()
 
@@ -509,7 +479,32 @@ class MPMSolver(ParticleSolver):
         self._n_vfaces = self.n_vfaces
 
         if self.is_active:
-            self._check_supported()
+            if self._B > mpm_func.MAX_KEY_ENVS:
+                gs.raise_exception(f"The implicit MPM solver supports {mpm_func.MAX_KEY_ENVS} environments at most.")
+            cells = np.concatenate([self._lower_bound, self._upper_bound]) * self._grid_density
+            if cells.min() < mpm_func.CELL_MIN or cells.max() >= mpm_func.CELL_END:
+                gs.raise_exception(
+                    f"The MPM domain spans the cells [{cells.min():.0f}, {cells.max():.0f}], past the range "
+                    f"[{mpm_func.CELL_MIN}, {mpm_func.CELL_END}) the sparse grid of the implicit solver indexes."
+                )
+            for material in self._materials:
+                if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
+                    gs.raise_exception(
+                        f"The implicit MPM solver has no energy for the material {type(material).__name__}. It "
+                        "supports the materials of genesis.materials.MPM."
+                    )
+            # The legacy coupler registers the Newton solve of every substep (see LegacyCoupler)
+            if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
+                gs.raise_exception(
+                    "The implicit MPM solver requires LegacyCouplerOptions, got "
+                    f"{type(self._sim.coupler.options).__name__}."
+                )
+            if self._requires_grad:
+                for force_field in self._ffs:
+                    if not force_field.differentiable:
+                        gs.raise_exception(
+                            f"Differentiable simulation does not support the force field {type(force_field).__name__}."
+                        )
 
             self.init_particle_fields()
             self.init_vvert_fields()
@@ -521,26 +516,32 @@ class MPMSolver(ParticleSolver):
 
         self._build_gravity()
         if self.is_active:
-            self._init_contact_invweight()
-
-    def _init_contact_invweight(self):
-        self._predict(0, t=0.0)
-        kernel_contact_invweight(
-            0,
-            self.particles,
-            self._newton_participant.grid,
-            self._newton_participant.newton,
-            self.particles_info,
-            self.mpm_materials,
-            self.mpm_info,
-        )
+            self._predict(0, t=0.0)
+            kernel_contact_invweight(
+                0,
+                self.particles,
+                self._newton_participant.grid,
+                self._newton_participant.newton,
+                self.particles_info,
+                self.mpm_materials,
+                self.mpm_info,
+            )
 
     def _predict(self, f, t):
         if not self._is_mpm_sized:
-            self._size_to_particles(f)
+            positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
+            self._resize_blocks(initial_block_capacity(positions, self._inv_dx))
+            self._is_mpm_sized = True
         build_grid(self.particles, self.particles_ng, self._newton_participant.grid, self.mpm_info, f)
         while int(qd_to_numpy(self._newton_participant.grid.has_grid_overflow)):
-            self._grow_grid()
+            demand = max(
+                int(qd_to_numpy(self._newton_participant.grid.grid_demand)),
+                int(qd_to_numpy(self._newton_participant.grid.n_particle_blocks)),
+            )
+            max_blocks = max(
+                int(np.ceil(demand * CAPACITY_GROW_FACTOR)), self._newton_participant.grid.blocks_key.shape[0] + 1
+            )
+            self._resize_blocks(max_blocks)
             build_grid(self.particles, self.particles_ng, self._newton_participant.grid, self.mpm_info, f)
         kernel_predict(
             f,
@@ -610,21 +611,6 @@ class MPMSolver(ParticleSolver):
         self._newton_participant.replace_scratch(
             grid, build_mpm_newton(n_sort, max_blocks), build_block_jacobi(max_blocks * BLOCK_CELLS)
         )
-
-    def _size_to_particles(self, f):
-        positions = qd_to_numpy(self.particles.pos, col_mask=f, keepdim=False, transpose=True)
-        self._resize_blocks(initial_block_capacity(positions, self._inv_dx))
-        self._is_mpm_sized = True
-
-    def _grow_grid(self):
-        demand = max(
-            int(qd_to_numpy(self._newton_participant.grid.grid_demand)),
-            int(qd_to_numpy(self._newton_participant.grid.n_particle_blocks)),
-        )
-        max_blocks = max(
-            int(np.ceil(demand * CAPACITY_GROW_FACTOR)), self._newton_participant.grid.blocks_key.shape[0] + 1
-        )
-        self._resize_blocks(max_blocks)
 
     def substep_post_coupling(self, f):
         """Finish the substep with the check of the particle positions.

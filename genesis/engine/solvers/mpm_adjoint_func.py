@@ -38,7 +38,6 @@ from .mpm_func import (
     stencil_node_slots,
     trial_deformation,
     unpack_block,
-    wall_normal,
 )
 from .newton_linear import LinearBlock, NewtonLinearScratch
 
@@ -165,7 +164,11 @@ def func_wall_contact_adjoint(
         u_p = particle_node_sum(slots, w, newton.u)
         lam_p = particle_node_sum(rows_p, w, linear.solution)
         stiffness = pairs.stiffness[i_pair]
-        direction = wall_normal(pairs.axis[i_pair], pairs.sign[i_pair])
+        # The inward normal of the wall, sign e_axis
+        axis = pairs.axis[i_pair]
+        direction = pairs.sign[i_pair] * qd.Vector(
+            [gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float
+        )
         gap = direction.dot(u_p) - pairs.target[i_pair]
         if stiffness > 0.0 and gap < 0.0:
             lam_gap = direction.dot(lam_p)

@@ -138,22 +138,9 @@ def unpack_block(key: qd.u64):
 
 
 @qd.func
-def particle_key(i_b: int, cell):
-    """Sort key of a particle: its block key followed by the 6-bit local index of its cell."""
-    return (pack_block(i_b, block_of(cell)) << qd.u64(6)) | qd.u64(cell_local(cell))
-
-
-@qd.func
 def flag_env_error(i_b: int, grid: MpmGridScratch, code: qd.template()):
     """Raise an error code for one environment, which the solver reports at the beginning of the next step."""
     qd.atomic_or(grid.errors.errno[i_b], qd.static(int(code)))
-
-
-@qd.func
-def flag_all_envs_error(grid: MpmGridScratch, mpm_info: MpmInfo, code: qd.template()):
-    """Raise an error code for every environment, for a failure of the solve they share."""
-    for i_b in range(mpm_info.n_envs[()]):
-        flag_env_error(i_b, grid, code)
 
 
 @qd.func
@@ -880,7 +867,9 @@ def func_compose_particle_keys(
                     i_b,
                 )
             if is_in_range:
-                key = particle_key(i_b, qd.floor(x).cast(gs.qd_int))
+                # The block key followed by the 6-bit local index of the cell
+                cell = qd.floor(x).cast(gs.qd_int)
+                key = (pack_block(i_b, block_of(cell)) << qd.u64(6)) | qd.u64(cell_local(cell))
             else:
                 flag_env_error(i_b, grid, ErrorCode.OVERFLOW_MPM_GRID_RANGE)
         grid.sort_keys[i_flat] = key
@@ -1421,23 +1410,6 @@ def stencil_gradient(slots, grad_w: qd.types.matrix(8, 3), nodes: qd.template())
     for a in qd.static(range(8)):
         gradient += nodes[slots[a]].outer_product(grad_w[a, :])
     return gradient
-
-
-@qd.func
-def add_particle_node_vector(slots, w: qd.types.vector(8), y: qd.types.vector(3), nodes: qd.template()):
-    """Add a weighted vector to the vector of every node of a stencil.
-
-    Node a of the stencil, the entry `slots[a]` of `nodes`, receives w_a y."""
-    for a in qd.static(range(8)):
-        qd.atomic_add(nodes[slots[a]], w[a] * y)
-
-
-@qd.func
-def wall_normal(axis: int, sign: float):
-    """Inward normal of a wall pair.
-
-    The normal is `sign` e_axis, e_axis being the unit vector of `axis`."""
-    return sign * qd.Vector([gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float)
 
 
 @qd.func(requires_top_level=True)

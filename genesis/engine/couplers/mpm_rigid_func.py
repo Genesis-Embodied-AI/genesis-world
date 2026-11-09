@@ -41,21 +41,6 @@ class MpmRigidPairs(Data, kind=DataKind.SCRATCH):
 # ============================================ Layer 0: spatial algebra =============================================
 
 
-@qd.func
-def link_point_jacobian(r: qd.types.vector(3)):
-    """Map of the spatial displacement of a link to the displacement of one of its points.
-
-    The map is P = [I, -[r]x], `r` being the arm of the point."""
-    return qd.Matrix(
-        [
-            [1.0, 0.0, 0.0, 0.0, r[2], -r[1]],
-            [0.0, 1.0, 0.0, -r[2], 0.0, r[0]],
-            [0.0, 0.0, 1.0, r[1], -r[0], 0.0],
-        ],
-        dt=gs.qd_float,
-    )
-
-
 # =============================================== Layer 0: geom distance ===============================================
 
 

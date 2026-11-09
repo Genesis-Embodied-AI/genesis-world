@@ -25,7 +25,7 @@ from genesis.utils.misc import qd_to_numpy
 
 from . import mpm_rigid_adjoint_func
 from .contact_candidates import CouplingPairs, CouplingPairsHost
-from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf, link_point_jacobian
+from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf
 
 
 @qd.data_oriented
@@ -222,7 +222,15 @@ class MpmRigidContact(CouplingPairs):
         # The spatial stiffness K_l = sum P^T H P of every link joins the factor of Rigid (see
         # func_add_island_hessian_batch)
         i_l, i_b, r = self.contact_point_arm(f, i_v)
-        P = link_point_jacobian(r)
+        # P = [I, -[r]x] maps the spatial displacement of the link to the displacement of the point at arm r
+        P = qd.Matrix(
+            [
+                [1.0, 0.0, 0.0, 0.0, r[2], -r[1]],
+                [0.0, 1.0, 0.0, -r[2], 0.0, r[0]],
+                [0.0, 0.0, 1.0, r[1], -r[0], 0.0],
+            ],
+            dt=gs.qd_float,
+        )
         qd.atomic_add(self.rigid.rigid_data.links_stiffness[i_l, i_b], P.transpose() @ H @ P)
 
     @qd.func(requires_top_level=True)
