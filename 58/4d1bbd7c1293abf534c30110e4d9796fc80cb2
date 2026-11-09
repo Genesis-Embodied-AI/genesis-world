@@ -1,0 +1,21 @@
+genesis/engine/simulator.py
+  s_c62ec9da443b15::t_5ab5ced3a987af 508-509
+genesis/engine/materials/FEM/base.py
+  s_c62ec9da443b15::t_bf3bb835d80817 6,45-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "584d1bbd7c1293abf534c30110e4d9796fc80cb2",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
