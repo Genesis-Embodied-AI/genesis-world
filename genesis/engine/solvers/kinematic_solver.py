@@ -916,14 +916,8 @@ class KinematicSolver(Solver):
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
-            # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integrals
-            # of the errors of the position and velocity controllers (see func_ctrl_err_int_next)
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             assign_indexed_tensor(vel, mask, value=0.0 if velocity is None else velocity)
-            if velocity is None:
-                for err_int in (self.dyn_state.dofs.ctrl_pos_err_int, self.dyn_state.dofs.ctrl_vel_err_int):
-                    err_int_t = qd_to_torch(err_int, transpose=True, copy=False)
-                    assign_indexed_tensor(err_int_t, mask, value=0.0)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
