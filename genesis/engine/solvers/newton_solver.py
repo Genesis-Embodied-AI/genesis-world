@@ -371,6 +371,9 @@ class NewtonSolver(Solver):
                 "adjoint_tol_rate": self._adjoint_pcg_tol,
             },
         )
+        # Every environment takes part in the adjoint solves, but the projected retry of those whose exact Hessian broke
+        # down (see _solve_adjoint)
+        self.pcg_scalars.is_env_adjoint.fill(1)
         # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, which those of the participants
         # besides MPM do in a scene tracking gradients
         if self._is_loop_graph and self._requires_grad and (len(participants) > 1 or couplings):
@@ -506,8 +509,6 @@ class NewtonSolver(Solver):
     def _solve_adjoint(self, f):
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
-        pcg_scalars = self.pcg_scalars
-        pcg_scalars.is_env_adjoint.fill(1)
         self._stage_adjoint(f, is_exact)
         envs_breakdown = self._pcg_adjoint(f, check_curvature=is_exact)
         # At a converged solution the Hessian of the incremental potential is positive definite
@@ -526,9 +527,10 @@ class NewtonSolver(Solver):
                     "whose gradients are approximate. Tighten NewtonOptions(velocity_tol) for exact ones."
                 )
                 self._has_warned_adjoint_projection = True
-            pcg_scalars.is_env_adjoint.from_numpy(envs_breakdown)
+            self.pcg_scalars.is_env_adjoint.from_numpy(envs_breakdown)
             self._stage_adjoint(f, is_exact=False)
             self._pcg_adjoint(f)
+            self.pcg_scalars.is_env_adjoint.fill(1)
         for host in self._hosts:
             host.newton_adjoint_finish(f)
 

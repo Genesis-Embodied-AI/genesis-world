@@ -282,7 +282,7 @@ class NewtonContact(NewtonDevice):
                         b_start = a
                     for b in range(b_start, n_c):
                         weight = weights_r[a] * weights_c[b]
-                        if weight == 0.0:
+                        if qd.abs(weight) < gs.EPS:
                             discard_block(i_t, linear)
                         else:
                             block = weight * H

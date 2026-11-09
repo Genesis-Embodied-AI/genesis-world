@@ -1494,7 +1494,7 @@ def func_elastic_assemble(
                 if is_head:
                     row_a = rows.row_start[()] + slots[a]
                     row_b = rows.row_start[()] + slots[b]
-                    if movable[a] * movable[b] == 0.0:
+                    if grid.node_fixed[slots[a]] != 0 or grid.node_fixed[slots[b]] != 0:
                         if t == s_c:
                             discard_block(base + pair, linear)
                     elif t == s_c:
