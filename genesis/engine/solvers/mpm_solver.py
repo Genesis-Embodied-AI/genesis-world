@@ -151,7 +151,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @property
     def max_linear_rows(self) -> int:
         """Rows of the nodes of the grid at its capacity."""
-        return self.grid.block_coords.shape[0] * BLOCK_CELLS
+        return self.grid.blocks_key.shape[0] * BLOCK_CELLS
 
     @property
     def data(self) -> Iterator[DataItem]:
@@ -377,8 +377,8 @@ class MPMSolver(ParticleSolver):
             sizes=dict(materials=n_materials, material_params=mpm_func.N_MATERIAL_PARAMS)
         )
         self.mpm_materials.material_table.from_numpy(table.reshape(-1))
-        self.mpm_materials.mat_family.from_numpy(family)
-        self.mpm_materials.mat_plastic.from_numpy(plastic)
+        self.mpm_materials.materials_family.from_numpy(family)
+        self.mpm_materials.materials_plastic.from_numpy(plastic)
         with namespace(self._namespace):
             grid = build_mpm_grid(n_sort, max_blocks)
         self._newton_participant = MpmNewtonParticipant(
@@ -613,7 +613,7 @@ class MPMSolver(ParticleSolver):
             int(qd_to_numpy(self._newton_participant.grid.n_particle_blocks)),
         )
         max_blocks = max(
-            int(np.ceil(demand * CAPACITY_GROW_FACTOR)), self._newton_participant.grid.block_coords.shape[0] + 1
+            int(np.ceil(demand * CAPACITY_GROW_FACTOR)), self._newton_participant.grid.blocks_key.shape[0] + 1
         )
         self._resize_blocks(max_blocks)
 
@@ -1353,27 +1353,29 @@ def build_grid(particles, particles_ng, grid, mpm_info, f):
     dynamic_radix_sort(
         grid.particle_sort,
         grid.sort_keys,
-        grid.sort_keys_tmp,
+        grid.sort_keys_buffer,
         grid.sort_ids,
-        grid.sort_ids_tmp,
+        grid.sort_ids_buffer,
         grid.n_sort_keys,
         key_bits=64,
     )
     kernel_grid_blocks(grid, mpm_info)
     dynamic_radix_sort(
         grid.block_sort,
-        grid.neighbor_keys,
-        grid.neighbor_keys_tmp,
-        grid.neighbor_perm,
-        grid.neighbor_perm_tmp,
+        grid.neighbors_key,
+        grid.neighbors_key_buffer,
+        grid.neighbors_source_idx,
+        grid.neighbors_source_idx_buffer,
         grid.n_neighbor_keys,
         key_bits=64,
     )
     kernel_grid_block_flags(grid)
-    kernel_dynamic_exclusive_sum(grid.block_flags, grid.block_ranks, grid.n_neighbor_keys, grid.block_scan)
+    kernel_dynamic_exclusive_sum(
+        grid.neighbors_is_new_block, grid.neighbors_block_idx, grid.n_neighbor_keys, grid.block_scan
+    )
     kernel_grid_publish_blocks(grid)
-    kernel_dynamic_exclusive_sum(grid.cell_flags, grid.cell_ranks, grid.n_valid, grid.cell_scan)
-    kernel_dynamic_exclusive_sum(grid.task_flags, grid.task_ranks, grid.n_valid, grid.task_scan)
+    kernel_dynamic_exclusive_sum(grid.sort_is_cell_start, grid.sort_cell_idx, grid.n_valid, grid.cell_scan)
+    kernel_dynamic_exclusive_sum(grid.sort_is_task_start, grid.sort_task_idx, grid.n_valid, grid.task_scan)
     kernel_grid_cells(grid)
 
 

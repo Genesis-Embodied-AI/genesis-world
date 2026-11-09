@@ -1102,15 +1102,15 @@ def func_solve_stretch(f: int, pbd_solver: qd.template()):
             if qd.static(pbd_solver._use_xpbd):
                 # Delta lambda = (-C - alpha lambda) / (sum n_i w_i |grad C_i|^2 + alpha), with |grad C_i| = 1
                 lam = pbd_solver.constraint_loop.edges_lambda[i_e, i_b]
-                denom = (
+                denominator = (
                     pbd_solver.constraint_loop.constraint_counts[edge.v1][0] * w1
                     + pbd_solver.constraint_loop.constraint_counts[edge.v2][0] * w2
                     + alpha
                 )
-                if denom > 0.0:
-                    dlam = (-C - alpha * lam) / denom
-                    pbd_solver.constraint_loop.edges_lambda[i_e, i_b] = lam + dlam
-                    dp = dlam * n / n.norm(gs.EPS)
+                if denominator > 0.0:
+                    delta_lambda = (-C - alpha * lam) / denominator
+                    pbd_solver.constraint_loop.edges_lambda[i_e, i_b] = lam + delta_lambda
+                    dp = delta_lambda * n / n.norm(gs.EPS)
                     func_add_correction(i_r1, i_b, dp * w1, pbd_solver)
                     func_add_correction(i_r2, i_b, -dp * w2, pbd_solver)
             elif w1 + w2 + alpha > 0.0:
@@ -1233,39 +1233,43 @@ def func_solve_volume(f: int, pbd_solver: qd.template()):
             grad3 = (p4 - p1).cross(p2 - p1) / 6.0
             grad4 = (p2 - p1).cross(p3 - p1) / 6.0
 
-            w1 = func_inv_mass(i_r1, i_b, pbd_solver) * grad1.norm_sqr()
-            w2 = func_inv_mass(i_r2, i_b, pbd_solver) * grad2.norm_sqr()
-            w3 = func_inv_mass(i_r3, i_b, pbd_solver) * grad3.norm_sqr()
-            w4 = func_inv_mass(i_r4, i_b, pbd_solver) * grad4.norm_sqr()
+            inv_mass1 = func_inv_mass(i_r1, i_b, pbd_solver)
+            inv_mass2 = func_inv_mass(i_r2, i_b, pbd_solver)
+            inv_mass3 = func_inv_mass(i_r3, i_b, pbd_solver)
+            inv_mass4 = func_inv_mass(i_r4, i_b, pbd_solver)
+            # The inverse masses weighted by the squared norm of their gradient
+            w1 = inv_mass1 * grad1.norm_sqr()
+            w2 = inv_mass2 * grad2.norm_sqr()
+            w3 = inv_mass3 * grad3.norm_sqr()
+            w4 = inv_mass4 * grad4.norm_sqr()
 
             if w1 + w2 + w3 + w4 > 0.0:
                 vol = gu.qd_tet_vol(p1, p2, p3, p4)
                 C = vol - pbd_solver.elems_info[i_el].vol_rest
                 alpha = pbd_solver.elems_info[i_el].volume_compliance / (pbd_solver._substep_dt**2)
-                s = gs.qd_float(0.0)
+                # The correction of every vertex along its gradient
+                scales = qd.Vector.zero(gs.qd_float, 4)
                 if qd.static(pbd_solver._use_xpbd):
                     lam = pbd_solver.constraint_loop.elems_lambda[i_el, i_b]
-                    denom = (
+                    denominator = (
                         pbd_solver.constraint_loop.constraint_counts[elem.v1][2] * w1
                         + pbd_solver.constraint_loop.constraint_counts[elem.v2][2] * w2
                         + pbd_solver.constraint_loop.constraint_counts[elem.v3][2] * w3
                         + pbd_solver.constraint_loop.constraint_counts[elem.v4][2] * w4
                         + alpha
                     )
-                    s = (-C - alpha * lam) / denom
-                    pbd_solver.constraint_loop.elems_lambda[i_el, i_b] = lam + s
+                    delta_lambda = (-C - alpha * lam) / denominator
+                    pbd_solver.constraint_loop.elems_lambda[i_el, i_b] = lam + delta_lambda
                     # Delta x_i = w_i grad C_i Delta lambda, with the inverse mass alone
-                    w1 = func_inv_mass(i_r1, i_b, pbd_solver)
-                    w2 = func_inv_mass(i_r2, i_b, pbd_solver)
-                    w3 = func_inv_mass(i_r3, i_b, pbd_solver)
-                    w4 = func_inv_mass(i_r4, i_b, pbd_solver)
+                    scales = delta_lambda * qd.Vector([inv_mass1, inv_mass2, inv_mass3, inv_mass4], dt=gs.qd_float)
                 else:
-                    s = -C / (w1 + w2 + w3 + w4 + alpha) * pbd_solver.elems_info[i_el].volume_relaxation
+                    scale = -C / (w1 + w2 + w3 + w4 + alpha) * pbd_solver.elems_info[i_el].volume_relaxation
+                    scales = scale * qd.Vector([w1, w2, w3, w4], dt=gs.qd_float)
 
-                func_add_correction(i_r1, i_b, s * w1 * grad1, pbd_solver)
-                func_add_correction(i_r2, i_b, s * w2 * grad2, pbd_solver)
-                func_add_correction(i_r3, i_b, s * w3 * grad3, pbd_solver)
-                func_add_correction(i_r4, i_b, s * w4 * grad4, pbd_solver)
+                func_add_correction(i_r1, i_b, scales[0] * grad1, pbd_solver)
+                func_add_correction(i_r2, i_b, scales[1] * grad2, pbd_solver)
+                func_add_correction(i_r3, i_b, scales[2] * grad3, pbd_solver)
+                func_add_correction(i_r4, i_b, scales[3] * grad4, pbd_solver)
 
 
 @qd.func(requires_top_level=True)
@@ -1357,57 +1361,59 @@ def kernel_gather_collision_neighbors(f: int, pbd_solver: qd.template()):
         if pbd_solver.particles_info_reordered[i_p, i_b].material_type != pbd_solver.MATERIAL.PARTICLE:
             base = pbd_solver.sh.pos_to_grid(pbd_solver.particles_reordered[i_p, i_b].pos)
             for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                slot_idx = pbd_solver.sh.grid_to_slot(base + offset)
-                for j in range(
-                    pbd_solver.sh.slot_start[slot_idx, i_b],
-                    pbd_solver.sh.slot_size[slot_idx, i_b] + pbd_solver.sh.slot_start[slot_idx, i_b],
+                i_slot = pbd_solver.sh.grid_to_slot(base + offset)
+                for j_p in range(
+                    pbd_solver.sh.slot_start[i_slot, i_b],
+                    pbd_solver.sh.slot_size[i_slot, i_b] + pbd_solver.sh.slot_start[i_slot, i_b],
                 ):
                     if (
-                        i_p != j
+                        i_p != j_p
                         and (
-                            pbd_solver.particles_reordered[i_p, i_b].free or pbd_solver.particles_reordered[j, i_b].free
+                            pbd_solver.particles_reordered[i_p, i_b].free
+                            or pbd_solver.particles_reordered[j_p, i_b].free
                         )
                         and not (
                             pbd_solver.particles_info_reordered[i_p, i_b].material_type == pbd_solver.MATERIAL.LIQUID
-                            and pbd_solver.particles_info_reordered[j, i_b].material_type == pbd_solver.MATERIAL.LIQUID
+                            and pbd_solver.particles_info_reordered[j_p, i_b].material_type
+                            == pbd_solver.MATERIAL.LIQUID
                         )
                     ):
-                        rest_dist = (
+                        rest_distance = (
                             pbd_solver.particles_info_reordered[i_p, i_b].pos_rest
-                            - pbd_solver.particles_info_reordered[j, i_b].pos_rest
+                            - pbd_solver.particles_info_reordered[j_p, i_b].pos_rest
                         ).norm()
-                        dist = qd.min(
+                        distance = qd.min(
                             (
                                 pbd_solver.particles_reordered[i_p, i_b].pos
-                                - pbd_solver.particles_reordered[j, i_b].pos
+                                - pbd_solver.particles_reordered[j_p, i_b].pos
                             ).norm(),
                             (
                                 pbd_solver.particles_reordered[i_p, i_b].ipos
-                                - pbd_solver.particles_reordered[j, i_b].ipos
+                                - pbd_solver.particles_reordered[j_p, i_b].ipos
                             ).norm(),
                         )
-                        if rest_dist > pbd_solver._particle_size and dist < reach:
-                            func_insert_collision_neighbor(i_p, i_b, j, dist, pbd_solver)
+                        if rest_distance > pbd_solver._particle_size and distance < reach:
+                            func_insert_collision_neighbor(i_p, i_b, j_p, distance, pbd_solver)
 
 
 @qd.func
-def func_insert_collision_neighbor(i_p: int, i_b: int, j: int, dist: float, pbd_solver: qd.template()):
-    n = pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b]
-    if n < COLLISION_NEIGHBORS:
-        pbd_solver.constraint_loop.collision_neighbors_idx[i_p, n, i_b] = j
-        pbd_solver.constraint_loop.collision_neighbors_dist[i_p, n, i_b] = dist
-        pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b] = n + 1
+def func_insert_collision_neighbor(i_p: int, i_b: int, j_p: int, distance: float, pbd_solver: qd.template()):
+    n_neighbors = pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b]
+    if n_neighbors < COLLISION_NEIGHBORS:
+        pbd_solver.constraint_loop.collision_neighbors_idx[i_p, n_neighbors, i_b] = j_p
+        pbd_solver.constraint_loop.collision_neighbors_dist[i_p, n_neighbors, i_b] = distance
+        pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b] = n_neighbors + 1
     else:
-        i_worst = 0
-        for k in range(1, COLLISION_NEIGHBORS):
+        i_nb_max = 0
+        for i_nb in range(1, COLLISION_NEIGHBORS):
             if (
-                pbd_solver.constraint_loop.collision_neighbors_dist[i_p, k, i_b]
-                > pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_worst, i_b]
+                pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_nb, i_b]
+                > pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_nb_max, i_b]
             ):
-                i_worst = k
-        if dist < pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_worst, i_b]:
-            pbd_solver.constraint_loop.collision_neighbors_idx[i_p, i_worst, i_b] = j
-            pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_worst, i_b] = dist
+                i_nb_max = i_nb
+        if distance < pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_nb_max, i_b]:
+            pbd_solver.constraint_loop.collision_neighbors_idx[i_p, i_nb_max, i_b] = j_p
+            pbd_solver.constraint_loop.collision_neighbors_dist[i_p, i_nb_max, i_b] = distance
 
 
 @qd.func
@@ -1479,12 +1485,12 @@ def func_solve_collision(f: int, pbd_solver: qd.template(), is_stabilization: qd
     The contacts carry friction (Macklin et al. 2014, Sec. 6.1). With `is_stabilization`, they reduce to the
     non-penetration at the start positions, for the pre-stabilization."""
     for i_p, i_b in qd.ndrange(pbd_solver._n_particles, pbd_solver._B):
-        for k in range(pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b]):
-            j = pbd_solver.constraint_loop.collision_neighbors_idx[i_p, k, i_b]
+        for i_nb in range(pbd_solver.constraint_loop.n_collision_neighbors[i_p, i_b]):
+            j_p = pbd_solver.constraint_loop.collision_neighbors_idx[i_p, i_nb, i_b]
             if qd.static(is_stabilization):
-                func_solve_collision_start(i_p, j, i_b, pbd_solver)
+                func_solve_collision_start(i_p, j_p, i_b, pbd_solver)
             else:
-                func_solve_collision_pair(i_p, j, i_b, pbd_solver)
+                func_solve_collision_pair(i_p, j_p, i_b, pbd_solver)
 
 
 @qd.kernel

@@ -96,12 +96,12 @@ class MpmParticlesInfo(Data, kind=DataKind.INFO, shape=(PARTICLES,)):
 
 
 class MpmMaterialTable(Data, kind=DataKind.CONSTANT):
-    """Parameter-major material table, `material_table[param * n_materials + slot]`, and the energy family and the
-    return map of each slot."""
+    """Parameter-major material table, `material_table[param * n_materials + i_mat]`, and the energy family and the
+    return map of each material."""
 
     material_table: qd.Tensor = field(float, shape=(MATERIAL_PARAMS * MATERIALS,))
-    mat_family: qd.Tensor = field(int, shape=(MATERIALS,))
-    mat_plastic: qd.Tensor = field(int, shape=(MATERIALS,))
+    materials_family: qd.Tensor = field(int, shape=(MATERIALS,))
+    materials_plastic: qd.Tensor = field(int, shape=(MATERIALS,))
 
 
 class MpmErrno(Data, kind=DataKind.STATE, shape=(ENVS,)):
@@ -132,61 +132,61 @@ class MpmGridScratch(Data, kind=DataKind.SCRATCH):
     grid_demand: qd.Tensor = field(int, ndarray=True)
 
     sort_keys: qd.Tensor = field(qd.u64, shape=(SORT,), ndarray=True)
-    sort_keys_tmp: qd.Tensor = field(qd.u64, shape=(SORT,), ndarray=True)
+    sort_keys_buffer: qd.Tensor = field(qd.u64, shape=(SORT,), ndarray=True)
     sort_ids: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    sort_ids_tmp: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    sort_ids_buffer: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
     particle_sort: DynamicRadixSortScratch
 
-    pblock_keys: qd.Tensor = field(qd.u64, shape=(PARTICLE_BLOCKS,), ndarray=True)
-    neighbor_keys: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
-    neighbor_keys_tmp: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
-    neighbor_perm: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
-    neighbor_perm_tmp: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    particle_blocks_key: qd.Tensor = field(qd.u64, shape=(PARTICLE_BLOCKS,), ndarray=True)
+    neighbors_key: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
+    neighbors_key_buffer: qd.Tensor = field(qd.u64, shape=(NEIGHBORS,), ndarray=True)
+    neighbors_source_idx: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    neighbors_source_idx_buffer: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
     block_sort: DynamicRadixSortScratch
-    block_flags: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
-    block_ranks: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    neighbors_is_new_block: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
+    neighbors_block_idx: qd.Tensor = field(int, shape=(NEIGHBORS,), ndarray=True)
     block_scan: DynamicExclusiveSumScratch
-    block_coords: qd.Tensor = field(qd.u64, shape=(BLOCKS,), ndarray=True)
+    blocks_key: qd.Tensor = field(qd.u64, shape=(BLOCKS,), ndarray=True)
     hash: OpenAddressingHashScratch
 
-    cell_flags: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    cell_ranks: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    sort_is_cell_start: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    sort_cell_idx: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
     cell_scan: DynamicExclusiveSumScratch
-    cell_starts: qd.Tensor = field(int, shape=(SORT + 1,), ndarray=True)
-    task_flags: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
-    task_ranks: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    cells_start: qd.Tensor = field(int, shape=(SORT + 1,), ndarray=True)
+    sort_is_task_start: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
+    sort_task_idx: qd.Tensor = field(int, shape=(SORT,), ndarray=True)
     task_scan: DynamicExclusiveSumScratch
-    cell_seg_start: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
-    cell_seg_end: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
+    cells_segment_start: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
+    cells_segment_end: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
 
-    node_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
+    nodes_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
     # Node touched by a non-free particle, whose displacement the Newton solve holds at zero
-    node_fixed: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
+    nodes_is_fixed: qd.Tensor = field(int, shape=(NODES,), ndarray=True)
     # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights of
     # the particles in their contact rows are computed once (see func_contact_invweight)
-    node_diag: qd.Tensor = field((float, (3, 3)), shape=(NODES,), ndarray=True)
-    node_v: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
-    node_v_free: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    nodes_diagonal: qd.Tensor = field((float, (3, 3)), shape=(NODES,), ndarray=True)
+    nodes_vel: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    nodes_vel_free: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
 
 
 class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
     """Newton state of the grid displacement `u` and the per-particle staging of the assembly."""
 
     u: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
-    u_temp: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    u_start: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
     du: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
     # Adjoint of the node momentum and mass of the particle-to-grid transfer, which the backward pass of a substep
     # gathers to the particles
-    adj_mom: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
-    adj_mass: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
+    nodes_momentum_bar: qd.Tensor = field((float, 3), shape=(NODES,), ndarray=True)
+    nodes_mass_bar: qd.Tensor = field(float, shape=(NODES,), ndarray=True)
     # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
-    g_p: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
+    particles_stress_factor: qd.Tensor = field((float, (3, 3)), shape=(SORT,), ndarray=True)
     # Per sorted particle: its position at the substep start, which the contact stages read for its stencil inside
     # the graph of the conjugate gradient
     # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, as the particle positions do
-    particle_pos: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    particles_pos: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Per sorted particle: the gradient of its constraint spring with respect to its trial displacement sum_a w_a u_a
-    g_spring: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
+    particles_spring_grad: qd.Tensor = field((float, 3), shape=(SORT,), ndarray=True)
     # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
     # dt^2 k and damping dt c, both zero for a free particle, and the target. They start at zero, since the substeps
     # build them only once a constraint exists.
@@ -197,8 +197,8 @@ class MpmNewtonScratch(Data, kind=DataKind.SCRATCH):
 
 class MpmWallPairs(Data, kind=DataKind.SCRATCH):
     """The contact pairs of the particles with the domain walls (see func_build_wall_pairs): a soft row on the trial
-    displacement of sorted particle `i_ps` along the inward normal `sign` e_axis, of stiffness `D` and target `t`.
-    `n_pairs` counts the pairs asked for, above the capacity on overflow."""
+    displacement of sorted particle `sorted_idx` along the inward normal `sign` e_axis, of stiffness `stiffness` and
+    target `target`. `n_pairs` counts the pairs asked for, above the capacity on overflow."""
 
     n_pairs: qd.Tensor = field(int, ndarray=True)
     sorted_idx: qd.Tensor = field(int, shape=(PAIRS,), ndarray=True)

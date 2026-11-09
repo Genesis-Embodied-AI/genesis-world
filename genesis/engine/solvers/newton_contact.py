@@ -159,38 +159,38 @@ class NewtonContact(NewtonDevice):
         kernel_contact_entry_layout(self)
 
     @qd.func
-    def write_doublet(self, i_d: int, i_vg: int, g: qd.types.vector(3)):
-        """Write the gradient `g` on contact vertex `i_vg` into doublet slot `i_d`."""
-        func_write_triplet(i_d, i_vg, 0, qd.Matrix.cols([g]), self.matrices.gradient, is_symmetric=False)
+    def write_doublet(self, i_db: int, i_v: int, g: qd.types.vector(3)):
+        """Write the gradient `g` on contact vertex `i_v` into doublet slot `i_db`."""
+        func_write_triplet(i_db, i_v, 0, qd.Matrix.cols([g]), self.matrices.gradient, is_symmetric=False)
 
     @qd.func
-    def write_triplet(self, i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3)):
-        """Write the Hessian block `H` of contact vertices (`i_r`, `i_c`) into triplet slot `i_t`, mirrored into the
+    def write_triplet(self, i_t: int, i_va: int, i_vb: int, H: qd.types.matrix(3, 3)):
+        """Write the Hessian block `H` of contact vertices (`i_va`, `i_vb`) into triplet slot `i_t`, mirrored into the
         upper triangle."""
-        func_write_triplet(i_t, i_r, i_c, H, self.matrices.hessian, is_symmetric=True)
+        func_write_triplet(i_t, i_va, i_vb, H, self.matrices.hessian, is_symmetric=True)
 
     @qd.func
-    def vertex_rows(self, i_vg: int):
-        """Rows of the linear system that contact vertex `i_vg` moves, their weights and their count, zero for a Rigid
+    def vertex_rows(self, i_v: int):
+        """Rows of the linear system that contact vertex `i_v` moves, their weights and their count, zero for a Rigid
         contact point."""
         n_rows = gs.qd_int(0)
         rows = qd.Vector.zero(gs.qd_int, MAX_VERTEX_ROWS)
         weights = qd.Vector.zero(gs.qd_float, MAX_VERTEX_ROWS)
         for vertex_map in qd.static(self.linear_maps):
-            i_v = i_vg - vertex_map.vertex_range.offset[()]
-            if 0 <= i_v and i_v < vertex_map.vertex_range.count[()]:
-                n_map, rows_map, weights_map = vertex_map.func_vertex_rows(i_v)
+            i_v_local = i_v - vertex_map.vertex_range.offset[()]
+            if 0 <= i_v_local and i_v_local < vertex_map.vertex_range.count[()]:
+                n_map, rows_map, weights_map = vertex_map.func_vertex_rows(i_v_local)
                 n_rows = n_map
-                for a in qd.static(range(vertex_map.n_vertex_rows)):
-                    rows[a] = rows_map[a]
-                    weights[a] = weights_map[a]
+                for i_r_ in qd.static(range(vertex_map.n_vertex_rows)):
+                    rows[i_r_] = rows_map[i_r_]
+                    weights[i_r_] = weights_map[i_r_]
         return n_rows, rows, weights
 
     @qd.func
-    def is_rigid_vertex(self, i_vg: int):
+    def is_rigid_vertex(self, i_v: int):
         is_rigid = False
         if qd.static(self.has_rigid_map):
-            is_rigid = self.rigid_map.vertex_range.offset[()] <= i_vg
+            is_rigid = self.rigid_map.vertex_range.offset[()] <= i_v
         return is_rigid
 
     @qd.func(requires_top_level=True)
@@ -225,14 +225,14 @@ class NewtonContact(NewtonDevice):
         of rows of the others, and none for an entry on a Rigid contact point."""
         qd.loop_config(name="newton_contact_entry_blocks")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_r, i_c, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
+            i_va, i_vb, _ = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
             n_blocks = gs.qd_int(0)
-            if not self.is_rigid_vertex(i_c):
-                n_r, rows_r, weights_r = self.vertex_rows(i_r)
-                n_c, rows_c, weights_c = self.vertex_rows(i_c)
-                n_blocks = n_r * n_c
-                if i_r == i_c:
-                    n_blocks = n_r * (n_r + 1) // 2
+            if not self.is_rigid_vertex(i_vb):
+                n_rows_a, _, _ = self.vertex_rows(i_va)
+                n_rows_b, _, _ = self.vertex_rows(i_vb)
+                n_blocks = n_rows_a * n_rows_b
+                if i_va == i_vb:
+                    n_blocks = n_rows_a * (n_rows_a + 1) // 2
             self.matrices.entry_blocks[i_nz] = n_blocks
         func_dynamic_exclusive_sum(
             self.matrices.entry_blocks,
@@ -258,38 +258,38 @@ class NewtonContact(NewtonDevice):
         func_reduce_bcoo(self.matrices.hessian, block_scalars=9)
         qd.loop_config(name="newton_contact_gradient")
         for i_nz in range(self.matrices.gradient.bcoo_nnz[()]):
-            i_vg, i_zero, block = func_read_bcoo(i_nz, self.matrices.gradient, block_rows=3, block_cols=1)
+            i_v, _, block = func_read_bcoo(i_nz, self.matrices.gradient, block_rows=3, block_cols=1)
             g = block[:, 0]
-            if self.is_rigid_vertex(i_vg):
+            if self.is_rigid_vertex(i_v):
                 if qd.static(self.has_rigid_map):
-                    self.rigid_map.func_vertex_add_force(f, i_vg - self.rigid_map.vertex_range.offset[()], g)
+                    self.rigid_map.func_vertex_add_force(f, i_v - self.rigid_map.vertex_range.offset[()], g)
             else:
-                n_rows, rows, weights = self.vertex_rows(i_vg)
-                for a in range(n_rows):
-                    qd.atomic_add(linear.b_rhs[rows[a]], weights[a] * g)
+                n_rows, rows, weights = self.vertex_rows(i_v)
+                for i_r_ in range(n_rows):
+                    qd.atomic_add(linear.b_rhs[rows[i_r_]], weights[i_r_] * g)
         if qd.static(self.has_rigid_map):
             self.rigid_map.func_vertex_end(DST_GRADIENT)
         qd.loop_config(name="newton_contact_blocks")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_r, i_c, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
-            if not self.is_rigid_vertex(i_c):
-                n_r, rows_r, weights_r = self.vertex_rows(i_r)
-                n_c, rows_c, weights_c = self.vertex_rows(i_c)
+            i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
+            if not self.is_rigid_vertex(i_vb):
+                n_rows_a, rows_a, weights_a = self.vertex_rows(i_va)
+                n_rows_b, rows_b, weights_b = self.vertex_rows(i_vb)
                 i_t = self.linear_block.triplet_start[()] + self.matrices.entry_starts[i_nz]
-                for a in range(n_r):
-                    b_start = 0
-                    if i_r == i_c:
-                        b_start = a
-                    for b in range(b_start, n_c):
-                        weight = weights_r[a] * weights_c[b]
+                for i_r_ in range(n_rows_a):
+                    j_r_start = 0
+                    if i_va == i_vb:
+                        j_r_start = i_r_
+                    for j_r_ in range(j_r_start, n_rows_b):
+                        weight = weights_a[i_r_] * weights_b[j_r_]
                         if qd.abs(weight) < gs.EPS:
                             discard_block(i_t, linear)
                         else:
                             block = weight * H
                             # Two vertices on one row: the block and its transpose land on the diagonal of the row
-                            if i_r != i_c and rows_r[a] == rows_c[b]:
+                            if i_va != i_vb and rows_a[i_r_] == rows_b[j_r_]:
                                 block += block.transpose()
-                            write_block(i_t, rows_r[a], rows_c[b], block, linear)
+                            write_block(i_t, rows_a[i_r_], rows_b[j_r_], block, linear)
                         i_t += 1
 
     @qd.func(requires_top_level=True)
@@ -298,38 +298,38 @@ class NewtonContact(NewtonDevice):
         start and the end of its factorization."""
         qd.loop_config(name="newton_contact_visit_rigid")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_r, i_c, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
-            if i_r == i_c and self.is_rigid_vertex(i_r):
-                self.rigid_map.func_vertex_visit_diag(f, i_r - self.rigid_map.vertex_range.offset[()], H)
+            i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
+            if i_va == i_vb and self.is_rigid_vertex(i_va):
+                self.rigid_map.func_vertex_visit_diag(f, i_va - self.rigid_map.vertex_range.offset[()], H)
 
     @qd.func(requires_top_level=True)
     def func_contact_rigid_product(self, f: int, linear: NewtonLinearScratch, pcg_scalars: PCGScalars):
-        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction: B p_c
-        to the image of r and, off the diagonal, B^T p_r to that of the contact point c, skipping the converged
+        """Add the product of the contact entries on a Rigid contact point with the conjugate gradient direction: B p_b
+        to the image of vertex a and, off the diagonal, B^T p_a to that of the contact point b, skipping the converged
         environments."""
         self.rigid_map.func_vertex_begin(f, SRC_DIRECTION)
         qd.loop_config(name="newton_contact_rigid_product")
         for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_r, i_c, B = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
+            i_va, i_vb, B = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
             # The Rigid contact points come last, so an entry on one has it as its column
             i_b = gs.qd_int(0)
             is_running = False
-            if self.is_rigid_vertex(i_c):
-                i_b = self.rigid_map.func_vertex_env(i_c - self.rigid_map.vertex_range.offset[()])
+            if self.is_rigid_vertex(i_vb):
+                i_b = self.rigid_map.func_vertex_env(i_vb - self.rigid_map.vertex_range.offset[()])
                 is_running = pcg_scalars.is_converged[i_b] == 0
             if is_running:
-                i_vc = i_c - self.rigid_map.vertex_range.offset[()]
-                y_c = B @ self.rigid_map.func_vertex_value(f, i_vc, SRC_DIRECTION)
-                if i_r != i_c:
-                    n_rows, rows, weights = self.vertex_rows(i_r)
-                    p_r = qd.Vector.zero(gs.qd_float, 3)
-                    for a in range(n_rows):
-                        p_r += weights[a] * linear.pcg.p[rows[a]]
-                        qd.atomic_add(linear.pcg.ap[rows[a]], weights[a] * y_c)
+                i_v_local = i_vb - self.rigid_map.vertex_range.offset[()]
+                y_b = B @ self.rigid_map.func_vertex_value(f, i_v_local, SRC_DIRECTION)
+                if i_va != i_vb:
+                    n_rows, rows, weights = self.vertex_rows(i_va)
+                    p_a = qd.Vector.zero(gs.qd_float, 3)
+                    for i_r_ in range(n_rows):
+                        p_a += weights[i_r_] * linear.pcg.p[rows[i_r_]]
+                        qd.atomic_add(linear.pcg.ap[rows[i_r_]], weights[i_r_] * y_b)
                     # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
-                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p_r.dot(y_c))
-                    y_c = B.transpose() @ p_r
-                self.rigid_map.func_vertex_add_force(f, i_vc, y_c)
+                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p_a.dot(y_b))
+                    y_b = B.transpose() @ p_a
+                self.rigid_map.func_vertex_add_force(f, i_v_local, y_b)
         self.rigid_map.func_vertex_end(DST_PRODUCT)
 
     @qd.func(requires_top_level=True)

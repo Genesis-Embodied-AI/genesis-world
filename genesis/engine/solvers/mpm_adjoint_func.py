@@ -272,7 +272,7 @@ def func_adjoint_g2p(
         F_trial = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
         F_trial_bar, Jp_bar = return_map_vjp(
             i_mat,
-            materials.mat_plastic[i_mat],
+            materials.materials_plastic[i_mat],
             F_trial,
             particles.Jp[f, i_p, i_b],
             particles.F.grad[f + 1, i_p, i_b],
@@ -309,7 +309,7 @@ def func_adjoint_rhs(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: New
     qd.loop_config(name="mpm_adjoint_rhs")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         value = newton.du[i_n]
-        if grid.node_fixed[i_n] != 0:
+        if grid.nodes_is_fixed[i_n] != 0:
             value = qd.Vector.zero(gs.qd_float, 3)
         linear.b_rhs[rows.row_start[()] + i_n] = value
 
@@ -325,29 +325,29 @@ def func_adjoint_nodes(
     force_fields: qd.template(),
     mpm_info: MpmInfo,
 ):
-    """Pull lambda back through the kinetic term and reverse the free velocity of every node into `newton.adj_mom` and
-    `newton.adj_mass`."""
+    """Pull lambda back through the kinetic term and reverse the free velocity of every node into
+    `newton.nodes_momentum_bar` and `newton.nodes_mass_bar`."""
     qd.loop_config(name="mpm_adjoint_nodes")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
-        mass = grid.node_mass[i_n]
+        mass = grid.nodes_mass[i_n]
         mass_bar = gs.qd_float(0.0)
         momentum_bar = qd.Vector.zero(gs.qd_float, 3)
-        if mass > 0.0 and grid.node_fixed[i_n] == 0:
+        if mass > 0.0 and grid.nodes_is_fixed[i_n] == 0:
             lam = linear.solution[rows.row_start[()] + i_n]
             u = newton.u[i_n]
-            v = grid.node_v[i_n]
-            v_free = grid.node_v_free[i_n]
+            v = grid.nodes_vel[i_n]
+            v_free = grid.nodes_vel_free[i_n]
             v_free_bar = (mass * dt) * lam
             v_bar = v_free_bar
             if qd.static(len(force_fields.force_fields) > 0):
-                i_b, block = unpack_block(grid.block_coords[i_n // BLOCK_CELLS])
+                i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
                 x_n = (block * 4 + local_offset(i_n % BLOCK_CELLS)).cast(gs.qd_float) * mpm_info.dx[()]
                 for i_ff in qd.static(range(len(force_fields.force_fields))):
                     v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
             momentum_bar = v_bar / mass
             mass_bar = -lam.dot(u - dt * v_free) - v.dot(v_bar) / mass
-        newton.adj_mom[i_n] = momentum_bar
-        newton.adj_mass[i_n] = mass_bar
+        newton.nodes_momentum_bar[i_n] = momentum_bar
+        newton.nodes_mass_bar[i_n] = mass_bar
 
 
 @qd.func(requires_top_level=True)
@@ -384,7 +384,7 @@ def func_adjoint_particles(
         # Snow scales mu and lam by exp(SNOW_HARDENING (1 - Jp)), to which its elastic energy and compression penalty
         # are proportional, so phi = V dt^2 P : (lam_grad F) moves by -SNOW_HARDENING phi with Jp
         Jp_bar = gs.qd_float(0.0)
-        if materials.mat_plastic[i_mat] == PLASTIC_SNOW:
+        if materials.materials_plastic[i_mat] == PLASTIC_SNOW:
             Jp_bar = qd.static(SNOW_HARDENING) * mpm_info.particle_volume[()] * dt * dt * (P * lam_grad_F).sum()
         muscle_direction = particles_info.muscle_direction[i_p]
         active_stiffness, dactive_stiffness = active_fibre_stiffness(
@@ -414,8 +414,8 @@ def func_adjoint_particles(
         for a in qd.static(range(8)):
             grad_w_a = grad_w[a, :]
             x_a = (cell + node_offset(a)).cast(gs.qd_float) * mpm_info.dx[()]
-            momentum_bar = newton.adj_mom[slots[a]]
-            mass_bar = newton.adj_mass[slots[a]]
+            momentum_bar = newton.nodes_momentum_bar[slots[a]]
+            mass_bar = newton.nodes_mass_bar[slots[a]]
             v_tilde = v_p + C_p @ (x_a - x_p)
             v_bar += (w[a] * m_p) * momentum_bar
             C_bar += (w[a] * m_p) * momentum_bar.outer_product(x_a - x_p)

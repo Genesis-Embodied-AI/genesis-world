@@ -205,7 +205,7 @@ class CouplingPairs(NewtonDevice):
         target: qd.types.vector(PYRAMID_ROWS),
     ):
         """Append the pair of sorted particle `i_ps` of environment `i_b` with the rows of its friction pyramid, of
-        stiffness D and target t, and return its slot, or -1 past the capacity."""
+        stiffness `stiffness` and target `target`, and return its slot, or -1 past the capacity."""
         i_pair = append_pair(self.pairs.n_pairs, self.pairs.sorted_idx.shape[0])
         if i_pair >= 0:
             self.pairs.sorted_idx[i_pair] = i_ps
