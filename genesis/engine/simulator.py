@@ -43,6 +43,14 @@ def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverChec
         torch.mps.synchronize()
 
 
+def load_replay_seeds(solvers: Iterable["Solver"], seeds: Iterable[torch.Tensor | None]) -> None:
+    """Seed the replay of a substep of every given solver, then flush the zero-copy writes of the seeds on Metal."""
+    for solver, seed in zip(solvers, seeds):
+        solver.load_replay_seed(seed)
+    if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+        torch.mps.synchronize()
+
+
 class Simulator(RBC):
     """
     A simulator is a scene-level simulation manager, which manages all simulation-related operations in the scene, including multiple solvers and the inter-solver coupler.
@@ -431,11 +439,21 @@ class Simulator(RBC):
         with self._step_timer.phase("sensors"), torch.no_grad():
             self._sensor_manager.step()
 
-    def _step(self):
-        """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
+    def _step(self, *, save_replay_seeds: bool = False) -> list[list[torch.Tensor | None]] | None:
+        """
+        Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them.
+
+        With `save_replay_seeds`, return what every differentiable solver saved after each substep for the replay of it,
+        in the order of the active solvers (see 'Solver.save_replay_seed'), None otherwise.
+        """
+        substeps_seeds = [] if save_replay_seeds else None
         self._steps += 1
         for _ in range(self._substeps):
             self.substep(self.cur_substep_local)
+            if save_replay_seeds:
+                substeps_seeds.append(
+                    [solver.save_replay_seed() for solver in self._active_solvers if solver.requires_grad]
+                )
             self._cur_substep_global += 1
             if self.cur_substep_local == 0:
                 for solver in self._active_solvers:
@@ -443,11 +461,18 @@ class Simulator(RBC):
                         solver.copy_frame(solver.n_frames - 1, 0)
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
+        return substeps_seeds
 
-    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
+    def _reverse(
+        self,
+        substep_start: int,
+        steps_start: torch.Tensor,
+        checkpoints: list[SolverCheckpoint],
+        substeps_seeds: list[list[torch.Tensor | None]],
+    ) -> None:
         """
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
-        differentiable solvers.
+        differentiable solvers and the seeds of the replay of each substep they saved (see 'Solver.save_replay_seed').
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
@@ -461,7 +486,8 @@ class Simulator(RBC):
         substeps_checkpoints = [boundary_checkpoints]
         self._cur_substep_global = substep_start
         restore_checkpoints(boundary_checkpoints)
-        for _ in range(self._substeps - 1):
+        for i_substep in range(self._substeps - 1):
+            load_replay_seeds(differentiable_solvers, substeps_seeds[i_substep])
             self.substep(self.cur_substep_local)
             self._cur_substep_global += 1
             substeps_checkpoints.append(
@@ -480,6 +506,7 @@ class Simulator(RBC):
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
+            load_replay_seeds(differentiable_solvers, substeps_seeds[i_substep])
             with LaunchRecorder() as recorder:
                 self.substep(self.cur_substep_local)
                 if is_last_substep:
@@ -668,8 +695,10 @@ class StepOperation(Operation):
         self._sim = weakref.proxy(sim)
         self._substep_start = sim.cur_substep_global
         self._steps_start = sim.steps.clone()
-        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it
+        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it,
+        # and the seeds of the replay of each substep (see 'Simulator._step')
         self._checkpoints = None
+        self._substeps_seeds = None
 
     def forward(self) -> tuple[torch.Tensor, ...]:
         self._checkpoints = [
@@ -677,11 +706,11 @@ class StepOperation(Operation):
             for solver in self._sim._active_solvers
             if solver.requires_grad
         ]
-        self._sim._step()
+        self._substeps_seeds = self._sim._step(save_replay_seeds=True)
         return ()
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
-        self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints)
+        self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints, self._substeps_seeds)
         # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises during the
         # pass, naming the step a shorter horizon would have to stop before. It is read from every array of the state
         # that carries one, so every differentiable solver is covered. The arrays are those the boundary checkpoint of
