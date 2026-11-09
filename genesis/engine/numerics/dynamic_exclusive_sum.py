@@ -31,7 +31,7 @@ def dynamic_exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
 
 @qd.func(requires_top_level=True)
 def _func_clear_scan(n: qd.Tensor, scanner: DynamicExclusiveSumScratch):
-    qd.loop_config(name="des_init_tile_state", block_dim=128)
+    qd.loop_config(name="exclusive_sum_init_tile_state", block_dim=128)
     n_tiles = qd.max((n[()] + 3071) // 3072, 1)
     for i_tile in range(n_tiles):
         scanner.status[i_tile] = 0
@@ -41,7 +41,7 @@ def _func_clear_scan(n: qd.Tensor, scanner: DynamicExclusiveSumScratch):
 
 @qd.func(requires_top_level=True)
 def _func_scan_cpu(values: qd.template(), output: qd.template(), n: qd.Tensor, scanner: DynamicExclusiveSumScratch):
-    qd.loop_config(name="des_chunk_sums")
+    qd.loop_config(name="exclusive_sum_chunk_sums")
     for i_chunk in range(CPU_CHUNKS):
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         total = gs.qd_int(0)
@@ -54,7 +54,7 @@ def _func_scan_cpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
             total = scanner.partial[i_chunk]
             scanner.partial[i_chunk] = running
             running += total
-    qd.loop_config(name="des_chunk_scans")
+    qd.loop_config(name="exclusive_sum_chunk_scans")
     for i_chunk in range(CPU_CHUNKS):
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         running = scanner.partial[i_chunk]
@@ -67,7 +67,7 @@ def _func_scan_cpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
 @qd.func(requires_top_level=True)
 def _func_scan_gpu(values: qd.template(), output: qd.template(), n: qd.Tensor, scanner: DynamicExclusiveSumScratch):
     _func_clear_scan(n, scanner)
-    qd.loop_config(name="des_scan", block_dim=128)
+    qd.loop_config(name="exclusive_sum_scan", block_dim=128)
     n_tiles = qd.max((n[()] + 3071) // 3072, 1)
     for i_th in range(n_tiles * 128):
         qd.simt.block.sync()

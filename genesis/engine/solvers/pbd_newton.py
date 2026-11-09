@@ -84,7 +84,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             i_t = self.linear_block.triplet_start[()] + row - self.linear_block.row_start[()]
             write_block(i_t, row, row, m * qd.Matrix.identity(gs.qd_float, 3), self.linear)
             self.linear.b_rhs[row] = grad
-            self.linear.pcg.row_env[row] = i_b
+            self.linear.pcg.rows_env[row] = i_b
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, control: NewtonControl, f: int):
@@ -92,7 +92,7 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         qd.loop_config(name="mpm_pbd_start_line_search")
         for i_q, i_b in qd.ndrange(self.solver._n_particles, self.solver._B):
             self.scratch.x_prev[i_q, i_b] = self.solver.particles_reordered[i_q, i_b].pos
-            qd.atomic_max(control.max_disp[i_b], qd.abs(self.linear.solution[self.row(i_q, i_b)]).max())
+            qd.atomic_max(control.max_displacement[i_b], qd.abs(self.linear.solution[self.row(i_q, i_b)]).max())
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: NewtonControl, f: int):

@@ -425,7 +425,7 @@ def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: Newton
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         rigid_data.dx[i_d, i_b] = -rigid_data.sol[i_d, i_b]
         rigid_data.x_temp[i_d, i_b] = rigid_data.x[i_d, i_b]
-        qd.atomic_max(control.max_disp[i_b], qd.abs(rigid_data.sol[i_d, i_b]))
+        qd.atomic_max(control.max_displacement[i_b], qd.abs(rigid_data.sol[i_d, i_b]))
 
 
 @qd.func(requires_top_level=True)

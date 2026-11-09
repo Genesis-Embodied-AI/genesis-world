@@ -355,17 +355,17 @@ class NewtonSolver(Solver):
         self.control = NewtonControl(
             sizes={ENVS: self._sim._B},
             values={
-                "max_newton_iter": options.max_iterations,
-                "max_ls_iter": options.line_search_max_iterations,
-                "ls_shrink": options.line_search_shrink,
+                "max_iterations": options.max_iterations,
+                "line_search_max_iterations": options.line_search_max_iterations,
+                "line_search_shrink": options.line_search_shrink,
                 "is_strict": int(options.strict),
-                "disp_tol": options.velocity_tol * self._sim._substep_dt,
+                "displacement_tol": options.velocity_tol * self._sim._substep_dt,
             },
         )
         self.pcg_scalars = PCGScalars(
             sizes={ENVS: self._sim._B},
             values={
-                "max_iter": options.pcg_max_iterations,
+                "max_iterations": options.pcg_max_iterations,
                 "tol_rate": options.pcg_tol,
                 "adjoint_tol_rate": self._adjoint_pcg_tol,
             },
@@ -423,10 +423,10 @@ class NewtonSolver(Solver):
         linear = participants.linear
         max_rows = self._max_linear_rows
         is_overflow = bool(int(qd_to_numpy(linear.matrix.has_triplet_overflow)))
-        if is_overflow or max_rows > linear.pcg.row_env.shape[0]:
-            max_triplets = linear.matrix.triplet_row.shape[0]
+        if is_overflow or max_rows > linear.pcg.rows_env.shape[0]:
+            max_triplets = linear.matrix.triplets_row.shape[0]
             if is_overflow:
-                max_triplets = max(grown_capacity(int(qd_to_numpy(linear.matrix.triplet_demand))), max_triplets)
+                max_triplets = max(grown_capacity(int(qd_to_numpy(linear.matrix.n_triplets_demanded))), max_triplets)
             retire_scratch(linear, self._linears_replaced)
             self._bind_linear(build_newton_linear(max_rows, max_triplets))
             kernel_linear_layout(participants)
@@ -467,14 +467,15 @@ class NewtonSolver(Solver):
 
     def _check_line_search(self, f):
         control = self.control
-        failed = qd_to_numpy(control.failed)
-        for i_b in np.flatnonzero(failed == NEWTON_FAILED_LINE_SEARCH):
+        failure_codes = qd_to_numpy(control.failure_code)
+        for i_b in np.flatnonzero(failure_codes == NEWTON_FAILED_LINE_SEARCH):
             gs.raise_exception(
-                f"Strict Newton solve: the line search of Newton iteration {int(qd_to_numpy(control.newton_iter)[i_b])} "
-                f"of substep {self._sim.cur_substep_global} in environment {i_b} found no energy below "
-                f"{float(qd_to_numpy(control.energy_start)[i_b])} within {self._options.line_search_max_iterations} "
-                f"trials, the last one giving {float(qd_to_numpy(control.energy_trial)[i_b])}. The energy disagrees "
-                "with its gradient or with the curvature of its Newton system."
+                "Strict Newton solve: the line search of Newton iteration "
+                f"{int(qd_to_numpy(control.n_iterations)[i_b])} of substep {self._sim.cur_substep_global} in "
+                f"environment {i_b} found no energy below {float(qd_to_numpy(control.energy_start)[i_b])} within "
+                f"{self._options.line_search_max_iterations} trials, the last one giving "
+                f"{float(qd_to_numpy(control.energy_trial)[i_b])}. The energy disagrees with its gradient or with the "
+                "curvature of its Newton system."
             )
 
     def _check_failures(self):

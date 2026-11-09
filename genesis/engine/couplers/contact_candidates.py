@@ -61,9 +61,9 @@ def func_reset_candidates(candidates: ContactCandidates):
 @qd.func
 def set_candidate_score(i_cand: int, s: int, score: float, secondary: float, candidates: ContactCandidates):
     """Record the scores of candidate `i_cand` of sorted particle `s`, an infinite score rejecting it."""
-    candidates.order.triplet_row[i_cand] = s
-    candidates.order.triplet_col[i_cand] = 0
-    candidates.order.triplet_val[i_cand] = score
+    candidates.order.triplets_row[i_cand] = s
+    candidates.order.triplets_col[i_cand] = 0
+    candidates.order.triplets_val[i_cand] = score
     candidates.secondary[i_cand] = secondary
 
 
@@ -89,22 +89,22 @@ def func_select_nearest(tie_tol: float, candidates: ContactCandidates):
         candidates.best_candidate[i_seg] = candidates.secondary.shape[0]
     qd.loop_config(name="contact_candidates_score")
     for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplet_perm[i_sorted]
-        score = candidates.order.triplet_val[i_cand]
+        i_cand = candidates.order.triplets_source_idx[i_sorted]
+        score = candidates.order.triplets_val[i_cand]
         if score < qd.math.inf:
-            qd.atomic_min(candidates.best_score[candidates.order.seg_ids[i_sorted]], score)
+            qd.atomic_min(candidates.best_score[candidates.order.triplets_segment_idx[i_sorted]], score)
     qd.loop_config(name="contact_candidates_secondary")
     for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplet_perm[i_sorted]
-        i_seg = candidates.order.seg_ids[i_sorted]
-        score = candidates.order.triplet_val[i_cand]
+        i_cand = candidates.order.triplets_source_idx[i_sorted]
+        i_seg = candidates.order.triplets_segment_idx[i_sorted]
+        score = candidates.order.triplets_val[i_cand]
         if score < qd.math.inf and score <= candidates.best_score[i_seg] + tie_tol:
             qd.atomic_max(candidates.best_secondary[i_seg], candidates.secondary[i_cand])
     qd.loop_config(name="contact_candidates_winner")
     for i_sorted in range(candidates.order.n_triplets[()]):
-        i_cand = candidates.order.triplet_perm[i_sorted]
-        i_seg = candidates.order.seg_ids[i_sorted]
-        score = candidates.order.triplet_val[i_cand]
+        i_cand = candidates.order.triplets_source_idx[i_sorted]
+        i_seg = candidates.order.triplets_segment_idx[i_sorted]
+        score = candidates.order.triplets_val[i_cand]
         if (
             score < qd.math.inf
             and score <= candidates.best_score[i_seg] + tie_tol
@@ -185,7 +185,7 @@ class CouplingPairs(NewtonDevice):
             i_cand = self.candidates.best_candidate[i_seg]
             if i_cand < self.candidates.secondary.shape[0]:
                 triplet = self.candidates.results.triplets[i_cand]
-                self.build_pair(f, triplet[0], triplet[1], triplet[2], self.candidates.order.triplet_val[i_cand])
+                self.build_pair(f, triplet[0], triplet[1], triplet[2], self.candidates.order.triplets_val[i_cand])
 
     @qd.func
     def add_pair(

@@ -101,7 +101,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
             i_t = self.linear_block.triplet_start[()] + i_r
             write_block(i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear)
             self.linear.b_rhs[row] = g
-            self.linear.pcg.row_env[row] = i_b
+            self.linear.pcg.rows_env[row] = i_b
         qd.loop_config(name="mpm_fem_assemble_elements")
         for i_b, i_e in qd.ndrange(self.n_envs, self.n_elements):
             i_vs = self.solver.elements_i[i_e].el2v
@@ -138,7 +138,7 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         qd.loop_config(name="mpm_fem_start_line_search")
         for i_b, i_v in qd.ndrange(self.n_envs, self.n_vertices):
             self.solver.linesearch_state_v[i_b, i_v].x_prev = self.solver.elements_v[f + 1, i_v, i_b].pos
-            qd.atomic_max(control.max_disp[i_b], qd.abs(self.solution(i_b, i_v)).max())
+            qd.atomic_max(control.max_displacement[i_b], qd.abs(self.solution(i_b, i_v)).max())
 
     @qd.func(requires_top_level=True)
     def func_step_forward(self, control: NewtonControl, f: int):

@@ -62,7 +62,7 @@ def build_newton_linear(max_rows: int, max_triplets: int) -> NewtonLinearScratch
     )
     init_bcoo_matrix(linear.matrix, n_triplets=0)
     linear.pcg.n_rows.fill(0)
-    linear.pcg.row_env.fill(0)
+    linear.pcg.rows_env.fill(0)
     return linear
 
 
@@ -156,7 +156,7 @@ def func_linear_layout(participants: qd.template()):
             participants.contact.linear_block.row_start[()] = n_rows
             participants.contact.linear_block.triplet_start[()] = n_triplets
             n_triplets += participants.contact.linear_block.n_triplets[()]
-        participants.linear.pcg.n_rows[()] = qd.min(n_rows, participants.linear.pcg.row_env.shape[0])
+        participants.linear.pcg.n_rows[()] = qd.min(n_rows, participants.linear.pcg.rows_env.shape[0])
         func_report_triplet_demand(n_triplets, participants.linear.matrix)
 
 

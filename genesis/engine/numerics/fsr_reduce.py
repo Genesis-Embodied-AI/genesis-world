@@ -71,31 +71,31 @@ def max_by_key(value, key, out: qd.template()):
 
 @qd.func(requires_top_level=True)
 def func_fsr_reduce(
-    seg_ids: qd.template(),
-    sorted_perm: qd.template(),
+    segments_idx: qd.template(),
+    sources_idx: qd.template(),
     sorted_keys: qd.template(),
     values: qd.template(),
     output: qd.template(),
     n: qd.template(),
-    padded_n: qd.template(),
+    n_padded: qd.template(),
     capacity: qd.template(),
     value_type: qd.template(),
-    block_scalar_count: qd.template(),
+    n_block_scalars: qd.template(),
 ):
-    """Sum the flattened blocks of each run of equal sorted keys into the output entry of its segment (see
-    add_by_key)."""
+    """Sum the flattened blocks of the sorted triplets of each run of equal keys into the output entry of its segment
+    (see add_by_key)."""
     qd.loop_config(name="fsr_reduce", block_dim=256)
-    for gid in range(qd.min(((padded_n[()] + 31) // 32) * 32, capacity)):
+    for i_t in range(qd.min(((n_padded[()] + 31) // 32) * 32, capacity)):
         segment = -1
         source = 0
-        if gid < n[()]:
-            if sorted_keys[gid] != qd.u64(0xFFFFFFFFFFFFFFFF):
-                segment = gs.qd_int(seg_ids[gid])
-                source = gs.qd_int(sorted_perm[gid]) * block_scalar_count
-        for component in qd.static(range(block_scalar_count)):
+        if i_t < n[()]:
+            if sorted_keys[i_t] != qd.u64(0xFFFFFFFFFFFFFFFF):
+                segment = gs.qd_int(segments_idx[i_t])
+                source = gs.qd_int(sources_idx[i_t]) * n_block_scalars
+        for component in qd.static(range(n_block_scalars)):
             value = value_type(0.0)
             key = -1
             if segment >= 0:
                 value = values[source + component]
-                key = segment * block_scalar_count + component
+                key = segment * n_block_scalars + component
             add_by_key(value, key, output)

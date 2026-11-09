@@ -145,7 +145,7 @@ class NewtonContact(NewtonDevice):
         matrices = (self.matrices.gradient, self.matrices.hessian)
         if any(int(qd_to_numpy(matrix.has_triplet_overflow)) for matrix in matrices):
             capacities = [
-                max(grown_capacity(int(qd_to_numpy(matrix.triplet_demand))), matrix.triplet_row.shape[0])
+                max(grown_capacity(int(qd_to_numpy(matrix.n_triplets_demanded))), matrix.triplets_row.shape[0])
                 for matrix in matrices
             ]
             retire_scratch(self.matrices, self._scratches_replaced)

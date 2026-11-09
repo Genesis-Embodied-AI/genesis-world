@@ -103,7 +103,7 @@ def _rank_warp_striped_items(digits: qd.template(), ranks: qd.template(), block_
 @qd.func(requires_top_level=True)
 def _func_clear_bins(sorter: DynamicRadixSortScratch, key_bits: qd.template()):
     n_passes = qd.static(radix_passes(key_bits))
-    qd.loop_config(name="drs_memset_bins", block_dim=256)
+    qd.loop_config(name="radix_sort_memset_bins", block_dim=256)
     for i_bin in range(n_passes * 256):
         i_pass = i_bin // 256
         i_digit = i_bin - i_pass * 256
@@ -113,7 +113,7 @@ def _func_clear_bins(sorter: DynamicRadixSortScratch, key_bits: qd.template()):
 @qd.func(requires_top_level=True)
 def _func_histogram(keys: qd.template(), n: qd.Tensor, sorter: DynamicRadixSortScratch, key_bits: qd.template()):
     n_passes = qd.static(radix_passes(key_bits))
-    qd.loop_config(name="drs_histogram", block_dim=128)
+    qd.loop_config(name="radix_sort_histogram", block_dim=128)
     for i_th in range(128 * 128):
         tid = qd.simt.block.thread_idx()
         i_blk = i_th // 128
@@ -156,7 +156,7 @@ def _func_histogram(keys: qd.template(), n: qd.Tensor, sorter: DynamicRadixSortS
 @qd.func(requires_top_level=True)
 def _func_scan_bins(sorter: DynamicRadixSortScratch, key_bits: qd.template()):
     n_passes = qd.static(radix_passes(key_bits))
-    qd.loop_config(name="drs_exclusive_sum", block_dim=256)
+    qd.loop_config(name="radix_sort_exclusive_sum", block_dim=256)
     for i_bin in range(n_passes * 256):
         i_pass = i_bin // 256
         i_digit = i_bin - i_pass * 256
@@ -167,7 +167,7 @@ def _func_scan_bins(sorter: DynamicRadixSortScratch, key_bits: qd.template()):
 
 @qd.func(requires_top_level=True)
 def _func_clear_pass(i_pass: int, n: qd.Tensor, sorter: DynamicRadixSortScratch):
-    qd.loop_config(name="drs_memset_lookback", block_dim=256)
+    qd.loop_config(name="radix_sort_memset_lookback", block_dim=256)
     n_tiles = qd.max((n[()] + 6143) // 6144, 1)
     for i_th in range(n_tiles * 256):
         i_tile = i_th // 256
@@ -182,13 +182,13 @@ def _func_onesweep_pass(
     i_pass: int,
     keys_in: qd.template(),
     keys_out: qd.template(),
-    perm_in: qd.template(),
-    perm_out: qd.template(),
+    permutation_in: qd.template(),
+    permutation_out: qd.template(),
     n: qd.Tensor,
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    qd.loop_config(name="drs_onesweep", block_dim=256)
+    qd.loop_config(name="radix_sort_onesweep", block_dim=256)
     n_tiles = qd.max((n[()] + 6143) // 6144, 1)
     for i_th in range(n_tiles * 256):
         shift = qd.u32(i_pass * 8)
@@ -209,7 +209,7 @@ def _func_onesweep_pass(
             sh_block_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
             sh_tile_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
             sh_sorted_keys = qd.simt.block.SharedArray((6144,), qd.u64)
-            sh_sorted_perm = qd.simt.block.SharedArray((6144,), gs.qd_int)
+            sh_sorted_permutation = qd.simt.block.SharedArray((6144,), gs.qd_int)
 
             keys32 = qd.Vector.zero(qd.u32, 24)
             keys64 = qd.Vector.zero(qd.u64, 24)
@@ -251,7 +251,7 @@ def _func_onesweep_pass(
                         sh_sorted_keys[i_sorted] = qd.u64(keys32[k])
                     else:
                         sh_sorted_keys[i_sorted] = keys64[k]
-                    sh_sorted_perm[i_sorted] = perm_in[i_in]
+                    sh_sorted_permutation[i_sorted] = permutation_in[i_in]
 
             tile_prefix = gs.qd_int(0)
             if tid < 256:
@@ -295,7 +295,7 @@ def _func_onesweep_pass(
                         keys_out[i_out] = qd.u32(key)
                     else:
                         keys_out[i_out] = key
-                    perm_out[i_out] = sh_sorted_perm[i_sorted]
+                    permutation_out[i_out] = sh_sorted_permutation[i_sorted]
         qd.simt.block.sync()
 
 
@@ -330,13 +330,13 @@ def _func_cpu_pass(
     i_pass: qd.template(),
     keys_in: qd.template(),
     keys_out: qd.template(),
-    perm_in: qd.template(),
-    perm_out: qd.template(),
+    permutation_in: qd.template(),
+    permutation_out: qd.template(),
     n: qd.Tensor,
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    qd.loop_config(name="drs_cpu_histogram")
+    qd.loop_config(name="radix_sort_cpu_histogram")
     for i_chunk in range(CPU_CHUNKS):
         for i_digit in range(_RADIX_DIGITS):
             sorter.chunk_offsets[i_chunk, i_digit] = 0
@@ -351,7 +351,7 @@ def _func_cpu_pass(
                 count = sorter.chunk_offsets[i_chunk, i_digit]
                 sorter.chunk_offsets[i_chunk, i_digit] = running
                 running += count
-    qd.loop_config(name="drs_cpu_scatter")
+    qd.loop_config(name="radix_sort_cpu_scatter")
     for i_chunk in range(CPU_CHUNKS):
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         for i_in in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
@@ -360,32 +360,32 @@ def _func_cpu_pass(
             i_out = sorter.chunk_offsets[i_chunk, i_digit]
             sorter.chunk_offsets[i_chunk, i_digit] = i_out + 1
             keys_out[i_out] = key
-            perm_out[i_out] = perm_in[i_in]
+            permutation_out[i_out] = permutation_in[i_in]
 
 
 @qd.func(requires_top_level=True)
 def _func_cpu_sort(
     keys_a: qd.template(),
     keys_b: qd.template(),
-    perm_a: qd.template(),
-    perm_b: qd.template(),
+    permutation_a: qd.template(),
+    permutation_b: qd.template(),
     n: qd.Tensor,
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
     for i_pass in qd.static(range(radix_passes(key_bits))):
         if qd.static(i_pass % 2 == 0):
-            _func_cpu_pass(i_pass, keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
+            _func_cpu_pass(i_pass, keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
         else:
-            _func_cpu_pass(i_pass, keys_b, keys_a, perm_b, perm_a, n, sorter, key_bits)
+            _func_cpu_pass(i_pass, keys_b, keys_a, permutation_b, permutation_a, n, sorter, key_bits)
 
 
 @qd.func(requires_top_level=True)
 def func_dynamic_radix_sort(
     keys_a: qd.template(),
     keys_b: qd.template(),
-    perm_a: qd.template(),
-    perm_b: qd.template(),
+    permutation_a: qd.template(),
+    permutation_b: qd.template(),
     n: qd.Tensor,
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
@@ -393,7 +393,7 @@ def func_dynamic_radix_sort(
     """Sort keys stably together with their permutation inside a graph kernel, the result landing in the input
     arrays."""
     if qd.static(gs.backend == gs.cpu):
-        _func_cpu_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
+        _func_cpu_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
     else:
         _func_clear_bins(sorter, key_bits)
         _func_histogram(keys_a, n, sorter, key_bits)
@@ -401,9 +401,11 @@ def func_dynamic_radix_sort(
         _func_start_passes(sorter)
         while qd.graph.do_while(sorter.is_pass_running):
             _func_clear_pass(sorter.pass_idx[()], n, sorter)
-            _func_onesweep_pass(sorter.pass_idx[()], keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
+            _func_onesweep_pass(sorter.pass_idx[()], keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
             _func_clear_pass(sorter.pass_idx[()] + 1, n, sorter)
-            _func_onesweep_pass(sorter.pass_idx[()] + 1, keys_b, keys_a, perm_b, perm_a, n, sorter, key_bits)
+            _func_onesweep_pass(
+                sorter.pass_idx[()] + 1, keys_b, keys_a, permutation_b, permutation_a, n, sorter, key_bits
+            )
             _func_advance_passes(sorter, key_bits)
 
 
@@ -411,17 +413,19 @@ def func_dynamic_radix_sort(
 def kernel_radix_sort(
     keys_a: qd.Tensor,
     keys_b: qd.Tensor,
-    perm_a: qd.Tensor,
-    perm_b: qd.Tensor,
+    permutation_a: qd.Tensor,
+    permutation_b: qd.Tensor,
     n: qd.Tensor,
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
     """Run func_dynamic_radix_sort as a graph of its own."""
-    func_dynamic_radix_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
+    func_dynamic_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
 
 
-def dynamic_radix_sort(sorter: DynamicRadixSortScratch, keys_a, keys_b, perm_a, perm_b, n, key_bits: int) -> None:
-    """Sort the first `n[()]` keys of `keys_a` stably together with their permutation `perm_a` (see
+def dynamic_radix_sort(
+    sorter: DynamicRadixSortScratch, keys_a, keys_b, permutation_a, permutation_b, n, key_bits: int
+) -> None:
+    """Sort the first `n[()]` keys of `keys_a` stably together with their permutation `permutation_a` (see
     func_dynamic_radix_sort)."""
-    kernel_radix_sort(keys_a, keys_b, perm_a, perm_b, n, sorter, key_bits)
+    kernel_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)

@@ -1449,7 +1449,7 @@ def func_kinetic_assemble(grid: MpmGridScratch, linear: NewtonLinearScratch, row
             rows.triplet_start[()] + node, row, row, kinetic_block(node, grid), linear.matrix, is_symmetric=True
         )
         env, block = unpack_block(grid.block_coords[node // BLOCK_CELLS])
-        linear.pcg.row_env[row] = env
+        linear.pcg.rows_env[row] = env
 
 
 @qd.func(requires_top_level=True)
@@ -1693,7 +1693,7 @@ def func_contribute_newton_max_disp(
             _, _, env_, _ = particle_of_sorted(s, grid, mpm_info)
             env = env_
             disp = particle_max_disp(f, s, particles, grid, newton, mpm_info)
-        max_by_key(disp, env, control.max_disp)
+        max_by_key(disp, env, control.max_displacement)
 
 
 @qd.func(requires_top_level=True)
