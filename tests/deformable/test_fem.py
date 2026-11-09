@@ -230,14 +230,14 @@ def test_halt_on_nan(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
-    "coupler_type, material_model",
+    "coupler_type, material_model, fem_floor_contact_type",
     [
-        (gs.options.SAPCouplerOptions, "linear"),
-        (gs.options.SAPCouplerOptions, "linear_corotated"),
-        (gs.options.LegacyCouplerOptions, "linear"),
+        (gs.options.SAPCouplerOptions, "linear", "tet"),
+        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
+        (gs.options.LegacyCouplerOptions, "linear", None),
     ],
 )
-def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
+def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_contact_type, show_viewer):
     SPHERE_POS = (0.4, -0.1, 0.1)
     SPHERE_RADIUS = 0.1
     SPHERE_RHO = 500.0
@@ -259,7 +259,11 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
             use_implicit_solver=True,
             enable_vertex_constraints=True,
         ),
-        coupler_options=coupler_type(),
+        coupler_options=(
+            coupler_type(fem_floor_contact_type=fem_floor_contact_type)
+            if coupler_type == gs.options.SAPCouplerOptions
+            else coupler_type()
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.6, 0.0, 0.5),
             camera_lookat=(0.0, -0.1, 0.3),
