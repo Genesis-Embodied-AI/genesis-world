@@ -39,7 +39,7 @@ class ForceField(RBC):
         return acc
 
     @qd.func
-    def get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         """
         Return the velocity adjoint from the acceleration adjoint, for a solver differentiating through the velocity.
 
@@ -48,13 +48,13 @@ class ForceField(RBC):
         """
         vel_bar = qd.Vector.zero(gs.qd_float, 3)
         if self._active[None]:
-            vel_bar = self._get_acc_vel_vjp(pos, vel, t, i, acc_bar)
+            vel_bar = self._get_acc_grad_vel(pos, vel, t, i, acc_bar)
         return vel_bar
 
     @property
     def differentiable(self):
         """
-        Whether the field provides the velocity adjoint of 'get_acc_vel_vjp'.
+        Whether the field provides the velocity adjoint of 'get_acc_grad_vel'.
 
         A field that draws random numbers differs on the replay of a backward pass, and a custom field gives no
         derivative, so neither of them provides it.
@@ -97,7 +97,7 @@ class Constant(ForceField):
         return self._acc_qd
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -155,7 +155,7 @@ class Wind(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -221,7 +221,7 @@ class Point(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         radius = (pos - self._position_qd).norm(gs.EPS)
         falloff = 1 / (radius + 1.0) ** self._falloff_pow
         return -(falloff * self._flow) * acc_bar
@@ -258,7 +258,7 @@ class Drag(ForceField):
         return -self._linear * vel - self._quadratic * vel.norm() * vel
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         # d(|v| v) / dv = |v| I + v v^T / |v|, which vanishes with v
         speed = vel.norm()
         vel_bar = -self._linear * acc_bar - self._quadratic * speed * acc_bar
@@ -302,7 +302,7 @@ class Noise(ForceField):
         return noise * self._strength
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         return qd.Vector.zero(gs.qd_float, 3)
 
     @property
@@ -391,7 +391,7 @@ class Vortex(ForceField):
         return acceleration
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         return -self._damping * acc_bar
 
     @property
@@ -471,7 +471,7 @@ class Turbulence(ForceField):
         return acc
 
     @qd.func
-    def _get_acc_vel_vjp(self, pos, vel, t, i, acc_bar):
+    def _get_acc_grad_vel(self, pos, vel, t, i, acc_bar):
         return -self._flow * acc_bar
 
     @property

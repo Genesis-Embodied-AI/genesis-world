@@ -184,7 +184,7 @@ def func_rigid_contact_adjoint(
             lam_p = particle_node_sum(rows_p, w, linear.solution)
             r = x_p - links_state.root_COM[i_l, i_b]
             u_lin, u_ang = link_chain_spatial(i_l, i_b, rigid_data.x, dofs_state, links_info, config)
-            lam_lin, lam_ang = link_chain_spatial(i_l, i_b, rigid_data.sol, dofs_state, links_info, config)
+            lam_lin, lam_ang = link_chain_spatial(i_l, i_b, rigid_data.solution, dofs_state, links_info, config)
             u_rel = u_p - (u_lin + u_ang.cross(r))
             lam_rel = lam_p - (lam_lin + lam_ang.cross(r))
 
@@ -220,7 +220,7 @@ def func_rigid_contact_adjoint(
                 J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
                 for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
                     x_d = rigid_data.x[i_d, i_b]
-                    lam_d = rigid_data.sol[i_d, i_b]
+                    lam_d = rigid_data.solution[i_d, i_b]
                     qd.atomic_add(dofs_state.cdof_vel.grad[i_d, i_b], -(x_d * u_rel_bar + lam_d * lam_rel_bar))
                     qd.atomic_add(
                         dofs_state.cdof_ang.grad[i_d, i_b], -(x_d * r_cross_u_rel_bar + lam_d * r_cross_lam_rel_bar)

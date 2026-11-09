@@ -118,14 +118,14 @@ class BlockJacobiOwner:
         """Invert every diagonal block, equilibrated to a unit diagonal."""
         qd.loop_config(name="newton_block_jacobi_invert")
         for i_r in range(self.linear_block.n_rows[()]):
-            D = self.jacobi.blocks[i_r]
-            d = qd.Vector([D[0, 0], D[1, 1], D[2, 2]], dt=gs.qd_float)
-            scale = qd.select(d > 0.0, 1.0 / qd.sqrt(qd.select(d > 0.0, d, 1.0)), 1.0)
+            block = self.jacobi.blocks[i_r]
+            diagonal = qd.Vector([block[0, 0], block[1, 1], block[2, 2]], dt=gs.qd_float)
+            scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
             scaling = scale.outer_product(scale)
-            S_inv = qd.Matrix.identity(gs.qd_float, 3)
-            if (D * scaling).determinant() > 0.0:
-                S_inv = (D * scaling).inverse()
-            self.jacobi.blocks[i_r] = S_inv * scaling
+            equilibrated_inverse = qd.Matrix.identity(gs.qd_float, 3)
+            if (block * scaling).determinant() > 0.0:
+                equilibrated_inverse = (block * scaling).inverse()
+            self.jacobi.blocks[i_r] = equilibrated_inverse * scaling
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):

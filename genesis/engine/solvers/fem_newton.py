@@ -173,8 +173,8 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @qd.func
     def func_vertex_value(self, f: int, i_v: int):
         i_b = i_v // self.n_vertices
-        i_fv = i_v - i_b * self.n_vertices
-        return self.solver.elements_v[f + 1, i_fv, i_b].pos - self.solver.elements_v[f, i_fv, i_b].pos
+        i_v_local = i_v - i_b * self.n_vertices
+        return self.solver.elements_v[f + 1, i_v_local, i_b].pos - self.solver.elements_v[f, i_v_local, i_b].pos
 
     @qd.func
     def func_vertex_rows(self, i_v: int):

@@ -34,7 +34,7 @@ class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
     """Rigid unknowns of the joint Newton solve and the Rigid part of its conjugate gradient vectors."""
 
     x: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
-    x_temp: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    x_start: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     dx: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     grad: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
@@ -43,7 +43,7 @@ class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
     z: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     p: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     ap: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
-    sol: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
+    solution: qd.Tensor = field(float, shape=(DOFS, ENVS), ndarray=True)
     cost: qd.Tensor = field(float, shape=(ENVS,), ndarray=True)
     links_motion_vel: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
     links_motion_ang: qd.Tensor = field((float, 3), shape=(LINKS, ENVS), ndarray=True)
@@ -245,9 +245,9 @@ def func_rigid_solve_batch(
 @qd.func
 def cdof_spatial(i_d: int, i_b: int, dofs_state: DofsState):
     """Spatial motion (linear, angular) of a link per unit velocity of dof `i_d`."""
-    v = dofs_state.cdof_vel[i_d, i_b]
-    w = dofs_state.cdof_ang[i_d, i_b]
-    return qd.Vector([v[0], v[1], v[2], w[0], w[1], w[2]], dt=gs.qd_float)
+    vel = dofs_state.cdof_vel[i_d, i_b]
+    ang = dofs_state.cdof_ang[i_d, i_b]
+    return qd.Vector([vel[0], vel[1], vel[2], ang[0], ang[1], ang[2]], dt=gs.qd_float)
 
 
 @qd.func
@@ -323,7 +323,7 @@ def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars,
         if qd.static(is_adjoint):
             is_kept = pcg_scalars.is_converged[i_b] != 0
         if not is_kept:
-            rigid_data.sol[i_d, i_b] = 0.0
+            rigid_data.solution[i_d, i_b] = 0.0
         rigid_data.ap[i_d, i_b] = 0.0
 
 
@@ -387,7 +387,7 @@ def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: PCGSca
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         if pcg_scalars.is_converged[i_b] == 0:
             alpha = pcg_scalars.alpha[i_b]
-            rigid_data.sol[i_d, i_b] = rigid_data.sol[i_d, i_b] + alpha * rigid_data.p[i_d, i_b]
+            rigid_data.solution[i_d, i_b] = rigid_data.solution[i_d, i_b] + alpha * rigid_data.p[i_d, i_b]
             rigid_data.r[i_d, i_b] = rigid_data.r[i_d, i_b] - alpha * rigid_data.ap[i_d, i_b]
 
 
@@ -425,9 +425,9 @@ def func_rigid_start_line_search(rigid_data: RigidNewtonScratch, control: Newton
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_start_line_search")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.dx[i_d, i_b] = -rigid_data.sol[i_d, i_b]
-        rigid_data.x_temp[i_d, i_b] = rigid_data.x[i_d, i_b]
-        qd.atomic_max(control.max_displacement[i_b], qd.abs(rigid_data.sol[i_d, i_b]))
+        rigid_data.dx[i_d, i_b] = -rigid_data.solution[i_d, i_b]
+        rigid_data.x_start[i_d, i_b] = rigid_data.x[i_d, i_b]
+        qd.atomic_max(control.max_displacement[i_b], qd.abs(rigid_data.solution[i_d, i_b]))
 
 
 @qd.func(requires_top_level=True)
@@ -436,7 +436,7 @@ def func_rigid_step_forward(rigid_data: RigidNewtonScratch, control: NewtonContr
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_step_forward")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.x[i_d, i_b] = rigid_data.x_temp[i_d, i_b] + control.alpha[i_b] * rigid_data.dx[i_d, i_b]
+        rigid_data.x[i_d, i_b] = rigid_data.x_start[i_d, i_b] + control.alpha[i_b] * rigid_data.dx[i_d, i_b]
 
 
 @qd.func(requires_top_level=True)
@@ -474,4 +474,4 @@ def func_rigid_adjoint_finish(
     dt_sq = newton_info.substep_dt[()] * newton_info.substep_dt[()]
     qd.loop_config(name="mpm_rigid_adjoint_finish")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        constraint_state.bw_u[i_d, i_b] = dt_sq * rigid_data.sol[i_d, i_b]
+        constraint_state.bw_u[i_d, i_b] = dt_sq * rigid_data.solution[i_d, i_b]

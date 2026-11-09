@@ -46,7 +46,7 @@ from .newton_linear import LinearBlock, NewtonLinearScratch
 
 
 @qd.func
-def return_map_vjp(
+def return_map_bw(
     i_mat: int,
     kind: int,
     F: qd.types.matrix(3, 3),
@@ -270,7 +270,7 @@ def func_adjoint_g2p(
         F = particles.F[f, i_p, i_b]
         i_mat = particles_info.material_idx[i_p]
         F_trial = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
-        F_trial_bar, Jp_bar = return_map_vjp(
+        F_trial_bar, Jp_bar = return_map_bw(
             i_mat,
             materials.materials_plastic[i_mat],
             F_trial,
@@ -343,7 +343,7 @@ def func_adjoint_nodes(
                 i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
                 x_n = (block * 4 + local_offset(i_n % BLOCK_CELLS)).cast(gs.qd_float) * mpm_info.dx[()]
                 for i_ff in qd.static(range(len(force_fields.force_fields))):
-                    v_bar += dt * force_fields.force_fields[i_ff].get_acc_vel_vjp(x_n, v, t, -1, v_free_bar)
+                    v_bar += dt * force_fields.force_fields[i_ff].get_acc_grad_vel(x_n, v, t, -1, v_free_bar)
             momentum_bar = v_bar / mass
             mass_bar = -lam.dot(u - dt * v_free) - v.dot(v_bar) / mass
         newton.nodes_momentum_bar[i_n] = momentum_bar
