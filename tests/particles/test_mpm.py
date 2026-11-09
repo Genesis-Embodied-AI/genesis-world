@@ -64,6 +64,22 @@ def test_particle_constraints(show_viewer, tol):
             sampler="regular",
         ),
     )
+    moving_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.85),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.Rigid(
+            gravity_compensation=1.0,
+        ),
+    )
+    mpm_follower = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.5, 0.7),
+            size=(0.05, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
     scene.build(n_envs=2)
 
     # The mass of the particles follows the density at the precision of the simulation
@@ -101,6 +117,14 @@ def test_particle_constraints(show_viewer, tol):
 
     pos_diff = torch.tensor([0.2, 0, 0], device=gs.device)
     rigid_box.set_pos(initial_rigid_pos + pos_diff, zero_velocity=False)
+
+    # Particles attached to a link translating at the velocity they share move rigidly with it
+    mpm_follower.set_particle_constraints(True, moving_box.links[0].idx, stiffness=1e3)
+    moving_box.set_dofs_velocity((1.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    mpm_follower.set_velocity((1.0, 0.0, 0.0))
+    follower_pos_0 = mpm_follower.get_particles_pos()
+    moving_box_pos_0 = moving_box.get_pos()
+
     for _ in range(30):
         scene.step()
 
@@ -110,6 +134,12 @@ def test_particle_constraints(show_viewer, tol):
     # The springs deflect under the pull of the rest of the block, so the attached particles lag the link by a physical
     # offset that precision does not bound
     assert_allclose(mpm_diff, pos_diff[0], tol=1e-4)
+
+    # The followers keep their offset to the link along its motion, gravity only sagging them vertically
+    moving_box_disp = moving_box.get_pos() - moving_box_pos_0
+    assert_allclose(moving_box_disp, (30 * scene.dt, 0.0, 0.0), tol=tol)
+    follower_offset = mpm_follower.get_particles_pos() - follower_pos_0 - moving_box_disp[:, None]
+    assert_allclose(follower_offset[..., :2], 0.0, tol=tol)
 
 
 @pytest.mark.required
