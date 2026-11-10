@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from genesis.engine.solvers.fem_solver import SURFACES, FEMInfo, FEMState
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
     MPMState,
+    func_add_coupling_force,
     func_point_vel_after_collision_with_rigid_geom,
     func_point_vel_after_two_way_collision_with_rigid_geom,
     func_quadratic_bspline_stencil,
@@ -31,6 +33,7 @@ from genesis.engine.solvers.sph_solver import (
     func_cubic_kernel_plane_integral,
     kernel_sum_boundary_ghosts,
 )
+from genesis.grad.bridge import reversed_with
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, Size, eoa, field, iter_data, opt_in
@@ -284,7 +287,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 particles=len(samples_tri_idx),
                 envs=self.sim._B,
                 surfaces=n_tris,
-                **hash_grid_sizes(self.sph_solver.hash_grid_res),
+                **hash_grid_sizes(math.prod(self.sph_solver.hash_grid_res)),
             ),
             values=dict(
                 ghosts=dict(
@@ -365,9 +368,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.sdf.sdf_info,
                 self.legacy_coupler_info,
+                self.mpm_solver.mpm_config,
                 self.legacy_coupler_config,
                 self.rigid_solver.collider.collider_config,
                 self.mpm_solver.force_fields,
+                is_backward=False,
             )
 
         # SPH <-> Rigid
@@ -505,15 +510,24 @@ def func_point_vel_after_collisions_with_rigid_geoms(
     pos_world: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
+    mpm_state: MPMState,
     geoms_state: GeomsState,
     links_state: LinksState,
+    mpm_info: MPMInfo,
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     legacy_coupler_info: LegacyCouplerInfo,
+    mpm_config: qd.template(),
     collider_config: qd.template(),
+    is_backward: qd.template(),
 ):
-    """Return the velocity of a point of the given mass once it collided with every rigid geom that couples."""
+    """
+    Return the velocity of a cell of the MPM grid of the given mass once it collided with every rigid geom that couples.
+
+    The momentum change of each collision pushes the link of the geom (see func_add_coupling_force), exactly with
+    `is_deterministic` (see MPMConfig), except in the variant autodiff reverses (`is_backward`).
+    """
     for i_g in range(geoms_info.needs_coup.shape[0]):
         if geoms_info.needs_coup[i_g]:
             _, influence, normal_rigid = func_rigid_geom_influence(
@@ -529,9 +543,21 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                 skip_weak_normal=True,
             )
             if influence > legacy_coupler_info.influence_min[None]:
-                vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+                vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
                     i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
                 )
+                if is_colliding:
+                    func_add_coupling_force(
+                        geoms_info.link_idx[i_g],
+                        i_b,
+                        pos_world,
+                        force,
+                        links_state,
+                        mpm_state.coupling_forces,
+                        mpm_info,
+                        is_exact=mpm_config.is_deterministic and not is_backward,
+                    )
+                vel = vel_new
     return vel
 
 
@@ -573,9 +599,12 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
         skip_weak_normal=False,
     )
     if influence > legacy_coupler_info.influence_min[None]:
-        vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+        vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
             i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
         )
+        if is_colliding:
+            func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+        vel = vel_new
 
     # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
     # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
@@ -643,6 +672,7 @@ def func_mpm_cell_vel_after_exchange_with_particles(
     return vel
 
 
+@reversed_with(is_backward=True)
 @qd.kernel
 def kernel_mpm_grid_op(
     sim_state: SimulatorState,
@@ -658,11 +688,18 @@ def kernel_mpm_grid_op(
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     legacy_coupler_info: LegacyCouplerInfo,
+    mpm_config: qd.template(),
     legacy_coupler_config: qd.template(),
     collider_config: qd.template(),
     force_fields: qd.template(),
+    is_backward: qd.template(),
 ):
-    """Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with."""
+    """
+    Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with.
+
+    The reactions of the rigid geoms add exactly to the coupling forces of their links with `is_deterministic` (see
+    MPMConfig), except in the variant autodiff reverses (`is_backward`).
+    """
     for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape):
         mass_cell = mpm_state.grid.mass[i_x, i_y, i_z, i_b]
         if mass_cell > rigid_info.EPS[None]:
@@ -686,13 +723,17 @@ def kernel_mpm_grid_op(
                     pos,
                     vel_mpm,
                     mass_mpm,
+                    mpm_state,
                     geoms_state,
                     links_state,
+                    mpm_info,
                     geoms_info,
                     rigid_info,
                     sdf_info,
                     legacy_coupler_info,
+                    mpm_config,
                     collider_config,
+                    is_backward,
                 )
 
             #################### MPM <-> SPH, PBD ####################

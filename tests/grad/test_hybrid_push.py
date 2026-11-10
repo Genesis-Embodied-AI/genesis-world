@@ -346,6 +346,6 @@ def test_coupling_wrench_grad_matches_fd(use_implicit_solver, precision, show_vi
                 losses.append([float(loss) for loss in rollout(perturbed)])
             fd_grad[:, i, j] = (np.array(losses[0]) - np.array(losses[1])) / (2.0 * eps)
     (grad_rerun,) = torch.autograd.grad(rollout(vel_ana)[0], vel_ana)
-    assert_allclose(grad_rerun, vel_ana.grad, tol=tol)
+    assert_allclose(grad_rerun, vel_ana.grad, tol=gs.EPS)
     assert_allclose(vel_ana.grad, fd_grad[0], rtol=tol, atol=tol)
     assert_allclose(fem_grad, fd_grad[1], rtol=fem_tol, atol=fem_tol)

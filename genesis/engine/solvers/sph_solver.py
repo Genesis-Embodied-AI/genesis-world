@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -247,7 +248,7 @@ class SPHSolver(ParticleSolver):
         self.sph_state = SPHState(
             sizes=dict(
                 sizes,
-                **hash_grid_sizes(self._hash_grid_res),
+                **hash_grid_sizes(math.prod(self._hash_grid_res)),
             ),
             values=dict(hash_grid=hash_grid_values),
             env_first=False,
@@ -257,7 +258,7 @@ class SPHSolver(ParticleSolver):
         # The columns of the hash grid, one cell high
         columns_grid_res = (*self._hash_grid_res[:2], 1)
         self.sph_columns = SPHColumns(
-            sizes=dict(sizes, **hash_grid_sizes(columns_grid_res)),
+            sizes=dict(sizes, **hash_grid_sizes(math.prod(columns_grid_res))),
             values=dict(grid=dict(cell_size=self._hash_grid_cell_size, grid_res=columns_grid_res)),
             env_first=False,
             unused=not self.is_active or is_dfsph,

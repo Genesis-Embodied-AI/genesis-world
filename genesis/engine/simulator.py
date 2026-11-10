@@ -30,6 +30,7 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
+from .solvers.mpm_solver import kernel_flush_coupling_forces
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -545,6 +546,13 @@ class Simulator(RBC):
                 rigid_solver.dyn_state.links,
                 soft_solver.mpm_info,
                 rigid_solver.dyn_info.geoms,
+                soft_solver.mpm_config,
+                is_backward=False,
+            )
+        # The MPM grid and particles push the rigid links once all of them added their forces (see MPMCouplingForces)
+        if self.mpm_solver.is_active and self.mpm_solver.mpm_config.is_deterministic:
+            kernel_flush_coupling_forces(
+                self.rigid_solver.dyn_state.links, self.mpm_solver.mpm_state.coupling_forces, self.mpm_solver.mpm_info
             )
 
     # -------------- pre coupling --------------

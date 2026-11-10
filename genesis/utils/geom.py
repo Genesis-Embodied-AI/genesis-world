@@ -2579,13 +2579,14 @@ class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
     slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
     cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
     grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
+    # The slot of each particle, -1 for an inactive one (see func_sort_particles_by_slot)
+    particles_slot: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
 
 
-def hash_grid_sizes(grid_res: tuple[int, int, int]) -> dict[str, int]:
-    """Return the sizes a spatial hash grid of a resolution is built with (see SpatialHashGrid)."""
+def hash_grid_sizes(n_slots: int) -> dict[str, int]:
+    """Return the sizes a spatial hash grid of a number of slots is built with (see SpatialHashGrid)."""
     # The slots split into chunks of about the cube root of their number, and the chunks into groups as long, which
     # keeps every part of the parallel sum of the slot sizes to that length
-    n_slots = math.prod(grid_res)
     part_len = math.ceil(n_slots ** (1 / 3))
     n_chunks = math.ceil(n_slots / part_len)
     return dict(hash_slots=n_slots, hash_chunks=n_chunks, hash_groups=math.ceil(n_chunks / part_len))
@@ -2596,18 +2597,34 @@ def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.T
     """
     Sort the active particles of every environment by the slot of the hash grid their position falls in.
 
-    The active particles of an environment take the sorted indices 0 to `n_particles - 1`, those of a slot following
-    each other in ascending order of index, and `particles_idx` receives the particle of each sorted index. Called at
-    the top level of a kernel, whose loops it runs in parallel.
+    Called at the top level of a kernel, whose loops it runs in parallel (see func_sort_particles_by_slot).
+    """
+    for i_p, i_b in qd.ndrange(particles_pos.shape[0], hash_grid.slot_size.shape[1]):
+        i_s = -1
+        if particles_is_active[i_p, i_b]:
+            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+        hash_grid.particles_slot[i_p, i_b] = i_s
+
+    func_sort_particles_by_slot(hash_grid)
+
+
+@qd.func
+def func_sort_particles_by_slot(hash_grid: SpatialHashGrid):
+    """
+    Sort the particles of every environment by the slot `particles_slot` gives them, leaving out those of slot -1.
+
+    The particles sorted take the sorted indices 0 to `n_particles - 1`, those of a slot following each other in
+    ascending order of index, and `particles_idx` receives the particle of each sorted index. Called at the top level of
+    a kernel, whose loops it runs in parallel.
     """
     n_slots, _B = hash_grid.slot_size.shape[0], hash_grid.slot_size.shape[1]
     # The slot starts are all written before they are read, so the counts alone start from zero
     for i_s, i_b in qd.ndrange(n_slots, _B):
         hash_grid.slot_size[i_s, i_b] = 0
 
-    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
-        if particles_is_active[i_p, i_b]:
-            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
             qd.atomic_add(hash_grid.slot_size[i_s, i_b], 1)
 
     # The slots of each environment are stored in slot order, so that the particles of neighbouring cells are close in
@@ -2649,9 +2666,9 @@ def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.T
             hash_grid.slot_start[i_s, i_b] = n_particles
             n_particles = n_particles + hash_grid.slot_size[i_s, i_b]
 
-    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
-        if particles_is_active[i_p, i_b]:
-            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
             i_r = qd.atomic_add(hash_grid.slot_start[i_s, i_b], 1)
             hash_grid.slots_particles_idx[i_r, i_b] = i_p
 
@@ -2662,9 +2679,9 @@ def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.T
     # The atomic increments fill each slot in the order the threads reach it, which varies from one run to the next.
     # Ranking the particles of a slot by index fixes the order in which the neighbour queries sum over them, so that
     # the same state steps on bit-identically.
-    for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
-        if particles_is_active[i_p, i_b]:
-            i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
+    for i_p, i_b in qd.ndrange(*hash_grid.particles_slot.shape):
+        i_s = hash_grid.particles_slot[i_p, i_b]
+        if i_s >= 0:
             slot_start = hash_grid.slot_start[i_s, i_b]
             rank = 0
             for i_r in range(slot_start, slot_start + hash_grid.slot_size[i_s, i_b]):
