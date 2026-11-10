@@ -1120,6 +1120,8 @@ def _kernel_reset_with_template_args(kernel):
     kernel.used_py_dataclass_parameters_by_key_enforcing = {}
     kernel._struct_ndarray_launch_info_by_key = {}
     kernel._struct_primitive_launch_info_by_key = {}
+    kernel._mutable_nd_cached_key = None
+    kernel._mutable_nd_cached_val = []
 
 
 # FIXME: quadrants#1038 - a performance dispatcher keeps the arguments of its last call for the lifetime of the process,
