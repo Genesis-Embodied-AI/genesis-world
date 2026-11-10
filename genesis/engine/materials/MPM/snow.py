@@ -7,7 +7,8 @@ import genesis as gs
 from genesis.typing import PositiveFloat
 
 from .base import SamplerType
-from .elasto_plastic import ElastoPlastic
+from .elastic import func_diagonal_matrix
+from .elasto_plastic import ElastoPlastic, func_clamp_return_map
 
 
 @qd.data_oriented
@@ -54,21 +55,36 @@ class Snow(ElastoPlastic):
 
     @qd.func
     def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
-        S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-        Jp_new = Jp
-        for d in qd.static(range(3)):
-            S_new[d, d] = min(max(S[d, d], 1 - self.yield_lower), 1 + self.yield_higher)
-            Jp_new *= S[d, d] / S_new[d, d]
+        sigma_new, Jp_new = func_snow_return_map(
+            qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float), Jp, self.yield_lower, self.yield_higher
+        )
+        S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 
     @qd.func
     def _update_stress_snow(self, U, S, V, F_tmp, F_new, J, Jp, actu, m_dir):
-        # Hardening coefficient: material harder when compressed
-        h = qd.exp(10 * (1.0 - Jp))
+        h = func_snow_hardening(Jp)
         mu, lam = self.mu * h, self.lam * h
 
         r = U @ V.transpose()
         stress = 2 * mu * (F_new - r) @ F_new.transpose() + qd.Matrix.identity(gs.qd_float, 3) * lam * J * (J - 1)
 
         return stress
+
+
+@qd.func
+def func_snow_hardening(Jp: float):
+    """Return the factor of the Lame parameters of snow at the plastic volume ratio `Jp`, harder once compressed."""
+    return qd.exp(10.0 * (1.0 - Jp))
+
+
+@qd.func
+def func_snow_return_map(sigma: qd.types.vector(3), Jp: float, yield_lower: float, yield_higher: float):
+    """Return the singular values of the deformation gradient of snow after its return map (see
+    'func_clamp_return_map'), and its plastic volume ratio, which takes the volume the clamp removed."""
+    sigma_new = func_clamp_return_map(sigma, yield_lower, yield_higher)
+    Jp_new = Jp
+    for k in qd.static(range(3)):
+        Jp_new *= sigma[k] / sigma_new[k]
+    return sigma_new, Jp_new

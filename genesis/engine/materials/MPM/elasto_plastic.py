@@ -7,6 +7,7 @@ import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Base
+from .elastic import func_diagonal_matrix
 
 
 @qd.data_oriented
@@ -45,27 +46,44 @@ class ElastoPlastic(Base):
     def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
         if qd.static(self.use_von_mises):
             S_new = qd.max(S, 0.05)  # to prevent NaN
-            epsilon = qd.Vector([qd.log(S_new[0, 0]), qd.log(S_new[1, 1]), qd.log(S_new[2, 2])])
-            epsilon_hat = epsilon - (epsilon.sum() / 3)
-            epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
-            delta_gamma = epsilon_hat_norm - self.von_mises_yield_stress / (2 * self.mu)
-
-            if delta_gamma > 0:  # Yields
-                epsilon -= (delta_gamma / epsilon_hat_norm) * epsilon_hat
-                S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for d in qd.static(range(3)):
-                    S_new[d, d] = qd.exp(epsilon[d])
+            sigma_new, is_yielding = func_von_mises_return_map(sigma, self.mu, self.von_mises_yield_stress)
+            if is_yielding:
+                S_new = func_diagonal_matrix(sigma_new)
                 F_new = U @ S_new @ V.transpose()
             else:
                 F_new = F_tmp
-
         else:
-            S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for d in qd.static(range(3)):
-                S_new[d, d] = min(max(S[d, d], 1 - self.yield_lower), 1 + self.yield_higher)
+            S_new = func_diagonal_matrix(func_clamp_return_map(sigma, self.yield_lower, self.yield_higher))
             F_new = U @ S_new @ V.transpose()
 
         Jp_new = Jp
         return F_new, S_new, Jp_new
+
+
+@qd.func
+def func_von_mises_return_map(sigma: qd.types.vector(3), mu: float, yield_stress: float):
+    """
+    Return the singular values of the deformation gradient after the von Mises return map, and whether it yields.
+
+    The logarithmic strain yields once its deviatoric part exceeds the yield stress over twice the shear modulus, and is
+    projected back onto the yield surface. The singular values are floored at 0.05 before taking their log.
+    """
+    epsilon = qd.log(qd.max(sigma, 0.05))
+    epsilon_hat = epsilon - epsilon.sum() / 3.0
+    epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
+    delta_gamma = epsilon_hat_norm - yield_stress / (2.0 * mu)
+    sigma_new = sigma
+    is_yielding = delta_gamma > 0.0
+    if is_yielding:
+        sigma_new = qd.exp(epsilon - (delta_gamma / epsilon_hat_norm) * epsilon_hat)
+    return sigma_new, is_yielding
+
+
+@qd.func
+def func_clamp_return_map(sigma: qd.types.vector(3), yield_lower: float, yield_higher: float):
+    """Return the singular values of the deformation gradient clamped between 1 - `yield_lower` and
+    1 + `yield_higher`, beyond which the material yields."""
+    return qd.min(qd.max(sigma, 1.0 - yield_lower), 1.0 + yield_higher)
