@@ -383,11 +383,15 @@ def test_dfsph_resting_liquid_stability(show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_pressure_carries_column_weight(show_viewer, pressure_solver):
+# The wide column settles for hundreds of steps, which the GPU affords, while the CPU runs the slab
+@pytest.mark.parametrize(
+    "pressure_solver, liquid_width, backend",
+    [("WCSPH", 0.3, gs.gpu), ("DFSPH", 0.3, gs.gpu), ("WCSPH", 0.02, gs.cpu), ("DFSPH", 0.02, gs.cpu)],
+)
+def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_width):
     GRAVITY = 9.81
     PARTICLE_SIZE = 0.02
-    LIQUID_SIZE = (0.3, 0.3, 0.5)
+    LIQUID_SIZE = (0.3, liquid_width, 0.5)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -431,13 +435,14 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     weight_per_area = sph_solver.n_particles * particle_weight / footprint_area
     # Under gravity tilted away from the vertical, the free surface settles normal to gravity, and the walls carry the
     # hydrostatic pressure of the depth along gravity. The walls only carry a hydrostatic pressure with WCSPH, whose
-    # column takes longer to settle under tilted gravity than under vertical gravity.
+    # column takes longer to settle under tilted gravity than under vertical gravity, and the walls along y of a slab
+    # thinner than the support radius hold all its particles, which the ratio would then average over.
     gravity_tilted = GRAVITY * np.array([np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))])
     sph_solver.set_gravity(gravity_tilted, envs_idx=1)
     rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
     tilted_ratios = []
     p_bottoms, p_middles, p_tops, p_hydrostatics = [], [], [], []
-    is_tilt_checked = pressure_solver == "WCSPH"
+    is_tilt_checked = pressure_solver == "WCSPH" and liquid_width > 2 * PARTICLE_SIZE
     for i_step in range(300 if is_tilt_checked else 100):
         scene.step()
         if is_tilt_checked and i_step >= 250:

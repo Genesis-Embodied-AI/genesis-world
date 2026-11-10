@@ -15,9 +15,13 @@ from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKin
 from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
+    func_hash_cell_to_slot,
     func_hash_grid_to_slot,
+    func_hash_n_cells,
     func_hash_pos_to_grid,
     func_hash_sort_particles,
+    func_hash_wrap_cell,
+    hash_grid_sizes,
 )
 
 from .base_solver import SimulatorState
@@ -201,7 +205,7 @@ class SPHSolver(ParticleSolver):
         self.sph_state = SPHState(
             sizes=dict(
                 sizes,
-                hash_slots=np.prod(self._hash_grid_res),
+                **hash_grid_sizes(self._hash_grid_res),
             ),
             values=dict(hash_grid=hash_grid_values),
             env_first=False,
@@ -211,7 +215,7 @@ class SPHSolver(ParticleSolver):
         # The columns of the hash grid, one cell high
         columns_grid_res = (*self._hash_grid_res[:2], 1)
         self.sph_columns = SPHColumns(
-            sizes=dict(sizes, hash_slots=np.prod(columns_grid_res)),
+            sizes=dict(sizes, **hash_grid_sizes(columns_grid_res)),
             values=dict(grid=dict(cell_size=self._hash_grid_cell_size, grid_res=columns_grid_res)),
             env_first=False,
             unused=not self.is_active or is_dfsph,
@@ -547,9 +551,10 @@ def func_for_all_neighbors(
     accumulates its result in `ret`.
     """
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-    base = func_hash_pos_to_grid(pos_i, sph_state.hash_grid)
-    for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-        i_s = func_hash_grid_to_slot(base + offset, sph_state.hash_grid)
+    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, sph_state.hash_grid) - 1, sph_state.hash_grid)
+    n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+        i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
         slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
         for j_p in range(slot_start, sph_state.hash_grid.slot_size[i_s, i_b] + slot_start):
             d_ij = pos_i - sph_state.particles_reordered.pos[j_p, i_b]
