@@ -292,6 +292,8 @@ CONSTRAINT_SORT_SLOTS = Size("constraint_sort_slots")
 FEM_INCIDENCE = Size("fem_incidence")
 LINK_INCIDENCE = Size("link_incidence")
 LINK_WRENCH_SHARES = Size("link_wrench_shares")
+# The contact pairs of each environment over every kind of contact
+SAP_ENV_CONTACTS = Size("sap_env_contacts")
 
 # Labels of the arrays that the solvers and the contact types of a scene leave unused
 FEM = "fem"
@@ -304,6 +306,7 @@ TET_TABLES = "tet_tables"
 RIGID_CONTACTS = "rigid_contacts"
 HOST_SORT = "host_sort"
 DEVICE_SORT = "device_sort"
+LAGGED_FRICTION = "lagged_friction"
 
 
 class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
@@ -474,6 +477,15 @@ class SAPState(Data, kind=DataKind.SCRATCH):
     )
 
 
+class SAPLaggedFriction(Data, kind=DataKind.STATE):
+    """The contact pairs of the last SAP solve of each environment, whose normal impulses scale the next friction."""
+
+    n_contacts: qd.Tensor = field(int, shape=(ENVS,))
+    # Sorted keys of the contact pairs, and the normal impulse of each
+    key: qd.Tensor = field(qd.u64, shape=(SAP_ENV_CONTACTS, ENVS))
+    normal_impulse: qd.Tensor = field(float, shape=(SAP_ENV_CONTACTS, ENVS))
+
+
 class SAPInfo(Data, kind=DataKind.CONSTANT):
     """The model of the SAP coupler: hydroelastic pressure fields, rigid volume meshes, solve layout and constants."""
 
@@ -539,6 +551,7 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     contact_stiffness_min: qd.Tensor = field(float, shape=())
     contact_separation_max: qd.Tensor = field(float, shape=())
     cap_residual_max: qd.Tensor = field(float, shape=())
+    stiction_tolerance: qd.Tensor = field(float, shape=())
     # Relative precision of the simulation, below which a ratio of lengths or a norm is round-off
     precision: qd.Tensor = field(float, shape=())
 
@@ -548,6 +561,7 @@ class SAPData(Data):
 
     sap_info: SAPInfo
     sap_state: SAPState
+    lagged_friction: SAPLaggedFriction = field(labels=LAGGED_FRICTION)
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
 
@@ -562,6 +576,7 @@ class SAPConfig(Config):
     has_rigid_tet_tree: bool
     enable_fem_self_tet_contact: bool
     enable_rigid_fem_contact: bool
+    enable_lagged_friction: bool
     enable_vertex_constraints: bool
     batch_links_info: bool
     # Whether the lanes of a GPU subgroup take the items of a chunk together (see CHUNK_SIZE), a link summing the wrench
@@ -777,6 +792,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self._sap_convergence_rtol = options.sap_convergence_rtol
         if self._sap_convergence_rtol is None:
             self._sap_convergence_rtol = CONVERGENCE_RTOL_DEFAULT[gs.np_float]
+        self._enable_lagged_friction = options.enable_lagged_friction
         if options.fem_floor_contact_type == "tet":
             self._fem_floor_contact_type = FEMFloorContactType.TET
         elif options.fem_floor_contact_type == "vert":
@@ -1120,6 +1136,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             fem_incidence=self._B * n_env_fem_entries,
             link_incidence=self._B * n_env_link_entries,
             link_wrench_shares=n_links * n_link_wrench_shares,
+            sap_env_contacts=sum([handler.max_contact_pairs // self._B for handler in self.contact_handlers]),
         )
         precision = np.finfo(gs.np_float).eps
         self.sap_data = SAPData(
@@ -1160,6 +1177,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     contact_stiffness_min=CONTACT_STIFFNESS_MIN,
                     contact_separation_max=CONTACT_SEPARATION_MAX,
                     cap_residual_max=CAP_RESIDUAL_MAX,
+                    stiction_tolerance=options.stiction_tolerance,
                     precision=precision,
                 )
             ),
@@ -1183,6 +1201,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid_contacts=not has_rigid_contacts,
                 host_sort=is_device_sort,
                 device_sort=not is_device_sort,
+                lagged_friction=not self._enable_lagged_friction,
             ),
         )
         self.sap_state, self.sap_info = self.sap_data.sap_state, self.sap_data.sap_info
@@ -1229,6 +1248,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_rigid_tet_tree=has_rigid_rigid_contact,
             enable_fem_self_tet_contact=self._enable_fem_self_tet_contact,
             enable_rigid_fem_contact=self._enable_rigid_fem_contact,
+            enable_lagged_friction=self._enable_lagged_friction,
             enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
             enable_cooperative_kernels=enable_cooperative_kernels,
@@ -1289,6 +1309,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         if self.sap_data is None:
             return
         yield from iter_data(self.sap_data, "errno", DataKind.STATE)
+        if self._enable_lagged_friction:
+            yield from iter_data(self.sap_data, "lagged_friction")
 
     def _init_bvh(self, n_rigid_tets: int) -> None:
         """Allocate the tree set and the box query of each contact handler traversing a tree."""
@@ -1441,6 +1463,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 dofs_state,
                 links_state,
                 self.sap_state,
+                self.sap_data.lagged_friction,
                 fem_info,
                 entities_info,
                 links_info,
@@ -1475,11 +1498,14 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_state,
                 dofs_state,
                 self.sap_state,
+                self.sap_data.lagged_friction,
                 self.sap_info,
                 self.sap_config,
                 self.contact_handlers,
                 self.sap_data.errno,
             )
+        elif self._enable_lagged_friction:
+            kernel_clear_normal_impulses(self.sim.scene._envs_idx, self.sap_data.lagged_friction)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- Properties -------------------------------------
@@ -1913,6 +1939,14 @@ def kernel_order_constraints(
 
 
 @qd.kernel
+def kernel_clear_normal_impulses(envs_idx: qd.Tensor, lagged_friction: SAPLaggedFriction):
+    """Forget the contact pairs of the last solve of the given environments, whose next substep estimates them."""
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        lagged_friction.n_contacts[i_b] = 0
+
+
+@qd.kernel
 def kernel_build_equality_constraints(
     equalities_info: EqualitiesInfo,
     joints_info: JointsInfo,
@@ -1962,6 +1996,7 @@ def kernel_compute_regularization(
     dofs_state: DofsState,
     links_state: LinksState,
     sap_state: SAPState,
+    lagged_friction: SAPLaggedFriction,
     fem_info: FEMInfo,
     entities_info: EntitiesInfo,
     links_info: LinksInfo,
@@ -1973,13 +2008,48 @@ def kernel_compute_regularization(
     contact_handlers: qd.template(),
     constraint_handler: qd.template(),
 ):
+    """Compute the regularization of every contact and equality constraint from its Delassus operator.
 
+    With lagged friction, the friction of each contact pair scales with the normal impulse the last solve gave the pair
+    of the same key, a pair without match keeping the estimate of its handler (see compute_regularization of
+    BaseContactHandler).
+    """
     for contact in qd.static(contact_handlers):
         contact.compute_regularization(
             fem_state, dofs_state, links_state, sap_state, fem_info, links_info, rigid_info, sap_info, sap_config
         )
     if qd.static(sap_config.has_equality_constraints):
         constraint_handler.compute_regularization(entities_info, equalities_info, rigid_info, sap_info)
+    if qd.static(sap_config.enable_lagged_friction):
+        # The normal impulse of a near-rigid contact is so stiff in the normal velocity that no function of the
+        # start-of-step state predicts it, where the last solve gives it within its change over a substep. The pairs of
+        # the last solve of each environment sort by key (see kernel_update_vel), which a binary search looks up.
+        env_shift = qd.u64(sap_info.constraints_env_shift[None])
+        for i_s in range(sap_state.constraint_order.n_sorted[None]):
+            key = sap_state.constraint_order.key[i_s]
+            i_b = qd.cast(key >> env_shift, gs.qd_int)
+            i_k_lo = 0
+            i_k_hi = lagged_friction.n_contacts[i_b]
+            for _ in range(32):
+                if i_k_lo < i_k_hi:
+                    i_k_mid = (i_k_lo + i_k_hi) // 2
+                    if lagged_friction.key[i_k_mid, i_b] < key:
+                        i_k_lo = i_k_mid + 1
+                    else:
+                        i_k_hi = i_k_mid
+            is_found = False
+            if i_k_lo < lagged_friction.n_contacts[i_b]:
+                is_found = lagged_friction.key[i_k_lo, i_b] == key
+            i_q = sap_state.constraint_order.order[i_s]
+            for i_h, handler in qd.static(enumerate(contact_handlers)):
+                if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                    contact_info = qd.static(handler.contact_pairs.contact_info)
+                    i_c = i_q - sap_info.handlers_slot_start[i_h]
+                    if is_found:
+                        contact_info[i_c].mu_n0 = contact_info[i_c].mu * lagged_friction.normal_impulse[i_k_lo, i_b]
+                    contact_info[i_c].vs = qd.max(
+                        sap_info.stiction_tolerance[None], contact_info[i_c].Rt * contact_info[i_c].mu_n0
+                    )
 
 
 @qd.kernel
@@ -1987,6 +2057,7 @@ def kernel_update_vel(
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
+    lagged_friction: SAPLaggedFriction,
     sap_info: SAPInfo,
     sap_config: qd.template(),
     contact_handlers: qd.template(),
@@ -1996,7 +2067,8 @@ def kernel_update_vel(
     Write the velocities of the solve back to the solvers, flagging the environments whose solve stopped at its Newton
     iteration cap with a residual above CAP_RESIDUAL_MAX.
 
-    The environments still active at the end of the solve are those whose last convergence check failed.
+    The environments still active at the end of the solve are those whose last convergence check failed. With lagged
+    friction, the normal impulses of the contact pairs are stored for the next substep.
     """
     for i_b in range(errno.shape[0]):
         if sap_state.envs.is_active[i_b] and sap_state.envs.relative_residual[i_b] >= sap_info.cap_residual_max[None]:
@@ -2007,6 +2079,27 @@ def kernel_update_vel(
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_info.n_dofs[None], errno.shape[0], axes=qd.static(eoa(dofs_state.vel))):
             dofs_state.vel[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b]
+    if qd.static(sap_config.enable_lagged_friction):
+        # The key and the normal impulse of the contact pairs of every environment, in their sorted order, which the
+        # next substep looks up. The contact handlers precede the equality constraints, so that the contact pairs of an
+        # environment come first in its sorted constraints (see kernel_order_constraints).
+        env_shift = qd.u64(sap_info.constraints_env_shift[None])
+        for i_b in range(lagged_friction.n_contacts.shape[0]):
+            n_contacts = 0
+            for handler in qd.static(contact_handlers):
+                n_contacts = n_contacts + handler.envs_n_constraints(i_b)
+            lagged_friction.n_contacts[i_b] = n_contacts
+        for i_s in range(sap_state.constraint_order.n_sorted[None]):
+            key = sap_state.constraint_order.key[i_s]
+            i_b = qd.cast(key >> env_shift, gs.qd_int)
+            i_k = i_s - sap_state.constraint_order.envs_constraint_start[i_b]
+            i_q = sap_state.constraint_order.order[i_s]
+            for i_h, handler in qd.static(enumerate(contact_handlers)):
+                if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                    contact_info = qd.static(handler.contact_pairs.contact_info)
+                    i_c = i_q - sap_info.handlers_slot_start[i_h]
+                    lagged_friction.key[i_k, i_b] = key
+                    lagged_friction.normal_impulse[i_k, i_b] = contact_info[i_c].gamma[2]
 
 
 @qd.kernel
@@ -4189,6 +4282,8 @@ class BaseContactHandler(RBC):
             mu=gs.qd_float,  # friction coefficient
             mu_hat=gs.qd_float,  # friction coefficient regularized
             mu_factor=gs.qd_float,  # friction coefficient factor, 1/(1+mu_tilde**2)
+            mu_n0=gs.qd_float,  # friction coefficient times the lagged normal impulse, see compute_regularization
+            vs=gs.qd_float,  # stiction velocity of the lagged friction, see compute_contact_cost_gamma_G
             gamma=gs.qd_vec3,  # contact impulse
             G=gs.qd_mat3,  # Hessian matrix
             GJp=gs.qd_vec3,  # product of the Hessian with the Jacobian of the search direction
@@ -4308,7 +4403,8 @@ class BaseContactHandler(RBC):
         sap_config: qd.template(),
     ):
         """
-        Compute the regularization of every contact pair from its Delassus operator.
+        Compute the regularization of every contact pair from its Delassus operator, and with lagged friction the normal
+        impulse its friction scales with.
         """
         contact_info = qd.static(self.contact_pairs.contact_info)
         dt = sap_info.substep_dt[None]
@@ -4327,6 +4423,21 @@ class BaseContactHandler(RBC):
             contact_info[i_p].vn_hat = -contact_info[i_p].phi0 / (dt + taud)
             contact_info[i_p].mu_hat = contact_info[i_p].mu * Rt / Rn
             contact_info[i_p].mu_factor = 1.0 / (1.0 + contact_info[i_p].mu * contact_info[i_p].mu_hat)
+            if qd.static(sap_config.enable_lagged_friction):
+                # The normal impulse at the velocities the solve starts from, the start-of-step ones for the entities in
+                # contact (see kernel_init_sap_solve), which a pair the last solve also held replaces with the impulse
+                # it gave (see kernel_compute_regularization).
+                vc = self.compute_Jx(
+                    i_p,
+                    sap_state.fem_vertices.v,
+                    sap_state.rigid_dofs.v,
+                    dofs_state,
+                    links_state,
+                    fem_info,
+                    links_info,
+                    sap_config,
+                )
+                contact_info[i_p].mu_n0 = contact_info[i_p].mu * qd.max(contact_info[i_p].vn_hat - vc[2], 0.0) / Rn
 
     @qd.func
     def compute_contact_cost_gamma_G(
@@ -4337,8 +4448,10 @@ class BaseContactHandler(RBC):
 
         The pair is i_p and the velocity `vc`, which holds the tangential velocities then the normal one, positive when
         the sides move apart. The normal impulse is the projection of the regularized normal velocity error on the
-        positive half-line, and the impulse the projection of the regularized velocity error on the friction cone, as in
-        SAP.
+        positive half-line. With lagged friction, the friction impulse is mu * n0 times the tangential velocity over its
+        soft norm sqrt(|vt|^2 + vs^2), n0 being the normal impulse of the previous substep (see
+        kernel_compute_regularization). Otherwise, the impulse is the projection of the regularized velocity error on
+        the friction cone, as in SAP.
         """
         contact_info = qd.static(self.contact_pairs.contact_info)
         cost = gs.qd_float(0.0)
@@ -4346,31 +4459,44 @@ class BaseContactHandler(RBC):
         G = qd.Matrix.zero(gs.qd_float, 3, 3)
         normal = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
         Pn = normal.outer_product(normal)
-        R = qd.Vector([contact_info[i_p].Rt, contact_info[i_p].Rt, contact_info[i_p].Rn])
-        R_inv = qd.Vector([contact_info[i_p].Rt_inv, contact_info[i_p].Rt_inv, contact_info[i_p].Rn_inv])
-        y = (qd.Vector([0.0, 0.0, contact_info[i_p].vn_hat]) - vc) * R_inv
-        yr = y[:2].norm(sap_info.precision[None])
-        yn = y[2]
-        t_hat = y[:2] / yr
-        mu = contact_info[i_p].mu
-        mu_hat = contact_info[i_p].mu_hat
-        mu_factor = contact_info[i_p].mu_factor
-        # Stiction, inside the friction cone
-        if yr <= mu * yn:
-            gamma = y
-            G = R_inv[0] * qd.Matrix.identity(gs.qd_float, 3) + (R_inv[2] - R_inv[0]) * Pn
-        # Sliding, on the boundary of the friction cone, the other cases being out of contact
-        elif -mu_hat * yr < yn and yn < yr / mu:
-            gn = (yn + mu_hat * yr) * mu_factor
-            gt = mu * gn * t_hat
-            gamma = qd.Vector([gt[0], gt[1], gn])
-            P = t_hat.outer_product(t_hat)
-            Pperp = qd.Matrix.identity(gs.qd_float, 2) - P
-            G[:2, :2] = mu * (gn / yr * Pperp + mu_hat * mu_factor * P) * R_inv[0]
-            G[:2, 2] = mu * mu_factor * t_hat * R_inv[2]
-            G[2, :2] = mu_hat * mu_factor * t_hat * R_inv[0]
-            G[2, 2] = mu_factor * R_inv[2]
-        cost = 0.5 * gamma.dot(R * gamma)
+        if qd.static(sap_config.enable_lagged_friction):
+            gn = qd.max(contact_info[i_p].vn_hat - vc[2], 0.0) * contact_info[i_p].Rn_inv
+            if gn > 0.0:
+                G = contact_info[i_p].Rn_inv * Pn
+            vt = vc - vc[2] * normal
+            vs = contact_info[i_p].vs
+            vt_soft = qd.sqrt(vt.norm_sqr() + vs**2)
+            t_hat = vt / vt_soft
+            mu_n0 = contact_info[i_p].mu_n0
+            cost = mu_n0 * (vt_soft - vs) + 0.5 * contact_info[i_p].Rn * gn**2
+            gamma = gn * normal - mu_n0 * t_hat
+            G = G + mu_n0 / vt_soft * (qd.Matrix.identity(gs.qd_float, 3) - t_hat.outer_product(t_hat) - Pn)
+        else:
+            R = qd.Vector([contact_info[i_p].Rt, contact_info[i_p].Rt, contact_info[i_p].Rn])
+            R_inv = qd.Vector([contact_info[i_p].Rt_inv, contact_info[i_p].Rt_inv, contact_info[i_p].Rn_inv])
+            y = (qd.Vector([0.0, 0.0, contact_info[i_p].vn_hat]) - vc) * R_inv
+            yr = y[:2].norm(sap_info.precision[None])
+            yn = y[2]
+            t_hat = y[:2] / yr
+            mu = contact_info[i_p].mu
+            mu_hat = contact_info[i_p].mu_hat
+            mu_factor = contact_info[i_p].mu_factor
+            # Stiction, inside the friction cone
+            if yr <= mu * yn:
+                gamma = y
+                G = R_inv[0] * qd.Matrix.identity(gs.qd_float, 3) + (R_inv[2] - R_inv[0]) * Pn
+            # Sliding, on the boundary of the friction cone, the other cases being out of contact
+            elif -mu_hat * yr < yn and yn < yr / mu:
+                gn = (yn + mu_hat * yr) * mu_factor
+                gt = mu * gn * t_hat
+                gamma = qd.Vector([gt[0], gt[1], gn])
+                P = t_hat.outer_product(t_hat)
+                Pperp = qd.Matrix.identity(gs.qd_float, 2) - P
+                G[:2, :2] = mu * (gn / yr * Pperp + mu_hat * mu_factor * P) * R_inv[0]
+                G[:2, 2] = mu * mu_factor * t_hat * R_inv[2]
+                G[2, :2] = mu_hat * mu_factor * t_hat * R_inv[0]
+                G[2, 2] = mu_factor * R_inv[2]
+            cost = 0.5 * gamma.dot(R * gamma)
         return cost, gamma, G
 
 

@@ -131,6 +131,17 @@ class SAPCouplerOptions(BaseCouplerOptions):
         Normal regularization parameter for SAP. Defaults to 1.0.
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
+    enable_lagged_friction : bool, optional
+        Whether the friction of each contact scales with its normal force of the previous substep rather than with the
+        normal force solved within the substep. Lagged friction keeps sliding bodies on the surface they slide on,
+        decelerating at the rate of Coulomb friction, where SAP friction lifts them off it at a speed growing with
+        their sliding speed. In exchange, the friction lags one substep behind changes of the normal force, so that it
+        grips harder on impact, and sticking contacts under load creep at a speed up to `stiction_tolerance`. Defaults
+        to True.
+    stiction_tolerance : float, optional
+        Sliding speed below which lagged friction holds a contact as sticking, in m/s. A smaller value lets sticking
+        contacts creep less, at the cost of more Newton iterations per substep. Ignored without lagged friction.
+        Defaults to 1e-4.
     pcg_threshold : float, optional
         Threshold of the Preconditioned Conjugate Gradient solver on the squared residual of each Newton step, relative
         to its initial value. A smaller value takes fewer and more accurate Newton steps, each costing more conjugate
@@ -181,6 +192,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     sap_taud: PositiveFloat = 0.1
     sap_beta: PositiveFloat = 1.0
     sap_sigma: PositiveFloat = 1e-3
+    enable_lagged_friction: StrictBool = True
+    stiction_tolerance: PositiveFloat = 1e-4
     pcg_threshold: PositiveFloat = 1e-2
     linesearch_ftol: PositiveFloat = 1e-6
     linesearch_max_step_size: PositiveFloat = 1.5

@@ -458,6 +458,9 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
 def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     PLANES_HEIGHT = (0.1, 0.3)
     BOX_HALFHEIGHT = 0.1
+    DT = 1 / 60
+    GRAVITY = 9.81
+    MU = 0.5
 
     # The ground is a single fixed plane facing up, and any other ground is refused
     for ground_morphs in (
@@ -473,8 +476,9 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1 / 60,
+            dt=DT,
             substeps=2,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
             batch_links_info=batch_links_info,
@@ -495,6 +499,25 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
             pos=(0.0, 0.0, PLANES_HEIGHT[0] + BOX_HALFHEIGHT),
         ),
         material=gs.materials.Rigid(),
+    )
+    # One box slides on the ground plane, and another one is pushed below the friction limit
+    slider = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.1),
+            pos=(1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=MU,
+        ),
+    )
+    pushed = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.1),
+            pos=(-1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=MU,
+        ),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
     robot_1 = scene.add_entity(
@@ -520,9 +543,27 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         entity_pos[..., 2] += PLANES_HEIGHT[1] - PLANES_HEIGHT[0]
         entity.set_pos(entity_pos, envs_idx=[1])
 
-    # Run simulation
-    for _ in range(80):
+    # Run simulation, launching the slider and pushing the other box once the boxes rest on the ground
+    for _ in range(10):
         scene.step()
+    slider.set_dofs_velocity([1.0], dofs_idx_local=[0])
+    push_force = 0.5 * MU * pushed.get_mass() * GRAVITY
+    slider_vel, slider_height, pushed_vel = [], [], []
+    for _ in range(70):
+        pushed.control_dofs_force(push_force[..., None], dofs_idx_local=[0])
+        scene.step()
+        slider_vel.append(tensor_to_array(slider.get_vel()))
+        slider_height.append(tensor_to_array(slider.get_pos()[..., 2]) - PLANES_HEIGHT)
+        pushed_vel.append(tensor_to_array(pushed.get_vel()))
+    slider_vel, slider_height, pushed_vel = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_vel)
+
+    # The sliding box stays on the ground, decelerating at the rate of Coulomb friction until it stops
+    assert_allclose(slider_height, 0.05, atol=1e-3)
+    assert_allclose(np.diff(slider_vel[:10, ..., 0], axis=0), -MU * GRAVITY * DT, tol=2e-3)
+    assert_allclose(slider_vel[15:], 0.0, atol=1e-3)
+
+    # The pushed box sticks, creeping at most at the stiction tolerance
+    assert (np.linalg.norm(pushed_vel[..., :2], axis=-1) < 1e-4).all()
 
     # All the entities must be still
     for entity in scene.entities:
@@ -543,7 +584,8 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
 
 @pytest.mark.required("sparse")
-def test_sap_fem_vs_robot(show_viewer):
+@pytest.mark.parametrize("enable_lagged_friction", [False, True])
+def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
     PLANE_HEIGHT = 0.1
     SPHERE_RADIUS = 0.2
 
@@ -557,6 +599,7 @@ def test_sap_fem_vs_robot(show_viewer):
         ),
         # Rigid-FEM contact without FEM self-contact, which no other test covers
         coupler_options=gs.options.SAPCouplerOptions(
+            enable_lagged_friction=enable_lagged_friction,
             enable_fem_self_tet_contact=False,
         ),
         viewer_options=gs.options.ViewerOptions(
