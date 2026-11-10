@@ -1,7 +1,7 @@
 from .base_entity import Entity
 from .emitter import Emitter
 from .fem_entity import FEMEntity
-from .hybrid_entity import HybridEntity
+from .hybrid_entity import HybridEntity, MPMHybridPart
 from .mpm_entity import MPMEntity
 from .pbd_entity import (
     PBD2DEntity,

@@ -16,7 +16,7 @@ from genesis.utils.tools import StepTimer
 from genesis.utils.warnings import warn_once
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
-from .couplers.rigid_mpm_hybrid import kernel_update_hybrid_soft_part
+from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
@@ -127,8 +127,8 @@ class Simulator(RBC):
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
         self._active_systems: list["ErrnoMixin | CheckpointMixin"] = []
-        # The hybrid entities whose soft part follows its rigid links, updated after the coupling of every substep
-        self._hybrid_entities: list[HybridEntity] = []
+        # The soft parts of the hybrid entities following their rigid links, updated after the coupling of every substep
+        self._rigid_mpm_hybrid: RigidMPMHybrid | None = None
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -282,11 +282,14 @@ class Simulator(RBC):
                 )
 
         # hybrid
-        for entity in self._entities:
-            if isinstance(entity, HybridEntity):
-                entity.build()
-                if entity.part_soft_info is not None:
-                    self._hybrid_entities.append(entity)
+        hybrid_entities = [
+            entity
+            for entity in self._entities
+            if isinstance(entity, HybridEntity) and entity.mpm_hybrid_part is not None
+        ]
+        if hybrid_entities:
+            self._rigid_mpm_hybrid = RigidMPMHybrid(hybrid_entities, self.mpm_solver, self.rigid_solver)
+            self._rigid_mpm_hybrid.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
         # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
@@ -531,24 +534,8 @@ class Simulator(RBC):
         self._coupler.couple()
         self.substep_post_coupling()
         # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
-        for entity in self._hybrid_entities:
-            soft_solver, rigid_solver = entity.solver_soft, entity.solver_rigid
-            kernel_update_hybrid_soft_part(
-                entity.part_soft.particle_start,
-                soft_solver.substep_dt,
-                soft_solver.dt,
-                rigid_solver.dt,
-                entity.material.damping,
-                entity.material.soft_dv_coef,
-                entity.part_soft_info,
-                entity.part_soft_init_positions,
-                soft_solver.mpm_state,
-                rigid_solver.dyn_state.links,
-                soft_solver.mpm_info,
-                rigid_solver.dyn_info.geoms,
-                soft_solver.mpm_config,
-                is_backward=False,
-            )
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.update_soft_parts()
         # The MPM grid and particles push the rigid links once all of them added their forces (see MPMCouplingForces)
         if self.mpm_solver.is_active and self.mpm_solver.mpm_config.is_deterministic:
             kernel_flush_coupling_forces(

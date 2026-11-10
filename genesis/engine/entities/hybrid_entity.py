@@ -1,12 +1,11 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
 
 import trimesh
-
-import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -24,6 +23,23 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+
+
+class MPMHybridPart(NamedTuple):
+    """
+    The soft part of a hybrid entity, as its entity registers it to the solver.
+
+    The fields are the arrays of RigidMPMHybridInfo but `particles_group_start`, in the same order.
+    """
+
+    groups_link_idx: np.ndarray
+    groups_geom_idx: np.ndarray
+    groups_trans_local_to_global: np.ndarray
+    groups_quat_local_to_global: np.ndarray
+    groups_damping: np.ndarray
+    groups_soft_dv_coef: np.ndarray
+    particles_idx: np.ndarray
+    particles_init_pos: np.ndarray
 
 
 class HybridEntity(Entity):
@@ -57,9 +73,8 @@ class HybridEntity(Entity):
         material_soft = material.material_soft
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
-        # The association of the soft particles with the rigid links, held without the default coupling alone
-        self._part_soft_info = None
-        self._part_soft_init_positions = None
+        # The soft part following the rigid links of its muscle groups, held without the default coupling alone
+        self._mpm_hybrid_part: MPMHybridPart | None = None
 
         assert isinstance(material_soft, gs.materials.MPM.Base)  # TODO: need FEM and PBD
 
@@ -132,24 +147,18 @@ class HybridEntity(Entity):
             material_soft.n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
-            # set up info in Quadrants field
             if isinstance(material_soft, gs.materials.MPM.Base):
-                part_soft_info = qd.types.struct(
-                    link_idx=gs.qd_int,
-                    geom_idx=gs.qd_int,
-                    trans_local_to_global=gs.qd_vec3,
-                    quat_local_to_global=gs.qd_vec4,
-                ).field(shape=(material_soft.n_groups,), needs_grad=False, layout=qd.Layout.SOA)
-                part_soft_info.link_idx.from_numpy(np.asarray(link_idcs, dtype=gs.np_int))
-                part_soft_info.geom_idx.from_numpy(np.asarray(geom_idcs, dtype=gs.np_int))
-                part_soft_info.trans_local_to_global.from_numpy(np.asarray(trans_local_to_global, dtype=gs.np_float))
-                part_soft_info.quat_local_to_global.from_numpy(np.asarray(quat_local_to_global, dtype=gs.np_float))
-
-                part_soft_init_positions = qd.field(dtype=gs.qd_vec3, shape=(part_soft.init_particles.shape[0],))
-                part_soft_init_positions.from_numpy(part_soft.init_particles)
-
-                self._part_soft_info = part_soft_info
-                self._part_soft_init_positions = part_soft_init_positions
+                n_particles = len(part_soft.init_particles)
+                self._mpm_hybrid_part = MPMHybridPart(
+                    groups_link_idx=np.asarray(link_idcs, dtype=gs.np_int),
+                    groups_geom_idx=np.asarray(geom_idcs, dtype=gs.np_int),
+                    groups_trans_local_to_global=np.asarray(trans_local_to_global, dtype=gs.np_float),
+                    groups_quat_local_to_global=np.asarray(quat_local_to_global, dtype=gs.np_float),
+                    groups_damping=np.full(material_soft.n_groups, material.damping),
+                    groups_soft_dv_coef=np.full(material_soft.n_groups, material.soft_dv_coef),
+                    particles_idx=np.arange(part_soft.particle_start, part_soft.particle_start + n_particles),
+                    particles_init_pos=part_soft.init_particles,
+                )
             else:
                 raise ValueError(f"Cannot handle soft material {material_soft}")
 
@@ -372,14 +381,9 @@ class HybridEntity(Entity):
         return self._part_rigid
 
     @property
-    def part_soft_info(self) -> qd.StructField | None:
-        """The rigid link, geom and local frame of each muscle group of the soft part, None under default coupling."""
-        return self._part_soft_info
-
-    @property
-    def part_soft_init_positions(self) -> qd.MatrixField | None:
-        """The initial positions of the particles of the soft part, None under default coupling."""
-        return self._part_soft_init_positions
+    def mpm_hybrid_part(self) -> MPMHybridPart | None:
+        """The soft part that follows the rigid links of its muscle groups, None under default coupling."""
+        return self._mpm_hybrid_part
 
     @property
     def part_soft(self):
