@@ -1,0 +1,23 @@
+tests/grad/test_rigid_dynamics.py
+  s_89519fefaf9334::t_175e4c121f077b 255
+  s_89519fefaf9334::t_5679ba87e53f92 298-299
+tests/rigid/test_control.py
+  s_89519fefaf9334::t_95705f4a59fbed 168
+  s_89519fefaf9334::t_56228ad932acd5 129,132,148,156,158,161-162,166-167,169-170,172-175,178,180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5ea22847187e86a6ae8e6f22c1bf0c5aa1adf797",
+  "prompts": {},
+  "sessions": {
+    "s_89519fefaf9334": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d2a1f18c-7a3c-4261-abbd-cb0686eb33c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
