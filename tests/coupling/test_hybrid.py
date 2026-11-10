@@ -453,12 +453,14 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     scene.step()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
 def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     PLANES_HEIGHT = (0.1, 0.3)
     BOX_HALFHEIGHT = 0.1
+    DT = 1 / 60
+    GRAVITY = 9.81
+    MU = 0.5
 
     # The ground is a single fixed plane facing up, and any other ground is refused
     for ground_morphs in (
@@ -474,18 +476,14 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1 / 60,
+            dt=DT,
             substeps=2,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
             batch_links_info=batch_links_info,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(
-            sap_convergence_atol=1e-10,
-            sap_convergence_rtol=1e-10,
-            pcg_threshold=1e-10,
-            linesearch_ftol=1e-10,
-        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -501,6 +499,25 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
             pos=(0.0, 0.0, PLANES_HEIGHT[0] + BOX_HALFHEIGHT),
         ),
         material=gs.materials.Rigid(),
+    )
+    # One box slides on the ground plane, and another one is pushed below the friction limit
+    slider = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.1),
+            pos=(1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=MU,
+        ),
+    )
+    pushed = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.1),
+            pos=(-1.0, 0.0, PLANES_HEIGHT[0] + 0.05),
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=MU,
+        ),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
     robot_1 = scene.add_entity(
@@ -526,9 +543,27 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         entity_pos[..., 2] += PLANES_HEIGHT[1] - PLANES_HEIGHT[0]
         entity.set_pos(entity_pos, envs_idx=[1])
 
-    # Run simulation
-    for _ in range(80):
+    # Run simulation, launching the slider and pushing the other box once the boxes rest on the ground
+    for _ in range(10):
         scene.step()
+    slider.set_dofs_velocity([1.0], dofs_idx_local=[0])
+    push_force = 0.5 * MU * pushed.get_mass() * GRAVITY
+    slider_vel, slider_height, pushed_vel = [], [], []
+    for _ in range(70):
+        pushed.control_dofs_force(push_force[..., None], dofs_idx_local=[0])
+        scene.step()
+        slider_vel.append(tensor_to_array(slider.get_vel()))
+        slider_height.append(tensor_to_array(slider.get_pos()[..., 2]) - PLANES_HEIGHT)
+        pushed_vel.append(tensor_to_array(pushed.get_vel()))
+    slider_vel, slider_height, pushed_vel = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_vel)
+
+    # The sliding box stays on the ground, decelerating at the rate of Coulomb friction until it stops
+    assert_allclose(slider_height, 0.05, atol=1e-3)
+    assert_allclose(np.diff(slider_vel[:10, ..., 0], axis=0), -MU * GRAVITY * DT, tol=2e-3)
+    assert_allclose(slider_vel[15:], 0.0, atol=1e-3)
+
+    # The pushed box sticks, creeping at most at the stiction tolerance
+    assert (np.linalg.norm(pushed_vel[..., :2], axis=-1) < 1e-4).all()
 
     # All the entities must be still
     for entity in scene.entities:
@@ -548,9 +583,9 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     assert (robot_2_aabb[..., 1, 2] > robot_1_aabb[..., 1, 2] + 0.05).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
-def test_sap_fem_vs_robot(show_viewer):
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("enable_lagged_friction", [False, True])
+def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
     PLANE_HEIGHT = 0.1
     SPHERE_RADIUS = 0.2
 
@@ -564,6 +599,7 @@ def test_sap_fem_vs_robot(show_viewer):
         ),
         # Rigid-FEM contact without FEM self-contact, which no other test covers
         coupler_options=gs.options.SAPCouplerOptions(
+            enable_lagged_friction=enable_lagged_friction,
             enable_fem_self_tet_contact=False,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -618,3 +654,66 @@ def test_sap_fem_vs_robot(show_viewer):
 
     # Check that the legs of the ants are resting on the sphere
     assert_allclose(robot.get_qpos()[-4:].abs(), 1.0, tol=0.1)
+
+
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_sap_coupler_implicit_damping(integrator, show_viewer):
+    DT = 0.01
+    N_STEPS = 10
+    SPHERE_RADIUS = 0.1
+    SAP_RTOL = 1e-10
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=1,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_convergence_rtol=SAP_RTOL,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, 1.5, 1.0),
+            camera_lookat=(0.5, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A resting FEM sphere keeps the SAP solve running, which the damped cube floating away from it goes through
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
+            radius=SPHERE_RADIUS,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+    )
+    scene.build()
+
+    dofs_damping = [2.0, 5.0, 10.0, 0.0, 0.0, 0.05]
+    cube.set_dofs_damping(dofs_damping)
+    vel = np.array([0.5, -0.5, 0.5, 0.0, 0.0, 5.0])
+    cube.set_dofs_velocity(vel)
+    mass_diag = np.diag(tensor_to_array(cube.get_mass_mat()))
+    for _ in range(N_STEPS):
+        scene.step()
+        # The implicit damping of a free cube spinning about a principal axis decouples its dofs: (M + hD) v' = M v
+        vel = vel * mass_diag / (mass_diag + DT * np.array(dofs_damping))
+    # Each SAP solve leaves the velocities within its relative tolerance of the velocities of the scene, which the
+    # spinning cube dominates, an error the steps add up. Single precision stops that solve at its round-off.
+    tol = N_STEPS * SAP_RTOL * np.abs(vel).max() if gs.np_float == np.float64 else 2e-7
+    assert_allclose(cube.get_dofs_velocity(), vel, tol=tol)
