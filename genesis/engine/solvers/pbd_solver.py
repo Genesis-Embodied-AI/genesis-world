@@ -165,6 +165,9 @@ class PBDConfig(Config):
 
 
 class PBDSolver(ParticleSolver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = PBD.Base
 
     class MATERIAL(gs.IntEnum):

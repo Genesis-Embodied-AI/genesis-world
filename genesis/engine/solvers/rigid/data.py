@@ -409,8 +409,11 @@ class VVertsInfo(Data, kind=DataKind.CONSTANT, shape=(VVERTS,)):
     vverts_state_idx: qd.Tensor = field(int)
 
 
-class VVertsState(Data, kind=DataKind.DERIVED, shape=(CUSTOM_VVERTS, ENVS)):
-    """The world positions of the visual vertices of the entities opted into custom visual vertices."""
+class VVertsState(Data, kind=DataKind.STATE, shape=(CUSTOM_VVERTS, ENVS)):
+    """The world positions of the visual vertices of the entities opted into custom visual vertices.
+
+    They are state, since 'set_vverts' writes them from one step to the next.
+    """
 
     pos: qd.Tensor = field(
         (float, 3),

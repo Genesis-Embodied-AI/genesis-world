@@ -132,6 +132,9 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
 
 
 class SPHSolver(ParticleSolver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = SPH.Base
 
     # ------------------------------------------------------------------------------------

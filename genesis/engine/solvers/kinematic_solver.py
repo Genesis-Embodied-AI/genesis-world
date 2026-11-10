@@ -146,6 +146,9 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     # Kinematic entities carry no dynamics, so their state stays outside the autograd graph of a differentiable scene.
     # The rigid solver deriving from this one reverses its own dynamics.
     is_differentiable = True

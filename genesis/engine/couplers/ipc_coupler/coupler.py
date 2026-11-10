@@ -15,7 +15,7 @@ import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.materials.FEM.cloth import Cloth
-from genesis.engine.solvers.base_solver import ErrnoMixin
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, field
@@ -101,7 +101,7 @@ class IPCCouplerState(Data, kind=DataKind.STATE):
     errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
-class IPCCoupler(ErrnoMixin, RBC):
+class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 

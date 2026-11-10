@@ -22,7 +22,7 @@ from genesis.engine.bvh import (
     func_no_filter,
     get_bvh_data,
 )
-from genesis.engine.solvers.base_solver import ErrnoMixin
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin
 from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
     VERTICES,
@@ -409,7 +409,7 @@ def compute_pressure_field(
     return distance / distance_max * modulus
 
 
-class SAPCoupler(ErrnoMixin, RBC):
+class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers using the
     Semi-Analytic Primal (SAP) contact solver used in Drake.

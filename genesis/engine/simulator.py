@@ -10,7 +10,7 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import ArrayItem, DataItem, DataKind, iter_data
+from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 from genesis.utils.warnings import warn_once
@@ -21,6 +21,7 @@ from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
 from .solvers.base_solver import (
+    CheckpointMixin,
     ErrnoMixin,
     GravityMixin,
     SimulatorState,
@@ -84,9 +85,9 @@ class Simulator(RBC):
             # than with the context of the step being reversed when a deferred check reads them. The adjoints start
             # from zero.
             self._is_forward_ready = False
-            for system in self._active_systems:
-                system.update_errno()
-                system.check_errno()
+            for component in self._active_systems:
+                component.update_errno()
+                component.check_errno()
             for solver in self._active_solvers:
                 solver.reset_grad()
             # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
@@ -95,8 +96,8 @@ class Simulator(RBC):
 
         def end_backward_pass():
             # The errors the solvers flagged while replaying the rollout are raised once the pass is over
-            for system in self._active_systems:
-                system.check_errno()
+            for component in self._active_systems:
+                component.check_errno()
 
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
@@ -124,7 +125,7 @@ class Simulator(RBC):
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
-        self._active_systems: list[ErrnoMixin] = []
+        self._active_systems: list["ErrnoMixin | CheckpointMixin"] = []
         # The hybrid entities whose soft part follows its rigid links, updated after the coupling of every substep
         self._hybrid_entities: list[HybridEntity] = []
 
@@ -250,12 +251,17 @@ class Simulator(RBC):
         # The systems are listed as they are built, so that a scene whose build fails frees those built (see 'destroy')
         self._active_systems.append(self._coupler)
         self._coupler.build()
-        # The errors of every system are raised at each step without further checks
+        # The errors and the checkpoints of every system are handled at each step without further checks
         for system in self._active_systems:
             if not isinstance(system, ErrnoMixin):
                 gs.raise_exception(
                     f"{type(system).__name__} does not support errno: solvers and couplers must report their errors "
                     "through ErrnoMixin."
+                )
+            if not isinstance(system, CheckpointMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support checkpoints: solvers and couplers must declare them "
+                    "through CheckpointMixin."
                 )
 
         # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
@@ -291,8 +297,8 @@ class Simulator(RBC):
         self._has_errno_flags = False
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
             self._errno_views = [
-                (system._errno_latched.numpy(), qd_to_numpy(system._errno, copy=False))
-                for system in self._active_systems
+                (component._errno_latched.numpy(), qd_to_numpy(component._errno, copy=False))
+                for component in self._active_systems
             ]
 
         self._step_timer.add_phases("physics", "sensors")
@@ -303,20 +309,25 @@ class Simulator(RBC):
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
         # They are gathered first, since 'data' reads the gradient of an array after yielding it.
-        for solver in self._active_solvers:
-            if type(solver).data is not Solver.data:
+        for system in self._active_systems:
+            if system.is_checkpointable:
                 arrays = [
                     item.array
-                    for item in solver.data
+                    for item in system.data
                     if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
                 ]
                 for array in arrays:
                     qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
-        for solver in self._active_solvers:
-            solver.set_state(state.solvers[type(solver).__name__], envs_idx)
+        """Put the given environments back in a state 'get_state' returned, all of them if None.
 
+        The states precede the restart, which starts the rollout of the autograd graph anew after them. A system holding
+        state outside its data, absent from the state, restarts alone (see 'CheckpointMixin').
+        """
+        for system in self._active_systems:
+            if system.is_checkpointable:
+                system.set_state(state.solvers[type(system).__name__], envs_idx)
         if envs_idx is None:
             self._steps.zero_()
         else:
@@ -342,33 +353,41 @@ class Simulator(RBC):
         self._sensor_manager.reset(envs_idx=envs_idx)
 
     def data(self, kinds: frozenset[DataKind]) -> Iterator[DataItem]:
-        """Yield every item of the requested kinds that the simulator and its active solvers hold.
+        """Yield every item of the requested kinds that the simulator and its active systems hold.
 
-        The items of the simulator are named under 'Simulator', and the ones of a solver under its class name.
+        The items of the simulator are named under 'Simulator', those of a solver or the coupler under its class name.
         """
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         for item in iter_data(self, "steps", DataKind.STATE):
             if item.kind in kinds:
                 yield item._replace(name=f"Simulator.{item.name}")
-        for solver in self._active_solvers:
-            prefix = type(solver).__name__
-            for item in solver.data:
+        for system in self._active_systems:
+            prefix = type(system).__name__
+            for item in system.data:
                 if isinstance(item, DataItem) and item.kind in kinds:
                     yield item._replace(name=f"{prefix}.{item.name}")
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            solvers={type(solver).__name__: solver.__getstate__() for solver in self._active_solvers},
+            solvers={type(system).__name__: system.__getstate__() for system in self._active_systems},
         )
+
+    def check_checkpoint(self, state: SimulatorCheckpoint) -> None:
+        """Raise unless a record holds the arrays of every active system as this simulation lays them out.
+
+        Every system checks its record before anything is touched, so a record from another scene leaves the simulation
+        as it was.
+        """
+        systems = {type(system).__name__: system for system in self._active_systems}
+        if set(state.solvers) != set(systems):
+            gs.raise_exception(
+                f"The checkpoint holds {sorted(state.solvers)} where this scene simulates {sorted(systems)}."
+            )
+        for name, system in systems.items():
+            record = state.solvers[name]
+            items = (item for item in system.data if isinstance(item, DataItem) and item.kind in record.kinds)
+            check_data(items, record.arrays)
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
         """Put the built simulation back in a state '__getstate__' read.
@@ -382,8 +401,8 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        for solver in self._active_solvers:
-            solver.__setstate__(state.solvers[type(solver).__name__])
+        for system in self._active_systems:
+            system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -394,20 +413,20 @@ class Simulator(RBC):
 
         See 'ErrnoMixin.check_errno'.
         """
-        for system in self._active_systems:
-            system.check_errno(blocking)
+        for component in self._active_systems:
+            component.check_errno(blocking)
 
     def get_error_envs_mask(self) -> torch.Tensor:
         """Return whether each env flagged an error in any solver or the coupler since its last reset."""
         envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
-        for system in self._active_systems:
-            envs_mask |= system.get_error_envs_mask()
+        for component in self._active_systems:
+            envs_mask |= component.get_error_envs_mask()
         return envs_mask
 
     def clear_errno(self, envs_idx=None):
         """Clear the errors every solver and the coupler flagged for the given envs, all of them if None."""
-        for system in self._active_systems:
-            system.clear_errno(envs_idx)
+        for component in self._active_systems:
+            component.clear_errno(envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -444,8 +463,8 @@ class Simulator(RBC):
                 if merge_errno(errno_out, errno_in):
                     self._has_errno_flags = True
         else:
-            for system in self._active_systems:
-                system.update_errno()
+            for component in self._active_systems:
+                component.update_errno()
 
         # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
         with self._step_timer.phase("sensors"), torch.no_grad():
@@ -541,7 +560,9 @@ class Simulator(RBC):
 
     def get_state(self) -> SimState:
         """Return the state the simulation stands in, for 'reset' to restore (see 'Solver.get_state')."""
-        solvers_state = {type(solver).__name__: solver.get_state() for solver in self._active_solvers}
+        solvers_state = {
+            type(system).__name__: system.get_state() for system in self._active_systems if system.is_checkpointable
+        }
         return SimState(self.scene, self.cur_step_global, solvers_state)
 
     def set_gravity(self, gravity, envs_idx=None):
