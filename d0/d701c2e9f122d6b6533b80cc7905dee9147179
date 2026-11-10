@@ -1,0 +1,41 @@
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_7eaf6dfcd351e5 118,127,129-130
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_6149ab17c12ca5 90
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_1cf04789ca1031 50-51,57-59,65-66,68-76,86-90,94-95,100-104,106-111,132,137-155,158,161,453,475,490-497,503,532
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_8396ff6172854a 167-169,177-178,303,333-334,421,457-458,543-544
+genesis/engine/materials/PBD/base.py
+  s_c62ec9da443b15::t_e91b470ee26aba 1
+genesis/engine/materials/PBD/cloth.py
+  s_c62ec9da443b15::t_53868a6150bda0 1,19,22-33
+genesis/engine/materials/PBD/elastic.py
+  s_c62ec9da443b15::t_ef710216f8d22f 1,18,21-34
+genesis/engine/materials/PBD/liquid.py
+  s_c62ec9da443b15::t_46e9452e52fa63 1,10-11,20-28,32
+genesis/engine/materials/PBD/particle.py
+  s_c62ec9da443b15::t_5c4d5dbf3769c0 1,10-11,26-29,33
+genesis/engine/materials/hybrid.py
+  s_c62ec9da443b15::t_e661de0774b562 2
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_5fa5eed2e0330c 352,370,388,402,416-418
+genesis/options/entities.py
+  s_c62ec9da443b15::t_c08c31e57dfbed 17,90,882-883,888,906-907,909,931
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d0d701c2e9f122d6b6533b80cc7905dee9147179",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
