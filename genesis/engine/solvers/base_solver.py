@@ -11,12 +11,26 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.entities.base_entity import Entity
+from genesis.engine.force_fields import ForceField, ForceFields
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import RolloutGraph
+from genesis.grad.bridge import RolloutGraph, no_grad
 from genesis.repr_base import RBC
-from genesis.utils.data import CHECKPOINT_KINDS, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
+from genesis.utils.data import (
+    CHECKPOINT_KINDS,
+    ENVS,
+    ArrayItem,
+    ConfigItem,
+    Data,
+    DataItem,
+    DataKind,
+    ScalarItem,
+    Size,
+    eoa,
+    field,
+    fill_data,
+)
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -65,6 +79,22 @@ class ErrorCode(IntFlag):
         if bit >= ERRNO_BITS:
             raise TypeError(f"'{name}' exceeds the {ERRNO_BITS} bits of an errno.")
         return 1 << bit
+
+
+# The visual vertices and faces a solver skins for rendering
+VVERTS = Size("vverts")
+VFACES = Size("vfaces")
+
+
+class SimulatorState(Data, kind=DataKind.SCRATCH):
+    """
+    Runtime state of the simulator that the kernels of the solvers read.
+
+    `t` is the time of the substep being run in each environment, in seconds, written at the start of every substep from
+    the steps the environment counted (see 'Simulator.get_time'), since the environments step and reset independently.
+    """
+
+    t: qd.Tensor = field(float, shape=(ENVS,))
 
 
 class TimeBasedMixin:
@@ -131,8 +161,8 @@ class BoundaryItems(NamedTuple):
 
     # Every item the checkpoint holds
     items: list[DataItem]
-    # The names of the arrays copied at once, in the order of their views
-    names: list[str]
+    # The items copied at once, in the order of their views
+    items_viewed: list[ArrayItem]
     # The zero-copy views of the arrays copied at once
     views: list[torch.Tensor]
     # The items copied one by one: the scalars, and the arrays without a view
@@ -231,7 +261,7 @@ class Solver(RBC):
     is_differentiable: bool = False
     # Whether the solver holds its state in frames, one per substep of a window of them (see 'n_frames'), frame 0
     # holding the state between two steps. The simulator copies the last frame into frame 0 at the end of each
-    # window ('copy_frame'), and a boundary checkpoint holds frame 0 alone.
+    # window ('copy_frame'), and a boundary checkpoint holds frame 0 alone of every array declared with frames.
     has_frames: bool = False
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
@@ -249,8 +279,8 @@ class Solver(RBC):
         # valid from then on since the arrays are never reallocated, which spares walking the structs at every step
         self._boundary_items: BoundaryItems | None = None
 
-        # force fields
-        self._ffs = list()
+        # The force fields acting on the entities of the solver, which its kernels take as a template
+        self._force_fields = ForceFields()
 
         # Registered Subscribers, notified after @mutates-tagged methods run; see subscribe(). The re-entrancy guard
         # below defers notification to the outermost tagged call, accumulating every change that occurred in between,
@@ -278,8 +308,8 @@ class Solver(RBC):
         # The context of the check that enqueued the copy 'check_errno' reads next
         self._errno_host_context: str | None = None
 
-    def _add_force_field(self, force_field):
-        self._ffs.append(force_field)
+    def _add_force_field(self, force_field: ForceField) -> None:
+        self._force_fields.fields.append(force_field)
 
     def subscribe(self, subscriber: Subscriber):
         """Register a Subscriber to be notified after any @mutates-tagged method whose change is in its filter."""
@@ -518,43 +548,116 @@ class Solver(RBC):
 
     @overload
     def _read_data(
-        self, data: qd.Tensor | qd.Field | qd.Ndarray, envs_idx, idx, *, copy: bool | None = None
+        self,
+        data: qd.Tensor | qd.Field | qd.Ndarray,
+        envs_idx,
+        idx,
+        *,
+        copy: bool | None = None,
+        is_framed: bool | None = None,
+        is_batched: bool = True,
     ) -> torch.Tensor: ...
 
     @overload
     def _read_data(
-        self, data: Sequence[qd.Tensor | qd.Field | qd.Ndarray], envs_idx, idx, *, copy: bool | None = None
+        self,
+        data: Sequence[qd.Tensor | qd.Field | qd.Ndarray],
+        envs_idx,
+        idx,
+        *,
+        copy: bool | None = None,
+        is_framed: bool | None = None,
+        is_batched: bool = True,
     ) -> list[torch.Tensor]: ...
 
-    def _read_data(self, data, envs_idx, idx, *, copy=None):
+    def _read_data(self, data, envs_idx, idx, *, copy=None, is_framed=None, is_batched=True):
         """
         Read the given slots of one array of the solver, or of several, in the layout of the getters ('qd_to_torch').
 
         `data` is one array, read as one tensor, or a sequence of them, read as a list of tensors, whatever their kind
-        (state, info). A solver holding its state in frames is given arrays held in frames, read from frame 0, which
-        holds the state between two steps (see 'has_frames'). `copy` is
-        passed on to 'qd_to_torch': a getter returning what it reads asks for a copy, since a getter returns by value.
-        While the operations of the solver are recorded, the read is one operation of the rollout whose outputs are
-        copies of the whole arrays, which a later step leaves untouched, and from which torch selects the slots (see
-        'record_read').
+        (state, info). `is_batched` states that the arrays hold the environments as their last axis, and `is_framed`
+        that they are held in frames, read from frame 0, which holds the state between two steps (see 'has_frames').
+        Both default to the layout of the state of the solver. `idx` selects the items once for every environment, or one
+        row per environment (see '_sanitize_io_variables'). `copy` is passed on to 'qd_to_torch': a getter returning
+        what it reads asks for a copy, since a getter returns by value. While the operations of the solver are recorded,
+        the read is one operation of the rollout whose outputs are copies of the whole arrays, which a later step leaves
+        untouched, and from which torch selects the slots (see 'record_read').
         """
         is_single = isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray))
         fields = (data,) if is_single else tuple(data)
         copy = True if self.is_recording else copy
-        if self.has_frames:
+        if is_framed is None:
+            is_framed = self.has_frames and is_batched
+        if is_framed:
             tensors = [qd_to_torch(field, row_mask=0, keepdim=False).movedim(1, 0) for field in fields]
             if copy:
                 tensors = [tensor.clone(memory_format=torch.contiguous_format) for tensor in tensors]
-        elif self.is_recording:
-            tensors = [qd_to_torch(field, transpose=True, copy=True) for field in fields]
         else:
-            tensors = [qd_to_torch(field, envs_idx, idx, transpose=True, copy=copy) for field in fields]
+            tensors = [qd_to_torch(field, transpose=is_batched, copy=copy) for field in fields]
         if self.is_recording:
             self.record_read(tuple(tensors), fields)
-        if self.has_frames or self.is_recording:
-            mask = indices_to_mask(envs_idx, idx)
-            tensors = [tensor[mask] for tensor in tensors]
+        mask = indices_to_mask(envs_idx, idx, pair_rows=True) if is_batched else indices_to_mask(idx)
+        tensors = [tensor[mask] for tensor in tensors]
         return tensors[0] if is_single else tensors
+
+    def _write_data(
+        self,
+        data: qd.Tensor | qd.Field | qd.Ndarray,
+        values: float | Sequence | np.ndarray | torch.Tensor,
+        idx: int | Sequence | np.ndarray | torch.Tensor | None,
+        n_items: int,
+        idx_name: str,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        *,
+        element_shape: tuple[int, ...] = (),
+        dtype: torch.dtype | None = None,
+        is_framed: bool | None = None,
+        is_batched: bool = True,
+    ) -> None:
+        """
+        Write the given slots of one array of the items of the solver, from values in the layout of the setters.
+
+        `data` holds the items as its first index, followed by the environments where `is_batched`, and by nothing for a
+        parameter shared by every environment, which `envs_idx` then leaves as None. An array held in frames
+        (`is_framed`) is written in frame 0. Both flags default to the layout of the state (see '_read_data'). `idx`
+        selects the items once for every environment, or one row per environment (see '_sanitize_io_variables'). On
+        Metal, the caller synchronizes the torch stream before the next kernel.
+        """
+        n_envs = self._scene.n_envs
+        if is_framed is None:
+            is_framed = self.has_frames and is_batched
+        if gs.use_zerocopy:
+            if n_envs == 0 and envs_idx is not None:
+                gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
+            if isinstance(envs_idx, (int, np.integer)) and not -n_envs <= envs_idx < n_envs:
+                gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-n_envs}, {n_envs}).")
+            if is_framed:
+                view = qd_to_torch(data, row_mask=0, keepdim=False, copy=False).movedim(1, 0)
+            else:
+                view = qd_to_torch(data, transpose=is_batched, copy=False)
+            if not is_batched:
+                mask = indices_to_mask(idx)
+            elif n_envs == 0:
+                mask = (0, *indices_to_mask(idx))
+            else:
+                mask = indices_to_mask(envs_idx, idx, pair_rows=True)
+            assign_indexed_tensor(view, mask, broadcast_tensor(values, view.dtype, view[mask].shape))
+            return
+        values, idx, envs_idx = self._sanitize_io_variables(
+            values,
+            idx,
+            n_items,
+            idx_name,
+            envs_idx,
+            element_shape,
+            dtype=dtype,
+            batched=is_batched,
+            batched_idx=is_batched,
+        )
+        if is_batched:
+            kernel_set_values(idx, envs_idx, values, data, is_framed)
+        else:
+            kernel_set_info(idx, values, data)
 
     def add_grad_from_state(self, grads, selection) -> None:
         """
@@ -563,13 +666,13 @@ class Solver(RBC):
         By default, `selection` holds the fields the tensors are, each read whole in the layout of the getters, from
         frame 0 for a solver holding its state in frames (see '_read_data').
         """
-        for field, grad in zip(selection, grads):
+        for array, grad in zip(selection, grads):
             # A field with no entry keeps one padding slot, to which no gradient goes
             if grad is not None and grad.numel() > 0:
                 if self.has_frames:
-                    qd_add_grad(field, grad.movedim(0, 1), row=0)
+                    qd_add_grad(array, grad.movedim(0, 1), row=0)
                 else:
-                    qd_add_grad(field, grad)
+                    qd_add_grad(array, grad)
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
 
@@ -583,27 +686,29 @@ class Solver(RBC):
         """
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-    def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SolverCheckpoint:
+    def save_checkpoint(self, *, boundary_only: bool = False) -> SolverCheckpoint:
         """
-        Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
+        Return a checkpoint of the arrays this solver holds, for 'load_checkpoint' to restore.
 
-        The arrays are what 'data' yields of those kinds. A full checkpoint copies them with their gradients where they
+        A full checkpoint holds the arrays of every kind a step reads (see 'CHECKPOINT_KINDS'), a boundary checkpoint
+        those of the state alone (see 'DataKind.STATE'). A full checkpoint copies them with their gradients where they
         live: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
         process off the host, and as numpy arrays otherwise. A boundary checkpoint holds the state at the boundary of
         two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame 0 of the arrays
         holding frames, on the device whatever the backend.
         """
         arrays = {}
+        kinds = frozenset((DataKind.STATE,)) if boundary_only else CHECKPOINT_KINDS
         if boundary_only:
             if self._boundary_items is None:
                 # The gradients ('iter_data' names each one after its array) and the placeholders of the features
                 # switched off (see 'ArrayItem') hold nothing a replay reads
                 self._boundary_items = BoundaryItems(
-                    items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
+                    items=[], items_viewed=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
                 )
                 grad_names = set()
                 for item in self.data:
-                    if isinstance(item, ConfigItem) or item.kind not in kinds:
+                    if isinstance(item, ConfigItem) or item.kind != DataKind.STATE:
                         continue
                     if isinstance(item, ArrayItem):
                         is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
@@ -630,7 +735,7 @@ class Solver(RBC):
                         view = item.array
                     else:
                         try:
-                            if self.has_frames:
+                            if item.is_framed:
                                 view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
                             else:
                                 view = qd_to_torch(item.array, copy=False)
@@ -638,7 +743,7 @@ class Solver(RBC):
                             # A member of a struct field may have no zero-copy view (see 'fill_data')
                             self._boundary_items.items_copied.append(item)
                             continue
-                    self._boundary_items.names.append(item.name)
+                    self._boundary_items.items_viewed.append(item)
                     self._boundary_items.views.append(view)
             if self._boundary_items.views:
                 # One fused copy of every array with a view, rather than one launch each
@@ -650,14 +755,14 @@ class Solver(RBC):
                 # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
                 if gs.backend == gs.metal:
                     torch.mps.synchronize()
-                arrays.update(zip(self._boundary_items.names, copies))
+                arrays.update(zip([item.name for item in self._boundary_items.items_viewed], copies))
             items = self._boundary_items.items_copied
         else:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in kinds]
         for item in items:
             if isinstance(item, ScalarItem):
                 arrays[item.name] = np.array(getattr(item.owner, item.attr))
-            elif boundary_only and self.has_frames:
+            elif boundary_only and item.is_framed:
                 arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
             else:
                 arrays[item.name] = data_to_array(
@@ -669,34 +774,96 @@ class Solver(RBC):
             configs = {item.name: item.config for item in self.data if isinstance(item, ConfigItem)}
         return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
 
-    def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
+    def load_checkpoint(
+        self,
+        checkpoint: SolverCheckpoint,
+        *,
+        boundary_only: bool = False,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> None:
         """Write back the arrays of a checkpoint 'save_checkpoint' returned, rejecting a record read from another build.
 
-        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint.
+        `boundary_only` states that 'save_checkpoint' saved a boundary checkpoint, of which `envs_idx` selects the
+        environments to write back, all of them if None. Every array of the state spans the environments as its last
+        index, frame 0 aside.
 
         Nothing is notified to the subscribers (see 'mutates'). A solver whose step reads a DERIVED array before
         recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
         """
+        assert boundary_only or envs_idx is None
         if boundary_only:
             # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them
             # in this process, which spares checking them against the scene
+            items_mask = {}
+            if envs_idx is not None:
+                envs_mask = indices_to_mask(envs_idx)
+                for item in self._boundary_items.items:
+                    if isinstance(item, ArrayItem):
+                        items_mask[item.name] = (*[slice(None)] * item.envs_axis, *envs_mask)
             if self._boundary_items.views:
                 # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
                 if gs.backend == gs.metal:
                     qd.sync()
-                values = [checkpoint.arrays[name] for name in self._boundary_items.names]
-                torch._foreach_copy_(self._boundary_items.views, values)
+                values = [checkpoint.arrays[item.name] for item in self._boundary_items.items_viewed]
+                if envs_idx is None:
+                    torch._foreach_copy_(self._boundary_items.views, values)
+                else:
+                    for item, view, value in zip(self._boundary_items.items_viewed, self._boundary_items.views, values):
+                        assign_indexed_tensor(view, items_mask[item.name], value[items_mask[item.name]])
             items = self._boundary_items.items_copied
             arrays = {item.name: checkpoint.arrays[item.name] for item in items}
+            if envs_idx is not None:
+                # The arrays without a view are written whole, their other environments as they stand
+                for item in items:
+                    if isinstance(item, ArrayItem):
+                        if item.is_framed:
+                            array = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
+                        else:
+                            array = data_to_array(item.array, to_torch=True, copy=True)
+                        assign_indexed_tensor(array, items_mask[item.name], arrays[item.name][items_mask[item.name]])
+                        arrays[item.name] = array
         else:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
             arrays = checkpoint.arrays
-        fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
+        if boundary_only:
+            for is_framed in (False, True):
+                items_selected = [
+                    item for item in items if (isinstance(item, ArrayItem) and item.is_framed) == is_framed
+                ]
+                fill_data(
+                    items_selected, {item.name: arrays[item.name] for item in items_selected}, frame_only=is_framed
+                )
+        else:
+            fill_data(items, arrays)
+
+    def get_state(self) -> SolverCheckpoint:
+        """Return the state the solver holds between two steps, for 'set_state' to restore (see 'DataKind.STATE')."""
+        return self.save_checkpoint(boundary_only=True)
+
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    def set_state(
+        self, state: SolverCheckpoint, envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None
+    ) -> None:
+        """
+        Write back the state 'get_state' returned, for the given environments, all of them if None.
+
+        The state is restored exactly as saved, and the errors the solver flagged for these environments are cleared.
+        """
+        # The selection reaches the zero-copy views of the state as it came (see 'load_checkpoint')
+        n_envs = self._scene.n_envs
+        if n_envs == 0 and envs_idx is not None:
+            gs.raise_exception("`envs_idx` is not supported for non-parallelized scene.")
+        if isinstance(envs_idx, (int, np.integer)) and not -n_envs <= envs_idx < n_envs:
+            gs.raise_exception(f"`envs_idx` out of range: {envs_idx} not in [{-n_envs}, {n_envs}).")
+        self.load_checkpoint(state, boundary_only=True, envs_idx=envs_idx)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
+        self.clear_errno(envs_idx)
 
     def __getstate__(self) -> SolverCheckpoint:
         """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
-        return self.save_checkpoint(CHECKPOINT_KINDS)
+        return self.save_checkpoint()
 
     def __setstate__(self, state: SolverCheckpoint) -> None:
         """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
@@ -731,8 +898,9 @@ class Solver(RBC):
         return len(self._entities)
 
     @property
-    def force_fields(self) -> list:
-        return self._ffs
+    def force_fields(self) -> ForceFields:
+        """The force fields acting on the entities of the solver, in the container its kernels take as a template."""
+        return self._force_fields
 
     def _repr_brief(self):
         repr_str = f"{self.__repr_name__()}: {self._uid}, n_entities: {self.n_entities}"
@@ -746,3 +914,105 @@ def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(),
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]
+
+
+# The accessors of a solver read and write frame 0 of a solver holding its state in frames, which holds the state
+# between two steps (see 'Solver.has_frames'). They tell a vector from a scalar by 'is_tensor', a compile-time query of
+# the element type of the array they access, which quadrants exposes alike for fields and ndarrays only on an entry.
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_values(
+    items_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    values: qd.types.ndarray(),
+    items_values: qd.Tensor,
+    has_frames: qd.template(),
+):
+    """Set a 3D vector or a scalar of some items of a solver, such as the velocity of its particles or vertices."""
+    for i_i_, i_b_ in qd.ndrange(items_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(items_values))):
+        i_i = items_idx[i_b_, i_i_]
+        i_b = envs_idx[i_b_]
+        # The earlier occurrences of a repeated item are -1 (see 'drop_repeated_index')
+        if i_i >= 0:
+            I_i = [0, i_i, i_b] if qd.static(has_frames) else [i_i, i_b]
+            if qd.static(items_values[I_i].is_tensor()):
+                items_values[I_i] = qd.Vector([values[i_b_, i_i_, 0], values[i_b_, i_i_, 1], values[i_b_, i_i_, 2]])
+            else:
+                items_values[I_i] = values[i_b_, i_i_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_values(
+    items_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    values: qd.types.ndarray(),
+    items_values: qd.Tensor,
+    has_frames: qd.template(),
+):
+    """Get a 3D vector or a scalar of some items of a solver (see 'kernel_set_values')."""
+    for i_i_, i_b_ in qd.ndrange(items_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(items_values))):
+        i_i = items_idx[i_b_, i_i_]
+        i_b = envs_idx[i_b_]
+        I_i = [0, i_i, i_b] if qd.static(has_frames) else [i_i, i_b]
+        if qd.static(items_values[I_i].is_tensor()):
+            for k in qd.static(range(3)):
+                values[i_b_, i_i_, k] = items_values[I_i][k]
+        else:
+            values[i_b_, i_i_] = items_values[I_i]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_actu(
+    items_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    actus: qd.types.ndarray(),
+    items_muscle_group: qd.Tensor,
+    items_actu: qd.Tensor,
+):
+    """Set the actuation of some items of a solver between two steps, each one taking that of its muscle group."""
+    for i_i_, i_g, i_b_ in qd.ndrange(items_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
+        i_i = items_idx[i_b_, i_i_]
+        i_b = envs_idx[i_b_]
+        # See 'kernel_set_values'
+        if i_i >= 0:
+            if items_muscle_group[i_i] == i_g:
+                items_actu[0, i_i, i_b] = actus[i_b_, i_i_, i_g]
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), items_values: qd.Tensor):
+    """Set a 3D vector or a scalar parameter of some items of a solver, shared by every environment."""
+    for i_i_ in range(items_idx.shape[0]):
+        i_i = items_idx[i_i_]
+        # See 'kernel_set_values'
+        if i_i >= 0:
+            if qd.static(items_values[i_i].is_tensor()):
+                items_values[i_i] = qd.Vector([values[i_i_, 0], values[i_i_, 1], values[i_i_, 2]])
+            else:
+                items_values[i_i] = values[i_i_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), items_values: qd.Tensor):
+    """Get a 3D vector or a scalar parameter of some items of a solver (see 'kernel_set_info')."""
+    for i_i_ in range(items_idx.shape[0]):
+        i_i = items_idx[i_i_]
+        if qd.static(items_values[i_i].is_tensor()):
+            for k in qd.static(range(3)):
+                values[i_i_, k] = items_values[i_i][k]
+        else:
+            values[i_i_] = items_values[i_i]
+
+
+@no_grad
+@qd.kernel
+def kernel_set_time(
+    i_substep: int, steps: qd.types.ndarray(), sim_state: SimulatorState, substeps: int, substep_dt: float
+):
+    """Set the time of the given substep of the step being run in each environment, from the steps it counted.
+
+    `substeps` is the number of substeps of a step and `substep_dt` their interval.
+    """
+    for i_b in range(steps.shape[0]):
+        sim_state.t[i_b] = ((steps[i_b] - 1) * substeps + i_substep) * substep_dt

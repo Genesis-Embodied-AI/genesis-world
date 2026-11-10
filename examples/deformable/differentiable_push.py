@@ -123,19 +123,19 @@ def main():
 
             scene.step()
 
-            # you can use a scene_state
+            # you can use the getters of a solver
             if i == 25:
                 # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
-                mpm_particles = scene.get_state().solvers_state[scene.solvers.index(scene.mpm_solver)]
-                loss += torch.pow(mpm_particles.pos[mpm_particles.active == 1] - goal, 2).sum()
+                particles_pos = scene.mpm_solver.get_particles_pos()
+                particles_active = scene.mpm_solver.get_particles_active()
+                loss += torch.pow(particles_pos[particles_active] - goal, 2).sum()
 
-            # you can also use an entity's state
+            # you can also use the getters of an entity
             if i == horizon - 1:
                 # compute loss
                 goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
-                state = obj1.get_state()
-                loss += torch.pow(state.pos - goal, 2).sum()
+                loss += torch.pow(obj1.get_particles_pos() - goal, 2).sum()
 
         timer.stamp("forward took: ")
         # backward pass

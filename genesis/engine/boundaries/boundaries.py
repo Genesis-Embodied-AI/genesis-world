@@ -1,47 +1,23 @@
-import numpy as np
 import quadrants as qd
 
-import genesis as gs
-from genesis.utils.misc import *
-from genesis.utils.repr import brief
+from genesis.utils.data import Data, DataKind, field
 
 
-@qd.data_oriented
-class CubeBoundary:
-    def __init__(self, lower, upper, restitution=0.0):
-        self.restitution = restitution
+class CubeBoundary(Data, kind=DataKind.CONSTANT, shape=()):
+    """An axis-aligned box confining the particles, which bounce off its walls with the given restitution."""
 
-        self.upper = np.array(upper, dtype=gs.np_float)
-        self.lower = np.array(lower, dtype=gs.np_float)
-        assert (self.upper >= self.lower).all()
+    lower: qd.Tensor = field((float, 3))
+    upper: qd.Tensor = field((float, 3))
+    restitution: qd.Tensor = field(float)
 
-        self.upper_qd = qd.Vector(upper, dt=gs.qd_float)
-        self.lower_qd = qd.Vector(lower, dt=gs.qd_float)
 
-    @qd.func
-    def impose_pos_vel(self, pos, vel):
-        for i in qd.static(range(3)):
-            if pos[i] >= self.upper_qd[i] and vel[i] >= 0:
-                vel[i] *= -self.restitution
-            elif pos[i] <= self.lower_qd[i] and vel[i] <= 0:
-                vel[i] *= -self.restitution
+@qd.func
+def func_impose_cube_boundary(pos: qd.types.vector(3), vel: qd.types.vector(3), boundary: CubeBoundary):
+    """Clamp a position inside a cube boundary, the velocity bouncing off any wall it crosses or presses against."""
+    lower = boundary.lower[None]
+    upper = boundary.upper[None]
+    is_bouncing = ((pos >= upper) & (vel >= 0)) | ((pos <= lower) & (vel <= 0))
+    vel = qd.select(is_bouncing, -boundary.restitution[None] * vel, vel)
+    pos = qd.max(qd.min(pos, upper), lower)
 
-        pos = qd.max(qd.min(pos, self.upper_qd), self.lower_qd)
-
-        return pos, vel
-
-    @qd.func
-    def impose_pos(self, pos):
-        pos = qd.max(qd.min(pos, self.upper_qd), self.lower_qd)
-        return pos
-
-    def is_inside(self, pos):
-        return np.all(pos < self.upper) and np.all(pos > self.lower)
-
-    def __repr__(self):
-        return (
-            f"{brief(self)}\n"
-            f"lower       : {brief(self.lower)}\n"
-            f"upper       : {brief(self.upper)}\n"
-            f"restitution : {brief(self.restitution)}"
-        )
+    return pos, vel

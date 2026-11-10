@@ -780,7 +780,7 @@ class RasterizerContext:
                         pyrender.Mesh.from_trimesh(
                             mu.create_box(
                                 bounds=np.array(
-                                    [self.sim.mpm_solver.boundary.lower, self.sim.mpm_solver.boundary.upper],
+                                    [self.sim.mpm_solver.boundary_lower, self.sim.mpm_solver.boundary_upper],
                                     dtype=np.float32,
                                 ),
                                 wireframe=True,
@@ -812,7 +812,7 @@ class RasterizerContext:
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
         particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.is_active).astype(dtype=np.bool_, copy=False)
         vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos)
         meshes = []
         for mpm_entity in self.sim.mpm_solver.entities:
@@ -863,7 +863,7 @@ class RasterizerContext:
                         pyrender.Mesh.from_trimesh(
                             mu.create_box(
                                 bounds=np.array(
-                                    [self.sim.sph_solver.boundary.lower, self.sim.sph_solver.boundary.upper],
+                                    [self.sim.sph_solver.boundary_lower, self.sim.sph_solver.boundary_upper],
                                     dtype=np.float32,
                                 ),
                                 wireframe=True,
@@ -895,7 +895,7 @@ class RasterizerContext:
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
         particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.sph_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        active_all = qd_to_numpy(self.sim.sph_solver.particles_render.is_active).astype(dtype=np.bool_, copy=False)
         meshes = []
         for sph_entity in self.sim.sph_solver.entities:
             if sph_entity.surface.vis_mode != "recon":
@@ -970,7 +970,7 @@ class RasterizerContext:
                     pyrender.Mesh.from_trimesh(
                         mu.create_box(
                             bounds=np.array(
-                                [self.sim.pbd_solver.boundary.lower, self.sim.pbd_solver.boundary.upper],
+                                [self.sim.pbd_solver.boundary_lower, self.sim.pbd_solver.boundary_upper],
                                 dtype=np.float32,
                             ),
                             wireframe=True,
@@ -1029,7 +1029,7 @@ class RasterizerContext:
         Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
         """
         particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
-        active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.is_active).astype(dtype=np.bool_, copy=False)
         meshes = []
         for pbd_entity in self.sim.pbd_solver.entities:
             if pbd_entity.surface.vis_mode != "recon":

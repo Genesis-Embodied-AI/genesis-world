@@ -349,7 +349,7 @@ def _kernel_solve_graph(
 
 @solver.func_solve_body.register(
     is_compatible=lambda *args, **kwargs: (
-        not (rigid_config := solver._get_static_config(*args, **kwargs)).requires_grad
+        not (rigid_config := solver._get_config(*args, **kwargs)).requires_grad
         and rigid_config.prefer_decomposed_solver != 0
     )
 )

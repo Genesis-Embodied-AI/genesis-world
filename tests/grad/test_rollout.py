@@ -78,7 +78,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, tol,
 
 
 @pytest.mark.required
-def test_sim_vs_solver_state_grad_parity(show_viewer):
+def test_state_query_grad_parity(show_viewer):
     DT = 0.01
 
     scene = gs.Scene(
@@ -106,15 +106,14 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
     ctrl = torch.tensor(np.random.randn(robot.n_dofs), dtype=gs.tc_float, device=gs.device, requires_grad=True)
 
     grads = []
-    for is_sim_state_source in (False, True):
+    for is_solver_source in (False, True):
         scene.reset()
         robot.set_dofs_velocity(ctrl)
         scene.step()
-        if is_sim_state_source:
-            sim_state = scene.get_state()
-            chassis_pos = sim_state.solvers_state[scene.solvers.index(scene.rigid_solver)].links_pos[:, 0].squeeze()
+        if is_solver_source:
+            chassis_pos = scene.rigid_solver.get_links_pos(links_idx=robot.base_link_idx)
         else:
-            chassis_pos = robot.get_state().pos.squeeze()
+            chassis_pos = robot.get_pos()
         loss = torch.linalg.norm(chassis_pos)
         loss.backward()
         # The backward pass of a step replays it from the state it started from, so the clock follows the physics the
@@ -129,9 +128,9 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
 
     # A state queried after a setter reflects it, even within the step of an earlier query
     scene.reset()
-    robot.get_state()
+    robot.get_pos()
     robot.set_pos((0.1, -0.2, 0.3))
-    assert_allclose(robot.get_state().pos[0], (0.1, -0.2, 0.3), tol=gs.EPS)
+    assert_allclose(robot.get_pos(), (0.1, -0.2, 0.3), tol=gs.EPS)
 
     # Starting at rest, a body turns by its angular velocity times the time step, and the imaginary part of its
     # quaternion by half of that.

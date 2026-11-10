@@ -296,7 +296,7 @@ def test_deformable_parallel(show_viewer):
 
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
-    assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
+    assert_allclose(entity_fem.get_verts_vel(), 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 
 
@@ -359,16 +359,15 @@ def test_fem_mpm_coupling(precision, show_viewer, tol):
         scene.step()
 
     # An unstressed body far from the grid falls freely, every vertex at the same velocity
-    assert_allclose(fem.get_state().vel, (0.0, 0.0, GRAVITY * DT * N_STEPS_FREE_FALL), tol=tol)
+    assert_allclose(fem.get_verts_vel(), (0.0, 0.0, GRAVITY * DT * N_STEPS_FREE_FALL), tol=tol)
 
     for _ in range(N_STEPS - N_STEPS_FREE_FALL):
         scene.step()
 
     # The box dropped on the block comes to rest on top of it. Its surface stands off the topmost particles by less
     # than one grid cell, the reach of the coupling.
-    box_state = box.get_state()
-    assert_allclose(box_state.vel, 0.0, atol=5e-3)
-    gap = box_state.pos[..., 2].min(dim=-1).values - block.get_particles_pos()[..., 2].max(dim=-1).values
+    assert_allclose(box.get_verts_vel(), 0.0, atol=5e-3)
+    gap = box.get_verts_pos()[..., 2].min(dim=-1).values - block.get_particles_pos()[..., 2].max(dim=-1).values
     assert ((gap > 0.0) & (gap < scene.mpm_solver.dx)).all()
 
 
@@ -587,13 +586,13 @@ def test_sap_fem_vs_robot(show_viewer):
         scene.step()
 
     # Check that the sphere did not move, and is slightly squished on top of the ground plane
-    state = sphere.get_state()
-    center = state.pos.mean(axis=(0, 1))
+    sphere_verts_pos = sphere.get_verts_pos()
+    center = sphere_verts_pos.mean(axis=0)
     assert_allclose(center[:2], 0.0, tol=0.01)
     assert center[2] < PLANE_HEIGHT + SPHERE_RADIUS - 0.02
     # FIXME: The SAP solve stops before converging on resting contacts, so the sphere sinks into the ground and
     # oscillates. The bound covers that error until the solve converges.
-    assert_allclose(state.pos[..., 2].min(), PLANE_HEIGHT, atol=2e-3)
+    assert_allclose(sphere_verts_pos[..., 2].min(), PLANE_HEIGHT, atol=2e-3)
 
     # Check that the ant is laying on top of the sphere
     robot_pos = robot.get_pos()

@@ -1,4 +1,5 @@
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -173,11 +174,13 @@ class Point(ForceField):
         self._flow = flow
 
         self._position_qd = qd.Vector(self._position, dt=gs.qd_float)
+        self._eps = qd.field(gs.qd_float, shape=())
+        self._eps[None] = gs.EPS
 
     @qd.func
     def _get_acc(self, pos, vel, t, i):
         relative_pos = pos - self._position_qd
-        radius = relative_pos.norm(gs.EPS)
+        radius = relative_pos.norm(self._eps[None])
         direction = relative_pos / radius
         falloff = 1 / (radius + 1.0) ** self._falloff_pow
         acc = self._strength * direction
@@ -435,6 +438,26 @@ class Custom(ForceField):
         super().__init__()
 
         self.get_acc = func
+
+
+@qd.data_oriented
+class ForceFields:
+    """The force fields acting on the entities of a solver, which its kernels take as a template."""
+
+    def __init__(self) -> None:
+        self.fields: list[ForceField] = []
+
+    @qd.func
+    def add_acc(self, acc: qd.types.vector(3), pos: qd.types.vector(3), vel: qd.types.vector(3), t: float, i_p: int):
+        """
+        Return an acceleration plus those of the force fields at a point, added one field after the other.
+
+        `pos` and `vel` are the position and the velocity of the point at time `t`, `i_p` the index of the point among
+        the particles of the solver, -1 for a point of no particle.
+        """
+        for i_ff in qd.static(range(len(self.fields))):
+            acc += self.fields[i_ff].get_acc(pos, vel, t, i_p)
+        return acc
 
 
 @qd.data_oriented

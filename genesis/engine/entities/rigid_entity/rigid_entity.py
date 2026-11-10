@@ -6,7 +6,6 @@ import torch
 
 import genesis as gs
 from genesis.constants import link_ref_frame
-from genesis.engine.states.entities import RigidEntityState
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
@@ -556,16 +555,6 @@ class KinematicEntity(Entity):
     # ------------------------------------------------------------------------------------
     # ---------------------------------- control & io ------------------------------------
     # ------------------------------------------------------------------------------------
-
-    @gs.assert_built
-    def get_state(self):
-        solver_state = self._solver.get_state()
-        return RigidEntityState(
-            self,
-            self._sim.cur_step_global,
-            solver_state.links_pos[:, self.base_link_idx],
-            solver_state.links_quat[:, self.base_link_idx],
-        )
 
     def get_joint(self, name=None, uid=None):
         """

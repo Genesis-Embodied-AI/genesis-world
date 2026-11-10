@@ -322,7 +322,8 @@ class ConstraintSolver:
         constraint_solver_kernel_reset(envs_idx, self.constraint_state, self._solver.rigid_config)
 
     def clear(self, envs_idx=None):
-        self.reset(envs_idx)
+        """Remove the constraints of the environments 'envs_idx' (None for all of them), their warm start aside."""
+        self._eq_const_info_cache.clear()
 
         if gs.use_zerocopy and (
             not isinstance(envs_idx, torch.Tensor) or (not IS_OLD_TORCH or envs_idx.dtype == torch.bool)
@@ -5853,7 +5854,7 @@ def func_solve_seed_batch(
         )
 
 
-def _get_static_config(*args, **kwargs):
+def _get_config(*args, **kwargs):
     # Positional index of rigid_config in func_solve_body's signature.
     return args[4] if len(args) > 4 else kwargs["rigid_config"]
 
@@ -5911,7 +5912,7 @@ def _kernel_solve_monolith(
 @func_solve_body.register(
     # Runs whenever the decomposed arm is not specifically preferred. Solves each env whole with 32 envs packed per
     # warp; islands only reshape the per-env factor into block-diagonal blocks, they do not change the solve scheme.
-    is_compatible=lambda *args, **kwargs: _get_static_config(*args, **kwargs).prefer_decomposed_solver != 1
+    is_compatible=lambda *args, **kwargs: _get_config(*args, **kwargs).prefer_decomposed_solver != 1
 )
 def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
     # This entrypoint statically IS the monolith arm, so it owns its init: func_solve_init groups the constraints by

@@ -1,23 +1,91 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
+from genesis.engine.boundaries import func_impose_cube_boundary
+from genesis.engine.solvers.base_solver import SimulatorState
+from genesis.engine.solvers.fem_solver import FEMInfo, FEMState
+from genesis.engine.solvers.mpm_solver import (
+    MPMInfo,
+    MPMState,
+    func_point_vel_after_collision_with_rigid_geom,
+    func_point_vel_after_two_way_collision_with_rigid_geom,
+    func_quadratic_bspline_stencil,
+)
+from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
+from genesis.engine.solvers.pbd_solver import PBDInfo, PBDState
+from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
+from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
 from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
+from genesis.engine.solvers.sph_solver import SPHInfo, SPHState, func_cubic_kernel_plane_integral
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import opt_in
-from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+from genesis.utils.data import ENVS, Config, Data, DataKind, Size, eoa, field, opt_in
+from genesis.utils.geom import SpatialHashGrid, qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 
-@qd.data_oriented
+PBD_PARTICLES = Size("pbd_particles")
+# The arrays of the coupling of the rigid geoms with the PBD particles, which a scene without it leaves out
+RIGID_PBD = "rigid_pbd"
+
+
+class LegacyCouplerState(Data, kind=DataKind.STATE):
+    """
+    Runtime state of the legacy coupler.
+
+    The PBD particles animated by a rigid link follow the point `pbd_attach_local_pos` of the link
+    `pbd_attach_link_idx`, -1 for none.
+    """
+
+    pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD)
+    pbd_attach_local_pos: qd.Tensor = field(
+        (float, 3), shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD
+    )
+
+
+class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
+    """
+    Model parameters of the legacy coupler.
+
+    `influence_min` is the influence of a rigid geom at a point below which the geom leaves the particle or vertex there
+    untouched, and `animate_inv_dt` the inverse time step the particles attached to links are animated with, that of
+    the PBD substep clamped to avoid large jerks. The cells of the MPM grid gather the SPH and PBD particles of a cube
+    of `mpm_sph_stencil_size` and `mpm_pbd_stencil_size` cells of their hash grid. `softness_min` bounds away from zero
+    the coupling softness of a rigid geom, which its influence divides the distance by.
+    """
+
+    influence_min: qd.Tensor = field(float, shape=())
+    animate_inv_dt: qd.Tensor = field(float, shape=())
+    softness_min: qd.Tensor = field(float, shape=())
+    mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
+    mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
+
+
+class LegacyCouplerConfig(Config):
+    """The couplings of the legacy coupler that its kernels compile in, between the solvers each one names."""
+
+    has_rigid_mpm: bool
+    has_rigid_sph: bool
+    has_rigid_pbd: bool
+    has_rigid_fem: bool
+    has_mpm_sph: bool
+    has_mpm_pbd: bool
+    has_fem_mpm: bool
+    has_fem_sph: bool
+    # Whether the rigid links hold their info per environment (see 'RigidOptions.batch_links_info')
+    is_links_info_batched: bool
+
+
 class LegacyCoupler(RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
@@ -36,6 +104,10 @@ class LegacyCoupler(RBC):
         self.sph_solver = self.sim.sph_solver
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
+
+        self.legacy_coupler_state: LegacyCouplerState | None = None
+        self.legacy_coupler_info: LegacyCouplerInfo | None = None
+        self.legacy_coupler_config: LegacyCouplerConfig | None = None
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any(self.rigid_couplings))
@@ -56,921 +128,167 @@ class LegacyCoupler(RBC):
         )
 
     def build(self) -> None:
-        self._rigid_mpm, self._rigid_sph, self._rigid_pbd, self._rigid_fem = self.rigid_couplings
-        self._mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
-        self._mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
-        self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
-        self._fem_sph = self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph
+        has_rigid_mpm, has_rigid_sph, has_rigid_pbd, has_rigid_fem = self.rigid_couplings
+        has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
+        has_mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
+        self.legacy_coupler_config = LegacyCouplerConfig(
+            has_rigid_mpm=has_rigid_mpm,
+            has_rigid_sph=has_rigid_sph,
+            has_rigid_pbd=has_rigid_pbd,
+            has_rigid_fem=has_rigid_fem,
+            has_mpm_sph=has_mpm_sph,
+            has_mpm_pbd=has_mpm_pbd,
+            has_fem_mpm=self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm,
+            has_fem_sph=self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph,
+            is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
+        )
 
-        # Influence of a rigid geom at a point below which the geom leaves the particle or vertex there untouched
-        self.influence_min = qd.field(dtype=gs.qd_float, shape=())
-        self.influence_min.fill(0.1)
-        # Largest inverse time step the particles attached to links are animated with, which avoids large jerks
-        self.animate_inv_dt_max = qd.field(dtype=gs.qd_float, shape=())
-        self.animate_inv_dt_max.fill(50.0)
+        self.legacy_coupler_state = LegacyCouplerState(
+            sizes=dict(pbd_particles=self.pbd_solver.n_particles, envs=self.sim._B),
+            env_first=False,
+            unused=dict(rigid_pbd=not has_rigid_pbd),
+        )
+        if has_rigid_pbd:
+            self.legacy_coupler_state.pbd_attach_link_idx.fill(-1)
+            self.legacy_coupler_state.pbd_attach_local_pos.fill(0.0)
 
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            # this field stores the geom index of the thin shell rigid object (if any) that separates particle and its surrounding grid cell
-            self.cpic_flag = qd.field(gs.qd_int, shape=(self.mpm_solver.n_particles, 3, 3, 3, self.mpm_solver._B))
-            self.mpm_rigid_normal = qd.Vector.field(
-                3,
-                dtype=gs.qd_float,
-                shape=(self.mpm_solver.n_particles, self.rigid_solver.n_geoms_, self.mpm_solver._B),
+        # The cells of the MPM grid reach the particles of the hash grid cells they overlap, plus one on each side
+        mpm_sph_stencil_size = mpm_pbd_stencil_size = 0
+        if has_mpm_sph:
+            mpm_sph_stencil_size = int(np.floor(self.mpm_solver.dx / self.sph_solver.hash_grid_cell_size) + 2)
+        if has_mpm_pbd:
+            mpm_pbd_stencil_size = int(np.floor(self.mpm_solver.dx / self.pbd_solver.hash_grid_cell_size) + 2)
+        self.legacy_coupler_info = LegacyCouplerInfo(
+            values=dict(
+                influence_min=0.1,
+                animate_inv_dt=min(1.0 / self.pbd_solver.substep_dt, 50.0),
+                softness_min=1e-10,
+                mpm_sph_stencil_size=mpm_sph_stencil_size,
+                mpm_pbd_stencil_size=mpm_pbd_stencil_size,
             )
-
-        if self._rigid_sph:
-            self.sph_rigid_normal = qd.Vector.field(
-                3,
-                dtype=gs.qd_float,
-                shape=(self.sph_solver.n_particles, self.rigid_solver.n_geoms_, self.sph_solver._B),
-            )
-            self.sph_rigid_normal_reordered = qd.Vector.field(
-                3,
-                dtype=gs.qd_float,
-                shape=(self.sph_solver.n_particles, self.rigid_solver.n_geoms_, self.sph_solver._B),
-            )
-
-        if self._rigid_pbd:
-            self.pbd_rigid_normal_reordered = qd.Vector.field(
-                3, dtype=gs.qd_float, shape=(self.pbd_solver.n_particles, self.pbd_solver._B, self.rigid_solver.n_geoms)
-            )
-
-            struct_particle_attach_info = qd.types.struct(link_idx=gs.qd_int, local_pos=gs.qd_vec3)
-
-            self.particle_attach_info = struct_particle_attach_info.field(
-                shape=(self.pbd_solver._n_particles, self.pbd_solver._B), layout=qd.Layout.SOA
-            )
-            self.particle_attach_info.link_idx.fill(-1)
-            self.particle_attach_info.local_pos.fill(0.0)
-
-        if self._mpm_sph:
-            self.mpm_sph_stencil_size = int(np.floor(self.mpm_solver.dx / self.sph_solver.hash_grid_cell_size) + 2)
-
-        if self._mpm_pbd:
-            self.mpm_pbd_stencil_size = int(np.floor(self.mpm_solver.dx / self.pbd_solver.hash_grid_cell_size) + 2)
-
-        ## DEBUG
-        self._dx = 1 / 1024
-        self._stencil_size = int(np.floor(self._dx / self.sph_solver.hash_grid_cell_size) + 2)
+        )
 
         self.reset(envs_idx=self.sim.scene._envs_idx)
 
-    def reset(self, envs_idx=None) -> None:
+    def reset(self, envs_idx: torch.Tensor | None = None) -> None:
         if envs_idx is None:
             envs_idx = self.sim.scene._envs_idx
 
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            self._kernel_reset_mpm(envs_idx)
+        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+            kernel_reset_mpm_rigid_normal(envs_idx, self.mpm_solver.mpm_state)
 
-        if self._rigid_sph:
-            self._kernel_reset_sph(envs_idx)
+    # ------------------------------------------------------------------------------------
+    # ------------------------------ PBD particles on links -------------------------------
+    # ------------------------------------------------------------------------------------
 
-    @qd.kernel
-    def _kernel_reset_mpm(self, envs_idx: qd.types.ndarray()):
-        for i_p, i_g, i_b_ in qd.ndrange(self.mpm_solver.n_particles, self.rigid_solver.n_geoms, envs_idx.shape[0]):
-            self.mpm_rigid_normal[i_p, i_g, envs_idx[i_b_]] = 0.0
-
-    @qd.kernel
-    def _kernel_reset_sph(self, envs_idx: qd.types.ndarray()):
-        for i_p, i_g, i_b_ in qd.ndrange(self.sph_solver.n_particles, self.rigid_solver.n_geoms, envs_idx.shape[0]):
-            self.sph_rigid_normal[i_p, i_g, envs_idx[i_b_]] = 0.0
-
-    @qd.func
-    def _func_collide_with_rigid(
-        self,
-        f,
-        pos_world,
-        vel,
-        mass,
-        i_b,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        for i_g in range(self.rigid_solver.n_geoms):
-            if geoms_info.needs_coup[i_g]:
-                vel = self._func_collide_with_rigid_geom(
-                    i_g,
-                    i_b,
-                    pos_world,
-                    vel,
-                    mass,
-                    geoms_state,
-                    geoms_info,
-                    links_state,
-                    rigid_info,
-                    sdf_info,
-                    collider_config,
-                )
-        return vel
-
-    @qd.func
-    def _func_collide_with_rigid_geom(
-        self,
-        geom_idx: int,
-        batch_idx: int,
-        pos_world: qd.types.vector(3),
-        vel: qd.types.vector(3),
-        mass: float,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        influence, normal_rigid = self._func_rigid_geom_influence(
-            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-        )
-        if influence > self.influence_min[None]:
-            vel = self._func_collide_in_rigid_geom(
-                geom_idx, batch_idx, pos_world, vel, mass, normal_rigid, influence, geoms_info, links_state, rigid_info
-            )
-
-        return vel
-
-    @qd.func
-    def _func_rigid_geom_influence(
-        self,
-        geom_idx: int,
-        batch_idx: int,
-        pos_world: qd.types.vector(3),
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
-
-        # bigger coup_softness implies that the coupling influence extends further away from the object.
-        influence = qd.min(qd.exp(-signed_dist / max(1e-10, geoms_info.coup_softness[geom_idx])), 1)
-
-        normal_rigid = qd.Vector.zero(gs.qd_float, 3)
-        if influence > self.influence_min[None]:
-            normal_rigid = sdf.sdf_func_normal_world(
-                geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-            )
-        return influence, normal_rigid
-
-    @qd.func
-    def _func_collide_with_rigid_geom_robust(
-        self,
-        pos_world,
-        vel,
-        mass,
-        pressure,
-        normal_prev,
-        geom_idx,
-        batch_idx,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        links_info: LinksInfo,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        """
-        Similar to _func_collide_with_rigid_geom, but additionally handles potential side flip due to penetration.
-        """
-        signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
-        normal_rigid = sdf.sdf_func_normal_world(
-            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+    def attach_pbd_particles_to_link(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor, link_idx: int) -> None:
+        """Animate some PBD particles by a rigid link, keeping their current offset to it."""
+        kernel_attach_pbd_to_rigid_link(
+            particles_idx,
+            envs_idx,
+            link_idx,
+            self.pbd_solver.pbd_state,
+            self.rigid_solver.dyn_state.links,
+            self.legacy_coupler_state,
         )
 
-        # bigger coup_softness implies that the coupling influence extends further away from the object.
-        influence = qd.min(qd.exp(-signed_dist / max(1e-10, geoms_info.coup_softness[geom_idx])), 1)
-
-        # if normal_rigid.dot(normal_prev) < 0: # side flip due to penetration
-        #     influence = 1.0
-        #     normal_rigid = normal_prev
-        if influence > self.influence_min[None]:
-            vel = self._func_collide_in_rigid_geom(
-                geom_idx, batch_idx, pos_world, vel, mass, normal_rigid, influence, geoms_info, links_state, rigid_info
-            )
-
-        # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
-        # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
-        # surface and integrating the symmetric pressure force over the truncated kernel support yields the factor
-        # 2 * sigma(signed_dist), with sigma the kernel plane integral (see cubic_kernel_plane_integral in
-        # sph_solver.py). Sigma integrates to 1/2 across the support band, so a covering particle layer transmits
-        # exactly p per unit area: Archimedes buoyancy with no tuning constant. Fixed links are exempt: they cannot
-        # respond to the force, and the reaction is a conservative stiff kick that keeps fluid resting on them
-        # ringing forever, pumped by the acoustic pressure fluctuations of the fluid.
-        link_idx = geoms_info.link_idx[geom_idx]
-        I_l = [link_idx, batch_idx] if qd.static(self.rigid_solver._options.batch_links_info) else link_idx
-        if signed_dist < self.sph_solver._support_radius and pressure > 0 and not links_info.is_fixed[I_l]:
-            pressure_force = (
-                -2.0
-                * pressure
-                * self.sph_solver._particle_volume
-                * self.sph_solver.cubic_kernel_plane_integral(signed_dist)
-                * normal_rigid
-            )
-            self.rigid_solver._func_apply_coupling_force(link_idx, batch_idx, pos_world, pressure_force, links_state)
-            vel = vel - pressure_force * (rigid_info.substep_dt[None] / mass)
-
-        # attraction force
-        # if 0.001 < signed_dist < 0.01:
-        #     vel = vel - normal_rigid * 0.1 * signed_dist
-
-        return vel, normal_rigid
-
-    @qd.func
-    def _func_collide_in_rigid_geom(
-        self,
-        geom_idx: int,
-        i_b: int,
-        pos_world: qd.types.vector(3),
-        vel: qd.types.vector(3),
-        mass: float,
-        normal_rigid: qd.types.vector(3),
-        influence: float,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-    ):
-        # The point is in the range of the geom, whose normal and influence at the point are known
-        vel_rigid = self.rigid_solver._func_vel_at_point(geoms_info.link_idx[geom_idx], i_b, pos_world, links_state)
-        vel_new, is_colliding = self._func_rigid_geom_response(
-            geom_idx, vel, vel_rigid, normal_rigid, influence, geoms_info
-        )
-        if is_colliding:
-            #################### particle -> rigid ####################
-            # Compute delta momentum and apply to rigid body.
-            delta_mv = mass * (vel_new - vel)
-            force = -delta_mv / rigid_info.substep_dt[None]
-            self.rigid_solver._func_apply_coupling_force(
-                geoms_info.link_idx[geom_idx], i_b, pos_world, force, links_state
-            )
-        return vel_new
-
-    @qd.func
-    def _func_rigid_geom_response(
-        self,
-        geom_idx: int,
-        vel: qd.types.vector(3),
-        vel_rigid: qd.types.vector(3),
-        normal_rigid: qd.types.vector(3),
-        influence: float,
-        geoms_info: GeomsInfo,
-    ):
-        # v w.r.t rigid
-        rvel = vel - vel_rigid
-        rvel_normal_magnitude = rvel.dot(normal_rigid)  # negative if inward
-
-        is_colliding = rvel_normal_magnitude < 0
-        if is_colliding:
-            #################### rigid -> particle ####################
-            # tangential component
-            rvel_tan = rvel - rvel_normal_magnitude * normal_rigid
-            rvel_tan_norm = rvel_tan.norm(gs.EPS)
-
-            # tangential component after friction
-            rvel_tan = (
-                rvel_tan
-                / rvel_tan_norm
-                * qd.max(0, rvel_tan_norm + rvel_normal_magnitude * geoms_info.coup_friction[geom_idx])
-            )
-
-            # normal component after collision
-            rvel_normal = -normal_rigid * rvel_normal_magnitude * geoms_info.coup_restitution[geom_idx]
-
-            # normal + tangential component
-            rvel_new = rvel_tan + rvel_normal
-
-            # apply influence
-            vel = vel_rigid + rvel_new * influence + rvel * (1 - influence)
-        return vel, is_colliding
-
-    @qd.kernel
-    def mpm_grid_op(
-        self,
-        f: qd.i32,
-        t: float,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        for ii, jj, kk, i_b in qd.ndrange(*self.mpm_solver.grid_res, self.mpm_solver._B):
-            I = (ii, jj, kk)
-            if self.mpm_solver.grid[f, I, i_b].mass > gs.EPS:
-                #################### MPM grid op ####################
-                # Momentum to velocity
-                vel_mpm = (1 / self.mpm_solver.grid[f, I, i_b].mass) * self.mpm_solver.grid[f, I, i_b].vel_in
-
-                # gravity
-                vel_mpm += self.mpm_solver.substep_dt * self.mpm_solver._gravity[i_b]
-
-                pos = (I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                mass_mpm = self.mpm_solver.grid[f, I, i_b].mass / self.mpm_solver._particle_volume_scale
-
-                # external force fields
-                for i_ff in qd.static(range(len(self.mpm_solver._ffs))):
-                    vel_mpm += self.mpm_solver._ffs[i_ff].get_acc(pos, vel_mpm, t, -1) * self.mpm_solver.substep_dt
-
-                #################### MPM <-> Rigid ####################
-                if qd.static(self._rigid_mpm):
-                    vel_mpm = self._func_collide_with_rigid(
-                        f,
-                        pos,
-                        vel_mpm,
-                        mass_mpm,
-                        i_b,
-                        geoms_state=geoms_state,
-                        geoms_info=geoms_info,
-                        links_state=links_state,
-                        rigid_info=rigid_info,
-                        sdf_info=sdf_info,
-                        collider_config=collider_config,
-                    )
-
-                #################### MPM <-> SPH ####################
-                if qd.static(self._mpm_sph):
-                    # using the lower corner of MPM cell to find the corresponding SPH base cell
-                    base = self.sph_solver.sh.pos_to_grid(pos - 0.5 * self.mpm_solver.dx)
-
-                    # ---------- SPH -> MPM ----------
-                    sph_vel = qd.Vector([0.0, 0.0, 0.0])
-                    colliding_particles = 0
-                    for offset in qd.grouped(
-                        qd.ndrange(self.mpm_sph_stencil_size, self.mpm_sph_stencil_size, self.mpm_sph_stencil_size)
-                    ):
-                        slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
-                        for i in range(
-                            self.sph_solver.sh.slot_start[slot_idx, i_b],
-                            self.sph_solver.sh.slot_start[slot_idx, i_b] + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                        ):
-                            if (
-                                qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
-                                < self.mpm_solver.dx * 0.5
-                            ):
-                                sph_vel += self.sph_solver.particles_reordered.vel[i, i_b]
-                                colliding_particles += 1
-                    if colliding_particles > 0:
-                        vel_old = vel_mpm
-                        vel_mpm = sph_vel / colliding_particles
-
-                        # ---------- MPM -> SPH ----------
-                        delta_mv = mass_mpm * (vel_mpm - vel_old)
-
-                        for offset in qd.grouped(
-                            qd.ndrange(self.mpm_sph_stencil_size, self.mpm_sph_stencil_size, self.mpm_sph_stencil_size)
-                        ):
-                            slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
-                            for i in range(
-                                self.sph_solver.sh.slot_start[slot_idx, i_b],
-                                self.sph_solver.sh.slot_start[slot_idx, i_b]
-                                + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                            ):
-                                if (
-                                    qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
-                                    < self.mpm_solver.dx * 0.5
-                                ):
-                                    self.sph_solver.particles_reordered[i, i_b].vel = (
-                                        self.sph_solver.particles_reordered[i, i_b].vel
-                                        - delta_mv / self.sph_solver.particles_info_reordered[i, i_b].mass
-                                    )
-
-                #################### MPM <-> PBD ####################
-                if qd.static(self._mpm_pbd):
-                    # using the lower corner of MPM cell to find the corresponding PBD base cell
-                    base = self.pbd_solver.sh.pos_to_grid(pos - 0.5 * self.mpm_solver.dx)
-
-                    # ---------- PBD -> MPM ----------
-                    pbd_vel = qd.Vector([0.0, 0.0, 0.0])
-                    colliding_particles = 0
-                    for offset in qd.grouped(
-                        qd.ndrange(self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size)
-                    ):
-                        slot_idx = self.pbd_solver.sh.grid_to_slot(base + offset)
-                        for i in range(
-                            self.pbd_solver.sh.slot_start[slot_idx, i_b],
-                            self.pbd_solver.sh.slot_start[slot_idx, i_b] + self.pbd_solver.sh.slot_size[slot_idx, i_b],
-                        ):
-                            if (
-                                qd.abs(pos - self.pbd_solver.particles_reordered.pos[i, i_b]).max()
-                                < self.mpm_solver.dx * 0.5
-                            ):
-                                pbd_vel += self.pbd_solver.particles_reordered.vel[i, i_b]
-                                colliding_particles += 1
-                    if colliding_particles > 0:
-                        vel_old = vel_mpm
-                        vel_mpm = pbd_vel / colliding_particles
-
-                        # ---------- MPM -> PBD ----------
-                        delta_mv = mass_mpm * (vel_mpm - vel_old)
-
-                        for offset in qd.grouped(
-                            qd.ndrange(self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size)
-                        ):
-                            slot_idx = self.pbd_solver.sh.grid_to_slot(base + offset)
-                            for i in range(
-                                self.pbd_solver.sh.slot_start[slot_idx, i_b],
-                                self.pbd_solver.sh.slot_start[slot_idx, i_b]
-                                + self.pbd_solver.sh.slot_size[slot_idx, i_b],
-                            ):
-                                if (
-                                    qd.abs(pos - self.pbd_solver.particles_reordered.pos[i, i_b]).max()
-                                    < self.mpm_solver.dx * 0.5
-                                ):
-                                    if self.pbd_solver.particles_reordered[i, i_b].free:
-                                        self.pbd_solver.particles_reordered[i, i_b].vel = (
-                                            self.pbd_solver.particles_reordered[i, i_b].vel
-                                            - delta_mv / self.pbd_solver.particles_info_reordered[i, i_b].mass
-                                        )
-
-                #################### MPM boundary ####################
-                _, self.mpm_solver.grid[f, I, i_b].vel_out = self.mpm_solver.boundary.impose_pos_vel(pos, vel_mpm)
-
-    @qd.kernel
-    def mpm_surface_to_particle(
-        self,
-        f: qd.i32,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        sdf_info: SDFInfo,
-        rigid_info: RigidInfo,
-        collider_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self.mpm_solver.n_particles, self.mpm_solver._B):
-            if self.mpm_solver.particles_ng[f, i_p, i_b].active:
-                for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
-                        sdf_normal = sdf.sdf_func_normal_world(
-                            i_g,
-                            i_b,
-                            self.mpm_solver.particles[f, i_p, i_b].pos,
-                            geoms_state,
-                            geoms_info,
-                            rigid_info,
-                            sdf_info,
-                            collider_config,
-                        )
-                        # we only update the normal if the particle does not the object
-                        if sdf_normal.dot(self.mpm_rigid_normal[i_p, i_g, i_b]) >= 0:
-                            self.mpm_rigid_normal[i_p, i_g, i_b] = sdf_normal
-
-    @qd.kernel
-    def fem_surface_force(
-        self,
-        f: qd.i32,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        # TODO: all collisions are on vertices instead of surface and edge
-        # Each surface vertex applies the couplings of its incident triangles in increasing triangle index, which
-        # reproduces a serial sweep over the triangles without a write race on the vertices they share.
-        for i_sv, i_b in qd.ndrange(self.fem_solver.n_surface_vertices, self.fem_solver._B):
-            i_v = self.fem_solver.surface_vertices[i_sv]
-            pos = self.fem_solver.elements_v[f, i_v, i_b].pos
-            vel_fem_sv = self.fem_solver.elements_v[f + 1, i_v, i_b].vel
-            i_tri_start = self.fem_solver.surface_vertices_tri_start[i_sv]
-            n_tris = self.fem_solver.surface_vertices_tri_start[i_sv + 1] - i_tri_start
-
-            # FEM <-> Rigid
-            # NOTE: collision only on surface vertices
-            if qd.static(self._rigid_fem):
-                # The influence, normal and velocity of a rigid geom at the vertex are the same for all its incident
-                # triangles, so they are evaluated once, and the momentum the vertex transfers is applied once.
-                for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
-                        influence, normal_rigid = self._func_rigid_geom_influence(
-                            i_g, i_b, pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-                        )
-                        if influence > self.influence_min[None]:
-                            vel_rigid = self.rigid_solver._func_vel_at_point(
-                                geoms_info.link_idx[i_g], i_b, pos, links_state
-                            )
-                            delta_mv = qd.Vector.zero(gs.qd_float, 3)
-                            is_colliding_any = False
-                            for i_s_ in range(n_tris):
-                                mass = (
-                                    self.fem_solver.surface_vertices_tri_mass_scaled[i_tri_start + i_s_]
-                                    / self.fem_solver.vol_scale
-                                )
-                                vel_new, is_colliding = self._func_rigid_geom_response(
-                                    i_g, vel_fem_sv, vel_rigid, normal_rigid, influence, geoms_info
-                                )
-                                if is_colliding:
-                                    # assume element mass uniformly distributed to vertices
-                                    delta_mv = delta_mv + (mass / 3.0) * (vel_new - vel_fem_sv)
-                                    is_colliding_any = True
-                                vel_fem_sv = vel_new
-                            if is_colliding_any:
-                                self.rigid_solver._func_apply_coupling_force(
-                                    geoms_info.link_idx[i_g],
-                                    i_b,
-                                    pos,
-                                    force=-delta_mv / rigid_info.substep_dt[None],
-                                    links_state=links_state,
-                                )
-
-            if qd.static(self._fem_mpm or self._fem_sph):
-                for i_s_ in range(n_tris):
-                    i_s = self.fem_solver.surface_vertices_tri_idx[i_tri_start + i_s_]
-                    mass = (
-                        self.fem_solver.surface_vertices_tri_mass_scaled[i_tri_start + i_s_] / self.fem_solver.vol_scale
-                    )
-
-                    tri2v = self.fem_solver.surface[i_s].tri2v
-                    p1 = self.fem_solver.elements_v[f, tri2v[0], i_b].pos
-                    p2 = self.fem_solver.elements_v[f, tri2v[1], i_b].pos
-                    p3 = self.fem_solver.elements_v[f, tri2v[2], i_b].pos
-                    u = p2 - p1
-                    v = p3 - p1
-                    surface_normal = qd.math.cross(u, v)
-                    surface_normal = surface_normal / surface_normal.norm(gs.EPS)
-
-                    # FEM <-> MPM (interact with MPM grid instead of particles)
-                    # NOTE: not doing this in mpm_grid_op otherwise we need to search for fem surface for each particles
-                    #       however, this function is called after mpm boundary conditions.
-                    if qd.static(self._fem_mpm):
-                        mass_fem_sv = mass / 4.0  # assume element mass uniformly distributed
-
-                        # follow MPM p2g scheme
-                        vel_mpm = qd.Vector([0.0, 0.0, 0.0])
-                        mass_mpm = 0.0
-                        mpm_base = qd.floor(pos * self.mpm_solver.inv_dx - 0.5).cast(gs.qd_int)
-                        mpm_fx = pos * self.mpm_solver.inv_dx - mpm_base.cast(gs.qd_float)
-                        mpm_w = [0.5 * (1.5 - mpm_fx) ** 2, 0.75 - (mpm_fx - 1.0) ** 2, 0.5 * (mpm_fx - 0.5) ** 2]
-                        new_vel_fem_sv = vel_fem_sv
-                        grid_res = qd.Vector(self.mpm_solver.grid_res, dt=gs.qd_int)
-                        for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
-                            mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
-                            # A vertex outside the domain of the grid exchanges nothing with the cells the grid lacks
-                            is_cell_in_grid = (mpm_grid_I >= 0).all() and (mpm_grid_I < grid_res).all()
-                            mpm_grid_mass = gs.qd_float(0.0)
-                            if is_cell_in_grid:
-                                mpm_grid_mass = (
-                                    self.mpm_solver.grid[f, mpm_grid_I, i_b].mass
-                                    / self.mpm_solver.particle_volume_scale
-                                )
-
-                            mpm_weight = gs.qd_float(1.0)
-                            for d in qd.static(range(3)):
-                                mpm_weight *= mpm_w[mpm_offset[d]][d]
-
-                            # FEM -> MPM
-                            mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                            signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
-                            # NOTE: use dx as minimal unit for collision
-                            if is_cell_in_grid and signed_dist <= self.mpm_solver.dx:
-                                vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                mass_mpm_at_cell = mpm_weight * mpm_grid_mass
-
-                                vel_mpm += vel_mpm_at_cell
-                                mass_mpm += mass_mpm_at_cell
-
-                                if mass_mpm_at_cell > gs.EPS:
-                                    delta_mpm_vel_at_cell_unmul = (
-                                        vel_fem_sv * mpm_weight - self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                    )
-                                    mass_mul_at_cell = (
-                                        mpm_grid_mass / mass_fem_sv
-                                    )  # NOTE: use un-reweighted mass instead of mass_mpm_at_cell
-                                    delta_mpm_vel_at_cell = delta_mpm_vel_at_cell_unmul * mass_mul_at_cell
-                                    qd.atomic_add(
-                                        self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out, delta_mpm_vel_at_cell
-                                    )
-
-                                    new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
-
-                        # MPM -> FEM
-                        if mass_mpm > gs.EPS:
-                            vel_fem_sv = new_vel_fem_sv
-
-                    # FEM <-> SPH TODO: this doesn't work well
-                    if qd.static(self._fem_sph):
-                        mass_fem_sv = mass / 4.0
-
-                        dx = self.sph_solver.hash_grid_cell_size  # self._dx
-                        stencil_size = 2  # self._stencil_size
-
-                        base = self.sph_solver.sh.pos_to_grid(pos=pos - 0.5 * dx)
-
-                        # ---------- SPH -> FEM ----------
-                        sph_vel = qd.Vector([0.0, 0.0, 0.0])
-                        colliding_particles = 0
-                        for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-                            slot_idx = self.sph_solver.sh.grid_to_slot(grid_id=base + offset)
-                            for k in range(
-                                self.sph_solver.sh.slot_start[slot_idx, i_b],
-                                self.sph_solver.sh.slot_start[slot_idx, i_b]
-                                + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                            ):
-                                if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                    sph_vel += self.sph_solver.particles_reordered.vel[k, i_b]
-                                    colliding_particles += 1
-
-                        if colliding_particles > 0:
-                            vel_old = vel_fem_sv
-                            vel_fem_sv_unprojected = sph_vel / colliding_particles
-                            vel_fem_sv = (
-                                vel_fem_sv_unprojected.dot(surface_normal) * surface_normal
-                            )  # exclude tangential velocity
-
-                            # ---------- FEM -> SPH ----------
-                            delta_mv = mass_fem_sv * (vel_fem_sv - vel_old)
-
-                            for offset in qd.grouped(qd.ndrange(stencil_size, stencil_size, stencil_size)):
-                                slot_idx = self.sph_solver.sh.grid_to_slot(grid_id=base + offset)
-                                for k in range(
-                                    self.sph_solver.sh.slot_start[slot_idx, i_b],
-                                    self.sph_solver.sh.slot_start[slot_idx, i_b]
-                                    + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                                ):
-                                    if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                        self.sph_solver.particles_reordered[k, i_b].vel = (
-                                            self.sph_solver.particles_reordered[k, i_b].vel
-                                            - delta_mv / self.sph_solver.particles_info_reordered[k, i_b].mass
-                                        )
-
-            self.fem_solver.elements_v[f + 1, i_v, i_b].vel = vel_fem_sv
-
-    @qd.kernel
-    def sph_rigid(
-        self,
-        f: qd.i32,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        links_info: LinksInfo,
-        rigid_info: RigidInfo,
-        sdf_info: SDFInfo,
-        collider_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self.sph_solver._n_particles, self.sph_solver._B):
-            if self.sph_solver.particles_ng_reordered[i_p, i_b].active:
-                for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
-                        (
-                            self.sph_solver.particles_reordered[i_p, i_b].vel,
-                            self.sph_rigid_normal_reordered[i_p, i_g, i_b],
-                        ) = self._func_collide_with_rigid_geom_robust(
-                            self.sph_solver.particles_reordered[i_p, i_b].pos,
-                            self.sph_solver.particles_reordered[i_p, i_b].vel,
-                            self.sph_solver.particles_info_reordered[i_p, i_b].mass,
-                            self.sph_solver.particles_reordered[i_p, i_b].p,
-                            self.sph_rigid_normal_reordered[i_p, i_g, i_b],
-                            i_g,
-                            i_b,
-                            geoms_state,
-                            geoms_info,
-                            links_state,
-                            links_info,
-                            rigid_info,
-                            sdf_info,
-                            collider_config,
-                        )
-
-    @qd.kernel
-    def kernel_pbd_rigid_collide(
-        self,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        sdf_info: SDFInfo,
-        rigid_info: RigidInfo,
-        collider_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self.pbd_solver._n_particles, self.sph_solver._B):
-            if self.pbd_solver.particles_ng_reordered[i_p, i_b].active:
-                # NOTE: Couldn't figure out a good way to handle collision with non-free particle. Such collision is not phsically plausible anyway.
-                for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
-                        (
-                            self.pbd_solver.particles_reordered[i_p, i_b].pos,
-                            self.pbd_solver.particles_reordered[i_p, i_b].vel,
-                            self.pbd_rigid_normal_reordered[i_p, i_b, i_g],
-                        ) = self._func_pbd_collide_with_rigid_geom(
-                            i_p,
-                            self.pbd_solver.particles_reordered[i_p, i_b].pos,
-                            self.pbd_solver.particles_reordered[i_p, i_b].vel,
-                            self.pbd_solver.particles_info_reordered[i_p, i_b].mass,
-                            self.pbd_rigid_normal_reordered[i_p, i_b, i_g],
-                            i_g,
-                            i_b,
-                            geoms_state,
-                            geoms_info,
-                            links_state,
-                            sdf_info,
-                            rigid_info,
-                            collider_config,
-                        )
-
-    @qd.kernel
-    def kernel_attach_pbd_to_rigid_link(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), link_idx: qd.i32, links_state: LinksState
-    ) -> None:
-        """
-        Sets listed particles in listed environments to be animated by the link.
-
-        Current position of the particle, relatively to the link, is stored and preserved.
-        """
-        pdb = self.pbd_solver
-
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            link_pos = links_state.pos[link_idx, i_b]
-            link_quat = links_state.quat[link_idx, i_b]
-
-            # compute local offset from link to the particle
-            world_pos = pdb.particles[i_p, i_b].pos
-            local_pos = qd_inv_transform_by_trans_quat(world_pos, link_pos, link_quat)
-
-            # set particle to be animated (not free) and store animation info
-            pdb.particles[i_p, i_b].free = False
-            self.particle_attach_info[i_p, i_b].link_idx = link_idx
-            self.particle_attach_info[i_p, i_b].local_pos = local_pos
-
-    @qd.kernel
-    def kernel_pbd_rigid_clear_animate_particles_by_link(
-        self, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray()
-    ) -> None:
-        """Detach listed particles from links, and simulate them freely."""
-        pdb = self.pbd_solver
-        for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
-            i_p = particles_idx[i_b_, i_p_]
-            i_b = envs_idx[i_b_]
-            pdb.particles[i_p, i_b].free = True
-            self.particle_attach_info[i_p, i_b].link_idx = -1
-            self.particle_attach_info[i_p, i_b].local_pos = qd.math.vec3([0.0, 0.0, 0.0])
-
-    @qd.kernel
-    def kernel_pbd_rigid_solve_animate_particles_by_link(self, substep_inv_dt: float, links_state: LinksState):
-        """
-        Itearates all particles and environments, and sets corrective velocity for all animated particle.
-
-        Computes target position and velocity from the attachment/reference link and local offset position.
-
-        Note, that this step shoudl be done after rigid solver update, and before PDB solver update.
-        Currently, this is done after both rigid and PBD solver updates, hence the corrective velocity
-        is off by a frame.
-
-        Note, it's adviced to clamp inv_dt to avoid large jerks and instability. 1/0.02 might be a good max value.
-        """
-        pdb = self.pbd_solver
-        for i_p, i_env in qd.ndrange(pdb._n_particles, pdb._B):
-            if self.particle_attach_info[i_p, i_env].link_idx >= 0:
-                # read link state
-                link_idx = self.particle_attach_info[i_p, i_env].link_idx
-                link_pos = links_state.pos[link_idx, i_env]
-                link_quat = links_state.quat[link_idx, i_env]
-
-                link_lin_vel = links_state.cd_vel[link_idx, i_env]
-                link_ang_vel = links_state.cd_ang[link_idx, i_env]
-                link_com_in_world = links_state.root_COM[link_idx, i_env] + links_state.i_pos[link_idx, i_env]
-
-                # calculate target pos and vel of the particle
-                local_pos = self.particle_attach_info[i_p, i_env].local_pos
-                target_world_pos = qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
-
-                world_arm = target_world_pos - link_com_in_world
-                target_world_vel = link_lin_vel + link_ang_vel.cross(world_arm)
-
-                # compute and apply corrective velocity
-                i_rp = pdb.particles_ng[i_p, i_env].reordered_idx
-                particle_pos = pdb.particles_reordered[i_rp, i_env].pos
-                pos_correction = target_world_pos - particle_pos
-                corrective_vel = pos_correction * qd.min(substep_inv_dt, self.animate_inv_dt_max[None])
-                pdb.particles_reordered[i_rp, i_env].vel = corrective_vel + target_world_vel
-
-    @qd.func
-    def _func_pbd_collide_with_rigid_geom(
-        self,
-        i,
-        pos_world,
-        vel,
-        mass,
-        normal_prev,
-        geom_idx,
-        batch_idx,
-        geoms_state: GeomsState,
-        geoms_info: GeomsInfo,
-        links_state: LinksState,
-        sdf_info: SDFInfo,
-        rigid_info: RigidInfo,
-        collider_config: qd.template(),
-    ):
-        """
-        Resolves collision when a particle is already in collision with a rigid object.
-        This function assumes known normal_rigid and influence.
-        """
-        signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
-        contact_normal = sdf.sdf_func_normal_world(
-            geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
-        )
-        new_pos = pos_world
-        new_vel = vel
-        if signed_dist < self.pbd_solver.particle_size / 2:  # skip non-penetration particles
-            stiffness = 1.0  # value in [0, 1]
-
-            # we don't consider friction for now
-            # friction = 0.15
-            # vel_rigid = self.rigid_solver._func_vel_at_point(
-            #     pos_world=pos_world,
-            #     link_idx=geoms_info.link_idx[geom_idx],
-            #     i_b=batch_idx,
-            #     links_state=links_state,
-            # )
-            # rvel = vel - vel_rigid
-            # rvel_normal_magnitude = rvel.dot(contact_normal)  # negative if inward
-            # rvel_tan = rvel - rvel_normal_magnitude * contact_normal
-            # rvel_tan_norm = rvel_tan.norm(gs.EPS)
-
-            #################### rigid -> particle ####################
-
-            energy_loss = 0.0  # value in [0, 1]
-            new_pos = pos_world + stiffness * contact_normal * (self.pbd_solver.particle_size / 2 - signed_dist)
-            prev_pos = self.pbd_solver.particles_reordered[i, batch_idx].ipos
-            new_vel = (new_pos - prev_pos) / self.pbd_solver._substep_dt
-
-            #################### particle -> rigid ####################
-            delta_mv = mass * (new_vel - vel)
-            force = (-delta_mv / self.rigid_solver._substep_dt) * (1 - energy_loss)
-
-            self.rigid_solver._func_apply_coupling_force(
-                geoms_info.link_idx[geom_idx], batch_idx, pos_world, force, links_state
-            )
-
-        return new_pos, new_vel, contact_normal
-
-    def preprocess(self, f):
+    def detach_pbd_particles(self, particles_idx: torch.Tensor, envs_idx: torch.Tensor) -> None:
+        """Detach some PBD particles from the links animating them."""
+        kernel_detach_pbd_from_rigid_link(particles_idx, envs_idx, self.legacy_coupler_state)
+
+    # ------------------------------------------------------------------------------------
+    # ------------------------------------ stepping --------------------------------------
+    # ------------------------------------------------------------------------------------
+
+    def preprocess(self, f: int) -> None:
         # preprocess for MPM CPIC
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            self.mpm_surface_to_particle(
+        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+            kernel_mpm_surface_to_particle(
                 f,
+                self.mpm_solver.mpm_state,
                 self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.rigid_info,
+                self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.collider.collider_config,
             )
 
-    def couple(self, f):
+    def couple(self, f: int) -> None:
         # MPM <-> all others
         if self.mpm_solver.is_active:
-            self.mpm_grid_op(
+            kernel_mpm_grid_op(
                 f,
-                self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
-                rigid_info=self.rigid_solver.rigid_info,
-                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                collider_config=self.rigid_solver.collider.collider_config,
+                self.sim.sim_state,
+                self.mpm_solver.mpm_state,
+                self.sph_solver.sph_state,
+                self.pbd_solver.pbd_state,
+                self.rigid_solver.dyn_state.geoms,
+                self.rigid_solver.dyn_state.links,
+                self.mpm_solver.mpm_info,
+                self.sph_solver.sph_info,
+                self.pbd_solver.pbd_info,
+                self.rigid_solver.dyn_info.geoms,
+                self.rigid_solver.rigid_info,
+                self.rigid_solver.collider.sdf.sdf_info,
+                self.legacy_coupler_info,
+                self.legacy_coupler_config,
+                self.rigid_solver.collider.collider_config,
+                self.mpm_solver.force_fields,
             )
 
         # SPH <-> Rigid
-        if self._rigid_sph:
-            self.sph_rigid(
-                f,
+        if self.legacy_coupler_config.has_rigid_sph:
+            kernel_sph_rigid(
+                self.sph_solver.sph_state,
                 self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_state.links,
+                self.sph_solver.sph_info,
+                self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_info.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.sdf.sdf_info,
+                self.legacy_coupler_info,
+                self.legacy_coupler_config,
                 self.rigid_solver.collider.collider_config,
             )
 
         # PBD <-> Rigid
-        if self._rigid_pbd:
-            self.kernel_pbd_rigid_collide(
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
-                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                rigid_info=self.rigid_solver.rigid_info,
-                collider_config=self.rigid_solver.collider.collider_config,
+        if self.legacy_coupler_config.has_rigid_pbd:
+            kernel_pbd_rigid_collide(
+                self.pbd_solver.pbd_state,
+                self.rigid_solver.dyn_state.geoms,
+                self.rigid_solver.dyn_state.links,
+                self.pbd_solver.pbd_info,
+                self.rigid_solver.dyn_info.geoms,
+                self.rigid_solver.rigid_info,
+                self.rigid_solver.collider.sdf.sdf_info,
+                self.rigid_solver.collider.collider_config,
             )
 
             # 1-way: animate particles by links, over the substep interval and no faster than the clamp allows.
-            self.kernel_pbd_rigid_solve_animate_particles_by_link(
-                substep_inv_dt=1.0 / self.pbd_solver.substep_dt, links_state=self.rigid_solver.dyn_state.links
+            kernel_pbd_rigid_solve_animate_particles_by_link(
+                self.pbd_solver.pbd_state,
+                self.rigid_solver.dyn_state.links,
+                self.legacy_coupler_state,
+                self.legacy_coupler_info,
             )
 
         if self.fem_solver.is_active:
-            self.fem_surface_force(
+            kernel_fem_surface_force(
                 f,
+                self.fem_solver.fem_state,
+                self.mpm_solver.mpm_state,
+                self.sph_solver.sph_state,
                 self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_state.links,
+                self.fem_solver.fem_info,
+                self.mpm_solver.mpm_info,
+                self.sph_solver.sph_info,
+                self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.sdf.sdf_info,
+                self.legacy_coupler_info,
+                self.legacy_coupler_config,
                 self.rigid_solver.collider.collider_config,
             )
 
@@ -982,9 +300,700 @@ class LegacyCoupler(RBC):
         The couplings of the FEM solver with the rigid, MPM and SPH solvers carry no gradient: they overwrite the
         velocity of the surface vertices of the FEM entities in place, which the reverse pass cannot undo.
         """
-        return not (self._rigid_fem or self._fem_mpm or self._fem_sph)
+        return not (
+            self.legacy_coupler_config.has_rigid_fem
+            or self.legacy_coupler_config.has_fem_mpm
+            or self.legacy_coupler_config.has_fem_sph
+        )
 
     @property
     def active_solvers(self):
         """All the active solvers managed by the scene's simulator."""
         return self.sim.active_solvers
+
+
+# ------------------------------------------------------------------------------------
+# ------------------------------------- kernels --------------------------------------
+# ------------------------------------------------------------------------------------
+
+
+@qd.kernel
+def kernel_reset_mpm_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: MPMState):
+    for i_p, i_b_ in qd.ndrange(
+        mpm_state.particles_cpic.rigid_normal.shape[0],
+        envs_idx.shape[0],
+        axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal)),
+    ):
+        i_b = envs_idx[i_b_]
+        for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
+            mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func
+def func_rigid_geom_influence(
+    i_g: int,
+    i_b: int,
+    pos_world: qd.types.vector(3),
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    collider_config: qd.template(),
+    skip_weak_normal: qd.template(),
+):
+    """
+    Return the signed distance of a point to a rigid geom, the influence of the geom there, and its normal there.
+
+    With `skip_weak_normal`, the normal is left zero where the influence is too weak to matter (see
+    'LegacyCouplerInfo'), which spares its evaluation.
+    """
+    signed_dist = sdf.sdf_func_world(i_g, i_b, pos_world, geoms_state, geoms_info, sdf_info)
+
+    # bigger coup_softness implies that the coupling influence extends further away from the object.
+    softness = qd.max(legacy_coupler_info.softness_min[None], geoms_info.coup_softness[i_g])
+    influence = qd.min(qd.exp(-signed_dist / softness), 1)
+
+    normal_rigid = qd.Vector.zero(gs.qd_float, 3)
+    is_normal_needed = True
+    if qd.static(skip_weak_normal):
+        is_normal_needed = influence > legacy_coupler_info.influence_min[None]
+    if is_normal_needed:
+        normal_rigid = sdf.sdf_func_normal_world(
+            i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+        )
+    return signed_dist, influence, normal_rigid
+
+
+@qd.func
+def func_point_vel_after_collisions_with_rigid_geoms(
+    i_b: int,
+    pos_world: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    collider_config: qd.template(),
+):
+    """Return the velocity of a point of the given mass once it collided with every rigid geom that couples."""
+    for i_g in range(geoms_info.needs_coup.shape[0]):
+        if geoms_info.needs_coup[i_g]:
+            _, influence, normal_rigid = func_rigid_geom_influence(
+                i_g,
+                i_b,
+                pos_world,
+                geoms_state,
+                geoms_info,
+                rigid_info,
+                sdf_info,
+                legacy_coupler_info,
+                collider_config,
+                skip_weak_normal=True,
+            )
+            if influence > legacy_coupler_info.influence_min[None]:
+                vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+                    i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
+                )
+    return vel
+
+
+@qd.func
+def func_sph_particle_vel_after_collision_with_rigid_geom(
+    i_g: int,
+    i_b: int,
+    pos_world: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    pressure: float,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    sph_info: SPHInfo,
+    geoms_info: GeomsInfo,
+    links_info: LinksInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    legacy_coupler_config: qd.template(),
+    collider_config: qd.template(),
+):
+    """
+    Return the velocity of an SPH particle colliding with a rigid geom.
+
+    The particle also pushes the geom by the static pressure of the liquid.
+    """
+    # The pressure below also pushes the geom where the influence is too weak for the collision, which takes the normal
+    signed_dist, influence, normal_rigid = func_rigid_geom_influence(
+        i_g,
+        i_b,
+        pos_world,
+        geoms_state,
+        geoms_info,
+        rigid_info,
+        sdf_info,
+        legacy_coupler_info,
+        collider_config,
+        skip_weak_normal=False,
+    )
+    if influence > legacy_coupler_info.influence_min[None]:
+        vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+            i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
+        )
+
+    # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
+    # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
+    # surface and integrating the symmetric pressure force over the truncated kernel support yields the factor
+    # 2 * sigma(signed_dist), with sigma the kernel plane integral (see func_cubic_kernel_plane_integral in
+    # sph_solver.py). Sigma integrates to 1/2 across the support band, so a covering particle layer transmits
+    # exactly p per unit area: Archimedes buoyancy with no tuning constant. Fixed links are exempt: they cannot
+    # respond to the force, and the reaction is a conservative stiff kick that keeps fluid resting on them
+    # ringing forever, pumped by the acoustic pressure fluctuations of the fluid.
+    i_l = geoms_info.link_idx[i_g]
+    I_l = [i_l, i_b] if qd.static(legacy_coupler_config.is_links_info_batched) else i_l
+    if signed_dist < sph_info.support_radius[None] and pressure > 0 and not links_info.is_fixed[I_l]:
+        pressure_force = (
+            -2.0
+            * pressure
+            * sph_info.particle_volume[None]
+            * func_cubic_kernel_plane_integral(signed_dist, sph_info)
+            * normal_rigid
+        )
+        func_apply_coupling_force(i_l, i_b, pos_world, pressure_force, links_state)
+        vel = vel - pressure_force * (rigid_info.substep_dt[None] / mass)
+
+    return vel
+
+
+@qd.func
+def func_mpm_cell_vel_after_exchange_with_particles(
+    i_b: int,
+    pos: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    half_size: float,
+    particles_pos: qd.Tensor,
+    particles_vel: qd.Tensor,
+    particles_is_moved: qd.Tensor,
+    particles_mass: qd.Tensor,
+    hash_grid: SpatialHashGrid,
+    n_cells: int,
+):
+    """
+    Return the velocity of a cell of the MPM grid once it exchanged momentum with the particles of a solver it holds.
+
+    The cell takes the mean velocity of the sorted particles within a cube of half side `half_size` around its position
+    `pos`, and those that `particles_is_moved` selects take the opposite momentum (see 'func_add_particles_momentum').
+    A cell holding no particle keeps its velocity.
+    """
+    particles_vel_mean, n_particles = func_get_particles_mean_vel(
+        i_b, pos, particles_pos, particles_vel, hash_grid, half_size, n_cells
+    )
+    if n_particles > 0:
+        particles_dmv = mass * (vel - particles_vel_mean)
+        func_add_particles_momentum(
+            i_b,
+            pos,
+            particles_dmv,
+            particles_pos,
+            particles_vel,
+            particles_is_moved,
+            particles_mass,
+            hash_grid,
+            half_size,
+            n_cells,
+        )
+        vel = particles_vel_mean
+    return vel
+
+
+@qd.kernel
+def kernel_mpm_grid_op(
+    f: int,
+    sim_state: SimulatorState,
+    mpm_state: MPMState,
+    sph_state: SPHState,
+    pbd_state: PBDState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    sph_info: SPHInfo,
+    pbd_info: PBDInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    legacy_coupler_config: qd.template(),
+    collider_config: qd.template(),
+    force_fields: qd.template(),
+):
+    """Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with."""
+    for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape[1:]):
+        mass_cell = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]
+        if mass_cell > rigid_info.EPS[None]:
+            #################### MPM grid op ####################
+            # Momentum to velocity, then gravity
+            vel_mpm = (1 / mass_cell) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
+            vel_mpm += mpm_info.substep_dt[None] * mpm_info.gravity[i_b]
+
+            pos = (qd.Vector([i_x, i_y, i_z]) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
+            mass_mpm = mass_cell / mpm_info.particle_volume_scale[None]
+
+            # External force fields, each one integrated on its own
+            for i_ff in qd.static(range(len(force_fields.fields))):
+                acc = force_fields.fields[i_ff].get_acc(pos, vel_mpm, sim_state.t[i_b], -1)
+                vel_mpm += acc * mpm_info.substep_dt[None]
+
+            #################### MPM <-> Rigid ####################
+            if qd.static(legacy_coupler_config.has_rigid_mpm):
+                vel_mpm = func_point_vel_after_collisions_with_rigid_geoms(
+                    i_b,
+                    pos,
+                    vel_mpm,
+                    mass_mpm,
+                    geoms_state,
+                    links_state,
+                    geoms_info,
+                    rigid_info,
+                    sdf_info,
+                    legacy_coupler_info,
+                    collider_config,
+                )
+
+            #################### MPM <-> SPH, PBD ####################
+            # Of the PBD particles, the free ones alone take momentum
+            half_size = 0.5 * mpm_info.dx[None]
+            if qd.static(legacy_coupler_config.has_mpm_sph):
+                vel_mpm = func_mpm_cell_vel_after_exchange_with_particles(
+                    i_b,
+                    pos,
+                    vel_mpm,
+                    mass_mpm,
+                    half_size,
+                    sph_state.particles_reordered.pos,
+                    sph_state.particles_reordered.vel,
+                    sph_state.particles_reordered.is_active,
+                    sph_info.particles.mass,
+                    sph_state.hash_grid,
+                    legacy_coupler_info.mpm_sph_stencil_size[None],
+                )
+            if qd.static(legacy_coupler_config.has_mpm_pbd):
+                vel_mpm = func_mpm_cell_vel_after_exchange_with_particles(
+                    i_b,
+                    pos,
+                    vel_mpm,
+                    mass_mpm,
+                    half_size,
+                    pbd_state.particles_reordered.pos,
+                    pbd_state.particles_reordered.vel,
+                    pbd_state.particles_reordered.is_free,
+                    pbd_info.particles.mass,
+                    pbd_state.hash_grid,
+                    legacy_coupler_info.mpm_pbd_stencil_size[None],
+                )
+
+            #################### MPM boundary ####################
+            _, vel_mpm = func_impose_cube_boundary(pos, vel_mpm, mpm_info.boundary)
+            mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = vel_mpm
+
+
+@qd.kernel
+def kernel_mpm_surface_to_particle(
+    f: int,
+    mpm_state: MPMState,
+    geoms_state: GeomsState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    collider_config: qd.template(),
+):
+    """Update the normal of the rigid geoms each active MPM particle sees, as long as it stays on the same side."""
+    for i_p, i_b in qd.ndrange(
+        *mpm_state.particles.pos.shape[1:], axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
+    ):
+        if mpm_state.particles.is_active[f, i_p, i_b]:
+            for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
+                if geoms_info.needs_coup[i_g]:
+                    sdf_normal = sdf.sdf_func_normal_world(
+                        i_g,
+                        i_b,
+                        mpm_state.particles.pos[f, i_p, i_b],
+                        geoms_state,
+                        geoms_info,
+                        rigid_info,
+                        sdf_info,
+                        collider_config,
+                    )
+                    # The normal is updated as long as the particle stays on the same side of the geom
+                    if sdf_normal.dot(mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b]) >= 0:
+                        mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = sdf_normal
+
+
+@qd.kernel
+def kernel_fem_surface_force(
+    f: int,
+    fem_state: FEMState,
+    mpm_state: MPMState,
+    sph_state: SPHState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    fem_info: FEMInfo,
+    mpm_info: MPMInfo,
+    sph_info: SPHInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    legacy_coupler_config: qd.template(),
+    collider_config: qd.template(),
+):
+    """Update the velocity of the surface vertices of the FEM entities by their collisions with the other solvers."""
+    # TODO: all collisions are on vertices instead of surface and edge
+    # Each surface vertex applies the couplings of its incident triangles in increasing triangle index, which
+    # reproduces a serial sweep over the triangles without a write race on the vertices they share.
+    for i_sv, i_b in qd.ndrange(
+        fem_info.surface_vertices.shape[0], fem_state.vertices.pos.shape[2], axes=qd.static(eoa(fem_state.vertices.vel))
+    ):
+        i_v = fem_info.surface_vertices[i_sv]
+        pos = fem_state.vertices.pos[f, i_v, i_b]
+        vel_fem_sv = fem_state.vertices.vel[f + 1, i_v, i_b]
+        i_tri_start = fem_info.surface_vertices_tri_start[i_sv]
+        n_tris = fem_info.surface_vertices_tri_start[i_sv + 1] - i_tri_start
+
+        # FEM <-> Rigid
+        # NOTE: collision only on surface vertices
+        if qd.static(legacy_coupler_config.has_rigid_fem):
+            # The influence, normal and velocity of a rigid geom at the vertex are the same for all its incident
+            # triangles, so they are evaluated once, and the momentum the vertex transfers is applied once.
+            for i_g in range(geoms_info.needs_coup.shape[0]):
+                if geoms_info.needs_coup[i_g]:
+                    _, influence, normal_rigid = func_rigid_geom_influence(
+                        i_g,
+                        i_b,
+                        pos,
+                        geoms_state,
+                        geoms_info,
+                        rigid_info,
+                        sdf_info,
+                        legacy_coupler_info,
+                        collider_config,
+                        skip_weak_normal=True,
+                    )
+                    if influence > legacy_coupler_info.influence_min[None]:
+                        vel_rigid = func_vel_at_point(geoms_info.link_idx[i_g], i_b, pos, links_state)
+                        delta_mv = qd.Vector.zero(gs.qd_float, 3)
+                        is_colliding_any = False
+                        for i_s_ in range(n_tris):
+                            mass = (
+                                fem_info.surface_vertices_tri_mass_scaled[i_tri_start + i_s_] / fem_info.vol_scale[None]
+                            )
+                            vel_new, is_colliding = func_point_vel_after_collision_with_rigid_geom(
+                                i_g, vel_fem_sv, vel_rigid, normal_rigid, influence, geoms_info, rigid_info
+                            )
+                            if is_colliding:
+                                # assume element mass uniformly distributed to vertices
+                                delta_mv = delta_mv + (mass / 3.0) * (vel_new - vel_fem_sv)
+                                is_colliding_any = True
+                            vel_fem_sv = vel_new
+                        if is_colliding_any:
+                            func_apply_coupling_force(
+                                geoms_info.link_idx[i_g],
+                                i_b,
+                                pos,
+                                force=-delta_mv / rigid_info.substep_dt[None],
+                                links_state=links_state,
+                            )
+
+        if qd.static(legacy_coupler_config.has_fem_mpm or legacy_coupler_config.has_fem_sph):
+            for i_s_ in range(n_tris):
+                i_s = fem_info.surface_vertices_tri_idx[i_tri_start + i_s_]
+                mass = fem_info.surface_vertices_tri_mass_scaled[i_tri_start + i_s_] / fem_info.vol_scale[None]
+
+                tri2v = fem_info.surfaces.tri2v[i_s]
+                surface_normal = triangle_face_normal(
+                    fem_state.vertices.pos[f, tri2v[0], i_b],
+                    fem_state.vertices.pos[f, tri2v[1], i_b],
+                    fem_state.vertices.pos[f, tri2v[2], i_b],
+                    rigid_info.EPS[None],
+                )
+
+                # FEM <-> MPM (interact with MPM grid instead of particles)
+                # NOTE: not doing this in mpm_grid_op otherwise we need to search for fem surface for each particles
+                #       however, this function is called after mpm boundary conditions.
+                if qd.static(legacy_coupler_config.has_fem_mpm):
+                    mass_fem_sv = mass / 4.0  # assume element mass uniformly distributed
+
+                    # Following the transfer of the MPM particles to the grid
+                    vel_mpm = qd.Vector.zero(gs.qd_float, 3)
+                    mass_mpm = gs.qd_float(0.0)
+                    mpm_base, _, mpm_w = func_quadratic_bspline_stencil(pos, mpm_info)
+                    new_vel_fem_sv = vel_fem_sv
+                    grid_shape = mpm_state.grid.mass.shape
+                    grid_res = qd.Vector([grid_shape[1], grid_shape[2], grid_shape[3]])
+                    dx = mpm_info.dx[None]
+                    for mpm_offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                        cell = mpm_base - mpm_info.grid_offset[None] + mpm_offset
+                        # A vertex outside the domain of the grid exchanges nothing with the cells the grid lacks
+                        is_cell_in_grid = (cell >= 0).all() and (cell < grid_res).all()
+                        mpm_grid_mass = gs.qd_float(0.0)
+                        if is_cell_in_grid:
+                            mpm_grid_mass = (
+                                mpm_state.grid.mass[f, cell[0], cell[1], cell[2], i_b]
+                                / mpm_info.particle_volume_scale[None]
+                            )
+
+                        mpm_weight = gs.qd_float(1.0)
+                        for d in qd.static(range(3)):
+                            mpm_weight *= mpm_w[mpm_offset[d], d]
+
+                        # FEM -> MPM, within one cell of the surface
+                        mpm_grid_pos = (cell + mpm_info.grid_offset[None]) * dx
+                        signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
+                        if is_cell_in_grid and signed_dist <= dx:
+                            vel_out = mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b]
+                            mass_mpm_at_cell = mpm_weight * mpm_grid_mass
+                            vel_mpm += mpm_weight * vel_out
+                            mass_mpm += mass_mpm_at_cell
+
+                            if mass_mpm_at_cell > rigid_info.EPS[None]:
+                                # The full mass of the cell, whereas mass_mpm_at_cell carries the weight of the vertex
+                                delta_mpm_vel_at_cell = (vel_fem_sv * mpm_weight - vel_out) * (
+                                    mpm_grid_mass / mass_fem_sv
+                                )
+                                qd.atomic_add(
+                                    mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b], delta_mpm_vel_at_cell
+                                )
+                                new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
+
+                    # MPM -> FEM
+                    if mass_mpm > rigid_info.EPS[None]:
+                        vel_fem_sv = new_vel_fem_sv
+
+                # FEM <-> SPH TODO: this doesn't work well
+                if qd.static(legacy_coupler_config.has_fem_sph):
+                    mass_fem_sv = mass / 4.0
+                    half_size = 0.5 * sph_state.hash_grid.cell_size[None]
+                    sph_vel, n_particles = func_get_particles_mean_vel(
+                        i_b,
+                        pos,
+                        sph_state.particles_reordered.pos,
+                        sph_state.particles_reordered.vel,
+                        sph_state.hash_grid,
+                        half_size,
+                        n_cells=2,
+                    )
+                    if n_particles > 0:
+                        # The tangential velocity is left out
+                        vel_old = vel_fem_sv
+                        vel_fem_sv = sph_vel.dot(surface_normal) * surface_normal
+                        func_add_particles_momentum(
+                            i_b,
+                            pos,
+                            -mass_fem_sv * (vel_fem_sv - vel_old),
+                            sph_state.particles_reordered.pos,
+                            sph_state.particles_reordered.vel,
+                            sph_state.particles_reordered.is_active,
+                            sph_info.particles.mass,
+                            sph_state.hash_grid,
+                            half_size,
+                            n_cells=2,
+                        )
+
+        fem_state.vertices.vel[f + 1, i_v, i_b] = vel_fem_sv
+
+
+@qd.kernel
+def kernel_sph_rigid(
+    sph_state: SPHState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    sph_info: SPHInfo,
+    geoms_info: GeomsInfo,
+    links_info: LinksInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    legacy_coupler_config: qd.template(),
+    collider_config: qd.template(),
+):
+    """Collide the sorted active SPH particles with the rigid geoms that couple."""
+    for i_p, i_b in qd.ndrange(
+        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.pos))
+    ):
+        if sph_state.particles_reordered.is_active[i_p, i_b]:
+            # The normals follow the particles in the order of their index, which the sorted ones read through
+            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+            for i_g in range(geoms_info.needs_coup.shape[0]):
+                if geoms_info.needs_coup[i_g]:
+                    vel = func_sph_particle_vel_after_collision_with_rigid_geom(
+                        i_g,
+                        i_b,
+                        sph_state.particles_reordered.pos[i_p, i_b],
+                        sph_state.particles_reordered.vel[i_p, i_b],
+                        sph_info.particles.mass[i_o],
+                        sph_state.particles_reordered.p[i_p, i_b],
+                        geoms_state,
+                        links_state,
+                        sph_info,
+                        geoms_info,
+                        links_info,
+                        rigid_info,
+                        sdf_info,
+                        legacy_coupler_info,
+                        legacy_coupler_config,
+                        collider_config,
+                    )
+                    sph_state.particles_reordered.vel[i_p, i_b] = vel
+
+
+@qd.func
+def func_pbd_collide_with_rigid_geom(
+    i_p: int,
+    i_g: int,
+    i_b: int,
+    pos_world: qd.types.vector(3),
+    vel: qd.types.vector(3),
+    mass: float,
+    pbd_state: PBDState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    pbd_info: PBDInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    collider_config: qd.template(),
+):
+    """
+    Push a sorted particle penetrating a rigid geom back to its surface, and apply the reaction to the geom.
+
+    The particle takes the velocity of its displacement over the substep, friction left out.
+    """
+    signed_dist = sdf.sdf_func_world(i_g, i_b, pos_world, geoms_state, geoms_info, sdf_info)
+    contact_normal = sdf.sdf_func_normal_world(
+        i_g, i_b, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+    )
+    new_pos = pos_world
+    new_vel = vel
+    particle_radius = pbd_info.particle_size[None] / 2
+    if signed_dist < particle_radius:
+        new_pos = pos_world + contact_normal * (particle_radius - signed_dist)
+        new_vel = (new_pos - pbd_state.particles_reordered.ipos[i_p, i_b]) / pbd_info.substep_dt[None]
+
+        delta_mv = mass * (new_vel - vel)
+        force = -delta_mv / rigid_info.substep_dt[None]
+        func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+
+    return new_pos, new_vel
+
+
+@qd.kernel
+def kernel_pbd_rigid_collide(
+    pbd_state: PBDState,
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    pbd_info: PBDInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    collider_config: qd.template(),
+):
+    """Collide the sorted active PBD particles with the rigid geoms that couple."""
+    for i_p, i_b in qd.ndrange(
+        *pbd_state.particles_reordered.pos.shape, axes=qd.static(eoa(pbd_state.particles_reordered.pos))
+    ):
+        if pbd_state.particles_reordered.is_active[i_p, i_b]:
+            i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
+            # A particle fixed in place or to a link collides as a free one, which is physically implausible
+            for i_g in range(geoms_info.needs_coup.shape[0]):
+                if geoms_info.needs_coup[i_g]:
+                    pos, vel = func_pbd_collide_with_rigid_geom(
+                        i_p,
+                        i_g,
+                        i_b,
+                        pbd_state.particles_reordered.pos[i_p, i_b],
+                        pbd_state.particles_reordered.vel[i_p, i_b],
+                        pbd_info.particles.mass[i_o],
+                        pbd_state,
+                        geoms_state,
+                        links_state,
+                        pbd_info,
+                        geoms_info,
+                        rigid_info,
+                        sdf_info,
+                        collider_config,
+                    )
+                    pbd_state.particles_reordered.pos[i_p, i_b] = pos
+                    pbd_state.particles_reordered.vel[i_p, i_b] = vel
+
+
+@qd.kernel
+def kernel_attach_pbd_to_rigid_link(
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    link_idx: int,
+    pbd_state: PBDState,
+    links_state: LinksState,
+    legacy_coupler_state: LegacyCouplerState,
+):
+    """Set some particles in some environments to be animated by a link, keeping their current offset to it."""
+    for i_p_, i_b_ in qd.ndrange(
+        particles_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(pbd_state.particles.is_free))
+    ):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        local_pos = qd_inv_transform_by_trans_quat(
+            pbd_state.particles.pos[i_p, i_b], links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
+        )
+        pbd_state.particles.is_free[i_p, i_b] = False
+        legacy_coupler_state.pbd_attach_link_idx[i_p, i_b] = link_idx
+        legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = local_pos
+
+
+@qd.kernel
+def kernel_detach_pbd_from_rigid_link(
+    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), legacy_coupler_state: LegacyCouplerState
+):
+    """Detach some particles from the links animating them."""
+    for i_p_, i_b_ in qd.ndrange(
+        particles_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(legacy_coupler_state.pbd_attach_link_idx))
+    ):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        legacy_coupler_state.pbd_attach_link_idx[i_p, i_b] = -1
+        legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel
+def kernel_pbd_rigid_solve_animate_particles_by_link(
+    pbd_state: PBDState,
+    links_state: LinksState,
+    legacy_coupler_state: LegacyCouplerState,
+    legacy_coupler_info: LegacyCouplerInfo,
+):
+    """
+    Give every particle animated by a link the velocity that brings it to its target on the link.
+
+    The target moves with the link, whose velocity the particle takes, plus the velocity correcting its position over
+    the substep, at an inverse time step clamped to avoid large jerks. It runs after both the rigid and the PBD solvers
+    updated, so the correction lags one substep behind.
+    """
+    for i_r, i_b in qd.ndrange(*pbd_state.particles.pos.shape, axes=qd.static(eoa(pbd_state.particles.pos))):
+        i_p = pbd_state.hash_grid.particles_idx[i_r, i_b]
+        i_l = -1
+        if pbd_state.particles_reordered.is_active[i_r, i_b]:
+            i_l = legacy_coupler_state.pbd_attach_link_idx[i_p, i_b]
+        if i_l >= 0:
+            target_world_pos = qd_transform_by_trans_quat(
+                legacy_coupler_state.pbd_attach_local_pos[i_p, i_b],
+                links_state.pos[i_l, i_b],
+                links_state.quat[i_l, i_b],
+            )
+            link_com_in_world = links_state.root_COM[i_l, i_b] + links_state.i_pos[i_l, i_b]
+            world_arm = target_world_pos - link_com_in_world
+            target_world_vel = links_state.cd_vel[i_l, i_b] + links_state.cd_ang[i_l, i_b].cross(world_arm)
+
+            pos_correction = target_world_pos - pbd_state.particles_reordered.pos[i_r, i_b]
+            corrective_vel = pos_correction * legacy_coupler_info.animate_inv_dt[None]
+            pbd_state.particles_reordered.vel[i_r, i_b] = corrective_vel + target_world_vel

@@ -7,8 +7,8 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import ErrorCode
-from genesis.utils.data import ENVS, Data, DataKind, Size, StaticConfig, field
+from genesis.engine.solvers.base_solver import VFACES, VVERTS, ErrorCode
+from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field
 
 
 class RigidErrorCode(ErrorCode):
@@ -159,9 +159,7 @@ FACES = Size("faces")
 EDGES = Size("edges")
 FREE_VERTS = Size("free_verts")
 FIXED_VERTS = Size("fixed_verts")
-VVERTS = Size("vverts")
 CUSTOM_VVERTS = Size("custom_vverts")
-VFACES = Size("vfaces")
 VGEOMS = Size("vgeoms")
 CANDIDATE_EQUALITIES = Size("candidate_equalities")
 DOFS_INFO_ENVS = Size("dofs_info_envs")
@@ -510,7 +508,7 @@ class DynState(Data):
     vgeoms: VGeomsState
 
 
-class RigidSimStaticConfig(StaticConfig):
+class RigidConfig(Config):
     """The compile-time configuration of the kernels of the rigid solver."""
 
     backend: int

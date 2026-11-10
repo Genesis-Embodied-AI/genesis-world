@@ -51,7 +51,7 @@ def V(*args, **kwargs):
 
 @qd.data_oriented
 @dataclass_transform(eq_default=True, kw_only_default=True, frozen_default=True)
-class StaticConfig:
+class Config:
     """
     Base of the static configs, the compile-time switches kernels take as `qd.template()`.
 
@@ -78,7 +78,7 @@ class StaticConfig:
                 validators[key] = TypeAdapter(StrictInt)
             elif isinstance(annotation, type) and issubclass(annotation, (IntEnum, StrEnum)):
                 validators[key] = TypeAdapter(annotation)
-            elif isinstance(annotation, type) and issubclass(annotation, StaticConfig):
+            elif isinstance(annotation, type) and issubclass(annotation, Config):
                 validators[key] = TypeAdapter(annotation, config=pydantic.ConfigDict(arbitrary_types_allowed=True))
             else:
                 raise TypeError(f"{name}.{key}: a static config holds bool, int, IntEnum, StrEnum or static configs.")
@@ -189,6 +189,9 @@ ENVS = Size("envs")
 # The workers of a detection scratch: one per environment, or one per thread of a pass draining a queue of pairs. They
 # stand for the environments in the memory order of the arrays (see 'env_first' in Data).
 WORKERS = Size("workers")
+# The frames of substeps a solver holding its state in frames keeps, the first axis of the arrays held in frames (see
+# 'Solver.has_frames')
+FRAMES = Size("frames")
 
 
 class FieldRef:
@@ -369,6 +372,8 @@ class _Node(NamedTuple):
         return self.member is None and self.shape == () and self.kind in (DataKind.CONSTANT, DataKind.INFO)
 
 
+# FIXME: quadrants#XXXX - the all-Field launch shortcut ignores nested structs, so a kernel taking an aggregate in
+# performance mode pays one Python call per leaf it reads at every launch whose context cannot be cached.
 class Data:
     """
     Base of the structs of solver data, which kernels take as arguments.
@@ -786,11 +791,15 @@ class ArrayItem(NamedTuple):
 
     It is a quadrants array, or a torch tensor such as the step counts of the simulator, which a restore fills in place
     (see 'fill_data'). An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built.
+    `is_framed` states that the array is declared held in frames in its struct (see 'field'). `envs_axis` is the last
+    index of the array, of its frame 0 for one held in frames, which the environments take in an array spanning them.
     """
 
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
+    is_framed: bool = False
+    envs_axis: int = 0
 
 
 class ScalarItem(NamedTuple):
@@ -828,32 +837,45 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
-    # The attributes left to walk, depth first in declaration order, each with the kind it inherits and its name
-    pending = [(owner, attr, kind, attr)]
+    # The attributes left to walk, depth first in declaration order, each with the kind and the declared shape it
+    # inherits, and its name
+    pending = [(owner, attr, kind, (), attr)]
     while pending:
-        owner, attr, kind, name = pending.pop()
+        owner, attr, kind, shape, name = pending.pop()
         value = getattr(owner, attr)
         is_owner_struct = dataclasses.is_dataclass(owner) or isinstance(owner, tuple)
-        if isinstance(value, StaticConfig):
+        if isinstance(value, Config):
             yield ConfigItem(name, value)
         elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-            yield ArrayItem(name, kind, value)
+            is_framed = shape[:1] == (FRAMES,)
+            envs_axis = len(value.shape) - 1 - is_framed
+            yield ArrayItem(name, kind, value, is_framed, envs_axis)
             if not isinstance(value, torch.Tensor) and value.has_grad():
-                yield ArrayItem(f"{name}.grad", kind, value.grad)
+                yield ArrayItem(f"{name}.grad", kind, value.grad, is_framed, envs_axis)
         elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
+            # A field takes the shape it states, else the default of its struct, else the shape the struct inherits,
+            # as the constructor of the struct resolves it (see 'Data')
+            if isinstance(value, Data) and value._shape is not None and not shape:
+                shape = value._shape
             if dataclasses.is_dataclass(value):
-                members = [
-                    (field.name, field.metadata.get(_SPEC, _FieldSpec()).kind) for field in dataclasses.fields(value)
-                ]
+                members = [(field.name, field.metadata.get(_SPEC, _FieldSpec())) for field in dataclasses.fields(value)]
             else:
-                members = [(member, None) for member in value._fields]
-            for member, stated_kind in reversed(members):
-                is_member_array = isinstance(getattr(value, member), (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
+                members = [(member, _FieldSpec()) for member in value._fields]
+            for member, spec in reversed(members):
+                member_value = getattr(value, member)
+                stated_kind = spec.kind
+                is_member_array = isinstance(member_value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
                 if stated_kind is None and kind is None and is_member_array:
                     stated_kind = type(value).kind
-                pending.append((value, member, kind if stated_kind is None else stated_kind, f"{name}.{member}"))
+                member_shape = spec.shape
+                if member_shape is None and isinstance(member_value, Data):
+                    member_shape = member_value._shape
+                if member_shape is None:
+                    member_shape = shape
+                member_kind = kind if stated_kind is None else stated_kind
+                pending.append((value, member, member_kind, member_shape, f"{name}.{member}"))
         elif isinstance(value, (bool, int, float)) and not is_owner_struct:
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")

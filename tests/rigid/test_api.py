@@ -7,7 +7,6 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.states.solvers import RigidSolverState
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1192,25 +1191,39 @@ def test_axis_aligned_bounding_boxes(n_envs):
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize(
-    "friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility",
+    "friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility, constraint_solver, iterations",
     [
-        (gs.friction_cone.pyramidal, None, False, False),
+        (gs.friction_cone.pyramidal, None, False, False, gs.constraint_solver.Newton, 25),
+        # A solve capped at a single iteration ends where its warm start leads it, so the steps that follow a restored
+        # state reveal whether the warm start was restored with it.
+        (gs.friction_cone.pyramidal, None, False, False, gs.constraint_solver.CG, 1),
         # Hibernation sleeps both boxes before the state is captured, so the reset has to wake them. It needs its own
         # cell because MuJoCo compatibility lowers the rest threshold to a velocity this scene never reaches, which
         # would leave the sleeping path unexercised.
-        (gs.friction_cone.pyramidal, None, True, False),
+        (gs.friction_cone.pyramidal, None, True, False, gs.constraint_solver.Newton, 25),
         # The buffers a step leaves behind: the elliptic cone keeps a cone-free Hessian mirror, the sparse solve zeroes
         # each Jacobian row through the pattern the previous step left, and MuJoCo compatibility reads the warm-start
         # acceleration unconditionally.
-        (gs.friction_cone.elliptic, True, False, True),
+        (gs.friction_cone.elliptic, True, False, True, gs.constraint_solver.Newton, 25),
     ],
 )
-def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable_mujoco_compatibility):
+def test_reset(
+    show_viewer,
+    precision,
+    friction_cone,
+    sparse_solve,
+    use_hibernation,
+    enable_mujoco_compatibility,
+    constraint_solver,
+    iterations,
+):
     N_STEPS = 60
     BOOL_MASK = torch.tensor([True, False, True, False], dtype=torch.bool, device=gs.device)
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
+            constraint_solver=constraint_solver,
+            iterations=iterations,
             friction_cone=friction_cone,
             sparse_solve=sparse_solve,
             use_hibernation=use_hibernation,
@@ -1248,6 +1261,9 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
     # before the first step that follows the reset. Acceleration only matches from the first step onwards: a restored
     # state derives it from the restored velocity, while the capture reflects the refresh the setter left pending.
     GETTERS = (
+        scene.rigid_solver.get_qpos,
+        scene.rigid_solver.get_dofs_velocity,
+        scene.rigid_solver.get_links_pos,
         box.get_pos,
         box.get_quat,
         box.get_vel,
@@ -1265,7 +1281,6 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
     )
 
     init_state = scene.get_state()
-    init_rigid_state = next(s for s in init_state.solvers_state if isinstance(s, RigidSolverState))
     init_getters = tuple(getter() for getter in GETTERS)
     # The horizon reaches past the point where both boxes come to rest, so the state is captured with them asleep
     # whenever hibernation is enabled, and the reset has to wake them.
@@ -1275,37 +1290,41 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
         for entity in (box, box_far):
             assert qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated, entity.base_link_idx).all()
     fallen_state = scene.get_state()
-    fallen_rigid_state = next(s for s in fallen_state.solvers_state if isinstance(s, RigidSolverState))
     fallen_getters = tuple(getter() for getter in GETTERS)
     fallen_acc_getters = tuple(getter() for getter in ACC_GETTERS)
+
+    # The step that follows a restored state replays the one that followed its capture, the warm starts of the collision
+    # detection and of the constraint solve included. Restoring a state wakes its sleeping bodies, so the replay holds
+    # while none sleeps.
+    if not use_hibernation:
+        scene.step()
+        scene.get_state()
+        continued_getters = tuple(getter() for getter in GETTERS)
+        scene.reset(state=fallen_state)
+        scene.step()
+        scene.get_state()
+        resumed_getters = tuple(getter() for getter in GETTERS)
+        # FIXME: quadrants#1086 - the replay drifts in the last bits, which contacts amplify to the tolerance in fp32.
+        tol = 1e-9 if precision == "64" else 2e-4
+        for actual, continued_ref in zip(resumed_getters, continued_getters):
+            assert_allclose(actual, continued_ref, tol=tol)
 
     for envs_idx in (BOOL_MASK, torch.where(BOOL_MASK)[0]):
         scene.reset(state=fallen_state)
         scene.reset(state=init_state, envs_idx=envs_idx)
-        restored_rigid_state = next(s for s in scene.get_state().solvers_state if isinstance(s, RigidSolverState))
         restored_getters = tuple(getter() for getter in GETTERS)
-        for actual, init_ref, fallen_ref in (
-            (restored_rigid_state.qpos, init_rigid_state.qpos, fallen_rigid_state.qpos),
-            (restored_rigid_state.dofs_vel, init_rigid_state.dofs_vel, fallen_rigid_state.dofs_vel),
-            (restored_rigid_state.links_pos, init_rigid_state.links_pos, fallen_rigid_state.links_pos),
-            *zip(restored_getters, init_getters, fallen_getters),
-        ):
+        for actual, init_ref, fallen_ref in zip(restored_getters, init_getters, fallen_getters):
             assert_equal(actual[BOOL_MASK], init_ref[BOOL_MASK])
             assert_equal(actual[~BOOL_MASK], fallen_ref[~BOOL_MASK])
 
     # After reset, simulation from init_state should reproduce the original fallen_state trajectory
     for _ in range(N_STEPS):
         scene.step()
-    replayed_rigid_state = next(s for s in scene.get_state().solvers_state if isinstance(s, RigidSolverState))
+    # Reading the state refreshes the poses the step left one integration behind, as the capture of 'fallen_state' did
+    scene.get_state()
     replayed_getters = tuple(getter() for getter in GETTERS)
     replayed_acc_getters = tuple(getter() for getter in ACC_GETTERS)
-    for actual, fallen_ref in (
-        (replayed_rigid_state.qpos, fallen_rigid_state.qpos),
-        (replayed_rigid_state.dofs_vel, fallen_rigid_state.dofs_vel),
-        (replayed_rigid_state.links_pos, fallen_rigid_state.links_pos),
-        *zip(replayed_getters, fallen_getters),
-        *zip(replayed_acc_getters, fallen_acc_getters),
-    ):
+    for actual, fallen_ref in (*zip(replayed_getters, fallen_getters), *zip(replayed_acc_getters, fallen_acc_getters)):
         assert_equal(actual[BOOL_MASK], fallen_ref[BOOL_MASK])
 
 

@@ -402,18 +402,18 @@ def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     # >get_gpu_core_count() env regime. With the monolith arm pinned, the seed factor + gradient come from the monolith
     # body itself (see has_per_env_solve_seed in rigid/data.py). A stale Mgrad drops the boxes through the floor.
     import genesis.engine.solvers.rigid.rigid_solver as rigid_solver
-    from genesis.engine.solvers.rigid.data import RigidSimStaticConfig
+    from genesis.engine.solvers.rigid.data import RigidConfig
 
     monkeypatch.setattr(rigid_solver, "get_gpu_core_count", lambda: 1)
     # The gap is in the monolith arm's init path, so pin the arm (otherwise the autotuner might pick the decomposed
     # arm, which always seeds and would hide the regression).
-    _orig_static_config_init = RigidSimStaticConfig.__init__
+    _orig_config_init = RigidConfig.__init__
 
     def _force_monolith(self, *args, **kwargs):
         kwargs["prefer_decomposed_solver"] = 0
-        _orig_static_config_init(self, *args, **kwargs)
+        _orig_config_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(RigidSimStaticConfig, "__init__", _force_monolith)
+    monkeypatch.setattr(RigidConfig, "__init__", _force_monolith)
 
     scene = gs.Scene(
         show_viewer=show_viewer,

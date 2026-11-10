@@ -155,9 +155,8 @@ class PBDTetEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
-            active=True,
+            is_active=True,
             material_type=self._material_type,
             mass=float(self._particle_mass),
             rho_rest=0.0,
@@ -501,9 +500,8 @@ class PBDParticleEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
-            active=self.active,
+            is_active=self.active,
             material_type=int(self._solver.MATERIAL.LIQUID),
             mass=self._material.rho,
             rho_rest=self._material.rho,
@@ -555,9 +553,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
 
     def _add_particles_to_solver(self):
         self._solver.add_particles(
-            self._sim.cur_substep_local,
             self._particle_start,
-            active=self.active,
+            is_active=self.active,
             material_type=int(self._solver.MATERIAL.PARTICLE),
             mass=self._material.rho,
             rho_rest=self._material.rho,

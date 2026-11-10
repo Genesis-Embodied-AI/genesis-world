@@ -7,7 +7,7 @@ import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from . import support_field
 from .constants import EPA_POLY_INIT_RETURN_CODE, GJK_RETURN_CODE, GJK_STAGE, RETURN_CODE
-from .data import ColliderState, GJKInfo, GJKScratch, GJKState, GJKStaticConfig
+from .data import ColliderState, GJKConfig, GJKInfo, GJKScratch, GJKState
 from .epa import (
     func_epa,
     func_epa_init_polytope_2d,
@@ -27,7 +27,7 @@ class GJK:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
-        # Resolved by the collider (see '_init_static_config')
+        # Resolved by the collider (see '_init_config')
         enable_contact_patch = rigid_solver._options.enable_contact_patch
         gjk_max_iterations = 50
         epa_max_iterations = 50
@@ -50,7 +50,7 @@ class GJK:
             max_contacts_per_pair = 1
             max_contact_polygon_verts = 1
 
-        self.gjk_config = GJKStaticConfig(enable_contact_patch=enable_contact_patch)
+        self.gjk_config = GJKConfig(enable_contact_patch=enable_contact_patch)
 
         float_min, float_max = 1e-15, 1e15
         self.gjk_info = GJKInfo(

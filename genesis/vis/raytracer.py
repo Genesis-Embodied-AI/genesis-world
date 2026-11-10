@@ -686,96 +686,63 @@ class Raytracer:
                 for geom in geoms:
                     self.update_rigid_batch(str(geom.uid), geoms_T[:, geom.idx])
 
-        # MPM particles
-        if self.sim.mpm_solver.is_active:
-            particles_all = self.sim.mpm_solver.particles_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
-            particles_vel_all = self.sim.mpm_solver.particles_render.vel.to_numpy()[:, self.rendered_envs_idx[0]]
-            active_all = self.sim.mpm_solver.particles_render.active.to_numpy().astype(bool)[
-                :, self.rendered_envs_idx[0]
-            ]
-            vverts_all = self.sim.mpm_solver.vverts_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
+        # Particle-based entities, read in the environment rendered
+        idx = self.rendered_envs_idx[0]
+        for solver in (self.sim.mpm_solver, self.sim.sph_solver, self.sim.pbd_solver):
+            if not solver.is_active:
+                continue
 
-            for mpm_entity in self.sim.mpm_solver.entities:
-                if mpm_entity.surface.vis_mode == "visual":
-                    vverts = vverts_all[mpm_entity.vvert_start : mpm_entity.vvert_end]
+            particles_render = solver.particles_render
+            particles_all = miscu.qd_to_numpy(particles_render.pos, idx, keepdim=False, transpose=True)
+            particles_vel_all = miscu.qd_to_numpy(particles_render.vel, idx, keepdim=False, transpose=True)
+            # The flags are integers on Metal (see 'gs.qd_bool'), which masks read as indices
+            active_all = miscu.qd_to_numpy(particles_render.is_active, idx, keepdim=False, transpose=True).astype(bool)
+            if solver.vverts_render is not None:
+                vverts_all = miscu.qd_to_numpy(solver.vverts_render.pos, idx, keepdim=False, transpose=True)
 
-                    self.update_deformable(
-                        str(mpm_entity.uid),
-                        vverts,
-                        mpm_entity.vmesh.trimesh.faces,
-                        mpm_entity.vmesh.trimesh.vertex_normals,
-                        np.array([]) if mpm_entity.vmesh.uvs is None else mpm_entity.vmesh.uvs,
-                    )
-                else:
-                    particles = particles_all[mpm_entity.particle_start : mpm_entity.particle_end][
-                        active_all[mpm_entity.particle_start : mpm_entity.particle_end]
-                    ]
-                    particles_vel = particles_vel_all[mpm_entity.particle_start : mpm_entity.particle_end][
-                        active_all[mpm_entity.particle_start : mpm_entity.particle_end]
-                    ]
-                    self.update_particles(
-                        str(mpm_entity.uid), particles, self.sim.mpm_solver.particle_radius, particles_vel
-                    )
-
-        # SPH particles
-        if self.sim.sph_solver.is_active:
-            particles_all = self.sim.sph_solver.particles_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
-            particles_vel_all = self.sim.sph_solver.particles_render.vel.to_numpy()[:, self.rendered_envs_idx[0]]
-            active_all = self.sim.sph_solver.particles_render.active.to_numpy().astype(bool)[
-                :, self.rendered_envs_idx[0]
-            ]
-
-            for sph_entity in self.sim.sph_solver.entities:
-                particles = particles_all[sph_entity.particle_start : sph_entity.particle_end][
-                    active_all[sph_entity.particle_start : sph_entity.particle_end]
-                ]
-                particles_vel = particles_vel_all[sph_entity.particle_start : sph_entity.particle_end][
-                    active_all[sph_entity.particle_start : sph_entity.particle_end]
-                ]
-                self.update_particles(
-                    str(sph_entity.uid), particles, self.sim.sph_solver.particle_radius, particles_vel
-                )
-
-        # PBD entities
-        if self.sim.pbd_solver.is_active:
-            idx = self.rendered_envs_idx[0]
-            particles_all = self.sim.pbd_solver.particles_render.pos.to_numpy()[:, idx]
-            particles_vel_all = self.sim.pbd_solver.particles_render.vel.to_numpy()[:, idx]
-            active_all = self.sim.pbd_solver.particles_render.active.to_numpy().astype(bool)[:, idx]
-            vverts_all = self.sim.pbd_solver.vverts_render.pos.to_numpy()[:, idx]
-
-            for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
-                    vverts = vverts_all[pbd_entity.vvert_start : pbd_entity.vvert_end]
-
-                    self.update_deformable(
-                        str(pbd_entity.uid),
-                        vverts,
-                        pbd_entity.vmesh.trimesh.faces,
-                        trimesh.Trimesh(
-                            vertices=vverts, faces=pbd_entity.vmesh.trimesh.faces, process=False
-                        ).vertex_normals,  # TODO: make this more principled
-                        np.array([]) if pbd_entity.vmesh.uvs is None else pbd_entity.vmesh.uvs,
-                    )
-                else:
-                    if self.render_particle_as == "sphere":
-                        particles = particles_all[pbd_entity.particle_start : pbd_entity.particle_end][
-                            active_all[pbd_entity.particle_start : pbd_entity.particle_end]
-                        ]
-
-                        self.update_particles(str(pbd_entity.uid), particles, self.sim.pbd_solver.particle_radius, None)
-                    elif self.render_particle_as == "tet":
+            for entity in solver.entities:
+                particles_slice = slice(entity.particle_start, entity.particle_end)
+                particles = particles_all[particles_slice][active_all[particles_slice]]
+                if solver is self.sim.mpm_solver:
+                    if entity.surface.vis_mode == "visual":
                         self.update_deformable(
-                            str(pbd_entity.uid),
-                            mu.transform_tets_mesh_verts(
-                                pbd_entity._tets_mesh.vertices,
-                                positions=particles_all[pbd_entity.particle_start : pbd_entity.particle_end],
-                                zs=particles_vel_all[pbd_entity.particle_start : pbd_entity.particle_end],
-                            ).astype(np.float32),
-                            pbd_entity._tets_mesh.faces,
-                            np.array([]),
-                            np.array([]),
+                            str(entity.uid),
+                            vverts_all[entity.vvert_start : entity.vvert_end],
+                            entity.vmesh.trimesh.faces,
+                            entity.vmesh.trimesh.vertex_normals,
+                            np.array([]) if entity.vmesh.uvs is None else entity.vmesh.uvs,
                         )
+                    else:
+                        particles_vel = particles_vel_all[particles_slice][active_all[particles_slice]]
+                        self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
+                elif solver is self.sim.sph_solver:
+                    particles_vel = particles_vel_all[particles_slice][active_all[particles_slice]]
+                    self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
+                elif entity.surface.vis_mode == "visual":
+                    vverts = vverts_all[entity.vvert_start : entity.vvert_end]
+                    self.update_deformable(
+                        str(entity.uid),
+                        vverts,
+                        entity.vmesh.trimesh.faces,
+                        trimesh.Trimesh(
+                            vertices=vverts, faces=entity.vmesh.trimesh.faces, process=False
+                        ).vertex_normals,  # TODO: make this more principled
+                        np.array([]) if entity.vmesh.uvs is None else entity.vmesh.uvs,
+                    )
+                elif self.render_particle_as == "sphere":
+                    self.update_particles(str(entity.uid), particles, solver.particle_radius, None)
+                elif self.render_particle_as == "tet":
+                    self.update_deformable(
+                        str(entity.uid),
+                        mu.transform_tets_mesh_verts(
+                            entity._tets_mesh.vertices,
+                            positions=particles_all[particles_slice],
+                            zs=particles_vel_all[particles_slice],
+                        ).astype(np.float32),
+                        entity._tets_mesh.faces,
+                        np.array([]),
+                        np.array([]),
+                    )
 
         # FEM entities
         if self.sim.fem_solver.is_active:

@@ -132,8 +132,7 @@ def test_goal_pose_optimization_converges(show_viewer):
         box.set_quat(init_quat)
         for _ in range(100):
             scene.step()
-        box_state = box.get_state()
-        loss = torch.abs(box_state.pos - goal_pos).sum() + torch.abs(box_state.quat - goal_quat).sum()
+        loss = torch.abs(box.get_pos() - goal_pos).sum() + torch.abs(box.get_quat() - goal_quat).sum()
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

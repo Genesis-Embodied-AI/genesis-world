@@ -3,7 +3,7 @@
 import quadrants as qd
 
 from genesis.engine.solvers.rigid.data import GEOMS, LINKS, VERTS
-from genesis.utils.data import ENVS, WORKERS, Data, DataKind, Size, StaticConfig, field
+from genesis.utils.data import ENVS, WORKERS, Config, Data, DataKind, Size, field
 
 
 # Sizes of the collision detection: the link pairs holding a valid geom pair, the possible geom pairs and those the
@@ -184,7 +184,7 @@ class VertsSpatialGrid(Data, kind=DataKind.CONSTANT):
     geoms_inv_cell_size: qd.Tensor = field((float, 3), shape=(GEOMS,))
 
 
-class ColliderStaticConfig(StaticConfig):
+class ColliderConfig(Config):
     """The compile-time configuration of the kernels of the collision detection of the rigid solver."""
 
     has_terrain: bool
@@ -391,7 +391,7 @@ class GJKScratch(Data, kind=DataKind.SCRATCH):
     multicontact: GJKState = field(opt_in=True)
 
 
-class GJKStaticConfig(StaticConfig):
+class GJKConfig(Config):
     """The compile-time configuration of the kernels of the Gilbert-Johnson-Keerthi (GJK) detection."""
 
     enable_contact_patch: bool

@@ -345,11 +345,13 @@ def kernel_collider_clear(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
+    reset_warm_start: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+        if qd.static(reset_warm_start):
+            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
         func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
         # Only the contacts of the sleepers remain listed, so their links alone keep a contact force
         for i_l in range(dyn_state.links.contact_force.shape[0]):
@@ -366,11 +368,13 @@ def kernel_masked_collider_clear(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     collider_config: qd.template(),
+    reset_warm_start: qd.template(),
 ):
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
-            func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
+            if qd.static(reset_warm_start):
+                func_collider_reset_env(i_b, collider_state, collider_config, cache_only=False)
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)
             # See 'kernel_collider_clear'
             for i_l in range(dyn_state.links.contact_force.shape[0]):

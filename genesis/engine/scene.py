@@ -978,7 +978,7 @@ class Scene(RBC):
                     self._init_state = state
             self._sim.reset(state, envs_idx)
         else:
-            self._init_state = self._get_state()
+            self._init_state = self._sim.get_state()
         self._restart()
 
     def _restart(self, refresh_viewer=True):
@@ -1019,7 +1019,7 @@ class Scene(RBC):
         """
         # Snapshot the current state before the backward pass rewinds the physics. The clocks go with it: the backward
         # pass of each step winds them down, and the restore below puts the physics back where they were.
-        snapshot = self._get_state()
+        snapshot = self._sim.get_state()
         steps = self._sim._steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
@@ -1029,17 +1029,13 @@ class Scene(RBC):
         self._sim._steps[:] = steps
         return snapshot
 
-    def _get_state(self):
-        # The scene keeps this state for itself, outside of the autograd graph of a differentiable rollout
-        with torch.no_grad():
-            return self._sim.get_state()
-
     @gs.assert_built
     def get_state(self):
         """
-        Returns the current state of the scene.
+        Returns the current state of the scene, which 'reset' restores.
 
-        In a differentiable scene, the state tracks gradients, as the getters of the entities do.
+        It holds what every solver steps from, as a copy outside of the autograd graph of a differentiable rollout. The
+        getters of the entities query the state with gradients.
 
         Returns
         -------
@@ -1575,7 +1571,7 @@ class Scene(RBC):
         # callback. Every solver holds the same force fields, so one solver names them all.
         rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
         rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
-        rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields)
+        rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields.fields)
         omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
         if self._visualizer is not None:
             omitted_kinds.update(type(camera).__name__ for camera in self._visualizer.cameras)
