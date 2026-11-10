@@ -650,6 +650,22 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
+    use_implicit_solver : bool, optional
+        Whether to use the implicit solver, which stays stable at a time step far larger than the explicit solver
+        allows, and resolves the contact of the particles with the rigid entities within the same solve as their motion
+        (see NewtonOptions). Each of its substeps costs several iterations, which the larger time step pays back.
+        Differentiable simulation, CPIC and the contact with FEM, PBD and SPH entities require the explicit solver.
+        Defaults to False.
+    wall_timeconst : float, optional
+        Time constant in seconds over which the walls of the domain push back the particles that penetrate them, at
+        least twice the substep. A smaller value gives stiffer walls that the particles penetrate less, at the cost of
+        more iterations of the solve near the walls. Defaults to 0.01. Only used when `use_implicit_solver` is True.
+    liquid_smoothing_velocity : float, optional
+        Velocity in m/s under which the resistance of a liquid to compression fades in, its stiffness rising from zero
+        to its bulk modulus over the compression the liquid undergoes at that velocity over a substep. A larger value
+        lets the solve of a liquid near rest take fewer iterations, but softens the liquid more. If None, resolved
+        based on the tolerance of the solve: 'NewtonOptions.velocity_tol', under which the solve does not resolve the
+        motion anyway. Defaults to None. Only used when `use_implicit_solver` is True.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -663,6 +679,10 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+
+    use_implicit_solver: StrictBool = False
+    wall_timeconst: PositiveFloat = 1e-2
+    liquid_smoothing_velocity: NonNegativeFloat | None = None
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)
@@ -681,6 +701,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.use_implicit_solver and self.enable_CPIC:
+            gs.raise_exception("'enable_CPIC' requires the explicit solver, got 'use_implicit_solver=True'.")
 
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
@@ -893,3 +915,51 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_alpha: NonNegativeFloat = 0.5
     damping_beta: NonNegativeFloat = 5e-4
     enable_vertex_constraints: StrictBool = False
+
+
+class NewtonOptions(Options):
+    """
+    Options configuring the NewtonSolver, which solves every substep of the implicit MPM solver (see
+    `MPMOptions.use_implicit_solver`) together with the rigid entities in contact with its particles.
+
+    Parameters
+    ----------
+    velocity_tol : float, optional
+        Convergence tolerance of the solve, in m/s: the solve of a substep stops once an iteration changes the velocity
+        of every MPM particle and of every rigid entity in contact with them by less than this value. A smaller value
+        gives a more accurate motion at the cost of more iterations per substep, and a larger one a faster but less
+        accurate one. Defaults to 5e-2.
+    max_iterations : int, optional
+        Iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning. Defaults
+        to 1024.
+    line_search_max_iterations : int, optional
+        Trial steps of an iteration at most along its direction, the last one being kept. More trials let an iteration
+        recover from a poor direction, at the cost of the energy of the scene evaluated once more per trial. Defaults to
+        12.
+    line_search_shrink : float, optional
+        Factor of the step of an iteration between two trials, strictly between 0 and 1. A smaller factor reaches an
+        acceptable step in fewer trials, while a larger one keeps a longer step at the cost of more trials. Defaults to
+        0.5.
+    pcg_max_iterations : int, optional
+        Iterations at most of the preconditioned conjugate gradient (PCG) that gives the direction of an iteration. A
+        larger cap lets the direction of a stiff scene converge, at the cost of a longer worst-case substep. Defaults to
+        1024.
+    pcg_tol : float, optional
+        Relative accuracy at which the PCG of an iteration stops. A looser value makes every iteration cheaper, the next
+        iterations correcting its inexact direction, at the cost of more iterations. Defaults to 1e-4.
+    failure_check_interval : int, optional
+        Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller interval
+        reports it sooner, at the cost of a slower simulation. Defaults to 32.
+    """
+
+    velocity_tol: PositiveFloat = 5e-2
+    max_iterations: PositiveInt = 1024
+    line_search_max_iterations: PositiveInt = 12
+    line_search_shrink: PositiveFloat = 0.5
+    pcg_max_iterations: PositiveInt = 1024
+    pcg_tol: PositiveFloat = 1e-4
+    failure_check_interval: PositiveInt = 32
+
+    def model_post_init(self, context: Any) -> None:
+        if self.line_search_shrink >= 1.0:
+            gs.raise_exception(f"'line_search_shrink' must be below 1, got {self.line_search_shrink}.")
