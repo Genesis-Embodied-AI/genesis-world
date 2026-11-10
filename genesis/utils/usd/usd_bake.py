@@ -12,15 +12,13 @@ def omni_bootstrap(device=0, log_level="warning"):
     kit_dir = os.path.dirname(os.path.abspath(os.path.realpath(omni.kit_app.__file__)))
     kit_path = os.path.join(kit_dir, "apps", "omni.app.empty.kit")
 
-    # The distiller reads the material from the RTX render engine attached to the stage, which the viewport window
-    # attaches and feeds when the stage opens.
+    # The distiller reads the material from the RTX render engine attached to the stage, which a bare hydra texture
+    # feeds without the viewport window.
     omni_extensions = [
-        "omni.usd",
-        "omni.kit.material.library",
         "omni.kit.usd.collect",
         "omni.mdl.distill_and_bake",
         "omni.hydra.rtx",
-        "omni.kit.viewport.window",
+        "omni.kit.hydra_texture",
     ]
     app_args = [
         kit_path,
@@ -40,6 +38,8 @@ def omni_bootstrap(device=0, log_level="warning"):
         "--/renderer/enabled=rtx",
         "--/renderer/active=rtx",
         "--/renderer/multiGpu/enabled=False",  # Avoids unnecessary GPU context initialization
+        # The bake uses no NGX feature (DLSS), whose initialization fails on some headless datacenter GPUs
+        "--/ngx/enabled=False",
         "--no-window",
         "--portable",  # TODO: set portable root to avoid extension conflicts
     ]
@@ -63,7 +63,9 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     import carb
     import omni.usd
     import omni.mdl.distill_and_bake
+    import omni.kit.hydra_texture
     import omni.kit.usd.collect
+    from pxr import Usd, UsdGeom
 
     # open stage
     start_time = time.time()
@@ -73,7 +75,19 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     # create render product
     start_time = time.time()
     stage = omni.usd.get_context().get_stage()
-    app.update()  # important
+    # The render engine syncs the materials of the stage only once a render product reads from it, which is bound to a
+    # local to stay alive until the export.
+    omni.usd.create_hydra_engine("rtx", omni.usd.get_context())
+    # The render product views the stage through a camera, which it would otherwise define on the root layer that the
+    # export collects. The session layer keeps the camera and the settings the renderer authors on it out of the baked
+    # stage.
+    camera_path = "/GenesisBakeCamera"
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        UsdGeom.Camera.Define(stage, camera_path)
+        hydra_texture = omni.kit.hydra_texture.create_hydra_texture(
+            name="usd_bake", width=16, height=16, usd_camera_path=camera_path
+        )
+        app.update()  # important
     logs.append(f"\tCreate render product: {time.time() - start_time}s.")
 
     # distill the material
