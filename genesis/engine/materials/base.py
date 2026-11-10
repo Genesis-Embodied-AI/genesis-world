@@ -1,3 +1,4 @@
+import copy
 from typing import TYPE_CHECKING, Any
 
 from pydantic import StrictBool
@@ -24,7 +25,7 @@ class Material[EntityT: "Entity"](Options):
         # explicitly rather than holding the kernels of the original. The fields the solver sets are left out.
         return type(self)(
             **{
-                name: value
+                name: copy.deepcopy(value, memo)
                 for name, value in self
                 if name in self.model_fields_set and not type(self).model_fields[name].exclude
             }
