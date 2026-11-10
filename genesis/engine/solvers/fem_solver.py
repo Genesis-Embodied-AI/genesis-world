@@ -54,6 +54,7 @@ from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_q
 from genesis.utils.misc import (
     broadcast_tensor,
     get_gpu_core_count,
+    get_gpu_cores_per_unit,
     qd_isfinite,
     qd_to_numpy,
     qd_zero_grad,
@@ -76,10 +77,6 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
-# Lanes of a GPU subgroup tile that gather together the element corners of a vertex (see 'vertices_corners_idx')
-LOG2_CORNER_LANES = 2
-# Threads of the GPU block that sums the terms of an environment over its vertices and elements in a fixed order
-ENV_BLOCK_DIM = 256
 # The most clusters an entity splits into, which bounds the size of its coarse matrix, the fewest vertices a cluster
 # holds, and the most clusters of a scene beyond one per entity (see 'FEMSolver.build'). The coarse matrices of an
 # environment then hold at most 36 * MAX_ENTITY_CLUSTERS * MAX_SCENE_CLUSTERS single precision entries, 18 KiB, a small
@@ -442,10 +439,9 @@ class FEMConfig(Config):
     use_implicit_solver: bool
     requires_grad: bool
     enable_vertex_constraints: bool
-    # Threads of the block summing the terms of an environment: 1 on CPU, ENV_BLOCK_DIM on GPU
-    env_block_dim: int
-    # See LOG2_CORNER_LANES
-    log2_corner_lanes: int
+    # Whether a block of threads sums the terms of each environment and the lanes of a subgroup tile those of each
+    # vertex, on GPU, where a single thread runs each environment on CPU
+    enable_cooperative_kernels: bool
     # The bound on the clusters of an entity that sizes the coarse matrices in the kernels, a power of two up to
     # MAX_ENTITY_CLUSTERS (see 'FEMSolver.build')
     max_entity_clusters: int
@@ -461,11 +457,6 @@ class FEMConfig(Config):
     has_linear_corotated: bool
     shared_model: int
     has_muscle: bool
-
-    @property
-    def n_block_tiles(self) -> int:
-        # Subgroup tiles of the block, of 32 threads each (see 'func_block_sum')
-        return (self.env_block_dim + 31) // 32
 
 
 class FEMClusters(NamedTuple):
@@ -527,7 +518,7 @@ class FEMData(Data):
                 IMPLICIT: not is_implicit,
                 COROTATED: not config.has_linear_corotated,
                 MUSCLE_FIBERS: not (is_implicit and config.has_muscle),
-                CORNER_BLOCKS: config.env_block_dim == 1,
+                CORNER_BLOCKS: not config.enable_cooperative_kernels,
             }
         super().__init__(
             sizes=dict(
@@ -604,7 +595,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # The implicit solve adds up every term in a fixed order, so it is reproducible bitwise. On CPU, one thread runs
         # each environment, the environments filling the cores. On GPU, the lanes of a subgroup tile gather the terms
         # of a vertex and a block of threads sums those of an environment.
-        env_block_dim = 1 if gs.backend == gs.cpu else ENV_BLOCK_DIM
+        enable_cooperative_kernels = gs.backend != gs.cpu
 
         # The entities holding elements, whose models and muscles the kernels dispatch on, a cloth entity holding
         # surface triangles alone.
@@ -629,18 +620,20 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 ):
                     entities_n_clusters[i_ent] = 2 * n_entity_clusters
                     is_doubled = True
-        # One block of threads runs the whole PCG solve of an environment once the blocks of all environments occupy
-        # every core of the device: each environment then keeps its data close to its block and steps without kernel
-        # boundaries. With fewer environments, the device-side loop spreads each environment over the whole device.
+        # One block of threads runs the whole PCG solve of an environment once the environments number half the compute
+        # units of the device, their blocks then keeping the device busy: each environment keeps its data close to its
+        # block and steps without kernel boundaries. With fewer environments, the device-side loop spreads each
+        # environment over the whole device.
         is_pcg_solved_per_env_block = (
-            self._use_implicit_solver and env_block_dim > 1 and self._B * ENV_BLOCK_DIM >= get_gpu_core_count()
+            self._use_implicit_solver
+            and enable_cooperative_kernels
+            and 2 * self._B * get_gpu_cores_per_unit() >= get_gpu_core_count()
         )
         self.fem_config = FEMConfig(
             use_implicit_solver=self._use_implicit_solver,
             requires_grad=self._requires_grad,
             enable_vertex_constraints=self._enable_vertex_constraints,
-            env_block_dim=env_block_dim,
-            log2_corner_lanes=LOG2_CORNER_LANES,
+            enable_cooperative_kernels=enable_cooperative_kernels,
             # The generic kernels outside performance mode serve every scene with the largest bound, sparing a
             # compilation per bound at a small cost for the scenes of small entities.
             max_entity_clusters=MAX_ENTITY_CLUSTERS if gs.use_ndarray else int(entities_n_clusters.max(initial=1)),
@@ -765,7 +758,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 ),
                 (self.fem_info.surface_elements, surface_elements),
             ]
-            if self.fem_config.env_block_dim > 1:
+            if self.fem_config.enable_cooperative_kernels:
                 # The corners of every element, those of Cloth ones included since their vertices are counted too
                 elements_el2v = qd_to_numpy(self.fem_info.elements.el2v)
                 topology_values += [
@@ -1854,9 +1847,10 @@ def kernel_init_pos_and_inertia(
 
 
 @qd.func
-def func_block_sum(i_t: int, values, sh_sum: qd.Tensor, fem_config: qd.template()):
+def func_block_sum(i_t: int, values, n_threads: qd.template()):
     """
-    Return the sum of the values over the threads of the block of an environment, the same bitwise on every run.
+    Return the sum of the values over the `n_threads` threads of the block of an environment, the same bitwise on every
+    run.
 
     The subgroup tiles of the block sum first, then every thread adds up the tile sums in order. On CPU, the block is a
     single thread.
@@ -1865,14 +1859,15 @@ def func_block_sum(i_t: int, values, sh_sum: qd.Tensor, fem_config: qd.template(
     TILE_DIM = qd.static(32)
 
     totals = values
-    if qd.static(fem_config.env_block_dim > 1):
+    if qd.static(n_threads > 1):
+        sh_sum = qd.simt.block.SharedArray((values.n, n_threads // TILE_DIM), gs.qd_float)
         for i in qd.static(range(values.n)):
             value_tile = su.qd_block_sum(values[i])
             if i_t % TILE_DIM == 0:
                 sh_sum[i, i_t // TILE_DIM] = value_tile
         qd.simt.block.sync()
         totals = qd.Vector.zero(gs.qd_float, values.n)
-        for i_tile in range(fem_config.n_block_tiles):
+        for i_tile in range(n_threads // TILE_DIM):
             totals = totals + qd.Vector([sh_sum[i, i_tile] for i in qd.static(range(values.n))])
         qd.simt.block.sync()
     return totals
@@ -1906,7 +1901,7 @@ def func_build_coarse(
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
     TILE_DIM = qd.static(32)
 
-    is_serial = qd.static(fem_config.env_block_dim == 1)
+    is_serial = qd.static(not fem_config.enable_cooperative_kernels)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)
     n_rows_max = qd.static(6 * fem_config.max_entity_clusters)
     I_3 = qd.Matrix.identity(gs.qd_float, 3)
@@ -2033,7 +2028,7 @@ def func_coarse_eliminate(
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
     TILE_DIM = qd.static(32)
 
-    is_serial = qd.static(fem_config.env_block_dim == 1)
+    is_serial = qd.static(not fem_config.enable_cooperative_kernels)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)
     n_rows_lane = (n_rows - i_lane + n_lanes - 1) // n_lanes
     for i_q in range(n_rows_lane):
@@ -2076,6 +2071,7 @@ def func_precondition_env(
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
+    n_threads: qd.template(),
 ):
     """
     Precondition the residual of an environment by the threads of its block, and return the part of its dot product
@@ -2091,8 +2087,7 @@ def func_precondition_env(
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
     TILE_DIM = qd.static(32)
 
-    is_serial = qd.static(fem_config.env_block_dim == 1)
-    n_threads = qd.static(fem_config.env_block_dim)
+    is_serial = qd.static(n_threads == 1)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)
     n_tiles = qd.static(n_threads // n_lanes)
     i_tile = i_t // n_lanes
@@ -2184,6 +2179,7 @@ def func_accumulate_vertex(
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
+    log2_n_lanes: qd.template(),
     gather_Ap: qd.template(),
     gather_internal_force: qd.template(),
     clip_vertex: qd.template(),
@@ -2193,12 +2189,12 @@ def func_accumulate_vertex(
 
     The internal force alone goes into `forces` for every environment if asked, else Ap alone or the force and diagonal
     block of the active environments. On CPU, the thread of an environment walks the corners of all its elements in
-    element order and adds each term to its vertex. On GPU, the lanes of a vertex stride its corners (see
-    'vertices_corners_idx'), then add up their sums in a fixed order, every lane of a subgroup tile taking part and the
-    lanes past the last vertex doing nothing when `clip_vertex` is set.
+    element order and adds each term to its vertex. On GPU, the 2**`log2_n_lanes` lanes of a vertex stride its corners
+    (see 'vertices_corners_idx'), then add up their sums in a fixed order, every lane of a subgroup tile taking part and
+    the lanes past the last vertex doing nothing when `clip_vertex` is set.
     """
-    is_serial = qd.static(fem_config.env_block_dim == 1)
-    n_lanes = qd.static(1 if is_serial else 2**fem_config.log2_corner_lanes)
+    is_serial = qd.static(not fem_config.enable_cooperative_kernels)
+    n_lanes = qd.static(2**log2_n_lanes)
     n_vertices = fem_info.vertices.mass.shape[0]
     n_elements = fem_info.elements.V.shape[0]
     damping_alpha_dt = fem_info.damping_alpha_dt[None]
@@ -2288,10 +2284,10 @@ def func_accumulate_vertex(
                     mat_elastic = mat_elastic + mat_corner
     if qd.static(not is_serial):
         for i in qd.static(range(3)):
-            vec_elastic[i] = su.qd_block_sum(vec_elastic[i], fem_config.log2_corner_lanes)
+            vec_elastic[i] = su.qd_block_sum(vec_elastic[i], log2_n_lanes)
             if qd.static(not gather_Ap and not gather_internal_force):
                 for j in qd.static(range(3)):
-                    mat_elastic[i, j] = su.qd_block_sum(mat_elastic[i, j], fem_config.log2_corner_lanes)
+                    mat_elastic[i, j] = su.qd_block_sum(mat_elastic[i, j], log2_n_lanes)
 
     if qd.static(gather_internal_force):
         # The first lane of a vertex writes its sum, which the walk over the corners adds up directly on CPU
@@ -2341,8 +2337,12 @@ def func_accumulate_vertices(
     update_loop_flag: qd.template(),
 ):
     """Sum the elastic terms of every vertex of every environment (see 'func_accumulate_vertex')."""
-    is_serial = qd.static(fem_config.env_block_dim == 1)
-    n_lanes = qd.static(1 if is_serial else 2**fem_config.log2_corner_lanes)
+    # Lanes of a GPU subgroup tile that gather together the element corners of a vertex (see 'vertices_corners_idx')
+    LOG2_CORNER_LANES = qd.static(2)
+
+    is_serial = qd.static(not fem_config.enable_cooperative_kernels)
+    log2_n_lanes = qd.static(0 if is_serial else LOG2_CORNER_LANES)
+    n_lanes = qd.static(2**log2_n_lanes)
     if qd.static(gather_Ap and not is_serial):
         for i_e, i_b in qd.ndrange(
             *fem_state.elements_energy.stress.shape, axes=qd.static(eoa(fem_state.elements_energy.stress))
@@ -2388,67 +2388,11 @@ def func_accumulate_vertices(
             fem_info,
             vertex_constraints,
             fem_config,
+            log2_n_lanes,
             gather_Ap,
             gather_internal_force,
             clip_vertex=False,
         )
-
-
-@qd.func
-def func_init_pcg_env(
-    i_b: int,
-    i_t: int,
-    sh_sum: qd.Tensor,
-    pcg_counter: qd.Tensor,
-    fem_state: FEMState,
-    fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
-    fem_config: qd.template(),
-    is_adjoint: qd.template(),
-):
-    """
-    Compute the first residual of the PCG solve of an environment, by the threads of its block (see 'func_block_sum').
-
-    It is the forces at the end of the substep, or for the adjoint solve the adjoint of the positions there (see
-    'FEMSolver._implicit_solve_grad' for that solve).
-    """
-    n_threads = qd.static(fem_config.env_block_dim)
-    n_vertices = fem_info.vertices.mass.shape[0]
-    is_active = fem_state.envs_solve.is_active[i_b]
-    rTr = gs.qd_float(0.0)
-    if is_active:
-        for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
-            i_v = i_v_ * n_threads + i_t
-            if i_v < n_vertices:
-                r = fem_state.vertices_energy.force[i_v, i_b]
-                if qd.static(is_adjoint):
-                    r = fem_state.vertices.pos_next.grad[i_v, i_b]
-                fem_state.vertices_solve.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
-                fem_state.vertices_solve.r[i_v, i_b] = r
-                rTr = rTr + r.dot(r)
-    rTz = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config)
-    if is_active:
-        for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
-            i_v = i_v_ * n_threads + i_t
-            if i_v < n_vertices:
-                fem_state.vertices_solve.p[i_v, i_b] = fem_state.vertices_solve.z[i_v, i_b]
-    rTr, rTz = func_block_sum(i_t, values=qd.Vector([rTr, rTz]), sh_sum=sh_sum, fem_config=fem_config)
-    if i_t == 0:
-        if is_active:
-            fem_state.envs_solve.rTr[i_b] = rTr
-            fem_state.envs_solve.rTz[i_b] = rTz
-        rTr_threshold = fem_info.pcg_threshold[None]
-        if qd.static(fem_config.requires_grad):
-            is_first_residual = True
-            if qd.static(not is_adjoint):
-                is_first_residual = fem_state.solve_loops.n_newton_left[()] == fem_info.n_newton_iterations[None]
-            if is_first_residual:
-                fem_state.envs_solve.rTr_threshold[i_b] = fem_info.pcg_threshold_rel[None] * rTr
-            rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
-        is_pcg_active = is_active and rTr > rTr_threshold
-        fem_state.envs_solve.is_pcg_active[i_b] = is_pcg_active
-        if is_pcg_active:
-            pcg_counter[()] = 1
 
 
 @qd.func
@@ -2460,16 +2404,58 @@ def func_init_pcg(
     fem_config: qd.template(),
     is_adjoint: qd.template(),
 ):
+    """
+    Compute the first residual of the PCG solve of each environment, by the threads of its block (see 'func_block_sum').
+
+    It is the forces at the end of the substep, or for the adjoint solve the adjoint of the positions there (see
+    'FEMSolver._implicit_solve_grad' for that solve).
+    """
+    # Threads of the GPU block that sums the terms of an environment over its vertices and elements in a fixed order
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
+
     pcg_counter[()] = 0
-    n_threads = qd.static(fem_config.env_block_dim)
     qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
     for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
-        sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
-        func_init_pcg_env(
-            i_b, i_t, sh_sum, pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint
-        )
+        n_vertices = fem_info.vertices.mass.shape[0]
+        is_active = fem_state.envs_solve.is_active[i_b]
+        rTr = gs.qd_float(0.0)
+        if is_active:
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    r = fem_state.vertices_energy.force[i_v, i_b]
+                    if qd.static(is_adjoint):
+                        r = fem_state.vertices.pos_next.grad[i_v, i_b]
+                    fem_state.vertices_solve.x[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                    fem_state.vertices_solve.r[i_v, i_b] = r
+                    rTr = rTr + r.dot(r)
+        rTz = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config, n_threads)
+        if is_active:
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    fem_state.vertices_solve.p[i_v, i_b] = fem_state.vertices_solve.z[i_v, i_b]
+        rTr, rTz = func_block_sum(i_t, values=qd.Vector([rTr, rTz]), n_threads=n_threads)
+        if i_t == 0:
+            if is_active:
+                fem_state.envs_solve.rTr[i_b] = rTr
+                fem_state.envs_solve.rTz[i_b] = rTz
+            rTr_threshold = fem_info.pcg_threshold[None]
+            if qd.static(fem_config.requires_grad):
+                is_first_residual = True
+                if qd.static(not is_adjoint):
+                    is_first_residual = fem_state.solve_loops.n_newton_left[()] == fem_info.n_newton_iterations[None]
+                if is_first_residual:
+                    fem_state.envs_solve.rTr_threshold[i_b] = fem_info.pcg_threshold_rel[None] * rTr
+                rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
+            is_pcg_active = is_active and rTr > rTr_threshold
+            fem_state.envs_solve.is_pcg_active[i_b] = is_pcg_active
+            if is_pcg_active:
+                pcg_counter[()] = 1
     fem_state.solve_loops.n_pcg_left[()] = fem_info.n_pcg_iterations[None]
 
 
@@ -2477,16 +2463,15 @@ def func_init_pcg(
 def func_update_pcg_env(
     i_b: int,
     i_t: int,
-    sh_sum: qd.Tensor,
     pcg_counter: qd.Tensor,
     fem_state: FEMState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
+    n_threads: qd.template(),
     update_loop_flag: qd.template(),
 ):
     """Run the step of a PCG iteration of an environment past its Ap on its block of threads (see 'func_block_sum')."""
-    n_threads = qd.static(fem_config.env_block_dim)
     n_vertices = fem_info.vertices.mass.shape[0]
     is_active = fem_state.envs_solve.is_pcg_active[i_b]
     rTz = fem_state.envs_solve.rTz[i_b]
@@ -2498,7 +2483,7 @@ def func_update_pcg_env(
             i_v = i_v_ * n_threads + i_t
             if i_v < n_vertices:
                 pTAp = pTAp + fem_state.vertices_solve.p[i_v, i_b].dot(fem_state.vertices_solve.Ap[i_v, i_b])
-    pTAp = func_block_sum(i_t, values=qd.Vector([pTAp]), sh_sum=sh_sum, fem_config=fem_config)[0]
+    pTAp = func_block_sum(i_t, values=qd.Vector([pTAp]), n_threads=n_threads)[0]
     alpha = gs.qd_float(0.0)
     rTr_new = gs.qd_float(0.0)
     if is_active:
@@ -2511,8 +2496,8 @@ def func_update_pcg_env(
                 fem_state.vertices_solve.x[i_v, i_b] = fem_state.vertices_solve.x[i_v, i_b] + alpha * p
                 fem_state.vertices_solve.r[i_v, i_b] = r
                 rTr_new = rTr_new + r.dot(r)
-    rTz_new = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config)
-    rTr_new, rTz_new = func_block_sum(i_t, values=qd.Vector([rTr_new, rTz_new]), sh_sum=sh_sum, fem_config=fem_config)
+    rTz_new = func_precondition_env(i_b, i_t, is_active, fem_state, fem_info, vertex_constraints, fem_config, n_threads)
+    rTr_new, rTz_new = func_block_sum(i_t, values=qd.Vector([rTr_new, rTz_new]), n_threads=n_threads)
 
     # Convergence check, then the new search direction
     rTr_threshold = fem_info.pcg_threshold[None]
@@ -2546,6 +2531,11 @@ def func_pcg_iter(
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
 ):
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
+
     func_accumulate_vertices(
         forces=None,
         envs_is_active=fem_state.envs_solve.is_pcg_active,
@@ -2558,14 +2548,12 @@ def func_pcg_iter(
         gather_internal_force=False,
         update_loop_flag=True,
     )
-    n_threads = qd.static(fem_config.env_block_dim)
     qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
     for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
-        sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
         func_update_pcg_env(
-            i_b, i_t, sh_sum, pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, update_loop_flag=True
+            i_b, i_t, pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, n_threads, update_loop_flag=True
         )
 
 
@@ -2582,20 +2570,23 @@ def func_pcg_solve_per_env_block(
 
     The threads synchronize between the steps of an iteration within the kernel (see 'is_pcg_solved_per_env_block').
     """
-    n_threads = qd.static(fem_config.env_block_dim)
-    n_lanes = qd.static(2**fem_config.log2_corner_lanes)
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+    # See LOG2_CORNER_LANES in 'func_accumulate_vertices'
+    LOG2_CORNER_LANES = qd.static(2)
+
+    n_lanes = qd.static(2**LOG2_CORNER_LANES)
     n_vertices = fem_info.vertices.mass.shape[0]
-    qd.loop_config(block_dim=n_threads)
-    for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
-        i_b = i_flat // n_threads
-        i_t = i_flat % n_threads
-        sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
+    qd.loop_config(block_dim=BLOCK_DIM)
+    for i_flat in range(fem_state.envs_solve.is_active.shape[0] * BLOCK_DIM):
+        i_b = i_flat // BLOCK_DIM
+        i_t = i_flat % BLOCK_DIM
         for i_iter in range(fem_info.n_pcg_iterations[None]):
             # Every thread of the block reads the flag behind the barrier that follows its last write
             if not fem_state.envs_solve.is_pcg_active[i_b]:
                 break
-            for i_e_ in range((fem_info.elements.V.shape[0] + n_threads - 1) // n_threads):
-                i_e = i_e_ * n_threads + i_t
+            for i_e_ in range((fem_info.elements.V.shape[0] + BLOCK_DIM - 1) // BLOCK_DIM):
+                i_e = i_e_ * BLOCK_DIM + i_t
                 if i_e < fem_info.elements.V.shape[0]:
                     S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
                     i_vs = fem_info.elements.el2v[i_e]
@@ -2605,8 +2596,8 @@ def func_pcg_solve_per_env_block(
                     fem_state.elements_energy.stress[i_e, i_b] = V * fem_info.damping_beta_factor[None] * dP
             qd.simt.grid.mem_fence()
             qd.simt.block.sync()
-            for i_item_ in range((n_vertices * n_lanes + n_threads - 1) // n_threads):
-                i_item = i_item_ * n_threads + i_t
+            for i_item_ in range((n_vertices * n_lanes + BLOCK_DIM - 1) // BLOCK_DIM):
+                i_item = i_item_ * BLOCK_DIM + i_t
                 func_accumulate_vertex(
                     i_b=i_b,
                     i_v=i_item // n_lanes,
@@ -2617,6 +2608,7 @@ def func_pcg_solve_per_env_block(
                     fem_info=fem_info,
                     vertex_constraints=vertex_constraints,
                     fem_config=fem_config,
+                    log2_n_lanes=LOG2_CORNER_LANES,
                     gather_Ap=True,
                     gather_internal_force=False,
                     clip_vertex=True,
@@ -2626,12 +2618,12 @@ def func_pcg_solve_per_env_block(
             func_update_pcg_env(
                 i_b,
                 i_t,
-                sh_sum,
                 pcg_counter,
                 fem_state,
                 fem_info,
                 vertex_constraints,
                 fem_config,
+                n_threads=BLOCK_DIM,
                 update_loop_flag=False,
             )
             qd.simt.grid.mem_fence()
@@ -2660,6 +2652,7 @@ def func_env_energy_part(
     fem_state: FEMState,
     fem_info: FEMInfo,
     fem_config: qd.template(),
+    n_threads: qd.template(),
     add_damping_alpha: qd.template(),
 ):
     """
@@ -2668,7 +2661,6 @@ def func_env_energy_part(
     The energy sums the inertia of the vertices, plus their Rayleigh mass damping if `add_damping_alpha` holds, then the
     energy of the elements as computed last (see 'func_linesearch_iter').
     """
-    n_threads = qd.static(fem_config.env_block_dim)
     n_vertices = fem_info.vertices.mass.shape[0]
     n_elements = fem_info.elements.V.shape[0]
     energy = gs.qd_float(0.0)
@@ -2693,14 +2685,16 @@ def func_env_energy_part(
 def func_init_linesearch(
     linesearch_counter: qd.Tensor, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()
 ):
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
     linesearch_counter[()] = 0
-    n_threads = qd.static(fem_config.env_block_dim)
     n_vertices = fem_info.vertices.mass.shape[0]
     qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
     for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
-        sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
         is_active = fem_state.envs_solve.is_active[i_b]
         prev_energy = gs.qd_float(0.0)
         m = gs.qd_float(0.0)
@@ -2710,8 +2704,10 @@ def func_init_linesearch(
                 if i_v < n_vertices:
                     fem_state.vertices_solve.x_prev[i_v, i_b] = fem_state.vertices.pos_next[i_v, i_b]
                     m = m - fem_state.vertices_solve.x[i_v, i_b].dot(fem_state.vertices_energy.force[i_v, i_b])
-            prev_energy = func_env_energy_part(i_b, i_t, fem_state, fem_info, fem_config, add_damping_alpha=False)
-        prev_energy, m = func_block_sum(i_t, values=qd.Vector([prev_energy, m]), sh_sum=sh_sum, fem_config=fem_config)
+            prev_energy = func_env_energy_part(
+                i_b, i_t, fem_state, fem_info, fem_config, n_threads, add_damping_alpha=False
+            )
+        prev_energy, m = func_block_sum(i_t, values=qd.Vector([prev_energy, m]), n_threads=n_threads)
         if i_t == 0:
             fem_state.envs_solve.is_linesearch_active[i_b] = is_active
             if is_active:
@@ -2730,6 +2726,11 @@ def func_linesearch_iter(
     vertex_constraints: FEMVertexConstraints,
     fem_config: qd.template(),
 ):
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
+
     _B = fem_state.envs_solve.is_active.shape[0]
     for i_v, i_b in qd.ndrange(*fem_state.vertices_solve.x.shape, axes=qd.static(eoa(fem_state.vertices_solve.x))):
         # A line search iteration starts here: its loop flag drops until an environment iterates on
@@ -2757,17 +2758,15 @@ def func_linesearch_iter(
                 energy = energy + 0.5 * fem_info.damping_beta_over_dt[None] * (dF * dP).sum()
             fem_state.elements_energy.energy[i_e, i_b] = energy
 
-    n_threads = qd.static(fem_config.env_block_dim)
     qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
     for i_flat in range(_B * n_threads):
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
-        sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
         is_active = fem_state.envs_solve.is_linesearch_active[i_b]
         energy = gs.qd_float(0.0)
         if is_active:
-            energy = func_env_energy_part(i_b, i_t, fem_state, fem_info, fem_config, add_damping_alpha=True)
-        energy = func_block_sum(i_t, values=qd.Vector([energy]), sh_sum=sh_sum, fem_config=fem_config)[0]
+            energy = func_env_energy_part(i_b, i_t, fem_state, fem_info, fem_config, n_threads, add_damping_alpha=True)
+        energy = func_block_sum(i_t, values=qd.Vector([energy]), n_threads=n_threads)[0]
 
         if i_t == 0 and is_active:
             step_size = fem_state.envs_solve.step_size[i_b]
