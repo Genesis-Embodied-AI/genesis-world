@@ -223,6 +223,7 @@ class NewtonSolver(Solver):
             return
         mpm_solver = self._sim.mpm_solver
         mpm_state, mpm_info, sparse_grid = mpm_solver.mpm_state, mpm_solver.mpm_info, mpm_solver.sparse_grid
+        mpm_config = mpm_solver.mpm_config
         errno = mpm_solver._errno
         self.newton_rows = update_newton_rows(
             int(qd_to_numpy(sparse_grid.n_blocks)) * 64,
@@ -231,9 +232,9 @@ class NewtonSolver(Solver):
             self._newton_rows_replaced,
         )
         args_mpm = (mpm_state, sparse_grid)
-        kernel_start_solve(f, self.newton_envs, self.newton_loops, *args_mpm, mpm_info, errno)
+        kernel_start_solve(f, self.newton_envs, self.newton_loops, *args_mpm, mpm_info, mpm_config, errno)
         for _ in range(self._options.max_iterations):
-            kernel_assemble(f, self.newton_rows, self.newton_envs, *args_mpm, mpm_info)
+            kernel_assemble(f, self.newton_rows, self.newton_envs, *args_mpm, mpm_info, mpm_config)
             assemble_bcoo_matrix(self.newton_rows.matrix, block_scalars=9)
             kernel_pcg_start(self.newton_rows, self.newton_envs, self.newton_loops, self.newton_info)
             kernel_pcg_loop(self.newton_rows, self.newton_envs, self.newton_loops)
@@ -241,7 +242,9 @@ class NewtonSolver(Solver):
                 f, self.newton_rows, self.newton_envs, self.newton_loops, *args_mpm, self.newton_info, mpm_info
             )
             while True:
-                kernel_line_search_trial(f, self.newton_envs, self.newton_loops, *args_mpm, self.newton_info, mpm_info)
+                kernel_line_search_trial(
+                    f, self.newton_envs, self.newton_loops, *args_mpm, self.newton_info, mpm_info, mpm_config
+                )
                 if not qd_to_numpy(self.newton_loops.is_line_search_running):
                     break
             kernel_end_iteration(self.newton_envs, self.newton_loops, self.newton_info)
@@ -307,6 +310,7 @@ def func_add_energies(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
+    mpm_config: qd.template(),
 ):
     """Add the incremental potential at the displacement of the nodes into the entry of every environment that
     `envs_mask` selects, the particles and the nodes of an environment following one another."""
@@ -316,7 +320,7 @@ def func_add_energies(
         i_b_key = gs.qd_int(-1)
         energy = gs.qd_float(0.0)
         if i_s < n_valid:
-            i_b, energy_particle = func_particle_energy(f, i_s, mpm_state, sparse_grid, mpm_info)
+            i_b, energy_particle = func_particle_energy(f, i_s, mpm_state, sparse_grid, mpm_info, mpm_config)
             if envs_mask[i_b]:
                 i_b_key = i_b
                 energy = energy_particle
@@ -348,6 +352,7 @@ def kernel_start_solve(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
+    mpm_config: qd.template(),
     errno: qd.Tensor,
 ):
     """Start the Newton solve of every environment at zero displacement, but those whose solve failed earlier in the
@@ -363,7 +368,7 @@ def kernel_start_solve(
         newton_envs.energy_start[i_b] = 0.0
         if is_active:
             qd.atomic_max(newton_loops.is_newton_running[None], 1)
-    func_add_energies(f, newton_envs.energy_start, newton_envs.is_active, mpm_state, sparse_grid, mpm_info)
+    func_add_energies(f, newton_envs.energy_start, newton_envs.is_active, mpm_state, sparse_grid, mpm_info, mpm_config)
 
 
 # ------------------------------------------------------------------------------------
@@ -379,6 +384,7 @@ def kernel_assemble(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
+    mpm_config: qd.template(),
 ):
     """
     Assemble the gradient and the projected Hessian of the incremental potential at the displacement of the nodes.
@@ -412,7 +418,7 @@ def kernel_assemble(
             i_t_start = n_nodes + 36 * mpm_state.sorted_particles.tasks_idx[i_s_start]
             for i_s in range(i_s_start, mpm_state.sorted_particles.cells_start[i_c + 1]):
                 slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
-                    func_particle_stencil_terms(f, i_s, mpm_state, sparse_grid, mpm_info)
+                    func_particle_stencil_terms(f, i_s, mpm_state, sparse_grid, mpm_info, mpm_config)
                 )
                 for i_pair in range(36):
                     a = pairs_a[i_pair]
@@ -441,7 +447,7 @@ def kernel_assemble(
                 i_task = mpm_state.sorted_particles.tasks_idx[i_s]
             i_task_prev, i_task_next = qd_slot_neighbors(tid, i_task)
             slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
-                func_particle_stencil_terms(f, i_s_clamped, mpm_state, sparse_grid, mpm_info)
+                func_particle_stencil_terms(f, i_s_clamped, mpm_state, sparse_grid, mpm_info, mpm_config)
             )
             for i_pair in range(36):
                 a = pairs_a[i_pair]
@@ -699,6 +705,7 @@ def kernel_line_search_trial(
     sparse_grid: MPMSparseGrid,
     newton_info: NewtonInfo,
     mpm_info: MPMInfo,
+    mpm_config: qd.template(),
 ):
     """
     Move the nodes of every environment still searching to the trial point of its step, and accept the step once the
@@ -715,7 +722,9 @@ def kernel_line_search_trial(
             )
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.energy_trial[i_b] = 0.0
-    func_add_energies(f, newton_envs.energy_trial, newton_envs.is_line_search_active, mpm_state, sparse_grid, mpm_info)
+    func_add_energies(
+        f, newton_envs.energy_trial, newton_envs.is_line_search_active, mpm_state, sparse_grid, mpm_info, mpm_config
+    )
     for _ in range(1):
         newton_loops.is_line_search_running[None] = 0
     for i_b in range(newton_envs.is_active.shape[0]):

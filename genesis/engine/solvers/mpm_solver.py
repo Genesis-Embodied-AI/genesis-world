@@ -36,10 +36,20 @@ from genesis.engine.numerics.hash_table import (
     hash_table_sizes,
 )
 from genesis.engine.numerics.radix_sort import RadixSortScratch, func_radix_sort, kernel_radix_sort, radix_sort_sizes
-from genesis.engine.numerics.soft_contact import func_band_row, func_contact_band_width, func_contact_invweight
+from genesis.engine.numerics.soft_contact import (
+    PYRAMID_ROWS,
+    func_band_row,
+    func_contact_band_width,
+    func_contact_friction,
+    func_contact_invweight,
+    func_contact_sol_params,
+    func_pyramid_coefficient,
+    func_pyramid_rows,
+    func_pyramid_terms,
+)
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
-from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward
@@ -99,6 +109,8 @@ CPIC = "cpic"
 # explicit one leaves out
 EXPLICIT = "explicit"
 IMPLICIT = "implicit"
+# The arrays of the contact of the particles of the implicit solver with the rigid geoms
+RIGID_CONTACT = "rigid_contact"
 
 # The distinct materials of the solver, and the particles of every environment, sorted by grid cell under the implicit
 # solver (see MPMSortedParticles)
@@ -238,6 +250,22 @@ class MPMSortedParticles(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,))
     walls_sign: qd.Tensor = field((float, 3), ndarray=True)
 
 
+class MPMRigidContacts(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
+    """
+    The contact of every sorted particle with the nearest rigid geom that couples with the particles, under the implicit
+    solver, staged from the state at the start of the substep (see 'kernel_stage_particle_rows').
+
+    `geom_idx` is the geom, -1 for none, which leaves the other arrays unset. `stiffness` and `target` are the rows of
+    the friction pyramid of the contact (see 'func_pyramid_rows'), of outward normal `normal` and friction `friction`.
+    """
+
+    geom_idx: qd.Tensor = field(int, ndarray=True)
+    normal: qd.Tensor = field((float, 3), ndarray=True)
+    friction: qd.Tensor = field(float, ndarray=True)
+    stiffness: qd.Tensor = field((float, PYRAMID_ROWS), ndarray=True)
+    target: qd.Tensor = field((float, PYRAMID_ROWS), ndarray=True)
+
+
 class MPMState(Data, kind=DataKind.STATE):
     """Runtime state of the material point method (MPM) solver."""
 
@@ -245,6 +273,7 @@ class MPMState(Data, kind=DataKind.STATE):
     grid: MPMGrid
     particles_cpic: MPMParticlesCPIC = field(labels=CPIC)
     sorted_particles: MPMSortedParticles = field(labels=IMPLICIT)
+    rigid_contacts: MPMRigidContacts = field(labels=RIGID_CONTACT)
 
 
 class MPMMaterialsInfo(Data, kind=DataKind.CONSTANT, shape=(MATERIALS,)):
@@ -381,7 +410,8 @@ class MPMInfo(Data, kind=DataKind.CONSTANT):
     `extension_sigma_min` and `extension_stiffness` the compression penalty of the elastic energies (see
     'func_compression_penalty'). `inversion_step_slack` is the fraction of the step to the first zero volume of a liquid
     particle along a Newton direction that the line search starts from at most. `wall_sol_params` are the solver
-    parameters of the walls of the domain, in the form of those of the rigid solver.
+    parameters of the walls of the domain, in the form of those of the rigid solver. `contact_min_friction` is the
+    smallest friction coefficient of the contact of a particle with a rigid geom (see 'func_contact_friction').
     """
 
     particles: MPMParticlesInfo
@@ -403,6 +433,7 @@ class MPMInfo(Data, kind=DataKind.CONSTANT):
     extension_stiffness: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     inversion_step_slack: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     wall_sol_params: qd.Tensor = field((float, 7), shape=(), labels=IMPLICIT)
+    contact_min_friction: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
 
 
 # TODO: 'scene.reset' restores the state alone, so constraints set after a saved state survive its restore. To revisit,
@@ -434,6 +465,11 @@ class MPMConfig(Config):
     is_cpic: bool
     # Whether the particles move by the implicit solver (see 'MPMOptions.use_implicit_solver')
     use_implicit_solver: bool
+    # Whether the particles of the implicit solver touch the rigid geoms that couple with them (see
+    # 'LegacyCouplerOptions.rigid_mpm')
+    has_rigid_contact: bool
+    # Whether the rigid links hold their info per environment (see 'RigidOptions.batch_links_info')
+    is_links_info_batched: bool
 
 
 class MPMData(Data):
@@ -475,12 +511,14 @@ class MPMData(Data):
                     extension_stiffness=20.0,
                     inversion_step_slack=0.9,
                     wall_sol_params=tuple(wall_sol_params.tolist()),
+                    contact_min_friction=1e-2,
                 )
             unused = {
                 SPARSE_GRID_RESET: solver._requires_grad or is_implicit,
                 CPIC: not solver.mpm_config.is_cpic,
                 EXPLICIT: is_implicit,
                 IMPLICIT: not is_implicit,
+                RIGID_CONTACT: not solver.mpm_config.has_rigid_contact,
             }
         # The sorted particles span every environment, padded to whole warps for the sums by environment over them
         n_sorted_particles = max((solver._B * solver._n_particles + 255) // 256 * 256, 256)
@@ -642,18 +680,8 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
                 "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
             )
 
-        # When no material reads U, S, V, the transfer to the grid takes J from the determinant of the advected
-        # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
-        # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
-        self.mpm_config = MPMConfig(
-            is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
-            requires_grad=self._requires_grad,
-            is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
-            use_implicit_solver=self._use_implicit_solver,
-        )
-        self._mpm_materials = MPMMaterials(tuple(self._materials))
-
-        if self.is_active and self._use_implicit_solver:
+        is_implicit = self.is_active and self._use_implicit_solver
+        if is_implicit:
             if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
                 gs.raise_exception(
                     "The implicit MPM solver requires LegacyCouplerOptions, got "
@@ -678,6 +706,19 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
                     "the liquid down to half its volume: lower MPMOptions(liquid_smoothing_velocity), "
                     "NewtonOptions(velocity_tol) or the substep."
                 )
+
+        # When no material reads U, S, V, the transfer to the grid takes J from the determinant of the advected
+        # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
+        # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
+        self.mpm_config = MPMConfig(
+            is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
+            requires_grad=self._requires_grad,
+            is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
+            use_implicit_solver=self._use_implicit_solver,
+            has_rigid_contact=is_implicit and self._sim.coupler.rigid_couplings[0],
+            is_links_info_batched=self._sim.rigid_solver.rigid_config.batch_links_info,
+        )
+        self._mpm_materials = MPMMaterials(tuple(self._materials))
 
         self.data_manager = MPMData(self)
         self.mpm_state = self.data_manager.mpm_state
@@ -758,7 +799,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 kernel_transfer_to_sparse_grid(
                     0, self.mpm_state, self.sparse_grid, self._sim.sim_state, self.mpm_info, self.force_fields
                 )
-                kernel_contact_invweight(0, self.mpm_state, self.sparse_grid, self.mpm_info)
+                kernel_contact_invweight(0, self.mpm_state, self.sparse_grid, self.mpm_info, self.mpm_config)
             else:
                 # See: https://github.com/taichi-dev/taichi_elements/blob/d19678869a28b09a32ef415b162e35dc929b792d/engine/mpm_solver.py#L84
                 suggested_dt = 2e-2 * self._dx
@@ -838,13 +879,20 @@ Please decrease the simulation timestep or adjust the material parameters."""
             kernel_transfer_to_sparse_grid(
                 f, self.mpm_state, self.sparse_grid, self._sim.sim_state, self.mpm_info, self.force_fields
             )
+            rigid_solver = self._sim.rigid_solver
             kernel_stage_particle_rows(
                 f,
                 self.mpm_state,
-                self.sparse_grid,
-                self._sim.rigid_solver.dyn_state.links,
+                rigid_solver.dyn_state.links,
+                rigid_solver.dyn_state.geoms,
                 self.particle_constraints,
                 self.mpm_info,
+                rigid_solver.dyn_info.links,
+                rigid_solver.dyn_info.geoms,
+                rigid_solver.rigid_info,
+                rigid_solver.collider.sdf.sdf_info,
+                self.mpm_config,
+                rigid_solver.collider.collider_config,
                 self._is_constrained,
                 self._sim.newton_solver.is_rigid_deferred,
             )
@@ -2265,20 +2313,65 @@ def func_particle_material(i_mat: int, Jp: float, mpm_info: MPMInfo):
 
 
 @qd.func
+def func_particle_point_terms(
+    i_s: int,
+    x: qd.types.vector(3),
+    disp: qd.types.vector(3),
+    sorted_particles: MPMSortedParticles,
+    rigid_contacts: MPMRigidContacts,
+    mpm_config: qd.template(),
+):
+    """Return the energy, the gradient and the Hessian of the terms acting on the displacement `disp` over the substep
+    of a sorted particle at x, from the rows staged at its slot: the spring of its constraint, the walls of the domain
+    and its contact with a rigid geom (see 'kernel_stage_particle_rows')."""
+    energy_spring, gradient_spring, curvature_spring = func_spring_terms(
+        sorted_particles.constraint_spring[i_s],
+        sorted_particles.constraint_damping[i_s],
+        sorted_particles.constraint_target[i_s],
+        sorted_particles.constraint_target_disp[i_s],
+        x,
+        disp,
+    )
+    energy_walls, gradient_walls, hessian_walls = func_walls_terms(
+        sorted_particles.walls_stiffness[i_s],
+        sorted_particles.walls_target[i_s],
+        sorted_particles.walls_sign[i_s],
+        disp,
+    )
+    energy = energy_spring + energy_walls
+    gradient = gradient_spring + gradient_walls
+    hessian = curvature_spring * qd.Matrix.identity(gs.qd_float, 3) + hessian_walls
+    if qd.static(mpm_config.has_rigid_contact):
+        if rigid_contacts.geom_idx[i_s] >= 0:
+            energy_rigid, gradient_rigid, hessian_rigid = func_pyramid_terms(
+                rigid_contacts.normal[i_s],
+                rigid_contacts.friction[i_s],
+                rigid_contacts.stiffness[i_s],
+                rigid_contacts.target[i_s],
+                disp,
+            )
+            energy += energy_rigid
+            gradient += gradient_rigid
+            hessian += hessian_rigid
+    return energy, gradient, hessian
+
+
+@qd.func
 def func_particle_stencil_terms(
     f: int,
     i_s: int,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
+    mpm_config: qd.template(),
 ):
     """
     Return the terms of the Hessian of the incremental potential of a sorted particle on the nodes of its stencil, at
     the displacement of the nodes, and stage the factors of its gradient at its slot.
 
     The particle contributes its elastic energy, the energy of the fibres of a muscle, and the terms acting on its own
-    displacement (the spring of a constraint, the walls of the domain). The block of the nodes a and b is
-    'func_stencil_pair_block' of the terms returned. A fixed node takes no part.
+    displacement (see 'func_particle_point_terms'). The block of the nodes a and b is 'func_stencil_pair_block' of the
+    terms returned. A fixed node takes no part.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
@@ -2316,29 +2409,16 @@ def func_particle_stencil_terms(
     S_block, alpha, beta = func_isotropic_projected_modes(sigma, g, A)
 
     # The terms on the displacement of the particle, sum_a w_a u_a
-    disp = u_nodes.transpose() @ w
-    energy_spring, spring_gradient, spring_hessian = func_spring_terms(
-        mpm_state.sorted_particles.constraint_spring[i_s],
-        mpm_state.sorted_particles.constraint_damping[i_s],
-        mpm_state.sorted_particles.constraint_target[i_s],
-        mpm_state.sorted_particles.constraint_target_disp[i_s],
-        x_p,
-        disp,
-    )
-    energy_walls, walls_gradient, walls_hessian = func_walls_terms(
-        mpm_state.sorted_particles.walls_stiffness[i_s],
-        mpm_state.sorted_particles.walls_target[i_s],
-        mpm_state.sorted_particles.walls_sign[i_s],
-        disp,
+    energy_point, point_gradient, point_hessian = func_particle_point_terms(
+        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles, mpm_state.rigid_contacts, mpm_config
     )
     mpm_state.sorted_particles.stress_factor[i_s] = scale * (P + P_fibre) @ F.transpose()
-    mpm_state.sorted_particles.point_gradient[i_s] = spring_gradient + walls_gradient
+    mpm_state.sorted_particles.point_gradient[i_s] = point_gradient
 
     # The rows r_a = grad w_a^T F V of the stencil in the frame V, the weights of the rank-one fibre term, and the
     # weights of the terms on the displacement, all zero on a fixed node
     r_frame = (movable.outer_product(qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float))) * (grad_w @ F @ V)
     fibre_weights = qd.sqrt(scale * fibre_curvature) * (r_frame @ (V.transpose() @ muscle_direction))
-    point_hessian = spring_hessian * qd.Matrix.identity(gs.qd_float, 3) + walls_hessian
     return slots, r_frame, U, scale * S_block, scale * alpha, scale * beta, fibre_weights, movable * w, point_hessian
 
 
@@ -2365,7 +2445,9 @@ def func_stencil_pair_block(
 
 
 @qd.func
-def func_particle_energy(f: int, i_s: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo):
+def func_particle_energy(
+    f: int, i_s: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, mpm_config: qd.template()
+):
     """Return the energy of a sorted particle in the incremental potential at the displacement of the nodes (see
     'func_particle_stencil_terms')."""
     n_particles = mpm_state.particles.pos.shape[1]
@@ -2395,23 +2477,11 @@ def func_particle_energy(f: int, i_s: int, mpm_state: MPMState, sparse_grid: MPM
         mpm_info.particles.muscle_direction[i_p],
         F_trial,
     )
-    disp = u_nodes.transpose() @ w
-    energy_spring, spring_gradient, spring_hessian = func_spring_terms(
-        mpm_state.sorted_particles.constraint_spring[i_s],
-        mpm_state.sorted_particles.constraint_damping[i_s],
-        mpm_state.sorted_particles.constraint_target[i_s],
-        mpm_state.sorted_particles.constraint_target_disp[i_s],
-        x_p,
-        disp,
-    )
-    energy_walls, walls_gradient, walls_hessian = func_walls_terms(
-        mpm_state.sorted_particles.walls_stiffness[i_s],
-        mpm_state.sorted_particles.walls_target[i_s],
-        mpm_state.sorted_particles.walls_sign[i_s],
-        disp,
+    energy_point, point_gradient, point_hessian = func_particle_point_terms(
+        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles, mpm_state.rigid_contacts, mpm_config
     )
     scale = mpm_info.particle_volume[None] / mpm_info.particle_volume_scale[None] * dt * dt
-    return i_b, scale * (psi + psi_fibre) + energy_spring + energy_walls
+    return i_b, scale * (psi + psi_fibre) + energy_point
 
 
 @qd.func
@@ -2530,24 +2600,33 @@ def func_particle_inversion_step_cap(
 def kernel_stage_particle_rows(
     f: int,
     mpm_state: MPMState,
-    sparse_grid: MPMSparseGrid,
     links_state: LinksState,
+    geoms_state: GeomsState,
     particle_constraints: MPMParticleConstraints,
     mpm_info: MPMInfo,
+    links_info: LinksInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    mpm_config: qd.template(),
+    collider_config: qd.template(),
     is_constrained: qd.template(),
     is_rigid_deferred: qd.template(),
 ):
     """
-    Stage at the slot of every active sorted particle the rows of the walls of the domain and the spring of its
-    constraint, from the state at the start of the substep.
+    Stage at the slot of every active sorted particle the rows of the walls of the domain, of its contact with a rigid
+    geom and of the spring of its constraint, from the state at the start of the substep.
 
     A particle gets the row of the nearer wall of an axis within the band of the wall (see 'func_contact_band_width'),
-    its stiffness from the inverse weight of the particle along the normal of the wall. The target of a spring moves
-    with the link of the particle at its velocity over the substep. The links stand where the substep starts when the
-    rigid solver solves it within the Newton solve (`is_rigid_deferred`), and where it ends otherwise.
+    and the rows of the friction pyramid of the nearest rigid geom that couples with the particles within the band of
+    the geom, its gap being its signed distance short of the softness of the geom. The stiffness of a row comes from the
+    inverse weight of the particle along its normal, and that of the link of the geom. The target of a spring moves with
+    the link of the particle at its velocity over the substep. The links stand where the substep starts when the rigid
+    solver solves it within the Newton solve (`is_rigid_deferred`), and where it ends otherwise.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     dt = mpm_info.substep_dt[None]
+    dx = mpm_info.dx[None]
     lower = mpm_info.boundary.lower[None]
     upper = mpm_info.boundary.upper[None]
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
@@ -2559,14 +2638,39 @@ def kernel_stage_particle_rows(
         is_upper = gaps_upper < x_p - lower
         gaps = qd.select(is_upper, gaps_upper, x_p - lower)
         signs = 1.0 - 2.0 * is_upper.cast(gs.qd_float)
-        stiffness = qd.Vector.zero(gs.qd_float, 3)
-        target = qd.Vector.zero(gs.qd_float, 3)
+        is_near = (gaps < 2.0 * dt * qd.max(-signs * v_p, 0.0) + dx).any()
+
+        # The nearest rigid geom, kept within reach of the particle at its speed relative to the geom, which bounds its
+        # approach speed and spares the normal of the geoms out of reach
+        i_g_contact = gs.qd_int(-1)
+        gap_contact = gs.qd_float(0.0)
+        vel_geom = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(mpm_config.has_rigid_contact):
+            gap_contact = gs.qd_float(qd.math.inf)
+            for i_g in range(geoms_info.needs_coup.shape[0]):
+                if geoms_info.needs_coup[i_g]:
+                    gap = (
+                        sdf.sdf_func_world(i_g, i_b, x_p, geoms_state, geoms_info, sdf_info)
+                        - geoms_info.coup_softness[i_g]
+                    )
+                    if gap < gap_contact:
+                        i_g_contact = i_g
+                        gap_contact = gap
+            if i_g_contact >= 0:
+                i_l = geoms_info.link_idx[i_g_contact]
+                vel_geom = func_vel_at_point(i_l, i_b, x_p, links_state)
+                if gap_contact >= func_contact_band_width((v_p - vel_geom).norm(), dt, dx):
+                    i_g_contact = -1
+            is_near = is_near or i_g_contact >= 0
         U = qd.Matrix.identity(gs.qd_float, 3)
         V = qd.Matrix.identity(gs.qd_float, 3)
-        if (gaps < 2.0 * dt * qd.max(-signs * v_p, 0.0) + mpm_info.dx[None]).any():
+        if is_near:
             U, S, V = gu.qd_svd(mpm_state.particles.F[f, i_p, i_b])
+
+        stiffness = qd.Vector.zero(gs.qd_float, 3)
+        target = qd.Vector.zero(gs.qd_float, 3)
         for k in range(3):
-            if gaps[k] < func_contact_band_width(-signs[k] * v_p[k], dt, mpm_info.dx[None]):
+            if gaps[k] < func_contact_band_width(-signs[k] * v_p[k], dt, dx):
                 normal = signs[k] * qd.Vector([gs.qd_float(k == d) for d in qd.static(range(3))], dt=gs.qd_float)
                 invweight = func_contact_invweight(U, V, mpm_info.particles.contact_invweight[i_p], normal)
                 stiffness_k, target_k = func_band_row(
@@ -2577,6 +2681,40 @@ def kernel_stage_particle_rows(
         mpm_state.sorted_particles.walls_stiffness[i_s] = stiffness
         mpm_state.sorted_particles.walls_target[i_s] = target
         mpm_state.sorted_particles.walls_sign[i_s] = signs
+
+        if qd.static(mpm_config.has_rigid_contact):
+            if i_g_contact >= 0:
+                normal = sdf.sdf_func_normal_world(
+                    i_g_contact, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+                )
+                if gap_contact < func_contact_band_width(-normal.dot(v_p - vel_geom), dt, dx):
+                    i_l = geoms_info.link_idx[i_g_contact]
+                    I_l = [i_l, i_b] if qd.static(mpm_config.is_links_info_batched) else i_l
+                    friction = func_contact_friction(
+                        geoms_info.friction[i_g_contact],
+                        geoms_state.friction_ratio[i_g_contact, i_b],
+                        mpm_info.contact_min_friction[None],
+                    )
+                    invweight_particle = func_contact_invweight(U, V, mpm_info.particles.contact_invweight[i_p], normal)
+                    stiffness_rigid, target_rigid = func_pyramid_rows(
+                        normal,
+                        friction,
+                        func_pyramid_coefficient(
+                            friction, rigid_info.impratio[None], invweight_particle + links_info.invweight[I_l][0]
+                        ),
+                        func_contact_sol_params(geoms_info.sol_params[i_g_contact], dt),
+                        gap_contact,
+                        v_p - vel_geom,
+                        vel_geom,
+                        dt,
+                    )
+                    mpm_state.rigid_contacts.normal[i_s] = normal
+                    mpm_state.rigid_contacts.friction[i_s] = friction
+                    mpm_state.rigid_contacts.stiffness[i_s] = stiffness_rigid
+                    mpm_state.rigid_contacts.target[i_s] = target_rigid
+                else:
+                    i_g_contact = -1
+            mpm_state.rigid_contacts.geom_idx[i_s] = i_g_contact
 
         spring = gs.qd_float(0.0)
         damping = gs.qd_float(0.0)
@@ -2606,13 +2744,16 @@ def kernel_stage_particle_rows(
 
 
 @qd.kernel
-def kernel_contact_invweight(f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo):
+def kernel_contact_invweight(
+    f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, mpm_config: qd.template()
+):
     """
     Compute the inverse weight of every particle in its contact rows at rest, from the diagonal blocks of the Hessian of
     the nodes of its stencil.
 
-    A particle is lumped onto the nodes of its stencil, each node of diagonal block D_a weighing w_a^2 D_a^-1. The
-    inverse weight is taken in the first environment, the frame of the material at rest being the same in all.
+    A particle is lumped onto the nodes of its stencil, each node of diagonal block D_a weighing w_a^2 D_a^-1, the
+    blocks holding the kinetic and the elastic terms alone. The inverse weight is taken in the first environment, the
+    frame of the material at rest being the same in all.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
@@ -2623,13 +2764,22 @@ def kernel_contact_invweight(f: int, mpm_state: MPMState, sparse_grid: MPMSparse
         sparse_grid.nodes_diagonal[i_n] = mass * qd.Matrix.identity(gs.qd_float, 3)
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
-            func_particle_stencil_terms(f, i_s, mpm_state, sparse_grid, mpm_info)
+            func_particle_stencil_terms(f, i_s, mpm_state, sparse_grid, mpm_info, mpm_config)
         )
         for a in qd.static(range(8)):
             qd.atomic_add(
                 sparse_grid.nodes_diagonal[slots[a]],
                 func_stencil_pair_block(
-                    a, a, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian
+                    a,
+                    a,
+                    r_frame,
+                    U,
+                    S_block,
+                    alpha,
+                    beta,
+                    fibre_weights,
+                    point_weights,
+                    qd.Matrix.zero(gs.qd_float, 3, 3),
                 ),
             )
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
