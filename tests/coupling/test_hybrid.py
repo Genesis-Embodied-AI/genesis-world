@@ -178,6 +178,91 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
 
 @pytest.mark.required
+def test_rigid_mpm_implicit_coupling(show_viewer):
+    BOX_SIZE = 0.08
+    N_STEPS = 50
+    # The bodies at rest keep the speed to which the solve resolves the velocities (see 'NewtonOptions.velocity_tol')
+    REST_SPEED = 0.1
+
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-0.5, -0.5, -0.05),
+            upper_bound=(0.5, 0.5, 0.6),
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.7, -0.9, 0.45),
+            camera_lookat=(0.0, 0.0, 0.08),
+            camera_fov=35,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A free box dropped on an elastic block resting on the plane
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2, 0.0, 0.05),
+            size=(0.24, 0.24, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(
+            E=1e5,
+            sampler="regular",
+        ),
+    )
+    box_dropped = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.2, 0.0, 0.25),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        ),
+        vis_mode="collision",
+    )
+    # An elastic cube dropped on a free box resting on the plane
+    box_resting = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.2, 0.0, 0.5 * BOX_SIZE),
+            size=(2 * BOX_SIZE, 2 * BOX_SIZE, BOX_SIZE),
+        ),
+        vis_mode="collision",
+    )
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.2, 0.0, 0.2),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.build(n_envs=2)
+    assert scene.sim.newton_solver.is_rigid_deferred
+
+    box_dropped.set_dofs_velocity(((0.0,) * 6, (0.0, 0.0, -1.0, 0.0, 0.0, 0.0)))
+    cube.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -1.0)))
+    for _ in range(N_STEPS):
+        scene.step()
+    softness = box_dropped.material.coup_softness
+
+    # The dropped box comes to rest on the block, the particles beneath it kept out of it at the softness of its contact
+    block_pos = tensor_to_array(block.get_particles_pos())
+    box_pos = tensor_to_array(box_dropped.get_pos())
+    offset = block_pos - box_pos[:, None]
+    assert not (np.abs(offset) < 0.5 * BOX_SIZE).all(axis=-1).any()
+    is_beneath = (np.abs(offset[..., :2]) < 0.5 * BOX_SIZE - scene.mpm_solver.dx).all(axis=-1)
+    top_beneath = np.where(is_beneath, block_pos[..., 2], -np.inf).max(axis=-1)
+    assert_allclose(box_pos[:, 2] - 0.5 * BOX_SIZE - top_beneath, softness, tol=0.5 * softness)
+    assert_allclose(box_dropped.get_vel(), 0.0, tol=REST_SPEED)
+
+    # The cube comes to rest on the box, which stays on the plane under its weight
+    assert_allclose(box_resting.get_pos()[..., 2], 0.5 * BOX_SIZE, tol=5e-4)
+    cube_pos = tensor_to_array(cube.get_particles_pos())
+    assert_allclose(cube_pos[..., 2].min(axis=-1) - BOX_SIZE, softness, tol=0.5 * softness)
+    assert_allclose(cube.get_particles_vel(), 0.0, tol=REST_SPEED)
+    assert_allclose(box_resting.get_vel(), 0.0, tol=REST_SPEED)
+
+
+@pytest.mark.required
 def test_mesh_mpm_build(show_viewer):
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(

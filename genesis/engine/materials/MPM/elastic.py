@@ -110,11 +110,11 @@ def func_compression_penalty(
     sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float, stiffness_ratio: float
 ):
     """
-    Return the penalty against the compression of the singular values below `sigma_min`, with its gradient and the
+    Return the penalty against the compression of the singular values below a floor, with its gradient and the
     diagonal of its Hessian.
 
-    Its stiffness is `stiffness_ratio` times the Young's modulus, which keeps an elastic material from collapsing where
-    its own energy grows too slowly under compression (Stomakhin et al. 2012).
+    The penalty acts below `sigma_min`, at a stiffness of `stiffness_ratio` times the Young's modulus. It keeps an
+    elastic material from collapsing where its own energy grows too slowly under compression (Stomakhin et al. 2012).
     """
     young_modulus = gs.qd_float(0.0)
     if lam + mu > 0.0:

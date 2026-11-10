@@ -48,7 +48,11 @@ class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
 
 
 def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
-    """Return the sizes of a matrix of at most `capacity` blocks of shape `block_shape`."""
+    """
+    Return the sizes of a matrix holding a bounded number of blocks of one shape.
+
+    The matrix holds at most `capacity` blocks of shape `block_shape`.
+    """
     n_padded_triplets = max(((max(capacity, 1) + 63) // 64) * 64, 64)
     return {
         TRIPLETS: capacity,
@@ -57,15 +61,6 @@ def bcoo_matrix_sizes(capacity: int, block_shape: tuple[int, int]) -> dict:
         BCOOMatrixScratch.sorter: radix_sort_sizes(key_bits=64, capacity=n_padded_triplets),
         BCOOMatrixScratch.scanner: exclusive_sum_sizes(n_padded_triplets),
     }
-
-
-def build_bcoo_matrix(capacity: int, block_shape: tuple[int, int]) -> BCOOMatrixScratch:
-    """Build a matrix of at most `capacity` blocks of shape `block_shape`, holding none."""
-    matrix = BCOOMatrixScratch(sizes=bcoo_matrix_sizes(capacity, block_shape))
-    for counter in (matrix.n_triplets, matrix.n_triplets_demanded, matrix.has_triplet_overflow, matrix.n_entries):
-        counter.fill(0)
-    matrix.n_padded_triplets.fill(64)
-    return matrix
 
 
 @qd.func
@@ -106,7 +101,7 @@ def func_report_triplet_demand(n_triplets_demanded: int, matrix: BCOOMatrixScrat
 
 
 @qd.func
-def func_write_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
+def func_write_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
     """
     Write a block in a triplet slot, the slots past the capacity dropping it.
 
@@ -114,27 +109,27 @@ def func_write_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixSc
     """
     if i_t < matrix.triplets_row.shape[0]:
         i_r_stored = i_r
-        i_c_stored = i_c
+        j_r_stored = j_r
         block_stored = block
         if qd.static(is_symmetric):
-            if i_r > i_c:
-                i_r_stored = i_c
-                i_c_stored = i_r
+            if i_r > j_r:
+                i_r_stored = j_r
+                j_r_stored = i_r
                 block_stored = block.transpose()
         matrix.triplets_row[i_t] = i_r_stored
-        matrix.triplets_col[i_t] = i_c_stored
+        matrix.triplets_col[i_t] = j_r_stored
         for k, j in qd.static(qd.ndrange(block.n, block.m)):
             matrix.triplets_value[i_t * (block.n * block.m) + k * block.m + j] = block_stored[k, j]
 
 
 @qd.func
-def func_add_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
+def func_add_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
     """Add a block to the triplet slot that the same thread wrote for the same row and column (see
     'func_write_triplet')."""
     if i_t < matrix.triplets_row.shape[0]:
         block_stored = block
         if qd.static(is_symmetric):
-            if i_r > i_c:
+            if i_r > j_r:
                 block_stored = block.transpose()
         for k, j in qd.static(qd.ndrange(block.n, block.m)):
             i_value = i_t * (block.n * block.m) + k * block.m + j
@@ -142,22 +137,12 @@ def func_add_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixScra
 
 
 @qd.func
-def func_discard_triplet(i_t: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
-    """Write a zero block at the first row and column in a triplet slot, which adds nothing to the entry it joins."""
-    if i_t < matrix.triplets_row.shape[0]:
-        matrix.triplets_row[i_t] = 0
-        matrix.triplets_col[i_t] = 0
-        for k in qd.static(range(block_rows * block_cols)):
-            matrix.triplets_value[i_t * (block_rows * block_cols) + k] = 0.0
-
-
-@qd.func
-def func_read_entry(i_e: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
+def func_read_entry(i_entry: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
     """Return the row, the column and the block of an entry."""
     block = qd.Matrix.zero(gs.qd_float, block_rows, block_cols)
     for k, j in qd.static(qd.ndrange(block_rows, block_cols)):
-        block[k, j] = matrix.entries_value[i_e * (block_rows * block_cols) + k * block_cols + j]
-    return matrix.entries_row[i_e], matrix.entries_col[i_e], block
+        block[k, j] = matrix.entries_value[i_entry * (block_rows * block_cols) + k * block_cols + j]
+    return matrix.entries_row[i_entry], matrix.entries_col[i_entry], block
 
 
 @qd.func(requires_top_level=True)
@@ -214,27 +199,27 @@ def func_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()
     # The loop covers whole warps, which take part in the sums by key together (see 'func_add_by_key')
     qd.loop_config(name="bcoo_sum_triplets", block_dim=256)
     for i_t in range(qd.min((matrix.n_triplets[()] + 31) // 32 * 32, matrix.triplets_key.shape[0])):
-        i_e = gs.qd_int(-1)
+        i_entry = gs.qd_int(-1)
         i_source = gs.qd_int(0)
         if i_t < matrix.n_triplets[()]:
-            i_e = matrix.triplets_entry_idx[i_t]
+            i_entry = matrix.triplets_entry_idx[i_t]
             i_source = matrix.triplets_source_idx[i_t]
         for k in qd.static(range(block_scalars)):
             value = gs.qd_float(0.0)
             i_value = gs.qd_int(-1)
-            if i_e >= 0:
+            if i_entry >= 0:
                 value = matrix.triplets_value[i_source * block_scalars + k]
-                i_value = i_e * block_scalars + k
+                i_value = i_entry * block_scalars + k
             func_add_by_key(i_value, value, matrix.entries_value)
     qd.loop_config(name="bcoo_publish_entries")
     for i_t in range(matrix.n_triplets[()]):
         if matrix.triplets_is_entry_end[i_t] != 0:
-            i_e = matrix.triplets_entry_idx[i_t]
+            i_entry = matrix.triplets_entry_idx[i_t]
             key = matrix.triplets_key[i_t]
-            matrix.entries_row[i_e] = gs.qd_int(key >> qd.u64(32))
-            matrix.entries_col[i_e] = gs.qd_int(key & qd.u64(0xFFFFFFFF))
+            matrix.entries_row[i_entry] = gs.qd_int(key >> qd.u64(32))
+            matrix.entries_col[i_entry] = gs.qd_int(key & qd.u64(0xFFFFFFFF))
             if i_t == matrix.n_triplets[()] - 1:
-                matrix.n_entries[()] = i_e + 1
+                matrix.n_entries[()] = i_entry + 1
 
 
 @qd.kernel

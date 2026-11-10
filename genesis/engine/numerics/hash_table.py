@@ -16,7 +16,11 @@ class HashTableScratch(Data, kind=DataKind.SCRATCH):
 
 
 def hash_table_sizes(capacity: int) -> dict[Size, int]:
-    """Return the sizes of a table of at most `capacity` keys: a power of two of at least twice as many slots."""
+    """
+    Return the sizes of a table holding a bounded number of keys.
+
+    The table holds at most `capacity` keys in a power of two of at least twice as many slots.
+    """
     return {HASH_SLOTS: 1 << max((max(2 * capacity, 2) - 1).bit_length(), 1)}
 
 

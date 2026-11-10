@@ -38,7 +38,11 @@ class RadixSortScratch(Data, kind=DataKind.SCRATCH):
 
 
 def radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
-    """Return the sizes of the workspace of a sort of at most `capacity` keys of `key_bits` bits, 32 or 64."""
+    """
+    Return the sizes of the workspace of a sort over a bounded number of keys.
+
+    The sort runs over at most `capacity` keys of `key_bits` bits, 32 or 64.
+    """
     assert key_bits in (32, 64)
     return {
         RADIX_PASSES: key_bits // 8,
@@ -49,7 +53,11 @@ def radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
 
 @qd.func
 def func_key_digit(i_pass: int, key, key_bits: qd.template()):
-    """Return the digit of a key a pass sorts on, its byte of rank `i_pass` from the least significant one."""
+    """
+    Return the digit of a key that a pass sorts on.
+
+    The digit is the byte of rank `i_pass` from the least significant one.
+    """
     i_digit = gs.qd_int(0)
     if qd.static(key_bits == 32):
         i_digit = gs.qd_int((key >> qd.u32(8 * i_pass)) & qd.u32(255))
@@ -352,11 +360,11 @@ def func_radix_sort(
     key_bits: qd.template(),
 ):
     """
-    Sort the first `n_keys[()]` keys stably together with their permutation, in place.
+    Sort the leading keys of an array stably together with their permutation, in place.
 
-    The buffers hold the output of every other pass. The passes are even in number, so the sorted keys land back in the
-    input arrays. The GPU passes run in a loop of the graph, which the caller's kernel must declare (see
-    'kernel_radix_sort').
+    The sort covers the first `n_keys[()]` keys. The buffers hold the output of every other pass. The passes are even
+    in number, so the sorted keys land back in the input arrays. The GPU passes run in a loop of the graph, which the
+    kernel of the caller must declare (see 'kernel_radix_sort').
     """
     if qd.static(gs.backend == gs.cpu):
         for i_pass in qd.static(range(key_bits // 8)):

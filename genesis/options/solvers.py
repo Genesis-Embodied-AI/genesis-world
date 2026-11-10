@@ -654,7 +654,9 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Whether to use the implicit solver, which stays stable at a time step far larger than the explicit solver
         allows, and resolves the contact of the particles with the rigid entities within the same solve as their motion
         (see NewtonOptions). Each of its substeps costs several iterations, which the larger time step pays back.
-        Differentiable simulation, CPIC and the contact with FEM, PBD and SPH entities require the explicit solver.
+        Differentiable simulation, CPIC, custom materials and the contact with FEM, PBD and SPH entities require the
+        explicit solver. The contact with moving rigid entities requires the pyramidal friction cone and the Newton
+        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions).
         Defaults to False.
     wall_timeconst : float, optional
         Time constant in seconds over which the walls of the domain push back the particles that penetrate them, at
@@ -919,8 +921,10 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
 
 class NewtonOptions(Options):
     """
-    Options configuring the NewtonSolver, which solves every substep of the implicit MPM solver (see
-    `MPMOptions.use_implicit_solver`) together with the rigid entities in contact with its particles.
+    Options of the iterative solve of the implicit material point method (MPM) solver, which moves its particles over
+    every substep together with the rigid entities in contact with them.
+
+    The implicit solver is enabled by `MPMOptions.use_implicit_solver`.
 
     Parameters
     ----------
@@ -933,23 +937,22 @@ class NewtonOptions(Options):
         Iterations of a substep at most. A solve reaching it stops short of 'velocity_tol' and logs a warning. Defaults
         to 1024.
     line_search_max_iterations : int, optional
-        Trial steps of an iteration at most along its direction, the last one being kept. More trials let an iteration
-        recover from a poor direction, at the cost of the energy of the scene evaluated once more per trial. Defaults to
-        12.
+        Trial steps of an iteration at most, each one shorter than the previous, the last one being kept. More trials
+        let an iteration progress where the motion is hard to resolve, at the cost of more work per iteration. Defaults
+        to 12.
     line_search_shrink : float, optional
         Factor of the step of an iteration between two trials, strictly between 0 and 1. A smaller factor reaches an
         acceptable step in fewer trials, while a larger one keeps a longer step at the cost of more trials. Defaults to
         0.5.
     pcg_max_iterations : int, optional
-        Iterations at most of the preconditioned conjugate gradient (PCG) that gives the direction of an iteration. A
-        larger cap lets the direction of a stiff scene converge, at the cost of a longer worst-case substep. Defaults to
-        1024.
+        Iterations at most of the inner linear solve of an iteration. A larger cap lets a stiff scene converge, at the
+        cost of a longer worst-case substep. Defaults to 1024.
     pcg_tol : float, optional
-        Relative accuracy at which the PCG of an iteration stops. A looser value makes every iteration cheaper, the next
-        iterations correcting its inexact direction, at the cost of more iterations. Defaults to 1e-4.
+        Relative accuracy of the inner linear solve of an iteration. A looser value makes every iteration cheaper, the
+        next iterations correcting its inexact result, at the cost of more iterations. Defaults to 1e-4.
     failure_check_interval : int, optional
-        Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller interval
-        reports it sooner, at the cost of a slower simulation. Defaults to 32.
+        Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller
+        interval reports it sooner, at the cost of a slower simulation. Defaults to 32.
     """
 
     velocity_tol: PositiveFloat = 5e-2

@@ -3706,7 +3706,9 @@ def func_hessian_and_cholesky_factor_direct_batch(
 
 @qd.data_oriented
 class NoExtraHessian:
-    """The `extra_hessian` of func_hessian_and_cholesky_factor_direct that adds nothing."""
+    """
+    The extra Hessian of the factor of the Hessian that adds nothing (see 'func_hessian_and_cholesky_factor_direct').
+    """
 
     has_extra_hessian = False
 

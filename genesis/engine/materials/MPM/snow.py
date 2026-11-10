@@ -75,7 +75,11 @@ class Snow(ElastoPlastic):
 
 @qd.func
 def func_snow_hardening(Jp: float):
-    """Return the factor of the Lame parameters of snow at the plastic volume ratio `Jp`, harder once compressed."""
+    """
+    Return the hardening factor of the Lame parameters of snow, which grows as the snow compacts.
+
+    `Jp` is the plastic volume ratio of the snow.
+    """
     return qd.exp(10.0 * (1.0 - Jp))
 
 

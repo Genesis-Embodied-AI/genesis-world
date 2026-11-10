@@ -88,8 +88,11 @@ def func_liquid_volume_terms(J: float, lam: float, band: float):
 
 @qd.func
 def func_liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band: float):
-    """Return the energy density of a liquid, its gradient and its Hessian in the signed singular values: a viscous
-    shear term of modulus `mu`, and the volume term (see 'func_liquid_volume_terms')."""
+    """
+    Return the energy density of a liquid, its gradient and its Hessian in the signed singular values.
+
+    The energy sums a viscous shear term of modulus `mu` and the volume term (see 'func_liquid_volume_terms').
+    """
     cofactor = func_cofactor(sigma)
     psi_volume, dpsi, d2psi = func_liquid_volume_terms(sigma[0] * sigma[1] * sigma[2], lam, band)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + psi_volume
@@ -101,7 +104,10 @@ def func_liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band
 
 @qd.func
 def func_liquid_return_map(F: qd.types.matrix(3, 3), J_min: float):
-    """Return the deformation gradient of a liquid once it forgets its shape, its volume ratio kept between `J_min` and
-    the rest volume, which a liquid does not exceed."""
+    """
+    Return the deformation gradient of a liquid once it forgets its shape, its volume ratio kept within its range.
+
+    The volume ratio stays between `J_min` and the rest volume, a liquid resisting compression alone.
+    """
     J = qd.min(qd.max(F.determinant(), J_min), 1.0)
     return qd.pow(J, 1.0 / 3.0) * qd.Matrix.identity(gs.qd_float, 3)

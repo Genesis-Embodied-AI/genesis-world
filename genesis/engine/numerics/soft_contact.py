@@ -70,8 +70,12 @@ def func_contact_friction(friction: float, friction_ratio: float, min_friction: 
 
 @qd.func
 def func_pyramid_coefficient(friction: float, impratio: float, invweight: float):
-    """Return the inverse weight of the rows of the friction pyramid of a contact whose two sides weigh `invweight` in
-    all, regularized by `impratio` as the pyramidal contacts of the rigid solver."""
+    """
+    Return the inverse weight of the rows of the friction pyramid of a contact, regularized as the pyramidal contacts of
+    the rigid solver.
+
+    The two sides of the contact weigh `invweight` in all, and `impratio` is the ratio of the regularization.
+    """
     friction_sq_reg = friction * friction / impratio
     return invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
 
@@ -103,10 +107,10 @@ def func_pyramid_rows(
 ):
     """
     Return the stiffness and the target of the rows of the friction pyramid of a contact point within the band of its
-    partner, at the gap `phi` and the velocity `vel_rel` relative to its partner (see 'func_band_row').
+    partner (see 'func_band_row').
 
-    The targets follow the partner over the substep at its velocity `vel_partner`, so that the rows act on the
-    displacement of the point alone.
+    The point lies at the gap `phi` and moves at the velocity `vel_rel` relative to its partner. The targets follow the
+    partner over the substep at its velocity `vel_partner`, so that the rows act on the displacement of the point alone.
     """
     directions = func_pyramid_directions(normal, friction)
     stiffness = qd.Vector.zero(gs.qd_float, directions.n)

@@ -30,7 +30,11 @@ class ExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
 
 
 def exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
-    """Return the sizes of the workspace of a sum over at most `capacity` values."""
+    """
+    Return the sizes of the workspace of a sum over a bounded number of values.
+
+    The sum runs over at most `capacity` values.
+    """
     n_tiles = max((capacity + TILE_VALUES - 1) // TILE_VALUES, 1)
     return {SCAN_TILES: n_tiles, SCAN_PARTIALS: max(n_tiles, CPU_CHUNKS)}
 
@@ -77,7 +81,8 @@ def func_gpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Te
         tid = qd.simt.block.thread_idx()
         i_blk = i_th // 128
         if i_blk < n_tiles:
-            # The tiles take their turn in the order the blocks start, so that a tile only waits on tiles already running
+            # The tiles take their turn in the order the blocks start, so that a tile only waits on
+            # tiles already running
             sh_tile_slot = qd.simt.block.SharedArray((1,), gs.qd_int)
             if tid == 0:
                 sh_tile_slot[0] = qd.atomic_add(scanner.tile_counter[()], 1)
@@ -147,7 +152,11 @@ def func_gpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Te
 
 @qd.func(requires_top_level=True)
 def func_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor, scanner: ExclusiveSumScratch):
-    """Write the exclusive prefix sum of the first `n_values[()]` values into `output`."""
+    """
+    Write the exclusive prefix sum of the leading values of an array into another.
+
+    The sum covers the first `n_values[()]` values of `values` and lands in `output`.
+    """
     if qd.static(gs.backend == gs.cpu):
         func_cpu_exclusive_sum(values, output, n_values, scanner)
     else:

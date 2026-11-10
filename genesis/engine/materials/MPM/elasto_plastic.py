@@ -84,6 +84,10 @@ def func_von_mises_return_map(sigma: qd.types.vector(3), mu: float, yield_stress
 
 @qd.func
 def func_clamp_return_map(sigma: qd.types.vector(3), yield_lower: float, yield_higher: float):
-    """Return the singular values of the deformation gradient clamped between 1 - `yield_lower` and
-    1 + `yield_higher`, beyond which the material yields."""
+    """
+    Return the singular values of the deformation gradient clamped to the elastic range, beyond which the material
+    yields.
+
+    The elastic range spans 1 - `yield_lower` to 1 + `yield_higher`.
+    """
     return qd.min(qd.max(sigma, 1.0 - yield_lower), 1.0 + yield_higher)

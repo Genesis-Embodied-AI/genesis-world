@@ -113,11 +113,11 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
 class NewtonLoops(Data, kind=DataKind.SCRATCH, shape=()):
     """
     The flags that keep the loops of the Newton solve running as long as an environment iterates on, with the
-    iterations left to the PCG.
+    iterations left to the preconditioned conjugate gradient (PCG).
 
-    The flags are ndarrays on every backend, since a loop of a graph tests the same ndarray on every call.
-    `has_failed_iterations` latches a solve that reached its iteration cap since the last check (see
-    'NewtonOptions.failure_check_interval').
+    The flags are ndarrays on every backend, since a loop of a graph tests the same ndarray on every call. Between two
+    checks (see 'NewtonOptions.failure_check_interval'), `has_failed_iterations` latches a solve that reached its
+    iteration cap.
     """
 
     is_newton_running: qd.Tensor = field(qd.i32, ndarray=True)
@@ -144,11 +144,9 @@ class NewtonConfig(Config):
 
     # Whether the dofs of the rigid solver join the unknowns (see 'NewtonSolver.is_rigid_deferred')
     is_rigid_deferred: bool
-    # Whether the rigid solver has constraint rows, whose cost joins the energy, its Gauss cost alone otherwise
+    # Whether the rigid solver has constraint rows. Their cost then joins the energy and the factor of the Hessian of its
+    # Newton constraint solver preconditions its dofs, its Gauss cost and the factor of its mass matrix otherwise.
     has_rigid_rows: bool
-    # Whether the factor of the Hessian of the rigid solver preconditions its dofs, which its Newton constraint solver
-    # holds, the factor of its mass matrix otherwise
-    is_rigid_factored: bool
     # Whether the rigid links hold their info per environment (see 'RigidOptions.batch_links_info')
     is_links_info_batched: bool
 
@@ -159,9 +157,9 @@ class NewtonRigidDofs(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
     the nodes, with the vectors of their solve.
 
     `qacc` is the acceleration of x and `Ma` its product with the mass matrix, at which the rigid solver updates its
-    constraint state (see 'func_rigid_evaluate'). The other vectors are those of the rows (see NewtonRows): the gradient,
-    the solution, the residual, the preconditioned residual, the search direction and its product with the Hessian of
-    the PCG, and the start point and the direction of the line search.
+    constraint state (see 'func_rigid_evaluate'). The other vectors are those of the rows (see NewtonRows): the
+    gradient, the solution, the residual, the preconditioned residual, the search direction and its product with the
+    Hessian of the preconditioned conjugate gradient (PCG), and the start point and the direction of the line search.
     """
 
     x: qd.Tensor = field(float)
@@ -211,9 +209,9 @@ class NewtonRows(Data, kind=DataKind.SCRATCH, shape=(ROWS,)):
 
     `gradient` is the gradient of the incremental potential at the current iterate, the right-hand side, `solution` the
     solution of the Hessian against it, and `r`, `z`, `p` and `Ap` the residual, the preconditioned residual, the search
-    direction and its product with the Hessian of the PCG. `jacobi` holds the inverses of the diagonal blocks of the
-    Hessian, the block Jacobi preconditioner. `rows_env` is the environment of every row, the rows of an environment
-    following one another. The matrix holds the upper triangle of the Hessian.
+    direction and its product with the Hessian of the preconditioned conjugate gradient (PCG). `jacobi` holds the
+    inverses of the diagonal blocks of the Hessian, the block Jacobi preconditioner. `rows_env` is the environment of
+    every row, the rows of an environment following one another. The matrix holds the upper triangle of the Hessian.
     """
 
     n_rows: qd.Tensor = field(int, shape=(), ndarray=True)
@@ -231,9 +229,11 @@ class NewtonRows(Data, kind=DataKind.SCRATCH, shape=(ROWS,)):
 @qd.data_oriented
 class RigidContactStiffness:
     """
-    The extra Hessian of the factor of the rigid solver (see 'func_hessian_and_cholesky_factor_direct'): the stiffness
-    of the contacts of the particles with the links, J_l^T K_l J_l summed over the links l, J_l mapping the dofs of the
-    chain of a link to its spatial displacement and K_l being its spatial stiffness (see NewtonRigidLinks).
+    The extra Hessian of the factor of the rigid solver: the stiffness of the contacts of the particles with the links.
+
+    The extra Hessian is J_l^T K_l J_l summed over the links l, J_l mapping the dofs of the chain of a link to its
+    spatial displacement and K_l being its spatial stiffness (see NewtonRigidLinks). The factor of the rigid solver adds
+    it to its own Hessian (see 'func_hessian_and_cholesky_factor_direct').
     """
 
     has_extra_hessian = True
@@ -293,7 +293,8 @@ class RigidContactStiffness:
 
 class NewtonSolver(Solver):
     """
-    Solver of the substeps of the implicit MPM solver by Newton iterations on their incremental potential.
+    Solver of the substeps of the implicit material point method (MPM) solver by Newton iterations on their incremental
+    potential.
 
     The unknowns of a substep are the displacement of the nodes of the sparse grid of the MPM solver over it (see
     MPMSparseGrid), and when the rigid geoms couple with the particles, the accelerations of the dofs of the rigid
@@ -328,15 +329,24 @@ class NewtonSolver(Solver):
 
     @property
     def is_rigid_deferred(self) -> bool:
-        """Whether the rigid solver solves its substeps within the Newton solve: the rigid geoms couple with the
-        particles (see 'LegacyCouplerOptions.rigid_mpm') and the rigid solver has dofs, whose accelerations join the
-        unknowns."""
+        """
+        Whether the rigid solver solves its substeps within the Newton solve, the accelerations of its dofs joining the
+        unknowns.
+
+        It does once a rigid geom that couples with the particles moves (see 'LegacyCouplerOptions.rigid_mpm' and
+        'needs_coup' of gs.materials.Rigid), the geoms fixed in the world acting on the particles alone.
+        """
         return self._is_rigid_deferred
 
     def build(self) -> None:
         super().build()
         if not self.is_active:
             return
+        if self._requires_grad:
+            gs.raise_exception(
+                "Differentiable simulation ('requires_grad=True') is not supported by the implicit MPM solver: set "
+                "MPMOptions(use_implicit_solver=False)."
+            )
         if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
             gs.raise_exception(
                 "The implicit MPM solver requires LegacyCouplerOptions, got "
@@ -344,18 +354,30 @@ class NewtonSolver(Solver):
             )
         rigid_solver = self._sim.rigid_solver
         rigid_options = self._scene.options.rigid
-        self._is_rigid_deferred = self._sim.coupler.rigid_couplings[0] and rigid_solver.n_dofs > 0
-        if self._is_rigid_deferred and rigid_options.friction_cone == gs.friction_cone.elliptic:
-            gs.raise_exception(
-                "The implicit MPM solver solves the substeps of the rigid solver with its own under the pyramidal "
-                "friction cone alone: set RigidOptions(friction_cone=gs.friction_cone.pyramidal), or "
-                "LegacyCouplerOptions(rigid_mpm=False)."
-            )
-        has_rigid_rows = not rigid_options.disable_constraint
+        self._is_rigid_deferred = self._sim.coupler.rigid_couplings[0] and any(
+            geom.needs_coup and not geom.is_fixed for geom in rigid_solver.geoms
+        )
+        if self._is_rigid_deferred:
+            # The Newton solve preconditions the dofs of the rigid solver by the factor of the Hessian of its Newton
+            # constraint solver, over the rows of the pyramidal friction cone, and its solution is final for every dof,
+            # which a sleeping body would discard and a noslip pass after it would change
+            for is_supported, requirement in (
+                (rigid_options.friction_cone == gs.friction_cone.pyramidal, "friction_cone=gs.friction_cone.pyramidal"),
+                (
+                    rigid_options.constraint_solver == gs.constraint_solver.Newton,
+                    "constraint_solver=gs.constraint_solver.Newton",
+                ),
+                (not rigid_options.use_hibernation, "use_hibernation=False"),
+                (rigid_options.noslip_iterations == 0, "noslip_iterations=0"),
+            ):
+                if not is_supported:
+                    gs.raise_exception(
+                        f"Coupling the rigid solver with the implicit MPM solver requires RigidOptions({requirement}), "
+                        "or else LegacyCouplerOptions(rigid_mpm=False)."
+                    )
         self.newton_config = NewtonConfig(
             is_rigid_deferred=self._is_rigid_deferred,
-            has_rigid_rows=has_rigid_rows,
-            is_rigid_factored=has_rigid_rows and rigid_options.constraint_solver == gs.constraint_solver.Newton,
+            has_rigid_rows=not rigid_options.disable_constraint,
             is_links_info_batched=rigid_options.batch_links_info,
         )
         self.data_manager = NewtonData(
@@ -394,8 +416,10 @@ class NewtonSolver(Solver):
         pass
 
     def substep_post_coupling(self, f: int) -> None:
-        """Solve the substep of the implicit MPM solver, and that of the rigid solver with it when deferred, before the
-        solvers finish them."""
+        """
+        Solve the substep of the implicit material point method (MPM) solver, and that of the rigid solver with it when
+        deferred, before the solvers finish them.
+        """
         if not self.is_active:
             return
         mpm_solver = self._sim.mpm_solver
@@ -461,9 +485,9 @@ class NewtonSolver(Solver):
             kernel_end_iteration(self.newton_envs, self.newton_loops, self.newton_info)
             if not qd_to_numpy(self.newton_loops.is_newton_running):
                 break
-        if self._is_rigid_deferred:
-            kernel_finish_rigid(self.newton_envs, *args_state, *args_info, *args_config)
         kernel_flag_failures(self.newton_envs, self.newton_loops, errno)
+        if self._is_rigid_deferred:
+            kernel_finish_rigid(self.newton_envs, *args_state, *args_info, *args_config, errno)
         if self._sim.cur_substep_global % self._options.failure_check_interval == 0:
             if qd_to_numpy(self.newton_loops.has_failed_iterations):
                 kernel_clear_failed_iterations(self.newton_loops)
@@ -615,8 +639,10 @@ def func_contact_arm(f: int, i_s: int, i_g: int, mpm_state: MPMState, dyn_state:
 def func_contact_partner_disp(
     f: int, i_s: int, mpm_state: MPMState, rigid_links: NewtonRigidLinks, dyn_state: DynState, dyn_info: DynInfo
 ):
-    """Return the displacement of the point of the rigid link a sorted particle touches, from the spatial displacement of
-    the link (see 'func_link_spatial_disp'), zero for a particle in no contact."""
+    """
+    Return the displacement of the point of the rigid link a sorted particle touches, from the spatial displacement of
+    the link (see 'func_link_spatial_disp'), zero for a particle in no contact.
+    """
     disp = qd.Vector.zero(gs.qd_float, 3)
     i_g = mpm_state.rigid_contacts.geom_idx[i_s]
     if i_g >= 0:
@@ -677,10 +703,13 @@ def func_rigid_solve_batch(
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
-    """Solve the block of the dofs of the rigid solver of an environment against `rhs`, by the factor of the rigid
-    solver of its block of the Hessian (see 'kernel_assemble_rigid'), or of its mass matrix (see
-    'NewtonConfig.is_rigid_factored')."""
-    if qd.static(newton_config.is_rigid_factored):
+    """
+    Solve the block of the dofs of the rigid solver of an environment against a vector over them.
+
+    The solve of `rhs` into `out` goes through the factor of the rigid solver, of its block of the Hessian (see
+    'kernel_assemble_rigid') or of its mass matrix without constraint rows (see 'NewtonConfig.has_rigid_rows').
+    """
+    if qd.static(newton_config.has_rigid_rows):
         for i_island in range(constraint_state.island.n_islands[i_b]):
             func_cholesky_solve_batch(
                 i_b, i_island, rhs=rhs, out=out, constraint_state=constraint_state, rigid_config=rigid_config
@@ -753,12 +782,12 @@ def func_add_energies(
     newton_config: qd.template(),
 ):
     """
-    Add the energy of the Newton solve at the current iterate into the entry of every environment that `envs_mask`
-    selects.
+    Add the energy of the Newton solve at the current iterate into the entry of every environment selected.
 
-    The energy is the incremental potential of the particles and of the nodes, the particles and the nodes of an
-    environment following one another, and when the dofs of the rigid solver join the unknowns, the cost of the rigid
-    solver at their iterate, scaled by dt^4 to the units of the incremental potential.
+    `envs_mask` selects the environments, and `energies` holds their entries. The energy is the incremental potential
+    of the particles and of the nodes, the particles and the nodes of an environment following one another, and when
+    the dofs of the rigid solver join the unknowns, the cost of the rigid solver at their iterate, scaled by dt^4 to
+    the units of the incremental potential.
     """
     if qd.static(newton_config.is_rigid_deferred):
         func_link_spatial_disp(rigid_dofs.x, rigid_links, dyn_state.dofs, dyn_info.links, newton_config)
@@ -828,9 +857,10 @@ def kernel_start_solve(
     Start the Newton solve of every environment at zero displacement of the nodes, but those whose solve failed earlier
     in the step, and evaluate its energy there.
 
-    The dofs of the rigid solver start from the warm start of its constraint solve, or from their smooth acceleration,
-    and its constraint rows are grouped by island, as its own constraint solve starts (see 'func_solve_init' in
-    rigid/constraint/solver.py).
+    The dofs of the rigid solver start from the warm start of its constraint solve, or from their smooth acceleration.
+    Its constraint rows are grouped by island (see 'func_solve_init' in rigid/constraint/solver.py), as its own
+    constraint solve starts. A link whose geom holds the rows of the contact of a particle is constrained over the
+    substep (see 'LinksState.is_constrained' in rigid/data.py), as the contacts of the rigid solver mark theirs.
     """
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
@@ -851,6 +881,15 @@ def kernel_start_solve(
                 if constraint_state.n_constraints[i_b] > 0 and constraint_state.is_warmstart[i_b]:
                     qacc = constraint_state.qacc_ws[i_d, i_b]
             rigid_dofs.x[i_d, i_b] = dt * dt * qacc
+        # The constraint assembly of the rigid solver resets the links it marks constrained, but without constraint rows
+        if qd.static(not newton_config.has_rigid_rows):
+            for i_l, i_b in qd.ndrange(*dyn_state.links.is_constrained.shape):
+                dyn_state.links.is_constrained[i_l, i_b] = False
+        for i_s in range(mpm_state.sorted_particles.n_valid[None]):
+            i_g = mpm_state.rigid_contacts.geom_idx[i_s]
+            if i_g >= 0:
+                i_l, i_b, _ = func_contact_arm(f, i_s, i_g, mpm_state, dyn_state, dyn_info)
+                dyn_state.links.is_constrained[i_l, i_b] = True
         if qd.static(newton_config.has_rigid_rows):
             if qd.static(rigid_config.enable_signorini_contact):
                 for i_cone, i_b in qd.ndrange(*constraint_state.cone_latch.shape):
@@ -905,7 +944,8 @@ def kernel_assemble(
     """
     Assemble the gradient and the projected Hessian of the incremental potential at the displacement of the nodes.
 
-    Every node takes its kinetic block, an identity on a fixed node or a node without mass, whose unknown stays zero.
+    Every node takes its kinetic block, an identity on a fixed node, whose unknown stays zero, and on a node without
+    mass, whose unknown the elastic terms of the particles around it set.
     Every task of the sorted particles (see 'kernel_list_cells' in mpm_solver.py) writes the 36 blocks of the upper
     triangle of the stencil of its cell, summed over its particles: the lanes of a warp sum them on GPU, and one thread
     walks the particles of a cell on CPU. The gradient of a node then gathers the factors its particles staged. The
@@ -933,10 +973,10 @@ def kernel_assemble(
     pairs_a = qd.Vector([a for a in range(8) for b in range(a, 8)], dt=gs.qd_int)
     pairs_b = qd.Vector([b for a in range(8) for b in range(a, 8)], dt=gs.qd_int)
     if qd.static(gs.backend == gs.cpu):
-        for i_c in range(mpm_state.sorted_particles.n_cells[None]):
-            i_s_start = mpm_state.sorted_particles.cells_start[i_c]
+        for i_cell in range(mpm_state.sorted_particles.n_cells[None]):
+            i_s_start = mpm_state.sorted_particles.cells_start[i_cell]
             i_t_start = n_nodes + 36 * mpm_state.sorted_particles.tasks_idx[i_s_start]
-            for i_s in range(i_s_start, mpm_state.sorted_particles.cells_start[i_c + 1]):
+            for i_s in range(i_s_start, mpm_state.sorted_particles.cells_start[i_cell + 1]):
                 disp_partner = qd.Vector.zero(gs.qd_float, 3)
                 if qd.static(newton_config.is_rigid_deferred):
                     disp_partner = func_contact_partner_disp(f, i_s, mpm_state, rigid_links, dyn_state, dyn_info)
@@ -1029,7 +1069,7 @@ def kernel_assemble(
         if i_lane == 0:
             mass = sparse_grid.nodes_mass[i_n]
             gradient_node = qd.Vector.zero(gs.qd_float, 3)
-            if mass > 0.0 and sparse_grid.nodes_is_fixed[i_n] == 0:
+            if sparse_grid.nodes_is_fixed[i_n] == 0:
                 u = sparse_grid.nodes_u[i_n]
                 gradient_node = gradient + mass * (u - dt * sparse_grid.nodes_vel_free[i_n])
             newton_rows.gradient[i_n] = gradient_node
@@ -1055,12 +1095,12 @@ def kernel_assemble_rigid(
 ):
     """
     Assemble the gradient of the energy in the dofs of the rigid solver at the current iterate, after the rows (see
-    'kernel_assemble'), and factor their block of the Hessian, which preconditions them in the PCG.
+    'kernel_assemble'), and factor their block of the Hessian, which preconditions them in the linear solve.
 
     The gradient holds that of the cost of the rigid solver and the forces of the contacts of the particles on the links
     (see 'MPMRigidContacts.gradient'). The block holds the Hessian of the rigid solver and the stiffness of these
     contacts (see RigidContactStiffness), or else the mass matrix, whose factor the rigid solver holds already (see
-    'NewtonConfig.is_rigid_factored'). A link pushed by a particle is constrained, as Rigid's own contacts mark theirs.
+    'NewtonConfig.has_rigid_rows').
     """
     func_rigid_evaluate(
         newton_envs.rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config
@@ -1086,10 +1126,8 @@ def kernel_assemble_rigid(
             qd.atomic_add(
                 rigid_links.stiffness[i_l, i_b], func_point_stiffness(mpm_state.rigid_contacts.hessian[i_s], r)
             )
-            if force.norm_sqr() > 0.0:
-                dyn_state.links.is_constrained[i_l, i_b] = True
     func_link_force_to_dofs(rigid_dofs.gradient, rigid_links, dyn_state.dofs, dyn_info.links, newton_config)
-    if qd.static(newton_config.is_rigid_factored):
+    if qd.static(newton_config.has_rigid_rows):
         func_hessian_and_cholesky_factor_direct(
             constraint_state, rigid_info, rigid_config, compute_envelope=True, extra_hessian=rigid_contact_stiffness
         )
@@ -1120,15 +1158,16 @@ def kernel_pcg_start(
     newton_config: qd.template(),
 ):
     """
-    Start the PCG of the environments still iterating from a zero solution, its preconditioner inverting the diagonal
-    blocks of the Hessian of the rows, and the block of the dofs of the rigid solver by its factor.
+    Start the preconditioned conjugate gradient (PCG) of the environments still iterating from a zero solution, its
+    preconditioner inverting the diagonal blocks of the rows and the block of the dofs by its factor.
 
     A diagonal block is inverted equilibrated to a unit diagonal, which keeps the inverse accurate for the rows of very
-    different stiffness. An environment stops once r . z falls below `pcg_tol` times its value at the start.
+    different stiffness. An environment stops once r . z falls below `pcg_tol` times its value at the start, and fails
+    its Newton solve once r . z is not finite, which a value that is not finite in its rows or its dofs makes.
     """
-    for i_e in range(newton_rows.matrix.n_entries[None]):
-        i_r, i_c, block = func_read_entry(i_e, newton_rows.matrix, block_rows=3, block_cols=3)
-        if i_r == i_c:
+    for i_entry in range(newton_rows.matrix.n_entries[None]):
+        i_r, j_r, block = func_read_entry(i_entry, newton_rows.matrix, block_rows=3, block_cols=3)
+        if i_r == j_r:
             diagonal = qd.Vector([block[0, 0], block[1, 1], block[2, 2]], dt=gs.qd_float)
             scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
             scaling = scale.outer_product(scale)
@@ -1177,7 +1216,10 @@ def kernel_pcg_start(
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.rz_tol[i_b] = newton_info.pcg_tol[None] * qd.abs(newton_envs.rz[i_b])
         if newton_envs.is_pcg_active[i_b]:
-            if newton_envs.rz[i_b] > 0.0:
+            if not qd_isfinite(newton_envs.rz[i_b]):
+                newton_envs.is_pcg_active[i_b] = False
+                newton_envs.failure[i_b] = NewtonFailure.NON_FINITE
+            elif newton_envs.rz[i_b] > 0.0:
                 qd.atomic_max(newton_loops.is_pcg_running[None], 1)
             else:
                 newton_envs.is_pcg_active[i_b] = False
@@ -1202,7 +1244,7 @@ def func_pcg_iteration(
     newton_config: qd.template(),
 ):
     """
-    Run one iteration of the PCG of the environments still solving.
+    Run one iteration of the preconditioned conjugate gradient (PCG) of the environments still solving.
 
     When the dofs of the rigid solver join the unknowns, the product of the Hessian with the search direction adds their
     block, the Hessian of the rigid solver, and the coupling of the contacts of the particles with the links, whose
@@ -1212,23 +1254,23 @@ def func_pcg_iteration(
     # dofs, the upper triangle standing for the transposed blocks of the lower one
     n_entries = newton_rows.matrix.n_entries[None]
     qd.loop_config(block_dim=256)
-    for i_e in range((n_entries + 31) // 32 * 32):
+    for i_entry in range((n_entries + 31) // 32 * 32):
         i_r_key = gs.qd_int(-1)
         i_b_key = gs.qd_int(-1)
         product = qd.Vector.zero(gs.qd_float, 3)
         energy = gs.qd_float(0.0)
-        if i_e < n_entries:
-            i_r, i_c, block = func_read_entry(i_e, newton_rows.matrix, block_rows=3, block_cols=3)
+        if i_entry < n_entries:
+            i_r, j_r, block = func_read_entry(i_entry, newton_rows.matrix, block_rows=3, block_cols=3)
             i_b = newton_rows.rows_env[i_r]
             if newton_envs.is_pcg_active[i_b]:
                 i_r_key = i_r
                 i_b_key = i_b
-                p_col = newton_rows.p[i_c]
+                p_col = newton_rows.p[j_r]
                 product = block @ p_col
                 energy = p_col.dot(product)
-                if i_r != i_c:
+                if i_r != j_r:
                     p_row = newton_rows.p[i_r]
-                    qd.atomic_add(newton_rows.Ap[i_c], block.transpose() @ p_row)
+                    qd.atomic_add(newton_rows.Ap[j_r], block.transpose() @ p_row)
                     energy = 2.0 * p_row.dot(product)
         func_add_by_key(i_r_key, product, newton_rows.Ap, n_components=3)
         if qd.static(not newton_config.is_rigid_deferred):
@@ -1238,8 +1280,8 @@ def func_pcg_iteration(
         func_rigid_matvec(rigid_dofs, constraint_state, rigid_info, rigid_config, newton_config)
         func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, newton_config)
         func_clear_link_forces(rigid_links)
-        # The coupling of a contact: its Hessian H in the displacement of the particle relative to the point of the link,
-        # between the nodes of the particle and the link, and between the link and itself
+        # The coupling of a contact: its Hessian H in the displacement of the particle relative to the point of the
+        # link, between the nodes of the particle and the link, and between the link and itself
         n_particles = mpm_state.particles.pos.shape[1]
         inv_dx = mpm_info.inv_dx[None]
         for i_s in range(mpm_state.sorted_particles.n_valid[None]):
@@ -1336,7 +1378,10 @@ def func_pcg_iteration(
             rz_new = newton_envs.rz_new[i_b]
             newton_envs.pcg_beta[i_b] = rz_new / rz
             newton_envs.rz[i_b] = rz_new
-            if qd.abs(rz_new) <= newton_envs.rz_tol[i_b] or not qd_isfinite(rz_new):
+            if not qd_isfinite(rz_new):
+                newton_envs.is_pcg_active[i_b] = False
+                newton_envs.failure[i_b] = NewtonFailure.NON_FINITE
+            elif qd.abs(rz_new) <= newton_envs.rz_tol[i_b]:
                 newton_envs.is_pcg_active[i_b] = False
             elif newton_loops.n_pcg_iterations_left[None] > 0:
                 qd.atomic_max(newton_loops.is_pcg_running[None], 1)
@@ -1371,7 +1416,10 @@ def kernel_pcg_loop(
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
-    """Run the PCG iterations as one graph, until every environment converges or the iterations run out."""
+    """
+    Run the iterations of the preconditioned conjugate gradient (PCG) as one graph, until every environment converges or
+    the iterations run out.
+    """
     while qd.graph.do_while(newton_loops.is_pcg_running):
         func_pcg_iteration(
             f,
@@ -1418,8 +1466,8 @@ def kernel_start_line_search(
     newton_config: qd.template(),
 ):
     """
-    Set the Newton direction of every environment still iterating, minus the solution of the PCG, and start its line
-    search from the full step.
+    Set the Newton direction of every environment still iterating, minus the solution of the preconditioned conjugate
+    gradient (PCG), and start its line search from the full step.
 
     An environment converges once its direction moves every particle and every dof by less than the tolerance, the step
     being taken still. The first step stays short of the first zero volume of a liquid particle (see
@@ -1568,6 +1616,7 @@ def kernel_finish_rigid(
     mpm_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
+    errno: qd.Tensor,
 ):
     """
     Hand the accelerations of the dofs solved to the rigid solver, which finishes its substep from them (see
@@ -1575,9 +1624,17 @@ def kernel_finish_rigid(
 
     The constraint state of the rigid solver takes their values, and its constraint force the whole force beyond the
     smooth one, the forces of the contacts of the particles included. Without constraint rows, the dofs take their
-    acceleration and their force at once, which the constraint solve sets otherwise (see 'func_update_qacc' in
-    rigid/constraint/solver.py).
+    acceleration and their force at once, which the constraint solve sets otherwise (see 'func_update_qacc' in the
+    constraint solver of the rigid solver). An environment whose Newton solve failed keeps the state of the rigid
+    solver until the error raises (see 'RigidInfo.is_env_frozen'), its dofs taking their smooth acceleration, which
+    keeps every value the rigid solver computes from them finite.
     """
+    dt = rigid_info.substep_dt[None]
+    for i_b in range(rigid_info.is_env_frozen.shape[0]):
+        rigid_info.is_env_frozen[i_b] = (errno[i_b] & MPMErrorCode.INVALID_NEWTON_NAN) != 0
+    for i_d, i_b in qd.ndrange(rigid_dofs.x.shape[0], rigid_dofs.x.shape[1]):
+        if rigid_info.is_env_frozen[i_b]:
+            rigid_dofs.x[i_d, i_b] = dt * dt * dyn_state.dofs.acc_smooth[i_d, i_b]
     func_rigid_evaluate(
         newton_envs.rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config
     )
@@ -1592,8 +1649,9 @@ def kernel_finish_rigid(
 
 @qd.kernel
 def kernel_flag_failures(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, errno: qd.Tensor):
-    """Flag the environments whose Newton solve met a value that is not finite, which keep their state (see
-    'kernel_transfer_from_sparse_grid' in mpm_solver.py) until the error raises."""
+    """Flag the environments whose Newton solve met a value that is not finite, which keep the state of their particles
+    (see 'kernel_transfer_from_sparse_grid' in mpm_solver.py) and of the rigid solver (see 'kernel_finish_rigid') until
+    the error raises."""
     for i_b in range(newton_envs.is_active.shape[0]):
         if newton_envs.failure[i_b] == NewtonFailure.NON_FINITE:
             qd.atomic_or(errno[i_b], MPMErrorCode.INVALID_NEWTON_NAN)
