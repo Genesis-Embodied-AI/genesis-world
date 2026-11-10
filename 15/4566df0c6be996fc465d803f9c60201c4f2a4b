@@ -6,6 +6,7 @@ genesis/ext/pyrender/shaders/mesh.frag
   s_c62ec9da443b15::t_1bb29caa677830 65-68,71,73-76,79,362-364,367,479-481,483
 genesis/options/textures.py
   s_c62ec9da443b15::t_1bb29caa677830 10,19,294-313,316-317,320-324,329-338,340-345,352-353,355-356,359-408
+  s_c62ec9da443b15::t_d98bb17a7ff9ea 2
 tests/rendering/test_offscreen.py
   s_c62ec9da443b15::t_1bb29caa677830 206-209,233-240,256,304,315-320,322,334-335,337,339-341,350
 genesis/ext/pyrender/renderer.py
@@ -24,6 +25,8 @@ genesis/ext/pyrender/overlay/plugin.py
   s_c62ec9da443b15::t_1bb29caa677830 1065-1070
 genesis/ext/pyrender/shaders/flat.frag
   s_c62ec9da443b15::t_1bb29caa677830 28-31,34,36-39,42,128-130,133
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_d98bb17a7ff9ea 266-274
 ---
 {
   "schema_version": "authorship/3.0.0",
