@@ -159,12 +159,16 @@ class FEMElements(Data, kind=DataKind.STATE, shape=(ELEMENTS, ENVS)):
 
 class FEMElementsEnergy(Data, kind=DataKind.SCRATCH, shape=(ELEMENTS, ENVS)):
     """
-    The energy density of each element at the end of a substep of the implicit solver, and its gradient with respect to
-    the deformation gradient plus the stress of the Rayleigh stiffness damping.
+    The energy density of each element at the end of a substep of the implicit solver, and the stress its vertices
+    gather.
     """
 
     energy: qd.Tensor = field(float)
-    gradient: qd.Tensor = field((float, (3, 3)))
+    # The stress times the rest volume: minus the gradient of the energy density with respect to the deformation
+    # gradient plus the Rayleigh stiffness damping where a Newton iteration starts, then on GPU the product of its
+    # Hessian with the change of deformation along the search direction of each PCG iteration. Each element computes it
+    # once, then each of its corners multiplies it by its row of the mapping matrix (see 'func_element_mapping_matrix').
+    stress: qd.Tensor = field((float, (3, 3)))
 
 
 class FEMElementsMaterial(Data, kind=DataKind.DERIVED, shape=(ELEMENTS, ENVS)):
@@ -2237,20 +2241,22 @@ def func_accumulate_vertex(
                         force_internal = func_element_internal_force(i_e, i_b, fem_state, fem_info, fem_config)
                     else:
                         S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
-                    if qd.static(gather_Ap):
-                        p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i], i_b] for i in qd.static(range(4))])
+                    if qd.static(gather_Ap and is_serial):
+                        p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_j], i_b] for i_j in qd.static(range(4))])
                         _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
                         stress = V * damping_beta_factor * dP
+                # On GPU, each element computes its stress once for all its corners (see 'FEMElementsEnergy')
+                if qd.static(not gather_internal_force and not (gather_Ap and is_serial)):
+                    stress = fem_state.elements_energy.stress[i_e, i_b]
                 S_k = S[i_k, :]
 
                 vec_corner = qd.Vector.zero(gs.qd_float, 3)
                 mat_corner = qd.Matrix.zero(gs.qd_float, 3, 3)
                 if qd.static(gather_internal_force):
                     vec_corner = force_internal[:, i_k]
-                elif qd.static(gather_Ap):
-                    vec_corner = stress @ S_k
                 else:
-                    vec_corner = -V * fem_state.elements_energy.gradient[i_e, i_b] @ S_k
+                    vec_corner = stress @ S_k
+                if qd.static(not gather_Ap and not gather_internal_force):
                     # Column j of the block is the force a unit displacement of the vertex along axis j induces on it
                     corner_k = qd.Matrix.identity(gs.qd_float, 4)[i_k, :]
                     for j in range(3):
@@ -2331,6 +2337,24 @@ def func_accumulate_vertices(
     """Sum the elastic terms of every vertex of every environment (see 'func_accumulate_vertex')."""
     is_serial = qd.static(fem_config.env_block_dim == 1)
     n_lanes = qd.static(1 if is_serial else 2**fem_config.log2_corner_lanes)
+    if qd.static(gather_Ap and not is_serial):
+        for i_e, i_b in qd.ndrange(
+            *fem_state.elements_energy.stress.shape, axes=qd.static(eoa(fem_state.elements_energy.stress))
+        ):
+            # A PCG iteration starts here: its loop flag drops until an environment iterates on (see
+            # 'kernel_batch_solve')
+            if qd.static(update_loop_flag):
+                if i_e == 0 and i_b == 0:
+                    pcg_counter[()] = 0
+                    fem_state.solve_loops.n_pcg_left[()] = fem_state.solve_loops.n_pcg_left[()] - 1
+            # The stress along the search direction (see 'FEMElementsEnergy')
+            if envs_is_active[i_b]:
+                S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                i_vs = fem_info.elements.el2v[i_e]
+                p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_k], i_b] for i_k in qd.static(range(4))])
+                _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
+                V = fem_info.elements.V[i_e]
+                fem_state.elements_energy.stress[i_e, i_b] = V * fem_info.damping_beta_factor[None] * dP
     # The thread count is an expression of the array shapes, which fields make a compile-time constant. A local computed
     # before the loop would be stored by a serial task of its own and read back as a runtime bound.
     for i_flat in range(
@@ -2340,8 +2364,8 @@ def func_accumulate_vertices(
         n_env_threads = 1
         if qd.static(not is_serial):
             n_env_threads = n_vertices * n_lanes
-        # A PCG iteration starts here: its loop flag drops until an environment iterates on (see 'kernel_batch_solve')
-        if qd.static(gather_Ap and update_loop_flag):
+        # A PCG iteration starts here on CPU, its first loop on GPU being over the elements
+        if qd.static(gather_Ap and update_loop_flag and is_serial):
             if i_flat == 0:
                 pcg_counter[()] = 0
                 fem_state.solve_loops.n_pcg_left[()] = fem_state.solve_loops.n_pcg_left[()] - 1
@@ -2560,10 +2584,21 @@ def func_pcg_solve_per_env_block(
         i_b = i_flat // n_threads
         i_t = i_flat % n_threads
         sh_sum = qd.simt.block.SharedArray((2, qd.static(fem_config.n_block_tiles)), gs.qd_float)
-        for _ in range(fem_info.n_pcg_iterations[None]):
+        for i_iter in range(fem_info.n_pcg_iterations[None]):
             # Every thread of the block reads the flag behind the barrier that follows its last write
             if not fem_state.envs_solve.is_pcg_active[i_b]:
                 break
+            for i_e_ in range((fem_info.elements.V.shape[0] + n_threads - 1) // n_threads):
+                i_e = i_e_ * n_threads + i_t
+                if i_e < fem_info.elements.V.shape[0]:
+                    S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                    i_vs = fem_info.elements.el2v[i_e]
+                    p = qd.Matrix.cols([fem_state.vertices_solve.p[i_vs[i_k], i_b] for i_k in qd.static(range(4))])
+                    _, dP = func_elastic_product(i_e, i_b, S, p, fem_state, fem_info, fem_config)
+                    V = fem_info.elements.V[i_e]
+                    fem_state.elements_energy.stress[i_e, i_b] = V * fem_info.damping_beta_factor[None] * dP
+            qd.simt.grid.mem_fence()
+            qd.simt.block.sync()
             for i_item_ in range((n_vertices * n_lanes + n_threads - 1) // n_threads):
                 i_item = i_item_ * n_threads + i_t
                 func_accumulate_vertex(
@@ -2768,7 +2803,7 @@ def func_newton_head(
                 i_e, i_b, fem_state, fem_info, vertex_constraints, fem_config
             )
             fem_state.elements_energy.energy[i_e, i_b] = energy
-            fem_state.elements_energy.gradient[i_e, i_b] = gradient
+            fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
     func_accumulate_vertices(
         forces=None,
         envs_is_active=fem_state.envs_solve.is_active,
