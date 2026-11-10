@@ -1408,7 +1408,7 @@ def merge_submeshes(verts_list, faces_list):
 
 
 def tetrahedralize_mesh(mesh, tet_cfg):
-    # Only deformable entities tetrahedralize: delay the import, as for 'pymeshlab' in 'Mesh.remesh'.
+    # Delay this infrequently used import until tetrahedralization is requested, as for 'pymeshlab' in 'Mesh.remesh'.
     import tetgen
 
     tet = tetgen.TetGen(mesh.vertices.astype(np.float64, copy=False), mesh.faces.astype(np.int32, copy=False))

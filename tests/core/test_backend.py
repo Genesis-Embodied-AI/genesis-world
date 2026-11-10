@@ -126,7 +126,7 @@ def _basic_sim_child(args: list[str]):
     for _ in range(10):
         scene.step()
 
-    # Only deformable entities need these, so a rigid scene runs without them installed.
+    # This scene neither tetrahedralizes nor remeshes a mesh, so it runs without these installed.
     modules_imported = [name for name in ("tetgen", "pymeshlab") if name in sys.modules]
     assert not modules_imported, f"Imported by a rigid scene: {modules_imported}."
 
