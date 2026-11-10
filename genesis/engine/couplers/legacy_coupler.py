@@ -8,7 +8,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import func_impose_cube_boundary
-from genesis.engine.solvers.base_solver import SimulatorState
+from genesis.engine.solvers.base_solver import ErrnoMixin, SimulatorState
 from genesis.engine.solvers.fem_solver import FEMInfo, FEMState
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
@@ -47,6 +47,8 @@ class LegacyCouplerState(Data, kind=DataKind.STATE):
     `pbd_attach_link_idx`, -1 for none.
     """
 
+    # The error flags of each env, which no kernel of the coupler raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
     pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD)
     pbd_attach_local_pos: qd.Tensor = field(
         (float, 3), shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD
@@ -86,7 +88,7 @@ class LegacyCouplerConfig(Config):
     is_links_info_batched: bool
 
 
-class LegacyCoupler(RBC):
+class LegacyCoupler(ErrnoMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
@@ -151,6 +153,8 @@ class LegacyCoupler(RBC):
         if has_rigid_pbd:
             self.legacy_coupler_state.pbd_attach_link_idx.fill(-1)
             self.legacy_coupler_state.pbd_attach_local_pos.fill(0.0)
+        self.build_errno(self.sim._B)
+        self.register_errors(self.legacy_coupler_state.errno, {})
 
         # The cells of the MPM grid reach the particles of the hash grid cells they overlap, plus one on each side
         mpm_sph_stencil_size = mpm_pbd_stencil_size = 0

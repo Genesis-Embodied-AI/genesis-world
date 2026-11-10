@@ -407,6 +407,7 @@ class KinematicSolver(Solver):
 
     def _create_data_manager(self):
         self.data_manager = RigidData(self, kinematic_only=True)
+        self._errno = self.data_manager.errno
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state

@@ -200,7 +200,7 @@ class Visualizer(RBC):
         if self._viewer is not None:
             # Setter changes are shown in the viewer right away, syncing the solver that changed alone. The window only
             # repaints when a refresh is due, so that a loop of setters does not pay one repaint per call.
-            for solver in self._scene.active_solvers:
+            for solver in self._scene.sim.active_solvers:
                 solver.subscribe(
                     Subscriber(
                         to=frozenset((StateChange.GEOMETRY,)),
@@ -283,7 +283,7 @@ class Visualizer(RBC):
                 elif camera._followed_entity is not None:
                     camera.update_following()
 
-        for solver in self._scene.active_solvers if solvers is None else solvers:
+        for solver in self._scene.sim.active_solvers if solvers is None else solvers:
             # The rigid solver derives from the kinematic one
             if isinstance(solver, gs.engine.solvers.KinematicSolver):
                 solver.update_vgeoms()

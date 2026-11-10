@@ -1958,11 +1958,6 @@ class Scene(RBC):
         return self._sim.solvers
 
     @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self._sim.active_solvers
-
-    @property
     def entities(self) -> list["Entity"]:
         """All the entities in the scene."""
         return self._sim.entities

@@ -936,6 +936,21 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
     return writes
 
 
+def copy_data(items: Iterable[DataItem], *, to_torch: bool) -> dict[str, np.ndarray | torch.Tensor]:
+    """Copy the value of every item under its name, for 'fill_data' to write back.
+
+    An array is copied where it lives as a torch tensor with `to_torch`, else to a numpy array. A scalar is copied to a
+    0-d numpy array.
+    """
+    values = {}
+    for item in items:
+        if isinstance(item, ScalarItem):
+            values[item.name] = np.array(getattr(item.owner, item.attr))
+        else:
+            values[item.name] = data_to_array(item.array, to_torch=to_torch, copy=True)
+    return values
+
+
 def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> None:
     """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
     record made for another scene leaves the scene as it was.

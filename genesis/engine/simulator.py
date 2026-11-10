@@ -20,7 +20,15 @@ from .couplers.rigid_mpm_hybrid import kernel_update_hybrid_soft_part
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
-from .solvers.base_solver import GravityMixin, SimulatorState, Solver, TimeBasedMixin, kernel_set_time, merge_errno
+from .solvers.base_solver import (
+    ErrnoMixin,
+    GravityMixin,
+    SimulatorState,
+    Solver,
+    TimeBasedMixin,
+    kernel_set_time,
+    merge_errno,
+)
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -76,9 +84,10 @@ class Simulator(RBC):
             # than with the context of the step being reversed when a deferred check reads them. The adjoints start
             # from zero.
             self._is_forward_ready = False
+            for system in self._active_systems:
+                system.update_errno()
+                system.check_errno()
             for solver in self._active_solvers:
-                solver.update_errno()
-                solver.check_errno()
                 solver.reset_grad()
             # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -86,8 +95,8 @@ class Simulator(RBC):
 
         def end_backward_pass():
             # The errors the solvers flagged while replaying the rollout are raised once the pass is over
-            for solver in self._active_solvers:
-                solver.check_errno()
+            for system in self._active_systems:
+                system.check_errno()
 
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
@@ -114,6 +123,8 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
+        # What runs in the scene in its own right: the active solvers, then the coupler when one is active
+        self._active_systems: list[ErrnoMixin] = []
         # The hybrid entities whose soft part follows its rigid links, updated after the coupling of every substep
         self._hybrid_entities: list[HybridEntity] = []
 
@@ -231,11 +242,21 @@ class Simulator(RBC):
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
+                self._active_systems.append(solver)
                 if not isinstance(solver, RigidSolver):
                     self._rigid_only = False
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
+        # The systems are listed as they are built, so that a scene whose build fails frees those built (see 'destroy')
+        self._active_systems.append(self._coupler)
         self._coupler.build()
+        # The errors of every system are raised at each step without further checks
+        for system in self._active_systems:
+            if not isinstance(system, ErrnoMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support errno: solvers and couplers must report their errors "
+                    "through ErrnoMixin."
+                )
 
         # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
         # coupler declares it for the couplings it activated at build.
@@ -270,9 +291,8 @@ class Simulator(RBC):
         self._has_errno_flags = False
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
             self._errno_views = [
-                (solver._errno_latched.numpy(), qd_to_numpy(solver._errno, copy=False))
-                for solver in self._active_solvers
-                if solver._errno is not None
+                (system._errno_latched.numpy(), qd_to_numpy(system._errno, copy=False))
+                for system in self._active_systems
             ]
 
         self._step_timer.add_phases("physics", "sensors")
@@ -370,21 +390,24 @@ class Simulator(RBC):
             torch.mps.synchronize()
 
     def check_errno(self, blocking: bool = True):
-        """Raise on the first error a solver flagged since the last reset of each env (see 'Solver.check_errno')."""
-        for solver in self._active_solvers:
-            solver.check_errno(blocking)
+        """Raise on the first error a solver or the coupler flagged since the last reset of each env.
+
+        See 'ErrnoMixin.check_errno'.
+        """
+        for system in self._active_systems:
+            system.check_errno(blocking)
 
     def get_error_envs_mask(self) -> torch.Tensor:
-        """Return whether each env flagged an error in any solver since its last reset."""
+        """Return whether each env flagged an error in any solver or the coupler since its last reset."""
         envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
-        for solver in self._active_solvers:
-            envs_mask |= solver.get_error_envs_mask()
+        for system in self._active_systems:
+            envs_mask |= system.get_error_envs_mask()
         return envs_mask
 
     def clear_errno(self, envs_idx=None):
-        """Clear the errors every solver flagged for the given envs, all of them if None."""
-        for solver in self._active_solvers:
-            solver.clear_errno(envs_idx)
+        """Clear the errors every solver and the coupler flagged for the given envs, all of them if None."""
+        for system in self._active_systems:
+            system.clear_errno(envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -421,8 +444,8 @@ class Simulator(RBC):
                 if merge_errno(errno_out, errno_in):
                     self._has_errno_flags = True
         else:
-            for solver in self._active_solvers:
-                solver.update_errno()
+            for system in self._active_systems:
+                system.update_errno()
 
         # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
         with self._step_timer.phase("sensors"), torch.no_grad():

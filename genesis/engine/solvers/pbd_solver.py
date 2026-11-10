@@ -115,6 +115,8 @@ class PBDState(Data, kind=DataKind.STATE):
     particles: PBDParticles
     particles_reordered: PBDParticles = field(kind=DataKind.SCRATCH)
     hash_grid: SpatialHashGrid
+    # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
 class PBDInfo(Data, kind=DataKind.CONSTANT):
@@ -211,6 +213,7 @@ class PBDSolver(ParticleSolver):
             env_first=False,
             unused=is_unused,
         )
+        self.register_errors(self.pbd_state.errno, {})
         info_values = {}
         if self.is_active:
             # The kernels of the density and viscosity constraints have a support radius of one once the distances are
