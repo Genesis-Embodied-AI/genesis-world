@@ -1,4 +1,3 @@
-import functools
 import weakref
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
@@ -14,6 +13,7 @@ from genesis.repr_base import RBC
 from genesis.utils.data import ArrayItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
+from genesis.utils.warnings import warn_once
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import kernel_update_hybrid_soft_part
@@ -315,7 +315,7 @@ class Simulator(RBC):
             torch.mps.synchronize()
         self._rollout_graph.restart()
         self._is_forward_ready = True
-        # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
+        # The cursor counts the substeps since the last restart, the clock of each environment being its step count
         self._cur_substep_global = 0
 
         # reset sensors state
@@ -404,7 +404,7 @@ class Simulator(RBC):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
                 for _ in range(self._substeps):
-                    self.rigid_solver.substep(self.cur_substep_local)
+                    self.rigid_solver.substep()
                     self._cur_substep_global += 1
                 self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
@@ -429,15 +429,11 @@ class Simulator(RBC):
             self._sensor_manager.step()
 
     def _step(self):
-        """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
+        """Run the substeps of a step."""
         self._steps += 1
         for _ in range(self._substeps):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
-            if self.cur_substep_local == 0:
-                for solver in self._active_solvers:
-                    if solver.has_frames:
-                        solver.copy_frame(solver.n_frames - 1, 0)
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
@@ -448,11 +444,10 @@ class Simulator(RBC):
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
-        once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
-        environments go back to `steps_start`, the steps they counted before it.
+        once beforehand, to save the start of each of them. The clocks of the environments go back to `steps_start`, the
+        steps they counted before it.
         """
-        # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
-        # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
+        # The state is saved at the start of every substep but the first, whose start the boundary checkpoints hold
         differentiable_solvers = [solver for solver in self._active_solvers if solver.requires_grad]
         boundary_checkpoints = list(zip(differentiable_solvers, checkpoints))
         substeps_checkpoints = [boundary_checkpoints]
@@ -462,51 +457,37 @@ class Simulator(RBC):
         self._steps += 1
         restore_checkpoints(boundary_checkpoints)
         for _ in range(self._substeps - 1):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
             substeps_checkpoints.append(
-                [
-                    (solver, solver.save_checkpoint(boundary_only=True))
-                    for solver in differentiable_solvers
-                    if not solver.has_frames
-                ]
+                [(solver, solver.save_checkpoint(boundary_only=True)) for solver in differentiable_solvers]
             )
-        # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
-        # the solvers holding their state in frames restore
-        framed_checkpoints = [(solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver.has_frames]
-        restore_frames = functools.partial(restore_checkpoints, framed_checkpoints)
         for i_substep in reversed(range(self._substeps)):
             self._cur_substep_global = substep_start + i_substep
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
             with LaunchRecorder() as recorder:
-                self.substep(self.cur_substep_local)
-                if is_last_substep:
-                    with recorder.entry(restore=restore_frames, autodiff=True):
-                        for solver in self._active_solvers:
-                            if solver.has_frames:
-                                solver.copy_frame(solver.n_frames - 1, 0)
-                    if self.rigid_solver.is_active:
-                        self.rigid_solver.clear_external_force()
+                self.substep()
+                if is_last_substep and self.rigid_solver.is_active:
+                    self.rigid_solver.clear_external_force()
             recorder.reverse()
         self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)
 
-    def substep(self, f):
+    def substep(self):
         # The kernels read the time of each environment from the simulator state, which keeps their launch context
         # cacheable
         i_substep = self._cur_substep_global % self._substeps
         kernel_set_time(i_substep, self._steps, self.sim_state, self._substeps, self._substep_dt)
-        self._coupler.preprocess(f)
-        self.substep_pre_coupling(f)
-        self._coupler.couple(f)
-        self.substep_post_coupling(f)
+        self._coupler.preprocess()
+        self.substep_pre_coupling()
+        self._coupler.couple()
+        self.substep_post_coupling()
         # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
         for entity in self._hybrid_entities:
             soft_solver, rigid_solver = entity.solver_soft, entity.solver_rigid
             kernel_update_hybrid_soft_part(
-                f,
                 entity.part_soft.particle_start,
                 soft_solver.substep_dt,
                 soft_solver.dt,
@@ -522,14 +503,14 @@ class Simulator(RBC):
             )
 
     # -------------- pre coupling --------------
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_pre_coupling(f)
+            solver.substep_pre_coupling()
 
     # -------------- post coupling --------------
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_post_coupling(f)
+            solver.substep_post_coupling()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -601,13 +582,9 @@ class Simulator(RBC):
 
     @property
     def cur_substep_local(self):
-        """
-        The frame the current substep starts from, among those the solvers hold.
-
-        The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
-        frames of one substep (see 'Solver.has_frames').
-        """
-        return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
+        """The current substep within the step. Deprecated: use 'cur_substep_global % substeps' instead."""
+        warn_once("'cur_substep_local' is deprecated and will be removed. Use 'cur_substep_global % substeps' instead.")
+        return self._cur_substep_global % self._substeps
 
     @property
     def step_timer(self) -> StepTimer:

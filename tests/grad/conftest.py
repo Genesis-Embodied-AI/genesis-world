@@ -22,9 +22,8 @@ with lazy_imports():
 def step_overwrites(backend, monkeypatch):
     # Check that the backward pass of a recorded rollout saves every overwrite it needs (see LaunchRecorder): before
     # each entry of a recorder, copy the arrays its launches use that an earlier entry used, and report those the entry
-    # changed without the recorder saving them. The arrays a kernel reaches through the solver it is a method of, such
-    # as the frames of the particle solvers, are outside of its reach. The arrays a kernel writes follow from its source
-    # alone, the same on every backend, so it runs on CPU alone.
+    # changed without the recorder saving them. The arrays a kernel writes follow from its source alone, the same on
+    # every backend, so it runs on CPU alone.
     if isinstance(backend, str):
         backend = getattr(gs.constants.backend, backend)
     if backend != gs.cpu:

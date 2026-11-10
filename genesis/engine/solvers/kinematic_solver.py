@@ -825,10 +825,10 @@ class KinematicSolver(Solver):
     # -------------------------------- simulation no-ops ----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         pass
 
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         if not self._is_forward_pos_updated or not self._is_forward_vel_updated:
             kernel_forward_kinematics(
                 self.scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config

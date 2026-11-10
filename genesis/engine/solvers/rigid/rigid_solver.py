@@ -1271,7 +1271,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_pos_updated = True
         self._is_forward_vel_updated = True
 
-    def substep(self, f):
+    def substep(self):
         from genesis.engine.couplers import SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
@@ -1578,7 +1578,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
             )
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         if self.is_active:
             # Skip rigid body computation when using IPCCoupler (IPC handles rigid simulation)
             from genesis.engine.couplers import IPCCoupler
@@ -1590,7 +1590,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     return
 
             # Run Genesis rigid simulation step for non-IPC couplers
-            self.substep(f)
+            self.substep()
 
     def reset_grad(self):
         # Every adjoint the backward pass writes accumulates through 'atomic_add', so a pass starts from zeros
@@ -1602,7 +1602,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             qd_zero_grad(self.dyn_state.geoms)
             qd_zero_grad(self.dyn_state.entities)
 
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         from genesis.engine.couplers import SAPCoupler, IPCCoupler
 
         if not self.is_active:
@@ -1615,7 +1615,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
-                self.substep(f)
+                self.substep()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

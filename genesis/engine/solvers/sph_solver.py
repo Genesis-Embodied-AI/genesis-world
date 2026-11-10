@@ -288,7 +288,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         if not self.is_active:
             return
         kernel_reorder_particles(self.sph_state)
@@ -304,7 +304,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             kernel_predict_velocity(self.sph_state, self.sph_info)
             self._solve_incompressibility(solve_density=True)
 
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         if self.is_active:
             kernel_advect_position(self.sph_state, self.sph_info)
             kernel_copy_from_reordered(self.sph_state)

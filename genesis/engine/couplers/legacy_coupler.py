@@ -198,11 +198,10 @@ class LegacyCoupler(RBC):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, f: int) -> None:
+    def preprocess(self) -> None:
         # preprocess for MPM CPIC
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
             kernel_mpm_surface_to_particle(
-                f,
                 self.mpm_solver.mpm_state,
                 self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_info.geoms,
@@ -211,11 +210,10 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.collider.collider_config,
             )
 
-    def couple(self, f: int) -> None:
+    def couple(self) -> None:
         # MPM <-> all others
         if self.mpm_solver.is_active:
             kernel_mpm_grid_op(
-                f,
                 self.sim.sim_state,
                 self.mpm_solver.mpm_state,
                 self.sph_solver.sph_state,
@@ -273,7 +271,6 @@ class LegacyCoupler(RBC):
 
         if self.fem_solver.is_active:
             kernel_fem_surface_force(
-                f,
                 self.fem_solver.fem_state,
                 self.mpm_solver.mpm_state,
                 self.sph_solver.sph_state,
@@ -509,7 +506,6 @@ def func_mpm_cell_vel_after_exchange_with_particles(
 
 @qd.kernel
 def kernel_mpm_grid_op(
-    f: int,
     sim_state: SimulatorState,
     mpm_state: MPMState,
     sph_state: SPHState,
@@ -528,12 +524,12 @@ def kernel_mpm_grid_op(
     force_fields: qd.template(),
 ):
     """Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with."""
-    for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape[1:]):
-        mass_cell = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]
+    for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape):
+        mass_cell = mpm_state.grid.mass[i_x, i_y, i_z, i_b]
         if mass_cell > rigid_info.EPS[None]:
             #################### MPM grid op ####################
             # Momentum to velocity, then gravity
-            vel_mpm = (1 / mass_cell) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
+            vel_mpm = (1 / mass_cell) * mpm_state.grid.vel_in[i_x, i_y, i_z, i_b]
             vel_mpm += mpm_info.substep_dt[None] * mpm_info.gravity[i_b]
 
             pos = (qd.Vector([i_x, i_y, i_z]) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
@@ -594,12 +590,11 @@ def kernel_mpm_grid_op(
 
             #################### MPM boundary ####################
             _, vel_mpm = func_impose_cube_boundary(pos, vel_mpm, mpm_info.boundary)
-            mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = vel_mpm
+            mpm_state.grid.vel_out[i_x, i_y, i_z, i_b] = vel_mpm
 
 
 @qd.kernel
 def kernel_mpm_surface_to_particle(
-    f: int,
     mpm_state: MPMState,
     geoms_state: GeomsState,
     geoms_info: GeomsInfo,
@@ -609,15 +604,15 @@ def kernel_mpm_surface_to_particle(
 ):
     """Update the normal of the rigid geoms each active MPM particle sees, as long as it stays on the same side."""
     for i_p, i_b in qd.ndrange(
-        *mpm_state.particles.pos.shape[1:], axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
+        *mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
     ):
-        if mpm_state.particles.is_active[f, i_p, i_b]:
+        if mpm_state.particles.is_active[i_p, i_b]:
             for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
                 if geoms_info.needs_coup[i_g]:
                     sdf_normal = sdf.sdf_func_normal_world(
                         i_g,
                         i_b,
-                        mpm_state.particles.pos[f, i_p, i_b],
+                        mpm_state.particles.pos[i_p, i_b],
                         geoms_state,
                         geoms_info,
                         rigid_info,
@@ -631,7 +626,6 @@ def kernel_mpm_surface_to_particle(
 
 @qd.kernel
 def kernel_fem_surface_force(
-    f: int,
     fem_state: FEMState,
     mpm_state: MPMState,
     sph_state: SPHState,
@@ -652,11 +646,11 @@ def kernel_fem_surface_force(
     # Each surface vertex applies the couplings of its incident triangles in increasing triangle index, which
     # reproduces a serial sweep over the triangles without a write race on the vertices they share.
     for i_sv, i_b in qd.ndrange(
-        fem_info.surface_vertices.shape[0], fem_state.vertices.pos.shape[2], axes=qd.static(eoa(fem_state.vertices.vel))
+        fem_info.surface_vertices.shape[0], fem_state.vertices.pos.shape[1], axes=qd.static(eoa(fem_state.vertices.vel))
     ):
         i_v = fem_info.surface_vertices[i_sv]
-        pos = fem_state.vertices.pos[f, i_v, i_b]
-        vel_fem_sv = fem_state.vertices.vel[f + 1, i_v, i_b]
+        pos = fem_state.vertices.pos[i_v, i_b]
+        vel_fem_sv = fem_state.vertices.vel_next[i_v, i_b]
         i_tri_start = fem_info.surface_vertices_tri_start[i_sv]
         n_tris = fem_info.surface_vertices_tri_start[i_sv + 1] - i_tri_start
 
@@ -711,9 +705,9 @@ def kernel_fem_surface_force(
 
                 tri2v = fem_info.surfaces.tri2v[i_s]
                 surface_normal = triangle_face_normal(
-                    fem_state.vertices.pos[f, tri2v[0], i_b],
-                    fem_state.vertices.pos[f, tri2v[1], i_b],
-                    fem_state.vertices.pos[f, tri2v[2], i_b],
+                    fem_state.vertices.pos[tri2v[0], i_b],
+                    fem_state.vertices.pos[tri2v[1], i_b],
+                    fem_state.vertices.pos[tri2v[2], i_b],
                     rigid_info.EPS[None],
                 )
 
@@ -729,7 +723,7 @@ def kernel_fem_surface_force(
                     mpm_base, _, mpm_w = func_quadratic_bspline_stencil(pos, mpm_info)
                     new_vel_fem_sv = vel_fem_sv
                     grid_shape = mpm_state.grid.mass.shape
-                    grid_res = qd.Vector([grid_shape[1], grid_shape[2], grid_shape[3]])
+                    grid_res = qd.Vector([grid_shape[0], grid_shape[1], grid_shape[2]])
                     dx = mpm_info.dx[None]
                     for mpm_offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
                         cell = mpm_base - mpm_info.grid_offset[None] + mpm_offset
@@ -738,7 +732,7 @@ def kernel_fem_surface_force(
                         mpm_grid_mass = gs.qd_float(0.0)
                         if is_cell_in_grid:
                             mpm_grid_mass = (
-                                mpm_state.grid.mass[f, cell[0], cell[1], cell[2], i_b]
+                                mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b]
                                 / mpm_info.particle_volume_scale[None]
                             )
 
@@ -750,7 +744,7 @@ def kernel_fem_surface_force(
                         mpm_grid_pos = (cell + mpm_info.grid_offset[None]) * dx
                         signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
                         if is_cell_in_grid and signed_dist <= dx:
-                            vel_out = mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b]
+                            vel_out = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
                             mass_mpm_at_cell = mpm_weight * mpm_grid_mass
                             vel_mpm += mpm_weight * vel_out
                             mass_mpm += mass_mpm_at_cell
@@ -761,7 +755,7 @@ def kernel_fem_surface_force(
                                     mpm_grid_mass / mass_fem_sv
                                 )
                                 qd.atomic_add(
-                                    mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b], delta_mpm_vel_at_cell
+                                    mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b], delta_mpm_vel_at_cell
                                 )
                                 new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
 
@@ -799,7 +793,7 @@ def kernel_fem_surface_force(
                             n_cells=2,
                         )
 
-        fem_state.vertices.vel[f + 1, i_v, i_b] = vel_fem_sv
+        fem_state.vertices.vel_next[i_v, i_b] = vel_fem_sv
 
 
 @qd.kernel

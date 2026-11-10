@@ -811,11 +811,11 @@ class IPCCoupler(RBC):
     # Section 2: Core implementation
     # ============================================================
 
-    def preprocess(self, f):
+    def preprocess(self):
         """Preprocessing step before coupling"""
         pass
 
-    def couple(self, f):
+    def couple(self):
         """
         Execute IPC coupling step with per-entity coupling types.
 

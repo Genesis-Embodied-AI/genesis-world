@@ -784,11 +784,11 @@ class SAPCoupler(RBC):
     # -------------------------------------- Main ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, i_step):
+    def preprocess(self):
         rigid_solver, fem_solver = self.rigid_solver, self.fem_solver
         if self._has_fem_pressure:
             kernel_compute_fem_pressure_gradient(
-                i_step, fem_solver.fem_state, self.sap_state, fem_solver.fem_info, self.sap_info
+                fem_solver.fem_state, self.sap_state, fem_solver.fem_info, self.sap_info
             )
         if rigid_solver.is_active:
             kernel_update_all_verts(rigid_solver.dyn_state, rigid_solver.dyn_info, rigid_solver.rigid_config)
@@ -799,7 +799,7 @@ class SAPCoupler(RBC):
 
         if self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact:
             kernel_compute_fem_surface_tet_aabb(
-                i_step, fem_solver.fem_state, self.fem_surface_tet_bvh_state.leaves, fem_solver.fem_info
+                fem_solver.fem_state, self.fem_surface_tet_bvh_state.leaves, fem_solver.fem_info
             )
         if self._enable_fem_self_tet_contact:
             build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
@@ -818,7 +818,6 @@ class SAPCoupler(RBC):
             build_bvh(self.rigid_tet_bvh_state, self.rigid_tet_bvh_config, eps=gs.EPS)
 
         self.has_contact, has_overflow = kernel_update_contact(
-            i_step,
             fem_solver.fem_state,
             rigid_solver.dyn_state.dofs,
             rigid_solver.dyn_state.links,
@@ -857,12 +856,11 @@ class SAPCoupler(RBC):
             self.equality_constraint_handler,
         )
 
-    def couple(self, i_step):
+    def couple(self):
         # Equality constraints bind the rigid dofs whether anything is in contact or not
         if self.has_contact or self._has_equality_constraints:
-            self.sap_solve(i_step)
+            self.sap_solve()
             kernel_update_vel(
-                i_step,
                 self.fem_solver.fem_state,
                 self.rigid_solver.dyn_state.dofs,
                 self.sap_state,
@@ -874,7 +872,7 @@ class SAPCoupler(RBC):
     # ------------------------------------- Solve ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def sap_solve(self, i_step):
+    def sap_solve(self):
         fem_state, fem_info = self.fem_solver.fem_state, self.fem_solver.fem_info
         vertex_constraints, fem_config = self.fem_solver.vertex_constraints, self.fem_solver.fem_config
         dofs_state = self.rigid_solver.dyn_state.dofs
@@ -882,10 +880,10 @@ class SAPCoupler(RBC):
         sap_state, sap_info, sap_config = self.sap_state, self.sap_info, self.sap_config
         contact_handlers, constraint_handler = self.contact_handlers, self.equality_constraint_handler
 
-        kernel_init_sap_solve(i_step, fem_state, dofs_state, sap_state, sap_info, sap_config)
+        kernel_init_sap_solve(fem_state, dofs_state, sap_state, sap_info, sap_config)
         for i_iter in range(self._n_sap_iterations):
             if self.fem_solver.is_active:
-                kernel_init_fem_unconstrained_gradient_diag(i_step, fem_state, sap_state, fem_info)
+                kernel_init_fem_unconstrained_gradient_diag(fem_state, sap_state, fem_info)
             if self.rigid_solver.is_active:
                 kernel_init_rigid_unconstrained_gradient(dofs_state, sap_state, sap_info)
             # The first iteration starts from the free-motion velocity v*, so that A(v - v*) = 0
@@ -928,7 +926,6 @@ class SAPCoupler(RBC):
             # Exact line search by a safeguarded Newton iteration (rtsafe) on the derivative of the cost along the
             # search direction.
             kernel_init_exact_linesearch(
-                i_step,
                 fem_state,
                 dofs_state,
                 sap_state,
@@ -943,7 +940,6 @@ class SAPCoupler(RBC):
             )
             for _ in range(self._n_linesearch_iterations):
                 kernel_one_exact_linesearch_iter(
-                    i_step,
                     fem_state,
                     dofs_state,
                     sap_state,
@@ -1019,7 +1015,7 @@ def kernel_update_rigid_volume_verts_pressure_gradient(geoms_state: GeomsState, 
 
 @qd.kernel
 def kernel_compute_fem_pressure_gradient(
-    i_step: int, fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo, sap_info: SAPInfo
+    fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo, sap_info: SAPInfo
 ):
     """Compute the gradient of the pressure field of every FEM element at its current shape."""
     for i_e, i_b in qd.ndrange(
@@ -1034,10 +1030,10 @@ def kernel_compute_fem_pressure_gradient(
             i_v1 = fem_info.elements.el2v[i_e][(i + 1) % 4]
             i_v2 = fem_info.elements.el2v[i_e][(i + 2) % 4]
             i_v3 = fem_info.elements.el2v[i_e][(i + 3) % 4]
-            pos_v0 = fem_state.vertices.pos[i_step, i_v0, i_b]
-            pos_v1 = fem_state.vertices.pos[i_step, i_v1, i_b]
-            pos_v2 = fem_state.vertices.pos[i_step, i_v2, i_b]
-            pos_v3 = fem_state.vertices.pos[i_step, i_v3, i_b]
+            pos_v0 = fem_state.vertices.pos[i_v0, i_b]
+            pos_v1 = fem_state.vertices.pos[i_v1, i_b]
+            pos_v2 = fem_state.vertices.pos[i_v2, i_b]
+            pos_v3 = fem_state.vertices.pos[i_v3, i_b]
 
             e10 = pos_v0 - pos_v1
             e12 = pos_v2 - pos_v1
@@ -1053,7 +1049,7 @@ def kernel_compute_fem_pressure_gradient(
 
 
 @qd.kernel
-def kernel_compute_fem_surface_tet_aabb(i_step: int, fem_state: FEMState, bvh_leaves: BVHLeaves, fem_info: FEMInfo):
+def kernel_compute_fem_surface_tet_aabb(fem_state: FEMState, bvh_leaves: BVHLeaves, fem_info: FEMInfo):
     """Fit the box of every FEM surface tet, the leaves of the trees of the FEM contacts."""
     for i_se, i_b in qd.ndrange(
         fem_info.surface_elements.shape[0], bvh_leaves.aabbs_min.shape[0], axes=qd.static(eoa(fem_state.vertices.pos))
@@ -1064,7 +1060,7 @@ def kernel_compute_fem_surface_tet_aabb(i_step: int, fem_state: FEMState, bvh_le
         leaf_min = qd.Vector([np.inf, np.inf, np.inf], dt=gs.qd_float)
         leaf_max = -leaf_min
         for i in qd.static(range(4)):
-            pos_v = fem_state.vertices.pos[i_step, i_vs[i], i_b]
+            pos_v = fem_state.vertices.pos[i_vs[i], i_b]
             leaf_min = qd.min(leaf_min, pos_v)
             leaf_max = qd.max(leaf_max, pos_v)
         bvh_leaves.aabbs_min[i_b, i_se] = leaf_min
@@ -1121,7 +1117,6 @@ def kernel_compute_rigid_tet_aabb(sap_state: SAPState, bvh_leaves: BVHLeaves, sa
 
 @qd.kernel
 def kernel_update_contact(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     links_state: LinksState,
@@ -1147,7 +1142,6 @@ def kernel_update_contact(
     has_overflow = False
     for contact in qd.static(contact_handlers):
         has_overflow |= contact.detection(
-            i_step,
             fem_state,
             free_verts_state,
             fixed_verts_state,
@@ -1188,7 +1182,6 @@ def kernel_compute_regularization(
 
 @qd.kernel
 def kernel_update_vel(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -1202,7 +1195,7 @@ def kernel_update_vel(
             sap_state.envs.is_active.shape[0],
             axes=qd.static(eoa(fem_state.vertices.vel)),
         ):
-            fem_state.vertices.vel[i_step + 1, i_v, i_b] = sap_state.fem_vertices.v[i_v, i_b]
+            fem_state.vertices.vel_next[i_v, i_b] = sap_state.fem_vertices.v[i_v, i_b]
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(
             sap_info.n_dofs[None], sap_state.envs.is_active.shape[0], axes=qd.static(eoa(dofs_state.vel))
@@ -1212,7 +1205,6 @@ def kernel_update_vel(
 
 @qd.kernel
 def kernel_init_sap_solve(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -1226,7 +1218,7 @@ def kernel_init_sap_solve(
             sap_state.envs.is_active.shape[0],
             axes=qd.static(eoa(sap_state.fem_vertices.v)),
         ):
-            sap_state.fem_vertices.v[i_v, i_b] = fem_state.vertices.vel[i_step + 1, i_v, i_b]
+            sap_state.fem_vertices.v[i_v, i_b] = fem_state.vertices.vel_next[i_v, i_b]
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(
             sap_info.n_dofs[None], sap_state.envs.is_active.shape[0], axes=qd.static(eoa(sap_state.rigid_dofs.v))
@@ -1237,9 +1229,7 @@ def kernel_init_sap_solve(
 
 
 @qd.kernel
-def kernel_init_fem_unconstrained_gradient_diag(
-    i_step: int, fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo
-):
+def kernel_init_fem_unconstrained_gradient_diag(fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo):
     """Clear the gradient of the FEM vertices, and set the diagonal blocks of their Hessian to the elastic ones."""
     for i_v, i_b in qd.ndrange(
         sap_state.fem_vertices.v.shape[0],
@@ -1250,7 +1240,7 @@ def kernel_init_fem_unconstrained_gradient_diag(
         # The FEM solver solves for positions and SAP for velocities, so the Hessian scales by dt^2
         sap_state.fem_vertices.diag3x3[i_v, i_b] = fem_state.vertices_solve.diag3x3[i_v, i_b] * fem_info.dt2[None]
         sap_state.fem_vertices.v_diff[i_v, i_b] = (
-            sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel[i_step + 1, i_v, i_b]
+            sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel_next[i_v, i_b]
         )
 
 
@@ -1613,7 +1603,6 @@ def kernel_one_pcg_iter(
 
 @qd.kernel
 def kernel_init_exact_linesearch(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -1666,7 +1655,7 @@ def kernel_init_exact_linesearch(
             if not sap_state.envs.is_linesearch_active[i_b]:
                 continue
             sap_state.fem_vertices.v_diff[i_v, i_b] = (
-                sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel[i_step + 1, i_v, i_b]
+                sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel_next[i_v, i_b]
             )
             qd.atomic_add(
                 sap_state.envs.prev_energy[i_b],
@@ -1756,7 +1745,6 @@ def kernel_init_exact_linesearch(
 
     func_update_velocity_linesearch(sap_state, sap_info, sap_config)
     func_compute_line_energy_gradient_hessian(
-        i_step,
         fem_state,
         dofs_state,
         sap_state,
@@ -1832,7 +1820,6 @@ def kernel_init_exact_linesearch(
 
 @qd.kernel
 def kernel_one_exact_linesearch_iter(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -1848,7 +1835,6 @@ def kernel_one_exact_linesearch_iter(
     """
     func_update_velocity_linesearch(sap_state, sap_info, sap_config)
     func_compute_line_energy_gradient_hessian(
-        i_step,
         fem_state,
         dofs_state,
         sap_state,
@@ -2059,7 +2045,6 @@ def func_update_velocity_linesearch(sap_state: SAPState, sap_info: SAPInfo, sap_
 
 @qd.func
 def func_compute_line_energy_gradient_hessian(
-    i_step: int,
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -2091,7 +2076,7 @@ def func_compute_line_energy_gradient_hessian(
                 sap_state.envs.energy[i_b],
                 sap_state.envs.step_size[i_b]
                 * sap_state.fem_vertices.dp[i_v, i_b].dot(
-                    sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel[i_step + 1, i_v, i_b]
+                    sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel_next[i_v, i_b]
                 ),
             )
         for i_v, i_b in qd.ndrange(
@@ -2102,7 +2087,7 @@ def func_compute_line_energy_gradient_hessian(
             qd.atomic_add(
                 sap_state.envs.dell_dalpha[i_b],
                 sap_state.fem_vertices.dp[i_v, i_b].dot(
-                    sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel[i_step + 1, i_v, i_b]
+                    sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel_next[i_v, i_b]
                 ),
             )
     if qd.static(sap_config.has_rigid):
@@ -2965,7 +2950,6 @@ class FEMFloorTetContactHandler(FEMContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -2993,7 +2977,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
             distance = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_e][i]
-                pos_v = fem_state.vertices.pos[f, i_v, i_b]
+                pos_v = fem_state.vertices.pos[i_v, i_b]
                 distance[i] = pos_v.z - ground_pos.z
                 if distance[i] > 0.0:
                     intersection_code |= 1 << i
@@ -3024,7 +3008,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
             tet_pressures = qd.Vector.zero(gs.qd_float, 4)  # pressures at the vertices
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_e][i]
-                tet_vertices[:, i] = fem_state.vertices.pos[f, i_v, i_b]
+                tet_vertices[:, i] = fem_state.vertices.pos[i_v, i_b]
                 tet_pressures[i] = sap_info.fem_pressure[i_v]
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)  # 3 or 4 vertices
@@ -3184,7 +3168,6 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     @qd.func
     def compute_candidates(
         self,
-        f: int,
         fem_state: FEMState,
         sap_state: SAPState,
         query_results: BVHQueryResults,
@@ -3200,8 +3183,8 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             i_q = fem_info.surface_elements[i_sq]
             i_v0 = fem_info.elements.el2v[i_a][0]
             i_v1 = fem_info.elements.el2v[i_q][0]
-            x0 = fem_state.vertices.pos[f, i_v0, i_b]
-            x1 = fem_state.vertices.pos[f, i_v1, i_b]
+            x0 = fem_state.vertices.pos[i_v0, i_b]
+            x1 = fem_state.vertices.pos[i_v1, i_b]
             p0 = sap_info.fem_pressure[i_v0]
             p1 = sap_info.fem_pressure[i_v1]
             g0 = sap_state.fem_pressure_gradient[i_a, i_b]
@@ -3229,13 +3212,13 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             distance1 = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_a][i]
-                pos_v = fem_state.vertices.pos[f, i_v, i_b]
+                pos_v = fem_state.vertices.pos[i_v, i_b]
                 distance0[i] = (pos_v - x).dot(normal)  # signed distance
                 if distance0[i] > 0.0:
                     intersection_code0 |= 1 << i
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_q][i]
-                pos_v = fem_state.vertices.pos[f, i_v, i_b]
+                pos_v = fem_state.vertices.pos[i_v, i_b]
                 distance1[i] = (pos_v - x).dot(normal)
                 if distance1[i] > 0.0:
                     intersection_code1 |= 1 << i
@@ -3261,9 +3244,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         return has_overflow
 
     @qd.func
-    def compute_pairs(
-        self, i_step: int, fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo, sap_info: SAPInfo
-    ):
+    def compute_pairs(self, fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo, sap_info: SAPInfo):
         """
         Computes the FEM self contact pairs and their properties.
 
@@ -3288,11 +3269,11 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             tet_vertices1 = qd.Matrix.zero(gs.qd_float, 3, 4)  # 4 vertices of tet 1
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_e0][i]
-                tet_vertices0[:, i] = fem_state.vertices.pos[i_step, i_v, i_b]
+                tet_vertices0[:, i] = fem_state.vertices.pos[i_v, i_b]
                 tet_pressures0[i] = sap_info.fem_pressure[i_v]
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_e1][i]
-                tet_vertices1[:, i] = fem_state.vertices.pos[i_step, i_v, i_b]
+                tet_vertices1[:, i] = fem_state.vertices.pos[i_v, i_b]
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 8)  # maximum 8 vertices
             polygon_n_vertices = gs.qd_int(0)
@@ -3404,7 +3385,6 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -3430,9 +3410,9 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             contact_queries_state.fem_self.results.count[0] > contact_queries_state.fem_self.results.triplets.shape[0]
         )
         has_overflow |= self.compute_candidates(
-            f, fem_state, sap_state, contact_queries_state.fem_self.results, fem_info, sap_info
+            fem_state, sap_state, contact_queries_state.fem_self.results, fem_info, sap_info
         )
-        has_overflow |= self.compute_pairs(f, fem_state, sap_state, fem_info, sap_info)
+        has_overflow |= self.compute_pairs(fem_state, sap_state, fem_info, sap_info)
         return has_overflow
 
     @qd.func
@@ -3571,7 +3551,6 @@ class FEMFloorVertContactHandler(FEMContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -3597,7 +3576,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         ):
             i_v = fem_info.surface_vertices[i_sv]
             i_g = sap_info.ground_geom_idx[None]
-            pos_v = fem_state.vertices.pos[f, i_v, i_b]
+            pos_v = fem_state.vertices.pos[i_v, i_b]
             distance = pos_v.z - geoms_state.pos[i_g, i_b].z
             if distance > 0.0:
                 continue
@@ -3690,7 +3669,6 @@ class RigidFloorVertContactHandler(RigidContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -3766,7 +3744,6 @@ class RigidFloorTetContactHandler(RigidContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -3938,7 +3915,6 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     @qd.func
     def compute_candidates(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -3981,7 +3957,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
             intersection_code = qd.int32(0)
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_q][i]
-                pos_v = fem_state.vertices.pos[f, i_v, i_b]
+                pos_v = fem_state.vertices.pos[i_v, i_b]
                 distance = (pos_v - pos_v0).dot(normal)  # signed distance
                 if distance > 0.0:
                     intersection_code |= 1 << i
@@ -4003,7 +3979,6 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     @qd.func
     def compute_pairs(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -4040,7 +4015,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
                     tri_vertices[:, i] = free_verts_state.pos[i_fv, i_b]
             for i in qd.static(range(4)):
                 i_v = fem_info.elements.el2v[i_e][i]
-                tet_vertices[:, i] = fem_state.vertices.pos[f, i_v, i_b]
+                tet_vertices[:, i] = fem_state.vertices.pos[i_v, i_b]
                 tet_pressures[i] = sap_info.fem_pressure[i_v]
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 7)  # maximum 7 vertices
@@ -4130,7 +4105,6 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
@@ -4152,7 +4126,6 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
             contact_queries_state.rigid_tri.results.count[0] > contact_queries_state.rigid_tri.results.triplets.shape[0]
         )
         has_overflow |= self.compute_candidates(
-            f,
             fem_state,
             free_verts_state,
             fixed_verts_state,
@@ -4164,7 +4137,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
             sap_info,
         )
         has_overflow |= self.compute_pairs(
-            f, fem_state, free_verts_state, fixed_verts_state, sap_state, fem_info, verts_info, geoms_info, sap_info
+            fem_state, free_verts_state, fixed_verts_state, sap_state, fem_info, verts_info, geoms_info, sap_info
         )
         return has_overflow
 
@@ -4516,7 +4489,6 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
     @qd.func
     def detection(
         self,
-        f: int,
         fem_state: FEMState,
         free_verts_state: VertsState,
         fixed_verts_state: VertsState,
