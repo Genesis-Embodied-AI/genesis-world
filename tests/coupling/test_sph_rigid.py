@@ -5,6 +5,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy
 
+from ..utils.assertions import assert_allclose
+
 
 @pytest.mark.parametrize(
     "n_envs, pressure_solver",
@@ -15,7 +17,11 @@ from genesis.utils.misc import qd_to_numpy
         pytest.param(2, "DFSPH", marks=pytest.mark.slow),  # ~300s
     ],
 )
-def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
+def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
+    PARTICLE_SIZE = 0.02
+    BLOCK_SIZE = 0.1
+    BLOCK_DENSITY_RATIO = 0.5
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -23,7 +29,7 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
             gravity=(0.0, 0.0, -9.81),
         ),
         sph_options=gs.options.SPHOptions(
-            particle_size=0.02,
+            particle_size=PARTICLE_SIZE,
             pressure_solver=pressure_solver,
             lower_bound=(-0.25, -0.25, 0.0),
             upper_bound=(0.25, 0.25, 1.0),
@@ -38,7 +44,7 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
-    scene.add_entity(
+    liquid = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.25),
             size=(0.5, 0.5, 0.5),
@@ -75,13 +81,47 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
             rho=200.0,
         ),
     )
+    block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, -0.13, 0.51 + 0.5 * BLOCK_SIZE),
+            size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+        ),
+    )
     scene.build(n_envs=n_envs)
 
     # The light ball first sinks with the settling fluid before buoyancy lifts it above the surface
-    raft_rolls = []
-    for _ in range(100):
+    raft_rolls, block_drafts = [], []
+    for i_step in range(100):
         scene.step()
         raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
+
+        # The liquid never enters the FEM block, whose surface holds it back like a wall. The particles next to a face
+        # stand half a particle size off it, so none lies within the block shrunk by that much.
+        verts_pos, particles_pos = block.get_verts_pos(), liquid.get_particles_pos()
+        block_center = verts_pos.mean(dim=-2, keepdim=True)
+        assert ((particles_pos - block_center).abs().amax(dim=-1) > 0.5 * (BLOCK_SIZE - PARTICLE_SIZE)).all()
+
+        # The draft of the block below the free surface of the liquid around it, the surface lying half a particle size
+        # above the centers of the topmost particles
+        if i_step >= 80:
+            offsets = (particles_pos[..., :2] - block_center[..., :2]).abs().amax(dim=-1)
+            is_around = (offsets > 0.5 * BLOCK_SIZE + PARTICLE_SIZE) & (offsets < 0.5 * BLOCK_SIZE + 3 * PARTICLE_SIZE)
+            heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
+            level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
+            block_drafts.append(level - verts_pos[..., 2].amin(dim=-1))
+
+            # The block rides the waves the other bodies raise, moving vertically with the liquid around it
+            verts_lo, verts_hi = verts_pos.amin(dim=-2, keepdim=True), verts_pos.amax(dim=-2, keepdim=True)
+            offsets_out = torch.maximum(verts_lo - particles_pos, particles_pos - verts_hi).clamp(min=0.0)
+            dists = offsets_out.norm(dim=-1)
+            is_near = (dists > 0.0) & (dists < 2 * scene.sph_solver.support_radius)
+            particles_vel_z = liquid.get_particles_vel()[..., 2]
+            liquid_vel_z = torch.where(is_near, particles_vel_z, 0.0).sum(dim=-1) / is_near.sum(dim=-1)
+            assert ((block.get_verts_vel()[..., 2].mean(dim=-1) - liquid_vel_z).abs() < 1e-1).all()
     raft_rolls = torch.stack(raft_rolls)
 
     # The static fluid pressure must push the light ball (rho well below the fluid rest density) up toward the
@@ -94,6 +134,9 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
     # The pressure on the tilted raft acts off its center of mass, so the buoyancy torque rocks it about its roll
     # axis. That torque reaches the rigid body through the coupling wrench alone.
     assert (raft_rolls.amax(dim=0) - raft_rolls.amin(dim=0) > 2.0).all(), f"Raft must rock, got rolls={raft_rolls}"
+    # The FEM block floats with the draft at which the weight of the liquid it displaces balances its own, up to the
+    # smoothing of the surface by the kernel over half a particle size.
+    assert_allclose(torch.stack(block_drafts).mean(dim=0), BLOCK_DENSITY_RATIO * BLOCK_SIZE, atol=0.5 * PARTICLE_SIZE)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
