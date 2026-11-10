@@ -1,6 +1,7 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.dynamic_exclusive_sum import func_lookback_prefix
 from genesis.utils.data import Data, DataKind, Size, field
 
 _RADIX_DIGITS = 256
@@ -43,6 +44,16 @@ def dynamic_radix_sort_sizes(key_bits: int, capacity: int) -> dict[Size, int]:
         RADIX_TILES: max((capacity + _TILE_ITEMS - 1) // _TILE_ITEMS, 1),
         RADIX_CHUNKS: CPU_CHUNKS if gs.backend == gs.cpu else 1,
     }
+
+
+@qd.func
+def _func_digit(key, shift, key_bits: qd.template()):
+    i_digit = gs.qd_int(0)
+    if qd.static(key_bits == 32):
+        i_digit = gs.qd_int((key >> qd.u32(shift)) & qd.u32(255))
+    else:
+        i_digit = gs.qd_int((key >> qd.u64(shift)) & qd.u64(255))
+    return i_digit
 
 
 @qd.func
@@ -128,23 +139,10 @@ def _func_histogram(keys: qd.template(), n: qd.Tensor, sorter: DynamicRadixSortS
             if i_in0 < n[()]:
                 for k in qd.static(range(16)):
                     i_in = i_in0 + k * 128
-                    key32 = qd.u32(0)
-                    key64 = qd.u64(0)
-                    is_valid = i_in < n[()]
-                    if is_valid:
-                        if qd.static(key_bits == 32):
-                            key32 = keys[i_in]
-                        else:
-                            key64 = keys[i_in]
-                    for i_pass in qd.static(range(n_passes)):
-                        i_digit = gs.qd_int(0)
-                        if is_valid:
-                            shift = qd.static(i_pass * 8)
-                            if qd.static(key_bits == 32):
-                                i_digit = gs.qd_int((key32 >> shift) & qd.u32(255))
-                            else:
-                                i_digit = gs.qd_int((key64 >> shift) & qd.u64(255))
-                            qd.atomic_add(sh_histogram[i_pass * 256 + i_digit], 1)
+                    if i_in < n[()]:
+                        key = keys[i_in]
+                        for i_pass in qd.static(range(n_passes)):
+                            qd.atomic_add(sh_histogram[i_pass * 256 + _func_digit(key, i_pass * 8, key_bits)], 1)
         qd.simt.block.sync()
         for i_pass in qd.static(range(n_passes)):
             for k in qd.static(range(2)):
@@ -211,30 +209,17 @@ def _func_onesweep_pass(
             sh_sorted_keys = qd.simt.block.SharedArray((6144,), qd.u64)
             sh_sorted_permutation = qd.simt.block.SharedArray((6144,), gs.qd_int)
 
-            keys32 = qd.Vector.zero(qd.u32, 24)
-            keys64 = qd.Vector.zero(qd.u64, 24)
+            keys = qd.Vector.zero(qd.u64, 24)
             digits = qd.Vector.zero(gs.qd_int, 24)
             local_ranks = qd.Vector.zero(gs.qd_int, 24)
 
             for k in qd.static(range(24)):
                 i_in = i_tile * 6144 + (tid // 32) * 24 * 32 + k * 32 + tid % 32
-                is_valid = i_in < count
-                key32 = qd.u32(0xFFFFFFFF)
-                key64 = qd.u64(0xFFFFFFFFFFFFFFFF)
-                if is_valid:
-                    if qd.static(key_bits == 32):
-                        key32 = keys_in[i_in]
-                    else:
-                        key64 = keys_in[i_in]
-
-                digit_key = qd.u32(0xFF)
-                if qd.static(key_bits == 32):
-                    digit_key = (key32 >> shift) & qd.u32(0xFF)
-                else:
-                    digit_key = qd.u32((key64 >> qd.u64(shift)) & qd.u64(0xFF))
-                i_digit = gs.qd_int(digit_key)
-                keys32[k] = key32
-                keys64[k] = key64
+                # Missing keys rank last, in the top digit
+                i_digit = gs.qd_int(255)
+                if i_in < count:
+                    keys[k] = qd.u64(keys_in[i_in])
+                    i_digit = _func_digit(keys_in[i_in], shift, key_bits)
                 digits[k] = i_digit
 
             rank_metadata = _rank_warp_striped_items(digits, local_ranks, sh_block_prefixes)
@@ -247,39 +232,13 @@ def _func_onesweep_pass(
                 if i_in < count:
                     i_digit = digits[k]
                     i_sorted = sh_block_prefixes[i_digit] + local_ranks[k]
-                    if qd.static(key_bits == 32):
-                        sh_sorted_keys[i_sorted] = qd.u64(keys32[k])
-                    else:
-                        sh_sorted_keys[i_sorted] = keys64[k]
+                    sh_sorted_keys[i_sorted] = keys[k]
                     sh_sorted_permutation[i_sorted] = permutation_in[i_in]
 
-            tile_prefix = gs.qd_int(0)
             if tid < 256:
-                j_tile = i_tile - 1
-                is_prefix_complete = i_tile == 0
-                if i_tile > 0:
-                    sorter.lookback_partial[i_tile, tid] = local_count
-                    qd.simt.grid.mem_fence()
-                    qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 1)
-
-                while not is_prefix_complete:
-                    if j_tile < 0:
-                        is_prefix_complete = True
-                    else:
-                        state = qd.volatile_load(sorter.lookback_status[j_tile, tid])
-                        if state != 0:
-                            qd.simt.grid.mem_fence()
-                            if state == 2:
-                                tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_complete[j_tile, tid])
-                                is_prefix_complete = True
-                            else:
-                                tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_partial[j_tile, tid])
-                                j_tile = j_tile - 1
-
-                sorter.lookback_complete[i_tile, tid] = tile_prefix + local_count
-                qd.simt.grid.mem_fence()
-                qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 2)
-                sh_tile_prefixes[tid] = tile_prefix
+                sh_tile_prefixes[tid] = func_lookback_prefix(
+                    sorter.lookback_status, sorter.lookback_partial, sorter.lookback_complete, i_tile, tid, local_count
+                )
             qd.simt.block.sync()
 
             valid_count = qd.min(qd.max(count - i_tile * 6144, 0), 6144)
@@ -287,7 +246,7 @@ def _func_onesweep_pass(
                 i_sorted = k * 256 + tid
                 if i_sorted < valid_count:
                     key = sh_sorted_keys[i_sorted]
-                    i_digit = gs.qd_int((key >> qd.u64(shift)) & qd.u64(0xFF))
+                    i_digit = _func_digit(key, shift, 64)
                     i_out = (
                         sorter.bins[i_pass, i_digit] + sh_tile_prefixes[i_digit] + i_sorted - sh_block_prefixes[i_digit]
                     )
@@ -314,17 +273,6 @@ def _func_advance_passes(sorter: DynamicRadixSortScratch, key_bits: qd.template(
         sorter.is_pass_running[()] = gs.qd_int(sorter.pass_idx[()] < n_passes)
 
 
-@qd.func
-def _func_digit(i_pass: qd.template(), key, key_bits: qd.template()):
-    shift = qd.static(i_pass * 8)
-    i_digit = gs.qd_int(0)
-    if qd.static(key_bits == 32):
-        i_digit = gs.qd_int((key >> qd.u32(shift)) & qd.u32(255))
-    else:
-        i_digit = gs.qd_int((key >> qd.u64(shift)) & qd.u64(255))
-    return i_digit
-
-
 @qd.func(requires_top_level=True)
 def _func_cpu_pass(
     i_pass: qd.template(),
@@ -342,7 +290,7 @@ def _func_cpu_pass(
             sorter.chunk_offsets[i_chunk, i_digit] = 0
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         for i_in in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
-            digit = _func_digit(i_pass, keys_in[i_in], key_bits)
+            digit = _func_digit(keys_in[i_in], i_pass * 8, key_bits)
             sorter.chunk_offsets[i_chunk, digit] = sorter.chunk_offsets[i_chunk, digit] + 1
     for _ in range(1):
         running = gs.qd_int(0)
@@ -356,7 +304,7 @@ def _func_cpu_pass(
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
         for i_in in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
             key = keys_in[i_in]
-            i_digit = _func_digit(i_pass, key, key_bits)
+            i_digit = _func_digit(key, i_pass * 8, key_bits)
             i_out = sorter.chunk_offsets[i_chunk, i_digit]
             sorter.chunk_offsets[i_chunk, i_digit] = i_out + 1
             keys_out[i_out] = key

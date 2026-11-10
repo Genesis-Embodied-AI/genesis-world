@@ -4,7 +4,7 @@ Rigid."""
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.linear_pcg import PCGScalars, pcg_direction, pcg_dot, pcg_update
+import genesis.utils.geom as gu
 from genesis.engine.numerics.newton_control import (
     NewtonControl,
     line_search_point,
@@ -15,10 +15,14 @@ from genesis.utils.array_class import ConstraintState, DofsState, DynInfo, DynSt
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
 from .abd.forward_dynamics import func_solve_mass_batch
+from .constraint.backward import func_matvec_Ap
 from .constraint.island import func_group_constraints_by_island
 from .constraint.solver import (
-    func_cholesky_solve_batch,
+    constraint_gradient,
+    func_cholesky_solve_islands_batch,
     func_update_constraint,
+    func_warmstart_qacc,
+    gauss_cost_term,
     initialize_Jaref,
     initialize_Ma,
 )
@@ -63,24 +67,6 @@ class RigidNewtonScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.func
-def dof_motion(cdof_vel: qd.types.vector(3), cdof_ang: qd.types.vector(3), value: float):
-    """Spatial displacement of a link from the value of one of the dofs of its chain."""
-    return cdof_vel * value, cdof_ang * value
-
-
-@qd.func
-def dof_force(
-    cdof_vel: qd.types.vector(3),
-    cdof_ang: qd.types.vector(3),
-    force_vel: qd.types.vector(3),
-    force_ang: qd.types.vector(3),
-    scale: float,
-):
-    """Generalized force on a dof of the chain of a link from the spatial force on the link, scaled."""
-    return scale * (cdof_vel.dot(force_vel) + cdof_ang.dot(force_ang))
-
-
-@qd.func
 def has_spatial_force(force_vel: qd.types.vector(3), force_ang: qd.types.vector(3)):
     return force_vel.norm_sqr() + force_ang.norm_sqr() > 0.0
 
@@ -104,12 +90,6 @@ def constraint_force(Ma: float, qf_smooth: float):
 
 
 @qd.func
-def gauss_cost_term(Ma: float, qf_smooth: float, qacc: float, acc_smooth: float):
-    """Term of a dof in the Gauss cost 1/2 (a - a_smooth)^T M (a - a_smooth) of Rigid without constraint rows."""
-    return 0.5 * (Ma - qf_smooth) * (qacc - acc_smooth)
-
-
-@qd.func
 def rigid_energy(cost: float, dt: float):
     """Share of Rigid's cost in the joint energy, scaled by dt^4 to the units of the other participants'."""
     return (dt * dt) * (dt * dt) * cost
@@ -118,18 +98,7 @@ def rigid_energy(cost: float, dt: float):
 @qd.func
 def rigid_gradient(Ma: float, qf_smooth: float, qfrc_constraint: float, dt: float):
     """Gradient of Rigid's share of the joint energy in the unknown x of a dof."""
-    return dt * dt * (Ma - qf_smooth - qfrc_constraint)
-
-
-@qd.func
-def jacobian_product(jac: float, value: float):
-    return jac * value
-
-
-@qd.func
-def constraint_row_stiffness(efc_D: float, jac_p: float):
-    """Product D J p of a constraint row with a direction."""
-    return efc_D * jac_p
+    return dt * dt * constraint_gradient(Ma, qf_smooth, qfrc_constraint)
 
 
 @qd.func
@@ -156,6 +125,31 @@ def dof_pair_stiffness(
 # ============================================ Layer 1: link kinematics =============================================
 
 
+@qd.func
+def link_chain_motion(
+    i_l: int,
+    i_b: int,
+    src: qd.template(),
+    dofs_state: DofsState,
+    links_info: LinksInfo,
+    config: qd.template(),
+):
+    """Spatial motion (linear, angular) of a link from a dof vector, summed over the dofs of its chain."""
+    motion_vel = qd.Vector.zero(gs.qd_float, 3)
+    motion_ang = qd.Vector.zero(gs.qd_float, 3)
+    j_l = i_l
+    while j_l >= 0:
+        J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
+        for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
+            motion_vel_d, motion_ang_d = gu.dof_motion(
+                dofs_state.cdof_vel[i_d, i_b], dofs_state.cdof_ang[i_d, i_b], src[i_d, i_b]
+            )
+            motion_vel += motion_vel_d
+            motion_ang += motion_ang_d
+        j_l = links_info.parent_idx[J_l]
+    return motion_vel, motion_ang
+
+
 @qd.func(requires_top_level=True)
 def func_link_spatial_disp(
     src: qd.template(),
@@ -169,20 +163,9 @@ def func_link_spatial_disp(
     n_envs = rigid_data.links_motion_vel.shape[1]
     qd.loop_config(name="mpm_link_spatial_disp")
     for i_l, i_b in qd.ndrange(n_links, n_envs):
-        motion_vel = qd.Vector.zero(gs.qd_float, 3)
-        motion_ang = qd.Vector.zero(gs.qd_float, 3)
-        j_l = i_l
-        while j_l >= 0:
-            J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
-            for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
-                motion_vel_d, motion_ang_d = dof_motion(
-                    dofs_state.cdof_vel[i_d, i_b], dofs_state.cdof_ang[i_d, i_b], src[i_d, i_b]
-                )
-                motion_vel += motion_vel_d
-                motion_ang += motion_ang_d
-            j_l = links_info.parent_idx[J_l]
-        rigid_data.links_motion_vel[i_l, i_b] = motion_vel
-        rigid_data.links_motion_ang[i_l, i_b] = motion_ang
+        rigid_data.links_motion_vel[i_l, i_b], rigid_data.links_motion_ang[i_l, i_b] = link_chain_motion(
+            i_l, i_b, src, dofs_state, links_info, config
+        )
         rigid_data.links_force_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         rigid_data.links_force_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
@@ -210,8 +193,9 @@ def func_link_force_to_dofs(
                 for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
                     qd.atomic_add(
                         out[i_d, i_b],
-                        dof_force(
-                            dofs_state.cdof_vel[i_d, i_b], dofs_state.cdof_ang[i_d, i_b], force_vel, force_ang, scale
+                        scale
+                        * gu.dof_force(
+                            dofs_state.cdof_vel[i_d, i_b], dofs_state.cdof_ang[i_d, i_b], force_vel, force_ang
                         ),
                     )
                 j_l = links_info.parent_idx[J_l]
@@ -231,7 +215,7 @@ def func_clear_links_stiffness(rigid_data: RigidNewtonScratch):
 @qd.kernel
 def kernel_rigid_begin(
     rigid_data: RigidNewtonScratch,
-    dofs_state: DofsState,
+    dyn_state: DynState,
     constraint_state: ConstraintState,
     newton_info: RigidNewtonInfo,
     rigid_config: qd.template(),
@@ -242,10 +226,9 @@ def kernel_rigid_begin(
     n_envs = rigid_data.x.shape[1]
     qd.loop_config(name="mpm_rigid_begin")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        qacc = dofs_state.acc_smooth[i_d, i_b]
+        qacc = dyn_state.dofs.acc_smooth[i_d, i_b]
         if qd.static(config.has_rigid_rows):
-            if constraint_state.n_constraints[i_b] > 0 and constraint_state.is_warmstart[i_b]:
-                qacc = constraint_state.qacc_ws[i_d, i_b]
+            qacc = func_warmstart_qacc(i_d, i_b, dyn_state, constraint_state)
         rigid_data.x[i_d, i_b] = to_displacement(qacc, newton_info.substep_dt[()])
     if qd.static(config.has_rigid_rows):
         qd.loop_config(name="mpm_rigid_group_islands")
@@ -337,12 +320,12 @@ def func_rigid_solve_batch(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Solve the Rigid block system of one environment by Rigid's own factors."""
+    """Solve the Rigid block system of one environment by Rigid's own factors, every island taking part (see
+    kernel_rigid_begin)."""
     if qd.static(config.has_rigid_rows):
-        for i_island in range(constraint_state.island.n_islands[i_b]):
-            func_cholesky_solve_batch(
-                i_b, i_island, rhs=rhs, out=out, constraint_state=constraint_state, rigid_config=rigid_config
-            )
+        func_cholesky_solve_islands_batch(
+            i_b, rhs=rhs, out=out, constraint_state=constraint_state, rigid_config=rigid_config
+        )
     else:
         func_solve_mass_batch(i_b, rhs, out, dyn_state, rigid_info, rigid_config)
 
@@ -420,33 +403,6 @@ def func_rigid_precondition(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_init(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars, is_adjoint: qd.template()):
-    """Start the Rigid part of the joint conjugate gradient from zero, with r = grad and the solution and Ap cleared."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_pcg_init")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.r[i_d, i_b] = rigid_data.grad[i_d, i_b]
-        is_kept = False
-        if qd.static(is_adjoint):
-            is_kept = pcg_scalars.is_converged[i_b] != 0
-        if not is_kept:
-            rigid_data.solution[i_d, i_b] = 0.0
-        rigid_data.ap[i_d, i_b] = 0.0
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pcg_init_direction(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
-    """Set the first search direction p = z over the Rigid dofs, and add r . z to rz."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_pcg_init_direction")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.p[i_d, i_b] = rigid_data.z[i_d, i_b]
-        qd.atomic_add(pcg_scalars.rz[i_b], pcg_dot(rigid_data.r[i_d, i_b], rigid_data.z[i_d, i_b]))
-
-
-@qd.func(requires_top_level=True)
 def func_rigid_matvec(
     rigid_data: RigidNewtonScratch,
     constraint_state: ConstraintState,
@@ -455,77 +411,20 @@ def func_rigid_matvec(
     rigid_config: qd.template(),
     config: qd.template(),
 ):
-    """Set Ap_r = (M + J^T D J) p_r over the active rows of Rigid."""
-    n_envs = rigid_data.x.shape[1]
-    initialize_Ma(rigid_data.ap, rigid_data.p, rigid_info, rigid_config)
+    """Set Ap_r = (M + J^T D J) p_r over the active rows of Rigid, the product of Rigid's adjoint solve."""
     if qd.static(config.has_rigid_rows):
-        qd.loop_config(name="mpm_rigid_matvec_rows")
-        for i_b in range(n_envs):
-            for i_c in range(constraint_state.n_constraints[i_b]):
-                if constraint_state.active[i_c, i_b]:
-                    jac_p = gs.qd_float(0.0)
-                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                        jac_p += jacobian_product(constraint_state.jac[i_c, i_d, i_b], rigid_data.p[i_d, i_b])
-                    D_jac_p = constraint_row_stiffness(constraint_state.efc_D[i_c, i_b], jac_p)
-                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                        rigid_data.ap[i_d, i_b] = rigid_data.ap[i_d, i_b] + jacobian_product(
-                            constraint_state.jac[i_c, i_d, i_b], D_jac_p
-                        )
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_matvec_dot(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
-    """Add p_r . Ap_r to p . Ap, once Ap_r holds the whole joint operator."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_matvec_dot")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.p_dot_ap[i_b], pcg_dot(rigid_data.p[i_d, i_b], rigid_data.ap[i_d, i_b]))
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pcg_update_xr(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
-    """Update the solution and the residual over the Rigid dofs, x += alpha p and r -= alpha Ap."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_pcg_update_xr")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[i_b] == 0:
-            rigid_data.solution[i_d, i_b], rigid_data.r[i_d, i_b] = pcg_update(
-                rigid_data.solution[i_d, i_b],
-                rigid_data.r[i_d, i_b],
-                rigid_data.p[i_d, i_b],
-                rigid_data.ap[i_d, i_b],
-                pcg_scalars.alpha[i_b],
+        qd.loop_config(name="mpm_rigid_matvec")
+        for i_b in range(rigid_data.x.shape[1]):
+            func_matvec_Ap(
+                i_b,
+                p=rigid_data.p,
+                Ap=rigid_data.ap,
+                constraint_state=constraint_state,
+                dyn_info=dyn_info,
+                rigid_info=rigid_info,
             )
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pcg_dot_rz(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
-    """Add r . z over the Rigid dofs to rz_new."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_pcg_dot_rz")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        if pcg_scalars.is_converged[i_b] == 0:
-            qd.atomic_add(pcg_scalars.rz_new[i_b], pcg_dot(rigid_data.r[i_d, i_b], rigid_data.z[i_d, i_b]))
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_pcg_direction(rigid_data: RigidNewtonScratch, pcg_scalars: PCGScalars):
-    """Update the search direction p = z + beta p over the Rigid dofs, and clear Ap."""
-    n_dofs = rigid_data.x.shape[0]
-    n_envs = rigid_data.x.shape[1]
-    qd.loop_config(name="mpm_rigid_pcg_direction")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        rigid_data.ap[i_d, i_b] = 0.0
-        if pcg_scalars.is_converged[i_b] == 0:
-            rigid_data.p[i_d, i_b] = pcg_direction(
-                rigid_data.z[i_d, i_b], rigid_data.p[i_d, i_b], pcg_scalars.beta[i_b]
-            )
+    else:
+        initialize_Ma(rigid_data.ap, rigid_data.p, rigid_info, rigid_config)
 
 
 # ============================================== Layer 1: Newton steps ==============================================

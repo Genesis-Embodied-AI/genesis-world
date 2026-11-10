@@ -674,8 +674,11 @@ def func_forward_velocity_link(
 
         if joint_type == gs.JOINT_TYPE.FREE:
             for i_3 in qd.static(range(3)):
-                _vel = dyn_state.dofs.cdof_vel[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
-                _ang = dyn_state.dofs.cdof_ang[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
+                _vel, _ang = gu.dof_motion(
+                    dyn_state.dofs.cdof_vel[dof_start + i_3, i_b],
+                    dyn_state.dofs.cdof_ang[dof_start + i_3, i_b],
+                    dyn_state.dofs.vel[dof_start + i_3, i_b],
+                )
 
                 cvel_vel = cvel_vel + A(curr_I, _vel, dyn_state.links.cd_vel_bw, BW)
                 cvel_ang = cvel_ang + A(curr_I, _ang, dyn_state.links.cd_ang_bw, BW)
@@ -701,8 +704,11 @@ def func_forward_velocity_link(
                 dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
 
             for i_3 in qd.static(range(3)):
-                _vel = dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
-                _ang = dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
+                _vel, _ang = gu.dof_motion(
+                    dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b],
+                    dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b],
+                    dyn_state.dofs.vel[dof_start + i_3 + 3, i_b],
+                )
                 cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
                 cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
 
@@ -720,8 +726,9 @@ def func_forward_velocity_link(
                 dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
 
             for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
-                _vel = dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                _ang = dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+                _vel, _ang = gu.dof_motion(
+                    dyn_state.dofs.cdof_vel[i_d, i_b], dyn_state.dofs.cdof_ang[i_d, i_b], dyn_state.dofs.vel[i_d, i_b]
+                )
                 cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
                 cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
 

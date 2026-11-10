@@ -6,10 +6,9 @@ from collections.abc import Iterator
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
+from genesis.engine.bvh import func_bvh_query_aabb
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import (
-    EMPTY_BOX_HALF,
     contact_gap,
     is_within_band,
     particle_invweight,
@@ -19,11 +18,16 @@ from genesis.engine.solvers.mpm_func import (
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.engine.solvers.pbd_newton import PBD_PARTICLES, PbdNewtonParticipant, is_moving
-from genesis.engine.solvers.pbd_solver import friction_correction, func_insert_nearest, separation_correction
+from genesis.engine.solvers.pbd_solver import (
+    friction_correction,
+    func_add_correction,
+    func_insert_nearest,
+    separation_correction,
+)
 from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import ENVS, Data, DataItem, DataKind, field, iter_data
 
-from .contact_candidates import CouplingPairs, pair_relative_displacement
+from .contact_candidates import CouplingPairs, LeafTrees, empty_box, pair_relative_displacement
 from .mpm_sph_func import kernel_fit_mpm_particle_leaves
 
 # Obstacle candidates of a PBD particle over a substep: the nearest OBSTACLE_NEIGHBORS MPM particles within its obstacle
@@ -112,7 +116,7 @@ class PbdContactParams(Data, kind=DataKind.CONSTANT, shape=()):
 
 
 @qd.data_oriented
-class PbdParticleQuery:
+class PbdParticleQuery(LeafTrees):
     """The linear bounding volume hierarchy (LBVH) over the position based dynamics (PBD) particles of every
     environment, in PBD's reordered layout (see genesis.engine.bvh)."""
 
@@ -120,14 +124,12 @@ class PbdParticleQuery:
         self.pbd = pbd
         self.mpm_info = mpm_info
         self.contact = contact
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(pbd.solver.n_particles, 1))
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
+        super().__init__(n_envs, pbd.solver.n_particles)
 
     def build(self):
         """Fit the leaf boxes to the PBD particles' sweeps over the substep and build the trees."""
         kernel_fit_pbd_leaves(self)
-        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+        self.build_trees()
 
 
 @qd.kernel
@@ -135,17 +137,15 @@ def kernel_fit_pbd_leaves(query: qd.template()):
     """The box of every PBD particle over its sweep from its start to its projected end position, grown by its radius
     and the contact thickness."""
     for i_b, i_q in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
+        lo, hi = empty_box()
         if query.pbd.solver.particles_ng_reordered[i_q, i_b].active:
             lo, hi = sweep_box(
                 query.pbd.solver.particles_reordered[i_q, i_b].ipos,
                 query.pbd.solver.particles_reordered[i_q, i_b].pos,
                 contact_distance(query.contact.radius[()], query.contact.thickness[()]),
             )
-            query.leaves.aabbs_min[i_b, i_q] = lo
-            query.leaves.aabbs_max[i_b, i_q] = hi
-        else:
-            query.leaves.aabbs_min[i_b, i_q] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            query.leaves.aabbs_max[i_b, i_q] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+        query.leaves.aabbs_min[i_b, i_q] = lo
+        query.leaves.aabbs_max[i_b, i_q] = hi
 
 
 # ======================================= Layer 1: MPM obstacles of the PBD loop =======================================
@@ -162,7 +162,7 @@ class MpmObstaclesScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.data_oriented
-class MpmParticleObstacles:
+class MpmParticleObstacles(LeafTrees):
     """The MPM particles at the start of the substep as immovable obstacles of the PBD particles, at the contact
     distance of the MPM-PBD rows so that PBD's own projection keeps its particles out of the MPM material."""
 
@@ -172,16 +172,14 @@ class MpmParticleObstacles:
         self.pbd = pbd
         self.contact = contact
         self.scratch = MpmObstaclesScratch(sizes={PBD_PARTICLES: pbd.n_particles, ENVS: n_envs})
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
+        super().__init__(n_envs, mpm_solver.n_particles)
         self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaves to the MPM particles, build the trees, and gather the obstacle candidates of every PBD
         particle, once PBD predicted its positions."""
         kernel_fit_mpm_particle_leaves(f, self)
-        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+        self.build_trees()
         kernel_gather_obstacle_neighbors(self)
 
     @qd.func(requires_top_level=True)
@@ -218,8 +216,7 @@ def func_obstacle_contact_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.tem
             obstacles.pbd.particles_info_reordered[i_q, i_t].mu_k,
             1.0,
         )
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos = particle.dpos + correction + friction
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount = particle.dcount + 1.0
+        func_add_correction(i_q, i_t, correction + friction, obstacles.pbd)
     return True
 
 
@@ -233,9 +230,7 @@ def func_obstacle_start_filter(i_t: int, i_a: int, i_q: int, obstacles: qd.templ
         particle.ipos, obstacles.mpm_particles.pos[f, i_a, i_t], target
     )
     if is_overlapping:
-        correction = separation_correction(separation, distance, target, 1.0)
-        obstacles.pbd.particles_reordered[i_q, i_t].dpos = particle.dpos + correction
-        obstacles.pbd.particles_reordered[i_q, i_t].dcount = particle.dcount + 1.0
+        func_add_correction(i_q, i_t, separation_correction(separation, distance, target, 1.0), obstacles.pbd)
     return True
 
 

@@ -13,12 +13,8 @@ import genesis as gs
 from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, sort_reduce_bcoo
 from genesis.engine.numerics.linear_pcg import (
     PCGScalars,
-    func_init_linear_pcg_direction,
-    func_init_linear_pcg_residual,
-    func_linear_pcg_direction,
-    func_linear_pcg_dot_rz,
+    PCGVectors,
     func_linear_pcg_spmv,
-    func_linear_pcg_update_xr,
     func_pcg_arm,
     func_pcg_decide,
     func_pcg_reset,
@@ -67,8 +63,9 @@ def displacement_tolerance(velocity_tol: float, substep_dt: float) -> float:
 
 
 @qd.data_oriented
-class NewtonParticipants:
-    """Participants of a Newton solve, their contacts and their linear system, gathered into one kernel argument."""
+class NewtonParticipants(PCGVectors):
+    """Participants of a Newton solve, their contacts and their linear system, gathered into one kernel argument, whose
+    block rows are the vectors of the joint PCG beside Rigid's dofs (see PCGVectors)."""
 
     def __init__(self, owners: list, rigid, contact, linear: NewtonLinearScratch):
         self.owners = participant_group("NewtonOwners", owners)
@@ -78,6 +75,26 @@ class NewtonParticipants:
         self.contact = contact
         self.has_contact = contact is not None
         self.linear = linear
+
+    @property
+    def pcg_vectors(self):
+        return self.linear.pcg
+
+    @property
+    def pcg_solution(self):
+        return self.linear.solution
+
+    @property
+    def pcg_rhs(self):
+        return self.linear.b_rhs
+
+    @qd.func
+    def pcg_count(self):
+        return self.linear.pcg.n_rows[()]
+
+    @qd.func
+    def pcg_entry(self, i_r: int):
+        return i_r, self.linear.pcg.rows_env[i_r]
 
 
 class NewtonDevice:
@@ -168,38 +185,38 @@ def func_pcg_start(
         participants.contact.func_contact_visit_rigid(f)
     for member in qd.static(participants.members):
         member.func_factor()
-    func_init_linear_pcg_residual(
-        participants.linear.b_rhs, participants.linear.solution, participants.linear.pcg, pcg_scalars, is_adjoint
-    )
-    for owner in qd.static(participants.owners):
-        owner.func_precondition()
-    func_init_linear_pcg_direction(participants.linear.pcg, pcg_scalars)
+    participants.func_pcg_init_residual(pcg_scalars, is_adjoint)
     if qd.static(participants.has_rigid):
-        participants.rigid.func_pcg_init(pcg_scalars, is_adjoint)
-        participants.rigid.func_precondition()
+        participants.rigid.func_pcg_init_residual(pcg_scalars, is_adjoint)
+    for member in qd.static(participants.members):
+        member.func_precondition()
+    participants.func_pcg_init_direction(pcg_scalars)
+    if qd.static(participants.has_rigid):
         participants.rigid.func_pcg_init_direction(pcg_scalars)
     func_pcg_arm(pcg_scalars, is_adjoint)
 
 
 @qd.func(requires_top_level=True)
 def func_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.template()):
-    """Run one preconditioned conjugate gradient iteration over all the rows (see PCGScalars)."""
+    """Run one preconditioned conjugate gradient iteration over all the rows (see PCGScalars), the block rows of the
+    linear system and Rigid's dofs being two sets of vectors (see PCGVectors)."""
     func_linear_pcg_spmv(participants.linear.pcg, pcg_scalars, participants.linear.matrix)
     if qd.static(participants.has_rigid):
-        participants.rigid.func_matvec(pcg_scalars)
+        participants.rigid.func_matvec()
         participants.contact.func_contact_rigid_product(f, participants.linear, pcg_scalars)
-        participants.rigid.func_matvec_dot(pcg_scalars)
+        # Ap_r holds the whole joint operator once the contacts added theirs
+        participants.rigid.func_pcg_dot(pcg_scalars, is_rz=False, is_new=False)
     func_pcg_step(pcg_scalars)
-    func_linear_pcg_update_xr(participants.linear.solution, participants.linear.pcg, pcg_scalars)
-    for owner in qd.static(participants.owners):
-        owner.func_precondition()
-    func_linear_pcg_dot_rz(out=pcg_scalars.rz_new, pcg_workspace=participants.linear.pcg, pcg_scalars=pcg_scalars)
+    participants.func_pcg_update_xr(pcg_scalars)
     if qd.static(participants.has_rigid):
         participants.rigid.func_pcg_update_xr(pcg_scalars)
-        participants.rigid.func_precondition()
-        participants.rigid.func_pcg_dot_rz(pcg_scalars)
+    for member in qd.static(participants.members):
+        member.func_precondition()
+    participants.func_pcg_dot(pcg_scalars, is_rz=True, is_new=True)
+    if qd.static(participants.has_rigid):
+        participants.rigid.func_pcg_dot(pcg_scalars, is_rz=True, is_new=True)
     func_pcg_decide(pcg_scalars)
-    func_linear_pcg_direction(participants.linear.pcg, pcg_scalars)
+    participants.func_pcg_direction(pcg_scalars)
     if qd.static(participants.has_rigid):
         participants.rigid.func_pcg_direction(pcg_scalars)
 

@@ -29,7 +29,7 @@ from genesis.engine.solvers.mpm_func import (
 )
 from genesis.engine.solvers.newton_linear import LinearBlock, NewtonLinearScratch
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch, dof_motion
+from genesis.engine.solvers.rigid.newton_func import RigidNewtonScratch, link_chain_motion
 from genesis.utils.array_class import DofsState, GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo, SDFInfo
 
 from .mpm_rigid_func import (
@@ -117,8 +117,8 @@ def dof_motion_backward(
     r_cross_u_rel_bar: qd.types.vector(3),
     r_cross_lam_rel_bar: qd.types.vector(3),
 ):
-    """Reverse of the motion of the contact point by a dof of the chain of its link (see dof_motion), from the adjoints
-    of the relative displacement and adjoint solution to those of the motion of the dof."""
+    """Reverse of the motion of the contact point by a dof of the chain of its link (see gu.dof_motion), from the
+    adjoints of the relative displacement and adjoint solution to those of the motion of the dof."""
     return -(x_d * u_rel_bar + lam_d * lam_rel_bar), -(x_d * r_cross_u_rel_bar + lam_d * r_cross_lam_rel_bar)
 
 
@@ -202,29 +202,6 @@ def point_velocity_backward(
 
 
 @qd.func
-def link_chain_spatial(
-    i_l: int,
-    i_b: int,
-    src: qd.template(),
-    dofs_state: DofsState,
-    links_info: LinksInfo,
-    config: qd.template(),
-):
-    """Spatial displacement of a link from a dof vector (see func_link_spatial_disp)."""
-    lin = qd.Vector.zero(gs.qd_float, 3)
-    ang = qd.Vector.zero(gs.qd_float, 3)
-    j_l = i_l
-    while j_l >= 0:
-        J_l = [j_l, i_b] if qd.static(config.rigid_batch_links_info) else j_l
-        for i_d in range(links_info.dof_start[J_l], links_info.dof_end[J_l]):
-            lin_d, ang_d = dof_motion(dofs_state.cdof_vel[i_d, i_b], dofs_state.cdof_ang[i_d, i_b], src[i_d, i_b])
-            lin += lin_d
-            ang += ang_d
-        j_l = links_info.parent_idx[J_l]
-    return lin, ang
-
-
-@qd.func
 def geom_contact_backward(
     i_g: int,
     i_b: int,
@@ -298,8 +275,8 @@ def kernel_rigid_contact_adjoint(
             u_nodes = gather_stencil(slots, newton.u)
             lam_nodes = gather_stencil(rows.row_start[()] + slots, linear.solution)
             r = contact_arm(x_p, links_state.root_COM[i_l, i_b])
-            u_lin, u_ang = link_chain_spatial(i_l, i_b, rigid_data.x, dofs_state, links_info, config)
-            lam_lin, lam_ang = link_chain_spatial(i_l, i_b, rigid_data.solution, dofs_state, links_info, config)
+            u_lin, u_ang = link_chain_motion(i_l, i_b, rigid_data.x, dofs_state, links_info, config)
+            lam_lin, lam_ang = link_chain_motion(i_l, i_b, rigid_data.solution, dofs_state, links_info, config)
 
             # The adjoints of the coefficients of the active rows, and of u_rel and lam_rel
             stiffness_bar, target_bar, direction_bar, u_rel_bar, lam_rel_bar = pyramid_rows_backward(

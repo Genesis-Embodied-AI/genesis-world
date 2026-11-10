@@ -28,6 +28,7 @@ from genesis.utils.misc import qd_to_numpy
 
 from .newton_linear import (
     MIN_SLOTS,
+    PAIRS,
     NewtonLinearScratch,
     block_product,
     block_transpose_product,
@@ -134,6 +135,76 @@ def append_pair(n_pairs: qd.template(), capacity: int):
 
 
 # ============================================== Layer 2: device ==============================================
+
+
+@qd.data_oriented
+class PairKind(NewtonDevice):
+    """Base of the pair kinds of NewtonContact, whose pairs of the substep, of type `pairs_type`, `pairs` holds.
+
+    A kind provides the `n_doublets` vertices of a pair, the `n_triplets` upper blocks between them, and `pair_terms(f,
+    i_pair)`: the environment, energy, gradient and Hessian of the rows of a pair in its relative displacement at the
+    current iterate, with its vertices and their weights in that displacement."""
+
+    def __init__(self):
+        self.pairs = self.build_pairs(MIN_SLOTS)
+        # The scratches that grew out of, kept referenced (see retire_scratch)
+        self.scratches_replaced = []
+        self.block_rows = tuple(i_v_ for i_v_ in range(self.n_doublets) for _ in range(i_v_, self.n_doublets))
+        self.block_cols = tuple(j_v_ for i_v_ in range(self.n_doublets) for j_v_ in range(i_v_, self.n_doublets))
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        yield from iter_data(self, "pairs")
+
+    def build_pairs(self, capacity: int):
+        """Build the pairs of the kind at a capacity, with no pair."""
+        pairs = self.pairs_type(sizes={PAIRS: capacity})
+        pairs.n_pairs.fill(0)
+        return pairs
+
+    def grow_pairs(self, capacity: int) -> None:
+        retire_scratch(self.pairs, self.scratches_replaced)
+        self.pairs = self.build_pairs(capacity)
+
+    def fill_pairs(self, build) -> None:
+        """Build the pairs of the substep by the launch `build`, and again after growing them past their capacity."""
+        build()
+        n_pairs = int(qd_to_numpy(self.pairs.n_pairs))
+        if n_pairs > self.pairs.sorted_idx.shape[0]:
+            self.grow_pairs(grown_capacity(n_pairs))
+            build()
+
+    @qd.func
+    def func_pair_count(self):
+        return self.pairs.n_pairs[()]
+
+    @qd.func(requires_top_level=True)
+    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
+        """Write the gradient w_k g of every vertex of every pair at the current iterate, and the upper blocks w_k w_l H
+        between them."""
+        qd.loop_config(name="newton_pair_terms")
+        for i_pair in range(self.pairs.n_pairs[()]):
+            i_b, energy, g, H, verts, weights = self.pair_terms(f, i_pair)
+            i_db_start = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
+            i_t_start = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
+            for i_v_ in range(qd.static(self.n_doublets)):
+                contact.write_doublet(i_db_start + i_v_, verts[i_v_], weighted_vector(weights[i_v_], g))
+            block_rows = qd.Vector(self.block_rows, dt=gs.qd_int)
+            block_cols = qd.Vector(self.block_cols, dt=gs.qd_int)
+            for i_t_ in range(qd.static(self.n_triplets)):
+                i_v_ = block_rows[i_t_]
+                j_v_ = block_cols[i_t_]
+                contact.write_triplet(
+                    i_t_start + i_t_, verts[i_v_], verts[j_v_], weighted_block(weights[i_v_], weights[j_v_], H)
+                )
+
+    @qd.func(requires_top_level=True)
+    def func_pair_energy(self, f: int, energies: qd.template()):
+        """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
+        qd.loop_config(name="newton_pair_energy")
+        for i_pair in range(self.pairs.n_pairs[()]):
+            i_b, energy, g, H, verts, weights = self.pair_terms(f, i_pair)
+            qd.atomic_add(energies[i_b], energy)
 
 
 @qd.data_oriented
@@ -302,7 +373,7 @@ class NewtonContact(NewtonDevice):
                     for i_r_ in range(n_rows):
                         p_a += weighted_vector(weights[i_r_], linear.pcg.p[rows[i_r_]])
                         qd.atomic_add(linear.pcg.ap[rows[i_r_]], weighted_vector(weights[i_r_], y_b))
-                    # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
+                    # Rigid adds the p . Ap of its own rows (see func_pcg_iteration)
                     qd.atomic_add(pcg_scalars.p_dot_ap[i_b], pcg_dot(p_a, y_b))
                     y_b = block_transpose_product(B, p_a)
                 self.rigid_map.func_vertex_add_force(f, i_v_local, y_b)

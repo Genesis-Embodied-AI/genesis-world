@@ -5,10 +5,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import build_bvh, get_bvh_data
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmInfo
 from genesis.engine.solvers.mpm_func import (
-    EMPTY_BOX_HALF,
     band_row,
     cofactor,
     cofactor_jacobian,
@@ -21,6 +19,8 @@ from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 from genesis.utils.array_class import GeomsInfo, GeomsState, RigidInfo, SDFInfo
 from genesis.utils.data import Data, DataKind, Size, field
+
+from .contact_candidates import LeafTrees, empty_box
 
 COUPLED_GEOMS = Size("coupled_geoms")
 
@@ -318,7 +318,7 @@ def geom_normal(
 
 
 @qd.data_oriented
-class RigidGeomQuery:
+class RigidGeomQuery(LeafTrees):
     """Linear bounding volume hierarchy (LBVH) over the coupled Rigid geoms of every environment."""
 
     def __init__(self, rigid: RigidNewtonParticipant, n_envs: int):
@@ -326,9 +326,7 @@ class RigidGeomQuery:
         self.coupled_geoms = CoupledGeoms(sizes={COUPLED_GEOMS: self.n_coupled})
         if self.n_coupled:
             self.coupled_geoms.idx.from_numpy(rigid.coupled_geoms_idx)
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(self.n_coupled, 1), is_active=self.n_coupled > 0)
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
+        super().__init__(n_envs, self.n_coupled, is_active=self.n_coupled > 0)
         self.geoms_state = rigid.dyn_state.geoms
         self.geoms_info = rigid.dyn_info.geoms
         self.geoms_init_AABB = rigid.geoms_init_AABB
@@ -340,7 +338,7 @@ class RigidGeomQuery:
         """Fit the leaf boxes to the geoms of the substep and build the trees."""
         if self.n_coupled:
             kernel_fit_geom_leaves(self, mpm_info)
-            build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+            self.build_trees()
 
 
 @qd.kernel
@@ -352,6 +350,7 @@ def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
         is_carried = True
         if qd.static(query.batch_links_info):
             is_carried = query.links_info.geom_start[i_l, i_b] <= i_g < query.links_info.geom_end[i_l, i_b]
+        lo, hi = empty_box()
         if is_carried:
             box_min, box_max, center, radius = posed_box(
                 qd.Matrix.rows([query.geoms_init_AABB[i_g, i_corner] for i_corner in qd.static(range(8))]),
@@ -367,8 +366,5 @@ def kernel_fit_geom_leaves(query: qd.template(), mpm_info: MpmInfo):
                 query.geoms_info.coup_softness[i_g],
                 mpm_info.substep_dt[()],
             )
-            query.leaves.aabbs_min[i_b, i_a] = lo
-            query.leaves.aabbs_max[i_b, i_a] = hi
-        else:
-            query.leaves.aabbs_min[i_b, i_a] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            query.leaves.aabbs_max[i_b, i_a] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+        query.leaves.aabbs_min[i_b, i_a] = lo
+        query.leaves.aabbs_max[i_b, i_a] = hi

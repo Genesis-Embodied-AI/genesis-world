@@ -1606,7 +1606,16 @@ def kernel_gather_collision_neighbors(f: int, pbd_solver: qd.template()):
                             pbd_solver.constraint_loop.collision_reach[()],
                         )
                         if is_candidate:
-                            func_insert_collision_neighbor(i_p, i_b, j_p, distance, pbd_solver)
+                            func_insert_nearest(
+                                i_p,
+                                i_b,
+                                j_p,
+                                distance,
+                                pbd_solver.constraint_loop.n_collision_neighbors,
+                                pbd_solver.constraint_loop.collision_neighbors_idx,
+                                pbd_solver.constraint_loop.collision_neighbors_dist,
+                                COLLISION_NEIGHBORS,
+                            )
 
 
 @qd.func
@@ -1635,20 +1644,6 @@ def func_insert_nearest(
         if distance < neighbors_dist[i_p, i_nb_max, i_b]:
             neighbors_idx[i_p, i_nb_max, i_b] = j
             neighbors_dist[i_p, i_nb_max, i_b] = distance
-
-
-@qd.func
-def func_insert_collision_neighbor(i_p: int, i_b: int, j_p: int, distance: float, pbd_solver: qd.template()):
-    func_insert_nearest(
-        i_p,
-        i_b,
-        j_p,
-        distance,
-        pbd_solver.constraint_loop.n_collision_neighbors,
-        pbd_solver.constraint_loop.collision_neighbors_idx,
-        pbd_solver.constraint_loop.collision_neighbors_dist,
-        COLLISION_NEIGHBORS,
-    )
 
 
 @qd.func

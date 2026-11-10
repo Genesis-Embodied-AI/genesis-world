@@ -9,15 +9,23 @@ from . import solver
 
 
 @qd.func
-def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInfo, rigid_info: RigidInfo):
+def func_matvec_Ap(
+    i_b: int,
+    p: qd.template(),
+    Ap: qd.template(),
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+):
     """
-    Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u.
+    Compute Ap = (M + J^T * diag(D) * J) * p on the current active set, which is used for solving the adjoint u and in
+    the joint Newton solve of Rigid with other solvers.
 
     Specifically, M = mass matrix, J = Jacobian, diag(D) = diagonal matrix of efc_D, and p = search direction.
     """
-    n_dofs = constraint_state.bw_p.shape[0]
+    n_dofs = p.shape[0]
     for i_d in range(n_dofs):
-        constraint_state.bw_Ap[i_d, i_b] = 0.0
+        Ap[i_d, i_b] = 0.0
 
     # Mp: Block multiplication
     n_entities = dyn_info.entities.link_start.shape[0]
@@ -25,21 +33,21 @@ def func_matvec_Ap(i_b: int, constraint_state: ConstraintState, dyn_info: DynInf
         for i_d1 in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
             acc = gs.qd_float(0.0)
             for i_d2 in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
-                acc += rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.bw_p[i_d2, i_b]
-            constraint_state.bw_Ap[i_d1, i_b] += acc
+                acc += rigid_info.mass_mat[i_d1, i_d2, i_b] * p[i_d2, i_b]
+            Ap[i_d1, i_b] += acc
 
     # tmp = J v
     for i_c in range(constraint_state.n_constraints[i_b]):
         jv = gs.qd_float(0.0)
         for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
             i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-            jv += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_p[i_d, i_b]
+            jv += constraint_state.jac[i_c, i_d, i_b] * p[i_d, i_b]
         # only active constraints contribute
         jv *= constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
         # out += J^T (D * J v)
         for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
             i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-            constraint_state.bw_Ap[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * jv
+            Ap[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * jv
 
 
 @qd.func
@@ -70,7 +78,15 @@ def func_solve_adjoint_u_cg_batch(
     for _ in range(rigid_info.iterations[None]):
         if num <= num_target:
             break
-        func_matvec_Ap(i_b, constraint_state, dyn_info, rigid_info)
+        # Keyword call: see the quadrants member-expansion note in func_solve_init.
+        func_matvec_Ap(
+            i_b,
+            p=constraint_state.bw_p,
+            Ap=constraint_state.bw_Ap,
+            constraint_state=constraint_state,
+            dyn_info=dyn_info,
+            rigid_info=rigid_info,
+        )
 
         # alpha = (r,r)/(p,Ap)
         den = gs.qd_float(0.0)

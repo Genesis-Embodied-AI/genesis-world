@@ -746,6 +746,19 @@ def motion_cross_motion_grad(s_ang, s_vel, m_ang, m_vel, ang_grad, vel_grad):
 
 
 @qd.func
+def dof_motion(cdof_vel, cdof_ang, value):
+    """Spatial motion (linear, angular) along the motion subspace of a dof at a value of the dof, the velocity of a link
+    at the velocity of a dof of its chain."""
+    return cdof_vel * value, cdof_ang * value
+
+
+@qd.func
+def dof_force(cdof_vel, cdof_ang, force_vel, force_ang):
+    """Generalized force on a dof of a spatial force (linear, angular) on a link of its subtree."""
+    return cdof_ang.dot(force_ang) + cdof_vel.dot(force_vel)
+
+
+@qd.func
 def qd_orthogonals(a):
     """
     Returns orthogonal vectors `b` and `c`, given a normal vector `a`.

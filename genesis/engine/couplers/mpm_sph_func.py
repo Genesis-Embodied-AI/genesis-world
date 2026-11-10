@@ -6,10 +6,12 @@ boundary terms of Bender and Koschier 2017)."""
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, particle_mass
+from genesis.engine.bvh import func_bvh_query_aabb
+from genesis.engine.solvers.mpm_func import particle_mass
 from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
+
+from .contact_candidates import LeafTrees, empty_box
 
 SPH_PARTICLES = Size("sph_particles")
 MPM_PARTICLES = Size("mpm_particles")
@@ -60,7 +62,7 @@ class MpmSphBoundaryScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.data_oriented
-class MpmSphBoundary:
+class MpmSphBoundary(LeafTrees):
     """The MPM particles at the start of the substep as boundary particles of SPH (see SPHSolver.set_boundary)."""
 
     def __init__(self, mpm_solver, sph, mpm_info, n_envs):
@@ -72,15 +74,13 @@ class MpmSphBoundary:
         self.scratch = MpmSphBoundaryScratch(
             sizes={SPH_PARTICLES: sph.n_particles, MPM_PARTICLES: mpm_solver.n_particles, ENVS: n_envs}
         )
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(mpm_solver.n_particles, 1))
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
+        super().__init__(n_envs, mpm_solver.n_particles)
         self.results = BVHQueryResults(sizes=dict(query_results=1))
 
     def build(self, f):
         """Fit the leaves to the MPM particles and build the trees, at the start of SPH's substep."""
         kernel_fit_mpm_particle_leaves(f, self)
-        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+        self.build_trees()
 
     def gather(self):
         """The boundary sums of every SPH particle, once SPH reordered its particles for an integration step."""
@@ -101,13 +101,12 @@ def kernel_fit_mpm_particle_leaves(f: int, query: qd.template()):
     for _ in range(1):
         query.scratch.frame[()] = f
     for i_b, i_p in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
+        lo, hi = empty_box()
         if query.mpm_particles_ng.active[f, i_p, i_b]:
-            x = query.mpm_particles.pos[f, i_p, i_b]
-            query.leaves.aabbs_min[i_b, i_p] = x
-            query.leaves.aabbs_max[i_b, i_p] = x
-        else:
-            query.leaves.aabbs_min[i_b, i_p] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
-            query.leaves.aabbs_max[i_b, i_p] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+            lo = query.mpm_particles.pos[f, i_p, i_b]
+            hi = lo
+        query.leaves.aabbs_min[i_b, i_p] = lo
+        query.leaves.aabbs_max[i_b, i_p] = hi
 
 
 @qd.func

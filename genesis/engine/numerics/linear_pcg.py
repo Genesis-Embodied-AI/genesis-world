@@ -67,6 +67,15 @@ def pcg_dot(a, b):
 
 
 @qd.func
+def zero_entry(value):
+    """Zero of the type of an entry, a block row or a scalar dof, whatever the entry holds."""
+    if qd.static(value.is_tensor()):
+        return qd.Vector.zero(gs.qd_float, value.n)
+    else:
+        return gs.qd_float(0.0)
+
+
+@qd.func
 def pcg_update(x, r, p, ap, alpha: float):
     """Solution and residual of an entry after the step alpha along the search direction."""
     return x + alpha * p, r - alpha * ap
@@ -113,56 +122,96 @@ def spmv_entry(block: qd.types.matrix(3, 3), p_row: qd.types.vector(3), p_col: q
     return product, block.transpose() @ p_row, energy
 
 
-# ================================================= Layer 1: stages =================================================
+# ============================================= Layer 1: vector stages =============================================
 
 
-@qd.func(requires_top_level=True)
-def func_linear_pcg_dot_rz(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Add r . z of the preconditioned residual of every running environment into its entry of an array of the
-    environments."""
-    qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
-    for i_r in range(warp_padded(pcg_workspace.n_rows[()])):
-        env_key = gs.qd_int(-1)
-        value = gs.qd_float(0.0)
-        if i_r < pcg_workspace.n_rows[()]:
-            i_b = pcg_workspace.rows_env[i_r]
+@qd.data_oriented
+class PCGVectors:
+    """Stages of a preconditioned conjugate gradient (PCG) over one set of vectors, the block rows of the linear system or
+    the dofs of a solver.
+
+    A set provides `pcg_vectors`, holding r, z, p and ap, `pcg_solution` and `pcg_rhs`, and lays them out by
+    `pcg_count()` and `pcg_entry(i)`, the index of entry i in the vectors and its environment."""
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_init_residual(self, pcg_scalars: PCGScalars, is_adjoint: qd.template()):
+        """Start a linear solve from a zero solution, its residual being the right-hand side.
+
+        With `is_adjoint`, an environment left out by `is_env_active` keeps the solution of an earlier adjoint solve.
+        The preconditioner and func_pcg_init_direction follow."""
+        qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
+        for i in range(self.pcg_count()):
+            I, i_b = self.pcg_entry(i)
+            is_kept = False
+            if qd.static(is_adjoint):
+                is_kept = pcg_scalars.is_converged[i_b] != 0
+            if not is_kept:
+                self.pcg_solution[I] = zero_entry(self.pcg_solution[I])
+            self.pcg_vectors.r[I] = self.pcg_rhs[I]
+            self.pcg_vectors.ap[I] = zero_entry(self.pcg_vectors.ap[I])
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_init_direction(self, pcg_scalars: PCGScalars):
+        """Set the first search direction p = z, and add r . z to rz."""
+        qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
+        for i in range(self.pcg_count()):
+            I, i_b = self.pcg_entry(i)
+            self.pcg_vectors.p[I] = self.pcg_vectors.z[I]
+        self.func_pcg_dot(pcg_scalars, is_rz=True, is_new=False)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_dot(self, pcg_scalars: PCGScalars, is_rz: qd.template(), is_new: qd.template()):
+        """Add r . z into rz, or into rz_new with `is_new`, or else p . Ap into p.Ap, over the entries of every running
+        environment."""
+        qd.loop_config(name="pcg_dot", block_dim=PCG_BLOCK)
+        for i in range(warp_padded(self.pcg_count())):
+            env_key = gs.qd_int(-1)
+            value = gs.qd_float(0.0)
+            if i < self.pcg_count():
+                I, i_b = self.pcg_entry(i)
+                if pcg_scalars.is_converged[i_b] == 0:
+                    env_key = i_b
+                    if qd.static(is_rz):
+                        value = pcg_dot(self.pcg_vectors.r[I], self.pcg_vectors.z[I])
+                    else:
+                        value = pcg_dot(self.pcg_vectors.p[I], self.pcg_vectors.ap[I])
+            if qd.static(not is_rz):
+                add_by_key(env_key, value, pcg_scalars.p_dot_ap)
+            elif qd.static(is_new):
+                add_by_key(env_key, value, pcg_scalars.rz_new)
+            else:
+                add_by_key(env_key, value, pcg_scalars.rz)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_update_xr(self, pcg_scalars: PCGScalars):
+        """Update the solution and the residual of every running environment along its search direction."""
+        qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
+        for i in range(self.pcg_count()):
+            I, i_b = self.pcg_entry(i)
             if pcg_scalars.is_converged[i_b] == 0:
-                env_key = i_b
-                value = pcg_dot(pcg_workspace.r[i_r], pcg_workspace.z[i_r])
-        add_by_key(env_key, value, out)
+                self.pcg_solution[I], self.pcg_vectors.r[I] = pcg_update(
+                    self.pcg_solution[I],
+                    self.pcg_vectors.r[I],
+                    self.pcg_vectors.p[I],
+                    self.pcg_vectors.ap[I],
+                    pcg_scalars.alpha[i_b],
+                )
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_direction(self, pcg_scalars: PCGScalars):
+        """Update the search direction of every running environment, p = z + beta p, and zero Ap for the product of the
+        next iteration."""
+        qd.loop_config(name="pcg_update_p", block_dim=PCG_BLOCK)
+        for i in range(self.pcg_count()):
+            I, i_b = self.pcg_entry(i)
+            self.pcg_vectors.ap[I] = zero_entry(self.pcg_vectors.ap[I])
+            if pcg_scalars.is_converged[i_b] == 0:
+                self.pcg_vectors.p[I] = pcg_direction(
+                    self.pcg_vectors.z[I], self.pcg_vectors.p[I], pcg_scalars.beta[i_b]
+                )
 
 
-@qd.func(requires_top_level=True)
-def func_init_linear_pcg_residual(
-    b: qd.template(),
-    x: qd.template(),
-    pcg_workspace: PCGWorkspaceScratch,
-    pcg_scalars: PCGScalars,
-    is_adjoint: qd.template(),
-):
-    """Start a linear solve from a zero solution, its residual being the right-hand side.
-
-    With `is_adjoint`, an environment left out by `is_env_active` keeps the solution of an earlier adjoint solve. The
-    preconditioner and func_init_linear_pcg_direction follow."""
-    qd.loop_config(name="pcg_init_residual", block_dim=PCG_BLOCK)
-    for i_r in range(pcg_workspace.n_rows[()]):
-        is_kept = False
-        if qd.static(is_adjoint):
-            i_b = pcg_workspace.rows_env[i_r]
-            is_kept = pcg_scalars.is_converged[i_b] != 0
-        if not is_kept:
-            x[i_r] = qd.Vector.zero(gs.qd_float, 3)
-        pcg_workspace.r[i_r] = b[i_r]
-        pcg_workspace.ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
-
-
-@qd.func(requires_top_level=True)
-def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Set the first search direction p = z, and add r . z to rz."""
-    qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
-    for i_r in range(pcg_workspace.n_rows[()]):
-        pcg_workspace.p[i_r] = pcg_workspace.z[i_r]
-    func_linear_pcg_dot_rz(out=pcg_scalars.rz, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
+# ================================================ Layer 1: SpMV ================================================
 
 
 @qd.func(requires_top_level=True)
@@ -190,30 +239,6 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGSca
                     qd.atomic_add(pcg_workspace.ap[i_c], transposed_product)
         add_by_key(row_key, product, pcg_workspace.ap, n_components=3)
         add_by_key(env_key, energy, pcg_scalars.p_dot_ap)
-
-
-@qd.func(requires_top_level=True)
-def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Update the solution and the residual of every running environment along its search direction."""
-    qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
-    for i_r in range(pcg_workspace.n_rows[()]):
-        i_b = pcg_workspace.rows_env[i_r]
-        if pcg_scalars.is_converged[i_b] == 0:
-            x[i_r], pcg_workspace.r[i_r] = pcg_update(
-                x[i_r], pcg_workspace.r[i_r], pcg_workspace.p[i_r], pcg_workspace.ap[i_r], pcg_scalars.alpha[i_b]
-            )
-
-
-@qd.func(requires_top_level=True)
-def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Update the search direction of every running environment, p = z + beta p, and zero Ap for the product of the
-    next iteration."""
-    qd.loop_config(name="pcg_update_p", block_dim=PCG_BLOCK)
-    for i_r in range(pcg_workspace.n_rows[()]):
-        pcg_workspace.ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
-        i_b = pcg_workspace.rows_env[i_r]
-        if pcg_scalars.is_converged[i_b] == 0:
-            pcg_workspace.p[i_r] = pcg_direction(pcg_workspace.z[i_r], pcg_workspace.p[i_r], pcg_scalars.beta[i_b])
 
 
 # ========================================= Layer 1: stages of the solve ==========================================

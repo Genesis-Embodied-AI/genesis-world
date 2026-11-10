@@ -270,13 +270,6 @@ def build_mpm_newton(n_sort: int, max_blocks: int) -> MpmNewtonScratch:
     return newton
 
 
-def build_wall_pairs(max_pairs: int) -> MpmWallPairs:
-    """Build the wall pairs of a capacity, with no pair."""
-    pairs = MpmWallPairs(sizes={PAIRS: max_pairs})
-    pairs.n_pairs.fill(0)
-    return pairs
-
-
 @qd.data_oriented
 class MpmForceFields:
     """The force fields acting on the material point method (MPM) grid, read with a static loop over the list."""

@@ -243,12 +243,10 @@ def kernel_mpm_reaction(f: int, contact: qd.template()):
     contact.func_vertex_begin(f, SRC_ITERATE)
     qd.loop_config(name="mpm_reaction_pairs")
     for i_pair in range(contact.pairs.n_pairs[()]):
-        energy, g, H, verts, weights = contact.pair_terms(f, i_pair)
+        i_b, energy, g, H, verts, weights = contact.pair_terms(f, i_pair)
         if has_force(g):
             contact.func_vertex_add_force(f, i_pair, g)
-            contact.rigid.dyn_state.links.is_constrained[contact.pairs.link_idx[i_pair], contact.pairs.i_b[i_pair]] = (
-                True
-            )
+            contact.rigid.dyn_state.links.is_constrained[contact.pairs.link_idx[i_pair], i_b] = True
     qd.loop_config(name="mpm_reaction_qfrc")
     for i_d, i_b in qd.ndrange(contact.rigid.rigid_data.x.shape[0], contact.rigid.rigid_data.x.shape[1]):
         contact.rigid.constraint_state.qfrc_constraint[i_d, i_b] = constraint_force(

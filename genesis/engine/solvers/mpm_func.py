@@ -81,10 +81,6 @@ _PAIRS = ((0, 1), (0, 2), (1, 2))
 _STENCIL_PAIR_A = tuple(a for a in range(8) for b in range(a, 8))
 _STENCIL_PAIR_B = tuple(b for a in range(8) for b in range(a, 8))
 
-# Half extent of the inverted box of a leaf that must meet no query of a coupling's tree, finite so that its center
-# gets a Morton code
-EMPTY_BOX_HALF = 1e10
-
 # Lanes of a warp
 _WARP = 32
 

@@ -17,9 +17,10 @@ SCAN_PARTIALS = Size("scan_partials")
 class DynamicExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
     """Tile state of an exclusive sum of 32-bit integer (i32) values, with a device-side count."""
 
-    status: qd.Tensor = field(int, shape=(SCAN_TILES,), ndarray=True)
-    partial: qd.Tensor = field(int, shape=(SCAN_PARTIALS,), ndarray=True)
-    complete: qd.Tensor = field(int, shape=(SCAN_TILES,), ndarray=True)
+    # One look-back lane per tile, as the radix sort's look-back has one per digit
+    status: qd.Tensor = field(int, shape=(SCAN_TILES, 1), ndarray=True)
+    partial: qd.Tensor = field(int, shape=(SCAN_PARTIALS, 1), ndarray=True)
+    complete: qd.Tensor = field(int, shape=(SCAN_TILES, 1), ndarray=True)
     tile_counter: qd.Tensor = field(int, ndarray=True)
 
 
@@ -29,12 +30,48 @@ def dynamic_exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
     return {SCAN_TILES: n_tiles, SCAN_PARTIALS: max(n_tiles, CPU_CHUNKS)}
 
 
+@qd.func
+def func_lookback_prefix(
+    status: qd.template(),
+    partial: qd.template(),
+    complete: qd.template(),
+    i_tile: int,
+    i_lane: int,
+    tile_sum: int,
+):
+    """Publish the sum of a tile in one lane and return the sum of the tiles before it (decoupled look-back)."""
+    tile_prefix = gs.qd_int(0)
+    j_tile = i_tile - 1
+    is_prefix_complete = i_tile == 0
+    if i_tile > 0:
+        partial[i_tile, i_lane] = tile_sum
+        qd.simt.grid.mem_fence()
+        qd.atomic_exchange(status[i_tile, i_lane], 1)
+    while not is_prefix_complete:
+        if j_tile < 0:
+            is_prefix_complete = True
+        else:
+            state = qd.volatile_load(status[j_tile, i_lane])
+            if state != 0:
+                qd.simt.grid.mem_fence()
+                if state == 2:
+                    tile_prefix = tile_prefix + qd.volatile_load(complete[j_tile, i_lane])
+                    is_prefix_complete = True
+                else:
+                    tile_prefix = tile_prefix + qd.volatile_load(partial[j_tile, i_lane])
+                    j_tile = j_tile - 1
+    complete[i_tile, i_lane] = tile_prefix + tile_sum
+    qd.simt.grid.mem_fence()
+    qd.atomic_exchange(status[i_tile, i_lane], 2)
+    return tile_prefix
+
+
 @qd.func(requires_top_level=True)
 def _func_clear_scan(n: qd.Tensor, scanner: DynamicExclusiveSumScratch):
     qd.loop_config(name="exclusive_sum_init_tile_state", block_dim=128)
     n_tiles = qd.max((n[()] + 3071) // 3072, 1)
     for i_tile in range(n_tiles):
-        scanner.status[i_tile] = 0
+        scanner.status[i_tile, 0] = 0
         if i_tile == 0:
             scanner.tile_counter[()] = 0
 
@@ -47,17 +84,17 @@ def _func_scan_cpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
         total = gs.qd_int(0)
         for i_val in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
             total += values[i_val]
-        scanner.partial[i_chunk] = total
+        scanner.partial[i_chunk, 0] = total
     for _ in range(1):
         running = gs.qd_int(0)
         for i_chunk in range(CPU_CHUNKS):
-            total = scanner.partial[i_chunk]
-            scanner.partial[i_chunk] = running
+            total = scanner.partial[i_chunk, 0]
+            scanner.partial[i_chunk, 0] = running
             running += total
     qd.loop_config(name="exclusive_sum_chunk_scans")
     for i_chunk in range(CPU_CHUNKS):
         size = (n[()] + CPU_CHUNKS - 1) // CPU_CHUNKS
-        running = scanner.partial[i_chunk]
+        running = scanner.partial[i_chunk, 0]
         for i_val in range(i_chunk * size, qd.min(i_chunk * size + size, n[()])):
             value = values[i_val]
             output[i_val] = running
@@ -103,31 +140,9 @@ def _func_scan_gpu(values: qd.template(), output: qd.template(), n: qd.Tensor, s
 
             sh_tile_prefix = qd.simt.block.SharedArray((1,), gs.qd_int)
             if tid == 0:
-                tile_sum = sh_tile_total[0]
-                tile_prefix = gs.qd_int(0)
-                j_tile = i_tile - 1
-                is_prefix_complete = i_tile == 0
-                if i_tile > 0:
-                    scanner.partial[i_tile] = tile_sum
-                    qd.simt.grid.mem_fence()
-                    qd.atomic_exchange(scanner.status[i_tile], 1)
-                while not is_prefix_complete:
-                    if j_tile < 0:
-                        is_prefix_complete = True
-                    else:
-                        state = qd.volatile_load(scanner.status[j_tile])
-                        if state != 0:
-                            qd.simt.grid.mem_fence()
-                            if state == 2:
-                                tile_prefix = tile_prefix + qd.volatile_load(scanner.complete[j_tile])
-                                is_prefix_complete = True
-                            else:
-                                tile_prefix = tile_prefix + qd.volatile_load(scanner.partial[j_tile])
-                                j_tile = j_tile - 1
-                scanner.complete[i_tile] = tile_prefix + tile_sum
-                qd.simt.grid.mem_fence()
-                qd.atomic_exchange(scanner.status[i_tile], 2)
-                sh_tile_prefix[0] = tile_prefix
+                sh_tile_prefix[0] = func_lookback_prefix(
+                    scanner.status, scanner.partial, scanner.complete, i_tile, 0, sh_tile_total[0]
+                )
             qd.simt.block.sync()
 
             for k in qd.static(range(24)):

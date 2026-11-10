@@ -1802,9 +1802,12 @@ def func_bias_force(dyn_state: DynState, dyn_info: DynInfo, rigid_config: qd.tem
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
             for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                dyn_state.dofs.qf_bias[i_d, i_b] = dyn_state.dofs.cdof_ang[i_d, i_b].dot(
-                    dyn_state.links.cfrc_ang[i_l, i_b]
-                ) + dyn_state.dofs.cdof_vel[i_d, i_b].dot(dyn_state.links.cfrc_vel[i_l, i_b])
+                dyn_state.dofs.qf_bias[i_d, i_b] = gu.dof_force(
+                    dyn_state.dofs.cdof_vel[i_d, i_b],
+                    dyn_state.dofs.cdof_ang[i_d, i_b],
+                    dyn_state.links.cfrc_vel[i_l, i_b],
+                    dyn_state.links.cfrc_ang[i_l, i_b],
+                )
 
                 dyn_state.dofs.force[i_d, i_b] = (
                     dyn_state.dofs.qf_passive[i_d, i_b]
@@ -2008,7 +2011,7 @@ def func_midpoint_free_body(
     tau_body = qd.Vector.zero(gs.qd_float, 3)
     for j in qd.static(range(3)):
         i_d = dof_start + 3 + j
-        qf_ext = dyn_state.dofs.cdof_ang[i_d, i_b].dot(ext_ang) + dyn_state.dofs.cdof_vel[i_d, i_b].dot(ext_vel)
+        qf_ext = gu.dof_force(dyn_state.dofs.cdof_vel[i_d, i_b], dyn_state.dofs.cdof_ang[i_d, i_b], ext_vel, ext_ang)
         tau_body[j] = dyn_state.dofs.force[i_d, i_b] + dyn_state.dofs.qf_bias[i_d, i_b] - qf_ext
     w = gu.qd_transform_by_quat(w_body, inv_iquat)
     tau_com = gu.qd_transform_by_quat(tau_body, inv_iquat)
@@ -2022,7 +2025,9 @@ def func_midpoint_free_body(
         force_world = qd.Vector.zero(gs.qd_float, 3)
         for j in qd.static(range(3)):
             i_d = dof_start + j
-            qf_ext = dyn_state.dofs.cdof_ang[i_d, i_b].dot(ext_ang) + dyn_state.dofs.cdof_vel[i_d, i_b].dot(ext_vel)
+            qf_ext = gu.dof_force(
+                dyn_state.dofs.cdof_vel[i_d, i_b], dyn_state.dofs.cdof_ang[i_d, i_b], ext_vel, ext_ang
+            )
             force_world[j] = dyn_state.dofs.force[i_d, i_b] + dyn_state.dofs.qf_bias[i_d, i_b] - qf_ext
         force = gu.qd_transform_by_quat(force_world, rot_x2i)
         r_com = gu.qd_transform_by_quat(ipos, inv_iquat)

@@ -168,8 +168,8 @@ def _func_update_qfrc_constraint_per_dof(
                     qfrc += constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
                 constraint_state.qfrc_constraint[i_d, i_b] = qfrc
                 if qd.static(update_gradient):
-                    constraint_state.grad[i_d, i_b] = (
-                        constraint_state.Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b] - qfrc
+                    constraint_state.grad[i_d, i_b] = solver.constraint_gradient(
+                        constraint_state.Ma[i_d, i_b], dyn_state.dofs.qf_smooth[i_d, i_b], qfrc
                     )
 
 

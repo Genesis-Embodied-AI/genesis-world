@@ -8,7 +8,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.numerics.linear_pcg import PCGScalars
+from genesis.engine.numerics.linear_pcg import PCGVectors
 from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.engine.solvers.rigid.constraint.solver import func_hessian_and_cholesky_factor_direct
@@ -32,7 +32,7 @@ class RigidNewtonConfig(StaticConfig):
 
 
 @qd.data_oriented
-class RigidNewtonParticipant(NewtonDevice):
+class RigidNewtonParticipant(PCGVectors, NewtonDevice):
     """Device stages of Rigid's dofs in the joint solve, which select the Rigid arrays the couplings read, the geoms
     they act on being `coupled_geoms_idx`."""
 
@@ -117,9 +117,30 @@ class RigidNewtonParticipant(NewtonDevice):
             self.config,
         )
 
-    @qd.func(requires_top_level=True)
-    def func_pcg_init(self, pcg_scalars: PCGScalars, is_adjoint: qd.template()):
-        newton_func.func_rigid_pcg_init(self.rigid_data, pcg_scalars, is_adjoint)
+    # The dofs as vectors of the joint PCG (see PCGVectors), numbered environment by environment so that the entries of
+    # an environment are consecutive
+
+    @property
+    def pcg_vectors(self):
+        return self.rigid_data
+
+    @property
+    def pcg_solution(self):
+        return self.rigid_data.solution
+
+    @property
+    def pcg_rhs(self):
+        return self.rigid_data.grad
+
+    @qd.func
+    def pcg_count(self):
+        return self.rigid_data.x.shape[0] * self.rigid_data.x.shape[1]
+
+    @qd.func
+    def pcg_entry(self, i: int):
+        n_dofs = self.rigid_data.x.shape[0]
+        i_b = i // n_dofs
+        return qd.Vector([i - i_b * n_dofs, i_b], dt=gs.qd_int), i_b
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
@@ -128,30 +149,10 @@ class RigidNewtonParticipant(NewtonDevice):
         )
 
     @qd.func(requires_top_level=True)
-    def func_pcg_init_direction(self, pcg_scalars: PCGScalars):
-        newton_func.func_rigid_pcg_init_direction(self.rigid_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_matvec(self, pcg_scalars: PCGScalars):
+    def func_matvec(self):
         newton_func.func_rigid_matvec(
             self.rigid_data, self.constraint_state, self.dyn_info, self.rigid_info, self.rigid_config, self.config
         )
-
-    @qd.func(requires_top_level=True)
-    def func_matvec_dot(self, pcg_scalars: PCGScalars):
-        newton_func.func_rigid_matvec_dot(self.rigid_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_update_xr(self, pcg_scalars: PCGScalars):
-        newton_func.func_rigid_pcg_update_xr(self.rigid_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_dot_rz(self, pcg_scalars: PCGScalars):
-        newton_func.func_rigid_pcg_dot_rz(self.rigid_data, pcg_scalars)
-
-    @qd.func(requires_top_level=True)
-    def func_pcg_direction(self, pcg_scalars: PCGScalars):
-        newton_func.func_rigid_pcg_direction(self.rigid_data, pcg_scalars)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, f: int, control: NewtonControl):
@@ -192,7 +193,7 @@ class RigidNewtonHost(NewtonHost):
     def newton_prepare(self, f):
         newton_func.kernel_rigid_begin(
             self._device.rigid_data,
-            self._device.dyn_state.dofs,
+            self._device.dyn_state,
             self._device.constraint_state,
             self._device.newton_info,
             self._device.rigid_config,

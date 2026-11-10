@@ -5117,6 +5117,18 @@ def func_qfrc_gather_dense(i_b: int, constraint_state: ConstraintState):
 
 
 @qd.func
+def gauss_cost_term(Ma: float, qf_smooth: float, qacc: float, acc_smooth: float):
+    """Term of a dof in the Gauss cost 1/2 (a - a_smooth)^T M (a - a_smooth), M a_smooth being the smooth force."""
+    return 0.5 * (Ma - qf_smooth) * (qacc - acc_smooth)
+
+
+@qd.func
+def constraint_gradient(Ma: float, qf_smooth: float, qfrc_constraint: float):
+    """Gradient M a - f_smooth - J^T f of the cost of the constraint solve in the acceleration of a dof."""
+    return Ma - qf_smooth - qfrc_constraint
+
+
+@qd.func
 def func_update_constraint_batch(
     i_b: int,
     qacc: qd.Tensor,
@@ -5205,8 +5217,11 @@ def func_update_constraint_batch(
         if is_moving:
             for i_pos in range(dof_lo, dof_hi):
                 i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
-                cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b]) * (
-                    qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
+                cost_i = cost_i + gauss_cost_term(
+                    Ma[i_d, i_b],
+                    dyn_state.dofs.qf_smooth[i_d, i_b],
+                    qacc[i_d, i_b],
+                    dyn_state.dofs.acc_smooth[i_d, i_b],
                 )
             for i_pos in range(row_lo, row_hi):
                 i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
@@ -5359,12 +5374,9 @@ def _func_update_cost_coop(
 
         i_d = tid
         while i_d < n_dofs:
-            v = (
-                0.5
-                * (Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b])
-                * (qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b])
+            cost_i = cost_i + gauss_cost_term(
+                Ma[i_d, i_b], dyn_state.dofs.qf_smooth[i_d, i_b], qacc[i_d, i_b], dyn_state.dofs.acc_smooth[i_d, i_b]
             )
-            cost_i = cost_i + v
             i_d = i_d + _K
 
         i_c = tid
@@ -5444,24 +5456,33 @@ def func_update_gradient_batch(
                 i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                 # dofs.force holds the smooth force only where the forward dynamics ran this step: a body woken at the
                 # island build (see func_build_islands) still carries the total force of its last solve there.
-                constraint_state.grad[i_d, i_b] = (
-                    constraint_state.Ma[i_d, i_b]
-                    - dyn_state.dofs.qf_smooth[i_d, i_b]
-                    - constraint_state.qfrc_constraint[i_d, i_b]
+                constraint_state.grad[i_d, i_b] = constraint_gradient(
+                    constraint_state.Ma[i_d, i_b],
+                    dyn_state.dofs.qf_smooth[i_d, i_b],
+                    constraint_state.qfrc_constraint[i_d, i_b],
                 )
     if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
         func_solve_mass_batch(i_b, constraint_state.grad, constraint_state.Mgrad, dyn_state, rigid_info, rigid_config)
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
-        for i_island in range(constraint_state.island.n_islands[i_b]):
-            if constraint_state.island.improved[i_island, i_b]:
-                func_cholesky_solve_batch(
-                    i_b,
-                    i_island,
-                    rhs=constraint_state.grad,
-                    out=constraint_state.Mgrad,
-                    constraint_state=constraint_state,
-                    rigid_config=rigid_config,
-                )
+        func_cholesky_solve_islands_batch(
+            i_b,
+            rhs=constraint_state.grad,
+            out=constraint_state.Mgrad,
+            constraint_state=constraint_state,
+            rigid_config=rigid_config,
+        )
+
+
+@qd.func
+def func_cholesky_solve_islands_batch(
+    i_b: int, rhs: qd.template(), out: qd.template(), constraint_state: ConstraintState, rigid_config: qd.template()
+):
+    """Solve the Newton system of every island of one env still iterating by the Cholesky factor of the island."""
+    for i_island in range(constraint_state.island.n_islands[i_b]):
+        if constraint_state.island.improved[i_island, i_b]:
+            func_cholesky_solve_batch(
+                i_b, i_island, rhs=rhs, out=out, constraint_state=constraint_state, rigid_config=rigid_config
+            )
 
 
 @qd.func
@@ -5480,10 +5501,10 @@ def func_update_gradient_no_solve(dyn_state: DynState, constraint_state: Constra
             # The gradient of an island standing still is kept (see improved in IslandState)
             i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
             if constraint_state.island.improved[i_island, i_b]:
-                constraint_state.grad[i_d, i_b] = (
-                    constraint_state.Ma[i_d, i_b]
-                    - dyn_state.dofs.qf_smooth[i_d, i_b]
-                    - constraint_state.qfrc_constraint[i_d, i_b]
+                constraint_state.grad[i_d, i_b] = constraint_gradient(
+                    constraint_state.Ma[i_d, i_b],
+                    dyn_state.dofs.qf_smooth[i_d, i_b],
+                    constraint_state.qfrc_constraint[i_d, i_b],
                 )
 
 
@@ -5573,6 +5594,16 @@ def initialize_Ma(Ma: qd.Tensor, qacc: qd.Tensor, rigid_info: RigidInfo, rigid_c
         Ma[i_d1, i_b] = Ma_
 
 
+@qd.func
+def func_warmstart_qacc(i_d: int, i_b: int, dyn_state: DynState, constraint_state: ConstraintState):
+    """Start acceleration of a dof in the constraint solve: the warm start of an env with constraints, the smooth
+    acceleration otherwise."""
+    qacc = dyn_state.dofs.acc_smooth[i_d, i_b]
+    if constraint_state.n_constraints[i_b] > 0 and constraint_state.is_warmstart[i_b]:
+        qacc = constraint_state.qacc_ws[i_d, i_b]
+    return qacc
+
+
 # ======================================================= Core ========================================================
 
 
@@ -5645,10 +5676,7 @@ def func_solve_init(
         for i_d, i_b in qd.ndrange(
             n_dofs, _B, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
         ):
-            if constraint_state.n_constraints[i_b] > 0 and constraint_state.is_warmstart[i_b]:
-                constraint_state.qacc[i_d, i_b] = constraint_state.qacc_ws[i_d, i_b]
-            else:
-                constraint_state.qacc[i_d, i_b] = dyn_state.dofs.acc_smooth[i_d, i_b]
+            constraint_state.qacc[i_d, i_b] = func_warmstart_qacc(i_d, i_b, dyn_state, constraint_state)
 
         initialize_Ma(constraint_state.Ma, constraint_state.qacc, rigid_info, rigid_config)
 

@@ -7,7 +7,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import build_bvh, get_bvh_data
 from genesis.engine.solvers.fem_newton import FemNewtonParticipant
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import (
@@ -23,7 +22,7 @@ from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_linear import PAIRS
 from genesis.utils.data import Data, DataItem, DataKind, field, iter_data
 
-from .contact_candidates import CouplingPairs, pair_relative_displacement
+from .contact_candidates import CouplingPairs, LeafTrees, pair_relative_displacement
 
 
 class MpmFemPairs(Data, kind=DataKind.SCRATCH):
@@ -170,7 +169,7 @@ class FemContactParams(Data, kind=DataKind.CONSTANT, shape=()):
 
 
 @qd.data_oriented
-class FemTriangleQuery:
+class FemTriangleQuery(LeafTrees):
     """The linear bounding volume hierarchy (LBVH) over the finite element method (FEM) surface triangles of every
     environment (see genesis.engine.bvh)."""
 
@@ -178,14 +177,12 @@ class FemTriangleQuery:
         self.fem = fem
         self.mpm_info = mpm_info
         self.contact = contact
-        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, fem.n_surfaces)
-        self.tree = self.bvh_state.tree
-        self.leaves = self.bvh_state.leaves
+        super().__init__(n_envs, fem.n_surfaces)
 
     def build(self, f):
         """Fit the leaf boxes to the triangles at the substep start and build the trees."""
         kernel_fit_triangle_leaves(f, self)
-        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+        self.build_trees()
 
 
 @qd.kernel

@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import func_bvh_query_aabb, func_no_filter
+from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, func_no_filter, get_bvh_data
 from genesis.engine.numerics.bcoo_matrix import (
     BCOOMatrixScratch,
     bcoo_matrix_sizes,
@@ -16,14 +16,38 @@ from genesis.engine.numerics.bcoo_matrix import (
 )
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmInfo
 from genesis.engine.solvers.mpm_func import contact_reach, particle_of_sorted, pyramid_terms
-from genesis.engine.solvers.newton_contact import append_pair, weighted_block, weighted_vector
-from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
-from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
+from genesis.engine.solvers.newton_contact import PairKind, append_pair
+from genesis.engine.solvers.newton_linear import MIN_SLOTS, grown_capacity, retire_scratch
+from genesis.engine.solvers.newton_solver import NewtonHost
 from genesis.utils.array_class import QUERY_RESULTS, BVHQueryResults
 from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
 from genesis.utils.misc import qd_to_numpy
 
 CANDIDATES = Size("candidates")
+
+# Half extent of the inverted box of a leaf that must meet no query of a coupling's tree, finite so that its center
+# gets a Morton code
+EMPTY_BOX_HALF = 1e10
+
+
+@qd.data_oriented
+class LeafTrees:
+    """The linear bounding volume hierarchies (LBVH) of a coupling, one per environment over the same leaves (see
+    genesis.engine.bvh), whose boxes a kernel of the coupling fits before every build."""
+
+    def __init__(self, n_envs: int, n_leaves: int, is_active: bool = True):
+        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(n_leaves, 1), is_active=is_active)
+        self.tree = self.bvh_state.tree
+        self.leaves = self.bvh_state.leaves
+
+    def build_trees(self):
+        build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+
+
+@qd.func
+def empty_box():
+    """Box of a leaf that meets no query."""
+    return qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float), qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
 
 
 class ContactCandidates(Data, kind=DataKind.SCRATCH):
@@ -123,7 +147,7 @@ def func_select_nearest(candidates: ContactCandidates, mpm_info: MpmInfo):
 
 
 @qd.data_oriented
-class CouplingPairs(NewtonDevice):
+class CouplingPairs(PairKind):
     """Pair kind of the contacts of the material point method (MPM) particles with the partners of one coupling, the
     nearest partner of every particle (see NewtonContact).
 
@@ -136,26 +160,12 @@ class CouplingPairs(NewtonDevice):
     def __init__(self, mpm):
         self.mpm = mpm
         self.candidates = build_contact_candidates(MIN_SLOTS, self.tie_ratio)
-        self.pairs = self.build_pairs(MIN_SLOTS)
-        # The candidates and pairs that grew out of, kept referenced (see retire_scratch)
-        self.scratches_replaced = []
-        self.block_rows = tuple(i_v_ for i_v_ in range(self.n_doublets) for _ in range(i_v_, self.n_doublets))
-        self.block_cols = tuple(j_v_ for i_v_ in range(self.n_doublets) for j_v_ in range(i_v_, self.n_doublets))
-
-    def build_pairs(self, capacity: int):
-        """Build the pairs of the coupling at a capacity, with no pair."""
-        pairs = self.pairs_type(sizes={PAIRS: capacity})
-        pairs.n_pairs.fill(0)
-        return pairs
+        super().__init__()
 
     @property
     def data(self) -> Iterator[DataItem]:
         yield from iter_data(self, "candidates")
-        yield from iter_data(self, "pairs")
-
-    @qd.func
-    def func_pair_count(self):
-        return self.pairs.n_pairs[()]
+        yield from super().data
 
     @qd.func
     def add_pair(
@@ -180,8 +190,8 @@ class CouplingPairs(NewtonDevice):
 
     @qd.func
     def pair_terms(self, f: int, i_pair: int):
-        """Energy, gradient and Hessian of the rows of a pair in its relative displacement at the current iterate, with
-        its vertices and their weights in that displacement (see pair_vertices)."""
+        """Environment, energy, gradient and Hessian of the rows of a pair in its relative displacement at the current
+        iterate, with its vertices and their weights in that displacement (see pair_vertices)."""
         verts, weights, u_rel = self.pair_vertices(f, i_pair)
         energy, g, H = pyramid_terms(
             self.pairs.normal[i_pair],
@@ -190,36 +200,7 @@ class CouplingPairs(NewtonDevice):
             self.pairs.target[i_pair],
             u_rel,
         )
-        return energy, g, H, verts, weights
-
-    @qd.func(requires_top_level=True)
-    def func_pair_terms(self, f: int, i_kind: qd.template(), contact: qd.template()):
-        """Write the gradient w_k g of every vertex of every pair at the current iterate, and the upper blocks w_k w_l H
-        between them."""
-        qd.loop_config(name="mpm_pair_terms")
-        for i_pair in range(self.pairs.n_pairs[()]):
-            _, g, H, verts, weights = self.pair_terms(f, i_pair)
-            i_db_start = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
-            i_t_start = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
-            for i_v_ in range(qd.static(self.n_doublets)):
-                contact.write_doublet(i_db_start + i_v_, verts[i_v_], weighted_vector(weights[i_v_], g))
-            block_rows = qd.Vector(self.block_rows, dt=gs.qd_int)
-            block_cols = qd.Vector(self.block_cols, dt=gs.qd_int)
-            for i_t_ in range(qd.static(self.n_triplets)):
-                i_v_ = block_rows[i_t_]
-                j_v_ = block_cols[i_t_]
-                contact.write_triplet(
-                    i_t_start + i_t_, verts[i_v_], verts[j_v_], weighted_block(weights[i_v_], weights[j_v_], H)
-                )
-
-    @qd.func(requires_top_level=True)
-    def func_pair_energy(self, f: int, energies: qd.template()):
-        """Add the energy of the rows of every pair at the current iterate into the entry of its environment."""
-        qd.loop_config(name="mpm_pair_energy")
-        for i_pair in range(self.pairs.n_pairs[()]):
-            energy, g, H, verts, weights = self.pair_terms(f, i_pair)
-            i_b = self.pairs.i_b[i_pair]
-            qd.atomic_add(energies[i_b], energy)
+        return self.pairs.i_b[i_pair], energy, g, H, verts, weights
 
     def prepare(self, f: int) -> None:
         self.build_query(f)
@@ -231,15 +212,7 @@ class CouplingPairs(NewtonDevice):
             kernel_query_candidates(f, self)
         kernel_score_candidates(f, self)
         sort_bcoo(self.candidates.order)
-        kernel_build_pairs(f, self)
-        n_pairs = int(qd_to_numpy(self.pairs.n_pairs))
-        if n_pairs > self.pairs.sorted_idx.shape[0]:
-            self.grow_pairs(grown_capacity(n_pairs))
-            kernel_build_pairs(f, self)
-
-    def grow_pairs(self, capacity: int) -> None:
-        retire_scratch(self.pairs, self.scratches_replaced)
-        self.pairs = self.build_pairs(capacity)
+        self.fill_pairs(lambda: kernel_build_pairs(f, self))
 
 
 class CouplingPairsHost(NewtonHost):
