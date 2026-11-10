@@ -1050,7 +1050,7 @@ class RasterizerContext:
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
+            vverts_pos, _, _ = self.sim.fem_solver.get_state_render()
             vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
 
             for fem_entity in self.sim.fem_solver.entities:
@@ -1073,7 +1073,7 @@ class RasterizerContext:
 
     def update_fem(self):
         if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
+            vverts_pos, _, _ = self.sim.fem_solver.get_state_render()
             vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
 
             for fem_entity in self.sim.fem_solver.entities:

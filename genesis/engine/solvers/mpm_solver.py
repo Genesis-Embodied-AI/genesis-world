@@ -571,7 +571,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             actus, particles_idx, self.n_particles, "particles_idx", envs_idx, (n_groups,), batched_idx=True
         )
         kernel_set_actu(
-            particles_idx, envs_idx, actus, self.mpm_info.particles.muscle_group, self.mpm_state.particles.actu, False
+            particles_idx, envs_idx, actus, self.mpm_info.particles.muscle_group, self.mpm_state.particles.actu
         )
 
     def get_particles_actu(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
