@@ -987,7 +987,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             actus, elements_idx, self.n_elements, "elements_idx", envs_idx, (n_groups,), batched_idx=True
         )
         kernel_set_actu(
-            elements_idx, envs_idx, actus, self.fem_info.elements.muscle_group, self.fem_state.elements.actu
+            elements_idx, envs_idx, actus, self.fem_info.elements.muscle_group, self.fem_state.elements.actu, True
         )
 
     @mutates(StateChange.MODEL)

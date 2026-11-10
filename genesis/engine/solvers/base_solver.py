@@ -969,6 +969,7 @@ def kernel_set_actu(
     actus: qd.types.ndarray(),
     items_muscle_group: qd.Tensor,
     items_actu: qd.Tensor,
+    has_frames: qd.template(),
 ):
     """Set the actuation of some items of a solver between two steps, each one taking that of its muscle group."""
     for i_i_, i_g, i_b_ in qd.ndrange(items_idx.shape[1], actus.shape[2], envs_idx.shape[0]):
@@ -977,7 +978,8 @@ def kernel_set_actu(
         # See 'kernel_set_values'
         if i_i >= 0:
             if items_muscle_group[i_i] == i_g:
-                items_actu[0, i_i, i_b] = actus[i_b_, i_i_, i_g]
+                I_i = [0, i_i, i_b] if qd.static(has_frames) else [i_i, i_b]
+                items_actu[I_i] = actus[i_b_, i_i_, i_g]
 
 
 @qd.kernel(fastcache=True)

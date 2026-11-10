@@ -506,7 +506,6 @@ class Simulator(RBC):
         for entity in self._hybrid_entities:
             soft_solver, rigid_solver = entity.solver_soft, entity.solver_rigid
             kernel_update_hybrid_soft_part(
-                f,
                 entity.part_soft.particle_start,
                 soft_solver.substep_dt,
                 soft_solver.dt,
