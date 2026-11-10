@@ -508,7 +508,7 @@ class FEMData(Data):
                     n_pcg_iterations=solver._n_pcg_iterations,
                     n_linesearch_iterations=solver._n_linesearch_iterations,
                     pcg_threshold=solver._pcg_threshold,
-                    pcg_threshold_rel=(1e-6 if gs.qd_float == qd.f32 else 1e-14) ** 2,
+                    pcg_threshold_rel=(1e-5 if gs.qd_float == qd.f32 else 1e-12) ** 2,
                     linesearch_c=solver._linesearch_c,
                     linesearch_tau=solver._linesearch_tau,
                     # The elimination runs in single precision (see 'FEMCoarseSolve')
