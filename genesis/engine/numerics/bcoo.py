@@ -128,6 +128,20 @@ def func_write_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixSc
 
 
 @qd.func
+def func_add_triplet(i_t: int, i_r: int, i_c: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
+    """Add a block to the triplet slot that the same thread wrote for the same row and column (see
+    'func_write_triplet')."""
+    if i_t < matrix.triplets_row.shape[0]:
+        block_stored = block
+        if qd.static(is_symmetric):
+            if i_r > i_c:
+                block_stored = block.transpose()
+        for k, j in qd.static(qd.ndrange(block.n, block.m)):
+            i_value = i_t * (block.n * block.m) + k * block.m + j
+            matrix.triplets_value[i_value] = matrix.triplets_value[i_value] + block_stored[k, j]
+
+
+@qd.func
 def func_discard_triplet(i_t: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
     """Write a zero block at the first row and column in a triplet slot, which adds nothing to the entry it joins."""
     if i_t < matrix.triplets_row.shape[0]:
