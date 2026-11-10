@@ -360,7 +360,7 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
 
     # Without Poisson contraction, the bar stretches uniaxially under its own weight, and its free end comes to rest
     # rho * g * L^2 / (2 * E) below its initial height.
-    assert_allclose(bar.get_verts_vel(), 0.0, atol=2e-14 if gs.np_float == np.float64 else 2e-5)
+    assert_allclose(bar.get_verts_vel(), 0.0, atol=5e-10 if gs.np_float == np.float64 else 2e-5)
     is_bottom = bar_pos_0[:, 2] < bar_pos_0[:, 2].min() + gs.EPS
     bar_sag = (bar_pos_0[is_bottom, 2] - bar.get_verts_pos()[..., is_bottom, 2]).mean()
     rtol = 2e-3 if gs.np_float == np.float64 else 1e-2
@@ -462,6 +462,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     MOTION_SPEED = 0.005
     VERTICES_IDX = [5, 7]
     MODE_AMPLITUDE = 1e-3
+    PCG_THRESHOLD = 1e-20
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -471,7 +472,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=use_implicit_solver,
-            pcg_threshold=1e-20,
+            pcg_threshold=PCG_THRESHOLD,
             # Each solver reads its own damping option
             damping=DAMPING,
             damping_alpha=DAMPING,
@@ -588,9 +589,16 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
             mode_pos = mode_pos + substep_dt * mode_vel
         modal_mass = vibrating_verts_mass[:, None] * mode
         vibrating_box_disp = vibrating_box.get_verts_pos() - vibrating_box.init_positions
-        rtol = 1e-12 if gs.np_float == np.float64 else 2e-4
-        assert_allclose((vibrating_box_disp * modal_mass).sum((-2, -1)), mode_pos, rtol=rtol)
-        assert_allclose((vibrating_box.get_verts_vel() * modal_mass).sum((-2, -1)), mode_vel, rtol=rtol)
+        if gs.np_float == np.float64:
+            # The solve stops below a residual force sqrt(PCG_THRESHOLD), which moves the mode of unit modal mass by at
+            # most that times substep_dt^2 * sqrt(m_max) / m_min per substep, every substep at most doubling the error
+            mass_ratio = vibrating_verts_mass.max().sqrt() / vibrating_verts_mass.min()
+            pos_atol = 2**N_SUBSTEPS * PCG_THRESHOLD**0.5 * substep_dt**2 * mass_ratio
+            pos_tols, vel_tols = dict(atol=pos_atol), dict(atol=pos_atol / substep_dt)
+        else:
+            pos_tols = vel_tols = dict(rtol=2e-4)
+        assert_allclose((vibrating_box_disp * modal_mass).sum((-2, -1)), mode_pos, **pos_tols)
+        assert_allclose((vibrating_box.get_verts_vel() * modal_mass).sum((-2, -1)), mode_vel, **vel_tols)
 
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)

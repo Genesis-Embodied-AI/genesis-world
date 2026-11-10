@@ -110,10 +110,34 @@ def func_stable_neohookean_energy(mu: float, lam: float, J: float, F: qd.types.m
 
 
 @qd.func
-def func_linear_corotated_rotation(F: qd.types.matrix(3, 3)):
-    """Return the rotation of the polar decomposition of a deformation gradient, taken at the start of a substep."""
-    U, S, V = gu.qd_svd(F)
-    return U @ V.transpose()
+def func_linear_corotated_rotation(F: qd.types.matrix(3, 3), rotation_atol: float):
+    """
+    Return the rotation of the polar decomposition of a deformation gradient, which the linear corotated model takes at
+    the start of a substep.
+
+    In double precision, the scaled Newton iteration X <- (z X + X^-T / z) / 2 from X = F, z the square root of the
+    ratio of the Frobenius norms of X^-T and X, converges to the rotation within rounding up to condition numbers of
+    1e6, without a transcendental function. The singular value decomposition (SVD) of F takes over where the iteration
+    ends farther than `rotation_atol` from a rotation, for an ill-conditioned element, and for an inverted one, whose
+    rotation pairs with a negative smallest singular value where the polar decomposition is a reflection. In single
+    precision, the SVD alone costs less than the iteration.
+    """
+    # The iterations reaching the rounding of double precision for the condition numbers a simulation meets
+    N_NEWTON_ITERATIONS = qd.static(6)
+
+    X = F
+    is_rotation = False
+    if qd.static(gs.qd_float == qd.f64):
+        for _ in qd.static(range(N_NEWTON_ITERATIONS)):
+            Y = X.inverse().transpose()
+            z = qd.sqrt(qd.sqrt((Y * Y).sum() / (X * X).sum()))
+            X = 0.5 * (z * X + Y / z)
+        error = qd.abs(X.transpose() @ X - qd.Matrix.identity(gs.qd_float, 3)).max()
+        is_rotation = F.determinant() > 0.0 and error < rotation_atol
+    if not is_rotation:
+        U, S, V = gu.qd_svd(F)
+        X = U @ V.transpose()
+    return X
 
 
 @qd.func
