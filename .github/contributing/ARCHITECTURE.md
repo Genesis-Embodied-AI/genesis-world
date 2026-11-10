@@ -61,7 +61,7 @@ An entity is created from a description: a dataclass holding everything its solv
 - the description class resolves the morphs, material and surface into a description (`RigidEntityDescription.resolve`), which is where assets are read and post-processed;
 - the entity class builds itself from the description alone (`RigidEntity.__init__`), so a description loaded from a file and one resolved from assets take the same path.
 
-`Scene.export` writes the description of every entity, obtained through `Entity.desc`, beside the scene options. `Scene.load` creates each entity from its description through the solver simulating its material (`Solver.add_entity` given `desc`), attachments included, since a description names only entities created before it. A kind of entity gains export support by defining its description class, returning it from `desc`, and having its solver's `add_entity` build from a given description, with no change to the scene. The serialization facility alone reduces every absolute path a value holds to the name of the asset, so no option or mesh redacts anything itself.
+`Scene.export` writes the description of every entity, obtained through `Entity.desc`, beside the scene options. `Scene.load` creates each entity from its description through the solver its entity options name (`Solver.add_entity` given `desc`), attachments included, since a description names only entities created before it. A kind of entity gains export support by defining its description class, returning it from `desc`, and having its solver's `add_entity` build from a given description, with no change to the scene. The serialization facility alone reduces every absolute path a value holds to the name of the asset, so no option or mesh redacts anything itself.
 
 ## Morphs
 
@@ -82,7 +82,7 @@ Location: `genesis/options/morphs.py`
 
 ## Materials
 
-Materials define physical properties and determine which solver handles the entity: each solver declares the material class it simulates (`Solver.material_cls`).
+Materials define physical properties, each material belonging to one solver. Each entity options class admits the materials of its solver.
 
 ```python
 gs.materials.Rigid(rho=1000)
@@ -92,6 +92,30 @@ gs.materials.PBD.Cloth(stretch_compliance=0.0)
 ```
 
 Location: `genesis/engine/materials/`
+
+## Entity options
+
+An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`gs.entities.BaseEntity._solver_options_cls`) and admits the materials of that solver. `gs.entities.Hybrid` names no solver, since a hybrid entity adds a rigid entity and an MPM entity of their own. The flattened arguments of `Scene.add_entity` are a shorthand for the entity options its material is given to, `gs.entities.Rigid` when it is None.
+
+```python
+scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))  # rigid
+scene.add_entity(options=gs.entities.Kinematic(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))))
+scene.add_entity(options=gs.entities.MPM(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()))
+scene.add_entity(options=gs.entities.SPH(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.SPH.Liquid()))
+```
+
+Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms.
+
+```python
+scene.add_entity(
+    options=gs.entities.Rigid(
+        morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
+        links={"arm2": gs.options.Link(material=gs.materials.Rigid(friction=1.2))},
+    )
+)
+```
+
+Location: `genesis/options/entities.py`, `genesis/options/indices.py`
 
 ## Solvers
 

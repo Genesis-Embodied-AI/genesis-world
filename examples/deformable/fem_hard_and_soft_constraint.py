@@ -66,6 +66,29 @@ def main():
         ),
     )
 
+    # A beam clamped by its left end face, which the vertex options hold at its initial position from the first step on
+    scene.add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=SCENE_POS + np.array([0.3, -0.3, 0]),
+                size=(0.4, 0.06, 0.06),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e5,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
+            vertices={
+                gs.VertexIndex.in_box(lower=(-0.2, -0.03, -0.03), upper=(-0.2, 0.03, 0.03)): gs.options.Vertex(
+                    solver_options=gs.options.FEMVertexSolverOptions(
+                        is_fixed=True,
+                    ),
+                ),
+            },
+        ),
+    )
+
     # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
     video_fps = min(100.0, 1.0 / args.dt)
 

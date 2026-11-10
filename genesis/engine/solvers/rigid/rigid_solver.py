@@ -200,7 +200,6 @@ def _sanitize_sol_params(
 
 
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
-    material_cls = Rigid
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
     _entities: list[RigidEntity] = gs.List()

@@ -151,7 +151,6 @@ class KinematicSolver(Solver):
     # The rigid solver deriving from this one reverses its own dynamics.
     is_differentiable = True
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
@@ -198,19 +197,28 @@ class KinematicSolver(Solver):
         surface: "gs.surfaces.Surface | None",
         visualize_contact: bool = False,
         name: str | None = None,
+        *,
+        options: "gs.entities.Kinematic",
         desc: KinematicEntityDescription | None = None,
     ) -> KinematicEntity:
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
+        deciding the kind of entity among those the solver builds ('_entity_classes'). The entity options the other
+        arguments were taken from are kept in the description as authored. The class of a given description
         says which kind it holds. Creation from a description reads no asset.
         """
         if desc is None:
             morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
             entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
             desc = entity_cls._description_cls.resolve(
-                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
+                morphs,
+                surface,
+                self._options,
+                self._enable_mujoco_compatibility,
+                visualize_contact,
+                name,
+                options=options,
             )
         else:
             for _, entity_cls in self._entity_classes:

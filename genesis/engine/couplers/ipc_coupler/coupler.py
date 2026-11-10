@@ -601,6 +601,13 @@ class IPCCoupler(BuildableMixin, BatchedMixin, ErrnoMixin, CheckpointMixin, RBC)
                     self._ipc_abd = AffineBodyConstitution()
                     self._ipc_constitution_tabular.insert(self._ipc_abd)
 
+                # An affine body holds the density of its entity alone, over every link merged into it
+                for source_link in source_links:
+                    if entity._options.has_link_density(entity._links_path[source_link.idx_local]):
+                        gs.raise_exception(
+                            f"The IPC coupler simulates link '{source_link.name}' of entity '{entity.name}' at the "
+                            "density of its material alone, so the link and geom options cannot give it a density."
+                        )
                 rho = entity.material.rho
                 if rho is None:
                     if self.rigid_solver.options.enable_mujoco_compatibility:

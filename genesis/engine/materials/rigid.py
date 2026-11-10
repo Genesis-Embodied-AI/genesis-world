@@ -111,10 +111,10 @@ class Rigid(Kinematic["RigidEntity"]):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve_defaults(cls, data: dict) -> dict:
+    def _resolve_defaults(cls, data: Any) -> Any:
         # ipc_only entities have their dynamics fully controlled by IPC (gravity + collision).
         # Genesis gravity must be disabled to avoid double-counting.
-        if data.get("coup_type") == "ipc_only":
+        if isinstance(data, dict) and data.get("coup_type") == "ipc_only":
             grav_comp = data.get("gravity_compensation")
             if grav_comp is not None and grav_comp != 0.0:
                 gs.raise_exception(
