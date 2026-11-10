@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -284,7 +285,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 particles=len(samples_tri_idx),
                 envs=self.sim._B,
                 surfaces=n_tris,
-                **hash_grid_sizes(self.sph_solver.hash_grid_res),
+                **hash_grid_sizes(math.prod(self.sph_solver.hash_grid_res)),
             ),
             values=dict(
                 ghosts=dict(

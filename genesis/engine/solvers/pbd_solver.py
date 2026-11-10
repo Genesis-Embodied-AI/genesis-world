@@ -215,7 +215,7 @@ class PBDSolver(ParticleSolver):
         is_unused = not self.is_active
         sizes = dict(envs=self._B, particles=self._n_particles)
         self.pbd_state = PBDState(
-            sizes=dict(sizes, **hash_grid_sizes(self._hash_grid_res)),
+            sizes=dict(sizes, **hash_grid_sizes(math.prod(self._hash_grid_res))),
             values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
             env_first=False,
             unused=is_unused,
