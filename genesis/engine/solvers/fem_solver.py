@@ -566,7 +566,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
-    material_cls = FEM.Base
     is_differentiable = True
 
     # ------------------------------------------------------------------------------------
@@ -802,12 +801,21 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     continue
                 array.from_numpy(values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False))
 
+            # The vertices the vertex options fix take slots on top of those left to the constraints set at runtime
+            self._max_vertex_constraints = self._options.max_vertex_constraints + sum(
+                entity._fixed_verts_idx_local.size for entity in self._entities
+            )
             # Laid out environment-first like the arrays of the solve, whose blocks read the vertices of an environment
             self.vertex_constraints = FEMVertexConstraints(
                 sizes=dict(vertices=self.n_vertices, constraint_slots=self._max_vertex_constraints, envs=self._B),
                 env_first=True,
             )
             kernel_clear_vertex_constraints(self.vertex_constraints)
+
+            # The vertices the vertex options fix are held at their initial positions from the first substep on
+            for entity in self._entities:
+                if entity._fixed_verts_idx_local.size > 0:
+                    self._set_vertex_constraints(entity._fixed_verts_idx_local + entity._v_start)
 
         self._build_gravity(self.fem_info.gravity)
 
@@ -823,7 +831,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_elements > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
@@ -838,6 +846,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            options=options,
         )
         self._entities.append(entity)
         return entity
@@ -1203,6 +1212,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
+        self._set_vertex_constraints(verts_idx, target_poss, link_idx, is_soft_constraint, stiffness, envs_idx)
+
+    def _set_vertex_constraints(
+        self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
+    ):
+        """Constrain some vertices (see 'set_vertex_constraints'), also before the scene is built."""
         # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
         from genesis.engine.couplers import IPCCoupler
 

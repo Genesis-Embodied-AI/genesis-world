@@ -161,8 +161,10 @@ class FEMEntity(Entity):
         vvert_start=0,
         vface_start=0,
         name: str | None = None,
+        *,
+        options,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
@@ -352,6 +354,9 @@ class FEMEntity(Entity):
 
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
+
+        # The vertex options select vertices as the morph states them, relative to its position before its rotation
+        self._fixed_verts_idx_local = self._options.get_fixed_verts_idx(verts - self._morph.pos)
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(

@@ -214,8 +214,6 @@ class SPHSolver(ParticleSolver):
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
-    material_cls = SPH.Base
-
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -353,7 +351,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
@@ -365,6 +363,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             idx=idx,
             particle_start=self.n_particles,
             name=name,
+            options=options,
         )
         self.entities.append(entity)
         return entity

@@ -362,8 +362,6 @@ class MPMSolver(ParticleSolver):
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
     is_checkpointable = True
 
-    material_cls = MPM.Base
-
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -479,7 +477,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "MPMEntity":
         self.add_material(material)
 
@@ -495,6 +493,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            options=options,
         )
         self._entities.append(entity)
         return entity

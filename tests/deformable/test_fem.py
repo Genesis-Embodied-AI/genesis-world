@@ -7,6 +7,7 @@ import torch
 import igl
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -845,6 +846,104 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     constrained_poss = box.get_verts_pos()[..., VERTICES_IDX, :]
     assert_allclose(constrained_poss[0], target_poss[0], tol=1e-6)
     assert (torch.linalg.norm(constrained_poss[1] - target_poss[1], dim=-1) > 0.01).all()
+
+
+@pytest.mark.required
+def test_vertex_options_fix_vertices(show_viewer, tol):
+    N_STEPS = 10
+
+    scene = gs.Scene(
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.25, -1.5, 1.2),
+            camera_lookat=(0.25, 0.0, 0.6),
+        ),
+        show_viewer=show_viewer,
+    )
+    # Vertex options fix the vertices they select at their initial positions. A box selects in the frame of the morph,
+    # which the rotation of the morph turns into a side face of the entity.
+    fixed_vertex_options = gs.options.Vertex(
+        solver_options=gs.options.FEMVertexSolverOptions(
+            is_fixed=True,
+        ),
+    )
+    rotated_box = scene.add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.6),
+                size=(0.2, 0.2, 0.2),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e4,
+            ),
+            vertices={
+                gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1)): fixed_vertex_options,
+            },
+        ),
+    )
+    # The union of an ordinal selection of two top corners and of the vertices closest to the other two pins the whole
+    # top face. The ordinals come from the same box added to a scene that is not built.
+    probe_box = gs.Scene().add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.FEM.Elastic(),
+        ),
+    )
+    probe_verts_pos = tensor_to_array(probe_box.init_positions)
+    top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > 0.1 - 1e-6)
+    top_face_selection = gs.VertexIndex.at(top_verts_idx[:2])
+    for corner_pos in probe_verts_pos[top_verts_idx[2:]]:
+        top_face_selection = top_face_selection | gs.VertexIndex.closest_to(pos=corner_pos, max_distance=1e-3)
+    hanging_box = scene.add_entity(
+        options=gs.entities.FEM(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.6),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e4,
+            ),
+            vertices={
+                top_face_selection: fixed_vertex_options,
+            },
+        ),
+    )
+
+    with pytest.raises(gs.GenesisException, match="vertices"):
+        gs.entities.FEM(
+            morph=gs.morphs.Sphere(),
+            material=gs.materials.FEM.Cloth(),
+            vertices={gs.VertexIndex.at(0): gs.options.Vertex()},
+        )
+    for vertex_index, match in (
+        (gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05), "max_distance"),
+        (gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)), "No vertex"),
+        (gs.VertexIndex.at(probe_verts_pos.shape[0]), "no valid vertex"),
+    ):
+        with pytest.raises(gs.GenesisException, match=match):
+            gs.Scene().add_entity(
+                options=hanging_box.options.model_copy(update={"vertices": {vertex_index: fixed_vertex_options}})
+            )
+
+    scene.build(n_envs=2)
+    for _ in range(N_STEPS):
+        scene.step()
+
+    # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
+    # face sags under gravity
+    for box in (rotated_box, hanging_box):
+        init_verts_pos = tensor_to_array(box.init_positions)
+        morph_verts_pos = (init_verts_pos - box.options.morph.pos) @ gu.quat_to_R(np.array(box.options.morph.quat))
+        verts_pos = tensor_to_array(box.get_verts_pos())
+        is_fixed = morph_verts_pos[:, 2] > morph_verts_pos[:, 2].max() - 1e-3
+        assert_allclose(verts_pos[:, is_fixed], init_verts_pos[is_fixed], tol=tol)
+        is_opposite = morph_verts_pos[:, 2] < morph_verts_pos[:, 2].min() + 1e-3
+        assert (init_verts_pos[is_opposite, 2] - verts_pos[:, is_opposite, 2] > 1e-2).all()
 
 
 @pytest.mark.required

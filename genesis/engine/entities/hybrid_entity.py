@@ -62,8 +62,8 @@ class HybridEntity(Entity):
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
-        super().__init__(idx, scene, morph, None, material, surface, name=name)
+    def __init__(self, idx, scene, material, morph, surface, name: str | None = None, *, options):
+        super().__init__(idx, scene, morph, None, material, surface, name=name, options=options)
 
         material_rigid = material.material_rigid
         material_soft = material.material_soft

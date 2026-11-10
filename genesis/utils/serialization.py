@@ -153,9 +153,13 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
-    """Return the declared type of each field of a class. Those types drive how a value loads back."""
+    """Return the declared type of each field of a class. Those types drive how a value loads back.
+
+    The fields of options excluded from their dump hold what the options compute or are given at run time (the
+    kernels a material binds, the index a solver assigns), so a file leaves them out.
+    """
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
+        return {name: info.annotation for name, info in cls.model_fields.items() if not info.exclude}
     return typing.get_type_hints(cls)
 
 
@@ -238,6 +242,15 @@ def _layout(cls: type) -> list[str] | dict[str, int | str]:
     return sorted(_declared_fields(cls))
 
 
+def _schema_name(cls: type) -> str:
+    """The name a class is recorded under in the schema of a file, unique among the classes of Genesis.
+
+    Classes of different modules share a name, such as the rigid entity options and the rigid material, so the name
+    holds the module of the class as well.
+    """
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 def schema(classes: set[type]) -> dict:
     """Records what each of these classes is made of, under the name each is written as.
 
@@ -246,7 +259,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {cls.__name__: _layout(cls) for cls in sorted(classes, key=lambda cls: cls.__name__)}
+    return {_schema_name(cls): _layout(cls) for cls in sorted(classes, key=_schema_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -267,13 +280,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, (IntEnum, StrEnum)):
-                layout[declared.__name__] = _layout(declared)
+                layout[_schema_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[cls.__name__] = _layout(cls)
+                    layout[_schema_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -384,9 +397,12 @@ def _export_value(value, expect, exported: "Exported"):
         if issubclass(type(value), Options):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
-            values = {"values": values, "given": sorted(value.model_fields_set)}
+            values = {"values": values, "given": sorted(value.model_fields_set.intersection(values))}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
-    expect = _deduce_union(expect, value)
+    # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
+    deduced = _deduce_union(expect, value)
+    if deduced is not expect:
+        return _export_value(value, deduced, exported)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)
@@ -498,7 +514,10 @@ def _load_value(raw, expect, loaded: list[np.ndarray]):
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
         return cls(**{name: _load_value(raw[name], declared[name], loaded) for name in declared if name in raw})
-    expect = _deduce_union(expect, raw)
+    # See '_export_value' for a union mixing an option with a sequence of them
+    deduced = _deduce_union(expect, raw)
+    if deduced is not expect:
+        return _load_value(raw, deduced, loaded)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
         args = typing.get_args(expect)

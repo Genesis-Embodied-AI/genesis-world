@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,10 +19,16 @@ class EntityDescription:
     """Base class of what one entity of a scene is created from, whatever the solver simulating it.
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
-    material is what every description holds, since the simulator picks the solver from it.
+    options the entity was constructed from stand here as authored, before any default was resolved, and decide the
+    solver simulating it (see 'gs.entities.BaseEntity._solver_options_cls').
     """
 
-    material: Material
+    options: gs.entities.BaseEntity = field(kw_only=True)
+
+    @property
+    def material(self) -> Material:
+        """The material of the entity, which its options hold."""
+        return self.options.material
 
 
 class Entity(RBC):
@@ -39,6 +45,8 @@ class Entity(RBC):
         material,
         surface,
         name: str | None = None,
+        *,
+        options: gs.entities.BaseEntity,
     ):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
@@ -53,6 +61,7 @@ class Entity(RBC):
         self._material = material
         self._morph = morph
         self._surface = surface
+        self._options = options
         self._sim = scene.sim
 
         # Set entity name (auto-generate if not provided)
@@ -111,6 +120,16 @@ class Entity(RBC):
         kind of entity gains export support by returning its description here.
         """
         return None
+
+    @property
+    def options(self) -> gs.entities.BaseEntity:
+        """The options this entity was constructed from, as authored.
+
+        Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
+        is. The entity holds a copy of the options passed to 'Scene.add_entity', which may change or construct other
+        entities afterwards. What the scene resolved from them lives in 'desc'.
+        """
+        return self._options.model_copy(deep=True)
 
     @property
     def material(self):
