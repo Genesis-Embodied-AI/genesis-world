@@ -95,21 +95,26 @@ def test_position_control(show_viewer):
     scene.rigid_solver.dyn_info.dofs.armature.from_numpy(dofs_armature)
 
     force_range = qd_to_torch(scene.rigid_solver.dyn_info.dofs.force_range)
-    err_int = torch.zeros_like(MOTORS_POS_TARGET)
+    force_int = torch.zeros_like(MOTORS_POS_TARGET)
     for i in range(200):
+        if i == 100:
+            robot.control_dofs_position_velocity(
+                MOTORS_POS_TARGET[7], MOTORS_VEL_TARGET[7], dofs_idx_local=[7], envs_idx=0
+            )
+            is_vel_ctrl[7] = False
         dofs_pos = robot.get_qpos(envs_idx=1)
         dofs_vel = robot.get_dofs_velocity(envs_idx=1)
         pos_err = MOTORS_POS_TARGET - dofs_pos
         vel_err = MOTORS_VEL_TARGET - dofs_vel
         err = torch.where(is_vel_ctrl, vel_err, pos_err)
         dofs_torque_base = torch.where(is_vel_ctrl, 0.0, MOTORS_KP * pos_err) + MOTORS_KD * vel_err
-        err_int_next = err_int + err * scene.sim._substep_dt
-        dofs_torque = dofs_torque_base + MOTORS_KI * err_int_next
+        force_int_next = force_int + MOTORS_KI * err * scene.sim._substep_dt
+        dofs_torque = dofs_torque_base + force_int_next
         is_winding_up = ((dofs_torque > force_range[:, 1, 1]) & (err > 0.0)) | (
             (dofs_torque < force_range[:, 1, 0]) & (err < 0.0)
         )
-        err_int = torch.where(is_winding_up, err_int, err_int_next)
-        dofs_torque = dofs_torque_base + MOTORS_KI * err_int
+        force_int = torch.where(is_winding_up, force_int, force_int_next)
+        dofs_torque = dofs_torque_base + force_int
         dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()
@@ -169,8 +174,8 @@ def test_reset_control(n_envs, robot_path):
         scene.step()
     late_control_force = robot.get_dofs_control_force()
 
-    # The integral of the position error restarts from zero on reset, and on a pose jump that zeroes the velocity, so the
-    # first step after either reproduces the first step above. An environment left alone keeps its integral.
+    # The integral term restarts from zero on reset, and on a pose jump that zeroes the velocity, so the
+    # first step after either reproduces the first step above. An environment left alone keeps its integral term.
     envs_idx = [0] if n_envs > 0 else None
     scene.reset()
     robot.set_dofs_position(qpos, zero_velocity=False)
