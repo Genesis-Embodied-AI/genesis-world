@@ -3015,11 +3015,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=True)
 
     def get_AABB(self, entities_idx=None, envs_idx=None):
-        from genesis.engine.couplers import LegacyCoupler
-
-        if not isinstance(self.sim.coupler, LegacyCoupler):
-            gs.raise_exception("Method only supported when using 'LegacyCoupler' coupler type.")
-
         aabb_min = qd_to_torch(self.dyn_state.geoms.aabb_min, envs_idx, transpose=True)
         aabb_max = qd_to_torch(self.dyn_state.geoms.aabb_max, envs_idx, transpose=True)
 

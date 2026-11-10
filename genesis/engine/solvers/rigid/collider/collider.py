@@ -21,7 +21,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
-from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
@@ -1180,13 +1179,12 @@ def func_detection(
     coop_dedup: qd.template(),
     errno: qd.Tensor,
 ):
-    """Update the geom bounding boxes, then run the broad phase, the narrow phase and the contact pruning.
+    """Run the broad phase, the narrow phase and the contact pruning on the geom boxes of the forward kinematics.
 
-    has_possible_pairs is False when no geom pair can collide, in which case only the bounding boxes are updated.
-    split_narrowphase runs the convex narrow phase as a contact 0 pass followed by a multi-contact pass, on their own
-    scratch states. coop_dedup prunes the contacts cooperatively.
+    has_possible_pairs is False when no geom pair can collide, in which case nothing runs. split_narrowphase runs the
+    convex narrow phase as a contact 0 pass followed by a multi-contact pass, on their own scratch states. coop_dedup
+    prunes the contacts cooperatively.
     """
-    func_update_geom_aabbs(geoms_init_AABB, dyn_state, dyn_info, rigid_config)
     if qd.static(has_possible_pairs):
         func_broad_phase(
             geoms_init_AABB,

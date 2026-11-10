@@ -1103,9 +1103,26 @@ def test_inertial_property_setters(sliding_ball_pair, xml_path, implicit_inertia
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 3])
-def test_axis_aligned_bounding_boxes(n_envs):
-    scene = gs.Scene()
+@pytest.mark.parametrize(
+    "n_envs, coupler_options, enable_collision",
+    [
+        (0, gs.options.LegacyCouplerOptions(), True),
+        (3, gs.options.LegacyCouplerOptions(), False),
+        (3, gs.options.SAPCouplerOptions(), False),
+    ],
+)
+def test_axis_aligned_bounding_boxes(n_envs, coupler_options, enable_collision, show_viewer):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=enable_collision,
+        ),
+        coupler_options=coupler_options,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -3.0, 1.5),
+            camera_lookat=(0.5, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
     scene.add_entity(
         gs.morphs.Plane(
             normal=(0, 0, 1),
@@ -1118,7 +1135,7 @@ def test_axis_aligned_bounding_boxes(n_envs):
             pos=(0.5, 0, 0.05),
         ),
     )
-    scene.add_entity(
+    cylinder = scene.add_entity(
         gs.morphs.Cylinder(
             height=0.8,
             radius=0.06,
@@ -1186,6 +1203,10 @@ def test_axis_aligned_bounding_boxes(n_envs):
 
     robot_vaabb = robot.get_vAABB()
     assert_allclose(robot_vaabb, robot_aabb, atol=1e-3)
+
+    # The boxes of the solver follow the geoms of a falling body after a step, whatever the coupler and the collisions
+    scene.step()
+    assert_allclose(cylinder.get_AABB(allow_fast_approx=True), cylinder.get_AABB(), tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
