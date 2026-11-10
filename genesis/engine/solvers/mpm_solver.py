@@ -15,10 +15,10 @@ from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
-from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.data import GEOMS, LINKS, GeomsInfo, GeomsState, LinksState, RigidInfo
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
-from genesis.grad.bridge import no_grad, register_custom_backward
+from genesis.grad.bridge import no_grad, register_custom_backward, reversed_with
 from genesis.options.solvers import MPMOptions
 from genesis.utils.data import (
     ENVS,
@@ -33,7 +33,12 @@ from genesis.utils.data import (
     iter_data,
     opt_in,
 )
-from genesis.utils.geom import PARTICLES
+from genesis.utils.geom import (
+    PARTICLES,
+    SpatialHashGrid,
+    func_sort_particles_by_slot,
+    hash_grid_sizes,
+)
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
 from genesis.utils.sdf import SDFInfo
 
@@ -55,38 +60,53 @@ class MPMErrorCode(ErrorCode):
 GRID_X = Size("grid_x")
 GRID_Y = Size("grid_y")
 GRID_Z = Size("grid_z")
+# The tiles of cells of the grid, and the groups of environments a warp gathers the cells of a tile for (see MPMTiles)
+TILES = Size("tiles")
+ENVS_GROUPS = Size("envs_groups")
+# The bins of the exact accumulation of the coupling forces of the links (see MPMCouplingForces)
+COUPLING_FORCE_BINS = Size("coupling_force_bins")
 # The arrays of the sparse reset of the grid, which the backward pass leaves out (see MPMGrid)
 SPARSE_GRID_RESET = "sparse_grid_reset"
 # The arrays of the compatible particle-in-cell (CPIC) separation of the particles from the cells by the rigid geoms
 CPIC = "cpic"
+# The arrays of the deterministic transfer of the particles to the grid (see MPMConfig)
+DETERMINISTIC = "deterministic"
+# The arrays the backward pass alone reads
+GRAD = "grad"
 
 
 class MPMParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
-    """
-    Runtime state of the material point method (MPM) particles, one value per particle and environment.
-
-    `C` is the affine velocity field, `F` the deformation gradient, `Jp` the plastic volume ratio and `actu` the
-    actuation of the muscles. A substep writes the state it integrates in the `*_next` arrays, which it copies to the
-    state once over (see 'kernel_copy_next_to_curr'). `F_tmp` is the deformation gradient advected over the substep,
-    before the plasticity of the material applies, and `U`, `S`, `V` its singular value decomposition.
-    """
+    """Runtime state of the material point method (MPM) particles, one value per particle and environment."""
 
     pos: qd.Tensor = field((float, 3), grad=True)
     vel: qd.Tensor = field((float, 3), grad=True)
+    # The affine velocity field
     C: qd.Tensor = field((float, (3, 3)), grad=True)
+    # The deformation gradient
     F: qd.Tensor = field((float, (3, 3)), grad=True)
+    # The state a substep integrates, which it copies to the state once over (see 'kernel_copy_next_to_curr')
     pos_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
     vel_next: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True)
     C_next: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
     F_next: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
     Jp_next: qd.Tensor = field(float, kind=DataKind.SCRATCH, grad=True)
+    # The deformation gradient advected over the substep, before the plasticity of the material applies, and its
+    # singular value decomposition
     F_tmp: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
     U: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
     V: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
     S: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True)
+    # The actuation of the muscles
     actu: qd.Tensor = field(float, grad=True)
+    # The plastic volume ratio
     Jp: qd.Tensor = field(float, grad=True)
     is_active: qd.Tensor = field(bool)
+    # The momentum per unit offset a particle gives the cells of its stencil, its stress and affine velocity together
+    affine: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True, labels=DETERMINISTIC)
+    # The velocity a particle gathers from the grid, before the boundary applies (see kernel_transfer_grid_to_particles)
+    vel_tmp: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True, labels=GRAD)
+    # The flat index of the lowest cell of the stencil of a particle, which tells apart the cells sharing a slot
+    cell_idx: qd.Tensor = field(int, kind=DataKind.SCRATCH, labels=DETERMINISTIC)
 
 
 class MPMParticlesInfo(Data, kind=DataKind.INFO, shape=(PARTICLES,)):
@@ -137,35 +157,64 @@ class MPMParticlesCPIC(Data, kind=DataKind.STATE, shape=(PARTICLES, GEOMS, ENVS)
     cell_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH)
 
 
+class MPMTiles(Data, kind=DataKind.DERIVED, shape=(TILES * ENVS_GROUPS,)):
+    """The cubic tiles of cells of the grid that the stencils of the particles cover, by group of environments."""
+
+    # Whether the lowest cell of the stencil of some particle of the group lies in the tile
+    is_occupied: qd.Tensor = field(bool, shape=(TILES, ENVS_GROUPS))
+    # The tiles some stencil of the group covers, `active_tile` being the flat index of each of the `n_active` tiles of
+    # group `active_envs_group`, in no particular order
+    n_active: qd.Tensor = field(int, shape=(1,))
+    active_tile: qd.Tensor = field(int)
+    active_envs_group: qd.Tensor = field(int)
+
+
+class MPMCouplingForces(Data, kind=DataKind.SCRATCH, shape=(LINKS, COUPLING_FORCE_BINS, 6, ENVS)):
+    """The forces and torques the MPM particles and grid apply the rigid links, summed exactly whatever their order."""
+
+    # The low and high 32 bits of the 64-bit integer sum of each bin, the terms of a force or torque component being cut
+    # exactly into multiples of the unit 2^(e + b k) of bin k, e and b being 'coupling_force_bin_exp_min' and
+    # 'coupling_force_bin_bits' of MPMInfo (see func_add_coupling_force). With e = -120, b = 40 and 6 bins, a term below
+    # 2^120 in magnitude adds at most 2^40 to a bin, so a bin holds 2^23 terms per link and substep before it overflows.
+    bins_lo: qd.Tensor = field(int)
+    bins_hi: qd.Tensor = field(int)
+
+
 class MPMState(Data, kind=DataKind.STATE):
     """Runtime state of the material point method (MPM) solver."""
 
     particles: MPMParticles
     grid: MPMGrid
     particles_cpic: MPMParticlesCPIC = field(labels=CPIC)
+    # The particles sorted by the lowest cell of their stencil, a slot of the hash grid hashing each cell
+    hash_grid: SpatialHashGrid = field(labels=DETERMINISTIC)
+    tiles: MPMTiles = field(labels=DETERMINISTIC)
+    coupling_forces: MPMCouplingForces = field(labels=DETERMINISTIC)
 
 
 class MPMInfo(Data, kind=DataKind.CONSTANT):
-    """
-    Model parameters of the material point method (MPM) solver.
-
-    The grid spans the cells from `grid_offset` on, of size `dx`. `particle_volume` is the volume a particle stands for,
-    scaled up by `particle_volume_scale` for numerical robustness, which the masses exchanged with the other solvers
-    divide out. `stress_scale` turns the stress of a particle into the momentum it gives the grid over a substep. `EPS`
-    bounds away from zero the gaps between singular values that the gradient of the decomposition divides by.
-    """
+    """Model parameters of the material point method (MPM) solver."""
 
     particles: MPMParticlesInfo
     boundary: CubeBoundary
     gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO)
     substep_dt: qd.Tensor = field(float, shape=())
+    # The size of a cell of the grid, which spans the cells from `grid_offset` on
     dx: qd.Tensor = field(float, shape=())
     inv_dx: qd.Tensor = field(float, shape=())
     grid_offset: qd.Tensor = field((int, 3), shape=())
+    # The volume a particle stands for, scaled up by `particle_volume_scale` for numerical robustness, which the masses
+    # exchanged with the other solvers divide out
     particle_volume: qd.Tensor = field(float, shape=())
     particle_volume_scale: qd.Tensor = field(float, shape=())
+    # The factor turning the stress of a particle into the momentum it gives the grid over a substep
     stress_scale: qd.Tensor = field(float, shape=())
+    # The bound away from zero of the gaps between singular values that the gradient of the decomposition divides by
     EPS: qd.Tensor = field(float, shape=())
+    # The exponent of the unit of the lowest bin of the exact sums of the coupling forces, and the bits between the
+    # units of two bins (see MPMCouplingForces)
+    coupling_force_bin_exp_min: qd.Tensor = field(int, shape=(), labels=DETERMINISTIC)
+    coupling_force_bin_bits: qd.Tensor = field(int, shape=(), labels=DETERMINISTIC)
 
 
 # TODO: 'scene.reset' restores the state alone, so constraints set after a saved state survive its restore. To revisit,
@@ -195,6 +244,9 @@ class MPMConfig(Config):
     requires_grad: bool
     # Whether the rigid geoms separate the particles from the cells of the grid (see MPMParticlesCPIC)
     is_cpic: bool
+    # Whether the transfer to the grid and the coupling forces sum in a fixed order on GPU, with
+    # `use_deterministic_algorithms` (see kernel_transfer_particles_to_grid and MPMCouplingForces)
+    is_deterministic: bool
 
 
 class MPMData(Data):
@@ -210,7 +262,9 @@ class MPMData(Data):
 
     def __init__(self, solver: "MPMSolver"):
         grid_x, grid_y, grid_z = solver._grid_res.tolist()
-        info_values = {}
+        # See TILE_SIZE and ENVS_GROUP_SIZE in 'func_sort_particles'
+        n_tiles = int(np.prod((solver._grid_res + 3) // 4))
+        values = {}
         unused = {(MPMData.mpm_info, MPMData.mpm_state): True}
         if solver.is_active:
             info_values = dict(
@@ -223,8 +277,17 @@ class MPMData(Data):
                 particle_volume_scale=solver._particle_volume_scale,
                 stress_scale=-solver.substep_dt * solver._particle_volume * 4 * solver._inv_dx * solver._inv_dx,
                 EPS=gs.EPS,
+                coupling_force_bin_exp_min=-120,
+                coupling_force_bin_bits=40,
             )
-            unused = {SPARSE_GRID_RESET: solver._requires_grad, CPIC: not solver.mpm_config.is_cpic}
+            hash_grid_values = dict(cell_size=solver._dx, grid_res=(grid_x, grid_y, grid_z))
+            values = dict(mpm_info=info_values, mpm_state=dict(hash_grid=hash_grid_values))
+            unused = {
+                SPARSE_GRID_RESET: solver._requires_grad,
+                CPIC: not solver.mpm_config.is_cpic,
+                DETERMINISTIC: not solver.mpm_config.is_deterministic,
+                GRAD: not solver._requires_grad,
+            }
         super().__init__(
             sizes=dict(
                 particles=solver._n_particles,
@@ -233,8 +296,14 @@ class MPMData(Data):
                 grid_y=grid_y,
                 grid_z=grid_z,
                 geoms=solver._sim.rigid_solver.n_geoms_,
+                # The slots of the hash grid hash the cells of the grid, one per particle
+                **hash_grid_sizes(max(solver._n_particles, 1)),
+                tiles=n_tiles,
+                envs_groups=(solver._B + 31) // 32,
+                links=solver._sim.rigid_solver.n_links_,
+                coupling_force_bins=6,
             ),
-            values=dict(mpm_info=info_values),
+            values=values,
             # The particles and the cells of the grid keep the environments innermost, as the kernels loop them
             env_first={
                 (
@@ -243,6 +312,7 @@ class MPMData(Data):
                     MPMData.mpm_state.grid.mass,
                     MPMData.mpm_state.grid.vel_in,
                     MPMData.mpm_state.grid.vel_out,
+                    MPMData.mpm_state.hash_grid,
                 ): False
             },
             unused=unused,
@@ -378,6 +448,8 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
             is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
             requires_grad=self._requires_grad,
             is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
+            # The threads of the CPU sum each environment in a fixed order already
+            is_deterministic=gs.use_deterministic_algorithms and gs.backend != gs.cpu,
         )
         self._mpm_materials = MPMMaterials(tuple(self._materials))
 
@@ -494,19 +566,33 @@ Please decrease the simulation timestep or adjust the material parameters."""
             self.mpm_config,
             rigid_solver.collider.collider_config,
             self._mpm_materials,
+            is_backward=False,
         )
 
     def substep_post_coupling(self) -> None:
         rigid_solver = self._sim.rigid_solver
-        kernel_integrate_particles(
-            self.mpm_state,
-            rigid_solver.dyn_state.links,
-            self.mpm_info,
-            rigid_solver.dyn_info.geoms,
-            rigid_solver.rigid_info,
-            self.mpm_config,
-            self._errno,
-        )
+        # With gradient, the advection of the particles reads back the velocity they gathered, which the backward pass
+        # of the gather reverses alone (see kernel_transfer_grid_to_particles_grad)
+        if self._requires_grad:
+            kernel_transfer_grid_to_particles(
+                self.mpm_state,
+                rigid_solver.dyn_state.links,
+                self.mpm_info,
+                rigid_solver.dyn_info.geoms,
+                rigid_solver.rigid_info,
+                self.mpm_config,
+            )
+            kernel_advect_particles(self.mpm_state, self.mpm_info, self._errno)
+        else:
+            kernel_integrate_particles(
+                self.mpm_state,
+                rigid_solver.dyn_state.links,
+                self.mpm_info,
+                rigid_solver.dyn_info.geoms,
+                rigid_solver.rigid_info,
+                self.mpm_config,
+                self._errno,
+            )
 
         # The particle constraints apply once the particles left the grid
         if self._is_constrained:
@@ -867,6 +953,7 @@ def kernel_svd(mpm_state: MPMState, mpm_info: MPMInfo):
             mpm_state.particles.V[i_p, i_b] = V
 
 
+@reversed_with(is_backward=True)
 @qd.kernel
 def kernel_transfer_particles_to_grid(
     mpm_state: MPMState,
@@ -878,15 +965,30 @@ def kernel_transfer_particles_to_grid(
     mpm_config: qd.template(),
     collider_config: qd.template(),
     mpm_materials: qd.template(),
+    is_backward: qd.template(),
 ):
     """
-    Update the deformation of the active particles, then scatter their momentum and mass to the grid.
+    Update the deformation of the active particles, then transfer their momentum and mass to the grid.
 
     The material of each particle updates its deformation gradient and plastic volume ratio into the next state and
     gives its stress, which enters the momentum. Under compatible particle-in-cell (CPIC), a cell separated from a
-    particle by a rigid geom gets nothing from it. Without gradient, the cells first touched are listed for the sparse
-    reset (see MPMGrid).
+    particle by a rigid geom gets nothing from it. A cell in the stencil of a particle held in place gets no momentum,
+    as a boundary condition of the grid. Without gradient, the cells touched are listed for the sparse reset (see
+    MPMGrid).
+
+    The particles scatter into the cells with atomic additions, whose order follows the threads. With
+    `is_deterministic` (see MPMConfig), the particles are sorted instead, and each cell gathers them in a fixed order
+    (see func_gather_particles), which gives the same sums bit for bit from one run to the next and across the
+    environments holding the same particles. The variant autodiff reverses (`is_backward`) scatters, whose reverse
+    accumulates the adjoint of each particle in its own thread.
     """
+    # The bins of the coupling forces start the substep empty, including in the replay of a step by the backward pass,
+    # which restores them to the values a later substep left
+    if qd.static(mpm_config.is_deterministic and not is_backward):
+        for i_l, i_k, i_c, i_b in qd.ndrange(*mpm_state.coupling_forces.bins_lo.shape):
+            mpm_state.coupling_forces.bins_lo[i_l, i_k, i_c, i_b] = 0
+            mpm_state.coupling_forces.bins_hi[i_l, i_k, i_c, i_b] = 0
+
     for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.F))):
         if mpm_state.particles.is_active[i_p, i_b]:
             # The determinant of F_tmp equals that of S, since U and V of the singular value decomposition are proper
@@ -926,50 +1028,211 @@ def kernel_transfer_particles_to_grid(
             )
             mass = mpm_info.particles.mass[i_p]
             affine = mpm_info.stress_scale[None] * stress + mass * mpm_state.particles.C[i_p, i_b]
+            if qd.static(mpm_config.is_deterministic):
+                mpm_state.particles.affine[i_p, i_b] = affine
 
-            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
-            grid_offset = mpm_info.grid_offset[None]
-            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
-                dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
-                weight = gs.qd_float(1.0)
-                for d in qd.static(range(3)):
-                    weight *= w[offset[d], d]
-
-                i_g_sep = -1
-                if qd.static(mpm_config.is_cpic):
-                    # The cell is separated from the particle by the first geom whose sides they lie on differ
-                    cell_pos = (base + offset) * mpm_info.dx[None]
-                    for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
-                        if i_g_sep == -1 and geoms_info.needs_coup[i_g]:
-                            sdf_normal_cell = sdf.sdf_func_normal_world(
-                                i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+            if qd.static(mpm_config.is_cpic or not mpm_config.is_deterministic or is_backward):
+                base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+                grid_offset = mpm_info.grid_offset[None]
+                for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                    i_g_sep = -1
+                    if qd.static(mpm_config.is_cpic):
+                        # The cell is separated from the particle by the first geom whose sides they lie on differ
+                        cell_pos = (base + offset) * mpm_info.dx[None]
+                        for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
+                            if i_g_sep == -1 and geoms_info.needs_coup[i_g]:
+                                sdf_normal_cell = sdf.sdf_func_normal_world(
+                                    i_g, i_b, cell_pos, geoms_state, geoms_info, rigid_info, sdf_info, collider_config
+                                )
+                                if mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b].dot(sdf_normal_cell) < 0:
+                                    i_g_sep = i_g
+                        mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b] = i_g_sep
+                    if qd.static(not mpm_config.is_deterministic or is_backward):
+                        if i_g_sep == -1:
+                            dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
+                            weight = gs.qd_float(1.0)
+                            for d in qd.static(range(3)):
+                                weight *= w[offset[d], d]
+                            cell = base - grid_offset + offset
+                            qd.atomic_add(
+                                mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b],
+                                weight * (mass * mpm_state.particles.vel[i_p, i_b] + affine @ dpos),
                             )
-                            if mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b].dot(sdf_normal_cell) < 0:
-                                i_g_sep = i_g
-                    mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b] = i_g_sep
-                cell = base - grid_offset + offset
-                if i_g_sep == -1:
-                    qd.atomic_add(
-                        mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b],
-                        weight * (mass * mpm_state.particles.vel[i_p, i_b] + affine @ dpos),
-                    )
-                    mass_contrib = weight * mass
-                    mass_prev = qd.atomic_add(mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b], mass_contrib)
-                    # The first contribution of an env to a cell claims the cell in the dirty flag shared by the envs,
-                    # and the first env claiming it lists it (see MPMGrid). The masses are non-negative.
-                    if qd.static(not mpm_config.requires_grad):
-                        if mass_prev <= 0.0 and mass_contrib > 0.0:
-                            dirty_flag_prev = qd.atomic_or(
-                                mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], gs.qd_int(1)
-                            )
-                            if dirty_flag_prev == 0:
-                                i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
-                                grid_y, grid_z = mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]
-                                mpm_state.grid.dirty_list[i_slot] = (cell[0] * grid_y + cell[1]) * grid_z + cell[2]
+                            mass_contrib = weight * mass
+                            mass_prev = qd.atomic_add(mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b], mass_contrib)
+                            # The masses are non-negative, so the first contribution of an env to a cell claims the cell
+                            # in the dirty flag shared by the envs, and the first env claiming it lists it (see MPMGrid)
+                            if qd.static(not mpm_config.requires_grad):
+                                if mass_prev <= 0.0 and mass_contrib > 0.0:
+                                    if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
+                                        i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
+                                        grid_y, grid_z = mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]
+                                        mpm_state.grid.dirty_list[i_slot] = (
+                                            cell[0] * grid_y + cell[1]
+                                        ) * grid_z + cell[2]
+                        # The particles held in place act as boundary conditions of the grid. The zero races with the
+                        # scatter of the other particles, which the variant autodiff reverses defers past it instead.
+                        if qd.static(not is_backward):
+                            if not mpm_info.particles.is_free[i_p]:
+                                cell = base - grid_offset + offset
+                                mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b] = qd.Vector.zero(gs.qd_float, 3)
 
-                # The particles held in place act as boundary conditions of the grid
-                if not mpm_info.particles.is_free[i_p]:
+    if qd.static(mpm_config.is_deterministic and not is_backward):
+        func_sort_particles(mpm_state, mpm_info, mpm_config)
+        func_gather_particles(mpm_state, mpm_info, mpm_config, is_g2p_backward=False)
+    elif qd.static(is_backward):
+        # The particles held in place zero the cells of their stencils once every particle scattered into them
+        for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.F))):
+            if mpm_state.particles.is_active[i_p, i_b] and not mpm_info.particles.is_free[i_p]:
+                base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+                for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                    cell = base - mpm_info.grid_offset[None] + offset
                     mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func
+def func_sort_particles(mpm_state: MPMState, mpm_info: MPMInfo, mpm_config: qd.template()):
+    """
+    Sort the active particles by the lowest cell of their stencil, and list the tiles their stencils cover.
+
+    The particles of a slot of the hash grid follow each other in ascending order of index, the cells sharing a slot
+    telling their particles apart by `cell_idx`. Called at the top level of a kernel, whose loops it runs in parallel
+    (see MPMTiles).
+    """
+    # The cells per side of a tile of the grid, and the environments the lanes of a warp gather a cell for
+    TILE_SIZE = qd.static(4)
+    ENVS_GROUP_SIZE = qd.static(32)
+    grid_res = qd.Vector([mpm_state.grid.mass.shape[0], mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]])
+    tiles_res = (grid_res + TILE_SIZE - 1) // TILE_SIZE
+
+    for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.pos))):
+        i_s = -1
+        i_cell = -1
+        if mpm_state.particles.is_active[i_p, i_b]:
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+            cell = base - mpm_info.grid_offset[None]
+            i_cell = (cell[0] * grid_res[1] + cell[1]) * grid_res[2] + cell[2]
+            i_s = i_cell % mpm_state.hash_grid.slot_size.shape[0]
+            tile = cell // TILE_SIZE
+            i_t = (tile[0] * tiles_res[1] + tile[1]) * tiles_res[2] + tile[2]
+            mpm_state.tiles.is_occupied[i_t, i_b // ENVS_GROUP_SIZE] = True
+        mpm_state.hash_grid.particles_slot[i_p, i_b] = i_s
+        mpm_state.particles.cell_idx[i_p, i_b] = i_cell
+        if i_p == 0 and i_b == 0:
+            mpm_state.tiles.n_active[0] = 0
+
+    func_sort_particles_by_slot(mpm_state.hash_grid)
+
+    # A tile is active when it or a tile below it along some axes holds the lowest cell of a stencil
+    for i_t, i_g in qd.ndrange(*mpm_state.tiles.is_occupied.shape):
+        tile = qd.Vector([i_t // (tiles_res[1] * tiles_res[2]), i_t // tiles_res[2] % tiles_res[1], i_t % tiles_res[2]])
+        is_active = False
+        for i_src in range(8):
+            tile_src = tile - qd.Vector([i_src // 4, i_src // 2 % 2, i_src % 2])
+            if (tile_src >= 0).all():
+                i_t_src = (tile_src[0] * tiles_res[1] + tile_src[1]) * tiles_res[2] + tile_src[2]
+                if mpm_state.tiles.is_occupied[i_t_src, i_g]:
+                    is_active = True
+        if is_active:
+            i_a = qd.atomic_add(mpm_state.tiles.n_active[0], 1)
+            mpm_state.tiles.active_tile[i_a] = i_t
+            mpm_state.tiles.active_envs_group[i_a] = i_g
+
+    for i_t, i_g in qd.ndrange(*mpm_state.tiles.is_occupied.shape):
+        mpm_state.tiles.is_occupied[i_t, i_g] = False
+
+
+@qd.func
+def func_gather_particles(
+    mpm_state: MPMState, mpm_info: MPMInfo, mpm_config: qd.template(), is_g2p_backward: qd.template()
+):
+    """
+    Gather into each cell of the active tiles the mass and momentum of the particles whose stencil covers it.
+
+    With `is_g2p_backward`, the cells add the adjoint of their velocity instead, which the particles give them through
+    the adjoint of the velocity and affine velocity field they gathered (see kernel_transfer_grid_to_particles_grad).
+
+    A thread sums the particles of one cell and environment, cell of its stencil by cell, in ascending order of index
+    within each of them. The lanes of a warp hold the same cell for consecutive environments, which read the same
+    particles at neighbouring addresses while the environments hold them in the same cells. Called at the top level of
+    a kernel, after func_sort_particles.
+    """
+    # See TILE_SIZE and ENVS_GROUP_SIZE in 'func_sort_particles'
+    TILE_SIZE = qd.static(4)
+    ENVS_GROUP_SIZE = qd.static(32)
+    N_TILE_CELLS = qd.static(TILE_SIZE**3)
+    _B = mpm_state.particles.pos.shape[1]
+    grid_res = qd.Vector([mpm_state.grid.mass.shape[0], mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]])
+    tiles_res = (grid_res + TILE_SIZE - 1) // TILE_SIZE
+    for i_flat in range(mpm_state.tiles.n_active[0] * N_TILE_CELLS * ENVS_GROUP_SIZE):
+        i_a = i_flat // (ENVS_GROUP_SIZE * N_TILE_CELLS)
+        i_c = i_flat // ENVS_GROUP_SIZE % N_TILE_CELLS
+        i_b = mpm_state.tiles.active_envs_group[i_a] * ENVS_GROUP_SIZE + i_flat % ENVS_GROUP_SIZE
+        i_t = mpm_state.tiles.active_tile[i_a]
+        tile = qd.Vector([i_t // (tiles_res[1] * tiles_res[2]), i_t // tiles_res[2] % tiles_res[1], i_t % tiles_res[2]])
+        cell = tile * TILE_SIZE + qd.Vector(
+            [i_c // (TILE_SIZE * TILE_SIZE), i_c // TILE_SIZE % TILE_SIZE, i_c % TILE_SIZE]
+        )
+        if i_b < _B and (cell < grid_res).all():
+            mass_cell = gs.qd_float(0.0)
+            momentum = qd.Vector.zero(gs.qd_float, 3)
+            is_fixed = False
+            for i_o in range(27):
+                offset = qd.Vector([i_o // 9, i_o // 3 % 3, i_o % 3])
+                base = cell - offset
+                if (base >= 0).all():
+                    i_cell = (base[0] * grid_res[1] + base[1]) * grid_res[2] + base[2]
+                    i_s = i_cell % mpm_state.hash_grid.slot_size.shape[0]
+                    i_r_start = mpm_state.hash_grid.slot_start[i_s, i_b]
+                    for i_r in range(i_r_start, i_r_start + mpm_state.hash_grid.slot_size[i_s, i_b]):
+                        i_p = mpm_state.hash_grid.particles_idx[i_r, i_b]
+                        if mpm_state.particles.cell_idx[i_p, i_b] == i_cell:
+                            _, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+                            weight = gs.qd_float(1.0)
+                            for d in qd.static(range(3)):
+                                weight *= qd.select(
+                                    offset[d] == 0, w[0, d], qd.select(offset[d] == 1, w[1, d], w[2, d])
+                                )
+                            if qd.static(is_g2p_backward):
+                                dpos = offset.cast(gs.qd_float) - fx
+                                momentum += weight * (
+                                    mpm_state.particles.vel_tmp.grad[i_p, i_b]
+                                    + 4 * mpm_info.inv_dx[None] * (mpm_state.particles.C_next.grad[i_p, i_b] @ dpos)
+                                )
+                            else:
+                                is_separated = False
+                                if qd.static(mpm_config.is_cpic):
+                                    i_g_sep = mpm_state.particles_cpic.cell_geom_idx[
+                                        i_p, offset[0], offset[1], offset[2], i_b
+                                    ]
+                                    is_separated = i_g_sep != -1
+                                if not is_separated:
+                                    mass = mpm_info.particles.mass[i_p]
+                                    dpos = (offset.cast(gs.qd_float) - fx) * mpm_info.dx[None]
+                                    momentum += weight * (
+                                        mass * mpm_state.particles.vel[i_p, i_b]
+                                        + mpm_state.particles.affine[i_p, i_b] @ dpos
+                                    )
+                                    mass_cell += weight * mass
+                                if not mpm_info.particles.is_free[i_p]:
+                                    is_fixed = True
+            if qd.static(is_g2p_backward):
+                mpm_state.grid.vel_out.grad[cell[0], cell[1], cell[2], i_b] = (
+                    mpm_state.grid.vel_out.grad[cell[0], cell[1], cell[2], i_b] + momentum
+                )
+            else:
+                if is_fixed:
+                    momentum = qd.Vector.zero(gs.qd_float, 3)
+                mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b] = mass_cell
+                mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b] = momentum
+                # The first env holding mass in a cell lists it (see MPMGrid)
+                if qd.static(not mpm_config.requires_grad):
+                    if mass_cell > 0.0:
+                        if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
+                            i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
+                            mpm_state.grid.dirty_list[i_slot] = (cell[0] * grid_res[1] + cell[1]) * grid_res[2] + cell[
+                                2
+                            ]
 
 
 @qd.func
@@ -1029,7 +1292,8 @@ def func_point_vel_after_two_way_collision_with_rigid_geom(
     rigid_info: RigidInfo,
 ):
     """
-    Return the velocity of a point of the given mass colliding with a rigid geom, its momentum change pushing the link.
+    Return the velocity of a point of the given mass colliding with a rigid geom, and the force its momentum change
+    applies the link of the geom, if it collides.
 
     The normal of the geom and its influence at the point are given (see
     'func_point_vel_after_collision_with_rigid_geom').
@@ -1038,12 +1302,167 @@ def func_point_vel_after_two_way_collision_with_rigid_geom(
     vel_new, is_colliding = func_point_vel_after_collision_with_rigid_geom(
         i_g, vel, vel_rigid, normal_rigid, influence, geoms_info, rigid_info
     )
-    if is_colliding:
-        # Compute delta momentum and apply to rigid body.
-        delta_mv = mass * (vel_new - vel)
-        force = -delta_mv / rigid_info.substep_dt[None]
-        func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
-    return vel_new
+    force = -mass * (vel_new - vel) / rigid_info.substep_dt[None]
+    return vel_new, force, is_colliding
+
+
+@qd.func
+def func_add_coupling_force(
+    i_l: int,
+    i_b: int,
+    pos: qd.types.vector(3),
+    force: qd.types.vector(3),
+    links_state: LinksState,
+    coupling_forces: MPMCouplingForces,
+    mpm_info: MPMInfo,
+    is_exact: qd.template(),
+):
+    """
+    Apply a force at a point of a rigid link, its reaction on the MPM particles or grid.
+
+    With `is_exact`, the force and its torque add exactly to integer bins (see MPMCouplingForces), whatever the order
+    of the terms, which kernel_flush_coupling_forces adds to the link. The cut of a term into bins is exact: from the
+    highest bin down, the integer part of the term at the scale of a bin holds the leading bits of its mantissa, and the
+    remainder the trailing ones. A bin adds its 64 bits as two 32-bit halves, the low half carrying into the high one.
+    """
+    if qd.static(is_exact):
+        torque = (pos - links_state.root_COM[i_l, i_b]).cross(force)
+        # A runtime loop over the components keeps a single inlined copy of the bin updates
+        for i_c in range(6):
+            wrench = qd.select(i_c < 3, torque, force)
+            i_d = i_c % 3
+            remainder = -qd.select(i_d == 0, wrench[0], qd.select(i_d == 1, wrench[1], wrench[2]))
+            for k_ in range(coupling_forces.bins_lo.shape[1]):
+                k = coupling_forces.bins_lo.shape[1] - 1 - k_
+                scale = qd.pow(
+                    2.0,
+                    qd.cast(
+                        mpm_info.coupling_force_bin_exp_min[None] + mpm_info.coupling_force_bin_bits[None] * k,
+                        gs.qd_float,
+                    ),
+                )
+                count = qd.cast(remainder / scale, qd.i64)
+                if count != 0:
+                    remainder = remainder - qd.cast(count, gs.qd_float) * scale
+                    count_lo = qd.cast(count & qd.i64(0xFFFFFFFF), qd.u32)
+                    lo_prev = qd.cast(
+                        qd.atomic_add(coupling_forces.bins_lo[i_l, k, i_c, i_b], qd.cast(count_lo, gs.qd_int)), qd.u32
+                    )
+                    carry = qd.select(lo_prev + count_lo < lo_prev, 1, 0)
+                    qd.atomic_add(coupling_forces.bins_hi[i_l, k, i_c, i_b], qd.cast(count >> 32, gs.qd_int) + carry)
+    else:
+        func_apply_coupling_force(i_l, i_b, pos, force, links_state)
+
+
+@no_grad
+@qd.kernel(fastcache=True)
+def kernel_flush_coupling_forces(links_state: LinksState, coupling_forces: MPMCouplingForces, mpm_info: MPMInfo):
+    """Add to the coupling forces of the links the exact sums of their bins, from the highest bin down."""
+    for i_l, i_b in qd.ndrange(coupling_forces.bins_lo.shape[0], coupling_forces.bins_lo.shape[3]):
+        terms = qd.Vector.zero(gs.qd_float, 6)
+        for i_c in qd.static(range(6)):
+            for k_ in range(coupling_forces.bins_lo.shape[1]):
+                k = coupling_forces.bins_lo.shape[1] - 1 - k_
+                count = (qd.cast(coupling_forces.bins_hi[i_l, k, i_c, i_b], qd.i64) << 32) | qd.cast(
+                    qd.cast(coupling_forces.bins_lo[i_l, k, i_c, i_b], qd.u32), qd.i64
+                )
+                scale = qd.pow(
+                    2.0,
+                    qd.cast(
+                        mpm_info.coupling_force_bin_exp_min[None] + mpm_info.coupling_force_bin_bits[None] * k,
+                        gs.qd_float,
+                    ),
+                )
+                terms[i_c] = terms[i_c] + qd.cast(count, gs.qd_float) * scale
+        links_state.cfrc_coupling_ang[i_l, i_b] = links_state.cfrc_coupling_ang[i_l, i_b] + qd.Vector(
+            [terms[0], terms[1], terms[2]]
+        )
+        links_state.cfrc_coupling_vel[i_l, i_b] = links_state.cfrc_coupling_vel[i_l, i_b] + qd.Vector(
+            [terms[3], terms[4], terms[5]]
+        )
+
+
+@qd.func
+def func_gather_grid_velocity(
+    i_p: int,
+    i_b: int,
+    mpm_state: MPMState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    mpm_config: qd.template(),
+):
+    """
+    Return the velocity and the affine velocity field an active particle gathers from the cells of its stencil.
+
+    Under compatible particle-in-cell (CPIC), a cell separated from the particle by a rigid geom gives it the velocity
+    of the collision of the particle with the geom instead, which pushes the link of the geom (see
+    'func_point_vel_after_two_way_collision_with_rigid_geom').
+    """
+    inv_dx = mpm_info.inv_dx[None]
+    base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+    vel = qd.Vector.zero(gs.qd_float, 3)
+    C = qd.Matrix.zero(gs.qd_float, 3, 3)
+    # A runtime loop over the cells of the stencil keeps a single inlined copy of the collision with the rigid geoms
+    for i_o in range(27):
+        offset = qd.Vector([i_o // 9, i_o // 3 % 3, i_o % 3])
+        dpos = offset.cast(gs.qd_float) - fx
+        cell = base - mpm_info.grid_offset[None] + offset
+        grid_vel = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
+        weight = gs.qd_float(1.0)
+        for d in qd.static(range(3)):
+            weight *= qd.select(offset[d] == 0, w[0, d], qd.select(offset[d] == 1, w[1, d], w[2, d]))
+
+        if qd.static(mpm_config.is_cpic):
+            i_g_sep = mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b]
+            if i_g_sep != -1:
+                pos = mpm_state.particles.pos[i_p, i_b]
+                grid_vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+                    i_g_sep,
+                    i_b,
+                    pos,
+                    mpm_state.particles.vel[i_p, i_b],
+                    mass=mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
+                    normal_rigid=mpm_state.particles_cpic.rigid_normal[i_p, i_g_sep, i_b],
+                    influence=1.0,
+                    links_state=links_state,
+                    geoms_info=geoms_info,
+                    rigid_info=rigid_info,
+                )
+                if is_colliding:
+                    func_add_coupling_force(
+                        geoms_info.link_idx[i_g_sep],
+                        i_b,
+                        pos,
+                        force,
+                        links_state,
+                        mpm_state.coupling_forces,
+                        mpm_info,
+                        is_exact=mpm_config.is_deterministic,
+                    )
+
+        vel += weight * grid_vel
+        C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
+    return vel, C
+
+
+@qd.func
+def func_advect_particle(
+    i_p: int, i_b: int, vel: qd.types.vector(3), mpm_state: MPMState, mpm_info: MPMInfo, errno: qd.Tensor
+):
+    """Advect an active particle by the velocity it gathered from the grid into the next state, within the boundary."""
+    # A velocity that is not finite flags its env, whose state kernel_copy_next_to_curr leaves as it was
+    if not qd_isfinite(vel):
+        errno[i_b] = errno[i_b] | MPMErrorCode.INVALID_VELOCITY_NAN
+
+    pos = mpm_state.particles.pos[i_p, i_b] + mpm_info.substep_dt[None] * vel
+
+    # The boundary keeps an exploding simulation from reading cells out of the grid
+    pos, vel = func_impose_cube_boundary(pos, vel, mpm_info.boundary)
+
+    mpm_state.particles.vel_next[i_p, i_b] = vel
+    mpm_state.particles.pos_next[i_p, i_b] = pos
 
 
 @qd.kernel
@@ -1059,62 +1478,130 @@ def kernel_integrate_particles(
     """
     Gather the velocity of the grid back to the active particles and advect them into the next state.
 
-    Under compatible particle-in-cell (CPIC), a cell separated from a particle by a rigid geom gives it the velocity of
-    the collision of the particle with the geom instead (see 'func_point_vel_after_two_way_collision_with_rigid_geom').
     The inactive particles carry their state unchanged to the next one.
     """
     for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
         if mpm_state.particles.is_active[i_p, i_b]:
-            inv_dx = mpm_info.inv_dx[None]
-            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
-            grid_offset = mpm_info.grid_offset[None]
-            new_vel = qd.Vector.zero(gs.qd_float, 3)
-            new_C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
-                dpos = offset.cast(gs.qd_float) - fx
-                cell = base - grid_offset + offset
-                grid_vel = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
-                weight = gs.qd_float(1.0)
-                for d in qd.static(range(3)):
-                    weight *= w[offset[d], d]
-
-                if qd.static(mpm_config.is_cpic):
-                    i_g_sep = mpm_state.particles_cpic.cell_geom_idx[i_p, offset[0], offset[1], offset[2], i_b]
-                    if i_g_sep != -1:
-                        grid_vel = func_point_vel_after_two_way_collision_with_rigid_geom(
-                            i_g_sep,
-                            i_b,
-                            mpm_state.particles.pos[i_p, i_b],
-                            mpm_state.particles.vel[i_p, i_b],
-                            mass=mpm_info.particles.mass[i_p] * weight / mpm_info.particle_volume_scale[None],
-                            normal_rigid=mpm_state.particles_cpic.rigid_normal[i_p, i_g_sep, i_b],
-                            influence=1.0,
-                            links_state=links_state,
-                            geoms_info=geoms_info,
-                            rigid_info=rigid_info,
-                        )
-
-                new_vel += weight * grid_vel
-                new_C += 4 * inv_dx * weight * grid_vel.outer_product(dpos)
-
-            # A velocity that is not finite flags its env, whose state kernel_copy_next_to_curr leaves as it was
-            if not qd_isfinite(new_vel):
-                errno[i_b] = errno[i_b] | MPMErrorCode.INVALID_VELOCITY_NAN
-
-            new_pos = mpm_state.particles.pos[i_p, i_b] + mpm_info.substep_dt[None] * new_vel
-
-            # The boundary keeps an exploding simulation from reading cells out of the grid
-            new_pos, new_vel = func_impose_cube_boundary(new_pos, new_vel, mpm_info.boundary)
-
-            mpm_state.particles.vel_next[i_p, i_b] = new_vel
-            mpm_state.particles.C_next[i_p, i_b] = new_C
-            mpm_state.particles.pos_next[i_p, i_b] = new_pos
+            vel, C = func_gather_grid_velocity(
+                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config
+            )
+            mpm_state.particles.C_next[i_p, i_b] = C
+            func_advect_particle(i_p, i_b, vel, mpm_state, mpm_info, errno)
         else:
             mpm_state.particles.vel_next[i_p, i_b] = mpm_state.particles.vel[i_p, i_b]
             mpm_state.particles.pos_next[i_p, i_b] = mpm_state.particles.pos[i_p, i_b]
             mpm_state.particles.C_next[i_p, i_b] = mpm_state.particles.C[i_p, i_b]
             mpm_state.particles.F_next[i_p, i_b] = mpm_state.particles.F[i_p, i_b]
             mpm_state.particles.Jp_next[i_p, i_b] = mpm_state.particles.Jp[i_p, i_b]
+
+
+@qd.kernel
+def kernel_transfer_grid_to_particles_grad(
+    mpm_state: MPMState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    mpm_config: qd.template(),
+):
+    """
+    Reverse the gather of the velocity of the grid, consuming the adjoint of what it wrote like autodiff.
+
+    Each cell of the grid sums the adjoint of its velocity from the particles whose stencil covers it, gathered in a
+    fixed order with `is_deterministic` (see func_gather_particles) and added by each particle otherwise. Each particle
+    adds the adjoint of its position, through the weights of its stencil, in its own thread.
+    """
+    if qd.static(mpm_config.is_deterministic):
+        func_sort_particles(mpm_state, mpm_info, mpm_config)
+        func_gather_particles(mpm_state, mpm_info, mpm_config, is_g2p_backward=True)
+
+    for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
+        if mpm_state.particles.is_active[i_p, i_b]:
+            inv_dx = mpm_info.inv_dx[None]
+            vel_grad = mpm_state.particles.vel_tmp.grad[i_p, i_b]
+            C_grad = mpm_state.particles.C_next.grad[i_p, i_b]
+            base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
+            # The derivatives of the weights of the quadratic B-spline along each axis, one row per cell offset
+            dw = qd.Matrix.rows([fx - 1.5, -2.0 * (fx - 1.0), fx - 0.5])
+            fx_grad = qd.Vector.zero(gs.qd_float, 3)
+            for offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
+                dpos = offset.cast(gs.qd_float) - fx
+                cell = base - mpm_info.grid_offset[None] + offset
+                grid_vel = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
+                weight = gs.qd_float(1.0)
+                for d in qd.static(range(3)):
+                    weight *= w[offset[d], d]
+                weight_grad = qd.Vector(
+                    [
+                        dw[offset[0], 0] * w[offset[1], 1] * w[offset[2], 2],
+                        w[offset[0], 0] * dw[offset[1], 1] * w[offset[2], 2],
+                        w[offset[0], 0] * w[offset[1], 1] * dw[offset[2], 2],
+                    ]
+                )
+                C_grad_dpos = C_grad @ dpos
+                fx_grad += (grid_vel.dot(vel_grad) + 4 * inv_dx * grid_vel.dot(C_grad_dpos)) * weight_grad
+                fx_grad -= 4 * inv_dx * weight * (C_grad.transpose() @ grid_vel)
+                if qd.static(not mpm_config.is_deterministic):
+                    qd.atomic_add(
+                        mpm_state.grid.vel_out.grad[cell[0], cell[1], cell[2], i_b],
+                        weight * (vel_grad + 4 * inv_dx * C_grad_dpos),
+                    )
+            mpm_state.particles.pos.grad[i_p, i_b] = mpm_state.particles.pos.grad[i_p, i_b] + inv_dx * fx_grad
+            mpm_state.particles.vel_tmp.grad[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        else:
+            mpm_state.particles.C.grad[i_p, i_b] = (
+                mpm_state.particles.C.grad[i_p, i_b] + mpm_state.particles.C_next.grad[i_p, i_b]
+            )
+            mpm_state.particles.F.grad[i_p, i_b] = (
+                mpm_state.particles.F.grad[i_p, i_b] + mpm_state.particles.F_next.grad[i_p, i_b]
+            )
+            mpm_state.particles.Jp.grad[i_p, i_b] = (
+                mpm_state.particles.Jp.grad[i_p, i_b] + mpm_state.particles.Jp_next.grad[i_p, i_b]
+            )
+            mpm_state.particles.F_next.grad[i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            mpm_state.particles.Jp_next.grad[i_p, i_b] = 0.0
+        mpm_state.particles.C_next.grad[i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+
+# The gather is reversed by hand, which reduces the adjoint of the cells of the grid in a fixed order where autodiff
+# would add it with atomic additions. The backward takes the arguments of the launch.
+@register_custom_backward(kernel_transfer_grid_to_particles_grad)
+@qd.kernel
+def kernel_transfer_grid_to_particles(
+    mpm_state: MPMState,
+    links_state: LinksState,
+    mpm_info: MPMInfo,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    mpm_config: qd.template(),
+):
+    """
+    Gather the velocity of the grid back to the active particles, ahead of their advection (kernel_advect_particles).
+
+    The inactive particles carry their affine velocity field, deformation and plastic volume ratio to the next state.
+    """
+    for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
+        if mpm_state.particles.is_active[i_p, i_b]:
+            vel, C = func_gather_grid_velocity(
+                i_p, i_b, mpm_state, links_state, mpm_info, geoms_info, rigid_info, mpm_config
+            )
+            mpm_state.particles.vel_tmp[i_p, i_b] = vel
+            mpm_state.particles.C_next[i_p, i_b] = C
+        else:
+            mpm_state.particles.C_next[i_p, i_b] = mpm_state.particles.C[i_p, i_b]
+            mpm_state.particles.F_next[i_p, i_b] = mpm_state.particles.F[i_p, i_b]
+            mpm_state.particles.Jp_next[i_p, i_b] = mpm_state.particles.Jp[i_p, i_b]
+
+
+@qd.kernel(fastcache=True)
+def kernel_advect_particles(mpm_state: MPMState, mpm_info: MPMInfo, errno: qd.Tensor):
+    """Advect the active particles by the velocity they gathered from the grid, the inactive ones staying in place."""
+    for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.is_active))):
+        if mpm_state.particles.is_active[i_p, i_b]:
+            func_advect_particle(i_p, i_b, mpm_state.particles.vel_tmp[i_p, i_b], mpm_state, mpm_info, errno)
+        else:
+            mpm_state.particles.vel_next[i_p, i_b] = mpm_state.particles.vel[i_p, i_b]
+            mpm_state.particles.pos_next[i_p, i_b] = mpm_state.particles.pos[i_p, i_b]
 
 
 @qd.kernel(fastcache=True)

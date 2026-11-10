@@ -865,8 +865,8 @@ def func_apply_coupling_force(
     link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: LinksState
 ):
     torque = (pos - links_state.root_COM[link_idx, env_idx]).cross(force)
-    links_state.cfrc_coupling_ang[link_idx, env_idx] -= torque
-    links_state.cfrc_coupling_vel[link_idx, env_idx] -= force
+    qd.atomic_sub(links_state.cfrc_coupling_ang[link_idx, env_idx], torque)
+    qd.atomic_sub(links_state.cfrc_coupling_vel[link_idx, env_idx], force)
 
 
 @qd.kernel(fastcache=True)
