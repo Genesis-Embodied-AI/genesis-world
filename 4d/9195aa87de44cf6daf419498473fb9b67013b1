@@ -1,0 +1,57 @@
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_ad14364e24d297 106
+genesis/__init__.py
+  s_c62ec9da443b15::t_d2720a647c34d3 524
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_5f75af0a0599e7 180-189,324
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_acf2977479113e 560-561,565
+genesis/ext/_trimesh_patch.py
+  s_c62ec9da443b15::t_4ef28385fd8f2f 282,307,335-336,338,376
+genesis/ext/urdfpy/urdf.py
+  s_c62ec9da443b15::t_227c6c2b1fbeda 645,652
+genesis/ext/urdfpy/utils.py
+  s_c62ec9da443b15::t_64b6d26746247b 229,240,242
+genesis/options/entities.py
+  s_c62ec9da443b15::t_9cc158102c073d 16,527
+genesis/utils/gltf.py
+  s_c62ec9da443b15::t_41fb5b7c7844dc 447
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_34293ebe5a4d16 812-816,819-820,837-838,844-855,857
+genesis/utils/mjcf.py
+  s_c62ec9da443b15::t_e0951edfbec329 526-527
+genesis/utils/urdf.py
+  s_c62ec9da443b15::t_d482fe99f2a607 206
+genesis/utils/usd/usd_context.py
+  s_c62ec9da443b15::t_a5734cc208b4bf 170,320,323
+genesis/utils/usd/usd_geometry.py
+  s_c62ec9da443b15::t_236b2a89d427f3 68,122,125,132,190
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_e6758622fdb135 99-101
+tests/core/test_entity_options.py
+  s_6c41c27d41ea92::t_f4bf9040dc566b 36,297,299,301,303-304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4d9195aa87de44cf6daf419498473fb9b67013b1",
+  "prompts": {},
+  "sessions": {
+    "s_6c41c27d41ea92": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a5d0a666a4e672b91",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
