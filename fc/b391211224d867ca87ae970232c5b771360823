@@ -1,0 +1,25 @@
+genesis/engine/dynamic_texture.py
+  s_c62ec9da443b15::t_568cfd3806cf61 10
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_568cfd3806cf61 326,386
+genesis/__init__.py
+  s_c62ec9da443b15::t_568cfd3806cf61 506-507
+genesis/constants.py
+  s_c62ec9da443b15::t_568cfd3806cf61 210-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fcb391211224d867ca87ae970232c5b771360823",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

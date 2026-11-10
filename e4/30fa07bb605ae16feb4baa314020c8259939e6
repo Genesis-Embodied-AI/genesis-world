@@ -1,0 +1,57 @@
+genesis/__init__.py
+  s_c62ec9da443b15::t_7111c9d6515280 519
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_efe8b8ead09eb3 388-390,497-513,1266-1270,1507-1517
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_8e350a19e05b03 180-182,317,321-330,670-688
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_566618e1716015 554-560,564
+genesis/ext/_trimesh_patch.py
+  s_c62ec9da443b15::t_ee7c32129e63bf 282-286,311,339-340,342,380
+genesis/ext/urdfpy/urdf.py
+  s_c62ec9da443b15::t_ced9ab3b518f6a 645-646,653
+genesis/ext/urdfpy/utils.py
+  s_c62ec9da443b15::t_f3fd7d9d45eaa0 229,236-238,243,245
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_679a0c420ca926 6,46
+genesis/options/entities.py
+  s_c62ec9da443b15::t_ffeb29b474d549 15,190-203,216-221,226-227,243-281,385-391
+genesis/options/indices.py
+  s_c62ec9da443b15::t_a7c2126985ad72 220-262
+genesis/utils/gltf.py
+  s_c62ec9da443b15::t_085e44dedebc2c 447-451
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_a20652aa521bd9 812-819,822-823,840-841,847-855,857
+genesis/utils/mjcf.py
+  s_c62ec9da443b15::t_92b12cf4c6f055 526,533-534
+genesis/utils/urdf.py
+  s_c62ec9da443b15::t_198c63ad5cd537 206-207,211-213,265-270
+genesis/utils/usd/usd_context.py
+  s_c62ec9da443b15::t_b884abc942e322 170-171,305-307,323,325,328,371
+genesis/utils/usd/usd_geometry.py
+  s_c62ec9da443b15::t_89e9ecf6e7c5f2 68,122-124,127-134,141-150,208-215,267,346
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_ca1e13cccffa63 32,37,166-175,202-208,263-272,278-281,334,336-343,345,347-348,351-360,405-414
+tests/parsers/conftest.py
+  s_c62ec9da443b15::t_e19279d4dceebe 37-54
+tests/parsers/test_mesh.py
+  s_c62ec9da443b15::t_a7051ce7949388 299-393
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_cbaf3523f8a40f 99-103,582-587
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e430fa07bb605ae16feb4baa314020c8259939e6",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
