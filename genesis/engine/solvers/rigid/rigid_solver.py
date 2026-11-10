@@ -40,7 +40,7 @@ from ..base_solver import GravityMixin, TimeBasedMixin
 from ..kinematic_solver import KinematicSolver, _fill_base_link_geom_offsets, _offset_world_shift, _select_links_offset
 from .abd.accessor import (
     ConstraintType,
-    kernel_clear_dofs_ctrl_err_int,
+    kernel_clear_dofs_ctrl_force_int,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -2455,27 +2455,26 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
-        # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integrals
-        # of the errors of the position and velocity controllers (see func_ctrl_err_int_next)
+        # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral term
+        # of the controller (see func_ctrl_force_int_next)
         if velocity is None and gs.use_zerocopy:
             mask = (
                 (0, *indices_to_mask(dofs_idx))
                 if self.n_envs == 0
                 else indices_to_mask(envs_idx, dofs_idx, boolean_mask=False)
             )
-            for ctrl_err_int_field in (self.dyn_state.dofs.ctrl_pos_err_int, self.dyn_state.dofs.ctrl_vel_err_int):
-                ctrl_err_int = qd_to_torch(ctrl_err_int_field, transpose=True, copy=False)
-                ctrl_err_int[mask] = 0.0
-        is_err_int_cleared_by_kernel = velocity is None and not gs.use_zerocopy
+            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+            ctrl_force_int[mask] = 0.0
+        is_force_int_cleared_by_kernel = velocity is None and not gs.use_zerocopy
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
-        if self._use_hibernation or is_err_int_cleared_by_kernel:
+        if self._use_hibernation or is_force_int_cleared_by_kernel:
             _, sanitized_dofs_idx, sanitized_envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
             if self._use_hibernation:
                 self._wake_dofs(sanitized_dofs_idx, sanitized_envs_idx)
-            if is_err_int_cleared_by_kernel:
-                kernel_clear_dofs_ctrl_err_int(
+            if is_force_int_cleared_by_kernel:
+                kernel_clear_dofs_ctrl_force_int(
                     sanitized_dofs_idx, sanitized_envs_idx, self.dyn_state, self.rigid_config
                 )
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)

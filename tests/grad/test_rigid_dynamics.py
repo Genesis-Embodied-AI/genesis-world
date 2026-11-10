@@ -241,7 +241,7 @@ def test_per_step_pid_target_grad_matches_fd(n_envs, grad_free_with_revolute, pr
     # steps after the next setter, which overwrites it or switches its dof to a mode that ignores it. The last dimension
     # of a target selects its setter, and the free joint drives its rotation from Euler angle targets. A plain target
     # finally overwrites those of the free joint, while the hinge keeps its last tracked one. Zeroing the velocity of the
-    # hinge midway restarts the integral of its velocity error. Between steps, the loss reads the forces and the
+    # hinge midway restarts its integral term. Between steps, the loss reads the forces and the
     # acceleration of the dofs over the last step, the control force depending on the targets directly.
     pair = make_diff_scene_pair(
         grad_free_with_revolute,

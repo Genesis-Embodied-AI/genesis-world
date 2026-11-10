@@ -721,13 +721,12 @@ def kernel_set_dofs_zero_velocity(
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_dofs_ctrl_err_int(
+def kernel_clear_dofs_ctrl_force_int(
     dofs_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), dyn_state: DynState, rigid_config: qd.template()
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.dofs.vel))):
-        dyn_state.dofs.ctrl_pos_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
-        dyn_state.dofs.ctrl_vel_err_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
+        dyn_state.dofs.ctrl_force_int[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
 
 
 @qd.kernel(fastcache=True)

@@ -2457,9 +2457,9 @@ class RigidEntity(KinematicEntity):
         """
         Set the entity's dofs' integral gains for the position and velocity controllers. Zero by default.
 
-        The accumulated error restarts from zero on `scene.reset`, whenever the velocity of the dof is zeroed
-        (`zero_velocity=True`, `zero_all_dofs_velocity`, `set_dofs_velocity(None)`), and on any step taken under another
-        control mode or with a zero gain.
+        The integral term restarts from zero on `scene.reset`, whenever the velocity of the dof is zeroed
+        (`zero_velocity=True`, `zero_all_dofs_velocity`, `set_dofs_velocity(None)`), and on any step taken under force
+        control or with a zero gain. It carries over a switch between position and velocity control.
 
         Parameters
         ----------
