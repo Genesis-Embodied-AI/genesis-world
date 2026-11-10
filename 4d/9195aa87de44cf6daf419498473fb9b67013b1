@@ -1,5 +1,6 @@
 .github/contributing/ARCHITECTURE.md
   s_c62ec9da443b15::t_ad14364e24d297 106
+  s_c62ec9da443b15::t_cd32e6c0e77c01 90
 genesis/__init__.py
   s_c62ec9da443b15::t_d2720a647c34d3 524
 genesis/engine/mesh.py
@@ -14,6 +15,7 @@ genesis/ext/urdfpy/utils.py
   s_c62ec9da443b15::t_64b6d26746247b 229,240,242
 genesis/options/entities.py
   s_c62ec9da443b15::t_9cc158102c073d 16,527
+  s_c62ec9da443b15::t_cd32e6c0e77c01 17,90,814-815,820,838-839,841,863
 genesis/utils/gltf.py
   s_c62ec9da443b15::t_41fb5b7c7844dc 447
 genesis/utils/mesh.py
@@ -30,6 +32,26 @@ tests/parsers/test_usd.py
   s_c62ec9da443b15::t_e6758622fdb135 99-101
 tests/core/test_entity_options.py
   s_6c41c27d41ea92::t_f4bf9040dc566b 36,297,299,301,303-304
+genesis/engine/materials/PBD/liquid.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 1,10-11,20-28,32
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 50-51,57-59,65-66,68-76,86-90,94-95,100-104,106-111,132,137-155,158,161,453,475,490-497,503,532
+genesis/engine/materials/hybrid.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 2
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 118,127,129-130
+genesis/engine/materials/PBD/elastic.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 1,18,21-34
+genesis/engine/materials/PBD/particle.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 1,10-11,26-29,33
+genesis/engine/materials/PBD/base.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 1
+genesis/engine/materials/PBD/cloth.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 1,19,22-33
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 167-169,177-178,303,333-334,421,457-458,543-544
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_cd32e6c0e77c01 352,370,388,402,416-418
 ---
 {
   "schema_version": "authorship/3.0.0",
