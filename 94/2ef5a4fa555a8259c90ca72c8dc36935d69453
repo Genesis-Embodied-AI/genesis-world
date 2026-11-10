@@ -1,0 +1,240 @@
+genesis/__init__.py
+  s_c62ec9da443b15::t_7111c9d6515280 525
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_efe8b8ead09eb3 390-392,499-515,1268-1272,1509-1519
+  s_c62ec9da443b15::t_3499a631125910 483-487
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_8e350a19e05b03 180-181,317,321-322,332-338,678-692,701-702
+  s_c62ec9da443b15::t_13d37d9b166ff0 182,324-325,327-328,700
+  s_c62ec9da443b15::t_3c39a5a5291ec3 693
+  s_c62ec9da443b15::t_1ed36d30bdb61c 326,329-331,547
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_566618e1716015 564-570,574
+  s_c62ec9da443b15::t_46b9eee68c7e1f 350
+  s_c62ec9da443b15::t_13d37d9b166ff0 980-983,987,1003,1005,1006,2178,2181
+  s_c62ec9da443b15::t_3c39a5a5291ec3 978,2180
+  s_c62ec9da443b15::t_4b64afd3cc3030 762,795,844
+  s_c62ec9da443b15::t_1ed36d30bdb61c 51,998-1002,1004
+genesis/ext/_trimesh_patch.py
+  s_c62ec9da443b15::t_ee7c32129e63bf 282-286,311,339-340,342,380
+genesis/ext/urdfpy/urdf.py
+  s_c62ec9da443b15::t_ced9ab3b518f6a 645-646,653
+genesis/ext/urdfpy/utils.py
+  s_c62ec9da443b15::t_f3fd7d9d45eaa0 229,236-238,243,245
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_679a0c420ca926 11,56
+genesis/options/entities.py
+  s_c62ec9da443b15::t_ffeb29b474d549 16,326-339,358-363,370-371,388-391,395-425,588-594
+  s_c62ec9da443b15::t_3499a631125910 380-385,387,426,438-439,582-586
+  s_c62ec9da443b15::t_70170295dfcb04 55,58-59,62,443,569,599-601,603
+genesis/options/indices.py
+  s_c62ec9da443b15::t_a7c2126985ad72 220-247,253-267
+genesis/utils/gltf.py
+  s_c62ec9da443b15::t_085e44dedebc2c 447-451
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_a20652aa521bd9 839-846,849-850,867-868,874-882,884
+  s_c62ec9da443b15::t_1ed36d30bdb61c 281-292,313-319,330-339,341,347,351
+genesis/utils/mjcf.py
+  s_c62ec9da443b15::t_92b12cf4c6f055 526,533-534
+genesis/utils/urdf.py
+  s_c62ec9da443b15::t_198c63ad5cd537 206-207,211-213,265-270
+genesis/utils/usd/usd_context.py
+  s_c62ec9da443b15::t_b884abc942e322 170-171,305-307,323,325,328,371
+genesis/utils/usd/usd_geometry.py
+  s_c62ec9da443b15::t_89e9ecf6e7c5f2 68,122-124,127-134,141-150,208-215,267,346
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_ca1e13cccffa63 32,37,161-170,197-203,258-267,273-276,329,331-338,340,342-343,346-355,406-415
+tests/parsers/conftest.py
+  s_c62ec9da443b15::t_e19279d4dceebe 37-54
+tests/parsers/test_mesh.py
+  s_c62ec9da443b15::t_a7051ce7949388 299-393
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_cbaf3523f8a40f 99-103,582-587
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 205,213-232,242-254,267-281,293-295,304-319,323,325-333,336-337,341,349,354-362,436-438,553-554
+  s_c62ec9da443b15::t_1bb29caa677830 206-207,235-241
+  s_c62ec9da443b15::t_2a6c5eca90da6e 350-353
+  s_c62ec9da443b15::t_3c39a5a5291ec3 367,398
+  s_c62ec9da443b15::t_4b64afd3cc3030 182,307,313,511,604,615,625,635,947,1068,1227,1286,1376,1384,1392,1474,1501,1542,1562,1620,1753,1780,1787,1940,1994,2003,2066,2192
+  s_c62ec9da443b15::t_1ed36d30bdb61c 209,256-266,288-291,347,374-377,384,386-389,396-397,412-420,429-430,432-435,460-461,474-477,479-504,519-524,526-538
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 169,179,180
+  s_c62ec9da443b15::t_1bb29caa677830 175-176,178
+  s_c62ec9da443b15::t_4b64afd3cc3030 499
+  s_c62ec9da443b15::t_1ed36d30bdb61c 122-123,154-155,166-167,175-178,356-358,371
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 1251,1255,1260,1297
+  s_c62ec9da443b15::t_f98c4f29802db6 1272-1273
+  s_c62ec9da443b15::t_3c39a5a5291ec3 1295
+genesis/options/textures.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 15,17-20,23-24,381-384,386-400
+  s_c62ec9da443b15::t_1bb29caa677830 10,22,381
+  s_c62ec9da443b15::t_d98bb17a7ff9ea 2
+  s_c62ec9da443b15::t_f98c4f29802db6 506-508,513
+  s_c62ec9da443b15::t_3c39a5a5291ec3 476,484-485,495,511,520
+  s_c62ec9da443b15::t_1ed36d30bdb61c 16,21,71,75-81,84-97,100-104,115-118,124,129,134,138-139,141-142,150-154,157,161,166-167,170,178,189,194,196-226,228-264,266,273-274,296,309,316-317,322-325,327-329,335-337,339-340,363,369,371,375,409-414,417-418,422,425-432,434,437,442-451,453-454,462-466,477-482,497-499,522-524,532-547,562-566,586-588,591,593
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 732
+  s_c62ec9da443b15::t_f98c4f29802db6 623,752,754
+  s_c62ec9da443b15::t_3c39a5a5291ec3 621
+genesis/ext/pyrender/texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 174,176-186,191,196-199,206-207,213
+  s_c62ec9da443b15::t_1bb29caa677830 29,41,105-106,161,191,223,225-226,242,248-250
+  s_c62ec9da443b15::t_1ed36d30bdb61c 243-245
+genesis/ext/pyrender/scene.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 85-86
+genesis/options/surfaces.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 142-150,297-298,300
+  s_c62ec9da443b15::t_1ed36d30bdb61c 15,167-168,241-271,275-276,278-279,288,290,296,299,304,307-308,359,361-362,529-530,619-620,715-716
+genesis/ext/pyrender/renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 150-152
+  s_c62ec9da443b15::t_1bb29caa677830 849-850,853-854
+genesis/vis/raytracer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 215-216
+  s_c62ec9da443b15::t_4b64afd3cc3030 243,619,628,812
+  s_c62ec9da443b15::t_1ed36d30bdb61c 351-352
+genesis/vis/rasterizer_context.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 48,57-58,66-67,648,712,1470
+  s_c62ec9da443b15::t_1bb29caa677830 36,41,365,367,369,374,377,391,394,410,431,437-449,808-809,811-812,814-815,1445-1448,1452,1454,1456,1459,1469
+  s_c62ec9da443b15::t_f98c4f29802db6 1419,1425-1427
+  s_c62ec9da443b15::t_1ed36d30bdb61c 16,21,46-56,59-60,62,65,231-232,334-337,620-622,624-625,637,647-711,1419-1424,1428,1438-1440,1442-1444,1455,1458,1462-1466,1468
+genesis/vis/batch_renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 291-292
+  s_c62ec9da443b15::t_4b64afd3cc3030 307
+  s_c62ec9da443b15::t_1ed36d30bdb61c 138,140,142-146,150-151,154,156,162-165,167-169
+genesis/constants.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 224-227
+  s_c62ec9da443b15::t_3c39a5a5291ec3 222
+examples/rendering/dynamic_texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 14,16,18-19,22-23,212-216,218-223,226-227,228-232,248,266-267,269-270,292,332,338,340-343
+  s_c62ec9da443b15::t_1ed36d30bdb61c 4-5,39,44-47,59-61,94-95,99-101,107-109,116,176,182-184,234-235,249-251,283-286,297-298
+genesis/ext/pyrender/jit_render.py
+  s_c62ec9da443b15::t_1bb29caa677830 45,118-126,538-539,555,640-643,767,804,879-880,930-931,934,936,938,940-941,945,1431,1505-1508
+genesis/ext/pyrender/shaders/mesh.frag
+  s_c62ec9da443b15::t_1bb29caa677830 65-68,71,73-76,79,376,383,386,498,501,503
+genesis/ext/pyrender/primitive.py
+  s_c62ec9da443b15::t_1bb29caa677830 115-118
+genesis/ext/pyrender/overlay/plugin.py
+  s_c62ec9da443b15::t_1bb29caa677830 1065-1070
+tests/utils/assets.py
+  s_c62ec9da443b15::t_2a6c5eca90da6e 25
+genesis/vis/camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 906-907
+  s_c62ec9da443b15::t_4b64afd3cc3030 32,77,96,114,513,547,564,908-909,926-927,929-930,933,1043,1047,1051
+genesis/engine/texture.py
+  s_c62ec9da443b15::t_3c39a5a5291ec3 26,39,65,115-116,217
+  s_c62ec9da443b15::t_1ed36d30bdb61c 10,28-29,31-36,51-54,56,75,83,88-89,91,100,111-113,140-153,179-181,187,189-211
+genesis/options/sensors/raycaster.py
+  s_c62ec9da443b15::t_c272c4cb758868 213
+  s_c62ec9da443b15::t_4b64afd3cc3030 105,109,113,129-130,212,230,238,241
+examples/rendering/speed_test.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 35
+examples/rendering/demo.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 16,157
+tests/rigid/test_api.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 1389
+tests/sensors/test_api.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 620,717
+examples/tutorials/visualization.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 17,34
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 99
+examples/rigid/wrecking_ball.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 220
+examples/speed_benchmark/franka.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 15
+examples/drone/hover_env.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 82
+tests/utils/simulators.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 145
+tests/sensors/test_raycaster.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 97,108,355,369
+examples/sensors/camera_as_sensor.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 151,155
+examples/coupling/fem_cube_linked_with_arm.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 65
+genesis/engine/sensors/camera.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 83,94,246,453,640,669,758,792
+tests/rendering/test_batch_render.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 49
+  s_c62ec9da443b15::t_1ed36d30bdb61c 28-33
+tests/rendering/test_dynamic_meshes.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 51,237,288,445
+genesis/options/sensors/camera.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 33,56
+examples/rigid/franka_cube.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 21
+genesis/vis/viewer.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 43,135,177,507
+examples/rigid/single_franka.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 34
+genesis/vis/rasterizer.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 53
+genesis/vis/visualizer.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 78,81,137,144
+examples/manipulation/grasp_env.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 65,103,121,130
+examples/rigid/hibernation.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 97
+examples/sensors/depth_camera_custom_vverts.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 106,121
+examples/tutorials/mpm.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 20
+genesis/options/vis.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 33,71,85
+examples/rendering/follow_entity.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 33
+examples/tutorials/pbd_cloth.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 14
+tests/core/test_misc.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 92
+tests/core/test_recorders.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 420
+examples/rigid/single_franka_envs.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 45
+tests/rendering/test_debug_draw.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 33,111,239,265
+tests/rendering/test_imgui_overlay.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 99
+tests/rendering/test_interactive_viewer.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 80,109,341,461,810,830,875,888,915,929
+examples/rigid/single_franka_batch_render.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 55,63,71,78
+  s_c62ec9da443b15::t_1ed36d30bdb61c 41-44
+tests/sensors/test_camera.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 81,99,108,121,133,232,294,352-353,388,434-435,485,550,608-609,670,699,707
+examples/rendering/moving_camera.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 30
+examples/tutorials/selecting_rendered_envs.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 11
+examples/drone/fly_route.py
+  s_c62ec9da443b15::t_4b64afd3cc3030 98
+tests/core/test_surface.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 65-68,75-94
+genesis/utils/serialization.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 209-210,215-221,223,302-306,547-549,562-563
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "942ef5a4fa555a8259c90ca72c8dc36935d69453",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
