@@ -366,6 +366,9 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     damping_beta_factor: qd.Tensor = field(float, shape=())
     # The factor scaling the masses of the elements, for numerical robustness
     vol_scale: qd.Tensor = field(float, shape=())
+    # The largest deviation from a rotation that the polar decomposition of the linear corotated model accepts from its
+    # Newton iteration (see 'func_linear_corotated_rotation').
+    rotation_atol: qd.Tensor = field(float, shape=())
     # Added to the squared length of a muscle fiber before taking its root
     fiber_length_eps: qd.Tensor = field(float, shape=())
     n_newton_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
@@ -505,6 +508,7 @@ class FEMData(Data):
                 damping_beta_over_dt=solver._damping_beta / substep_dt,
                 damping_beta_factor=solver._damping_beta / substep_dt + 1.0,
                 vol_scale=solver._vol_scale,
+                rotation_atol=1e-10,
                 fiber_length_eps=1e-12,
             )
             if is_implicit:
@@ -1489,7 +1493,9 @@ def func_element_precompute(
     """Compute the data the material of an element takes from its deformation at the start of a substep."""
     if qd.static(fem_config.has_linear_corotated):
         if func_element_model(i_e, fem_info, fem_config) == FEMModel.LINEAR_COROTATED:
-            fem_state.elements_material.rotation[i_e, i_b] = func_linear_corotated_rotation(F)
+            fem_state.elements_material.rotation[i_e, i_b] = func_linear_corotated_rotation(
+                F, fem_info.rotation_atol[None]
+            )
     if qd.static(fem_config.has_muscle):
         if fem_info.elements.is_muscle[i_e]:
             fem_state.elements_material.fiber_dir[i_e, i_b] = func_muscle_fiber_dir(
