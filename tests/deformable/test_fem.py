@@ -833,11 +833,16 @@ def test_soft_constraint(asset_tmp_path, show_viewer):
 def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.015
+    CUBE_HALFSIZE = 0.05
+    CUBE_RHO = 1000.0
+    CUBE_HYDROELASTIC_MODULUS = 1e5
+    GRAVITY = 9.81
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1.0 / 60.0,
             substeps=2,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
@@ -877,6 +882,20 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
             model="linear_corotated",
         ),
     )
+    # A stack of two cubes resting on each other, clear of the sphere and the box
+    bottom_cube, top_cube = [
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.3, -0.3, (2 * i + 1) * CUBE_HALFSIZE),
+                size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                rho=CUBE_RHO,
+                hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+            ),
+        )
+        for i in range(2)
+    ]
     scene.build()
 
     # Run simulation
@@ -893,6 +912,16 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         entity_center = 0.5 * (BV[0] + BV[-1])
         assert_allclose(entity_center[:2], 0.0, tol=0.02)
         assert_allclose(entity_center[2], init_height, tol=5e-3)
+
+    # The pressure field of each cube is E * d / h at depth d below its surface, so the equal-pressure plane splits the
+    # overlap evenly. The mesh joins each face to the cube center, so the contact face has the side 2 * h - overlap at
+    # that depth, and the pressure E * overlap / (2 * h) over it balances the top cube weight rho * (2 * h)^3 * g.
+    # One fixed-point iteration from the unshrunk face solves this equation well within the tolerance, which covers the
+    # residual settling motion of the stack over the horizon.
+    cubes_overlap = bottom_cube.get_verts_pos()[..., 2].max() - top_cube.get_verts_pos()[..., 2].min()
+    cubes_overlap_ref = 4.0 * CUBE_RHO * GRAVITY * CUBE_HALFSIZE**2 / CUBE_HYDROELASTIC_MODULUS
+    cubes_overlap_ref *= (2.0 * CUBE_HALFSIZE / (2.0 * CUBE_HALFSIZE - cubes_overlap_ref)) ** 2
+    assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.05)
 
 
 # This test cannot be flagged as required because it takes 400s to run on CPU.
