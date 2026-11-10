@@ -2453,6 +2453,28 @@ class RigidEntity(KinematicEntity):
         self._solver.set_dofs_kv(kv, dofs_idx, envs_idx)
 
     @gs.assert_built
+    def set_dofs_ki(self, ki, dofs_idx_local=None, envs_idx=None):
+        """
+        Set the entity's dofs' integral gains for the position and velocity controllers. Zero by default.
+
+        The integral term restarts from zero on `scene.reset`, whenever the velocity of the dof is zeroed
+        (`zero_velocity=True`, `zero_all_dofs_velocity`, `set_dofs_velocity(None)`), and on any step taken under force
+        control or with a zero gain. It carries over a switch between position and velocity control.
+
+        Parameters
+        ----------
+        ki : array_like
+            The integral gains to set, non-negative.
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to set. If None, all dofs will be set. Note that here this uses the local `q_idx`,
+            not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        self._solver.set_dofs_ki(ki, dofs_idx, envs_idx)
+
+    @gs.assert_built
     def set_dofs_act_gain(self, act_gain, dofs_idx_local=None, envs_idx=None):
         """
         Set the actuator gain for the entity's dofs. Invalidates PD-reducibility.
@@ -2800,6 +2822,27 @@ class RigidEntity(KinematicEntity):
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_kv(dofs_idx, envs_idx)
+
+    @gs.assert_built
+    def get_dofs_ki(self, dofs_idx_local=None, envs_idx=None):
+        """
+        Get the integral gain (ki) for the entity's dofs used by the position and velocity controllers.
+
+        Parameters
+        ----------
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
+            `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        ki : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+            The integral gain (ki) for the entity's dofs.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        return self._solver.get_dofs_ki(dofs_idx, envs_idx)
 
     @gs.assert_built
     def get_dofs_act_gain(self, dofs_idx_local=None, envs_idx=None):

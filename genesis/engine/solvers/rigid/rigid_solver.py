@@ -40,6 +40,7 @@ from ..base_solver import GravityMixin, TimeBasedMixin
 from ..kinematic_solver import KinematicSolver, _fill_base_link_geom_offsets, _offset_world_shift, _select_links_offset
 from .abd.accessor import (
     ConstraintType,
+    kernel_clear_dofs_ctrl_force_int,
     kernel_control_dofs_force,
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
@@ -48,6 +49,7 @@ from .abd.accessor import (
     kernel_get_links_vel,
     kernel_set_dofs_act_bias,
     kernel_set_dofs_act_gain,
+    kernel_set_dofs_act_ki,
     kernel_set_dofs_armature,
     kernel_set_dofs_damping,
     kernel_set_dofs_force_range,
@@ -2304,6 +2306,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             "kv",
             "act_gain",
             "act_bias",
+            "act_ki",
             "force_range",
             "stiffness",
             "damping",
@@ -2368,6 +2371,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_act_gain(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "act_bias":
             kernel_set_dofs_act_bias(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
+        elif name == "act_ki":
+            kernel_set_dofs_act_ki(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         else:
             gs.raise_exception(f"Invalid `name` {name}.")
 
@@ -2376,6 +2381,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def set_dofs_kv(self, kv, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([kv], dofs_idx, "kv", envs_idx)
+
+    def set_dofs_ki(self, ki, dofs_idx=None, envs_idx=None):
+        if ((ki if isinstance(ki, torch.Tensor) else np.asarray(ki)) < 0.0).any():
+            gs.raise_exception("`ki` must be non-negative.")
+        self._set_dofs_info([ki], dofs_idx, "act_ki", envs_idx)
 
     def set_dofs_act_gain(self, act_gain, dofs_idx=None, envs_idx=None):
         self._set_dofs_info([act_gain], dofs_idx, "act_gain", envs_idx)
@@ -2445,12 +2455,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
+        # Zeroing the velocity marks a jump of the pose, such as the reset of an episode, which restarts the integral term
+        # of the controller (see func_ctrl_force_int_next)
+        if velocity is None and gs.use_zerocopy:
+            mask = (
+                (0, *indices_to_mask(dofs_idx))
+                if self.n_envs == 0
+                else indices_to_mask(envs_idx, dofs_idx, boolean_mask=False)
+            )
+            ctrl_force_int = qd_to_torch(self.dyn_state.dofs.ctrl_force_int, transpose=True, copy=False)
+            ctrl_force_int[mask] = 0.0
+        is_force_int_cleared_by_kernel = velocity is None and not gs.use_zerocopy
         # Wake the owning entities before delegating to the base setter, which re-sanitizes and applies the write.
-        if self._use_hibernation:
-            _, wake_dofs_idx, wake_envs_idx = self._sanitize_io_variables(
+        if self._use_hibernation or is_force_int_cleared_by_kernel:
+            _, sanitized_dofs_idx, sanitized_envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
-            self._wake_dofs(wake_dofs_idx, wake_envs_idx)
+            if self._use_hibernation:
+                self._wake_dofs(sanitized_dofs_idx, sanitized_envs_idx)
+            if is_force_int_cleared_by_kernel:
+                kernel_clear_dofs_ctrl_force_int(
+                    sanitized_dofs_idx, sanitized_envs_idx, self.dyn_state, self.rigid_config
+                )
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
 
     @mutates()
@@ -2831,6 +2857,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 "Use get_dofs_act_gain() and get_dofs_act_bias() instead."
             )
         return -bias[..., 2]
+
+    def get_dofs_ki(self, dofs_idx=None, envs_idx=None):
+        if not self._options.batch_dofs_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
+        tensor = qd_to_torch(self.dyn_info.dofs.act_ki, envs_idx, dofs_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_dofs_info else tensor
 
     def get_dofs_act_gain(self, dofs_idx=None, envs_idx=None):
         if not self._options.batch_dofs_info and envs_idx is not None:
