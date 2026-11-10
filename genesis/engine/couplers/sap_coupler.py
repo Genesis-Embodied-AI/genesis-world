@@ -34,7 +34,9 @@ from genesis.engine.solvers.fem_solver import (
     FEMInfo,
     FEMState,
     FEMVertexConstraints,
+    func_accumulate_vertices,
     func_elastic_product,
+    func_element_energy_gradient_damped,
     func_element_mapping_matrix,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_block
@@ -225,6 +227,7 @@ class VertexDofSum(IntEnum):
     PTAP = 7
     SLOPE = 0
     ENERGY = 1
+    ENERGY_SCALE = 4
     D2ELLA = 2
     DELL = 3
 
@@ -244,7 +247,7 @@ class VertexDofSum(IntEnum):
             case VertexDofOp.LINESEARCH_INIT:
                 return (VertexDofSum.SLOPE,)
             case VertexDofOp.ENERGY:
-                return (VertexDofSum.ENERGY,)
+                return (VertexDofSum.ENERGY, VertexDofSum.ENERGY_SCALE)
             case VertexDofOp.LINESEARCH_D2ELLA:
                 return (VertexDofSum.D2ELLA,)
             case VertexDofOp.LINESEARCH_VELOCITY:
@@ -317,6 +320,8 @@ class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
     v_diff: qd.Tensor = field((float, 3))
     gradient: qd.Tensor = field((float, 3))
     impulse: qd.Tensor = field((float, 3))
+    # Gradient of the cost at the reference velocity (see kernel_init_sap_solve)
+    gradient_ref: qd.Tensor = field((float, 3))
     # Diagonal 3x3 block of the Hessian, whose inverse `prec` is the preconditioner
     diag3x3: qd.Tensor = field((float, (3, 3)))
     prec: qd.Tensor = field((float, (3, 3)))
@@ -1435,8 +1440,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
 
     def couple(self):
-        # Equality constraints bind the rigid dofs whether anything is in contact or not
-        if self.has_contact or self._has_equality_constraints:
+        # Equality constraints bind the rigid dofs whether anything is in contact or not, and the solve gives the FEM
+        # vertices their velocities, the implicit solver skipping its free solve (see kernel_init_sap_solve).
+        if self.has_contact or self._has_equality_constraints or self.fem_solver.is_active:
             fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
             fem_state, fem_info = fem_solver.fem_state, fem_solver.fem_info
             vertex_constraints, fem_config = fem_solver.vertex_constraints, fem_solver.fem_config
@@ -1446,6 +1452,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             loops = self.sap_state.loops
             kernel_init_sap_solve(
                 loops.newton_counter,
+                loops.pcg_counter,
                 fem_state,
                 dofs_state,
                 self.sap_state,
@@ -1455,9 +1462,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_config,
                 self.sap_config,
             )
-            # The regularization reads the preconditioner of the FEM solve and the factor of the rigid mass matrix of
-            # this substep, which the solvers compute after the detection of the contacts, and the velocities the solve
-            # starts from
+            # The regularization reads the preconditioner of the FEM vertices (see kernel_init_sap_solve),
+            # the factor of the rigid mass matrix of this substep, which the rigid solver computes after the detection
+            # of the contacts, and the velocities the solve starts from.
             kernel_compute_regularization(
                 fem_state,
                 dofs_state,
@@ -2105,6 +2112,7 @@ def kernel_update_vel(
 @qd.kernel
 def kernel_init_sap_solve(
     newton_counter: qd.types.ndarray(qd.i32, ndim=0),
+    pcg_counter: qd.types.ndarray(qd.i32, ndim=0),
     fem_state: FEMState,
     dofs_state: DofsState,
     sap_state: SAPState,
@@ -2119,9 +2127,8 @@ def kernel_init_sap_solve(
 
     The entities in contact start from their velocities at the start of the substep, the solution of the previous one,
     which the contacts of a resting or slowly changing scene leave close to the solution of this one, where the free
-    velocities are far from it. The other entities start from their free velocities, which solve their share of the
-    cost exactly. The constrained FEM vertices, which the solve leaves as they start, start from their free velocities,
-    which follow their constraints.
+    velocities are far from it. The rigid entities without contact start from their free velocities, which solve their
+    share of the cost exactly, and the FEM entities without contact from their inertia guess.
     """
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     newton_counter[()] = sap_info.n_newton_iterations[None]
@@ -2130,6 +2137,7 @@ def kernel_init_sap_solve(
         # an entity in contact starts from its velocity at the start of the substep, and of an entity without contact
         # from the inertia guess, which gravity alone moves. A constrained vertex starts from the velocity that follows
         # its constraint.
+        dt = sap_info.substep_dt[None]
         for i_e, i_b in qd.ndrange(sap_state.fem_coarse.mass.shape[0], sap_state.fem_coarse.mass.shape[1]):
             is_in_contact = False
             for i_k in range(sap_info.entities_chunk_start[i_e], sap_info.entities_chunk_start[i_e + 1]):
@@ -2142,10 +2150,14 @@ def kernel_init_sap_solve(
                             is_in_contact = True
             for i_k in range(sap_info.entities_chunk_start[i_e], sap_info.entities_chunk_start[i_e + 1]):
                 for i_v in range(sap_info.chunks_vertex_start[i_k], sap_info.chunks_vertex_end[i_k]):
-                    vel = fem_state.vertices.vel_next[i_v, i_b]
-                    if is_in_contact and func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
-                        vel = fem_state.vertices.vel[i_v, i_b]
-                    sap_state.fem_vertices.v[i_v, i_b] = vel
+                    v = fem_state.vertices.vel_next[i_v, i_b]
+                    if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+                        v = fem_state.vertices.vel[i_v, i_b]
+                        if not is_in_contact:
+                            v = v + fem_info.gravity[i_b] * dt
+                        fem_state.vertices.vel_next[i_v, i_b] = v
+                        fem_state.vertices.pos_next[i_v, i_b] = fem_state.vertices.pos[i_v, i_b] + v * dt
+                    sap_state.fem_vertices.v[i_v, i_b] = v
     if qd.static(sap_config.has_rigid):
         # The rigid dofs of each kinematic tree, in contact when the contact lists of the links of the subtree of its
         # root hold any contact.
@@ -2168,6 +2180,36 @@ def kernel_init_sap_solve(
         sap_state.envs.is_active[i_b] = True
         sap_state.envs.energy_newton_prev[i_b] = qd.math.inf
     if qd.static(sap_config.has_fem):
+        # The gradient of the cost of the FEM vertices at their reference velocity, and its diagonal Hessian blocks. The
+        # energy of every material of the implicit solver is quadratic in the positions at the end of the substep, so
+        # that the cost of the vertices at v is 1/2 (v - v_ref)^T A (v - v_ref) + g_ref^T (v - v_ref) up to a constant,
+        # A being its Hessian and g_ref = -dt f(x + dt v_ref) its gradient at the reference velocity, f the forces of
+        # the implicit solver at the end positions. This spares solving the free velocities.
+        for i_e, i_b in qd.ndrange(
+            *fem_state.elements_energy.energy.shape, axes=qd.static(eoa(fem_state.elements_energy.energy))
+        ):
+            energy, gradient = func_element_energy_gradient_damped(
+                i_e, i_b, fem_state, fem_info, vertex_constraints, fem_config
+            )
+            fem_state.elements_energy.energy[i_e, i_b] = energy
+            fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
+        func_accumulate_vertices(
+            forces=None,
+            envs_is_active=fem_state.envs_solve.is_active,
+            pcg_counter=pcg_counter,
+            fem_state=fem_state,
+            fem_info=fem_info,
+            vertex_constraints=vertex_constraints,
+            fem_config=fem_config,
+            gather_Ap=False,
+            gather_internal_force=False,
+            update_loop_flag=False,
+        )
+        for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(sap_state.fem_vertices.v))):
+            gradient_ref = qd.Vector.zero(gs.qd_float, 3)
+            if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+                gradient_ref = -fem_info.substep_dt[None] * fem_state.vertices_energy.force[i_v, i_b]
+            sap_state.fem_vertices.gradient_ref[i_v, i_b] = gradient_ref
         # The inertia of the rigid motions of each FEM entity, which their Hessian starts from at every Newton
         # iteration. The rigid motion (c_lin, c_ang) moves a vertex at c_lin + c_ang x d, d its position relative to
         # x_ref, whose inertia sums a d^T d terms over the vertices that move, a being the inertia of a vertex in the
@@ -2348,7 +2390,12 @@ def func_gather_fem_vertex(
                     JtGJ[i, j] = su.qd_block_sum(JtGJ[i, j], LOG2_GATHER_LANES)
     if i_lane == 0 and envs_is_active[i_b]:
         if qd.static(op == VertexDofOp.GRADIENT):
-            sap_state.fem_vertices.gradient[i_v, i_b] = sap_state.fem_vertices.gradient[i_v, i_b] + elastic - Jt_x
+            sap_state.fem_vertices.gradient[i_v, i_b] = (
+                sap_state.fem_vertices.gradient[i_v, i_b]
+                + sap_state.fem_vertices.gradient_ref[i_v, i_b]
+                + elastic
+                - Jt_x
+            )
             sap_state.fem_vertices.impulse[i_v, i_b] = Jt_x
             diag3x3 = sap_state.fem_vertices.diag3x3[i_v, i_b] + JtGJ
             sap_state.fem_vertices.diag3x3[i_v, i_b] = diag3x3
@@ -3327,14 +3374,18 @@ def func_compute_fem_vertex(
     if qd.static(op == VertexDofOp.ENERGY):
         v_diff = sap_state.fem_vertices.v[i_v, i_b] - fem_state.vertices.vel_next[i_v, i_b]
         sap_state.fem_vertices.v_diff[i_v, i_b] = v_diff
-        sums[VertexDofSum.ENERGY] = 0.5 * inertia * v_diff.norm_sqr()
+        gradient_ref = sap_state.fem_vertices.gradient_ref[i_v, i_b]
+        sums[VertexDofSum.ENERGY] = 0.5 * inertia * v_diff.norm_sqr() + gradient_ref.dot(v_diff)
+        sums[VertexDofSum.ENERGY_SCALE] = 0.5 * inertia * v_diff.norm_sqr() + qd.abs(gradient_ref.dot(v_diff))
     if qd.static(op == VertexDofOp.LINESEARCH_D2ELLA):
         sums[VertexDofSum.D2ELLA] = sap_state.fem_vertices.x[i_v, i_b].dot(sap_state.fem_vertices.dp[i_v, i_b])
     if qd.static(op == VertexDofOp.LINESEARCH_VELOCITY):
         v = sap_state.fem_vertices.x_prev[i_v, i_b] + sap_state.envs.step_size[i_b] * sap_state.fem_vertices.x[i_v, i_b]
         sap_state.fem_vertices.v[i_v, i_b] = v
         v_ref = fem_state.vertices.vel_next[i_v, i_b]
-        sums[VertexDofSum.DELL] = sap_state.fem_vertices.dp[i_v, i_b].dot(v - v_ref)
+        sums[VertexDofSum.DELL] = sap_state.fem_vertices.dp[i_v, i_b].dot(v - v_ref) + sap_state.fem_vertices.x[
+            i_v, i_b
+        ].dot(sap_state.fem_vertices.gradient_ref[i_v, i_b])
     return sums
 
 
@@ -3419,6 +3470,7 @@ def func_compute_rigid_dof(
         sums[VertexDofSum.ENERGY] = (
             0.5 * sap_state.rigid_dofs.v_diff[i_d, i_b] * sap_state.rigid_dofs.mass_v_diff[i_d, i_b]
         )
+        sums[VertexDofSum.ENERGY_SCALE] = sums[VertexDofSum.ENERGY]
     if qd.static(op == VertexDofOp.LINESEARCH_D2ELLA):
         sums[VertexDofSum.D2ELLA] = sap_state.rigid_dofs.x[i_d, i_b] * sap_state.rigid_dofs.dp[i_d, i_b]
     if qd.static(op == VertexDofOp.LINESEARCH_VELOCITY):
@@ -3954,19 +4006,34 @@ def func_one_exact_linesearch_iter(
                 n_sums=3,
             )
             sap_state.envs.m[i_b] = totals[VertexDofSum.SLOPE]
-            # The cost, whose round-off its changes are compared to
-            energy = totals[VertexDofSum.ENERGY] + func_constraints_total(
-                i_b, qd.static(ConstraintSum.ENERGY), sap_state
-            )
+            # The cost and the magnitude of its terms, whose round-off its changes are compared to, the cost of the
+            # FEM vertices being known up to a constant (see kernel_init_sap_solve).
+            energy_elastic = gs.qd_float(0.0)
             if qd.static(sap_config.has_fem):
                 for i_k in range(sap_info.n_element_chunks[None]):
-                    energy = energy + sap_state.elements_partials[i_k, i_b]
-            sap_state.envs.prev_energy[i_b] = energy
+                    energy_elastic = energy_elastic + sap_state.elements_partials[i_k, i_b]
+            energy_constraints = func_constraints_total(i_b, qd.static(ConstraintSum.ENERGY), sap_state)
+            energy = totals[VertexDofSum.ENERGY] + energy_elastic + energy_constraints
+            energy_scale = (
+                func_chunks_total(
+                    i_b,
+                    0,
+                    sap_state.vertices_dofs_partials.shape[0],
+                    qd.static(VertexDofSum.ENERGY_SCALE),
+                    0,
+                    sap_state,
+                    n_lanes=1,
+                    n_sums=1,
+                )[0]
+                + energy_elastic
+                + energy_constraints
+            )
+            sap_state.envs.prev_energy[i_b] = energy_scale
             # The solve stops once a Newton iteration decreases its cost by no more than its round-off: a tolerance on
             # its gradient below what the precision of the simulation resolves would otherwise run it to the cap.
             energy_decrease = sap_state.envs.energy_newton_prev[i_b] - energy
             sap_state.envs.energy_newton_prev[i_b] = energy
-            cost_tol = sap_info.linesearch_cost_atol[None] + sap_info.linesearch_cost_rtol[None] * energy
+            cost_tol = sap_info.linesearch_cost_atol[None] + sap_info.linesearch_cost_rtol[None] * energy_scale
             if energy_decrease < cost_tol:
                 sap_state.envs.is_active[i_b] = False
                 sap_state.envs.is_linesearch_active[i_b] = False

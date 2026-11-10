@@ -239,6 +239,9 @@ class Simulator(RBC):
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        # The SAP coupler solves every FEM vertex from its momentum residual, which the quadratic energy of the models
+        # of the implicit solver makes exact (see func_init_fem_reference_gradient in sap_coupler.py).
+        self.fem_solver._is_free_solve_skipped = isinstance(self._coupler, SAPCoupler)
         for solver in self._solvers:
             solver.build()
             if solver.is_active:

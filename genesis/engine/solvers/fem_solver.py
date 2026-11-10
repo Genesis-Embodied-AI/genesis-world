@@ -568,6 +568,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self._damping = options.damping
         self._use_implicit_solver = options.use_implicit_solver
+        # Whether the coupler solves the motion of the implicit solver from the momentum residual at the start of each
+        # substep, which spares the free solve (see 'Simulator.build').
+        self._is_free_solve_skipped = False
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
         self._n_pcg_iterations = options.n_pcg_iterations
@@ -925,21 +928,23 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_init_pos_and_inertia(
                 self.fem_state, links_state, self.fem_info, self.vertex_constraints, self.fem_config
             )
-            # The solve is reversed through the adjoint of its root, which spares reversing its iterations
-            with custom_backward(self._implicit_solve_grad):
-                if self._requires_grad and gs.use_ndarray:
-                    self._solve_on_host(is_adjoint=False)
-                else:
-                    loops = self.fem_state.solve_loops
-                    kernel_batch_solve(
-                        loops.newton_counter,
-                        loops.pcg_counter,
-                        loops.linesearch_counter,
-                        self.fem_state,
-                        self.fem_info,
-                        self.vertex_constraints,
-                        self.fem_config,
-                    )
+            # The SAP coupler solves the motion from the momentum residual instead (see 'Simulator.build')
+            if not self._is_free_solve_skipped:
+                # The solve is reversed through the adjoint of its root, which spares reversing its iterations
+                with custom_backward(self._implicit_solve_grad):
+                    if self._requires_grad and gs.use_ndarray:
+                        self._solve_on_host(is_adjoint=False)
+                    else:
+                        loops = self.fem_state.solve_loops
+                        kernel_batch_solve(
+                            loops.newton_counter,
+                            loops.pcg_counter,
+                            loops.linesearch_counter,
+                            self.fem_state,
+                            self.fem_info,
+                            self.vertex_constraints,
+                            self.fem_config,
+                        )
             kernel_setup_pos_vel(self.fem_state, self.fem_info)
         else:
             kernel_init_vel(self.fem_state)
