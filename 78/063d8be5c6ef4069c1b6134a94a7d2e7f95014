@@ -37,6 +37,8 @@ genesis/constants.py
   s_c62ec9da443b15::t_13d37d9b166ff0 210-215
 examples/rendering/dynamic_texture.py
   s_c62ec9da443b15::t_13d37d9b166ff0 1-74
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_2e708b0ebe15c2 269-275,357-362
 ---
 {
   "schema_version": "authorship/3.0.0",
