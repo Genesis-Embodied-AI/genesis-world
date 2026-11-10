@@ -3369,8 +3369,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             pressure = barycentric0.dot(tet_pressures0)
             g0 = sap_state.fem_pressure_gradient[i_e0, i_b].dot(self.contact_candidates[i_c].normal)
             g1 = -sap_state.fem_pressure_gradient[i_e1, i_b].dot(self.contact_candidates[i_c].normal)
+            # The stiffness of a contact is its area times the pressure gradients of both sides along its normal,
+            # harmonically averaged, as for the other hydroelastic contacts. A side whose pressure does not increase
+            # into its body along the normal has no stiffness to give.
+            if g0 < sap_info.contact_eps[None] or g1 < sap_info.contact_eps[None]:
+                continue
+            g = 1.0 / (1.0 / g0 + 1.0 / g1)  # harmonic average
             # FIXME This is an approximated value, different from Drake, which actually calculates the distance
-            deformable_phi0 = -pressure / g0 - pressure / g1
+            deformable_phi0 = -pressure / g
 
             if deformable_phi0 > sap_info.EPS[None]:
                 continue
@@ -3386,9 +3392,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
                 self.contact_pairs[i_p].barycentric0 = barycentric0
                 self.contact_pairs[i_p].barycentric1 = barycentric1
 
-                deformable_g = sap_info.hydroelastic_stiffness[None]
-                deformable_k = total_area * deformable_g
-                contact_info[i_p].k = deformable_k
+                contact_info[i_p].k = total_area * g
                 contact_info[i_p].phi0 = deformable_phi0
                 contact_info[i_p].mu = qd.sqrt(
                     fem_info.elements.friction_mu[i_e0] * fem_info.elements.friction_mu[i_e1]
