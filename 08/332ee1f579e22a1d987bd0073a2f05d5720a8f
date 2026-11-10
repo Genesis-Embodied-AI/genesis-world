@@ -1,0 +1,66 @@
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 204-333
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 154-155,168-174,359
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 30-31,1238-1259
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_46b9eee68c7e1f 351
+  s_c62ec9da443b15::t_13d37d9b166ff0 26-27,52,266,972-997,1098-1103,2151-2160,2166-2169
+genesis/options/textures.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 9,13-19,292-361
+genesis/engine/entities/rigid_entity/rigid_geom.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 19-20,732-738
+genesis/ext/pyrender/texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 167-193,199
+genesis/ext/pyrender/scene.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 85-86
+genesis/options/surfaces.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 15,142-150,265-268
+genesis/ext/pyrender/renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 150-152
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 182,323-328,691
+genesis/vis/raytracer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 215-216
+genesis/vis/rasterizer_context.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 19,31-34,39,43-55,219-220,322,350,352-353,355-356,364,378,381-382,397-400,402,423,429-443,614-621,633-636,648-672,768,771-772,1386-1405
+genesis/vis/batch_renderer.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 294-295
+genesis/engine/dynamic_texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 1-131
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 309-313,317,319-322,328-330,334,341-342
+genesis/__init__.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 498
+genesis/constants.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 210-215
+examples/rendering/dynamic_texture.py
+  s_c62ec9da443b15::t_13d37d9b166ff0 1-74
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_2e708b0ebe15c2 269-275,357-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "08332ee1f579e22a1d987bd0073a2f05d5720a8f",
+  "prompts": {},
+  "sessions": {
+    "s_91e0422623a7c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
