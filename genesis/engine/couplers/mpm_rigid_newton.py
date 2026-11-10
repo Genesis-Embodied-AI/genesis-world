@@ -224,64 +224,36 @@ class MpmRigidContact(CouplingPairs):
         )
         qd.atomic_add(self.rigid.rigid_data.links_stiffness[i_l, i_b], P.transpose() @ H @ P)
 
-    @qd.func(requires_top_level=True)
-    def func_reaction(self, f: int):
-        """Apply the force of the pairs on Rigid at the converged solve, after func_rigid_write_back."""
-        self.func_vertex_begin(f, SRC_ITERATE)
-        qd.loop_config(name="mpm_reaction_pairs")
-        for i_pair in range(self.pairs.n_pairs[()]):
-            energy, g, H, verts, weights = self.pair_terms(f, i_pair)
-            if g.norm_sqr() > 0.0:
-                i_l, i_b, r = self.contact_point_arm(f, i_pair)
-                qd.atomic_add(self.rigid.rigid_data.links_force_vel[i_l, i_b], g)
-                qd.atomic_add(self.rigid.rigid_data.links_force_ang[i_l, i_b], r.cross(g))
-                self.rigid.dyn_state.links.is_constrained[i_l, i_b] = True
-        qd.loop_config(name="mpm_reaction_qfrc")
-        for i_d, i_b in qd.ndrange(self.rigid.rigid_data.x.shape[0], self.rigid.rigid_data.x.shape[1]):
-            self.rigid.constraint_state.qfrc_constraint[i_d, i_b] = (
-                self.rigid.rigid_data.Ma[i_d, i_b] - self.rigid.dyn_state.dofs.qf_smooth[i_d, i_b]
-            )
-
 
 @qd.kernel
 def kernel_mpm_reaction(f: int, contact: qd.template()):
-    contact.func_reaction(f)
+    """Apply the force of the pairs on Rigid at the converged solve, after func_rigid_write_back."""
+    contact.func_vertex_begin(f, SRC_ITERATE)
+    qd.loop_config(name="mpm_reaction_pairs")
+    for i_pair in range(contact.pairs.n_pairs[()]):
+        energy, g, H, verts, weights = contact.pair_terms(f, i_pair)
+        if g.norm_sqr() > 0.0:
+            i_l, i_b, r = contact.contact_point_arm(f, i_pair)
+            qd.atomic_add(contact.rigid.rigid_data.links_force_vel[i_l, i_b], g)
+            qd.atomic_add(contact.rigid.rigid_data.links_force_ang[i_l, i_b], r.cross(g))
+            contact.rigid.dyn_state.links.is_constrained[i_l, i_b] = True
+    qd.loop_config(name="mpm_reaction_qfrc")
+    for i_d, i_b in qd.ndrange(contact.rigid.rigid_data.x.shape[0], contact.rigid.rigid_data.x.shape[1]):
+        contact.rigid.constraint_state.qfrc_constraint[i_d, i_b] = (
+            contact.rigid.rigid_data.Ma[i_d, i_b] - contact.rigid.dyn_state.dofs.qf_smooth[i_d, i_b]
+        )
 
 
 @qd.kernel
 def kernel_add_mpm_contact_force(contact: qd.template()):
-    """Add the force of the pairs on each link (see MpmRigidContact.func_reaction) to `contact_force`, after Rigid's own
-    contact forces were written by the post-solve stage of its substep."""
+    """Add the force of the pairs on each link (see kernel_mpm_reaction) to `contact_force`, after Rigid's own contact
+    forces were written by the post-solve stage of its substep."""
     dt = contact.mpm.mpm_info.substep_dt[()]
     n_links = contact.rigid.rigid_data.links_force_vel.shape[0]
     for i_l, i_b in qd.ndrange(n_links, contact.rigid.rigid_data.links_force_vel.shape[1]):
         force = contact.rigid.rigid_data.links_force_vel[i_l, i_b]
         contact_force = contact.rigid.dyn_state.links.contact_force[i_l, i_b]
         contact.rigid.dyn_state.links.contact_force[i_l, i_b] = contact_force + force / (dt * dt)
-
-
-@qd.kernel
-def kernel_rigid_contact_adjoint(f: int, contact: qd.template()):
-    mpm_rigid_adjoint_func.func_rigid_contact_adjoint(
-        f,
-        contact.mpm.particles,
-        contact.mpm.grid,
-        contact.mpm.newton,
-        contact.mpm.linear,
-        contact.mpm.linear_block,
-        contact.pairs,
-        contact.rigid.rigid_data,
-        contact.rigid.dyn_state.geoms,
-        contact.rigid.dyn_state.links,
-        contact.rigid.dyn_state.dofs,
-        contact.mpm.particles_info,
-        contact.rigid.dyn_info.geoms,
-        contact.rigid.dyn_info.links,
-        contact.rigid.rigid_info,
-        contact.rigid.sdf_info,
-        contact.mpm.mpm_info,
-        contact.rigid.config,
-    )
 
 
 class MpmRigidContactHost(CouplingPairsHost):
@@ -300,4 +272,23 @@ class MpmRigidContactHost(CouplingPairsHost):
 
     def newton_adjoint_finish(self, f):
         """Pull the contact pairs back into the adjoints of the particles and of Rigid's state."""
-        kernel_rigid_contact_adjoint(f, self._device)
+        mpm_rigid_adjoint_func.kernel_rigid_contact_adjoint(
+            f,
+            self._device.mpm.particles,
+            self._device.mpm.grid,
+            self._device.mpm.newton,
+            self._device.mpm.linear,
+            self._device.mpm.linear_block,
+            self._device.pairs,
+            self._device.rigid.rigid_data,
+            self._device.rigid.dyn_state.geoms,
+            self._device.rigid.dyn_state.links,
+            self._device.rigid.dyn_state.dofs,
+            self._device.mpm.particles_info,
+            self._device.rigid.dyn_info.geoms,
+            self._device.rigid.dyn_info.links,
+            self._device.rigid.rigid_info,
+            self._device.rigid.sdf_info,
+            self._device.mpm.mpm_info,
+            self._device.rigid.config,
+        )

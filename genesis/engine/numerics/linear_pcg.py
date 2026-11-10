@@ -53,7 +53,9 @@ class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
 
 
 @qd.func(requires_top_level=True)
-def _func_dot(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
+def func_linear_pcg_dot_rz(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
+    """Add r . z of the preconditioned residual of every running environment into its entry of an array of the
+    environments."""
     qd.loop_config(name="pcg_dot_rz", block_dim=PCG_BLOCK)
     for i_r in range(warp_padded(pcg_workspace.n_rows[()])):
         env_key = gs.qd_int(-1)
@@ -96,7 +98,7 @@ def func_init_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scala
     qd.loop_config(name="pcg_copy_z_to_p", block_dim=PCG_BLOCK)
     for i_r in range(pcg_workspace.n_rows[()]):
         pcg_workspace.p[i_r] = pcg_workspace.z[i_r]
-    _func_dot(out=pcg_scalars.rz, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
+    func_linear_pcg_dot_rz(out=pcg_scalars.rz, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
 
 
 @qd.func(requires_top_level=True)
@@ -138,12 +140,6 @@ def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScrat
             alpha = pcg_scalars.alpha[i_b]
             x[i_r] = x[i_r] + alpha * pcg_workspace.p[i_r]
             pcg_workspace.r[i_r] = pcg_workspace.r[i_r] - alpha * pcg_workspace.ap[i_r]
-
-
-@qd.func(requires_top_level=True)
-def func_linear_pcg_dot_rz(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
-    """Add r . z of the preconditioned residual to rz_new."""
-    _func_dot(out=pcg_scalars.rz_new, pcg_workspace=pcg_workspace, pcg_scalars=pcg_scalars)
 
 
 @qd.func(requires_top_level=True)

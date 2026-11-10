@@ -8,6 +8,7 @@ import genesis as gs
 from genesis.engine.numerics.bcoo_matrix import (
     BCOOMatrixScratch,
     bcoo_matrix_sizes,
+    func_discard_triplet,
     func_read_bcoo,
     func_reduce_bcoo,
     func_report_triplet_demand,
@@ -29,10 +30,8 @@ from .newton_linear import (
     MIN_SLOTS,
     NewtonLinearScratch,
     build_linear_block,
-    discard_block,
     grown_capacity,
     retire_scratch,
-    write_block,
 )
 from .newton_solver import NewtonDevice, participant_group
 
@@ -193,57 +192,12 @@ class NewtonContact(NewtonDevice):
         return is_rigid
 
     @qd.func(requires_top_level=True)
-    def func_layout(self):
-        """Lay the slots of every pair kind out in the vertex-space matrices, and report the demand of both."""
-        for _ in range(1):
-            n_doublets = gs.qd_int(0)
-            n_triplets = gs.qd_int(0)
-            for i_kind in qd.static(range(len(self.pair_kinds))):
-                self.matrices.doublet_offsets[i_kind] = n_doublets
-                self.matrices.triplet_offsets[i_kind] = n_triplets
-                n_pairs = self.pair_kinds[i_kind].func_pair_count()
-                n_doublets += qd.static(self.pair_kinds[i_kind].n_doublets) * n_pairs
-                n_triplets += qd.static(self.pair_kinds[i_kind].n_triplets) * n_pairs
-            self.matrices.doublet_offsets[qd.static(len(self.pair_kinds))] = n_doublets
-            self.matrices.triplet_offsets[qd.static(len(self.pair_kinds))] = n_triplets
-            func_report_triplet_demand(n_doublets, self.matrices.gradient)
-            func_report_triplet_demand(n_triplets, self.matrices.hessian)
-
-    @qd.func(requires_top_level=True)
     def func_terms(self, f: int):
         """Write the doublets and triplets of every pair at the current iterate."""
         if qd.static(self.has_rigid_map):
             self.rigid_map.func_vertex_begin(f, SRC_ITERATE)
         for i_kind in qd.static(range(len(self.pair_kinds))):
             self.pair_kinds[i_kind].func_pair_terms(f, i_kind, self)
-
-    @qd.func(requires_top_level=True)
-    def func_entry_layout(self):
-        """Number the blocks of the linear system of every reduced Hessian entry, which hold over the substep, and
-        report their count in the share of the contacts."""
-        qd.loop_config(name="newton_contact_entry_blocks")
-        for i_nz in range(self.matrices.hessian.bcoo_nnz[()]):
-            i_va, i_vb, H = func_read_bcoo(i_nz, self.matrices.hessian, block_rows=3, block_cols=3)
-            n_blocks = gs.qd_int(0)
-            if not self.is_rigid_vertex(i_vb):
-                n_rows_a, rows_a, weights_a = self.vertex_rows(i_va)
-                n_rows_b, rows_b, weights_b = self.vertex_rows(i_vb)
-                n_blocks = n_rows_a * n_rows_b
-                if i_va == i_vb:
-                    n_blocks = n_rows_a * (n_rows_a + 1) // 2
-            self.matrices.entry_blocks[i_nz] = n_blocks
-        func_dynamic_exclusive_sum(
-            self.matrices.entry_blocks,
-            self.matrices.entry_starts,
-            self.matrices.hessian.bcoo_nnz,
-            self.matrices.entry_scan,
-        )
-        for _ in range(1):
-            n_entries = self.matrices.hessian.bcoo_nnz[()]
-            n_blocks = gs.qd_int(0)
-            if n_entries > 0:
-                n_blocks = self.matrices.entry_starts[n_entries - 1] + self.matrices.entry_blocks[n_entries - 1]
-            self.linear_block.n_triplets[()] = n_blocks
 
     @qd.func(requires_top_level=True)
     def func_contact_assemble(self, f: int, linear: NewtonLinearScratch):
@@ -279,13 +233,13 @@ class NewtonContact(NewtonDevice):
                     for j_r_ in range(j_r_start, n_rows_b):
                         weight = weights_a[i_r_] * weights_b[j_r_]
                         if qd.abs(weight) < gs.EPS:
-                            discard_block(i_t, linear)
+                            func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)
                         else:
                             block = weight * H
                             # Two vertices on one row: the block and its transpose land on the diagonal of the row
                             if i_va != i_vb and rows_a[i_r_] == rows_b[j_r_]:
                                 block += block.transpose()
-                            write_block(i_t, rows_a[i_r_], rows_b[j_r_], block, linear)
+                            func_write_triplet(i_t, rows_a[i_r_], rows_b[j_r_], block, linear.matrix, is_symmetric=True)
                         i_t += 1
 
     @qd.func(requires_top_level=True)
@@ -337,7 +291,20 @@ class NewtonContact(NewtonDevice):
 
 @qd.kernel
 def kernel_contact_layout(contact: qd.template()):
-    contact.func_layout()
+    """Lay the slots of every pair kind out in the vertex-space matrices, and report the demand of both."""
+    for _ in range(1):
+        n_doublets = gs.qd_int(0)
+        n_triplets = gs.qd_int(0)
+        for i_kind in qd.static(range(len(contact.pair_kinds))):
+            contact.matrices.doublet_offsets[i_kind] = n_doublets
+            contact.matrices.triplet_offsets[i_kind] = n_triplets
+            n_pairs = contact.pair_kinds[i_kind].func_pair_count()
+            n_doublets += qd.static(contact.pair_kinds[i_kind].n_doublets) * n_pairs
+            n_triplets += qd.static(contact.pair_kinds[i_kind].n_triplets) * n_pairs
+        contact.matrices.doublet_offsets[qd.static(len(contact.pair_kinds))] = n_doublets
+        contact.matrices.triplet_offsets[qd.static(len(contact.pair_kinds))] = n_triplets
+        func_report_triplet_demand(n_doublets, contact.matrices.gradient)
+        func_report_triplet_demand(n_triplets, contact.matrices.hessian)
 
 
 @qd.kernel
@@ -347,4 +314,28 @@ def kernel_contact_terms(f: int, contact: qd.template()):
 
 @qd.kernel
 def kernel_contact_entry_layout(contact: qd.template()):
-    contact.func_entry_layout()
+    """Number the blocks of the linear system of every reduced Hessian entry, which hold over the substep, and report
+    their count in the share of the contacts."""
+    qd.loop_config(name="newton_contact_entry_blocks")
+    for i_nz in range(contact.matrices.hessian.bcoo_nnz[()]):
+        i_va, i_vb, H = func_read_bcoo(i_nz, contact.matrices.hessian, block_rows=3, block_cols=3)
+        n_blocks = gs.qd_int(0)
+        if not contact.is_rigid_vertex(i_vb):
+            n_rows_a, rows_a, weights_a = contact.vertex_rows(i_va)
+            n_rows_b, rows_b, weights_b = contact.vertex_rows(i_vb)
+            n_blocks = n_rows_a * n_rows_b
+            if i_va == i_vb:
+                n_blocks = n_rows_a * (n_rows_a + 1) // 2
+        contact.matrices.entry_blocks[i_nz] = n_blocks
+    func_dynamic_exclusive_sum(
+        contact.matrices.entry_blocks,
+        contact.matrices.entry_starts,
+        contact.matrices.hessian.bcoo_nnz,
+        contact.matrices.entry_scan,
+    )
+    for _ in range(1):
+        n_entries = contact.matrices.hessian.bcoo_nnz[()]
+        n_blocks = gs.qd_int(0)
+        if n_entries > 0:
+            n_blocks = contact.matrices.entry_starts[n_entries - 1] + contact.matrices.entry_blocks[n_entries - 1]
+        contact.linear_block.n_triplets[()] = n_blocks

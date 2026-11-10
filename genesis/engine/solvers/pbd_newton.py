@@ -3,6 +3,7 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.bcoo_matrix import func_write_triplet
 from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.utils.data import ENVS, Data, DataKind, Size, field, iter_data
 
@@ -14,7 +15,6 @@ from .newton_linear import (
     NewtonLinearScratch,
     build_block_jacobi,
     build_linear_block,
-    write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
 
@@ -82,7 +82,9 @@ class PbdNewtonParticipant(BlockJacobiOwner, NewtonDevice):
                 grad = mass * (self.solver.particles_reordered[i_rp, i_b].pos - self.scratch.target[i_rp, i_b])
             row = self.row(i_rp, i_b)
             i_t = self.linear_block.triplet_start[()] + row - self.linear_block.row_start[()]
-            write_block(i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear)
+            func_write_triplet(
+                i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear.matrix, is_symmetric=True
+            )
             self.linear.b_rhs[row] = grad
             self.linear.pcg.rows_env[row] = i_b
 

@@ -4,7 +4,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_write_triplet
+from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_discard_triplet, func_write_triplet
 from genesis.engine.numerics.fsr_reduce import add_by_key, head_segmented_reduce_add, max_by_key
 from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.numerics.open_addressing_hash import (
@@ -32,7 +32,7 @@ from .mpm_data import (
     MpmWallPairs,
 )
 from .newton_contact import append_pair
-from .newton_linear import LinearBlock, NewtonLinearScratch, discard_block
+from .newton_linear import LinearBlock, NewtonLinearScratch
 
 # Biased signed range of block coordinates packed into 14 bits per axis
 COORD_BIAS = 8192
@@ -1478,7 +1478,7 @@ def func_elastic_assemble(
                     i_rb = rows.row_start[()] + slots[b]
                     if grid.nodes_is_fixed[slots[a]] != 0 or grid.nodes_is_fixed[slots[b]] != 0:
                         if j_ps == i_ps_clamped:
-                            discard_block(i_t_start + i_pair, linear)
+                            func_discard_triplet(i_t_start + i_pair, linear.matrix, block_rows=3, block_cols=3)
                     elif j_ps == i_ps_clamped:
                         func_write_triplet(i_t_start + i_pair, i_ra, i_rb, block, linear.matrix, is_symmetric=True)
                     else:

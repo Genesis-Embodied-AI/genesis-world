@@ -30,12 +30,12 @@ from genesis.engine.numerics.newton_control import (
     NewtonControl,
     func_accept_or_backtrack,
     func_check_convergence,
-    func_clear_non_finite,
     func_init_line_search,
     func_reset_energy,
-    func_reset_newton_control,
     func_reset_newton_measures,
     func_update_convergence,
+    kernel_clear_non_finite,
+    kernel_reset_newton_control,
 )
 from genesis.grad.bridge import custom_backward
 from genesis.utils.data import ENVS, DataItem, DataKind, iter_data, iter_data_oriented
@@ -46,9 +46,9 @@ from .newton_linear import (
     MIN_SLOTS,
     NewtonLinearScratch,
     build_newton_linear,
-    func_linear_layout,
     func_linear_visit,
     grown_capacity,
+    kernel_linear_layout,
     retire_scratch,
 )
 
@@ -188,7 +188,7 @@ def func_pcg_iteration(f: int, pcg_scalars: PCGScalars, participants: qd.templat
     func_linear_pcg_update_xr(participants.linear.solution, participants.linear.pcg, pcg_scalars)
     for owner in qd.static(participants.owners):
         owner.func_precondition()
-    func_linear_pcg_dot_rz(participants.linear.pcg, pcg_scalars)
+    func_linear_pcg_dot_rz(out=pcg_scalars.rz_new, pcg_workspace=participants.linear.pcg, pcg_scalars=pcg_scalars)
     if qd.static(participants.has_rigid):
         participants.rigid.func_pcg_update_xr(pcg_scalars)
         participants.rigid.func_precondition()
@@ -245,11 +245,6 @@ def kernel_assemble_terms(f: int, participants: qd.template(), is_exact: qd.temp
 
 
 @qd.kernel
-def kernel_linear_layout(participants: qd.template()):
-    func_linear_layout(participants)
-
-
-@qd.kernel
 def kernel_pcg_start(
     f: int,
     newton_control: NewtonControl,
@@ -293,16 +288,6 @@ def kernel_line_search_trial(f: int, newton_control: NewtonControl, participants
 @qd.kernel
 def kernel_update_convergence(newton_control: NewtonControl):
     func_update_convergence(newton_control)
-
-
-@qd.kernel
-def kernel_reset_newton_control(newton_control: NewtonControl):
-    func_reset_newton_control(newton_control)
-
-
-@qd.kernel
-def kernel_clear_non_finite(newton_control: NewtonControl):
-    func_clear_non_finite(newton_control)
 
 
 @qd.kernel(graph=True)

@@ -11,9 +11,9 @@ from .dynamic_exclusive_sum import (
 )
 from .dynamic_radix_sort import (
     DynamicRadixSortScratch,
-    dynamic_radix_sort,
     dynamic_radix_sort_sizes,
     func_dynamic_radix_sort,
+    kernel_radix_sort,
 )
 from .fsr_reduce import func_fsr_reduce
 
@@ -250,13 +250,13 @@ def kernel_reduce_bcoo(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
 def sort_bcoo(matrix: BCOOMatrixScratch) -> None:
     """Run func_sort_bcoo as separate launches from the host, sharing the compiled sort and scan kernels."""
     kernel_compose_bcoo_sort_keys(matrix)
-    dynamic_radix_sort(
-        matrix.triplet_sorter,
+    kernel_radix_sort(
         matrix.triplets_key,
         matrix.sort_buffer_keys,
         matrix.triplets_source_idx,
         matrix.sort_buffer_sources_idx,
         matrix.n_padded_triplets,
+        matrix.triplet_sorter,
         key_bits=64,
     )
     kernel_mark_bcoo_segment_ends(matrix)

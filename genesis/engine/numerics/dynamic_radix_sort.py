@@ -419,15 +419,8 @@ def kernel_radix_sort(
     sorter: DynamicRadixSortScratch,
     key_bits: qd.template(),
 ):
-    """Run func_dynamic_radix_sort as a graph of its own."""
-    func_dynamic_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
-
-
-def dynamic_radix_sort(
-    sorter: DynamicRadixSortScratch, keys_a, keys_b, permutation_a, permutation_b, n, key_bits: int
-) -> None:
     """Sort keys stably together with their permutation in a launch of its own (see func_dynamic_radix_sort).
 
     The first `n[()]` keys of `keys_a` are sorted together with `permutation_a`, `keys_b` and `permutation_b` serving as
     buffers."""
-    kernel_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)
+    func_dynamic_radix_sort(keys_a, keys_b, permutation_a, permutation_b, n, sorter, key_bits)

@@ -12,7 +12,7 @@ from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
-from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
+from genesis.engine.numerics.dynamic_radix_sort import kernel_radix_sort
 from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
@@ -1341,23 +1341,23 @@ def kernel_grid_cells(grid: MpmGridScratch):
 def build_grid(particles, particles_ng, grid, mpm_info, f):
     """Rebuild the block-sparse grid of the substep from the particles, its topology fixed until the next substep."""
     kernel_grid_keys(f, particles, particles_ng, grid, mpm_info)
-    dynamic_radix_sort(
-        grid.particle_sort,
+    kernel_radix_sort(
         grid.sort_keys,
         grid.sort_keys_buffer,
         grid.sort_ids,
         grid.sort_ids_buffer,
         grid.n_sort_keys,
+        grid.particle_sort,
         key_bits=64,
     )
     kernel_grid_blocks(grid, mpm_info)
-    dynamic_radix_sort(
-        grid.block_sort,
+    kernel_radix_sort(
         grid.neighbors_key,
         grid.neighbors_key_buffer,
         grid.neighbors_source_idx,
         grid.neighbors_source_idx_buffer,
         grid.n_neighbor_keys,
+        grid.block_sort,
         key_bits=64,
     )
     kernel_grid_block_flags(grid)

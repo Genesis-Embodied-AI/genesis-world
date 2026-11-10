@@ -3,6 +3,7 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.bcoo_matrix import func_discard_triplet, func_write_triplet
 from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.utils.data import StaticConfig, iter_data
 
@@ -14,8 +15,6 @@ from .newton_linear import (
     NewtonLinearScratch,
     build_block_jacobi,
     build_linear_block,
-    discard_block,
-    write_block,
 )
 from .newton_solver import NewtonDevice, NewtonHost
 
@@ -100,7 +99,9 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
                 mass = dt_sq * self.solver.elements_v_info[i_v].mass_over_dt2 * (1.0 + self.damping_alpha_dt)
                 g = -dt_sq * self.solver.elements_v_energy[i_b, i_v].force
             i_t = self.linear_block.triplet_start[()] + i_r
-            write_block(i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear)
+            func_write_triplet(
+                i_t, row, row, mass * qd.Matrix.identity(gs.qd_float, 3), self.linear.matrix, is_symmetric=True
+            )
             self.linear.b_rhs[row] = g
             self.linear.pcg.rows_env[row] = i_b
         qd.loop_config(name="mpm_fem_assemble_elements")
@@ -130,9 +131,16 @@ class FemNewtonParticipant(BlockJacobiOwner, NewtonDevice):
                                 [[columns[3 * k_r + a, c] for c in qd.static(range(3))] for a in qd.static(range(3))]
                             )
                             rows = row_start + i_vs
-                            write_block(i_t + i_block, rows[k_r], rows[k_c], scale * block, self.linear)
+                            func_write_triplet(
+                                i_t + i_block,
+                                rows[k_r],
+                                rows[k_c],
+                                scale * block,
+                                self.linear.matrix,
+                                is_symmetric=True,
+                            )
                         else:
-                            discard_block(i_t + i_block, self.linear)
+                            func_discard_triplet(i_t + i_block, self.linear.matrix, block_rows=3, block_cols=3)
 
     @qd.func(requires_top_level=True)
     def func_start_line_search(self, f: int, control: NewtonControl):

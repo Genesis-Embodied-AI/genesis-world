@@ -142,55 +142,6 @@ class CouplingPairs(NewtonDevice):
     def func_pair_count(self):
         return self.pairs.n_pairs[()]
 
-    @qd.func(requires_top_level=True)
-    def func_query(self, f: int):
-        """Record as candidates the partners whose leaf box meets the band of every valid particle at its own speed (see
-        contact_band_width), the leaves spanning the motion of the partners over the substep."""
-        for _ in range(1):
-            self.candidates.results.count[0] = 0
-        qd.loop_config(name="mpm_query_partners")
-        for i_ps in range(self.mpm.grid.n_valid[()]):
-            i_p, i_b, cell = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
-            x_p = self.mpm.particles.pos[f, i_p, i_b]
-            speed = self.mpm.particles.vel[f, i_p, i_b].norm()
-            reach = contact_band_width(speed, self.mpm.mpm_info.substep_dt[()], self.mpm.mpm_info)
-            func_bvh_query_aabb(
-                i_b,
-                i_ps,
-                x_p - reach,
-                x_p + reach,
-                self.query.tree,
-                self.candidates.results,
-                func_no_filter,
-                self.query,
-            )
-
-    @qd.func(requires_top_level=True)
-    def func_score(self, f: int):
-        """Score every candidate by the narrow phase of the coupling (see candidate_score)."""
-        # The candidates to sort are those the results hold
-        for _ in range(1):
-            func_report_triplet_demand(self.candidates.results.count[0], self.candidates.order)
-        qd.loop_config(name="mpm_score_partners")
-        for i_cand in range(self.candidates.order.n_triplets[()]):
-            triplet = self.candidates.results.triplets[i_cand]
-            score, secondary = self.candidate_score(f, triplet[0], triplet[1], triplet[2])
-            set_candidate_score(i_cand, triplet[2], score, secondary, self.candidates)
-
-    @qd.func(requires_top_level=True)
-    def func_build_pairs(self, f: int):
-        """Pair every valid particle with its nearest candidate (see build_pair), once the candidates are sorted by
-        particle."""
-        func_select_nearest(self.candidates, self.mpm.mpm_info)
-        for _ in range(1):
-            self.pairs.n_pairs[()] = 0
-        qd.loop_config(name="mpm_build_pairs")
-        for i_nz in range(self.candidates.order.bcoo_nnz[()]):
-            i_cand = self.candidates.best_candidate[i_nz]
-            if i_cand < self.candidates.secondary.shape[0]:
-                triplet = self.candidates.results.triplets[i_cand]
-                self.build_pair(f, triplet[0], triplet[1], triplet[2], self.candidates.order.triplets_val[i_cand])
-
     @qd.func
     def add_pair(
         self,
@@ -286,14 +237,51 @@ class CouplingPairsHost(NewtonHost):
 
 @qd.kernel
 def kernel_query_candidates(f: int, pair_kind: qd.template()):
-    pair_kind.func_query(f)
+    """Record as candidates the partners whose leaf box meets the band of every valid particle at its own speed (see
+    contact_band_width), the leaves spanning the motion of the partners over the substep."""
+    for _ in range(1):
+        pair_kind.candidates.results.count[0] = 0
+    qd.loop_config(name="mpm_query_partners")
+    for i_ps in range(pair_kind.mpm.grid.n_valid[()]):
+        i_p, i_b, cell = particle_of_sorted(i_ps, pair_kind.mpm.grid, pair_kind.mpm.mpm_info)
+        x_p = pair_kind.mpm.particles.pos[f, i_p, i_b]
+        speed = pair_kind.mpm.particles.vel[f, i_p, i_b].norm()
+        reach = contact_band_width(speed, pair_kind.mpm.mpm_info.substep_dt[()], pair_kind.mpm.mpm_info)
+        func_bvh_query_aabb(
+            i_b,
+            i_ps,
+            x_p - reach,
+            x_p + reach,
+            pair_kind.query.tree,
+            pair_kind.candidates.results,
+            func_no_filter,
+            pair_kind.query,
+        )
 
 
 @qd.kernel
 def kernel_score_candidates(f: int, pair_kind: qd.template()):
-    pair_kind.func_score(f)
+    """Score every candidate by the narrow phase of the coupling (see candidate_score)."""
+    # The candidates to sort are those the results hold
+    for _ in range(1):
+        func_report_triplet_demand(pair_kind.candidates.results.count[0], pair_kind.candidates.order)
+    qd.loop_config(name="mpm_score_partners")
+    for i_cand in range(pair_kind.candidates.order.n_triplets[()]):
+        triplet = pair_kind.candidates.results.triplets[i_cand]
+        score, secondary = pair_kind.candidate_score(f, triplet[0], triplet[1], triplet[2])
+        set_candidate_score(i_cand, triplet[2], score, secondary, pair_kind.candidates)
 
 
 @qd.kernel
 def kernel_build_pairs(f: int, pair_kind: qd.template()):
-    pair_kind.func_build_pairs(f)
+    """Pair every valid particle with its nearest candidate (see build_pair), once the candidates are sorted by
+    particle."""
+    func_select_nearest(pair_kind.candidates, pair_kind.mpm.mpm_info)
+    for _ in range(1):
+        pair_kind.pairs.n_pairs[()] = 0
+    qd.loop_config(name="mpm_build_pairs")
+    for i_nz in range(pair_kind.candidates.order.bcoo_nnz[()]):
+        i_cand = pair_kind.candidates.best_candidate[i_nz]
+        if i_cand < pair_kind.candidates.secondary.shape[0]:
+            triplet = pair_kind.candidates.results.triplets[i_cand]
+            pair_kind.build_pair(f, triplet[0], triplet[1], triplet[2], pair_kind.candidates.order.triplets_val[i_cand])

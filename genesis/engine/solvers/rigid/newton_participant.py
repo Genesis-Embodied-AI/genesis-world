@@ -168,18 +168,6 @@ class RigidNewtonParticipant(NewtonDevice):
 
 
 @qd.kernel
-def kernel_rigid_begin(rigid: qd.template()):
-    newton_func.func_rigid_begin(
-        rigid.rigid_data,
-        rigid.dyn_state.dofs,
-        rigid.constraint_state,
-        rigid.newton_info,
-        rigid.rigid_config,
-        rigid.config,
-    )
-
-
-@qd.kernel
 def kernel_rigid_write_back(f: int, rigid: qd.template()):
     rigid.func_evaluate(f)
     newton_func.func_rigid_write_back(rigid.rigid_data, rigid.constraint_state, rigid.config)
@@ -192,16 +180,6 @@ def kernel_rigid_freeze(rigid: qd.template(), control: NewtonControl):
         rigid.rigid_info.is_env_frozen[i_b] = control.has_failed_non_finite[i_b]
 
 
-@qd.kernel
-def kernel_rigid_adjoint_rhs(rigid: qd.template()):
-    newton_func.func_rigid_adjoint_rhs(rigid.rigid_data, rigid.constraint_state, rigid.newton_info)
-
-
-@qd.kernel
-def kernel_rigid_adjoint_finish(rigid: qd.template()):
-    newton_func.func_rigid_adjoint_finish(rigid.rigid_data, rigid.constraint_state, rigid.newton_info)
-
-
 class RigidNewtonHost(NewtonHost):
     """Host stages of Rigid's dofs around the joint solve."""
 
@@ -212,7 +190,14 @@ class RigidNewtonHost(NewtonHost):
         self._device = device
 
     def newton_prepare(self, f):
-        kernel_rigid_begin(self._device)
+        newton_func.kernel_rigid_begin(
+            self._device.rigid_data,
+            self._device.dyn_state.dofs,
+            self._device.constraint_state,
+            self._device.newton_info,
+            self._device.rigid_config,
+            self._device.config,
+        )
 
     def newton_finish(self, f, control):
         kernel_rigid_write_back(f, self._device)
@@ -230,7 +215,11 @@ class RigidNewtonHost(NewtonHost):
         self._rigid_solver._constraint_force_grad(solve_adjoint=solve)
 
     def newton_adjoint_rhs(self, f):
-        kernel_rigid_adjoint_rhs(self._device)
+        newton_func.kernel_rigid_adjoint_rhs(
+            self._device.rigid_data, self._device.constraint_state, self._device.newton_info
+        )
 
     def newton_adjoint_finish(self, f):
-        kernel_rigid_adjoint_finish(self._device)
+        newton_func.kernel_rigid_adjoint_finish(
+            self._device.rigid_data, self._device.constraint_state, self._device.newton_info
+        )

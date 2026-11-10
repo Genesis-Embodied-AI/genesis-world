@@ -122,8 +122,8 @@ def func_clear_links_stiffness(rigid_data: RigidNewtonScratch):
 # ============================================== Layer 1: Rigid block ===============================================
 
 
-@qd.func(requires_top_level=True)
-def func_rigid_begin(
+@qd.kernel
+def kernel_rigid_begin(
     rigid_data: RigidNewtonScratch,
     dofs_state: DofsState,
     constraint_state: ConstraintState,
@@ -452,8 +452,8 @@ def func_rigid_write_back(rigid_data: RigidNewtonScratch, constraint_state: Cons
             constraint_state.qfrc_constraint[i_d, i_b] = 0.0
 
 
-@qd.func(requires_top_level=True)
-def func_rigid_adjoint_rhs(
+@qd.kernel
+def kernel_rigid_adjoint_rhs(
     rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
 ):
     """Set Rigid's right-hand side of the joint adjoint solve, in place of the gradient from which the solve starts."""
@@ -465,8 +465,8 @@ def func_rigid_adjoint_rhs(
         rigid_data.grad[i_d, i_b] = constraint_state.dL_dqacc[i_d, i_b] * inv_dt_sq
 
 
-@qd.func(requires_top_level=True)
-def func_rigid_adjoint_finish(
+@qd.kernel
+def kernel_rigid_adjoint_finish(
     rigid_data: RigidNewtonScratch, constraint_state: ConstraintState, newton_info: RigidNewtonInfo
 ):
     """Set the solution of Rigid's adjoint solve from that of the joint one."""

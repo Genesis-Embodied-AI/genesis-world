@@ -8,10 +8,8 @@ import genesis as gs
 from genesis.engine.numerics.bcoo_matrix import (
     BCOOMatrixScratch,
     bcoo_matrix_sizes,
-    func_discard_triplet,
     func_read_bcoo,
     func_report_triplet_demand,
-    func_write_triplet,
     init_bcoo_matrix,
 )
 from genesis.engine.numerics.linear_pcg import PCG_ROWS, PCGWorkspaceScratch
@@ -43,7 +41,10 @@ def grown_capacity(demand: int) -> int:
 
 
 class NewtonLinearScratch(Data, kind=DataKind.SCRATCH):
-    """The matrix, right-hand side, solution and conjugate gradient vectors of the joint Newton solve."""
+    """The matrix, right-hand side, solution and conjugate gradient vectors of the joint Newton solve.
+
+    An owner eliminates the unknown of a row by an identity diagonal block and a zero right-hand side, and discards the
+    other blocks on the row (see func_discard_triplet), so that the row decouples and its solution is exactly zero."""
 
     matrix: BCOOMatrixScratch
     pcg: PCGWorkspaceScratch
@@ -139,8 +140,8 @@ class BlockJacobiOwner:
 # ============================================== Layer 1: stages ==============================================
 
 
-@qd.func(requires_top_level=True)
-def func_linear_layout(participants: qd.template()):
+@qd.kernel
+def kernel_linear_layout(participants: qd.template()):
     """Lay out the rows and triplets of every owner, then the triplets of the contacts, from the counts they reported,
     and report the live rows and the triplet demand of the matrix."""
     for _ in range(1):
@@ -172,18 +173,3 @@ def func_linear_visit(linear: NewtonLinearScratch, owners: qd.template()):
             n_rows = owner.linear_block.n_rows[()]
             if 0 <= i_r_local and i_r_local < n_rows and 0 <= i_c_local and i_c_local < n_rows:
                 owner.func_linear_visit_block(i_r_local, i_c_local, H)
-
-
-@qd.func
-def write_block(i_t: int, i_r: int, i_c: int, H: qd.types.matrix(3, 3), linear: NewtonLinearScratch):
-    """Write a 3 x 3 block of the symmetric matrix into a triplet slot, mirrored into the upper triangle."""
-    func_write_triplet(i_t, i_r, i_c, H, linear.matrix, is_symmetric=True)
-
-
-@qd.func
-def discard_block(i_t: int, linear: NewtonLinearScratch):
-    """Discard a triplet slot, that of a block on an eliminated row.
-
-    An owner eliminates the unknown of a row by an identity diagonal block and a zero right-hand side, and discards the
-    other blocks on the row, so that the row decouples and its solution is exactly zero."""
-    func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)

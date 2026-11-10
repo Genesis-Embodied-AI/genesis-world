@@ -35,8 +35,8 @@ class NewtonControl(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     max_displacement: qd.Tensor = field(float, ndarray=True)
 
 
-@qd.func(requires_top_level=True)
-def func_reset_newton_control(control: NewtonControl):
+@qd.kernel
+def kernel_reset_newton_control(control: NewtonControl):
     """Start the solve of every environment but those stopped on a non-finite measure earlier in the step."""
     for _ in range(1):
         control.is_newton_running[()] = 0
@@ -49,8 +49,8 @@ def func_reset_newton_control(control: NewtonControl):
             qd.atomic_max(control.is_newton_running[()], 1)
 
 
-@qd.func(requires_top_level=True)
-def func_clear_non_finite(control: NewtonControl):
+@qd.kernel
+def kernel_clear_non_finite(control: NewtonControl):
     """Clear the latch of the solves stopped on a non-finite measure, once the participants read it."""
     for i_b in range(control.has_failed_non_finite.shape[0]):
         control.has_failed_non_finite[i_b] = 0

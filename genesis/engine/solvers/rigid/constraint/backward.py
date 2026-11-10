@@ -583,7 +583,7 @@ def kernel_manual_add_collision_constraints_bw(
                 else:
                     g_d2 += s_i * g_d
 
-            g_normal += gu.qd_orthogonals_bw(normal, g_d1, g_d2)
+            g_normal += gu.qd_orthogonals_backward(normal, g_d1, g_d2)
 
             for j in qd.static(range(3)):
                 collider_state.contact_data.pos.grad[i_col, i_b][j] = g_pos[j]

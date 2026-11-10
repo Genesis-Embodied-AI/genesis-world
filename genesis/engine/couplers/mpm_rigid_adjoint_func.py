@@ -5,7 +5,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.solvers.mpm_adjoint_func import band_row_bw, polar_rotation_bw
+from genesis.engine.solvers.mpm_adjoint_func import band_row_backward, polar_rotation_backward
 from genesis.engine.solvers.mpm_data import (
     PYRAMID_ROWS,
     MpmGridScratch,
@@ -70,7 +70,7 @@ def geom_sdf_grid_hessian(i_g: int, i_b: int, x: qd.types.vector(3), geoms_state
 
 
 @qd.func
-def geom_contact_bw(
+def geom_contact_backward(
     i_g: int,
     i_b: int,
     x: qd.types.vector(3),
@@ -147,8 +147,8 @@ def link_chain_spatial(
 # ============================================== Layer 1: pullback ===============================================
 
 
-@qd.func(requires_top_level=True)
-def func_rigid_contact_adjoint(
+@qd.kernel
+def kernel_rigid_contact_adjoint(
     f: int,
     particles: MpmParticles,
     grid: MpmGridScratch,
@@ -267,7 +267,7 @@ def func_rigid_contact_adjoint(
                 # target = target_soft + dt direction . v_r
                 direction_bar_k += dt * target_bar[k] * v_r
                 v_r_bar += dt * target_bar[k] * direction
-                phi_bar_k, vel_bar_k, diag_coef_bar_k = band_row_bw(
+                phi_bar_k, vel_bar_k, diag_coef_bar_k = band_row_backward(
                     sol_params, phi, direction.dot(v_rel), diag_coef, dt, stiffness_bar[k], target_bar[k]
                 )
                 phi_bar += phi_bar_k
@@ -279,13 +279,13 @@ def func_rigid_contact_adjoint(
                     tangent2_bar += (sign * friction) * direction_bar_k
                 else:
                     tangent1_bar += (sign * friction) * direction_bar_k
-            n_bar += gu.qd_orthogonals_bw(normal, tangent1_bar, tangent2_bar)
+            n_bar += gu.qd_orthogonals_backward(normal, tangent1_bar, tangent2_bar)
 
             # The inverse weight n^T R invweight_p R^T n
             invweight_bar = diag_coef_bar * diag_coef_scale
             n_bar += 2.0 * invweight_bar * (R @ (invweight_p @ n_rest))
             R_bar = (2.0 * invweight_bar) * normal.outer_product(invweight_p @ n_rest)
-            F_bar = polar_rotation_bw(U, S, V, R_bar)
+            F_bar = polar_rotation_backward(U, S, V, R_bar)
 
             # v_rel = v_p - v_r, v_r = cd_vel + cd_ang x (x_p - root_COM)
             v_p_bar = v_rel_bar
@@ -298,7 +298,7 @@ def func_rigid_contact_adjoint(
             qd.atomic_add(links_state.root_COM.grad[i_l, i_b], com_bar)
 
             # The distance and the normal of the geom at the particle
-            x_bar += geom_contact_bw(i_g, i_b, x_p, phi_bar, n_bar, geoms_state, geoms_info, rigid_info, sdf_info)
+            x_bar += geom_contact_backward(i_g, i_b, x_p, phi_bar, n_bar, geoms_state, geoms_info, rigid_info, sdf_info)
 
             # A particle has one pair at most, whose thread alone adds to its adjoint
             particles.pos.grad[f, i_p, i_b] = particles.pos.grad[f, i_p, i_b] + x_bar

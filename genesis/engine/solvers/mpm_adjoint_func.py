@@ -43,7 +43,7 @@ from .newton_linear import LinearBlock, NewtonLinearScratch
 
 
 @qd.func
-def return_map_bw(
+def return_map_backward(
     i_mat: int,
     kind: int,
     F: qd.types.matrix(3, 3),
@@ -77,7 +77,7 @@ def return_map_bw(
 
 
 @qd.func
-def band_row_bw(
+def band_row_backward(
     sol_params: qd.types.vector(7),
     phi: float,
     vel: float,
@@ -114,7 +114,7 @@ def band_row_bw(
 
 
 @qd.func
-def polar_rotation_bw(
+def polar_rotation_backward(
     U: qd.types.matrix(3, 3), S: qd.types.matrix(3, 3), V: qd.types.matrix(3, 3), R_bar: qd.types.matrix(3, 3)
 ):
     """Reverse of the rotation of the polar decomposition of a deformation gradient."""
@@ -142,7 +142,7 @@ def func_wall_contact_adjoint(
     mpm_info: MpmInfo,
 ):
     """Pull the wall pairs (see func_build_wall_pairs) back into the adjoint of the particles, as the Rigid rows with a
-    fixed wall (see func_rigid_contact_adjoint)."""
+    fixed wall (see kernel_rigid_contact_adjoint)."""
     qd.loop_config(name="mpm_wall_contact_adjoint")
     for i_pair in range(pairs.n_pairs[()]):
         i_ps = pairs.sorted_idx[i_pair]
@@ -175,7 +175,7 @@ def func_wall_contact_adjoint(
             invweight_p = particles_info.contact_invweight[i_p]
             n_rest = R.transpose() @ direction
             invweight = n_rest.dot(invweight_p @ n_rest)
-            phi_bar, vel_bar, invweight_bar = band_row_bw(
+            phi_bar, vel_bar, invweight_bar = band_row_backward(
                 mpm_info.wall_sol_params[()],
                 phi,
                 direction.dot(v_p),
@@ -193,7 +193,7 @@ def func_wall_contact_adjoint(
             # A particle has a pair per wall it nears, up to three
             qd.atomic_add(particles.pos.grad[f, i_p, i_b], x_bar)
             qd.atomic_add(particles.vel.grad[f, i_p, i_b], v_bar)
-            qd.atomic_add(particles.F.grad[f, i_p, i_b], polar_rotation_bw(U, S, V, R_bar))
+            qd.atomic_add(particles.F.grad[f, i_p, i_b], polar_rotation_backward(U, S, V, R_bar))
 
 
 @qd.func(requires_top_level=True)
@@ -270,7 +270,7 @@ def func_adjoint_g2p(
         F = particles.F[f, i_p, i_b]
         i_mat = particles_info.material_idx[i_p]
         F_trial = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
-        F_trial_bar, Jp_bar = return_map_bw(
+        F_trial_bar, Jp_bar = return_map_backward(
             i_mat,
             materials.materials_plastic[i_mat],
             F_trial,
