@@ -11,7 +11,6 @@ import coacd
 import igl
 import Imath
 import OpenEXR
-import tetgen
 import trimesh
 from PIL import Image
 
@@ -1409,6 +1408,9 @@ def merge_submeshes(verts_list, faces_list):
 
 
 def tetrahedralize_mesh(mesh, tet_cfg):
+    # Only deformable entities tetrahedralize: delay the import, as for 'pymeshlab' in 'Mesh.remesh'.
+    import tetgen
+
     tet = tetgen.TetGen(mesh.vertices.astype(np.float64, copy=False), mesh.faces.astype(np.int32, copy=False))
 
     # Build and apply the switches string directly, since
