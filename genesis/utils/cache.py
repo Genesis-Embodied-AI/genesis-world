@@ -4,6 +4,7 @@ scenes."""
 import dataclasses
 import functools
 import hashlib
+import importlib.metadata
 import marshal
 import os
 import pickle
@@ -310,7 +311,9 @@ def get_gnd_path(
 
 
 def get_cvx_cache(verts, faces, coacd_options):
-    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__, CVX_CACHE_VERSION)
+    # Keyed on the coacd version, since a coacd release may change the decomposition of a fixed mesh.
+    coacd_version = importlib.metadata.version("coacd")
+    return MeshCache(get_cvx_cache_dir(), "cvx", verts, faces, coacd_options.__dict__, coacd_version, CVX_CACHE_VERSION)
 
 
 def get_ptc_cache(verts, faces, p_size, sampler, random_state):
