@@ -6,7 +6,14 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.numerics.bcoo_matrix import func_add_triplet, func_discard_triplet, func_write_triplet
 from genesis.engine.numerics.fsr_reduce import add_by_key, head_segmented_reduce_add, max_by_key
-from genesis.engine.numerics.newton_control import NewtonControl
+from genesis.engine.numerics.newton_control import (
+    NewtonControl,
+    inertia_energy,
+    inertia_gradient,
+    line_search_point,
+    newton_direction,
+    step_measure,
+)
 from genesis.engine.numerics.open_addressing_hash import (
     EMPTY_KEY,
     func_insert_hash,
@@ -136,12 +143,6 @@ def unpack_block(key: qd.u64):
 
 
 @qd.func
-def flag_env_error(i_b: int, grid: MpmGridScratch, code: qd.template()):
-    """Raise an error code for one environment, which the solver reports at the beginning of the next step."""
-    qd.atomic_or(grid.errors.errno[i_b], qd.static(int(code)))
-
-
-@qd.func
 def cofactor(v: qd.types.vector(3)):
     """Products of the two other components of every component of a vector, the gradient of the product of all three."""
     return qd.Vector([v[1] * v[2], v[0] * v[2], v[0] * v[1]], dt=gs.qd_float)
@@ -211,6 +212,37 @@ def q1_weight_hessian(a: int, fx: qd.types.vector(3), inv_dx: float):
     return axis_dw.outer_product(axis_dw) * cofactor_jacobian(axis_w)
 
 
+# ============================================ Layer 0: stencil algebra =============================================
+
+
+@qd.func
+def cell_fraction(x: qd.types.vector(3), cell, inv_dx: float):
+    """Coordinates of a point in grid cells from the lower corner of a cell."""
+    return x * inv_dx - cell.cast(gs.qd_float)
+
+
+@qd.func
+def node_position(node_coords, dx: float):
+    return node_coords.cast(gs.qd_float) * dx
+
+
+@qd.func
+def stencil_interpolate(w: qd.types.vector(8), values: qd.types.matrix(8, 3)):
+    """Sum of the vectors of the nodes of a stencil (see gather_stencil), weighted by its weights."""
+    return values.transpose() @ w
+
+
+@qd.func
+def stencil_gradient(grad_w: qd.types.matrix(8, 3), values: qd.types.matrix(8, 3)):
+    """Gradient sum_a v_a grad w_a^T of the vectors of the nodes of a stencil (see gather_stencil)."""
+    return values.transpose() @ grad_w
+
+
+@qd.func
+def symmetric_part(matrix: qd.types.matrix(3, 3)):
+    return 0.5 * (matrix + matrix.transpose())
+
+
 # ============================================= Layer 0: gather lanes ==============================================
 
 
@@ -243,23 +275,6 @@ def lanes_max(value: int):
         for level in qd.static(range(5)):
             value = qd.max(value, qd.simt.subgroup.shuffle_xor(value, qd.u32(16 >> level)))
     return value
-
-
-@qd.func
-def cell_segment(i_b: int, cell, i_lane: int, grid: MpmGridScratch):
-    """Range of the sorted particles of a cell, looked up by lane 0 and broadcast to the gather lanes."""
-    i_ps_start = 0
-    i_ps_end = 0
-    if i_lane == 0:
-        i_blk = func_lookup_hash(pack_block(i_b, block_of(cell)), grid.hash)
-        if i_blk >= 0:
-            i_cell_slot = i_blk * BLOCK_CELLS + cell_local(cell)
-            i_ps_start = grid.cells_segment_start[i_cell_slot]
-            i_ps_end = grid.cells_segment_end[i_cell_slot]
-    if qd.static(gather_lanes() > 1):
-        i_ps_start = qd.simt.subgroup.shuffle(i_ps_start, qd.u32(0))
-        i_ps_end = qd.simt.subgroup.shuffle(i_ps_end, qd.u32(0))
-    return i_ps_start, i_ps_end
 
 
 # ============================================== Layer 0: constitution ================================================
@@ -491,7 +506,7 @@ def isotropic_projected_modes(
 ):
     """Symmetric positive definite (SPD) projection of the principal Hessian of an isotropic energy, as a scaling block
     and per-pair modes."""
-    S = 0.5 * (A + A.transpose())
+    S = symmetric_part(A)
     twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
     if qd.static(not is_exact):
         eigenvalues, Q = qd.sym_eig(S, gs.qd_float)
@@ -523,22 +538,13 @@ def isotropic_pair_block(
     return Z
 
 
-# ========================================= Layer 1: per-item stencil access ==========================================
-
-
 @qd.func
-def material_param(i_mat: int, param: qd.template(), materials: MpmMaterialTable, mpm_info: MpmInfo):
-    i_entry = param * mpm_info.n_materials[()] + i_mat
-    return materials.material_table[i_entry]
-
-
-@qd.func
-def material_params(i_mat: int, Jp: float, materials: MpmMaterialTable, mpm_info: MpmInfo):
-    """Lame parameters of a material slot for a particle, hardened by its plastic state for snow."""
-    mu = material_param(i_mat, PARAM_MU, materials, mpm_info)
-    lam = material_param(i_mat, PARAM_LAM, materials, mpm_info)
-    if materials.materials_plastic[i_mat] == PLASTIC_SNOW:
-        hardening = qd.exp(mpm_info.snow_hardening[()] * (1.0 - Jp))
+def hardened_lame(plastic: int, params: qd.types.vector(N_MATERIAL_PARAMS), Jp: float, snow_hardening: float):
+    """Lame parameters of a material (see material_values), hardened by the plastic state of a particle for snow."""
+    mu = params[PARAM_MU]
+    lam = params[PARAM_LAM]
+    if plastic == PLASTIC_SNOW:
+        hardening = qd.exp(snow_hardening * (1.0 - Jp))
         mu *= hardening
         lam *= hardening
     return mu, lam
@@ -546,25 +552,29 @@ def material_params(i_mat: int, Jp: float, materials: MpmMaterialTable, mpm_info
 
 @qd.func
 def elastic_principal(
-    i_mat: int, sigma: qd.types.vector(3), mu: float, lam: float, materials: MpmMaterialTable, mpm_info: MpmInfo
+    family: int,
+    sigma: qd.types.vector(3),
+    mu: float,
+    lam: float,
+    hencky_sigma_min: float,
+    liquid_band: float,
+    extension_sigma_min: float,
+    extension_stiffness: float,
 ):
-    """Energy density, principal gradient and Hessian of the energy family of a material slot."""
+    """Energy density, principal gradient and Hessian of an energy family."""
     psi = gs.qd_float(0.0)
     g = qd.Vector.zero(gs.qd_float, 3)
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    family = materials.materials_family[i_mat]
     if family == FAMILY_EXTENDED_HENCKY:
-        psi, g, A = extended_hencky_principal(sigma, mu, lam, mpm_info.hencky_sigma_min[()])
+        psi, g, A = extended_hencky_principal(sigma, mu, lam, hencky_sigma_min)
     elif family == FAMILY_LIQUID:
-        psi, g, A = liquid_principal(sigma, mu, lam, mpm_info.liquid_band[()])
+        psi, g, A = liquid_principal(sigma, mu, lam, liquid_band)
     else:
         if family == FAMILY_STABLE_NEOHOOKEAN:
             psi, g, A = stable_neohookean_principal(sigma, mu, lam)
         else:
             psi, g, A = fixed_corotated_principal(sigma, mu, lam)
-        penalty, g_penalty, A_penalty = compression_penalty(
-            sigma, mu, lam, mpm_info.extension_sigma_min[()], mpm_info.extension_stiffness[()]
-        )
+        penalty, g_penalty, A_penalty = compression_penalty(sigma, mu, lam, extension_sigma_min, extension_stiffness)
         psi += penalty
         g += g_penalty
         A += diagonal(A_penalty)
@@ -572,30 +582,56 @@ def elastic_principal(
 
 
 @qd.func
-def active_fibre_stiffness(i_mat: int, actu: float, materials: MpmMaterialTable, mpm_info: MpmInfo):
+def elastic_terms(
+    F_trial: qd.types.matrix(3, 3),
+    family: int,
+    mu: float,
+    lam: float,
+    hencky_sigma_min: float,
+    liquid_band: float,
+    extension_sigma_min: float,
+    extension_stiffness: float,
+):
+    """Principal decomposition of a trial deformation gradient, with the energy density, principal gradient and Hessian
+    of an energy family there (see elastic_principal)."""
+    U, S, V = gu.qd_svd(F_trial)
+    sigma = diagonal_of(S)
+    psi, g, A = elastic_principal(
+        family, sigma, mu, lam, hencky_sigma_min, liquid_band, extension_sigma_min, extension_stiffness
+    )
+    return U, sigma, V, psi, g, A
+
+
+@qd.func
+def first_piola(U: qd.types.matrix(3, 3), g: qd.types.vector(3), V: qd.types.matrix(3, 3)):
+    """First Piola-Kirchhoff stress of an isotropic energy from its principal gradient (see elastic_terms)."""
+    return U @ diagonal(g) @ V.transpose()
+
+
+@qd.func
+def active_fibre_stiffness(fibre_stiffness: float, actu: float):
     """Active stiffness of the muscle fibre term of a particle, and its derivative in the actuation."""
-    stiffness = material_param(i_mat, PARAM_FIBRE, materials, mpm_info)
-    return stiffness * qd.max(actu, 0.0), qd.select(actu > 0.0, stiffness, 0.0)
+    return fibre_stiffness * qd.max(actu, 0.0), qd.select(actu > 0.0, fibre_stiffness, 0.0)
 
 
 @qd.func
 def fibre_terms(
-    i_mat: int,
-    actu: float,
-    muscle_direction: qd.types.vector(3),
-    F_trial: qd.types.matrix(3, 3),
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
+    fibre_stiffness: float, actu: float, muscle_direction: qd.types.vector(3), F_trial: qd.types.matrix(3, 3)
 ):
     """Energy density, first Piola-Kirchhoff stress and Hessian curvature of the muscle fibre term of a particle."""
-    stiffness, _ = active_fibre_stiffness(i_mat, actu, materials, mpm_info)
+    stiffness, _ = active_fibre_stiffness(fibre_stiffness, actu)
     F_fibre = F_trial @ muscle_direction
     return 0.5 * stiffness * F_fibre.dot(F_fibre), stiffness * F_fibre.outer_product(muscle_direction), stiffness
 
 
 @qd.func
 def return_map_principal(
-    i_mat: int, kind: int, sigma: qd.types.vector(3), Jp: float, materials: MpmMaterialTable, mpm_info: MpmInfo
+    kind: int,
+    sigma: qd.types.vector(3),
+    Jp: float,
+    params: qd.types.vector(N_MATERIAL_PARAMS),
+    von_mises_sigma_min: float,
+    sand_sigma_min: float,
 ):
     """Principal values of a plastic return map that acts on the singular values, with the derivatives of its
     reverse."""
@@ -606,27 +642,27 @@ def return_map_principal(
     dh_dJp = qd.Vector.zero(gs.qd_float, 3)
     dJp_new_dsigma = qd.Vector.zero(gs.qd_float, 3)
     dJp_new_dJp = gs.qd_float(1.0)
-    mu = material_param(i_mat, PARAM_MU, materials, mpm_info)
+    mu = params[PARAM_MU]
     eye = qd.Matrix.identity(gs.qd_float, 3)
     if kind == PLASTIC_VON_MISES:
         # log h = mean(eps) 1 + r eps_hat / |eps_hat| on yield, r = yield stress / (2 mu)
-        eps = qd.log(qd.max(sigma, mpm_info.von_mises_sigma_min[()]))
+        eps = qd.log(qd.max(sigma, von_mises_sigma_min))
         eps_hat = eps - eps.sum() / 3.0
         eps_hat_norm = eps_hat.norm(gs.EPS)
-        r = material_param(i_mat, PARAM_YIELD_STRESS, materials, mpm_info) / (2.0 * mu)
+        r = params[PARAM_YIELD_STRESS] / (2.0 * mu)
         delta_gamma = eps_hat_norm - r
         is_changed = delta_gamma > 0.0
         if is_changed:
             h = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
-            is_log = sigma > mpm_info.von_mises_sigma_min[()]
+            is_log = sigma > von_mises_sigma_min
             deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
             dlog = 1.0 / 3.0 + r * ((eye - 1.0 / 3.0) / eps_hat_norm - eps_hat.outer_product(eps_hat) / eps_hat_norm**3)
             dh = h.outer_product(deps) * dlog
     elif kind == PLASTIC_SAND:
-        lam = material_param(i_mat, PARAM_LAM, materials, mpm_info)
-        is_log = qd.abs(sigma) > mpm_info.sand_sigma_min[()]
+        lam = params[PARAM_LAM]
+        is_log = qd.abs(sigma) > sand_sigma_min
         deps = qd.select(is_log, 1.0 / qd.select(is_log, sigma, 1.0), 0.0)
-        eps = qd.log(qd.max(qd.abs(sigma), mpm_info.sand_sigma_min[()]))
+        eps = qd.log(qd.max(qd.abs(sigma), sand_sigma_min))
         trace = eps.sum() + Jp
         eps_hat = eps - trace / 3.0
         eps_hat_norm = eps_hat.norm(gs.EPS)
@@ -638,7 +674,7 @@ def return_map_principal(
         else:
             Jp_new = 0.0
             dJp_new_dJp = 0.0
-            c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * material_param(i_mat, PARAM_SAND_ALPHA, materials, mpm_info)
+            c = (3.0 * lam + 2.0 * mu) / (2.0 * mu) * params[PARAM_SAND_ALPHA]
             delta_gamma = eps_hat_norm + c * trace
             h = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
             if delta_gamma <= 0.0:
@@ -654,8 +690,8 @@ def return_map_principal(
                 dh = h.outer_product(deps) * dlog
                 dh_dJp = h * (1.0 / 3.0 - c * u + scale / 3.0 * (tangent @ ones))
     else:
-        lower = 1.0 - material_param(i_mat, PARAM_YIELD_LOWER, materials, mpm_info)
-        higher = 1.0 + material_param(i_mat, PARAM_YIELD_HIGHER, materials, mpm_info)
+        lower = 1.0 - params[PARAM_YIELD_LOWER]
+        higher = 1.0 + params[PARAM_YIELD_HIGHER]
         h = qd.min(qd.max(sigma, lower), higher)
         is_inside = (sigma > lower).cast(gs.qd_float) * (sigma < higher).cast(gs.qd_float)
         dh = diagonal(is_inside)
@@ -670,90 +706,33 @@ def return_map_principal(
 
 @qd.func
 def return_map(
-    i_mat: int, kind: int, F: qd.types.matrix(3, 3), Jp: float, materials: MpmMaterialTable, mpm_info: MpmInfo
+    kind: int,
+    F: qd.types.matrix(3, 3),
+    Jp: float,
+    params: qd.types.vector(N_MATERIAL_PARAMS),
+    von_mises_sigma_min: float,
+    sand_sigma_min: float,
+    liquid_j_min: float,
 ):
-    """Plastic return map of a material slot, applied to the deformation gradient and the plastic state after the
+    """Plastic return map of a material, applied to the deformation gradient and the plastic state after the
     grid-to-particle (G2P) transfer."""
     F_new = F
     Jp_new = Jp
     if kind == PLASTIC_LIQUID:
-        J = qd.min(qd.max(F.determinant(), mpm_info.liquid_j_min[()]), 1.0)
+        J = qd.min(qd.max(F.determinant(), liquid_j_min), 1.0)
         F_new = qd.pow(J, 1.0 / 3.0) * qd.Matrix.identity(gs.qd_float, 3)
     elif kind != PLASTIC_NONE:
         U, S, V = gu.qd_svd(F)
         sigma = diagonal_of(S)
         h, Jp_new, is_changed, dh, dh_dJp, dJp_new_dsigma, dJp_new_dJp = return_map_principal(
-            i_mat, kind, sigma, Jp, materials, mpm_info
+            kind, sigma, Jp, params, von_mises_sigma_min, sand_sigma_min
         )
         if is_changed:
             F_new = U @ diagonal(h) @ V.transpose()
     return F_new, Jp_new
 
 
-@qd.func
-def particle_of_sorted(i_ps: int, grid: MpmGridScratch, mpm_info: MpmInfo):
-    """Particle index, environment index and cell of a sorted particle."""
-    i_flat = grid.sort_ids[i_ps]
-    i_b = i_flat // mpm_info.n_particles[()]
-    i_p = i_flat - i_b * mpm_info.n_particles[()]
-    key = grid.sort_keys[i_ps]
-    _, block = unpack_block(key >> qd.u64(6))
-    cell = block * 4 + local_offset(gs.qd_int(key & qd.u64(63)))
-    return i_p, i_b, cell
-
-
-@qd.func
-def stencil_node_slots(i_b: int, cell, grid: MpmGridScratch):
-    """Node slots of the 8 nodes of a cell."""
-    slots = qd.Vector.zero(gs.qd_int, 8)
-    for a in qd.static(range(8)):
-        node_coords = cell + node_offset(a)
-        i_blk = func_lookup_hash(pack_block(i_b, block_of(node_coords)), grid.hash)
-        if qd.static(qd_debug_asserts()):
-            assert i_blk >= 0, "MPM grid: no block holds stencil node (%d, %d, %d) of env %d" % (
-                node_coords[0],
-                node_coords[1],
-                node_coords[2],
-                i_b,
-            )
-        if i_blk < 0:
-            flag_env_error(i_b, grid, ErrorCode.INVALID_MPM_GRID)
-            i_blk = 0
-        slots[a] = i_blk * BLOCK_CELLS + cell_local(node_coords)
-    return slots
-
-
-@qd.func
-def trial_deformation(
-    f: int, i_p: int, i_b: int, cell, slots, particles: MpmParticles, newton: MpmNewtonScratch, mpm_info: MpmInfo
-):
-    """Trial deformation gradient F_trial = (I + sum_a u_a grad w_a^T) F of a particle, with its stencil gradients and
-    its deformation gradient F."""
-    fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-    w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-    F = particles.F[f, i_p, i_b]
-    return (qd.Matrix.identity(gs.qd_float, 3) + stencil_gradient(slots, grad_w, newton.u)) @ F, grad_w, F
-
-
-@qd.func
-def particle_elastic_stress(
-    f: int,
-    i_p: int,
-    i_b: int,
-    F_trial: qd.types.matrix(3, 3),
-    particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    mpm_info: MpmInfo,
-):
-    """Principal decomposition and first Piola-Kirchhoff stress of the elastic energy of a particle."""
-    U, S, V = gu.qd_svd(F_trial)
-    sigma = diagonal_of(S)
-    i_mat = particles_info.material_idx[i_p]
-    mu, lam = material_params(i_mat, particles.Jp[f, i_p, i_b], materials, mpm_info)
-    psi, g, A = elastic_principal(i_mat, sigma, mu, lam, materials, mpm_info)
-    P = U @ diagonal(g) @ V.transpose()
-    return i_mat, U, sigma, V, g, A, P
+# ============================================== Layer 0: contact rows ================================================
 
 
 @qd.func
@@ -804,6 +783,493 @@ def pyramid_terms(
         grad += grad_k
         hess += hess_k
     return energy, grad, hess
+
+
+@qd.func
+def band_row(sol_params: qd.types.vector(7), phi: float, vel: float, diag_coef: float, dt: float):
+    """Stiffness and target of a soft row on the displacement relative to the obstacle."""
+    # The edge of the range is phi = 0 at rest, chosen at runtime so that `soft_row` is inlined once
+    phi_row = gs.qd_float(0.0)
+    vel_row = gs.qd_float(0.0)
+    if phi <= 0.0:
+        phi_row = phi
+        vel_row = vel
+    stiffness, target = soft_row(sol_params, phi_row, vel_row, diag_coef, dt)
+    if phi > 0.0:
+        target = -phi
+    return stiffness, target
+
+
+@qd.func
+def penalty_rows(stiffness_per_mass: float, invweight_particle: float, invweight_partner: float, phi: float):
+    """Stiffness and target of the rows of a friction pyramid whose stiffness is a penalty per unit of the effective
+    mass of the pair, from the inverse weights of its particle and of its partner, pushing the gap phi back to zero."""
+    stiffness = stiffness_per_mass / (invweight_particle + invweight_partner)
+    return qd.Vector([stiffness] * PYRAMID_ROWS), qd.Vector([-phi] * PYRAMID_ROWS)
+
+
+@qd.func
+def contact_gap(distance: float, offset: float):
+    """Gap of a contact pair, its distance short of the contact offset of its partner."""
+    return distance - offset
+
+
+@qd.func
+def contact_band_width(approach, dt: float, dx: float):
+    """Gap within which a particle gets a contact row at the substep start."""
+    return 2.0 * dt * qd.max(approach, 0.0) + dx
+
+
+@qd.func
+def contact_reach(v: qd.types.vector(3), dt: float, dx: float):
+    """Reach of the box query of the contact partners of a particle, the band of a contact row at its own speed."""
+    return contact_band_width(v.norm(), dt, dx)
+
+
+@qd.func
+def is_within_band(
+    phi: float,
+    normal: qd.types.vector(3),
+    v_p: qd.types.vector(3),
+    v_partner: qd.types.vector(3),
+    dt: float,
+    dx: float,
+):
+    """Whether a particle at the gap phi lies within the band of a contact row, at its approach speed relative to its
+    partner along the outward normal of the partner."""
+    return phi < contact_band_width(-normal.dot(v_p - v_partner), dt, dx)
+
+
+@qd.func
+def is_within_reach(phi: float, v_p: qd.types.vector(3), v_partner: qd.types.vector(3), dt: float, dx: float):
+    """Whether a particle at the gap phi lies within the band of a contact row at any normal, its relative speed bounding
+    its approach speed."""
+    return phi < contact_band_width((v_p - v_partner).norm(), dt, dx)
+
+
+@qd.func
+def contact_friction(friction: float, friction_ratio: float, min_friction: float):
+    return qd.max(friction * friction_ratio, min_friction)
+
+
+@qd.func
+def contact_invweight(
+    U: qd.types.matrix(3, 3), V: qd.types.matrix(3, 3), invweight_rest: qd.types.matrix(3, 3), n: qd.types.vector(3)
+):
+    """Inverse weight of a particle along a direction, its rest-frame matrix rotated along with the material by the
+    polar rotation U V^T of its deformation gradient."""
+    n_rest = V @ (U.transpose() @ n)
+    return n_rest.dot(invweight_rest @ n_rest)
+
+
+@qd.func
+def lone_invweight(volume: float, rho: float):
+    """Inverse weight matrix of a particle alone in its contact rows, its inverse mass."""
+    return qd.Matrix.identity(gs.qd_float, 3) / (volume * rho)
+
+
+@qd.func
+def lumped_invweight(w: float, node_diagonal: qd.types.matrix(3, 3)):
+    """Share of a node of weight w in the inverse weight of a particle, from the diagonal block of the node."""
+    return w * w * node_diagonal.inverse()
+
+
+@qd.func
+def wall_normal(axis: int, sign: float):
+    """Inward normal of a domain wall, sign e_axis."""
+    return sign * qd.Vector([gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float)
+
+
+@qd.func
+def wall_proximity(
+    x_p: qd.types.vector(3),
+    v_p: qd.types.vector(3),
+    lower: qd.types.vector(3),
+    upper: qd.types.vector(3),
+    dt: float,
+    dx: float,
+):
+    """Distance of a particle to the nearer wall plane of each axis, positive inside the domain, the sign of the inward
+    normal of that wall, the velocity of the particle along it, and whether the particle lies within the band of a
+    contact row (see contact_band_width)."""
+    gaps_upper = upper - x_p
+    is_upper = gaps_upper < x_p - lower
+    gaps = qd.select(is_upper, gaps_upper, x_p - lower)
+    signs = 1.0 - 2.0 * is_upper.cast(gs.qd_float)
+    vels = signs * v_p
+    return gaps, signs, vels, gaps < contact_band_width(-vels, dt, dx)
+
+
+@qd.func
+def wall_distance(
+    sign: float,
+    normal: qd.types.vector(3),
+    x_p: qd.types.vector(3),
+    lower: qd.types.vector(3),
+    upper: qd.types.vector(3),
+):
+    """Distance of a particle to a wall along its inward normal, the gap of its row (see wall_proximity), which is its
+    gradient in the position."""
+    phi = normal.dot(x_p - lower)
+    if sign < 0.0:
+        phi = normal.dot(x_p - upper)
+    return phi
+
+
+# ========================================== Layer 0: particle and node terms ==========================================
+
+
+@qd.func
+def particle_mass(stored_mass: float, mass_scale: float):
+    """Mass of a particle in kilograms from its stored mass, scaled by the particle volume scale."""
+    return stored_mass / mass_scale
+
+
+@qd.func
+def apic_contribution(
+    w: float,
+    mass: float,
+    v: qd.types.vector(3),
+    gravity: qd.types.vector(3),
+    dt: float,
+    C: qd.types.matrix(3, 3),
+    x_n: qd.types.vector(3),
+    x_p: qd.types.vector(3),
+):
+    """Mass and affine particle-in-cell (APIC) momentum that a particle of weight w brings to a node."""
+    node_mass = w * mass
+    return node_mass, node_mass * (v + dt * gravity + C @ (x_n - x_p))
+
+
+@qd.func
+def is_free_node(mass: float, is_fixed: int):
+    """Whether the displacement of a node is an unknown of the solve: a node with mass that no fixed particle touches."""
+    return mass > 0.0 and is_fixed == 0
+
+
+@qd.func
+def node_velocity(mass: float, momentum: qd.types.vector(3), is_fixed: int):
+    """Velocity of a node from its mass and momentum, zero on a fixed or massless node."""
+    v = qd.Vector.zero(gs.qd_float, 3)
+    if is_free_node(mass, is_fixed):
+        v = momentum / mass
+    return v
+
+
+@qd.func
+def explicit_velocity(v: qd.types.vector(3), acceleration: qd.types.vector(3), dt: float):
+    return v + dt * acceleration
+
+
+@qd.func
+def g2p_advect(
+    u_nodes: qd.types.matrix(8, 3),
+    w: qd.types.vector(8),
+    grad_w: qd.types.matrix(8, 3),
+    dt: float,
+    x_p: qd.types.vector(3),
+    F: qd.types.matrix(3, 3),
+):
+    """Position, velocity, affine velocity and trial deformation gradient of a particle at the end of the substep, from
+    the displacements of the nodes of its stencil (grid-to-particle transfer, G2P)."""
+    v = stencil_interpolate(w, u_nodes) / dt
+    C = stencil_gradient(grad_w, u_nodes) / dt
+    return x_p + dt * v, v, C, (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ F
+
+
+@qd.func
+def trial_deformation(u_nodes: qd.types.matrix(8, 3), grad_w: qd.types.matrix(8, 3), F: qd.types.matrix(3, 3)):
+    """Trial deformation gradient F_trial = (I + sum_a u_a grad w_a^T) F of a particle."""
+    return (qd.Matrix.identity(gs.qd_float, 3) + stencil_gradient(grad_w, u_nodes)) @ F
+
+
+@qd.func
+def elastic_scale(volume: float, dt: float):
+    """Scale V dt^2 of the elastic energy density of a particle in the incremental potential."""
+    return volume * dt * dt
+
+
+@qd.func
+def stress_gradient_factor(
+    scale: float, P: qd.types.matrix(3, 3), P_fibre: qd.types.matrix(3, 3), F: qd.types.matrix(3, 3)
+):
+    """Factor V dt^2 (P + P_fibre) F^T of the elastic gradient contribution of a particle to every node of its stencil
+    (see node_gradient_contribution)."""
+    return scale * (P + P_fibre) @ F.transpose()
+
+
+@qd.func
+def particle_modes(
+    sigma: qd.types.vector(3), g: qd.types.vector(3), A: qd.types.matrix(3, 3), scale: float, is_exact: qd.template()
+):
+    """Modes of the principal Hessian of a particle (see isotropic_projected_modes), scaled to the incremental
+    potential."""
+    S_block, alpha, beta = isotropic_projected_modes(sigma, g, A, is_exact)
+    return scale * S_block, scale * alpha, scale * beta
+
+
+@qd.func
+def stencil_frame_terms(
+    grad_w: qd.types.matrix(8, 3),
+    F: qd.types.matrix(3, 3),
+    V: qd.types.matrix(3, 3),
+    movable: qd.types.vector(8),
+    w: qd.types.vector(8),
+    scale: float,
+    fibre_curvature: float,
+    muscle_direction: qd.types.vector(3),
+    spring_hessian: float,
+):
+    """Rows r_a = grad w_a^T F V of the stencil of a particle in the V frame, zero on a fixed node, and the weights of
+    the rank-one terms of the fibre and of the constraint spring (see stencil_pair_block)."""
+    r_frame = movable.outer_product(qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)) * (grad_w @ F @ V)
+    fibre_weights = qd.sqrt(scale * fibre_curvature) * (r_frame @ (V.transpose() @ muscle_direction))
+    return r_frame, qd.Matrix.cols([fibre_weights, qd.sqrt(spring_hessian) * movable * w])
+
+
+@qd.func
+def stencil_pair_block(
+    a: int,
+    b: int,
+    r_frame: qd.types.matrix(8, 3),
+    U: qd.types.matrix(3, 3),
+    S_block: qd.types.matrix(3, 3),
+    alpha: qd.types.vector(3),
+    beta: qd.types.vector(3),
+    iso: qd.types.matrix(8, 2),
+):
+    """Block of a node pair of a particle stencil from its terms (see particle_stencil_terms), zero on a fixed node."""
+    r_a = qd.Vector([r_frame[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
+    r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
+    block = U @ isotropic_pair_block(r_a, r_b, S_block, alpha, beta) @ U.transpose()
+    return block + (iso[a, 0] * iso[b, 0] + iso[a, 1] * iso[b, 1]) * qd.Matrix.identity(gs.qd_float, 3)
+
+
+@qd.func
+def node_gradient_contribution(
+    w: float, grad_w: qd.types.vector(3), spring_grad: qd.types.vector(3), stress_factor: qd.types.matrix(3, 3)
+):
+    """Gradient contribution of a particle at a node of its stencil, from its staged terms (see
+    particle_stencil_terms)."""
+    return w * spring_grad + stress_factor @ grad_w
+
+
+@qd.func
+def node_gradient(
+    elastic_grad: qd.types.vector(3), mass: float, u: qd.types.vector(3), v_free: qd.types.vector(3), dt: float
+):
+    """Gradient of the incremental potential at a free node: its gathered elastic gradient and its kinetic term
+    m (u - dt v_free)."""
+    return elastic_grad + inertia_gradient(mass, u, dt * v_free)
+
+
+@qd.func
+def kinetic_block(mass: float, is_fixed: int):
+    """Kinetic diagonal block of a node, m I, or I on a fixed or massless node."""
+    scale = gs.qd_float(1.0)
+    if is_free_node(mass, is_fixed):
+        scale = mass
+    return scale * qd.Matrix.identity(gs.qd_float, 3)
+
+
+@qd.func
+def kinetic_energy(mass: float, is_fixed: int, u: qd.types.vector(3), v_free: qd.types.vector(3), dt: float):
+    """Kinetic energy of a node, zero for a fixed node."""
+    energy = gs.qd_float(0.0)
+    if is_fixed == 0:
+        energy = inertia_energy(mass, u, dt * v_free)
+    return energy
+
+
+@qd.func
+def constraint_spring(stiffness: float, mass: float, dt: float):
+    """Stiffness dt^2 k and critical damping dt c of the implicit constraint spring of a particle of a mass."""
+    return dt * dt * stiffness, dt * 2.0 * qd.sqrt(stiffness * mass)
+
+
+@qd.func
+def spring_terms(
+    spring: float, damping: float, target: qd.types.vector(3), x: qd.types.vector(3), dx: qd.types.vector(3)
+):
+    """Energy, gradient and Hessian scale of a constraint spring on the trial displacement dx of its particle at x."""
+    gap = x + dx - target
+    energy = 0.5 * spring * gap.norm_sqr() + 0.5 * damping * dx.norm_sqr()
+    grad = spring * gap + damping * dx
+    return energy, grad, spring + damping
+
+
+@qd.func
+def particle_incremental_energy(scale: float, psi: float, psi_fibre: float, energy_spring: float):
+    """Elastic and constraint spring energies of a particle in the incremental potential."""
+    return scale * (psi + psi_fibre) + energy_spring
+
+
+@qd.func
+def inversion_step_cap(
+    u_nodes: qd.types.matrix(8, 3),
+    du_nodes: qd.types.matrix(8, 3),
+    grad_w: qd.types.matrix(8, 3),
+    F: qd.types.matrix(3, 3),
+    slack: float,
+):
+    """Whether the volume of a particle reaches zero within the line-search step 1 / slack along the Newton direction,
+    and slack times the first such step."""
+    c0, c1, c2, c3 = det_cubic(trial_deformation(u_nodes, grad_w, F), stencil_gradient(grad_w, du_nodes) @ F)
+    is_capped = False
+    alpha_cap = gs.qd_float(0.0)
+    if c0 > 0.0:
+        t_max = 1.0 / slack
+        root = cubic_first_root(c0, c1, c2, c3, t_max)
+        if root <= t_max:
+            is_capped = True
+            alpha_cap = slack * root
+    return is_capped, alpha_cap
+
+
+# ========================================= Layer 1: per-item stencil access ==========================================
+
+
+@qd.func
+def flag_env_error(i_b: int, grid: MpmGridScratch, code: qd.template()):
+    """Raise an error code for one environment, which the solver reports at the beginning of the next step."""
+    qd.atomic_or(grid.errors.errno[i_b], qd.static(int(code)))
+
+
+@qd.func
+def cell_segment(i_b: int, cell, i_lane: int, grid: MpmGridScratch):
+    """Range of the sorted particles of a cell, looked up by lane 0 and broadcast to the gather lanes."""
+    i_ps_start = 0
+    i_ps_end = 0
+    if i_lane == 0:
+        i_blk = func_lookup_hash(pack_block(i_b, block_of(cell)), grid.hash)
+        if i_blk >= 0:
+            i_cell_slot = i_blk * BLOCK_CELLS + cell_local(cell)
+            i_ps_start = grid.cells_segment_start[i_cell_slot]
+            i_ps_end = grid.cells_segment_end[i_cell_slot]
+    if qd.static(gather_lanes() > 1):
+        i_ps_start = qd.simt.subgroup.shuffle(i_ps_start, qd.u32(0))
+        i_ps_end = qd.simt.subgroup.shuffle(i_ps_end, qd.u32(0))
+    return i_ps_start, i_ps_end
+
+
+@qd.func
+def material_values(i_mat: int, materials: MpmMaterialTable, mpm_info: MpmInfo):
+    """Energy family, return map and parameters (in the order of PARAM_MU) of a material slot."""
+    params = qd.Vector.zero(gs.qd_float, N_MATERIAL_PARAMS)
+    for k in qd.static(range(N_MATERIAL_PARAMS)):
+        params[k] = materials.material_table[k * mpm_info.n_materials[()] + i_mat]
+    return materials.materials_family[i_mat], materials.materials_plastic[i_mat], params
+
+
+@qd.func
+def sorted_particle_index(i_ps: int, grid: MpmGridScratch, mpm_info: MpmInfo):
+    """Particle index and environment index of a sorted particle."""
+    i_flat = grid.sort_ids[i_ps]
+    i_b = i_flat // mpm_info.n_particles[()]
+    return i_flat - i_b * mpm_info.n_particles[()], i_b
+
+
+@qd.func
+def particle_of_sorted(i_ps: int, grid: MpmGridScratch, mpm_info: MpmInfo):
+    """Particle index, environment index and cell of a sorted particle."""
+    i_p, i_b = sorted_particle_index(i_ps, grid, mpm_info)
+    key = grid.sort_keys[i_ps]
+    _, block = unpack_block(key >> qd.u64(6))
+    return i_p, i_b, block * 4 + local_offset(gs.qd_int(key & qd.u64(63)))
+
+
+@qd.func
+def stencil_node_slots(i_b: int, cell, grid: MpmGridScratch):
+    """Node slots of the 8 nodes of a cell."""
+    slots = qd.Vector.zero(gs.qd_int, 8)
+    for a in qd.static(range(8)):
+        node_coords = cell + node_offset(a)
+        i_blk = func_lookup_hash(pack_block(i_b, block_of(node_coords)), grid.hash)
+        if qd.static(qd_debug_asserts()):
+            assert i_blk >= 0, "MPM grid: no block holds stencil node (%d, %d, %d) of env %d" % (
+                node_coords[0],
+                node_coords[1],
+                node_coords[2],
+                i_b,
+            )
+        if i_blk < 0:
+            flag_env_error(i_b, grid, ErrorCode.INVALID_MPM_GRID)
+            i_blk = 0
+        slots[a] = i_blk * BLOCK_CELLS + cell_local(node_coords)
+    return slots
+
+
+@qd.func
+def stencil_weights(i_b: int, cell, x: qd.types.vector(3), grid: MpmGridScratch, mpm_info: MpmInfo):
+    """Node slots of the stencil of a cell, with the coordinates in cells (see cell_fraction), the weights and the
+    weight gradients of a point in it."""
+    fx = cell_fraction(x, cell, mpm_info.inv_dx[()])
+    w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
+    return stencil_node_slots(i_b, cell, grid), fx, w, grad_w
+
+
+@qd.func
+def gather_stencil(slots, nodes: qd.template()):
+    """Vectors of the 8 nodes of a stencil, node a in row a."""
+    values = qd.Matrix.zero(gs.qd_float, 8, 3)
+    for a in qd.static(range(8)):
+        node_value = nodes[slots[a]]
+        for d in qd.static(range(3)):
+            values[a, d] = node_value[d]
+    return values
+
+
+@qd.func
+def gather_stencil_scalars(slots, nodes: qd.template()):
+    """Scalars of the 8 nodes of a stencil."""
+    return qd.Vector([nodes[slots[a]] for a in qd.static(range(8))], dt=gs.qd_float)
+
+
+@qd.func
+def gather_movable(slots, grid: MpmGridScratch):
+    """1 on the free nodes of a stencil and 0 on the fixed ones."""
+    return qd.Vector([gs.qd_float(grid.nodes_is_fixed[slots[a]] == 0) for a in qd.static(range(8))], dt=gs.qd_float)
+
+
+@qd.func
+def particle_invweight(
+    f: int, i_p: int, i_b: int, n: qd.types.vector(3), particles: MpmParticles, particles_info: MpmParticlesInfo
+):
+    """Inverse weight of a particle along a direction (see contact_invweight)."""
+    U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
+    return contact_invweight(U, V, particles_info.contact_invweight[i_p], n)
+
+
+@qd.func
+def particle_elastic_state(
+    f: int,
+    i_p: int,
+    i_b: int,
+    u_nodes: qd.types.matrix(8, 3),
+    grad_w: qd.types.matrix(8, 3),
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    mpm_info: MpmInfo,
+):
+    """Deformation gradient, trial deformation gradient at the displacement of the stencil, return map and material
+    parameters of a particle, with the principal decomposition and the terms of its energy family there (see
+    elastic_terms)."""
+    F = particles.F[f, i_p, i_b]
+    family, plastic, params = material_values(particles_info.material_idx[i_p], materials, mpm_info)
+    mu, lam = hardened_lame(plastic, params, particles.Jp[f, i_p, i_b], mpm_info.snow_hardening[()])
+    F_trial = trial_deformation(u_nodes, grad_w, F)
+    U, sigma, V, psi, g, A = elastic_terms(
+        F_trial,
+        family,
+        mu,
+        lam,
+        mpm_info.hencky_sigma_min[()],
+        mpm_info.liquid_band[()],
+        mpm_info.extension_sigma_min[()],
+        mpm_info.extension_stiffness[()],
+    )
+    return F, F_trial, plastic, params, U, sigma, V, psi, g, A
 
 
 # ============================================== Layer 1: grid rebuild ================================================
@@ -876,10 +1342,7 @@ def func_gen_neighbor_keys(grid: MpmGridScratch):
     qd.loop_config(name="mpm_gen_neighbor_keys")
     for i_key in range(grid.n_neighbor_keys[()]):
         i_b, block = unpack_block(grid.particle_blocks_key[i_key >> 3])
-        octant = i_key & 7
-        grid.neighbors_key[i_key] = pack_block(
-            i_b, block + qd.Vector([(octant >> 2) & 1, (octant >> 1) & 1, octant & 1], dt=gs.qd_int)
-        )
+        grid.neighbors_key[i_key] = pack_block(i_b, block + node_offset(i_key & 7))
         grid.neighbors_source_idx[i_key] = i_key
 
 
@@ -1014,7 +1477,7 @@ def func_p2g(
         i_n = i_th // n_lanes
         i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
         node_coords = block * 4 + local_offset(i_n % BLOCK_CELLS)
-        x_n = node_coords.cast(gs.qd_float) * mpm_info.dx[()]
+        x_n = node_position(node_coords, mpm_info.dx[()])
         mass = gs.qd_float(0.0)
         momentum = qd.Vector.zero(gs.qd_float, 3)
         is_fixed = 0
@@ -1025,11 +1488,11 @@ def func_p2g(
             for i_chunk_ in range((i_ps_end - i_ps_start + n_lanes - 1) // n_lanes):
                 i_ps = i_ps_start + i_chunk_ * n_lanes + i_lane
                 if i_ps < i_ps_end:
-                    particle_mass, particle_momentum, is_free = apic_node_contribution(
+                    mass_p, momentum_p, is_free = apic_node_contribution(
                         f, i_ps, offset, cell, dt, x_n, gravity, particles, grid, particles_info, mpm_info
                     )
-                    mass += particle_mass
-                    momentum += particle_momentum
+                    mass += mass_p
+                    momentum += momentum_p
                     if not is_free:
                         is_fixed = 1
         mass = lanes_sum(mass)
@@ -1056,15 +1519,20 @@ def apic_node_contribution(
 ):
     """Mass and affine particle-in-cell (APIC) momentum that a sorted particle brings to one node of its stencil, and
     whether the particle is free."""
-    i_flat = grid.sort_ids[i_ps]
-    i_b = i_flat // mpm_info.n_particles[()]
-    i_p = i_flat - i_b * mpm_info.n_particles[()]
+    i_p, i_b = sorted_particle_index(i_ps, grid, mpm_info)
     x_p = particles.pos[f, i_p, i_b]
-    fx = x_p * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-    w, grad_w = q1_node_weight(offset, fx, mpm_info.inv_dx[()])
-    mass = w * (particles_info.mass[i_p] / mpm_info.mass_scale[()])
-    v_p = particles.vel[f, i_p, i_b] + dt * gravity[i_b] + particles.C[f, i_p, i_b] @ (x_n - x_p)
-    return mass, mass * v_p, particles_info.free[i_p]
+    w, _ = q1_node_weight(offset, cell_fraction(x_p, cell, mpm_info.inv_dx[()]), mpm_info.inv_dx[()])
+    node_mass, node_momentum = apic_contribution(
+        w,
+        particle_mass(particles_info.mass[i_p], mpm_info.mass_scale[()]),
+        particles.vel[f, i_p, i_b],
+        gravity[i_b],
+        dt,
+        particles.C[f, i_p, i_b],
+        x_n,
+        x_p,
+    )
+    return node_mass, node_momentum, particles_info.free[i_p]
 
 
 @qd.func
@@ -1073,10 +1541,7 @@ def publish_node_mass_velocity(
 ):
     grid.nodes_mass[i_n] = mass
     grid.nodes_is_fixed[i_n] = is_fixed
-    v = qd.Vector.zero(gs.qd_float, 3)
-    if mass > 0.0 and is_fixed == 0:
-        v = momentum / mass
-    grid.nodes_vel[i_n] = v
+    grid.nodes_vel[i_n] = node_velocity(mass, momentum, is_fixed)
 
 
 @qd.func(requires_top_level=True)
@@ -1085,13 +1550,13 @@ def func_apply_force_fields(t: float, dt: float, grid: MpmGridScratch, force_fie
     qd.loop_config(name="mpm_apply_force_fields")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
-        x_n = (block * 4 + local_offset(i_n % BLOCK_CELLS)).cast(gs.qd_float) * mpm_info.dx[()]
+        x_n = node_position(block * 4 + local_offset(i_n % BLOCK_CELLS), mpm_info.dx[()])
         v = grid.nodes_vel[i_n]
-        if grid.nodes_mass[i_n] > 0.0 and grid.nodes_is_fixed[i_n] == 0:
+        if is_free_node(grid.nodes_mass[i_n], grid.nodes_is_fixed[i_n]):
             acceleration = qd.Vector.zero(gs.qd_float, 3)
             for i_ff in qd.static(range(len(force_fields.force_fields))):
                 acceleration += force_fields.force_fields[i_ff].get_acc(x_n, v, t, i=-1)
-            v += dt * acceleration
+            v = explicit_velocity(v, acceleration, dt)
         grid.nodes_vel_free[i_n] = v
 
 
@@ -1108,10 +1573,10 @@ def func_node_diag(
     """Diagonal block of every node of the physical Hessian (kinetic and elastic, see func_assemble)."""
     qd.loop_config(name="mpm_kinetic_node_diag")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
-        grid.nodes_diagonal[i_n] = kinetic_block(i_n, grid)
+        grid.nodes_diagonal[i_n] = kinetic_block(grid.nodes_mass[i_n], grid.nodes_is_fixed[i_n])
     qd.loop_config(name="mpm_elastic_node_diag")
     for i_ps in range(grid.n_valid[()]):
-        slots, movable, r_frame, U, S_block, alpha, beta, iso = particle_stencil_terms(
+        slots, r_frame, U, S_block, alpha, beta, iso = particle_stencil_terms(
             f, i_ps, mpm_info.substep_dt[()], particles, grid, newton, particles_info, materials, mpm_info, False
         )
         for a in qd.static(range(8)):
@@ -1136,44 +1601,11 @@ def func_contact_invweight(
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
         if i_b == 0:
-            slots = stencil_node_slots(i_b, cell, grid)
-            fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-            w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
+            slots, fx, w, grad_w = stencil_weights(i_b, cell, particles.pos[f, i_p, i_b], grid, mpm_info)
             invweight = qd.Matrix.zero(gs.qd_float, 3, 3)
             for a in qd.static(range(8)):
-                invweight += w[a] * w[a] * grid.nodes_diagonal[slots[a]].inverse()
-            particles_info.contact_invweight[i_p] = 0.5 * (invweight + invweight.transpose())
-
-
-@qd.func
-def contact_invweight(
-    f: int, i_p: int, i_b: int, n: qd.types.vector(3), particles: MpmParticles, particles_info: MpmParticlesInfo
-):
-    """Inverse weight of a particle along a direction, its rest-frame matrix rotated along with the material."""
-    U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
-    n_rest = V @ (U.transpose() @ n)
-    return n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
-
-
-@qd.func
-def contact_band_width(approach, dt: float, mpm_info: MpmInfo):
-    """Gap within which a particle gets a contact row at the substep start."""
-    return 2.0 * dt * qd.max(approach, 0.0) + mpm_info.dx[()]
-
-
-@qd.func
-def band_row(sol_params: qd.types.vector(7), phi: float, vel: float, diag_coef: float, dt: float):
-    """Stiffness and target of a soft row on the displacement relative to the obstacle."""
-    # The edge of the range is phi = 0 at rest, chosen at runtime so that `soft_row` is inlined once
-    phi_row = gs.qd_float(0.0)
-    vel_row = gs.qd_float(0.0)
-    if phi <= 0.0:
-        phi_row = phi
-        vel_row = vel
-    stiffness, target = soft_row(sol_params, phi_row, vel_row, diag_coef, dt)
-    if phi > 0.0:
-        target = -phi
-    return stiffness, target
+                invweight += lumped_invweight(w[a], grid.nodes_diagonal[slots[a]])
+            particles_info.contact_invweight[i_p] = symmetric_part(invweight)
 
 
 @qd.func(requires_top_level=True)
@@ -1192,26 +1624,23 @@ def func_build_wall_pairs(
     qd.loop_config(name="mpm_build_wall_pairs")
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-        x_p = particles.pos[f, i_p, i_b]
-        v_p = particles.vel[f, i_p, i_b]
-        sol_params = mpm_info.wall_sol_params[()]
-        # Distance to the nearer wall plane of each axis, positive inside the domain, and the sign of the inward normal
-        gaps_upper = mpm_info.wall_upper[()] - x_p
-        is_upper = gaps_upper < x_p - mpm_info.wall_lower[()]
-        gaps = qd.select(is_upper, gaps_upper, x_p - mpm_info.wall_lower[()])
-        signs = 1.0 - 2.0 * is_upper.cast(gs.qd_float)
-        vels = signs * v_p
-        is_near = gaps < contact_band_width(-vels, dt, mpm_info)
-        # The rotation of the inverse weight (see contact_invweight) is computed once per particle near a wall: along
-        # the inward normal n = +-e_d, n^T R W R^T n is the quadratic form of W on column d of R^T
+        gaps, signs, vels, is_near = wall_proximity(
+            particles.pos[f, i_p, i_b],
+            particles.vel[f, i_p, i_b],
+            mpm_info.wall_lower[()],
+            mpm_info.wall_upper[()],
+            dt,
+            mpm_info.dx[()],
+        )
+        # The polar decomposition of the inverse weight (see contact_invweight) is computed once per particle near a
+        # wall
         if is_near.any():
             U, S, V = gu.qd_svd(particles.F[f, i_p, i_b])
-            rotation_t = V @ U.transpose()
+            invweight_rest = particles_info.contact_invweight[i_p]
             for d in range(3):
                 if is_near[d]:
-                    n_rest = qd.Vector([rotation_t[j, d] for j in qd.static(range(3))], dt=gs.qd_float)
-                    invweight = n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
-                    stiffness, target = band_row(sol_params, gaps[d], vels[d], invweight, dt)
+                    invweight = contact_invweight(U, V, invweight_rest, wall_normal(d, signs[d]))
+                    stiffness, target = band_row(mpm_info.wall_sol_params[()], gaps[d], vels[d], invweight, dt)
                     i_pair = append_pair(pairs.n_pairs, pairs.sorted_idx.shape[0])
                     if i_pair >= 0:
                         pairs.sorted_idx[i_pair] = i_ps
@@ -1240,24 +1669,24 @@ def func_g2p_advect(
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
         if is_env_frozen[i_b] == 0:
-            slots = stencil_node_slots(i_b, cell, grid)
-            pos = particles.pos[f, i_p, i_b]
-            fx = pos * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-            w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-            vel = particle_node_sum(slots, w, newton.u) / dt
-            C = stencil_gradient(slots, grad_w, newton.u) / dt
-            particles.pos[f + 1, i_p, i_b] = pos + dt * vel
-            particles.vel[f + 1, i_p, i_b] = vel
-            particles.C[f + 1, i_p, i_b] = C
-            i_mat = particles_info.material_idx[i_p]
-            F_new, Jp_new = return_map(
-                i_mat,
-                materials.materials_plastic[i_mat],
-                (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ particles.F[f, i_p, i_b],
-                particles.Jp[f, i_p, i_b],
-                materials,
-                mpm_info,
+            x_p = particles.pos[f, i_p, i_b]
+            slots, fx, w, grad_w = stencil_weights(i_b, cell, x_p, grid, mpm_info)
+            x_new, v_new, C_new, F_trial = g2p_advect(
+                gather_stencil(slots, newton.u), w, grad_w, dt, x_p, particles.F[f, i_p, i_b]
             )
+            family, plastic, params = material_values(particles_info.material_idx[i_p], materials, mpm_info)
+            F_new, Jp_new = return_map(
+                plastic,
+                F_trial,
+                particles.Jp[f, i_p, i_b],
+                params,
+                mpm_info.von_mises_sigma_min[()],
+                mpm_info.sand_sigma_min[()],
+                mpm_info.liquid_j_min[()],
+            )
+            particles.pos[f + 1, i_p, i_b] = x_new
+            particles.vel[f + 1, i_p, i_b] = v_new
+            particles.C[f + 1, i_p, i_b] = C_new
             particles.F[f + 1, i_p, i_b] = F_new
             particles.Jp[f + 1, i_p, i_b] = Jp_new
             particles.actu[f + 1, i_p, i_b] = particles.actu[f, i_p, i_b]
@@ -1275,17 +1704,6 @@ def func_g2p_advect(
 
 
 # ================================================== Layer 1: Newton ==================================================
-
-
-@qd.func
-def constraint_row_terms(i_ps: int, x: qd.types.vector(3), dx: qd.types.vector(3), newton: MpmNewtonScratch):
-    """Energy, gradient and Hessian scale of the constraint spring of a sorted particle."""
-    spring = newton.constraint_spring[i_ps]
-    damping = newton.constraint_damping[i_ps]
-    gap = x + dx - newton.constraint_target[i_ps]
-    energy = 0.5 * spring * gap.norm_sqr() + 0.5 * damping * dx.norm_sqr()
-    grad = spring * gap + damping * dx
-    return energy, grad, spring + damping
 
 
 @qd.func(requires_top_level=True)
@@ -1313,62 +1731,23 @@ def func_build_constraint_rows(
                 target = gu.qd_transform_by_trans_quat(
                     constraints[i_p, i_b].link_local_pos, links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
                 )
-            stiffness = constraints[i_p, i_b].stiffness
-            mass = particles_info.mass[i_p] / mpm_info.mass_scale[()]
-            spring = dt * dt * stiffness
-            damping = dt * 2.0 * qd.sqrt(stiffness * mass)
+            spring, damping = constraint_spring(
+                constraints[i_p, i_b].stiffness, particle_mass(particles_info.mass[i_p], mpm_info.mass_scale[()]), dt
+            )
         newton.constraint_spring[i_ps] = spring
         newton.constraint_damping[i_ps] = damping
         newton.constraint_target[i_ps] = target
 
 
 @qd.func
-def particle_trial_displacement(
-    f: int, i_p: int, i_b: int, cell, slots, particles: MpmParticles, newton: MpmNewtonScratch, mpm_info: MpmInfo
-):
-    """Trial displacement sum_a w_a u_a of a particle, with its stencil weights."""
-    fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-    w, grad_w = q1_stencil(fx, mpm_info.inv_dx[()])
-    return particle_node_sum(slots, w, newton.u), w
-
-
-# ============================================ Layer 1: contact vertices ============================================
-
-
-@qd.func
 def particle_stencil(i_ps: int, grid: MpmGridScratch, newton: MpmNewtonScratch, mpm_info: MpmInfo):
     """Environment, node slots and weights of the stencil of a sorted particle, a fixed node taking a zero weight."""
     i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-    slots = stencil_node_slots(i_b, cell, grid)
-    w, _ = q1_stencil(newton.particles_pos[i_ps] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
+    slots, fx, w, grad_w = stencil_weights(i_b, cell, newton.particles_pos[i_ps], grid, mpm_info)
     for a in qd.static(range(8)):
         if grid.nodes_is_fixed[slots[a]] != 0:
             w[a] = 0.0
     return i_b, slots, w
-
-
-@qd.func
-def particle_node_sum(slots, w: qd.types.vector(8), nodes: qd.template()):
-    """Sum of the node vectors of a stencil, weighted by its weights."""
-    value = qd.Vector.zero(gs.qd_float, 3)
-    for a in qd.static(range(8)):
-        value += w[a] * nodes[slots[a]]
-    return value
-
-
-@qd.func
-def stencil_dots(slots, y: qd.types.vector(3), nodes: qd.template()):
-    """Dot products of a vector with the node vectors of a stencil."""
-    return qd.Vector([nodes[slots[a]].dot(y) for a in qd.static(range(8))], dt=gs.qd_float)
-
-
-@qd.func
-def stencil_gradient(slots, grad_w: qd.types.matrix(8, 3), nodes: qd.template()):
-    """Gradient sum_a v_a grad w_a^T of the node vectors of a stencil."""
-    gradient = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for a in qd.static(range(8)):
-        gradient += nodes[slots[a]].outer_product(grad_w[a, :])
-    return gradient
 
 
 @qd.func(requires_top_level=True)
@@ -1402,16 +1781,6 @@ def func_report_extent(grid: MpmGridScratch, rows: LinearBlock):
         rows.n_triplets[()] = n_nodes + STENCIL_BLOCKS * grid.n_tasks[()]
 
 
-@qd.func
-def kinetic_block(i_n: int, grid: MpmGridScratch):
-    """Kinetic diagonal block of a node, m I, or I on a fixed or massless node."""
-    mass = grid.nodes_mass[i_n]
-    scale = gs.qd_float(1.0)
-    if mass > 0.0 and grid.nodes_is_fixed[i_n] == 0:
-        scale = mass
-    return scale * qd.Matrix.identity(gs.qd_float, 3)
-
-
 @qd.func(requires_top_level=True)
 def func_kinetic_assemble(grid: MpmGridScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     """Write the kinetic diagonal block and the environment of the row of every node."""
@@ -1419,7 +1788,12 @@ def func_kinetic_assemble(grid: MpmGridScratch, linear: NewtonLinearScratch, row
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_r = rows.row_start[()] + i_n
         func_write_triplet(
-            rows.triplet_start[()] + i_n, i_r, i_r, kinetic_block(i_n, grid), linear.matrix, is_symmetric=True
+            rows.triplet_start[()] + i_n,
+            i_r,
+            i_r,
+            kinetic_block(grid.nodes_mass[i_n], grid.nodes_is_fixed[i_n]),
+            linear.matrix,
+            is_symmetric=True,
         )
         i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
         linear.pcg.rows_env[i_r] = i_b
@@ -1461,7 +1835,7 @@ def func_elastic_assemble(
         else:
             i_ps_end = grid.cells_start[i_task + 1] if is_head else i_ps_clamped
         for j_ps in range(i_ps_clamped, i_ps_end):
-            slots, movable, r_frame, U, S_block, alpha, beta, iso = particle_stencil_terms(
+            slots, r_frame, U, S_block, alpha, beta, iso = particle_stencil_terms(
                 f, j_ps, dt, particles, grid, newton, particles_info, materials, mpm_info, is_exact
             )
             pair_a = qd.Vector(_STENCIL_PAIR_A, dt=gs.qd_int)
@@ -1501,44 +1875,31 @@ def particle_stencil_terms(
     """Terms of the stencil blocks of a sorted particle (see stencil_pair_block), after staging its gradient factor and
     the gradient of its constraint spring for the gradient gather."""
     i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-    slots = stencil_node_slots(i_b, cell, grid)
-    movable = qd.Vector([gs.qd_float(grid.nodes_is_fixed[slots[a]] == 0) for a in qd.static(range(8))], dt=gs.qd_float)
-    F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    i_mat, U, sigma, V, g, A, P = particle_elastic_stress(
-        f, i_p, i_b, F_trial, particles, particles_info, materials, mpm_info
+    x_p = particles.pos[f, i_p, i_b]
+    slots, fx, w, grad_w = stencil_weights(i_b, cell, x_p, grid, mpm_info)
+    u_nodes = gather_stencil(slots, newton.u)
+    F, F_trial, plastic, params, U, sigma, V, psi, g, A = particle_elastic_state(
+        f, i_p, i_b, u_nodes, grad_w, particles, particles_info, materials, mpm_info
     )
-    scale = mpm_info.particle_volume[()] * dt * dt
     muscle_direction = particles_info.muscle_direction[i_p]
     psi_fibre, P_fibre, fibre_curvature = fibre_terms(
-        i_mat, particles.actu[f, i_p, i_b], muscle_direction, F_trial, materials, mpm_info
+        params[PARAM_FIBRE], particles.actu[f, i_p, i_b], muscle_direction, F_trial
     )
-    newton.particles_stress_factor[i_ps] = scale * (P + P_fibre) @ F.transpose()
-    S_block, alpha, beta = isotropic_projected_modes(sigma, g, A, is_exact)
-    dx, w = particle_trial_displacement(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    energy_spring, grad_spring, hess_spring = constraint_row_terms(i_ps, particles.pos[f, i_p, i_b], dx, newton)
+    scale = elastic_scale(mpm_info.particle_volume[()], dt)
+    newton.particles_stress_factor[i_ps] = stress_gradient_factor(scale, first_piola(U, g, V), P_fibre, F)
+    energy_spring, grad_spring, hess_spring = spring_terms(
+        newton.constraint_spring[i_ps],
+        newton.constraint_damping[i_ps],
+        newton.constraint_target[i_ps],
+        x_p,
+        stencil_interpolate(w, u_nodes),
+    )
     newton.particles_spring_grad[i_ps] = grad_spring
-    r_frame = movable.outer_product(qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)) * (grad_w @ F @ V)
-    fibre_weights = qd.sqrt(scale * fibre_curvature) * (r_frame @ (V.transpose() @ muscle_direction))
-    iso = qd.Matrix.cols([fibre_weights, qd.sqrt(hess_spring) * movable * w])
-    return slots, movable, r_frame, U, scale * S_block, scale * alpha, scale * beta, iso
-
-
-@qd.func
-def stencil_pair_block(
-    a: int,
-    b: int,
-    r_frame: qd.types.matrix(8, 3),
-    U: qd.types.matrix(3, 3),
-    S_block: qd.types.matrix(3, 3),
-    alpha: qd.types.vector(3),
-    beta: qd.types.vector(3),
-    iso: qd.types.matrix(8, 2),
-):
-    """Block of a node pair of a particle stencil from its terms (see particle_stencil_terms), zero on a fixed node."""
-    r_a = qd.Vector([r_frame[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
-    r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
-    block = U @ isotropic_pair_block(r_a, r_b, S_block, alpha, beta) @ U.transpose()
-    return block + (iso[a, 0] * iso[b, 0] + iso[a, 1] * iso[b, 1]) * qd.Matrix.identity(gs.qd_float, 3)
+    S_block, alpha, beta = particle_modes(sigma, g, A, scale, is_exact)
+    r_frame, iso = stencil_frame_terms(
+        grad_w, F, V, gather_movable(slots, grid), w, scale, fibre_curvature, muscle_direction, hess_spring
+    )
+    return slots, r_frame, U, S_block, alpha, beta, iso
 
 
 @qd.func(requires_top_level=True)
@@ -1568,7 +1929,7 @@ def func_gradient_gather(
             for i_chunk_ in range((i_ps_end - i_ps_start + n_lanes - 1) // n_lanes):
                 i_ps = i_ps_start + i_chunk_ * n_lanes + i_lane
                 if i_ps < i_ps_end:
-                    grad = add_particle_node_gradient(f, i_ps, offset, cell, grad, particles, grid, newton, mpm_info)
+                    grad += particle_node_gradient(f, i_ps, offset, cell, particles, grid, newton, mpm_info)
         for d in qd.static(range(3)):
             grad[d] = lanes_sum(grad[d])
         if i_lane == 0:
@@ -1576,24 +1937,24 @@ def func_gradient_gather(
 
 
 @qd.func
-def add_particle_node_gradient(
+def particle_node_gradient(
     f: int,
     i_ps: int,
     offset,
     cell,
-    grad: qd.types.vector(3),
     particles: MpmParticles,
     grid: MpmGridScratch,
     newton: MpmNewtonScratch,
     mpm_info: MpmInfo,
 ):
-    """Add the gradient contribution of a sorted particle at one node of its stencil."""
-    i_flat = grid.sort_ids[i_ps]
-    i_b = i_flat // mpm_info.n_particles[()]
-    i_p = i_flat - i_b * mpm_info.n_particles[()]
-    fx = particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float)
-    w, grad_w = q1_node_weight(offset, fx, mpm_info.inv_dx[()])
-    return grad + w * newton.particles_spring_grad[i_ps] + newton.particles_stress_factor[i_ps] @ grad_w
+    """Gradient contribution of a sorted particle at one node of its stencil."""
+    i_p, i_b = sorted_particle_index(i_ps, grid, mpm_info)
+    w, grad_w = q1_node_weight(
+        offset, cell_fraction(particles.pos[f, i_p, i_b], cell, mpm_info.inv_dx[()]), mpm_info.inv_dx[()]
+    )
+    return node_gradient_contribution(
+        w, grad_w, newton.particles_spring_grad[i_ps], newton.particles_stress_factor[i_ps]
+    )
 
 
 @qd.func
@@ -1608,10 +1969,8 @@ def publish_node_gradient(
 ):
     value = qd.Vector.zero(gs.qd_float, 3)
     if grid.nodes_is_fixed[i_n] == 0:
-        u = newton.u[i_n]
-        value = grad + grid.nodes_mass[i_n] * (u - dt * grid.nodes_vel_free[i_n])
-    i_r = rows.row_start[()] + i_n
-    linear.b_rhs[i_r] = value
+        value = node_gradient(grad, grid.nodes_mass[i_n], newton.u[i_n], grid.nodes_vel_free[i_n], dt)
+    linear.b_rhs[rows.row_start[()] + i_n] = value
 
 
 @qd.func(requires_top_level=True)
@@ -1638,8 +1997,7 @@ def func_assemble(
 def func_negate_du(grid: MpmGridScratch, newton: MpmNewtonScratch, linear: NewtonLinearScratch, rows: LinearBlock):
     qd.loop_config(name="mpm_negate_du")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
-        i_r = rows.row_start[()] + i_n
-        newton.du[i_n] = -linear.solution[i_r]
+        newton.du[i_n] = newton_direction(linear.solution[rows.row_start[()] + i_n])
 
 
 @qd.func(requires_top_level=True)
@@ -1687,16 +2045,17 @@ def func_cap_inversion_step(
     qd.loop_config(name="mpm_cap_inversion_step")
     for i_ps in range(grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-        i_mat = particles_info.material_idx[i_p]
-        if materials.materials_family[i_mat] == FAMILY_LIQUID:
-            slots = stencil_node_slots(i_b, cell, grid)
-            F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-            c0, c1, c2, c3 = det_cubic(F_trial, stencil_gradient(slots, grad_w, newton.du) @ F)
-            if c0 > 0.0:
-                t_max = 1.0 / mpm_info.inversion_step_slack[()]
-                root = cubic_first_root(c0, c1, c2, c3, t_max)
-                if root <= t_max:
-                    qd.atomic_min(control.alpha[i_b], mpm_info.inversion_step_slack[()] * root)
+        if materials.materials_family[particles_info.material_idx[i_p]] == FAMILY_LIQUID:
+            slots, fx, w, grad_w = stencil_weights(i_b, cell, particles.pos[f, i_p, i_b], grid, mpm_info)
+            is_capped, alpha_cap = inversion_step_cap(
+                gather_stencil(slots, newton.u),
+                gather_stencil(slots, newton.du),
+                grad_w,
+                particles.F[f, i_p, i_b],
+                mpm_info.inversion_step_slack[()],
+            )
+            if is_capped:
+                qd.atomic_min(control.alpha[i_b], alpha_cap)
 
 
 @qd.func
@@ -1705,9 +2064,8 @@ def particle_max_displacement(
 ):
     """Largest |du| component of a sorted particle, from its interpolated displacement update sum_a w_a du_a."""
     i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-    slots = stencil_node_slots(i_b, cell, grid)
-    w, _ = q1_stencil(particles.pos[f, i_p, i_b] * mpm_info.inv_dx[()] - cell.cast(gs.qd_float), mpm_info.inv_dx[()])
-    return qd.abs(particle_node_sum(slots, w, newton.du)).max()
+    slots, fx, w, grad_w = stencil_weights(i_b, cell, particles.pos[f, i_p, i_b], grid, mpm_info)
+    return step_measure(stencil_interpolate(w, gather_stencil(slots, newton.du)))
 
 
 @qd.func(requires_top_level=True)
@@ -1716,7 +2074,7 @@ def func_step_forward(grid: MpmGridScratch, newton: MpmNewtonScratch, control: N
     qd.loop_config(name="mpm_step_forward")
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_b, block = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
-        newton.u[i_n] = newton.u_start[i_n] + control.alpha[i_b] * newton.du[i_n]
+        newton.u[i_n] = line_search_point(newton.u_start[i_n], control.alpha[i_b], newton.du[i_n])
 
 
 @qd.func(requires_top_level=True)
@@ -1757,19 +2115,23 @@ def particle_energy(
 ):
     """Elastic and constraint spring energies of a sorted particle."""
     i_p, i_b, cell = particle_of_sorted(i_ps, grid, mpm_info)
-    slots = stencil_node_slots(i_b, cell, grid)
-    F_trial, grad_w, F = trial_deformation(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    i_mat = particles_info.material_idx[i_p]
-    mu, lam = material_params(i_mat, particles.Jp[f, i_p, i_b], materials, mpm_info)
-    _, S, _ = gu.qd_svd(F_trial)
-    psi, g, A = elastic_principal(i_mat, diagonal_of(S), mu, lam, materials, mpm_info)
-    psi_fibre, P_fibre, fibre_curvature = fibre_terms(
-        i_mat, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_trial, materials, mpm_info
+    x_p = particles.pos[f, i_p, i_b]
+    slots, fx, w, grad_w = stencil_weights(i_b, cell, x_p, grid, mpm_info)
+    u_nodes = gather_stencil(slots, newton.u)
+    F, F_trial, plastic, params, U, sigma, V, psi, g, A = particle_elastic_state(
+        f, i_p, i_b, u_nodes, grad_w, particles, particles_info, materials, mpm_info
     )
-    psi += psi_fibre
-    dx, w = particle_trial_displacement(f, i_p, i_b, cell, slots, particles, newton, mpm_info)
-    energy_spring, grad_spring, hess_spring = constraint_row_terms(i_ps, particles.pos[f, i_p, i_b], dx, newton)
-    return mpm_info.particle_volume[()] * dt * dt * psi + energy_spring
+    psi_fibre, P_fibre, fibre_curvature = fibre_terms(
+        params[PARAM_FIBRE], particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_trial
+    )
+    energy_spring, grad_spring, hess_spring = spring_terms(
+        newton.constraint_spring[i_ps],
+        newton.constraint_damping[i_ps],
+        newton.constraint_target[i_ps],
+        x_p,
+        stencil_interpolate(w, u_nodes),
+    )
+    return particle_incremental_energy(elastic_scale(mpm_info.particle_volume[()], dt), psi, psi_fibre, energy_spring)
 
 
 @qd.func(requires_top_level=True)
@@ -1778,14 +2140,7 @@ def func_kinetic_energy(dt: float, energies: qd.template(), grid: MpmGridScratch
     qd.loop_config(name="mpm_kinetic_energy", block_dim=REDUCE_BLOCK)
     for i_n in range(grid.n_blocks[()] * BLOCK_CELLS):
         i_b, _ = unpack_block(grid.blocks_key[i_n // BLOCK_CELLS])
-        add_by_key(i_b, node_kinetic_energy(i_n, dt, grid, newton), energies)
-
-
-@qd.func
-def node_kinetic_energy(i_n: int, dt: float, grid: MpmGridScratch, newton: MpmNewtonScratch):
-    """Kinetic energy of a node, zero for a fixed node."""
-    energy = gs.qd_float(0.0)
-    if grid.nodes_is_fixed[i_n] == 0:
-        u = newton.u[i_n]
-        energy = 0.5 * grid.nodes_mass[i_n] * (u - dt * grid.nodes_vel_free[i_n]).norm_sqr()
-    return energy
+        energy = kinetic_energy(
+            grid.nodes_mass[i_n], grid.nodes_is_fixed[i_n], newton.u[i_n], grid.nodes_vel_free[i_n], dt
+        )
+        add_by_key(i_b, energy, energies)

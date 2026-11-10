@@ -16,6 +16,37 @@ if TYPE_CHECKING:
     from genesis.engine.entities import SPHEntity
 
 
+def cycle_interval(substep_dt: float, n_subcycles: int) -> float:
+    """Interval of one SPH integration step, the substep or a fraction of it with subcycles."""
+    return substep_dt / n_subcycles
+
+
+# The boundary terms of the particles of another solver (Akinci et al. 2012), from their sums at every fluid particle
+# (see SPHSolver.set_boundary)
+
+
+@qd.func
+def boundary_pressure_terms(rho0: float, p: float, rho: float, grad_sum: qd.types.vector(3), dt: float):
+    """Pressure acceleration of a fluid particle from the boundary, which mirrors the fluid's, -rho0 p_i / rho_i^2
+    sum_b V_b grad W_ib, and the share of its coefficient in the impulse on the boundary over an integration step."""
+    coef = -rho0 * p / rho**2
+    return coef * grad_sum, dt * coef
+
+
+@qd.func
+def boundary_divergence(v: qd.types.vector(3), grad_sum: qd.types.vector(3), vel_grad_sum: float):
+    """Rate of the density of a fluid particle from its motion relative to the boundary, v_i . sum_b V_b grad W_ib -
+    sum_b v_b . V_b grad W_ib."""
+    return v.dot(grad_sum) - vel_grad_sum
+
+
+@qd.func
+def boundary_stiffness_terms(k_i: float, grad_sum: qd.types.vector(3), scale: float):
+    """Velocity change of a fluid particle from the boundary, which takes the fluid's stiffness alone, scale k_i
+    sum_b V_b grad W_ib, and the share of its coefficient in the impulse on the boundary."""
+    return scale * k_i * grad_sum, scale * k_i
+
+
 @qd.data_oriented
 class SPHSolver(ParticleSolver):
     material_cls = SPH.Base
@@ -140,8 +171,7 @@ class SPHSolver(ParticleSolver):
         super().build()
 
         self._B = self._sim._B
-        # The interval of one SPH integration step: the substep, or a fraction of it with subcycles
-        self._cycle_dt = self.substep_dt / self._n_subcycles
+        self._cycle_dt = cycle_interval(self.substep_dt, self._n_subcycles)
 
         # particles and entities
         self._n_particles = self.n_particles
@@ -371,15 +401,16 @@ class SPHSolver(ParticleSolver):
                     i_b,
                 )
                 if qd.static(self._has_boundary):
-                    # The boundary pressure mirrors the fluid's: -rho0 p_i / rho_i^2 sum_b V_b grad W_ib
-                    coef = (
-                        -self.particles_info_reordered[i_p, i_b].rho
-                        * self.particles_reordered[i_p, i_b].p
-                        / self.particles_reordered[i_p, i_b].rho ** 2
+                    acc_boundary, impulse_coef = boundary_pressure_terms(
+                        self.particles_info_reordered[i_p, i_b].rho,
+                        self.particles_reordered[i_p, i_b].p,
+                        self.particles_reordered[i_p, i_b].rho,
+                        self._boundary.scratch.grad_sum[i_p, i_b],
+                        self._cycle_dt,
                     )
-                    acc += coef * self._boundary.scratch.grad_sum[i_p, i_b]
+                    acc += acc_boundary
                     self._boundary.scratch.impulse_coef[i_p, i_b] = (
-                        self._boundary.scratch.impulse_coef[i_p, i_b] + self._cycle_dt * coef
+                        self._boundary.scratch.impulse_coef[i_p, i_b] + impulse_coef
                     )
                 self.particles_reordered[i_p, i_b].acc += acc
 
@@ -479,9 +510,10 @@ class SPHSolver(ParticleSolver):
                     i_b,
                 )
                 if qd.static(self._has_boundary):
-                    ret.drho += (
-                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.scratch.grad_sum[i_p, i_b])
-                        - self._boundary.scratch.vel_grad_sum[i_p, i_b]
+                    ret.drho += boundary_divergence(
+                        self.particles_reordered[i_p, i_b].vel,
+                        self._boundary.scratch.grad_sum[i_p, i_b],
+                        self._boundary.scratch.vel_grad_sum[i_p, i_b],
                     )
                     ret.num_neighbors += self._boundary.scratch.n_neighbors[i_p, i_b]
 
@@ -531,11 +563,13 @@ class SPHSolver(ParticleSolver):
                     i_b,
                 )
                 if qd.static(self._has_boundary):
-                    # The boundary takes the fluid's stiffness alone: k_i sum_b V_b grad W_ib
                     if qd.abs(k_i) > self._df_eps:
-                        ret.dv += k_i * self._boundary.scratch.grad_sum[i_p, i_b]
+                        dv_boundary, impulse_coef = boundary_stiffness_terms(
+                            k_i, self._boundary.scratch.grad_sum[i_p, i_b], 1.0
+                        )
+                        ret.dv += dv_boundary
                         self._boundary.scratch.impulse_coef[i_p, i_b] = (
-                            self._boundary.scratch.impulse_coef[i_p, i_b] + k_i
+                            self._boundary.scratch.impulse_coef[i_p, i_b] + impulse_coef
                         )
                 self.particles_reordered.vel[i_p, i_b] = self.particles_reordered.vel[i_p, i_b] + ret.dv
 
@@ -608,9 +642,10 @@ class SPHSolver(ParticleSolver):
                     i_p, self.particles_reordered.pos, self._support_radius, delta, self._task_compute_density_star, i_b
                 )
                 if qd.static(self._has_boundary):
-                    delta += (
-                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.scratch.grad_sum[i_p, i_b])
-                        - self._boundary.scratch.vel_grad_sum[i_p, i_b]
+                    delta += boundary_divergence(
+                        self.particles_reordered[i_p, i_b].vel,
+                        self._boundary.scratch.grad_sum[i_p, i_b],
+                        self._boundary.scratch.vel_grad_sum[i_p, i_b],
                     )
                 drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._cycle_dt * delta
                 self.particles_reordered[i_p, i_b].drho = qd.max(drho, 1.0)  # - 1.0
@@ -650,9 +685,12 @@ class SPHSolver(ParticleSolver):
                 )
                 if qd.static(self._has_boundary):
                     if qd.abs(k_i) > self._df_eps:
-                        ret.dv += self._cycle_dt * k_i * self._boundary.scratch.grad_sum[i_p, i_b]
+                        dv_boundary, impulse_coef = boundary_stiffness_terms(
+                            k_i, self._boundary.scratch.grad_sum[i_p, i_b], self._cycle_dt
+                        )
+                        ret.dv += dv_boundary
                         self._boundary.scratch.impulse_coef[i_p, i_b] = (
-                            self._boundary.scratch.impulse_coef[i_p, i_b] + self._cycle_dt * k_i
+                            self._boundary.scratch.impulse_coef[i_p, i_b] + impulse_coef
                         )
                 self.particles_reordered[i_p, i_b].vel = self.particles_reordered[i_p, i_b].vel + ret.dv
 

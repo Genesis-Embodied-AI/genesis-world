@@ -52,6 +52,70 @@ class PCGWorkspaceScratch(Data, kind=DataKind.SCRATCH):
     n_rows: qd.Tensor = field(int, ndarray=True)
 
 
+# ================================================ Layer 0: updates =================================================
+
+
+@qd.func
+def pcg_dot(a, b):
+    """Product a . b of two entries of the vectors of a conjugate gradient, block rows or scalar dofs."""
+    product = gs.qd_float(0.0)
+    if qd.static(a.is_tensor()):
+        product = a.dot(b)
+    else:
+        product = a * b
+    return product
+
+
+@qd.func
+def pcg_update(x, r, p, ap, alpha: float):
+    """Solution and residual of an entry after the step alpha along the search direction."""
+    return x + alpha * p, r - alpha * ap
+
+
+@qd.func
+def pcg_direction(z, p, beta: float):
+    """Search direction of an entry, p = z + beta p."""
+    return z + beta * p
+
+
+@qd.func
+def pcg_tolerance(tol_rate: float, rz: float):
+    """Convergence threshold of r . z of a solve, its tolerance rate times |rz0|."""
+    return tol_rate * qd.abs(rz)
+
+
+@qd.func
+def pcg_step_size(rz: float, p_dot_ap: float):
+    """Step alpha = rz / p.Ap of a solve, and whether its direction has a non-positive curvature."""
+    alpha = gs.qd_float(0.0)
+    if qd.abs(p_dot_ap) > 0.0:
+        alpha = rz / p_dot_ap
+    return alpha, p_dot_ap <= 0.0 and qd.abs(rz) > 0.0
+
+
+@qd.func
+def pcg_decision(rz: float, rz_new: float, tol_sq: float):
+    """Whether a solve converged at r . z = rz_new, or stopped on a non-finite one, and its beta = rz_new / rz."""
+    beta = gs.qd_float(0.0)
+    if qd.abs(rz) > 0.0:
+        beta = rz_new / rz
+    return qd.abs(rz_new) <= tol_sq or not qd_isfinite(rz_new), beta
+
+
+@qd.func
+def spmv_entry(block: qd.types.matrix(3, 3), p_row: qd.types.vector(3), p_col: qd.types.vector(3), is_diagonal: bool):
+    """Products of an entry of the upper triangle of a symmetric matrix with the search direction: block p_col on its
+    row, block^T p_row on its column, and its share of p . Ap, counting the transpose of an entry off the diagonal."""
+    product = block @ p_col
+    energy = p_col.dot(product)
+    if not is_diagonal:
+        energy = 2.0 * p_row.dot(product)
+    return product, block.transpose() @ p_row, energy
+
+
+# ================================================= Layer 1: stages =================================================
+
+
 @qd.func(requires_top_level=True)
 def func_linear_pcg_dot_rz(out: qd.template(), pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGScalars):
     """Add r . z of the preconditioned residual of every running environment into its entry of an array of the
@@ -64,7 +128,7 @@ def func_linear_pcg_dot_rz(out: qd.template(), pcg_workspace: PCGWorkspaceScratc
             i_b = pcg_workspace.rows_env[i_r]
             if pcg_scalars.is_converged[i_b] == 0:
                 env_key = i_b
-                value = pcg_workspace.r[i_r].dot(pcg_workspace.z[i_r])
+                value = pcg_dot(pcg_workspace.r[i_r], pcg_workspace.z[i_r])
         add_by_key(env_key, value, out)
 
 
@@ -118,14 +182,12 @@ def func_linear_pcg_spmv(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: PCGSca
                 env_key = i_b
                 i_c = matrix.bcoo_col[i_nz]
                 block = func_read_bcoo(i_nz, matrix, block_rows=3, block_cols=3)[2]
-                p_col = pcg_workspace.p[i_c]
-                product = block @ p_col
-                energy = p_col.dot(product)
+                product, transposed_product, energy = spmv_entry(
+                    block, pcg_workspace.p[i_r], pcg_workspace.p[i_c], i_r == i_c
+                )
                 # The upper triangle stores a block off the diagonal for its transpose as well
                 if i_r != i_c:
-                    p_row = pcg_workspace.p[i_r]
-                    qd.atomic_add(pcg_workspace.ap[i_c], block.transpose() @ p_row)
-                    energy = 2.0 * p_row.dot(product)
+                    qd.atomic_add(pcg_workspace.ap[i_c], transposed_product)
         add_by_key(row_key, product, pcg_workspace.ap, n_components=3)
         add_by_key(env_key, energy, pcg_scalars.p_dot_ap)
 
@@ -137,9 +199,9 @@ def func_linear_pcg_update_xr(x: qd.template(), pcg_workspace: PCGWorkspaceScrat
     for i_r in range(pcg_workspace.n_rows[()]):
         i_b = pcg_workspace.rows_env[i_r]
         if pcg_scalars.is_converged[i_b] == 0:
-            alpha = pcg_scalars.alpha[i_b]
-            x[i_r] = x[i_r] + alpha * pcg_workspace.p[i_r]
-            pcg_workspace.r[i_r] = pcg_workspace.r[i_r] - alpha * pcg_workspace.ap[i_r]
+            x[i_r], pcg_workspace.r[i_r] = pcg_update(
+                x[i_r], pcg_workspace.r[i_r], pcg_workspace.p[i_r], pcg_workspace.ap[i_r], pcg_scalars.alpha[i_b]
+            )
 
 
 @qd.func(requires_top_level=True)
@@ -151,10 +213,10 @@ def func_linear_pcg_direction(pcg_workspace: PCGWorkspaceScratch, pcg_scalars: P
         pcg_workspace.ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
         i_b = pcg_workspace.rows_env[i_r]
         if pcg_scalars.is_converged[i_b] == 0:
-            pcg_workspace.p[i_r] = pcg_workspace.z[i_r] + pcg_scalars.beta[i_b] * pcg_workspace.p[i_r]
+            pcg_workspace.p[i_r] = pcg_direction(pcg_workspace.z[i_r], pcg_workspace.p[i_r], pcg_scalars.beta[i_b])
 
 
-# ============================================ stages of the solve ============================================
+# ========================================= Layer 1: stages of the solve ==========================================
 
 
 @qd.func(requires_top_level=True)
@@ -189,7 +251,7 @@ def func_pcg_arm(pcg_scalars: PCGScalars, is_adjoint: qd.template()):
         pcg_scalars.is_running[()] = 0
     for i_b in range(pcg_scalars.rz.shape[0]):
         tol_rate = pcg_scalars.adjoint_tol_rate[()] if qd.static(is_adjoint) else pcg_scalars.tol_rate[()]
-        pcg_scalars.tol_sq[i_b] = tol_rate * qd.abs(pcg_scalars.rz[i_b])
+        pcg_scalars.tol_sq[i_b] = pcg_tolerance(tol_rate, pcg_scalars.rz[i_b])
         if pcg_scalars.is_converged[i_b] == 0:
             qd.atomic_max(pcg_scalars.is_running[()], 1)
 
@@ -199,11 +261,10 @@ def func_pcg_step(pcg_scalars: PCGScalars):
     """Take the step alpha = rz / p.Ap of every running environment, once every owner added its p.Ap."""
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
-            rz = pcg_scalars.rz[i_b]
-            p_dot_ap = pcg_scalars.p_dot_ap[i_b]
-            if pcg_scalars.is_curvature_checked[()] != 0 and p_dot_ap <= 0.0 and qd.abs(rz) > 0.0:
+            alpha, is_breakdown = pcg_step_size(pcg_scalars.rz[i_b], pcg_scalars.p_dot_ap[i_b])
+            if pcg_scalars.is_curvature_checked[()] != 0 and is_breakdown:
                 pcg_scalars.has_breakdown[i_b] = 1
-            pcg_scalars.alpha[i_b] = rz / p_dot_ap if qd.abs(p_dot_ap) > 0.0 else gs.qd_float(0.0)
+            pcg_scalars.alpha[i_b] = alpha
         pcg_scalars.rz_new[i_b] = 0.0
 
 
@@ -216,14 +277,14 @@ def func_pcg_decide(pcg_scalars: PCGScalars):
         pcg_scalars.is_running[()] = 0
     for i_b in range(pcg_scalars.rz.shape[0]):
         if pcg_scalars.is_converged[i_b] == 0:
-            rz = pcg_scalars.rz[i_b]
             rz_new = pcg_scalars.rz_new[i_b]
             if qd.static(qd_debug_asserts()):
                 assert qd_isfinite(rz_new), "PCG: r . z of environment %d is not finite" % i_b
-            if qd.abs(rz_new) <= pcg_scalars.tol_sq[i_b] or not qd_isfinite(rz_new):
+            is_converged, beta = pcg_decision(pcg_scalars.rz[i_b], rz_new, pcg_scalars.tol_sq[i_b])
+            if is_converged:
                 pcg_scalars.is_converged[i_b] = 1
             elif pcg_scalars.n_iterations_left[()] > 0:
                 qd.atomic_max(pcg_scalars.is_running[()], 1)
-            pcg_scalars.beta[i_b] = rz_new / rz if qd.abs(rz) > 0.0 else gs.qd_float(0.0)
+            pcg_scalars.beta[i_b] = beta
             pcg_scalars.rz[i_b] = rz_new
         pcg_scalars.p_dot_ap[i_b] = 0.0

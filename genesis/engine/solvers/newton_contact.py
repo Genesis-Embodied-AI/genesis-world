@@ -22,13 +22,15 @@ from genesis.engine.numerics.dynamic_exclusive_sum import (
     dynamic_exclusive_sum_sizes,
     func_dynamic_exclusive_sum,
 )
-from genesis.engine.numerics.linear_pcg import PCGScalars
+from genesis.engine.numerics.linear_pcg import PCGScalars, pcg_dot
 from genesis.utils.data import Data, DataItem, DataKind, Size, field, iter_data
 from genesis.utils.misc import qd_to_numpy
 
 from .newton_linear import (
     MIN_SLOTS,
     NewtonLinearScratch,
+    block_product,
+    block_transpose_product,
     build_linear_block,
     grown_capacity,
     retire_scratch,
@@ -91,7 +93,35 @@ def build_newton_contact(n_kinds: int, max_doublets: int, max_triplets: int) -> 
     return scratch
 
 
-# =============================================== Layer 0: dispatch ===============================================
+# =========================================== Layer 0: vertex weights ===========================================
+
+
+@qd.func
+def weighted_vector(weight: float, v: qd.types.vector(3)):
+    """Share of a vertex, or of a row, of weight w in the displacement of a term: its gradient from the gradient of the
+    term, or its share of a displacement."""
+    return weight * v
+
+
+@qd.func
+def weighted_block(weight_a: float, weight_b: float, H: qd.types.matrix(3, 3)):
+    """Hessian block between two vertices, or two rows, of weights w_a and w_b in the displacement of a term with the
+    Hessian H in it."""
+    return (weight_a * weight_b) * H
+
+
+@qd.func
+def is_negligible_weight(weight_a: float, weight_b: float):
+    return qd.abs(weight_a * weight_b) < gs.EPS
+
+
+@qd.func
+def shared_row_block(block: qd.types.matrix(3, 3)):
+    """Block of two distinct vertices on one row: the block and its transpose land on the diagonal of the row."""
+    return block + block.transpose()
+
+
+# =============================================== Layer 1: dispatch ===============================================
 
 
 @qd.func
@@ -216,7 +246,7 @@ class NewtonContact(NewtonDevice):
             else:
                 n_rows, rows, weights = self.vertex_rows(i_v)
                 for i_r_ in range(n_rows):
-                    qd.atomic_add(linear.b_rhs[rows[i_r_]], weights[i_r_] * g)
+                    qd.atomic_add(linear.b_rhs[rows[i_r_]], weighted_vector(weights[i_r_], g))
         if qd.static(self.has_rigid_map):
             self.rigid_map.func_vertex_end(DST_GRADIENT)
         qd.loop_config(name="newton_contact_blocks")
@@ -231,14 +261,12 @@ class NewtonContact(NewtonDevice):
                     if i_va == i_vb:
                         j_r_start = i_r_
                     for j_r_ in range(j_r_start, n_rows_b):
-                        weight = weights_a[i_r_] * weights_b[j_r_]
-                        if qd.abs(weight) < gs.EPS:
+                        if is_negligible_weight(weights_a[i_r_], weights_b[j_r_]):
                             func_discard_triplet(i_t, linear.matrix, block_rows=3, block_cols=3)
                         else:
-                            block = weight * H
-                            # Two vertices on one row: the block and its transpose land on the diagonal of the row
+                            block = weighted_block(weights_a[i_r_], weights_b[j_r_], H)
                             if i_va != i_vb and rows_a[i_r_] == rows_b[j_r_]:
-                                block += block.transpose()
+                                block = shared_row_block(block)
                             func_write_triplet(i_t, rows_a[i_r_], rows_b[j_r_], block, linear.matrix, is_symmetric=True)
                         i_t += 1
 
@@ -267,16 +295,16 @@ class NewtonContact(NewtonDevice):
                 is_running = pcg_scalars.is_converged[i_b] == 0
             if is_running:
                 i_v_local = i_vb - self.rigid_map.vertex_range.offset[()]
-                y_b = B @ self.rigid_map.func_vertex_value(f, i_v_local, SRC_DIRECTION)
+                y_b = block_product(B, self.rigid_map.func_vertex_value(f, i_v_local, SRC_DIRECTION))
                 if i_va != i_vb:
                     n_rows, rows, weights = self.vertex_rows(i_va)
                     p_a = qd.Vector.zero(gs.qd_float, 3)
                     for i_r_ in range(n_rows):
-                        p_a += weights[i_r_] * linear.pcg.p[rows[i_r_]]
-                        qd.atomic_add(linear.pcg.ap[rows[i_r_]], weights[i_r_] * y_b)
+                        p_a += weighted_vector(weights[i_r_], linear.pcg.p[rows[i_r_]])
+                        qd.atomic_add(linear.pcg.ap[rows[i_r_]], weighted_vector(weights[i_r_], y_b))
                     # Rigid adds the p . Ap of its own rows (see func_matvec_dot)
-                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], p_a.dot(y_b))
-                    y_b = B.transpose() @ p_a
+                    qd.atomic_add(pcg_scalars.p_dot_ap[i_b], pcg_dot(p_a, y_b))
+                    y_b = block_transpose_product(B, p_a)
                 self.rigid_map.func_vertex_add_force(f, i_v_local, y_b)
         self.rigid_map.func_vertex_end(DST_PRODUCT)
 

@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 CLAMPED_INV_DT = 50.0
 
 
+def contact_thickness(dx: float) -> float:
+    """Thickness of the surface of a partner of the implicit MPM solver in its contact rows, half a grid spacing."""
+    return 0.5 * dx
+
+
 @qd.data_oriented
 class LegacyCoupler(RBC):
     """
@@ -172,7 +177,9 @@ class LegacyCoupler(RBC):
         if self._is_mpm_fem_coupled:
             fem_host, fem_participant = self.fem_solver.build_newton_participant()
             owners.append((fem_host, fem_participant))
-            fem_contact = FemContactParams(values={"thickness": 0.5 * self.mpm_solver.dx, "stiffness": 10.0})
+            fem_contact = FemContactParams(
+                values={"thickness": contact_thickness(self.mpm_solver.dx), "stiffness": 10.0}
+            )
             query = FemTriangleQuery(fem_participant, mpm_participant.mpm_info, fem_contact, self.sim._B)
             contact = MpmFemContact(mpm_participant, fem_participant, query)
             couplings.append((CouplingPairsHost(contact), contact))
@@ -181,7 +188,7 @@ class LegacyCoupler(RBC):
             pbd_contact = PbdContactParams(
                 values={
                     "radius": self.pbd_solver.particle_radius,
-                    "thickness": 0.5 * self.mpm_solver.dx,
+                    "thickness": contact_thickness(self.mpm_solver.dx),
                     "stiffness": 10.0,
                     "friction": 0.15,
                     "obstacle_reach": 1.5,

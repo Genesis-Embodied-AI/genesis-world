@@ -6,26 +6,48 @@ from collections.abc import Iterator
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.solvers.mpm_data import PYRAMID_ROWS
 from genesis.engine.solvers.mpm_func import (
-    band_row,
-    contact_band_width,
-    contact_invweight,
+    contact_friction,
+    contact_gap,
+    is_within_band,
+    is_within_reach,
+    particle_invweight,
     particle_of_sorted,
-    pyramid_directions,
 )
 from genesis.engine.solvers.mpm_solver import MpmNewtonParticipant
 from genesis.engine.solvers.newton_contact import DST_GRADIENT, MAX_VERTICES, SRC_ITERATE, VertexRange
 from genesis.engine.solvers.newton_linear import MIN_SLOTS
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.newton_func import func_link_force_to_dofs, func_link_spatial_disp
+from genesis.engine.solvers.rigid.newton_func import constraint_force, func_link_force_to_dofs, func_link_spatial_disp
 from genesis.engine.solvers.rigid.newton_participant import RigidNewtonParticipant
 from genesis.utils.data import DataItem, iter_data
 from genesis.utils.misc import qd_to_numpy
 
 from . import mpm_rigid_adjoint_func
-from .contact_candidates import CouplingPairs, CouplingPairsHost
-from .mpm_rigid_func import MpmRigidPairs, RigidGeomQuery, geom_normal, geom_sdf
+from .contact_candidates import CouplingPairs, CouplingPairsHost, pair_relative_displacement
+from .mpm_rigid_func import (
+    MpmRigidPairs,
+    RigidGeomQuery,
+    contact_arm,
+    geom_normal,
+    geom_sdf,
+    point_motion,
+    point_stiffness,
+    point_wrench,
+    rigid_pair_rows,
+    rigid_row_coefficients,
+)
+
+
+@qd.func
+def has_force(g: qd.types.vector(3)):
+    return g.norm_sqr() > 0.0
+
+
+@qd.func
+def gradient_force(g: qd.types.vector(3), dt: float):
+    """Force of a gradient of the incremental potential, which scales forces by dt^2."""
+    return g / (dt * dt)
 
 
 @qd.data_oriented
@@ -74,7 +96,7 @@ class MpmRigidContact(CouplingPairs):
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
         phi = geom_sdf(i_g, i_b, x_p, self.rigid.dyn_state.geoms, self.rigid.dyn_info.geoms, self.rigid.sdf_info)
-        return phi - self.rigid.dyn_info.geoms.coup_softness[i_g], 0.0
+        return contact_gap(phi, self.rigid.dyn_info.geoms.coup_softness[i_g]), 0.0
 
     @qd.func
     def build_pair(self, f: int, i_b: int, i_a: int, i_ps: int, phi: float):
@@ -83,12 +105,13 @@ class MpmRigidContact(CouplingPairs):
         i_g = self.query.coupled_geoms.idx[i_a]
         i_p, _, _ = particle_of_sorted(i_ps, self.mpm.grid, self.mpm.mpm_info)
         x_p = self.mpm.particles.pos[f, i_p, i_b]
+        v_p = self.mpm.particles.vel[f, i_p, i_b]
         dt = self.mpm.mpm_info.substep_dt[()]
+        dx = self.mpm.mpm_info.dx[()]
         i_l = self.rigid.dyn_info.geoms.link_idx[i_g]
         v_r = func_vel_at_point(i_l, i_b, x_p, self.rigid.dyn_state.links)
-        v_rel = self.mpm.particles.vel[f, i_p, i_b] - v_r
         # The relative speed bounds the normal approach speed, which needs the normal
-        if phi < contact_band_width(v_rel.norm(), dt, self.mpm.mpm_info):
+        if is_within_reach(phi, v_p, v_r, dt, dx):
             normal = geom_normal(
                 i_g,
                 i_b,
@@ -99,26 +122,22 @@ class MpmRigidContact(CouplingPairs):
                 self.rigid.sdf_info,
                 self.rigid.config,
             )
-            if phi < contact_band_width(-normal.dot(v_rel), dt, self.mpm.mpm_info):
+            if is_within_band(phi, normal, v_p, v_r, dt, dx):
                 I_l = [i_l, i_b] if qd.static(self.rigid.config.rigid_batch_links_info) else i_l
-                friction_ratio = self.rigid.dyn_state.geoms.friction_ratio[i_g, i_b]
-                friction = qd.max(
-                    self.rigid.dyn_info.geoms.friction[i_g] * friction_ratio, self.mpm.mpm_info.contact_min_friction[()]
+                friction = contact_friction(
+                    self.rigid.dyn_info.geoms.friction[i_g],
+                    self.rigid.dyn_state.geoms.friction_ratio[i_g, i_b],
+                    self.mpm.mpm_info.contact_min_friction[()],
                 )
-                friction_sq_reg = friction * friction / self.rigid.rigid_info.impratio[None]
-                invweight = contact_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info)
-                invweight += self.rigid.dyn_info.links.invweight[I_l][0]
-                diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
-                sol_params = self.rigid.dyn_info.geoms.sol_params[i_g]
-                sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
-                directions = pyramid_directions(normal, friction)
-                stiffness = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
-                target = qd.Vector.zero(gs.qd_float, PYRAMID_ROWS)
-                for k in range(PYRAMID_ROWS):
-                    direction = qd.Vector([directions[k, j] for j in qd.static(range(3))], dt=gs.qd_float)
-                    stiffness_k, target_k = band_row(sol_params, phi, direction.dot(v_rel), diag_coef, dt)
-                    stiffness[k] = stiffness_k
-                    target[k] = target_k + dt * direction.dot(v_r)
+                diag_coef, diag_coef_scale, sol_params_row = rigid_row_coefficients(
+                    friction,
+                    self.rigid.rigid_info.impratio[None],
+                    particle_invweight(f, i_p, i_b, normal, self.mpm.particles, self.mpm.particles_info),
+                    self.rigid.dyn_info.links.invweight[I_l][0],
+                    self.rigid.dyn_info.geoms.sol_params[i_g],
+                    dt,
+                )
+                stiffness, target = rigid_pair_rows(normal, friction, diag_coef, sol_params_row, phi, v_p, v_r, dt)
                 i_pair = self.add_pair(i_ps, i_b, normal, friction, stiffness, target)
                 if i_pair >= 0:
                     self.pairs.geom_idx[i_pair] = i_g
@@ -130,13 +149,14 @@ class MpmRigidContact(CouplingPairs):
         """The particle of a pair, of weight 1, and with Rigid dofs its contact point, of weight -1, with their relative
         displacement at the current iterate."""
         i_v_mpm = self.mpm.vertex_range.offset[()] + self.pairs.sorted_idx[i_pair]
-        u_rel = self.mpm.func_vertex_value(f, self.pairs.sorted_idx[i_pair])
+        u_mpm = self.mpm.func_vertex_value(f, self.pairs.sorted_idx[i_pair])
         if qd.static(self.has_rigid_dofs):
-            u_rel -= self.func_vertex_value(f, i_pair, SRC_ITERATE)
             verts = qd.Vector([i_v_mpm, self.vertex_range.offset[()] + i_pair], dt=gs.qd_int)
-            return verts, qd.Vector([1.0, -1.0], dt=gs.qd_float), u_rel
+            weights = qd.Vector([1.0, -1.0], dt=gs.qd_float)
+            values = qd.Matrix.rows([u_mpm, self.func_vertex_value(f, i_pair, SRC_ITERATE)])
+            return verts, weights, pair_relative_displacement(weights, values)
         else:
-            return qd.Vector([i_v_mpm], dt=gs.qd_int), qd.Vector([1.0], dt=gs.qd_float), u_rel
+            return qd.Vector([i_v_mpm], dt=gs.qd_int), qd.Vector([1.0], dt=gs.qd_float), u_mpm
 
     # ------------------------------------------- vertex map -------------------------------------------
 
@@ -147,7 +167,7 @@ class MpmRigidContact(CouplingPairs):
         i_p, _, _ = particle_of_sorted(self.pairs.sorted_idx[i_pair], self.mpm.grid, self.mpm.mpm_info)
         i_l = self.pairs.link_idx[i_pair]
         i_b = self.pairs.i_b[i_pair]
-        return i_l, i_b, self.mpm.particles.pos[f, i_p, i_b] - self.rigid.dyn_state.links.root_COM[i_l, i_b]
+        return i_l, i_b, contact_arm(self.mpm.particles.pos[f, i_p, i_b], self.rigid.dyn_state.links.root_COM[i_l, i_b])
 
     @qd.func(requires_top_level=True)
     def func_vertex_begin(self, f: int, src: qd.template()):
@@ -197,32 +217,24 @@ class MpmRigidContact(CouplingPairs):
     def func_vertex_value(self, f: int, i_v: int, src: qd.template()):
         # The link displacements of `src` are those of func_vertex_begin
         i_l, i_b, r = self.contact_point_arm(f, i_v)
-        return self.rigid.rigid_data.links_motion_vel[i_l, i_b] + self.rigid.rigid_data.links_motion_ang[
-            i_l, i_b
-        ].cross(r)
+        return point_motion(
+            self.rigid.rigid_data.links_motion_vel[i_l, i_b], self.rigid.rigid_data.links_motion_ang[i_l, i_b], r
+        )
 
     @qd.func
     def func_vertex_add_force(self, f: int, i_v: int, y: qd.types.vector(3)):
         """Add the spatial force of a vector on a contact point to its link, which func_vertex_end maps to the dofs."""
         i_l, i_b, r = self.contact_point_arm(f, i_v)
-        qd.atomic_add(self.rigid.rigid_data.links_force_vel[i_l, i_b], y)
-        qd.atomic_add(self.rigid.rigid_data.links_force_ang[i_l, i_b], r.cross(y))
+        force, torque = point_wrench(y, r)
+        qd.atomic_add(self.rigid.rigid_data.links_force_vel[i_l, i_b], force)
+        qd.atomic_add(self.rigid.rigid_data.links_force_ang[i_l, i_b], torque)
 
     @qd.func
     def func_vertex_visit_diag(self, f: int, i_v: int, H: qd.types.matrix(3, 3)):
         # The spatial stiffness K_l = sum P^T H P of every link joins the factor of Rigid (see
         # func_add_island_hessian_batch)
         i_l, i_b, r = self.contact_point_arm(f, i_v)
-        # P = [I, -[r]x] maps the spatial displacement of the link to the displacement of the point at arm r
-        P = qd.Matrix(
-            [
-                [1.0, 0.0, 0.0, 0.0, r[2], -r[1]],
-                [0.0, 1.0, 0.0, -r[2], 0.0, r[0]],
-                [0.0, 0.0, 1.0, r[1], -r[0], 0.0],
-            ],
-            dt=gs.qd_float,
-        )
-        qd.atomic_add(self.rigid.rigid_data.links_stiffness[i_l, i_b], P.transpose() @ H @ P)
+        qd.atomic_add(self.rigid.rigid_data.links_stiffness[i_l, i_b], point_stiffness(H, r))
 
 
 @qd.kernel
@@ -232,15 +244,15 @@ def kernel_mpm_reaction(f: int, contact: qd.template()):
     qd.loop_config(name="mpm_reaction_pairs")
     for i_pair in range(contact.pairs.n_pairs[()]):
         energy, g, H, verts, weights = contact.pair_terms(f, i_pair)
-        if g.norm_sqr() > 0.0:
-            i_l, i_b, r = contact.contact_point_arm(f, i_pair)
-            qd.atomic_add(contact.rigid.rigid_data.links_force_vel[i_l, i_b], g)
-            qd.atomic_add(contact.rigid.rigid_data.links_force_ang[i_l, i_b], r.cross(g))
-            contact.rigid.dyn_state.links.is_constrained[i_l, i_b] = True
+        if has_force(g):
+            contact.func_vertex_add_force(f, i_pair, g)
+            contact.rigid.dyn_state.links.is_constrained[contact.pairs.link_idx[i_pair], contact.pairs.i_b[i_pair]] = (
+                True
+            )
     qd.loop_config(name="mpm_reaction_qfrc")
     for i_d, i_b in qd.ndrange(contact.rigid.rigid_data.x.shape[0], contact.rigid.rigid_data.x.shape[1]):
-        contact.rigid.constraint_state.qfrc_constraint[i_d, i_b] = (
-            contact.rigid.rigid_data.Ma[i_d, i_b] - contact.rigid.dyn_state.dofs.qf_smooth[i_d, i_b]
+        contact.rigid.constraint_state.qfrc_constraint[i_d, i_b] = constraint_force(
+            contact.rigid.rigid_data.Ma[i_d, i_b], contact.rigid.dyn_state.dofs.qf_smooth[i_d, i_b]
         )
 
 
@@ -251,9 +263,10 @@ def kernel_add_mpm_contact_force(contact: qd.template()):
     dt = contact.mpm.mpm_info.substep_dt[()]
     n_links = contact.rigid.rigid_data.links_force_vel.shape[0]
     for i_l, i_b in qd.ndrange(n_links, contact.rigid.rigid_data.links_force_vel.shape[1]):
-        force = contact.rigid.rigid_data.links_force_vel[i_l, i_b]
         contact_force = contact.rigid.dyn_state.links.contact_force[i_l, i_b]
-        contact.rigid.dyn_state.links.contact_force[i_l, i_b] = contact_force + force / (dt * dt)
+        contact.rigid.dyn_state.links.contact_force[i_l, i_b] = contact_force + gradient_force(
+            contact.rigid.rigid_data.links_force_vel[i_l, i_b], dt
+        )
 
 
 class MpmRigidContactHost(CouplingPairsHost):

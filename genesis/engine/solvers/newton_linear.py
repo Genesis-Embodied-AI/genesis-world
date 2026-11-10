@@ -97,6 +97,32 @@ def build_block_jacobi(n_rows: int) -> BlockJacobiScratch:
     return BlockJacobiScratch(sizes={JACOBI_ROWS: max(n_rows, 1)})
 
 
+# ============================================ Layer 0: block algebra ============================================
+
+
+@qd.func
+def block_product(B: qd.types.matrix(3, 3), v: qd.types.vector(3)):
+    return B @ v
+
+
+@qd.func
+def block_transpose_product(B: qd.types.matrix(3, 3), v: qd.types.vector(3)):
+    return B.transpose() @ v
+
+
+@qd.func
+def equilibrated_inverse(block: qd.types.matrix(3, 3)):
+    """Inverse of a diagonal block of a matrix, equilibrated to a unit diagonal, or the identity for a block that is not
+    positive definite."""
+    diagonal = qd.Vector([block[0, 0], block[1, 1], block[2, 2]], dt=gs.qd_float)
+    scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
+    scaling = scale.outer_product(scale)
+    inverse = qd.Matrix.identity(gs.qd_float, 3)
+    if (block * scaling).determinant() > 0.0:
+        inverse = (block * scaling).inverse()
+    return inverse * scaling
+
+
 @qd.data_oriented
 class BlockJacobiOwner:
     """Block Jacobi preconditioner of an owner of rows of the linear system, which holds its rows in `linear_block` and
@@ -119,14 +145,7 @@ class BlockJacobiOwner:
         """Invert every diagonal block, equilibrated to a unit diagonal."""
         qd.loop_config(name="newton_block_jacobi_invert")
         for i_r in range(self.linear_block.n_rows[()]):
-            block = self.jacobi.blocks[i_r]
-            diagonal = qd.Vector([block[0, 0], block[1, 1], block[2, 2]], dt=gs.qd_float)
-            scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
-            scaling = scale.outer_product(scale)
-            equilibrated_inverse = qd.Matrix.identity(gs.qd_float, 3)
-            if (block * scaling).determinant() > 0.0:
-                equilibrated_inverse = (block * scaling).inverse()
-            self.jacobi.blocks[i_r] = equilibrated_inverse * scaling
+            self.jacobi.blocks[i_r] = equilibrated_inverse(self.jacobi.blocks[i_r])
 
     @qd.func(requires_top_level=True)
     def func_precondition(self):
@@ -134,7 +153,7 @@ class BlockJacobiOwner:
         qd.loop_config(name="newton_block_jacobi_apply")
         for i_r in range(self.linear_block.n_rows[()]):
             row = self.linear_block.row_start[()] + i_r
-            self.linear.pcg.z[row] = self.jacobi.blocks[i_r] @ self.linear.pcg.r[row]
+            self.linear.pcg.z[row] = block_product(self.jacobi.blocks[i_r], self.linear.pcg.r[row])
 
 
 # ============================================== Layer 1: stages ==============================================

@@ -7,12 +7,43 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF
+from genesis.engine.solvers.mpm_func import EMPTY_BOX_HALF, particle_mass
 from genesis.utils.array_class import BVHQueryResults
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
 SPH_PARTICLES = Size("sph_particles")
 MPM_PARTICLES = Size("mpm_particles")
+
+
+# =============================================== Layer 0: boundary terms ===============================================
+
+
+@qd.func
+def boundary_separation(x_i: qd.types.vector(3), x_b: qd.types.vector(3), support_radius: float):
+    """Separation of a fluid particle from a boundary particle, its length, and whether it lies within the kernel
+    support."""
+    r = x_i - x_b
+    distance = r.norm()
+    return r, distance, distance < support_radius
+
+
+@qd.func
+def boundary_sums(volume: float, kernel: float, kernel_gradient: qd.types.vector(3), v_b: qd.types.vector(3)):
+    """Terms of a boundary particle of volume V_b in the boundary sums of a fluid particle: V_b W, V_b grad W and
+    v_b . V_b grad W."""
+    grad = volume * kernel_gradient
+    return volume * kernel, grad, v_b.dot(grad)
+
+
+@qd.func
+def boundary_impulse(mass: float, impulse_coef: float, volume: float, kernel_gradient: qd.types.vector(3)):
+    """Impulse -m_i s_i V_b grad W_ib of a fluid particle on a boundary particle."""
+    return (-mass * impulse_coef * volume) * kernel_gradient
+
+
+@qd.func
+def impulse_velocity(v: qd.types.vector(3), impulse: qd.types.vector(3), mass: float):
+    return v + impulse / mass
 
 
 class MpmSphBoundaryScratch(Data, kind=DataKind.SCRATCH):
@@ -83,18 +114,22 @@ def kernel_fit_mpm_particle_leaves(f: int, query: qd.template()):
 def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
     """Add an MPM particle to the boundary sums of an SPH particle if it lies within the kernel support."""
     f = boundary.scratch.frame[()]
-    r = boundary.sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
-    dist = r.norm()
-    if dist < qd.static(boundary.sph.support_radius):
-        volume = boundary.mpm_info.particle_volume[()]
-        grad = volume * boundary.sph.cubic_kernel_derivative(r)
-        # The thread of the SPH particle alone accumulates its sums
-        boundary.scratch.rho_sum[i_q, i_t] = boundary.scratch.rho_sum[i_q, i_t] + volume * boundary.sph.cubic_kernel(
-            dist
+    r, dist, is_within = boundary_separation(
+        boundary.sph.particles_reordered[i_q, i_t].pos,
+        boundary.mpm_particles.pos[f, i_a, i_t],
+        qd.static(boundary.sph.support_radius),
+    )
+    if is_within:
+        rho_term, grad_term, vel_grad_term = boundary_sums(
+            boundary.mpm_info.particle_volume[()],
+            boundary.sph.cubic_kernel(dist),
+            boundary.sph.cubic_kernel_derivative(r),
+            boundary.mpm_particles.vel[f, i_a, i_t],
         )
-        boundary.scratch.grad_sum[i_q, i_t] = boundary.scratch.grad_sum[i_q, i_t] + grad
-        vel_grad = boundary.mpm_particles.vel[f, i_a, i_t].dot(grad)
-        boundary.scratch.vel_grad_sum[i_q, i_t] = boundary.scratch.vel_grad_sum[i_q, i_t] + vel_grad
+        # The thread of the SPH particle alone accumulates its sums
+        boundary.scratch.rho_sum[i_q, i_t] = boundary.scratch.rho_sum[i_q, i_t] + rho_term
+        boundary.scratch.grad_sum[i_q, i_t] = boundary.scratch.grad_sum[i_q, i_t] + grad_term
+        boundary.scratch.vel_grad_sum[i_q, i_t] = boundary.scratch.vel_grad_sum[i_q, i_t] + vel_grad_term
         boundary.scratch.n_neighbors[i_q, i_t] = boundary.scratch.n_neighbors[i_q, i_t] + 1
     return True
 
@@ -103,14 +138,21 @@ def func_boundary_gather_filter(i_t: int, i_a: int, i_q: int, boundary: qd.templ
 def func_boundary_scatter_filter(i_t: int, i_a: int, i_q: int, boundary: qd.template()) -> bool:
     """Give an MPM particle within the kernel support of an SPH particle its impulse -m_i s_i V_b grad W_ib."""
     f = boundary.scratch.frame[()]
-    r = boundary.sph.particles_reordered[i_q, i_t].pos - boundary.mpm_particles.pos[f, i_a, i_t]
-    if r.norm() < qd.static(boundary.sph.support_radius):
-        coef = (
-            -boundary.sph.particles_info_reordered[i_q, i_t].mass
-            * boundary.scratch.impulse_coef[i_q, i_t]
-            * boundary.mpm_info.particle_volume[()]
+    r, dist, is_within = boundary_separation(
+        boundary.sph.particles_reordered[i_q, i_t].pos,
+        boundary.mpm_particles.pos[f, i_a, i_t],
+        qd.static(boundary.sph.support_radius),
+    )
+    if is_within:
+        qd.atomic_add(
+            boundary.scratch.impulse[i_a, i_t],
+            boundary_impulse(
+                boundary.sph.particles_info_reordered[i_q, i_t].mass,
+                boundary.scratch.impulse_coef[i_q, i_t],
+                boundary.mpm_info.particle_volume[()],
+                boundary.sph.cubic_kernel_derivative(r),
+            ),
         )
-        qd.atomic_add(boundary.scratch.impulse[i_a, i_t], coef * boundary.sph.cubic_kernel_derivative(r))
     return True
 
 
@@ -151,7 +193,9 @@ def kernel_apply_boundary_impulse(f: int, boundary: qd.template()):
     """Add the impulses of the SPH particles to the velocity of every active MPM particle, and clear them."""
     for i_p, i_b in qd.ndrange(boundary.scratch.impulse.shape[0], boundary.scratch.impulse.shape[1]):
         if boundary.mpm_particles_ng.active[f, i_p, i_b]:
-            mass = boundary.mpm_particles_info.mass[i_p] / boundary.mpm_info.mass_scale[()]
-            impulse = boundary.scratch.impulse[i_p, i_b]
-            boundary.mpm_particles.vel[f, i_p, i_b] = boundary.mpm_particles.vel[f, i_p, i_b] + impulse / mass
+            boundary.mpm_particles.vel[f, i_p, i_b] = impulse_velocity(
+                boundary.mpm_particles.vel[f, i_p, i_b],
+                boundary.scratch.impulse[i_p, i_b],
+                particle_mass(boundary.mpm_particles_info.mass[i_p], boundary.mpm_info.mass_scale[()]),
+            )
         boundary.scratch.impulse[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)

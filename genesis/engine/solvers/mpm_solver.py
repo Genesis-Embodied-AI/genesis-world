@@ -70,6 +70,17 @@ if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 
+def liquid_smoothing_band(velocity: float, substep_dt: float, dx: float) -> float:
+    """Width in volume ratio of the band over which the stiffness of the liquid rises (see liquid_volume_terms): the
+    compression of a cell moving at the smoothing velocity over a substep."""
+    return velocity * substep_dt / dx
+
+
+def floored_timeconst(timeconst: float, substep_dt: float) -> float:
+    """Time constant of a soft row floored at twice the substep, below which Rigid's impedance cannot resolve it."""
+    return max(timeconst, 2.0 * substep_dt)
+
+
 def material_table_column(material):
     """Compute the column of a material in the material table, its energy family and its return map."""
     column = np.zeros(mpm_func.N_MATERIAL_PARAMS, dtype=gs.np_float)
@@ -206,7 +217,7 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
     @qd.func
     def func_vertex_value(self, f: int, i_v: int):
         _, slots, w = mpm_func.particle_stencil(i_v, self.grid, self.newton, self.mpm_info)
-        return mpm_func.particle_node_sum(slots, w, self.newton.u)
+        return mpm_func.stencil_interpolate(w, mpm_func.gather_stencil(slots, self.newton.u))
 
     @qd.func
     def func_vertex_rows(self, i_v: int):
@@ -225,14 +236,11 @@ class MpmNewtonParticipant(BlockJacobiOwner, NewtonDevice):
         i_b, slots, w = mpm_func.particle_stencil(
             self.wall_pairs.sorted_idx[i_pair], self.grid, self.newton, self.mpm_info
         )
-        u_p = mpm_func.particle_node_sum(slots, w, self.newton.u)
-        # The inward normal of the wall, sign e_axis
-        axis = self.wall_pairs.axis[i_pair]
-        direction = self.wall_pairs.sign[i_pair] * qd.Vector(
-            [gs.qd_float(axis == d) for d in qd.static(range(3))], dt=gs.qd_float
-        )
         energy, g, H = mpm_func.soft_row_terms(
-            direction, self.wall_pairs.stiffness[i_pair], self.wall_pairs.target[i_pair], u_p
+            mpm_func.wall_normal(self.wall_pairs.axis[i_pair], self.wall_pairs.sign[i_pair]),
+            self.wall_pairs.stiffness[i_pair],
+            self.wall_pairs.target[i_pair],
+            mpm_func.stencil_interpolate(w, mpm_func.gather_stencil(slots, self.newton.u)),
         )
         return i_b, energy, g, H
 
@@ -363,7 +371,7 @@ class MPMSolver(ParticleSolver):
         velocity = self._options.liquid_smoothing_velocity
         if velocity is None:
             velocity = self._scene.options.newton.velocity_tol
-        liquid_band = velocity * self.substep_dt / self._dx
+        liquid_band = liquid_smoothing_band(velocity, self.substep_dt, self._dx)
         if liquid_band >= 0.5:
             gs.raise_exception(
                 f"The smoothing band of the liquid energy, {liquid_band:.3g} in volume ratio, would soften the liquid "
@@ -371,7 +379,7 @@ class MPMSolver(ParticleSolver):
                 "the substep."
             )
         wall_sol_params = gu.default_solver_params()
-        wall_sol_params[0] = max(self._options.wall_timeconst, 2.0 * self.substep_dt)
+        wall_sol_params[0] = floored_timeconst(self._options.wall_timeconst, self.substep_dt)
 
         self.mpm_info = MpmInfo(
             values=dict(
@@ -854,11 +862,9 @@ class MPMSolver(ParticleSolver):
             self.particles_info.free[i_p] = True
             self.particles_info.muscle_group[i_p] = 0
             self.particles_info.muscle_direction[i_p] = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
-            # The inverse mass of the particle alone, kept by a particle inactive in the configuration that the contact
-            # inverse weights are computed from (see _init_contact_invweight)
-            self.particles_info.contact_invweight[i_p] = qd.Matrix.identity(gs.qd_float, 3) / (
-                self._particle_volume_real * mat_rho
-            )
+            # The inverse weight of the particle alone, kept by a particle inactive in the configuration that the contact
+            # inverse weights are computed from (see func_contact_invweight)
+            self.particles_info.contact_invweight[i_p] = mpm_func.lone_invweight(self._particle_volume_real, mat_rho)
 
         for i_p_, i_b in qd.ndrange(n_particles, self.particles.pos.shape[2]):
             i_p = i_p_ + particle_start

@@ -15,8 +15,8 @@ from genesis.engine.numerics.bcoo_matrix import (
     sort_bcoo,
 )
 from genesis.engine.solvers.mpm_data import PYRAMID_ROWS, MpmInfo
-from genesis.engine.solvers.mpm_func import contact_band_width, particle_of_sorted, pyramid_terms
-from genesis.engine.solvers.newton_contact import append_pair
+from genesis.engine.solvers.mpm_func import contact_reach, particle_of_sorted, pyramid_terms
+from genesis.engine.solvers.newton_contact import append_pair, weighted_block, weighted_vector
 from genesis.engine.solvers.newton_linear import MIN_SLOTS, PAIRS, grown_capacity, retire_scratch
 from genesis.engine.solvers.newton_solver import NewtonDevice, NewtonHost
 from genesis.utils.array_class import QUERY_RESULTS, BVHQueryResults
@@ -56,6 +56,24 @@ def build_contact_candidates(max_candidates: int, tie_ratio: float) -> ContactCa
     return candidates
 
 
+# =============================================== Layer 0: selection ================================================
+
+
+@qd.func
+def is_within_tie(score: float, best_score: float, tie_ratio: float, dx: float):
+    """Whether a candidate ties with the best score of its particle, within the tie ratio of the grid spacing."""
+    return score < qd.math.inf and score <= best_score + tie_ratio * dx
+
+
+@qd.func
+def pair_relative_displacement(weights, values):
+    """Relative displacement of a pair from the displacements of its vertices, row k of values, and their weights."""
+    return values.transpose() @ weights
+
+
+# ============================================== Layer 1: candidates ================================================
+
+
 @qd.func
 def set_candidate_score(i_cand: int, i_ps: int, score: float, secondary: float, candidates: ContactCandidates):
     """Record the scores of a candidate of a sorted particle, an infinite score rejecting it."""
@@ -90,18 +108,15 @@ def func_select_nearest(candidates: ContactCandidates, mpm_info: MpmInfo):
         i_cand = candidates.order.triplets_source_idx[i_t]
         i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
-        tie_tol = candidates.tie_ratio[()] * mpm_info.dx[()]
-        if score < qd.math.inf and score <= candidates.best_score[i_nz] + tie_tol:
+        if is_within_tie(score, candidates.best_score[i_nz], candidates.tie_ratio[()], mpm_info.dx[()]):
             qd.atomic_max(candidates.best_secondary[i_nz], candidates.secondary[i_cand])
     qd.loop_config(name="contact_candidates_winner")
     for i_t in range(candidates.order.n_triplets[()]):
         i_cand = candidates.order.triplets_source_idx[i_t]
         i_nz = candidates.order.triplets_segment_idx[i_t]
         score = candidates.order.triplets_val[i_cand]
-        tie_tol = candidates.tie_ratio[()] * mpm_info.dx[()]
         if (
-            score < qd.math.inf
-            and score <= candidates.best_score[i_nz] + tie_tol
+            is_within_tie(score, candidates.best_score[i_nz], candidates.tie_ratio[()], mpm_info.dx[()])
             and candidates.secondary[i_cand] >= candidates.best_secondary[i_nz]
         ):
             qd.atomic_min(candidates.best_candidate[i_nz], i_cand)
@@ -187,13 +202,15 @@ class CouplingPairs(NewtonDevice):
             i_db_start = contact.matrices.doublet_offsets[i_kind] + qd.static(self.n_doublets) * i_pair
             i_t_start = contact.matrices.triplet_offsets[i_kind] + qd.static(self.n_triplets) * i_pair
             for i_v_ in range(qd.static(self.n_doublets)):
-                contact.write_doublet(i_db_start + i_v_, verts[i_v_], weights[i_v_] * g)
+                contact.write_doublet(i_db_start + i_v_, verts[i_v_], weighted_vector(weights[i_v_], g))
             block_rows = qd.Vector(self.block_rows, dt=gs.qd_int)
             block_cols = qd.Vector(self.block_cols, dt=gs.qd_int)
             for i_t_ in range(qd.static(self.n_triplets)):
                 i_v_ = block_rows[i_t_]
                 j_v_ = block_cols[i_t_]
-                contact.write_triplet(i_t_start + i_t_, verts[i_v_], verts[j_v_], (weights[i_v_] * weights[j_v_]) * H)
+                contact.write_triplet(
+                    i_t_start + i_t_, verts[i_v_], verts[j_v_], weighted_block(weights[i_v_], weights[j_v_], H)
+                )
 
     @qd.func(requires_top_level=True)
     def func_pair_energy(self, f: int, energies: qd.template()):
@@ -245,8 +262,11 @@ def kernel_query_candidates(f: int, pair_kind: qd.template()):
     for i_ps in range(pair_kind.mpm.grid.n_valid[()]):
         i_p, i_b, cell = particle_of_sorted(i_ps, pair_kind.mpm.grid, pair_kind.mpm.mpm_info)
         x_p = pair_kind.mpm.particles.pos[f, i_p, i_b]
-        speed = pair_kind.mpm.particles.vel[f, i_p, i_b].norm()
-        reach = contact_band_width(speed, pair_kind.mpm.mpm_info.substep_dt[()], pair_kind.mpm.mpm_info)
+        reach = contact_reach(
+            pair_kind.mpm.particles.vel[f, i_p, i_b],
+            pair_kind.mpm.mpm_info.substep_dt[()],
+            pair_kind.mpm.mpm_info.dx[()],
+        )
         func_bvh_query_aabb(
             i_b,
             i_ps,

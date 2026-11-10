@@ -61,6 +61,11 @@ if TYPE_CHECKING:
 DEFAULT_ADJOINT_PCG_TOL = {64: 1e-24, 32: 1e-12}
 
 
+def displacement_tolerance(velocity_tol: float, substep_dt: float) -> float:
+    """Convergence tolerance of the Newton step on the displacements, the velocity tolerance over a substep."""
+    return velocity_tol * substep_dt
+
+
 @qd.data_oriented
 class NewtonParticipants:
     """Participants of a Newton solve, their contacts and their linear system, gathered into one kernel argument."""
@@ -343,7 +348,7 @@ class NewtonSolver(Solver):
                 "line_search_max_iterations": self._options.line_search_max_iterations,
                 "line_search_shrink": self._options.line_search_shrink,
                 "is_strict": int(self._options.strict),
-                "displacement_tol": self._options.velocity_tol * self._sim._substep_dt,
+                "displacement_tol": displacement_tolerance(self._options.velocity_tol, self._sim._substep_dt),
             },
         )
         self.pcg_scalars = PCGScalars(

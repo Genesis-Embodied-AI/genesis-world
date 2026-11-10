@@ -95,6 +95,18 @@ def func_solve_adjoint_u_cg_batch(
             constraint_state.bw_p[i_d, i_b] = constraint_state.bw_r[i_d, i_b] + beta * constraint_state.bw_p[i_d, i_b]
 
 
+@qd.func
+def jaref_adjoint(efc_D: float, efc_force_grad: float):
+    """Adjoint of Jaref of an active constraint row from that of its force, efc_force = -D Jaref."""
+    return -efc_D * efc_force_grad
+
+
+@qd.func
+def row_dof_adjoint(jac: float, jaref_bar: float):
+    """Share of a dof in the adjoint of qacc from the adjoint of Jaref of a constraint row, J^T Jaref_bar."""
+    return jac * jaref_bar
+
+
 @qd.func(requires_top_level=True)
 def func_add_constraint_force_grad(constraint_state: ConstraintState, rigid_config: qd.template()):
     """Add the direct gradient of the constraint forces, J^T * (-D * dL/defc_force) over the active rows, to dL_dqacc
@@ -102,10 +114,12 @@ def func_add_constraint_force_grad(constraint_state: ConstraintState, rigid_conf
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_c, i_b in qd.ndrange(*constraint_state.bw_Ju.shape, axes=qd.static(eoa(constraint_state.dL_dqacc))):
         if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
-            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
+            dL_dJaref = jaref_adjoint(constraint_state.efc_D[i_c, i_b], constraint_state.efc_force.grad[i_c, i_b])
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
                 i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                qd.atomic_add(constraint_state.dL_dqacc[i_d, i_b], constraint_state.jac[i_c, i_d, i_b] * dL_dJaref)
+                qd.atomic_add(
+                    constraint_state.dL_dqacc[i_d, i_b], row_dof_adjoint(constraint_state.jac[i_c, i_d, i_b], dL_dJaref)
+                )
 
 
 @qd.kernel(fastcache=True)

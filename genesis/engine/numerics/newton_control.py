@@ -35,6 +35,72 @@ class NewtonControl(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     max_displacement: qd.Tensor = field(float, ndarray=True)
 
 
+# =========================================== Layer 0: Newton step and inertia ===========================================
+
+
+@qd.func
+def newton_direction(solution):
+    """Newton direction of an unknown from the solution of its linear system, the step that lowers the energy."""
+    return -solution
+
+
+@qd.func
+def line_search_point(start, alpha: float, direction):
+    return start + alpha * direction
+
+
+@qd.func
+def step_measure(step):
+    """Largest component of a Newton step, the measure of its convergence (see func_check_convergence)."""
+    measure = gs.qd_float(0.0)
+    if qd.static(step.is_tensor()):
+        measure = qd.abs(step).max()
+    else:
+        measure = qd.abs(step)
+    return measure
+
+
+@qd.func
+def inertia_energy(mass: float, x, target):
+    return 0.5 * mass * (x - target).dot(x - target)
+
+
+@qd.func
+def inertia_gradient(mass: float, x, target):
+    return mass * (x - target)
+
+
+@qd.func
+def inertia_block(mass: float):
+    """Hessian block m I of the inertia of a vertex."""
+    return mass * qd.Matrix.identity(gs.qd_float, 3)
+
+
+@qd.func
+def step_displacement(x, x_start):
+    """Displacement of an unknown over the substep, from its position at the substep start."""
+    return x - x_start
+
+
+@qd.func
+def has_converged(max_displacement: float, displacement_tol: float):
+    return max_displacement < displacement_tol
+
+
+@qd.func
+def is_trial_accepted(energy_trial: float, energy_start: float):
+    """Whether a line-search trial lowers the energy, or keeps it."""
+    return energy_trial <= energy_start
+
+
+@qd.func
+def backtracked_step(alpha: float, shrink: float):
+    return shrink * alpha
+
+
+# ================================================== Layer 1: stages ==================================================
+
+
 @qd.kernel
 def kernel_reset_newton_control(control: NewtonControl):
     """Start the solve of every environment but those stopped on a non-finite measure earlier in the step."""
@@ -78,7 +144,9 @@ def func_check_convergence(control: NewtonControl):
     """Judge the convergence of every running environment on its Newton direction, before the line search."""
     for i_b in range(control.failure_code.shape[0]):
         if control.is_env_running[i_b] != 0:
-            control.is_converged[i_b] = gs.qd_int(control.max_displacement[i_b] < control.displacement_tol[()])
+            control.is_converged[i_b] = gs.qd_int(
+                has_converged(control.max_displacement[i_b], control.displacement_tol[()])
+            )
             is_finite = qd_isfinite(control.max_displacement[i_b]) and qd_isfinite(control.energy_start[i_b])
             if qd.static(qd_debug_asserts()):
                 assert is_finite, (
@@ -112,7 +180,7 @@ def func_accept_or_backtrack(control: NewtonControl):
             is_accepted = (
                 control.is_converged[i_b] != 0
                 or control.failure_code[i_b] != 0
-                or control.energy_trial[i_b] <= control.energy_start[i_b]
+                or is_trial_accepted(control.energy_trial[i_b], control.energy_start[i_b])
             )
             is_exhausted = control.n_line_search_iterations[i_b] >= control.line_search_max_iterations[()]
             if is_accepted or (is_exhausted and control.is_strict[()] == 0):
@@ -122,7 +190,7 @@ def func_accept_or_backtrack(control: NewtonControl):
                 control.is_env_line_search_running[i_b] = 0
                 control.failure_code[i_b] = NEWTON_FAILED_LINE_SEARCH
             else:
-                control.alpha[i_b] = control.line_search_shrink[()] * control.alpha[i_b]
+                control.alpha[i_b] = backtracked_step(control.alpha[i_b], control.line_search_shrink[()])
                 qd.atomic_max(control.is_line_search_running[()], 1)
 
 
