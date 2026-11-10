@@ -518,7 +518,7 @@ class FEMData(Data):
                 IMPLICIT: not is_implicit,
                 COROTATED: not config.has_linear_corotated,
                 MUSCLE_FIBERS: not (is_implicit and config.has_muscle),
-                CORNER_BLOCKS: not config.enable_cooperative_kernels,
+                CORNER_BLOCKS: not config.enable_cooperative_kernels and not is_implicit,
             }
         super().__init__(
             sizes=dict(
@@ -761,8 +761,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 ),
                 (self.fem_info.surface_elements, surface_elements),
             ]
-            if self.fem_config.enable_cooperative_kernels:
-                # The corners of every element, those of Cloth ones included since their vertices are counted too
+            if self.fem_config.enable_cooperative_kernels or self._use_implicit_solver:
+                # The corners of every element, those of Cloth ones included since their vertices are counted too. The
+                # SAP coupler gathers the terms of the vertices of the implicit solver in their order on every backend.
                 elements_el2v = qd_to_numpy(self.fem_info.elements.el2v)
                 topology_values += [
                     (

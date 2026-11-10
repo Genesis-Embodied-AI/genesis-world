@@ -453,8 +453,7 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
     scene.step()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
 def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     PLANES_HEIGHT = (0.1, 0.3)
@@ -480,12 +479,7 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         rigid_options=gs.options.RigidOptions(
             batch_links_info=batch_links_info,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(
-            sap_convergence_atol=1e-10,
-            sap_convergence_rtol=1e-10,
-            pcg_threshold=1e-10,
-            linesearch_ftol=1e-10,
-        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
         show_viewer=show_viewer,
         show_FPS=False,
     )
@@ -548,8 +542,7 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     assert (robot_2_aabb[..., 1, 2] > robot_1_aabb[..., 1, 2] + 0.05).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("precision", ["64"])
+@pytest.mark.required("sparse")
 def test_sap_fem_vs_robot(show_viewer):
     PLANE_HEIGHT = 0.1
     SPHERE_RADIUS = 0.2
@@ -618,3 +611,66 @@ def test_sap_fem_vs_robot(show_viewer):
 
     # Check that the legs of the ants are resting on the sphere
     assert_allclose(robot.get_qpos()[-4:].abs(), 1.0, tol=0.1)
+
+
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_sap_coupler_implicit_damping(integrator, show_viewer):
+    DT = 0.01
+    N_STEPS = 10
+    SPHERE_RADIUS = 0.1
+    SAP_RTOL = 1e-10
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=1,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_convergence_rtol=SAP_RTOL,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, 1.5, 1.0),
+            camera_lookat=(0.5, 0.0, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A resting FEM sphere keeps the SAP solve running, which the damped cube floating away from it goes through
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 0.9 * SPHERE_RADIUS),
+            radius=SPHERE_RADIUS,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+    )
+    scene.build()
+
+    dofs_damping = [2.0, 5.0, 10.0, 0.0, 0.0, 0.05]
+    cube.set_dofs_damping(dofs_damping)
+    vel = np.array([0.5, -0.5, 0.5, 0.0, 0.0, 5.0])
+    cube.set_dofs_velocity(vel)
+    mass_diag = np.diag(tensor_to_array(cube.get_mass_mat()))
+    for _ in range(N_STEPS):
+        scene.step()
+        # The implicit damping of a free cube spinning about a principal axis decouples its dofs: (M + hD) v' = M v
+        vel = vel * mass_diag / (mass_diag + DT * np.array(dofs_damping))
+    # Each SAP solve leaves the velocities within its relative tolerance of the velocities of the scene, which the
+    # spinning cube dominates, an error the steps add up. Single precision stops that solve at its round-off.
+    tol = N_STEPS * SAP_RTOL * np.abs(vel).max() if gs.np_float == np.float64 else 2e-7
+    assert_allclose(cube.get_dofs_velocity(), vel, tol=tol)

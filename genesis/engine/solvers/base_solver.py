@@ -418,6 +418,9 @@ class CheckpointMixin:
                     torch._foreach_copy_(self._boundary_items.views, values)
                 else:
                     for item, view, value in zip(self._boundary_items.items_viewed, self._boundary_items.views, values):
+                        # Torch writes no unsigned 64-bit integer by index, so such an array is written as its signed bits
+                        if view.dtype == torch.uint64:
+                            view, value = view.view(torch.int64), value.view(torch.int64)
                         assign_indexed_tensor(view, items_mask[item.name], value[items_mask[item.name]])
             items = self._boundary_items.items_copied
             arrays = {item.name: checkpoint.arrays[item.name] for item in items}

@@ -120,13 +120,15 @@ class BVHState(Data, kind=DataKind.SCRATCH):
 
 
 class BVHQueryResults(Data, kind=DataKind.SCRATCH):
-    """The (tree, leaf, query) triplets a box query of a BVH collects, and their count, above the capacity on overflow.
+    """The (tree, leaf, query) triplets a box query of a BVH collects, their count, and the count of each tree.
 
-    See func_bvh_query_aabb.
+    Each tree holds an equal share of the triplets, and its count grows above that share on overflow, as
+    func_bvh_query_aabb describes.
     """
 
     triplets: qd.Tensor = field((int, 3), shape=(QUERY_RESULTS,))
     count: qd.Tensor = field(int, shape=(1,))
+    trees_count: qd.Tensor = field(int, shape=(BVH_TREES,))
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -616,8 +618,10 @@ def func_bvh_query_aabb(
 ):
     """Collect the leaves of a tree whose box meets a query box, as (tree, leaf, query) triplets.
 
-    ``filter(i_t, i_a, i_q, filter_ctx)`` drops a found leaf when it returns True. The count keeps growing past the
-    capacity of the result list, the pairs beyond it dropped, so a count above the capacity reports the overflow.
+    ``filter(i_t, i_a, i_q, filter_ctx)`` drops a found leaf when it returns True. Each tree holds an equal share of the
+    result list, its count growing past that share, the pairs beyond it dropped, so that a tree count above the share
+    reports the overflow of that tree while the other trees keep theirs. The caller zeroes `count` and `trees_count`
+    before every query.
     """
     n_leaves = bvh_tree_state.leaves_idx.shape[1]
     # One pending sibling per level: a tree splits one key bit per level below the bits every key of the set shares,
@@ -641,8 +645,9 @@ def func_bvh_query_aabb(
             if i_left < 0:
                 i_a = bvh_tree_state.leaves_idx[i_t, i_n - (n_leaves - 1)]
                 if not filter(i_t, i_a, i_q, filter_ctx):
-                    i_r = qd.atomic_add(query_results.count[0], 1)
-                    if i_r < query_results.triplets.shape[0]:
+                    n_tree_results = qd.atomic_add(query_results.trees_count[i_t], 1)
+                    if n_tree_results < query_results.triplets.shape[0] // query_results.trees_count.shape[0]:
+                        i_r = qd.atomic_add(query_results.count[0], 1)
                         query_results.triplets[i_r] = gs.qd_ivec3(i_t, i_a, i_q)
             else:
                 stack[n_stack] = bvh_tree_state.nodes_right[i_t, i_n]
