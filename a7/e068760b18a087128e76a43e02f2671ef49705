@@ -1,0 +1,99 @@
+examples/tutorials/pbd_cloth.py
+  s_c62ec9da443b15::t_f75365b34a9f84 14
+genesis/vis/rasterizer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 53-55
+examples/rendering/follow_entity.py
+  s_c62ec9da443b15::t_f75365b34a9f84 33
+examples/drone/fly_route.py
+  s_c62ec9da443b15::t_f75365b34a9f84 98
+examples/rigid/single_franka_envs.py
+  s_c62ec9da443b15::t_f75365b34a9f84 45
+examples/rendering/speed_test.py
+  s_c62ec9da443b15::t_f75365b34a9f84 35
+examples/rigid/single_franka_batch_render.py
+  s_c62ec9da443b15::t_f75365b34a9f84 52,60,68,75
+genesis/options/sensors/camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 63-64,67-71
+tests/rendering/test_debug_draw.py
+  s_c62ec9da443b15::t_f75365b34a9f84 33,111,239,265
+examples/rigid/hibernation.py
+  s_c62ec9da443b15::t_f75365b34a9f84 97
+examples/rigid/wrecking_ball.py
+  s_c62ec9da443b15::t_f75365b34a9f84 220
+examples/tutorials/visualization.py
+  s_c62ec9da443b15::t_f75365b34a9f84 17,34
+examples/coupling/fem_cube_linked_with_arm.py
+  s_c62ec9da443b15::t_f75365b34a9f84 65
+tests/core/test_recorders.py
+  s_c62ec9da443b15::t_f75365b34a9f84 420
+genesis/vis/batch_renderer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 310
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_f75365b34a9f84 756,770,790-791,836-842,846
+tests/rendering/test_interactive_viewer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 80,109,341,461,810,830,875,915,929
+examples/manipulation/grasp_env.py
+  s_c62ec9da443b15::t_f75365b34a9f84 65,103
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_f75365b34a9f84 493
+examples/tutorials/selecting_rendered_envs.py
+  s_c62ec9da443b15::t_f75365b34a9f84 11
+tests/sensors/test_camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 550
+tests/rendering/test_dynamic_meshes.py
+  s_c62ec9da443b15::t_f75365b34a9f84 51,237,288,445
+tests/rigid/test_api.py
+  s_c62ec9da443b15::t_f75365b34a9f84 1389
+examples/tutorials/mpm.py
+  s_c62ec9da443b15::t_f75365b34a9f84 20
+genesis/vis/camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 32,77,96,114,513,547,564,907,909-915,932-933,935-936,939,1049,1053,1057
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_f75365b34a9f84 97
+examples/rigid/single_franka.py
+  s_c62ec9da443b15::t_f75365b34a9f84 34
+genesis/engine/sensors/camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 83,94,640
+examples/drone/hover_env.py
+  s_c62ec9da443b15::t_f75365b34a9f84 82
+examples/rendering/moving_camera.py
+  s_c62ec9da443b15::t_f75365b34a9f84 30
+genesis/vis/visualizer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 78,81,137-152,159
+tests/utils/simulators.py
+  s_c62ec9da443b15::t_f75365b34a9f84 145
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_f75365b34a9f84 183,290,444,455,465,475,787,908,1067,1126,1216,1224,1232,1314,1341,1382,1402,1460,1593,1620,1627,1780,1843,1906,2032
+tests/rendering/test_imgui_overlay.py
+  s_c62ec9da443b15::t_f75365b34a9f84 99
+examples/rendering/demo.py
+  s_c62ec9da443b15::t_f75365b34a9f84 16,157
+examples/rigid/franka_cube.py
+  s_c62ec9da443b15::t_f75365b34a9f84 21
+genesis/options/vis.py
+  s_c62ec9da443b15::t_f75365b34a9f84 33,71,85,87,98-102
+tests/rendering/test_batch_render.py
+  s_c62ec9da443b15::t_f75365b34a9f84 44
+genesis/vis/viewer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 43,135,177,504-507,510-512
+examples/speed_benchmark/franka.py
+  s_c62ec9da443b15::t_f75365b34a9f84 15
+genesis/vis/raytracer.py
+  s_c62ec9da443b15::t_f75365b34a9f84 243,617,626,810
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a7e068760b18a087128e76a43e02f2671ef49705",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
