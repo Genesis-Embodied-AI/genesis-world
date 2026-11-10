@@ -198,7 +198,7 @@ class LegacyCoupler(RBC):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, f: int) -> None:
+    def preprocess(self) -> None:
         # preprocess for MPM CPIC
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
             kernel_mpm_surface_to_particle(
@@ -210,7 +210,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.collider.collider_config,
             )
 
-    def couple(self, f: int) -> None:
+    def couple(self) -> None:
         # MPM <-> all others
         if self.mpm_solver.is_active:
             kernel_mpm_grid_op(

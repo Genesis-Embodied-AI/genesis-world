@@ -419,7 +419,7 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         if not self.is_active:
             return
         kernel_apply_external_force(self._sim.sim_state, self.pbd_state, self.pbd_info, self._force_fields)
@@ -438,7 +438,7 @@ class PBDSolver(ParticleSolver):
         kernel_solve_collision(self.pbd_state, self.pbd_info)
         kernel_compute_velocity(self.pbd_state, self.pbd_info)
 
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         if self.is_active:
             kernel_copy_from_reordered(self.pbd_state)
             kernel_solve_boundary_collision(self.pbd_state, self.pbd_info)

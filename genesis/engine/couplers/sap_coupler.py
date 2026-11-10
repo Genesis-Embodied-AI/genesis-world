@@ -784,7 +784,7 @@ class SAPCoupler(RBC):
     # -------------------------------------- Main ----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, i_step):
+    def preprocess(self):
         rigid_solver, fem_solver = self.rigid_solver, self.fem_solver
         if self._has_fem_pressure:
             kernel_compute_fem_pressure_gradient(
@@ -856,7 +856,7 @@ class SAPCoupler(RBC):
             self.equality_constraint_handler,
         )
 
-    def couple(self, i_step):
+    def couple(self):
         # Equality constraints bind the rigid dofs whether anything is in contact or not
         if self.has_contact or self._has_equality_constraints:
             self.sap_solve()

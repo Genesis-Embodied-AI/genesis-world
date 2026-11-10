@@ -168,7 +168,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
             actives, particles_idx, self.n_particles, "particles_idx", envs_idx, dtype=gs.tc_bool, batched_idx=True
         )
-        kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active, self.has_frames)
+        kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active)
         self._reset_particles(particles_idx, envs_idx, reset_deformation=False)
 
     def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:

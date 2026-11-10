@@ -52,6 +52,7 @@ from genesis.utils.data import (
 )
 from genesis.utils.geom import qd_inv_quat, qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import broadcast_tensor, get_gpu_core_count, qd_isfinite, qd_to_numpy, qd_zero_grad
+from genesis.utils.warnings import warn_once
 
 from .base_solver import (
     VFACES,
@@ -746,7 +747,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f: int) -> None:
+    def substep_pre_coupling(self) -> None:
         if not self.is_active:
             return
         # The IPC coupler simulates the FEM entities itself. Imported here to avoid a circular dependency, the couplers
@@ -784,7 +785,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             if self._is_constraints_initialized:
                 kernel_apply_soft_constraints(self.fem_state, links_state, self.fem_info, self.vertex_constraints)
 
-    def substep_post_coupling(self, f: int) -> None:
+    def substep_post_coupling(self) -> None:
         if not self.is_active:
             return
         kernel_compute_pos(self.fem_state, self.fem_info, self._errno)
@@ -867,9 +868,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def get_state_render(self):
+    def get_state_render(self, f: int | None = None):
         """
         Refresh and return the render geometry of every visual geom, laid out contiguously.
+
+        Parameters
+        ----------
+        f : int, optional
+            Deprecated and ignored.
 
         Returns
         -------
@@ -877,6 +883,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             (vverts_pos, vverts_uvs, vfaces_indices) - environment-offset render vertex positions with shape
             (n_vverts, B), their UV coordinates, and the render triangles in global render vertex space.
         """
+        if f is not None:
+            warn_once(
+                "The argument of 'get_state_render' is deprecated and ignored. Call 'get_state_render()' instead."
+            )
         if not self.is_active or self.n_vverts == 0:
             return None, None, None
 
@@ -1055,7 +1065,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             target_poss, verts_idx, self.n_vertices, "verts_idx", envs_idx, (3,), batched_idx=True
         )
         if is_target_current:
-            kernel_get_values(verts_idx, envs_idx, target_poss, self.fem_state.vertices.pos, False)
+            kernel_get_values(verts_idx, envs_idx, target_poss, self.fem_state.vertices.pos)
 
         if link_idx < 0:
             link_init_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)

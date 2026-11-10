@@ -196,7 +196,7 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     # back, keeping the contacts the substep detected at that same state.
     rigid_solver = gs_sim.rigid_solver
     qpos, dofs_vel = rigid_solver.get_qpos(), rigid_solver.get_dofs_velocity()
-    rigid_solver.substep(0)
+    rigid_solver.substep()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(rigid_solver.collider, "clear", lambda envs_idx=None: None)
         rigid_solver.set_qpos(qpos)

@@ -472,7 +472,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f: int) -> None:
+    def substep_pre_coupling(self) -> None:
         if self._requires_grad:
             kernel_reset_grid_and_grad(self.mpm_state)
             kernel_compute_F_tmp(self.mpm_state, self.mpm_info, compute_svd=False)
@@ -493,7 +493,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
             self._mpm_materials,
         )
 
-    def substep_post_coupling(self, f: int) -> None:
+    def substep_post_coupling(self) -> None:
         rigid_solver = self._sim.rigid_solver
         kernel_integrate_particles(
             self.mpm_state,
