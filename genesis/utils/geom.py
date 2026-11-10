@@ -19,6 +19,10 @@ from genesis.utils.data import ENVS, Data, DataKind, Size, field
 PARTICLES = Size("particles")
 # The slots of a spatial hash grid (see SpatialHashGrid)
 HASH_SLOTS = Size("hash_slots")
+# The chunks of consecutive slots, and the groups of consecutive chunks, over which the slot starts of a spatial hash
+# grid are summed in parallel
+HASH_CHUNKS = Size("hash_chunks")
+HASH_GROUPS = Size("hash_groups")
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- Quadrants ----------------------------------------
@@ -2565,10 +2569,26 @@ class SpatialHashGrid(Data, kind=DataKind.DERIVED, shape=(HASH_SLOTS, ENVS)):
     slot_start: qd.Tensor = field(int)
     particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS))
     n_particles: qd.Tensor = field(int, shape=(ENVS,))
+    # The particle count and the first sorted index of each chunk of consecutive slots, and of each group of consecutive
+    # chunks (see hash_grid_sizes)
+    chunks_size: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
+    chunks_start: qd.Tensor = field(int, shape=(HASH_CHUNKS, ENVS), kind=DataKind.SCRATCH)
+    groups_size: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
+    groups_start: qd.Tensor = field(int, shape=(HASH_GROUPS, ENVS), kind=DataKind.SCRATCH)
     # The particle each sorted index holds before the particles of each slot are put in ascending order of index
     slots_particles_idx: qd.Tensor = field(int, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
     cell_size: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
     grid_res: qd.Tensor = field((int, 3), shape=(), kind=DataKind.CONSTANT)
+
+
+def hash_grid_sizes(grid_res: tuple[int, int, int]) -> dict[str, int]:
+    """Return the sizes a spatial hash grid of a resolution is built with (see SpatialHashGrid)."""
+    # The slots split into chunks of about the cube root of their number, and the chunks into groups as long, which
+    # keeps every part of the parallel sum of the slot sizes to that length
+    n_slots = math.prod(grid_res)
+    part_len = math.ceil(n_slots ** (1 / 3))
+    n_chunks = math.ceil(n_slots / part_len)
+    return dict(hash_slots=n_slots, hash_chunks=n_chunks, hash_groups=math.ceil(n_chunks / part_len))
 
 
 @qd.func
@@ -2584,17 +2604,50 @@ def func_hash_sort_particles(particles_pos: qd.Tensor, particles_is_active: qd.T
     # The slot starts are all written before they are read, so the counts alone start from zero
     for i_s, i_b in qd.ndrange(n_slots, _B):
         hash_grid.slot_size[i_s, i_b] = 0
-        if i_s == 0:
-            hash_grid.n_particles[i_b] = 0
 
     for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
         if particles_is_active[i_p, i_b]:
             i_s = func_hash_pos_to_slot(particles_pos[i_p, i_b], hash_grid)
             qd.atomic_add(hash_grid.slot_size[i_s, i_b], 1)
 
-    for i_s in range(n_slots):
-        for i_b in range(_B):
-            hash_grid.slot_start[i_s, i_b] = qd.atomic_add(hash_grid.n_particles[i_b], hash_grid.slot_size[i_s, i_b])
+    # The slots of each environment are stored in slot order, so that the particles of neighbouring cells are close in
+    # memory, and identical environments store the same particle at the same sorted index, which the parallel threads
+    # running over the environments of one index read side by side. The slot starts are an exclusive prefix sum of the
+    # slot sizes, summed over chunks of consecutive slots and over groups of consecutive chunks in parallel, so that
+    # the serial part of the sum runs over the groups alone.
+    n_chunks, n_groups = hash_grid.chunks_size.shape[0], hash_grid.groups_size.shape[0]
+    chunk_len = (n_slots + n_chunks - 1) // n_chunks
+    group_len = (n_chunks + n_groups - 1) // n_groups
+    for i_c, i_b in qd.ndrange(n_chunks, _B):
+        n_particles = 0
+        for i_s in range(i_c * chunk_len, qd.min((i_c + 1) * chunk_len, n_slots)):
+            n_particles = n_particles + hash_grid.slot_size[i_s, i_b]
+        hash_grid.chunks_size[i_c, i_b] = n_particles
+
+    for i_g, i_b in qd.ndrange(n_groups, _B):
+        n_particles = 0
+        for i_c in range(i_g * group_len, qd.min((i_g + 1) * group_len, n_chunks)):
+            n_particles = n_particles + hash_grid.chunks_size[i_c, i_b]
+        hash_grid.groups_size[i_g, i_b] = n_particles
+
+    for i_b in range(_B):
+        n_particles = 0
+        for i_g in range(n_groups):
+            hash_grid.groups_start[i_g, i_b] = n_particles
+            n_particles = n_particles + hash_grid.groups_size[i_g, i_b]
+        hash_grid.n_particles[i_b] = n_particles
+
+    for i_g, i_b in qd.ndrange(n_groups, _B):
+        n_particles = hash_grid.groups_start[i_g, i_b]
+        for i_c in range(i_g * group_len, qd.min((i_g + 1) * group_len, n_chunks)):
+            hash_grid.chunks_start[i_c, i_b] = n_particles
+            n_particles = n_particles + hash_grid.chunks_size[i_c, i_b]
+
+    for i_c, i_b in qd.ndrange(n_chunks, _B):
+        n_particles = hash_grid.chunks_start[i_c, i_b]
+        for i_s in range(i_c * chunk_len, qd.min((i_c + 1) * chunk_len, n_slots)):
+            hash_grid.slot_start[i_s, i_b] = n_particles
+            n_particles = n_particles + hash_grid.slot_size[i_s, i_b]
 
     for i_p, i_b in qd.ndrange(particles_pos.shape[0], _B):
         if particles_is_active[i_p, i_b]:
@@ -2629,10 +2682,42 @@ def func_hash_pos_to_grid(pos: qd.types.vector(3), hash_grid: SpatialHashGrid):
 # The integer dtype is spelled out since the Genesis integer vector types only exist once Genesis is initialized
 @qd.func
 def func_hash_grid_to_slot(grid_id, hash_grid: SpatialHashGrid):
-    """Return the slot of the hash grid a cell of integer coordinates hashes to."""
+    """
+    Return the slot of the hash grid a cell of integer coordinates hashes to.
+
+    The grid wraps around along each axis, so that the cells of a run along an axis shorter than the resolution of the
+    grid hash to distinct slots (see func_hash_n_cells).
+    """
+    return func_hash_cell_to_slot(func_hash_wrap_cell(grid_id, hash_grid), hash_grid)
+
+
+@qd.func
+def func_hash_wrap_cell(grid_id, hash_grid: SpatialHashGrid):
+    """Return the cell of integer coordinates wrapped into the grid along each axis."""
+    return grid_id % hash_grid.grid_res[None]
+
+
+@qd.func
+def func_hash_cell_to_slot(cell, hash_grid: SpatialHashGrid):
+    """
+    Return the slot of a cell wrapped into the grid along each axis, or past it by less than one grid resolution.
+
+    A neighbour search wraps the first cell of its run once (see func_hash_wrap_cell), and the cells after it with a
+    subtraction rather than a modulo.
+    """
     grid_res = hash_grid.grid_res[None]
-    n_slots = hash_grid.slot_size.shape[0]
-    return (grid_id[0] * grid_res[1] * grid_res[2] + grid_id[1] * grid_res[2] + grid_id[2]) % n_slots
+    cell_wrapped = qd.select(cell >= grid_res, cell - grid_res, cell)
+    return cell_wrapped[0] * grid_res[1] * grid_res[2] + cell_wrapped[1] * grid_res[2] + cell_wrapped[2]
+
+
+@qd.func
+def func_hash_n_cells(n_cells: int, hash_grid: SpatialHashGrid):
+    """
+    Return how many of a run of consecutive cells along each axis hash to distinct slots, the grid wrapping around.
+
+    A neighbour search over the run visits each slot once by looping over that many cells along each axis.
+    """
+    return qd.min(qd.Vector([n_cells, n_cells, n_cells], dt=gs.qd_int), hash_grid.grid_res[None])
 
 
 @qd.func

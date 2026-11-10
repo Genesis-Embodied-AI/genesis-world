@@ -10,7 +10,15 @@ import genesis.utils.geom as gu
 from genesis.engine.state_change import StateChange, mutates
 from genesis.options.solvers import MPMOptions, PBDOptions, SPHOptions
 from genesis.utils.data import ENVS, Data, DataKind, Size, eoa, field
-from genesis.utils.geom import PARTICLES, SpatialHashGrid, func_hash_grid_to_slot, func_hash_pos_to_grid
+from genesis.utils.geom import (
+    PARTICLES,
+    SpatialHashGrid,
+    func_hash_cell_to_slot,
+    func_hash_grid_to_slot,
+    func_hash_n_cells,
+    func_hash_pos_to_grid,
+    func_hash_wrap_cell,
+)
 from genesis.utils.misc import indices_to_mask, qd_to_torch
 
 from .base_solver import VVERTS, GravityMixin, Solver, TimeBasedMixin, kernel_set_values
@@ -363,11 +371,12 @@ def func_get_particles_mean_vel(
     The cube is centered at `pos` with half side `half_size`. The particles are searched for among the cells of the hash
     grid of the solver, `n_cells` along each axis from the one holding the lowest corner of the cube.
     """
-    base = func_hash_pos_to_grid(pos - half_size, hash_grid)
+    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos - half_size, hash_grid), hash_grid)
     vel_sum = qd.Vector.zero(gs.qd_float, 3)
     n_particles = 0
-    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
-        i_s = func_hash_grid_to_slot(base + offset, hash_grid)
+    n_cells_distinct = func_hash_n_cells(n_cells, hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells_distinct[0], n_cells_distinct[1], n_cells_distinct[2])):
+        i_s = func_hash_cell_to_slot(base + offset, hash_grid)
         i_p_start = hash_grid.slot_start[i_s, i_b]
         for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
             if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size:
@@ -395,9 +404,10 @@ def func_add_particles_momentum(
     Each particle that `particles_is_moved` selects gains the velocity `momentum` over its mass, which `particles_mass`
     holds by particle index.
     """
-    base = func_hash_pos_to_grid(pos - half_size, hash_grid)
-    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
-        i_s = func_hash_grid_to_slot(base + offset, hash_grid)
+    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos - half_size, hash_grid), hash_grid)
+    n_cells_distinct = func_hash_n_cells(n_cells, hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells_distinct[0], n_cells_distinct[1], n_cells_distinct[2])):
+        i_s = func_hash_cell_to_slot(base + offset, hash_grid)
         i_p_start = hash_grid.slot_start[i_s, i_b]
         for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
             if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size and particles_is_moved[i_p, i_b]:
