@@ -95,6 +95,8 @@ class SPHState(Data, kind=DataKind.STATE):
     particles_k_reordered: qd.Tensor = field(float, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH, labels=DFSPH)
     envs_solve: SPHEnvsSolve = field(labels=DFSPH)
     hash_grid: SpatialHashGrid
+    # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
 class SPHInfo(Data, kind=DataKind.CONSTANT):
@@ -130,6 +132,9 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
 
 
 class SPHSolver(ParticleSolver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = SPH.Base
 
     # ------------------------------------------------------------------------------------
@@ -173,6 +178,7 @@ class SPHSolver(ParticleSolver):
             env_first=False,
             unused=unused_labels,
         )
+        self.register_errors(self.sph_state.errno, {})
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2
         if self.is_active:

@@ -553,6 +553,9 @@ class FEMData(Data):
 
 
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = FEM.Base
     is_differentiable = True
 

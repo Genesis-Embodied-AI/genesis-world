@@ -49,7 +49,7 @@ from genesis.recorders import RecorderManager
 from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
 from genesis.utils import serialization
-from genesis.utils.data import DataItem, Namespace, check_data, namespace
+from genesis.utils.data import Namespace, namespace
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.tools import RunningMean
@@ -1832,17 +1832,9 @@ class Scene(RBC):
             )
         if state.digest != self._desc_digest:
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
-        # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
-        # it was, the recorders included
-        solvers = {type(solver).__name__: solver for solver in self._sim.active_solvers}
-        if set(state.sim.solvers) != set(solvers):
-            gs.raise_exception(
-                f"The checkpoint holds {sorted(state.sim.solvers)} where this scene simulates {sorted(solvers)}."
-            )
-        for name, solver in solvers.items():
-            record = state.sim.solvers[name]
-            items = (item for item in solver.data if isinstance(item, DataItem) and item.kind in record.kinds)
-            check_data(items, record.arrays)
+        # The record is checked before anything is touched, so a record from another scene leaves this one as it was,
+        # the recorders included
+        self._sim.check_checkpoint(state.sim)
         # The recorders finish the run first (see 'reset'), and the restart follows the state, so the visualizer draws
         # the state put back.
         self._recorder_manager.record(self._sim.cur_step_global)
@@ -1956,11 +1948,6 @@ class Scene(RBC):
     def solvers(self):
         """All the solvers managed by the scene's simulator."""
         return self._sim.solvers
-
-    @property
-    def active_solvers(self):
-        """All the active solvers managed by the scene's simulator."""
-        return self._sim.active_solvers
 
     @property
     def entities(self) -> list["Entity"]:

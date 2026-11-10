@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -8,7 +9,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import func_impose_cube_boundary
-from genesis.engine.solvers.base_solver import SimulatorState
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin, SimulatorState
 from genesis.engine.solvers.fem_solver import FEMInfo, FEMState
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
@@ -25,7 +26,18 @@ from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, 
 from genesis.engine.solvers.sph_solver import SPHInfo, SPHState, func_cubic_kernel_plane_integral
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import ENVS, Config, Data, DataKind, Size, eoa, field, opt_in
+from genesis.utils.data import (
+    ENVS,
+    Config,
+    Data,
+    DataItem,
+    DataKind,
+    Size,
+    eoa,
+    field,
+    iter_data,
+    opt_in,
+)
 from genesis.utils.geom import SpatialHashGrid, qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
@@ -47,10 +59,10 @@ class LegacyCouplerState(Data, kind=DataKind.STATE):
     `pbd_attach_link_idx`, -1 for none.
     """
 
-    pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD)
-    pbd_attach_local_pos: qd.Tensor = field(
-        (float, 3), shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD
-    )
+    # The error flags of each env, which no kernel of the coupler raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
+    pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), labels=RIGID_PBD)
+    pbd_attach_local_pos: qd.Tensor = field((float, 3), shape=(PBD_PARTICLES, ENVS), labels=RIGID_PBD)
 
 
 class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
@@ -86,10 +98,14 @@ class LegacyCouplerConfig(Config):
     is_links_info_batched: bool
 
 
-class LegacyCoupler(RBC):
+class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
+
+    # Its whole state, the error flags and the PBD particles attached to rigid links, lives in the arrays 'data'
+    # yields (see 'CheckpointMixin').
+    is_checkpointable = True
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -111,6 +127,14 @@ class LegacyCoupler(RBC):
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any(self.rigid_couplings))
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        """Yield every array the coupler holds, under the dotted name a checkpoint uses for it (see 'Solver.data')."""
+        # A coupler whose build failed holds no array
+        if self.legacy_coupler_state is None:
+            return
+        yield from iter_data(self, "legacy_coupler_state")
 
     @property
     def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
@@ -151,6 +175,8 @@ class LegacyCoupler(RBC):
         if has_rigid_pbd:
             self.legacy_coupler_state.pbd_attach_link_idx.fill(-1)
             self.legacy_coupler_state.pbd_attach_local_pos.fill(0.0)
+        self.build_errno(self.sim._B)
+        self.register_errors(self.legacy_coupler_state.errno, {})
 
         # The cells of the MPM grid reach the particles of the hash grid cells they overlap, plus one on each side
         mpm_sph_stencil_size = mpm_pbd_stencil_size = 0
@@ -168,12 +194,13 @@ class LegacyCoupler(RBC):
             )
         )
 
-        self.reset()
+        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+            kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
 
     def reset(self, envs_idx=None) -> None:
-        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
-            envs_idx = self.sim.scene._sanitize_envs_idx(envs_idx)
-            kernel_reset_mpm_rigid_normal(envs_idx, self.mpm_solver.mpm_state)
+        # The MPM particles keep the rigid normals they saw in their state, which 'set_state' writes back before the
+        # restart, so the restart leaves them as restored.
+        pass
 
     # ------------------------------------------------------------------------------------
     # ------------------------------ PBD particles on links -------------------------------

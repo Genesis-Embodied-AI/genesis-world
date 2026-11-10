@@ -22,6 +22,7 @@ from genesis.engine.bvh import (
     func_no_filter,
     get_bvh_data,
 )
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin
 from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
     VERTICES,
@@ -216,6 +217,8 @@ class SAPState(Data, kind=DataKind.SCRATCH):
     rigid_pressure_gradient: qd.Tensor = field(
         (float, 3), shape=(RIGID_VOLUME_ELEMS, ENVS), kind=DataKind.DERIVED, labels=RIGID_VOLUME
     )
+    # The error flags of each env, which no kernel of the coupler raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
 
 class SAPInfo(Data, kind=DataKind.CONSTANT):
@@ -406,7 +409,7 @@ def compute_pressure_field(
     return distance / distance_max * modulus
 
 
-class SAPCoupler(RBC):
+class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers using the
     Semi-Analytic Primal (SAP) contact solver used in Drake.
@@ -643,6 +646,8 @@ class SAPCoupler(RBC):
                 rigid_volume=not self._rigid_compliant,
             ),
         )
+        self.build_errno(self._B)
+        self.register_errors(self.sap_state.errno, {})
         self.sap_info = SAPInfo(
             sizes=dict(sizes, rigid_tri_faces=len(rigid_tri_faces_idx), geoms=self.rigid_solver.n_geoms),
             values=dict(

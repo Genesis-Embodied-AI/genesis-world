@@ -312,6 +312,9 @@ class MPMMaterials:
 
 
 class MPMSolver(ParticleSolver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = MPM.Base
 
     # ------------------------------------------------------------------------------------
