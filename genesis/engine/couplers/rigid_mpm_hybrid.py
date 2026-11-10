@@ -35,8 +35,8 @@ def kernel_update_hybrid_soft_part(
         mpm_state.particles.pos.shape[2],
         axes=qd.static(eoa(mpm_state.particles.pos)),
     ):
-        if mpm_state.particles.is_active[f, i_p_, i_b]:
-            i_p = i_p_ + particle_start
+        i_p = i_p_ + particle_start
+        if mpm_state.particles.is_active[f, i_p, i_b]:
             group_idx = mpm_info.particles.muscle_group[i_p]
             link_idx = part_soft_info.link_idx[group_idx]
             geom_idx = part_soft_info.geom_idx[group_idx]

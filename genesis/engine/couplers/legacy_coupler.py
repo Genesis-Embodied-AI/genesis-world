@@ -168,13 +168,11 @@ class LegacyCoupler(RBC):
             )
         )
 
-        self.reset(envs_idx=self.sim.scene._envs_idx)
+        self.reset()
 
-    def reset(self, envs_idx: torch.Tensor | None = None) -> None:
-        if envs_idx is None:
-            envs_idx = self.sim.scene._envs_idx
-
+    def reset(self, envs_idx=None) -> None:
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+            envs_idx = self.sim.scene._sanitize_envs_idx(envs_idx)
             kernel_reset_mpm_rigid_normal(envs_idx, self.mpm_solver.mpm_state)
 
     # ------------------------------------------------------------------------------------

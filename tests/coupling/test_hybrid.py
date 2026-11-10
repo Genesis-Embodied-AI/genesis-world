@@ -5,7 +5,7 @@ import torch
 import genesis as gs
 from genesis.utils.misc import tensor_to_array
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 
 
@@ -41,6 +41,13 @@ def test_rigid_mpm_muscle(show_viewer):
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.85, 0.1, 0.1),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             file="urdf/simple/two_link_arm.urdf",
@@ -73,17 +80,21 @@ def test_rigid_mpm_muscle(show_viewer):
             friction=0.5,
         ),
     )
-    scene.build()
+    scene.build(n_envs=2)
 
     scene.reset()
+    # The soft part of the robot follows its links regardless of the activeness of the particles of another entity
+    cube.set_particles_active(gs.INACTIVE, envs_idx=[1])
     for i in range(150):
         robot.control_dofs_velocity(np.array([2.0 * np.sin(2 * np.pi * i * 0.006)] * robot.n_dofs))
         scene.step()
 
     ball_pos_delta = ball.get_pos() - torch.tensor(BALL_POS_INIT, dtype=gs.tc_float, device=gs.device)
     assert_allclose(ball_pos_delta[..., 0], 0.0, tol=1e-2)
-    assert ((0.02 < ball_pos_delta[1]) & (ball_pos_delta[1] < 0.05)).all()
+    assert ((0.02 < ball_pos_delta[..., 1]) & (ball_pos_delta[..., 1] < 0.05)).all()
     assert_allclose(ball_pos_delta[..., 2], 0.0, tol=1e-3)
+    soft_pos = robot.part_soft.get_particles_pos()
+    assert_allclose(soft_pos[0], soft_pos[1], tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -101,6 +112,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
             substeps=substeps,
         ),
         mpm_options=gs.options.MPMOptions(
+            enable_CPIC=True,
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
         ),
@@ -143,7 +155,7 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
         ),
     )
 
-    scene.build()
+    scene.build(n_envs=2)
 
     horizon = horizon_substeps // substeps
     for i in range(horizon):
@@ -151,13 +163,18 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
 
     # Check that the sand moved the box along the negative Y direction
     pos = tensor_to_array(obj_rigid.get_pos())
-    assert pos[1] + 0.25 < 0.0
+    assert (pos[..., 1] + 0.25 < 0.0).all()
+
+    # Resetting one environment leaves the other one as it was
+    sand_pos = tensor_to_array(obj_sand.get_particles_pos())
+    scene.reset(envs_idx=[1])
+    assert_equal(obj_rigid.get_pos()[0], pos[0])
+    assert_equal(obj_sand.get_particles_pos()[0], sand_pos[0])
 
     # A rollout after a reset starts free of the coupling wrench the previous one left
-    scene.reset()
     for i in range(horizon):
         scene.step()
-    assert_allclose(obj_rigid.get_pos(), pos, tol=tol)
+    assert_allclose(obj_rigid.get_pos()[1], pos[1], tol=tol)
 
 
 @pytest.mark.required
