@@ -1,0 +1,99 @@
+examples/sensors/tactile_sandbox.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 305,358
+examples/ipc/ipc_objects_falling.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 81-82
+tests/rendering/test_interactive_viewer.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 480-481
+examples/ipc/ipc_momentum.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 63-64
+examples/rigid/friction_breakaway.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 87,96
+tests/parsers/test_mesh.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 869-870
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 107
+tests/ipc/test_rigid.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 96-97,228-229,245-246,520-521,640-641
+tests/benchmarks/test_rigid.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 541
+examples/ipc/ipc_robot_cloth_teleop.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 160-161
+examples/rigid/authored_decomp.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 60-61,79-80,94-95
+tests/parsers/conftest.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 422-423,458-459,499-500
+tests/core/test_recorders.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 146-147
+examples/sensors/temperature_grid.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 87,102
+tests/rigid/test_asset_loading.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 389-390,400-401,1212-1213,1244-1245,1709-1710,1732-1733
+tests/sensors/test_contact.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 60-61,72-73
+examples/sap_coupling/franka_grasp_fem_sphere.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 53
+examples/rigid/screw_constraint.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 46
+examples/viewer_plugin/keyboard_teleop.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 72-73
+tests/ipc/test_deformable.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 348-349
+examples/rigid/torsional_grasp.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 73,82
+tests/rendering/test_debug_draw.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 146-147
+examples/rigid/rolling_coast.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 69,80
+tests/rigid/test_collision_nonconvex.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 461
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 247-248
+tests/rigid/test_dynamics.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 721-722
+examples/sensors/tactile_franka.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 227-228,240-241
+tests/rigid/test_collision.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 1528-1529,1548-1549,1565-1566,2125-2126,2139-2140,2150-2151
+tests/coupling/test_sph_rigid.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 54-55,63-64,73-74,137-138,148-149
+tests/rigid/test_sparse.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 52
+examples/sap_coupling/franka_grasp_rigid_cube.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 48,62
+examples/rigid/bolt_nut_self_screw.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 57
+tests/coupling/test_hybrid.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 71-72,121-122
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 473,483-484,640-641,680-681
+examples/deformable/differentiable_push.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 51-52
+tests/integration/test_integration.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 260
+tests/rigid/test_friction.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 194-195,365,375,384,393,466,475,563,576,657,671,777,796,810,993,1004
+tests/rigid/test_islands.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 381-382
+examples/tutorials/advanced_hybrid_robot.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 74-75
+tests/grad/test_hybrid_push.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 48-49
+tests/sensors/test_tactile.py
+  s_c62ec9da443b15::t_8724a5eebdf2eb 1735
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "be2cbd38ecd695161674a459d56e93c736babfa8",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
