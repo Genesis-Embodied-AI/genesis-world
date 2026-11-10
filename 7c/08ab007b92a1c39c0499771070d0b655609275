@@ -1,0 +1,49 @@
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 118,128
+genesis/engine/materials/PBD/cloth.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 1,19,22-24,27-34
+  s_c62ec9da443b15::t_a54480b593bcea 35
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 60-66,68,78,82-89,94-96,98,119,124-139,435,457,472-482,488,517
+genesis/engine/materials/PBD/base.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 1,17-18
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_50367eaa75d4fb 90
+genesis/engine/materials/hybrid.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 2,18-19,42
+  s_c62ec9da443b15::t_6930fa6f5dcf1e 43
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 5,8,41,48
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 362-369
+genesis/engine/materials/PBD/liquid.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 1,3,19-21,24-25,27
+genesis/engine/materials/PBD/elastic.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 1,18,21-23,26-34
+  s_c62ec9da443b15::t_5c9ee2838c15f6 35
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 12,168-170,175,179-180,305,335-336,423,459-460,545-546
+genesis/engine/materials/PBD/particle.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 1,3,25-26,29-30,32
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 17,353-355,373-375,393-394,408-409,423-429
+genesis/options/entities.py
+  s_c62ec9da443b15::t_50367eaa75d4fb 874-945,953-955,960-964,970-1021,1034-1036,1038-1043,1065,1067-1068,1076-1152
+  s_c62ec9da443b15::t_4a6761a7354e53 17,90,1153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7c08ab007b92a1c39c0499771070d0b655609275",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
