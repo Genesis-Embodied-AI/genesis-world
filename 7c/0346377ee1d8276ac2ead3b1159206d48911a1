@@ -1,0 +1,65 @@
+genesis/engine/materials/MPM/base.py
+  s_c62ec9da443b15::t_9332f59358a677 2,4-5,8-9,32,48,53-56,68-104
+genesis/engine/materials/MPM/elasto_plastic.py
+  s_c62ec9da443b15::t_9332f59358a677 1-3,6-7,12,24,39-71
+genesis/engine/entities/fem_entity.py
+  s_c62ec9da443b15::t_cd0929ad6d98ba 112-113,134-135,181,408,437,449-453
+genesis/engine/materials/MPM/liquid.py
+  s_c62ec9da443b15::t_9332f59358a677 1-3,6-7,11,23,29-52
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_9c66383e795711 421
+genesis/engine/materials/rigid.py
+  s_c62ec9da443b15::t_8a739f1f1fe8c4 89-90,106
+genesis/engine/materials/FEM/base.py
+  s_c62ec9da443b15::t_9332f59358a677 1,3,6-7,15,32-33,36-38,51-63,65-158
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_9c66383e795711 84
+genesis/engine/materials/base.py
+  s_c62ec9da443b15::t_8a739f1f1fe8c4 4,45-46,48,50,52-56,59-65
+  s_c62ec9da443b15::t_e877dbdf670d50 29-38
+genesis/engine/materials/FEM/cloth.py
+  s_c62ec9da443b15::t_9332f59358a677 7-8,32,38-40,43-45,69
+genesis/engine/materials/MPM/elastic.py
+  s_c62ec9da443b15::t_2467b176265d10 1,17-18,33,49
+  s_c62ec9da443b15::t_9332f59358a677 3,7,19,31-32,40-48,50-73
+  s_c62ec9da443b15::t_cde81fd22866d6 4,13-16,39
+genesis/engine/materials/MPM/sand.py
+  s_c62ec9da443b15::t_9332f59358a677 1-8,13,25-27,34-84
+genesis/engine/materials/FEM/muscle.py
+  s_c62ec9da443b15::t_9332f59358a677 1,3-7,11-13,15,23,28-31,34-35,41-162
+genesis/engine/entities/mpm_entity.py
+  s_c62ec9da443b15::t_cd0929ad6d98ba 17-18,69-71,92,101-102
+genesis/engine/materials/MPM/muscle.py
+  s_c62ec9da443b15::t_9332f59358a677 3-4,7,12,20,24-25,27-28,36-56
+  s_c62ec9da443b15::t_2467b176265d10 26
+  s_c62ec9da443b15::t_603bba856bd121 1,9,34
+  s_c62ec9da443b15::t_00ae120a3c836d 2
+genesis/options/entities.py
+  s_c62ec9da443b15::t_9c66383e795711 87,96
+genesis/engine/materials/MPM/snow.py
+  s_c62ec9da443b15::t_9332f59358a677 3,7,13,30-32,44,49-74
+genesis/engine/materials/FEM/elastic.py
+  s_c62ec9da443b15::t_9332f59358a677 1,3-4,7,12-21,34-35,38-46,51-54,58-59,61,63-308
+genesis/engine/solvers/mpm_solver.py
+  s_c62ec9da443b15::t_71423c41b46a54 80-84,240,282,303-315,410-412,434-436,589
+  s_c62ec9da443b15::t_2467b176265d10 277,281
+  s_c62ec9da443b15::t_3eb3a71078784c 278-280
+genesis/engine/solvers/fem_solver.py
+  s_c62ec9da443b15::t_0d0efa3fc8c94b 72-73,386-387,469-488,515-516,540,543,545,591,593,651,653,711,713,745,747,1324,1326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7c0346377ee1d8276ac2ead3b1159206d48911a1",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
