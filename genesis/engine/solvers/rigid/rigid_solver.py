@@ -1339,7 +1339,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
             # faster than its size while one more graph replay costs next to nothing. The collision detection takes a
             # graph of its own, the one Collider.detection launches, so that a scene compiles it once whether it steps
-            # or detects collisions alone. The work after the solve is captured as one graph.
+            # or detects collisions alone. The work after the solve is captured as one graph. A substep solved within
+            # the Newton solve of the implicit MPM solver stops once its constraint rows are assembled, the Newton solve
+            # writing the constraint solution that the work after the solve reads (see 'substep_post_coupling').
+            is_deferred = self.sim.newton_solver.is_rigid_deferred
             collider = self.collider
             constraint_solver = self.constraint_solver
             collider._contact_data_cache.clear()
@@ -1367,25 +1370,27 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                     collider.collider_config,
                 )
-                func_solve_body(
+                if not is_deferred:
+                    func_solve_body(
+                        self.dyn_state,
+                        constraint_solver.constraint_state,
+                        self.dyn_info,
+                        self.rigid_info,
+                        self.rigid_config,
+                        constraint_solver._n_iterations,
+                    )
+            if not is_deferred:
+                kernel_substep_post(
                     self.dyn_state,
+                    collider.collider_state,
                     constraint_solver.constraint_state,
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
-                    constraint_solver._n_iterations,
+                    not self._disable_constraint,
+                    self._options.noslip_iterations > 0,
+                    self._errno,
                 )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
 
         if not isinstance(self.sim.coupler, SAPCoupler):
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
@@ -1611,6 +1616,18 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
             kernel_step_2(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno)
+        elif self.sim.newton_solver.is_rigid_deferred:
+            kernel_substep_post(
+                self.dyn_state,
+                self.collider.collider_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                not self._disable_constraint,
+                self._options.noslip_iterations > 0,
+                self._errno,
+            )
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.

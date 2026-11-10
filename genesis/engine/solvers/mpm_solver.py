@@ -53,7 +53,7 @@ from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, Link
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward
-from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
+from genesis.options.solvers import MPMOptions
 from genesis.utils.data import (
     ENVS,
     FRAMES,
@@ -257,6 +257,9 @@ class MPMRigidContacts(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
 
     `geom_idx` is the geom, -1 for none, which leaves the other arrays unset. `stiffness` and `target` are the rows of
     the friction pyramid of the contact (see 'func_pyramid_rows'), of outward normal `normal` and friction `friction`.
+    `gradient` and `hessian` are those of its rows in the displacement of the particle relative to the geom, staged at
+    the last assembly of the Newton solve, which the rigid solver takes its share of when it solves its substep within
+    the Newton solve (see genesis/engine/solvers/newton_solver.py).
     """
 
     geom_idx: qd.Tensor = field(int, ndarray=True)
@@ -264,6 +267,8 @@ class MPMRigidContacts(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
     friction: qd.Tensor = field(float, ndarray=True)
     stiffness: qd.Tensor = field((float, PYRAMID_ROWS), ndarray=True)
     target: qd.Tensor = field((float, PYRAMID_ROWS), ndarray=True)
+    gradient: qd.Tensor = field((float, 3), ndarray=True)
+    hessian: qd.Tensor = field((float, (3, 3)), ndarray=True)
 
 
 class MPMState(Data, kind=DataKind.STATE):
@@ -682,11 +687,6 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
 
         is_implicit = self.is_active and self._use_implicit_solver
         if is_implicit:
-            if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
-                gs.raise_exception(
-                    "The implicit MPM solver requires LegacyCouplerOptions, got "
-                    f"{type(self._sim.coupler.options).__name__}."
-                )
             if self._B > MAX_KEY_ENVS:
                 gs.raise_exception(f"The implicit MPM solver supports {MAX_KEY_ENVS} environments at most.")
             # The cells of a particle and of the blocks around it must fit in the keys of the sparse grid
@@ -2317,13 +2317,20 @@ def func_particle_point_terms(
     i_s: int,
     x: qd.types.vector(3),
     disp: qd.types.vector(3),
+    disp_partner: qd.types.vector(3),
     sorted_particles: MPMSortedParticles,
     rigid_contacts: MPMRigidContacts,
     mpm_config: qd.template(),
 ):
-    """Return the energy, the gradient and the Hessian of the terms acting on the displacement `disp` over the substep
-    of a sorted particle at x, from the rows staged at its slot: the spring of its constraint, the walls of the domain
-    and its contact with a rigid geom (see 'kernel_stage_particle_rows')."""
+    """
+    Return the energy, the gradient and the Hessian of the terms acting on the displacement `disp` over the substep of
+    a sorted particle at x, from the rows staged at its slot: the spring of its constraint, the walls of the domain and
+    its contact with a rigid geom (see 'kernel_stage_particle_rows'), and the gradient and the Hessian of the contact
+    alone.
+
+    The contact acts on the displacement relative to the point of the geom it touches, which moves by `disp_partner`
+    beyond the motion its rows already follow.
+    """
     energy_spring, gradient_spring, curvature_spring = func_spring_terms(
         sorted_particles.constraint_spring[i_s],
         sorted_particles.constraint_damping[i_s],
@@ -2341,25 +2348,28 @@ def func_particle_point_terms(
     energy = energy_spring + energy_walls
     gradient = gradient_spring + gradient_walls
     hessian = curvature_spring * qd.Matrix.identity(gs.qd_float, 3) + hessian_walls
+    gradient_rigid = qd.Vector.zero(gs.qd_float, 3)
+    hessian_rigid = qd.Matrix.zero(gs.qd_float, 3, 3)
     if qd.static(mpm_config.has_rigid_contact):
         if rigid_contacts.geom_idx[i_s] >= 0:
-            energy_rigid, gradient_rigid, hessian_rigid = func_pyramid_terms(
+            energy_rigid, gradient_contact, hessian_contact = func_pyramid_terms(
                 rigid_contacts.normal[i_s],
                 rigid_contacts.friction[i_s],
                 rigid_contacts.stiffness[i_s],
                 rigid_contacts.target[i_s],
-                disp,
+                disp - disp_partner,
             )
             energy += energy_rigid
-            gradient += gradient_rigid
-            hessian += hessian_rigid
-    return energy, gradient, hessian
+            gradient_rigid = gradient_contact
+            hessian_rigid = hessian_contact
+    return energy, gradient + gradient_rigid, hessian + hessian_rigid, gradient_rigid, hessian_rigid
 
 
 @qd.func
 def func_particle_stencil_terms(
     f: int,
     i_s: int,
+    disp_partner: qd.types.vector(3),
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
@@ -2370,8 +2380,8 @@ def func_particle_stencil_terms(
     the displacement of the nodes, and stage the factors of its gradient at its slot.
 
     The particle contributes its elastic energy, the energy of the fibres of a muscle, and the terms acting on its own
-    displacement (see 'func_particle_point_terms'). The block of the nodes a and b is 'func_stencil_pair_block' of the
-    terms returned. A fixed node takes no part.
+    displacement (see 'func_particle_point_terms', for `disp_partner`). The block of the nodes a and b is
+    'func_stencil_pair_block' of the terms returned. A fixed node takes no part.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
@@ -2409,11 +2419,20 @@ def func_particle_stencil_terms(
     S_block, alpha, beta = func_isotropic_projected_modes(sigma, g, A)
 
     # The terms on the displacement of the particle, sum_a w_a u_a
-    energy_point, point_gradient, point_hessian = func_particle_point_terms(
-        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles, mpm_state.rigid_contacts, mpm_config
+    energy_point, point_gradient, point_hessian, gradient_rigid, hessian_rigid = func_particle_point_terms(
+        i_s,
+        x_p,
+        u_nodes.transpose() @ w,
+        disp_partner,
+        mpm_state.sorted_particles,
+        mpm_state.rigid_contacts,
+        mpm_config,
     )
     mpm_state.sorted_particles.stress_factor[i_s] = scale * (P + P_fibre) @ F.transpose()
     mpm_state.sorted_particles.point_gradient[i_s] = point_gradient
+    if qd.static(mpm_config.has_rigid_contact):
+        mpm_state.rigid_contacts.gradient[i_s] = gradient_rigid
+        mpm_state.rigid_contacts.hessian[i_s] = hessian_rigid
 
     # The rows r_a = grad w_a^T F V of the stencil in the frame V, the weights of the rank-one fibre term, and the
     # weights of the terms on the displacement, all zero on a fixed node
@@ -2446,7 +2465,13 @@ def func_stencil_pair_block(
 
 @qd.func
 def func_particle_energy(
-    f: int, i_s: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, mpm_config: qd.template()
+    f: int,
+    i_s: int,
+    disp_partner: qd.types.vector(3),
+    mpm_state: MPMState,
+    sparse_grid: MPMSparseGrid,
+    mpm_info: MPMInfo,
+    mpm_config: qd.template(),
 ):
     """Return the energy of a sorted particle in the incremental potential at the displacement of the nodes (see
     'func_particle_stencil_terms')."""
@@ -2477,8 +2502,14 @@ def func_particle_energy(
         mpm_info.particles.muscle_direction[i_p],
         F_trial,
     )
-    energy_point, point_gradient, point_hessian = func_particle_point_terms(
-        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles, mpm_state.rigid_contacts, mpm_config
+    energy_point, point_gradient, point_hessian, gradient_rigid, hessian_rigid = func_particle_point_terms(
+        i_s,
+        x_p,
+        u_nodes.transpose() @ w,
+        disp_partner,
+        mpm_state.sorted_particles,
+        mpm_state.rigid_contacts,
+        mpm_config,
     )
     scale = mpm_info.particle_volume[None] / mpm_info.particle_volume_scale[None] * dt * dt
     return i_b, scale * (psi + psi_fibre) + energy_point
@@ -2764,7 +2795,9 @@ def kernel_contact_invweight(
         sparse_grid.nodes_diagonal[i_n] = mass * qd.Matrix.identity(gs.qd_float, 3)
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
-            func_particle_stencil_terms(f, i_s, mpm_state, sparse_grid, mpm_info, mpm_config)
+            func_particle_stencil_terms(
+                f, i_s, qd.Vector.zero(gs.qd_float, 3), mpm_state, sparse_grid, mpm_info, mpm_config
+            )
         )
         for a in qd.static(range(8)):
             qd.atomic_add(
