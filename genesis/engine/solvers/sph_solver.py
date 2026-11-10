@@ -494,29 +494,6 @@ def func_cubic_kernel_derivative(r: qd.types.vector(3), h: float, k: float, dist
 
 
 @qd.func
-def func_cubic_kernel_plane_integral(dist: float, sph_info: SPHInfo):
-    """
-    Return the integral of the cubic spline smoothing kernel over the plane at a distance from its center.
-
-    Closed form of 2 * pi * int_{|dist|}^{h} W(r) r dr, with h the support radius. Its own integral along the plane
-    normal equals half the kernel normalization: int_{0}^{h} of this quantity over dist is exactly 1/2, which makes
-    forces weighted by it integrate to a per-unit-area magnitude over a covering layer of particles.
-    """
-    res = gs.qd_float(0.0)
-    h = sph_info.support_radius[None]
-    q = qd.abs(dist) / h
-    if q <= 1.0:
-        q2 = q**2
-        q3 = q2 * q
-        if q <= 0.5:
-            res = 0.0875 - (1.2 * q3 * q2 - 1.5 * q2**2 + 0.5 * q2)
-        else:
-            res = 0.1 - (q2 - 2.0 * q3 + 1.5 * q2**2 - 0.4 * q3 * q2)
-        res = res * 16.0 / h
-    return res
-
-
-@qd.func
 def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.template()):
     """
     Return the kernel-weighted volume of the walls of the domain around a point, with its gradient and first moment.
