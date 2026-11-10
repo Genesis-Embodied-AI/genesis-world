@@ -2,6 +2,7 @@ genesis/__init__.py
   s_c62ec9da443b15::t_7111c9d6515280 519
 genesis/engine/entities/rigid_entity/description.py
   s_c62ec9da443b15::t_efe8b8ead09eb3 388-390,497-513,1266-1270,1507-1517
+  s_c62ec9da443b15::t_3499a631125910 481-485
 genesis/engine/mesh.py
   s_c62ec9da443b15::t_8e350a19e05b03 180-182,317,321-330,670-688
 genesis/engine/scene.py
@@ -16,6 +17,9 @@ genesis/options/__init__.py
   s_c62ec9da443b15::t_679a0c420ca926 6,46
 genesis/options/entities.py
   s_c62ec9da443b15::t_ffeb29b474d549 15,190-203,216-221,226-227,243-281,385-391
+  s_c62ec9da443b15::t_3499a631125910 236-242,282-284,379-383
+  s_c62ec9da443b15::t_70170295dfcb04 37,40-41,44,288,369,384,399-407
+  s_c62ec9da443b15::t_ff6aa595dcd450 205
 genesis/options/indices.py
   s_c62ec9da443b15::t_a7c2126985ad72 220-262
 genesis/utils/gltf.py
@@ -38,6 +42,8 @@ tests/parsers/test_mesh.py
   s_c62ec9da443b15::t_a7051ce7949388 299-393
 tests/parsers/test_usd.py
   s_c62ec9da443b15::t_cbaf3523f8a40f 99-103,582-587
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_ff6aa595dcd450 107
 ---
 {
   "schema_version": "authorship/3.0.0",
