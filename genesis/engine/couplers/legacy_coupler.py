@@ -715,7 +715,7 @@ def func_active_frictions(
     i_b: int,
     pos: qd.types.vector(3),
     vel: qd.types.vector(3),
-    active_geoms: qd.types.vector(3, dtype=gs.qd_int),
+    active_geoms: qd.types.vector(3, dtype=qd.i32),
     active_normals: qd.types.matrix(3, 3),
     active_influences: qd.types.vector(3),
     active_lambdas: qd.types.vector(3),
