@@ -7,11 +7,13 @@ import torch
 import genesis as gs
 from genesis.engine.materials.base import Material
 from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.sensors.base_sensor import Sensor
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass
@@ -35,15 +37,15 @@ class Entity(RBC):
 
     def __init__(
         self,
-        idx,
-        scene,
-        morph,
-        solver,
-        material,
-        surface,
+        idx: int,
+        scene: "Scene",
+        morph: Morph,
+        solver: "Solver | None",
+        material: Material,
+        surface: Surface,
         options: gs.entities.BaseEntity,
         name: str | None = None,
-    ):
+    ) -> None:
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
             gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")

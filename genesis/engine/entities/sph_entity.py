@@ -1,8 +1,16 @@
+from typing import TYPE_CHECKING
+
 import quadrants as qd
 
 import genesis as gs
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 
 from .particle_entity import ParticleEntity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.sph_solver import SPHSolver
 
 
 @qd.data_oriented
@@ -32,17 +40,17 @@ class SPHEntity(ParticleEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        options,
+        scene: "Scene",
+        solver: "SPHSolver",
+        material: "gs.materials.SPH.Base",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        options: "gs.entities.SPH",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,

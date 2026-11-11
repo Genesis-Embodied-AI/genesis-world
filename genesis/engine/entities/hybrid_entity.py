@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -11,6 +11,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -23,6 +25,9 @@ from genesis.utils.hybrid import (
 from genesis.utils.mesh import load_mesh
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
 
 
 class MPMHybridPart(NamedTuple):
@@ -62,7 +67,16 @@ class HybridEntity(Entity):
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(self, idx, scene, material, morph, surface, options, name: str | None = None):
+    def __init__(
+        self,
+        idx: int,
+        scene: "Scene",
+        material: "gs.materials.Hybrid",
+        morph: Morph,
+        surface: Surface,
+        options: "gs.entities.Hybrid",
+        name: str | None = None,
+    ) -> None:
         super().__init__(idx, scene, morph, None, material, surface, name=name, options=options)
 
         material_rigid = material.material_rigid

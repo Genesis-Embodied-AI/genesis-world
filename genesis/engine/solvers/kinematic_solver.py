@@ -8,8 +8,9 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
+from genesis.engine.entities.rigid_entity.description import KinematicEntityDescription, _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
+from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
     kernel_forward_kinematics_query,
@@ -23,6 +24,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
@@ -177,7 +179,15 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, options, visualize_contact=False, name=None, desc=None
+        self,
+        idx: int,
+        material: Kinematic,
+        morph: Morph | Sequence[Morph] | None,
+        surface: Surface | None,
+        options: "gs.entities.Kinematic | gs.entities.Rigid",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: KinematicEntityDescription | None = None,
     ) -> "KinematicEntity":
         """Create an entity from its description.
 

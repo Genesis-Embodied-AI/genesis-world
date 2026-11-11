@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -9,6 +11,12 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.pbd_solver import PBDSolver
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -125,20 +133,20 @@ class PBDTetEntity(PBDBaseEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        edge_start,
-        vvert_start,
-        vface_start,
-        options,
+        scene: "Scene",
+        solver: "PBDSolver",
+        material: "gs.materials.PBD.Cloth | gs.materials.PBD.Elastic",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        edge_start: int,
+        vvert_start: int,
+        vface_start: int,
+        options: "gs.entities.PBD",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,
@@ -257,21 +265,21 @@ class PBD2DEntity(PBDTetEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        edge_start,
-        inner_edge_start,
-        vvert_start,
-        vface_start,
-        options,
+        scene: "Scene",
+        solver: "PBDSolver",
+        material: "gs.materials.PBD.Cloth",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        edge_start: int,
+        inner_edge_start: int,
+        vvert_start: int,
+        vface_start: int,
+        options: "gs.entities.PBD",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,
@@ -374,21 +382,21 @@ class PBD3DEntity(PBDTetEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        edge_start,
-        elem_start,
-        vvert_start,
-        vface_start,
-        options,
+        scene: "Scene",
+        solver: "PBDSolver",
+        material: "gs.materials.PBD.Elastic",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        edge_start: int,
+        elem_start: int,
+        vvert_start: int,
+        vface_start: int,
+        options: "gs.entities.PBD",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,
@@ -499,17 +507,17 @@ class PBDParticleEntity(PBDBaseEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        options,
+        scene: "Scene",
+        solver: "PBDSolver",
+        material: "gs.materials.PBD.Liquid",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        options: "gs.entities.PBD",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,
@@ -572,17 +580,17 @@ class PBDFreeParticleEntity(PBDBaseEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        options,
+        scene: "Scene",
+        solver: "PBDSolver",
+        material: "gs.materials.PBD.Particle",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        options: "gs.entities.PBD",
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(
             scene,
             solver,

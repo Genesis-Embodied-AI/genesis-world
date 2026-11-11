@@ -19,7 +19,9 @@ from genesis.engine.solvers.rigid.data import GEOMS, GeomsInfo, GeomsState, Link
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import no_grad, register_custom_backward, reversed_with
+from genesis.options.morphs import Morph
 from genesis.options.solvers import MPMOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -42,6 +44,7 @@ from .base_solver import ErrorCode, kernel_set_actu
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -477,7 +480,15 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: MPM.Base,
+        morph: Morph,
+        surface: Surface,
+        options: "gs.entities.MPM",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
         self.add_material(material)
 

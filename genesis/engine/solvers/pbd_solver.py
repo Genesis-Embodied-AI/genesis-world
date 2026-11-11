@@ -11,8 +11,11 @@ import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.materials import PBD
 from genesis.engine.state_change import StateChange, mutates
+from genesis.options.morphs import Morph
 from genesis.options.solvers import PBDOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, Size, eoa, field, iter_data
 from genesis.utils.geom import (
     PARTICLES,
@@ -30,6 +33,7 @@ from .base_solver import VFACES, VVERTS, SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -358,7 +362,15 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: PBD.Base,
+        morph: Morph,
+        surface: Surface,
+        options: "gs.entities.PBD",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: "EntityDescription | None" = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(

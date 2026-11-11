@@ -11,7 +11,9 @@ import genesis as gs
 from genesis.engine.boundaries import CubeBoundary, func_impose_cube_boundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
+from genesis.options.morphs import Morph
 from genesis.options.solvers import SPHOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKind, eoa, field, is_opted_in, iter_data
 from genesis.utils.geom import (
     PARTICLES,
@@ -37,6 +39,7 @@ from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -351,7 +354,15 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
+        self,
+        idx: int,
+        material: SPH.Base,
+        morph: Morph,
+        surface: Surface,
+        options: "gs.entities.SPH",
+        visualize_contact: bool = False,
+        name: str | None = None,
+        desc: "EntityDescription | None" = None,
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
