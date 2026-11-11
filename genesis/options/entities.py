@@ -60,7 +60,7 @@ class _FrozenOptions(Options):
         fields = {name: getattr(self, name) for name in self.model_fields_set}
         if deep:
             fields = copy.deepcopy(fields)
-        return type(self)(**fields, **(update or {}))
+        return type(self)(**{**fields, **(update or {})})
 
 
 class BaseEntity(_FrozenOptions, Generic[EntityT]):
