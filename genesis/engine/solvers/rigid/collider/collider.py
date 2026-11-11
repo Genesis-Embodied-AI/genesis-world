@@ -1401,8 +1401,3 @@ def kernel_detection_without_graph(
         coop_dedup=coop_dedup,
         errno=errno,
     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.collider_decomp")

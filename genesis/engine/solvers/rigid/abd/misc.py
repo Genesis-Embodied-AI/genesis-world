@@ -1028,8 +1028,3 @@ def func_list_item(ids: qd.Tensor, i_pos: int, lo: int, range_start: int, i_b: i
     if range_start < 0:
         i_item = ids[i_pos, i_b]
     return i_item
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.rigid_solver_util_decomp")

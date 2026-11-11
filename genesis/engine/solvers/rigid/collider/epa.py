@@ -1426,8 +1426,3 @@ def func_plane_normal(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.typ
                 finished = True
 
     return normal, flag
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.gjk_decomp")

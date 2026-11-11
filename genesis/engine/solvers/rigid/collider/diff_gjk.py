@@ -967,8 +967,3 @@ def func_triangle_affine_coords(
         (v3 - point).cross(v1 - point).dot(normal) * inv_nn,
         (v1 - point).cross(v2 - point).dot(normal) * inv_nn,
     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.diff_gjk_decomp")
