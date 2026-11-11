@@ -111,11 +111,11 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     """
     The progress and the scalars of the Newton solve of every environment.
 
-    `is_active` says whether its Newton iterations go on, `is_converged` whether its last direction moved every particle
-    and every dof by less than the tolerance, and `failure` why it stopped short of convergence (see NewtonFailure).
-    `energy_start` is the energy at the start point of the line search, `energy_trial` at its trial point of step
-    `alpha`, and `max_displacement` the largest update of the displacement of a particle or of a dof along the
-    direction. The scalars of the preconditioned conjugate gradient (PCG) follow: `rz` is r . z, `rz_tol` the value
+    `is_active` says whether its Newton iterations go on, `is_converged` whether its last direction moved every
+    particle, vertex of the cloth and dof by less than the tolerance, and `failure` why it stopped short of convergence
+    (see NewtonFailure). `energy_start` is the energy at the start point of the line search, `energy_trial` at its trial
+    point of step `alpha`, and `max_displacement` the largest update of the displacement of a particle, of a vertex or
+    of a dof along the direction. The scalars of the preconditioned conjugate gradient (PCG) follow: `rz` is r . z, `rz_tol` the value
     below which it stops, and `pcg_alpha` and `pcg_beta` its steps. `rigid_cost` is the cost of the constraint solve of
     the rigid solver at the current iterate of its dofs (see 'func_rigid_update_constraint' in rigid/global_newton.py).
     """
@@ -158,8 +158,8 @@ class NewtonLoops(Data, kind=DataKind.SCRATCH, shape=()):
 
 
 class NewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
-    """The constants of the Newton solve (see NewtonOptions), the tolerance on the displacement of a particle or a dof
-    being the tolerance on its velocity over a substep."""
+    """The constants of the Newton solve (see NewtonOptions), the tolerance on the displacement of a particle, a vertex
+    of the cloth or a dof being the tolerance on its velocity over a substep."""
 
     max_iterations: qd.Tensor = field(int)
     line_search_max_iterations: qd.Tensor = field(int)
@@ -1292,8 +1292,9 @@ def kernel_finish_rigid(
 
 @qd.kernel
 def kernel_flag_failures(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, errno: qd.Tensor):
-    """Flag the environments whose Newton solve met a value that is not finite, which keep the state of their particles
-    and of the rigid solver until the error raises (see 'kernel_finish_rigid' and 'kernel_mpm_g2p' in mpm_solver.py)."""
+    """Flag the environments whose Newton solve met a value that is not finite, which keep the state of their particles,
+    of their cloth and of the rigid solver until the error raises (see 'kernel_finish_rigid', 'kernel_mpm_g2p' in
+    mpm_solver.py and 'kernel_cloth_finish' in fem_solver.py)."""
     for i_b in range(newton_envs.is_active.shape[0]):
         if newton_envs.failure[i_b] == NewtonFailure.NON_FINITE:
             qd.atomic_or(errno[i_b], NewtonErrorCode.INVALID_SOLVE_NAN)
