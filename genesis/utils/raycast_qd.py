@@ -1,11 +1,20 @@
+from typing import TYPE_CHECKING
+
+import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import BVHState, BVHTreeState, func_build_bvh
+from genesis.engine.bvh import BVHState, BVHTreeState, PackedInstances, build_packed_instances, func_build_bvh
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
+from genesis.utils.cache import OwnedCache
 from genesis.utils.data import ENVS, Data, DataKind, field
+from genesis.utils.misc import qd_to_numpy
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.kinematic_solver import KinematicSolver
 
 
 class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
@@ -17,6 +26,42 @@ class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     geom_idx: qd.Tensor = field(int)
     hit_point: qd.Tensor = field((float, 3))
     normal: qd.Tensor = field((float, 3))
+
+
+_SOLVER_MESHES_CACHE = OwnedCache()
+
+
+def get_solver_meshes(
+    solver: "KinematicSolver", is_visual: bool, faces_is_used: np.ndarray | None = None
+) -> PackedInstances:
+    """Return the trees of the faces of the geoms of a solver, or of its visual geoms, in the frame of each geom.
+
+    The geoms of one mesh share its tree. A geom holding a face that `faces_is_used` drops gets no tree. The trees are
+    built once and shared by every user of the solver.
+    """
+
+    def compute():
+        dyn_info = solver.dyn_info
+        if is_visual:
+            verts = qd_to_numpy(dyn_info.vverts.init_pos, transpose=True)
+            faces_verts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
+            geoms_face_start = qd_to_numpy(dyn_info.vgeoms.vface_start, transpose=True)
+            geoms_face_end = qd_to_numpy(dyn_info.vgeoms.vface_end, transpose=True)
+        else:
+            verts = qd_to_numpy(dyn_info.verts.init_pos, transpose=True)
+            faces_verts_idx = qd_to_numpy(dyn_info.faces.verts_idx, transpose=True)
+            geoms_face_start = qd_to_numpy(dyn_info.geoms.face_start, transpose=True)
+            geoms_face_end = qd_to_numpy(dyn_info.geoms.face_end, transpose=True)
+        geoms_aabb_min, geoms_aabb_max = [], []
+        for i_f_start, i_f_end in zip(geoms_face_start.tolist(), geoms_face_end.tolist()):
+            tris = verts[faces_verts_idx[i_f_start:i_f_end]]
+            if faces_is_used is not None and not faces_is_used[i_f_start:i_f_end].all():
+                tris = tris[:0]
+            geoms_aabb_min.append(tris.min(axis=1))
+            geoms_aabb_max.append(tris.max(axis=1))
+        return build_packed_instances(geoms_face_start.tolist(), geoms_aabb_min, geoms_aabb_max)
+
+    return _SOLVER_MESHES_CACHE.get(solver, (solver, is_visual), compute)
 
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths

@@ -590,6 +590,21 @@ def qd_inv_transform_by_trans_quat(pos, trans, quat):
 
 
 @qd.func
+def qd_transform_aabb(
+    aabb_min: qd.types.vector(3), aabb_max: qd.types.vector(3), trans: qd.types.vector(3), quat: qd.types.vector(4)
+):
+    """Return the box of a box transformed by a translation and a rotation, the box of its 8 transformed corners."""
+    out_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+    out_max = -out_min
+    for i_corner in qd.static(range(8)):
+        corner = qd.Vector([aabb_max[j] if (i_corner >> j) & 1 else aabb_min[j] for j in qd.static(range(3))])
+        x = qd_transform_by_trans_quat(corner, trans, quat)
+        out_min = qd.min(out_min, x)
+        out_max = qd.max(out_max, x)
+    return out_min, out_max
+
+
+@qd.func
 def qd_transform_motion_by_trans_quat(m_ang, m_vel, trans, quat):
     quat_inv = qd_inv_quat(quat)
     ang = qd_transform_by_quat(m_ang, quat_inv)

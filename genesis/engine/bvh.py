@@ -8,18 +8,20 @@ A leaf carries two indices: i_a names it by its box, in the order the caller wro
 sorted order the tree is laid out in, the one leaves_idx maps back to i_a.
 """
 
-import dataclasses
 import math
 from enum import IntEnum
 from typing import NamedTuple
+
+import numpy as np
 
 import quadrants as qd
 from quadrants.algorithms import sort as radix_sort
 from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.data import Config, Data, DataKind, Size, field
-from genesis.utils.misc import get_gpu_core_count
+from genesis.utils.misc import get_gpu_core_count, qd_to_numpy
 
 
 class BVH_SORT_KIND(IntEnum):
@@ -68,6 +70,11 @@ class BVHConfig(Config):
 # device-wide radix sort, the rows of chunk histograms of its host radix sort and the lanes of its extent reduction.
 BVH_TREES = Size("bvh_trees")
 BVH_LEAVES = Size("bvh_leaves")
+# The nodes of each tree, 2 * n_leaves - 1 for a set and the sum of those of its trees for packed trees
+BVH_NODES = Size("bvh_nodes")
+# The trees packed in one row (see BVHPackedTrees), and the instances of packed trees (see PackedInstances)
+BVH_PACKED_TREES = Size("bvh_packed_trees")
+BVH_INSTANCES = Size("bvh_instances")
 SORT_SLOTS = Size("sort_slots")
 SORT_CHUNKS = Size("sort_chunks")
 EXTENT_LANES = Size("extent_lanes")
@@ -79,11 +86,12 @@ PER_TREE_RADIX_SORT = "per_tree_radix_sort"
 BLOCK_SWEEP_FIT = "block_sweep_fit"
 
 
-class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, 2 * BVH_LEAVES - 1)):
+class BVHTreeState(Data, kind=DataKind.SCRATCH, shape=(BVH_TREES, BVH_NODES)):
     """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
 
-    The n_leaves - 1 internal nodes come first, then the leaves, so node n_leaves - 1 + i holds the i-th sorted leaf,
-    whose index is leaves_idx[i_t, i]. A leaf node holds -1 in nodes_left.
+    A tree of row i_t spans the nodes from its root, its internal nodes first and then its leaves, the leaf node i_n
+    holding the leaf leaves_idx[i_t, i_n - leaf_offset]. A tree of a set roots at node 0 with a leaf offset of
+    n_leaves - 1, and a packed tree at its own root and offset (see BVHPackedTrees). A leaf node holds -1 in nodes_left.
     """
 
     nodes_left: qd.Tensor = field(int)
@@ -110,7 +118,7 @@ class BVHState(Data, kind=DataKind.SCRATCH):
     sort_scratch: qd.Tensor = field(qd.u32, shape=(SORT_SLOTS,), labels=DEVICE_RADIX_SORT)
     sort_hist: qd.Tensor = field(int, shape=(SORT_CHUNKS, 256), labels=PER_TREE_RADIX_SORT)
     n_keys: qd.Tensor = field(int, shape=())
-    nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, 2 * BVH_LEAVES - 1))
+    nodes_parent: qd.Tensor = field(int, shape=(BVH_TREES, BVH_NODES))
     nodes_fitted: qd.Tensor = field(int, shape=(BVH_TREES, BVH_LEAVES - 1))
     fit_frontier: qd.Tensor = field(int, shape=(BVH_TREES, 2, BVH_LEAVES - 1), labels=BLOCK_SWEEP_FIT)
     lanes_min: qd.Tensor = field((float, 3), shape=(BVH_TREES, EXTENT_LANES))
@@ -122,8 +130,7 @@ class BVHState(Data, kind=DataKind.SCRATCH):
 class BVHQueryResults(Data, kind=DataKind.SCRATCH):
     """The (tree, leaf, query) triplets a box query of a BVH collects, their count, and the count of each tree.
 
-    Each tree holds an equal share of the triplets, and its count grows above that share on overflow, as
-    func_bvh_query_aabb describes.
+    Each tree holds an equal share of the triplets, and its count grows above that share on overflow (see BoxQuery).
     """
 
     triplets: qd.Tensor = field((int, 3), shape=(QUERY_RESULTS,))
@@ -131,17 +138,25 @@ class BVHQueryResults(Data, kind=DataKind.SCRATCH):
     trees_count: qd.Tensor = field(int, shape=(BVH_TREES,))
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class BVHQueryState:
-    """A box query of a set of trees: the leaves tested, the trees traversed and the pairs found.
+class BVHPackedTrees(Data, kind=DataKind.CONSTANT):
+    """Trees over different numbers of leaves, built once and packed in the single row of a tree set."""
 
-    Leaf i_q of tree i_t of 'leaves' is tested against tree i_t of 'tree' (see func_bvh_query_leaves). It holds arrays
-    of other structs, apart from its results.
-    """
-
-    leaves: BVHLeaves
     tree: BVHTreeState
-    results: BVHQueryResults
+    # Root node of each tree
+    trees_root: qd.Tensor = field(int, shape=(BVH_PACKED_TREES,))
+    # Offset from a leaf node of each tree to its slot in leaves_idx
+    trees_leaf_offset: qd.Tensor = field(int, shape=(BVH_PACKED_TREES,))
+
+
+# A subclass rather than a member: a struct is frozen once built, so it cannot take trees built apart at their exact
+# size (see build_packed_bvh).
+class PackedInstances(BVHPackedTrees):
+    """Packed trees and their instances, each tied to the tree of its elements, -1 for none, the instances of one mesh
+    sharing it."""
+
+    instances_tree_idx: qd.Tensor = field(int, shape=(BVH_INSTANCES,))
+    # Offset from a leaf of the tree of each instance to the element of the instance
+    instances_leaf_base: qd.Tensor = field(int, shape=(BVH_INSTANCES,))
 
 
 # Bits of a morton code: three interleaved 10-bit coordinates.
@@ -248,6 +263,7 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
         sizes=dict(
             bvh_trees=n_trees,
             bvh_leaves=n_leaves,
+            bvh_nodes=2 * n_leaves - 1,
             sort_slots=n_sort_scratch,
             sort_chunks=n_trees * max(1, bvh_config.sort_max_chunks // n_trees),
             extent_lanes=TREE_EXTENT_LANES,
@@ -599,70 +615,323 @@ def build_bvh(bvh_state: BVHState, bvh_config: qd.template(), eps: float):
     func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
 
 
-@qd.func
-def func_no_filter(i_t: int, i_a: int, i_q: int, filter_ctx: qd.template()) -> bool:
-    """Keep every pair a box query finds."""
-    return False
+def build_packed_bvh(
+    trees_aabb_min: list[np.ndarray],
+    trees_aabb_max: list[np.ndarray],
+    packed_cls: type[BVHPackedTrees] = BVHPackedTrees,
+    **sizes: int,
+) -> BVHPackedTrees:
+    """Build one tree over each set of boxes, once, and pack the trees in one row.
+
+    Tree i_t spans the boxes [trees_aabb_min[i_t], trees_aabb_max[i_t]], at least one, and its leaves hold the indices
+    of its boxes among the boxes of every tree in order. The trees of one leaf count are built together, each at its
+    exact size. Without tree, the trees are placeholders, which no query reaches. The packed set is an instance of
+    `packed_cls`, a subclass whose other sizes `sizes` gives.
+    """
+    trees_n_leaves = np.array([len(aabb_min) for aabb_min in trees_aabb_min], dtype=gs.np_int)
+    n_trees, n_leaves = len(trees_n_leaves), trees_n_leaves.sum()
+    if n_trees == 0:
+        return packed_cls(
+            sizes=dict(bvh_trees=1, bvh_nodes=0, bvh_leaves=0, bvh_packed_trees=0, **sizes),
+            unused={(BVHPackedTrees.tree, BVHPackedTrees.trees_root, BVHPackedTrees.trees_leaf_offset): True},
+        )
+    trees_leaf_start = np.cumsum(trees_n_leaves) - trees_n_leaves
+    trees_root = np.cumsum(2 * trees_n_leaves - 1) - (2 * trees_n_leaves - 1)
+    trees_leaf_offset = trees_root + trees_n_leaves - 1 - trees_leaf_start
+    nodes_left = np.empty(2 * n_leaves - n_trees, dtype=gs.np_int)
+    nodes_right = np.empty_like(nodes_left)
+    nodes_min = np.empty((len(nodes_left), 3), dtype=gs.np_float)
+    nodes_max = np.empty_like(nodes_min)
+    leaves_idx = np.empty(n_leaves, dtype=gs.np_int)
+    for n_tree_leaves in np.unique(trees_n_leaves).tolist():
+        trees_idx = np.flatnonzero(trees_n_leaves == n_tree_leaves)
+        bvh_state, bvh_config = get_bvh_data(len(trees_idx), n_tree_leaves)
+        # The boxes come in the dtype of their source, which a device without double precision cannot copy from
+        bvh_state.leaves.aabbs_min.from_numpy(np.stack([trees_aabb_min[i_t] for i_t in trees_idx], dtype=gs.np_float))
+        bvh_state.leaves.aabbs_max.from_numpy(np.stack([trees_aabb_max[i_t] for i_t in trees_idx], dtype=gs.np_float))
+        build_bvh(bvh_state, bvh_config, eps=gs.EPS)
+        # The nodes and the leaves of each tree, its rows first, the children of a packed node being absolute
+        tree_left = qd_to_numpy(bvh_state.tree.nodes_left, transpose=True).T
+        tree_right = qd_to_numpy(bvh_state.tree.nodes_right, transpose=True).T
+        tree_min = qd_to_numpy(bvh_state.tree.nodes_min, transpose=True).swapaxes(0, 1)
+        tree_max = qd_to_numpy(bvh_state.tree.nodes_max, transpose=True).swapaxes(0, 1)
+        tree_leaves_idx = qd_to_numpy(bvh_state.tree.leaves_idx, transpose=True).T
+        nodes_idx = trees_root[trees_idx, None] + np.arange(2 * n_tree_leaves - 1)
+        nodes_left[nodes_idx] = np.where(tree_left >= 0, tree_left + trees_root[trees_idx, None], -1)
+        nodes_right[nodes_idx] = np.where(tree_right >= 0, tree_right + trees_root[trees_idx, None], -1)
+        nodes_min[nodes_idx] = tree_min
+        nodes_max[nodes_idx] = tree_max
+        leaves_idx[trees_leaf_start[trees_idx, None] + np.arange(n_tree_leaves)] = (
+            tree_leaves_idx + trees_leaf_start[trees_idx, None]
+        )
+    packed_trees = packed_cls(
+        sizes=dict(bvh_trees=1, bvh_nodes=len(nodes_left), bvh_leaves=n_leaves, bvh_packed_trees=n_trees, **sizes)
+    )
+    packed_trees.tree.nodes_left.from_numpy(nodes_left[None])
+    packed_trees.tree.nodes_right.from_numpy(nodes_right[None])
+    packed_trees.tree.nodes_min.from_numpy(nodes_min[None])
+    packed_trees.tree.nodes_max.from_numpy(nodes_max[None])
+    packed_trees.tree.leaves_idx.from_numpy(leaves_idx[None])
+    packed_trees.trees_root.from_numpy(trees_root)
+    packed_trees.trees_leaf_offset.from_numpy(trees_leaf_offset)
+    return packed_trees
+
+
+def build_packed_instances(
+    instances_elem_start: list[int], instances_aabb_min: list[np.ndarray], instances_aabb_max: list[np.ndarray]
+) -> PackedInstances:
+    """Build the trees of the elements of a set of instances once, the instances of identical elements sharing one.
+
+    The elements of instance i_k are numbered from instances_elem_start[i_k] and span the boxes
+    [instances_aabb_min[i_k], instances_aabb_max[i_k]] in the frame of the instance, an instance without element
+    getting no tree.
+    """
+    trees_key, trees_aabb_min, trees_aabb_max, trees_leaf_start = {}, [], [], [0]
+    instances_tree_idx, instances_leaf_base = [], []
+    for elem_start, aabb_min, aabb_max in zip(instances_elem_start, instances_aabb_min, instances_aabb_max):
+        if len(aabb_min) == 0:
+            instances_tree_idx.append(-1)
+            instances_leaf_base.append(0)
+            continue
+        key = aabb_min.tobytes() + aabb_max.tobytes()
+        if key not in trees_key:
+            trees_key[key] = len(trees_aabb_min)
+            trees_aabb_min.append(aabb_min)
+            trees_aabb_max.append(aabb_max)
+            trees_leaf_start.append(trees_leaf_start[-1] + len(aabb_min))
+        instances_tree_idx.append(trees_key[key])
+        instances_leaf_base.append(elem_start - trees_leaf_start[trees_key[key]])
+    packed_instances = build_packed_bvh(
+        trees_aabb_min, trees_aabb_max, PackedInstances, bvh_instances=len(instances_tree_idx)
+    )
+    packed_instances.instances_tree_idx.from_numpy(np.array(instances_tree_idx, dtype=gs.np_int))
+    packed_instances.instances_leaf_base.from_numpy(np.array(instances_leaf_base, dtype=gs.np_int))
+    return packed_instances
+
+
+@qd.kernel(fastcache=True)
+def kernel_build_instances_tree(
+    i_k_excluded: int,
+    instances_aabb_min: qd.Tensor,
+    instances_aabb_max: qd.Tensor,
+    bvh_state: BVHState,
+    packed_instances: PackedInstances,
+    bvh_config: qd.template(),
+    eps: float,
+):
+    """Build the tree of the instances of each environment from their boxes in the world, an instance without tree and
+    instance i_k_excluded getting an empty box, which no query reaches."""
+    for i_k, i_b in qd.ndrange(bvh_state.leaves.aabbs_min.shape[1], bvh_state.leaves.aabbs_min.shape[0]):
+        aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+        aabb_max = -aabb_min
+        if packed_instances.instances_tree_idx[i_k] >= 0 and i_k != i_k_excluded:
+            aabb_min = instances_aabb_min[i_k, i_b]
+            aabb_max = instances_aabb_max[i_k, i_b]
+        bvh_state.leaves.aabbs_min[i_b, i_k] = aabb_min
+        bvh_state.leaves.aabbs_max[i_b, i_k] = aabb_max
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
 
 
 @qd.func
-def func_bvh_query_aabb(
+def func_bvh_traverse(
     i_t: int,
     i_q: int,
-    query_min,
-    query_max,
-    bvh_tree_state: BVHTreeState,
-    query_results: BVHQueryResults,
-    filter: qd.template(),
-    filter_ctx: qd.template(),
-):
-    """Collect the leaves of a tree whose box meets a query box, as (tree, leaf, query) triplets.
+    i_root: int,
+    leaf_offset: int,
+    leaf_base: int,
+    query,
+    bound: float,
+    tree: BVHTreeState,
+    visitor: qd.template(),
+) -> float:
+    """Visit the elements of a tree that a query of environment i_t reaches, depth first, and return the bound the
+    visits leave.
 
-    ``filter(i_t, i_a, i_q, filter_ctx)`` drops a found leaf when it returns True. Each tree holds an equal share of the
-    result list, its count growing past that share, the pairs beyond it dropped, so that a tree count above the share
-    reports the overflow of that tree while the other trees keep theirs. The caller zeroes `count` and `trees_count`
-    before every query.
+    The tree is row i_t of a tree set, or the single row of a set of one row, from node i_root, the leaf node i_n
+    holding the leaf leaves_idx[row, i_n - leaf_offset], visited as the element leaf_base + leaf (see BVHTreeState).
+    The visitor is a closure over the arrays it reads and writes, its funcs handed the environment i_t, the query
+    index i_q, the query, a value of the struct type `visitor.Query`, and the bound: `is_node_hit(i_t, i_q, node_min,
+    node_max, query, bound)` accepts the nodes to descend into, and `visit_leaf(i_t, i_q, i_k, i_a, query, bound)`
+    visits element i_a and returns the bound, which a closest-hit search lowers to prune the nodes beyond its best hit.
+    A visitor writes its other results into its own arrays.
+
+    A visitor whose `is_instance_level` holds walks a top-level tree whose leaves are instances of its packed trees
+    `instances`: `enter_instance(i_t, i_q, i_k, query, bound)` returns the packed tree of instance i_k, -1 for none,
+    with the query in its frame and the offset of its elements, and its `inner` visitor tests the nodes of both levels
+    and visits the elements, i_k handed to it. A single-level visitor gets -1 for i_k.
     """
-    n_leaves = bvh_tree_state.leaves_idx.shape[1]
-    # One pending sibling per level: a tree splits one key bit per level below the bits every key of the set shares,
-    # so its depth is at most the morton bits plus the leaf bits, well under this
-    STACK_SIZE = qd.static(64)
+    # One pending sibling per level of each tree: a tree splits one key bit per level below the bits every key of the
+    # set shares, so its depth is at most the morton bits plus the leaf bits, well under 64.
+    STACK_SIZE = qd.static(128 if visitor.is_instance_level else 64)
+    i_row = i_t if tree.nodes_left.shape[0] > 1 else 0
     stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
+    stack[0] = i_root
     n_stack = 1
-    for _ in range(2 * n_leaves):
-        if n_stack == 0:
-            break
+    # The walk of an instance ends before the next node of the top-level tree is popped, so the instance, its query and
+    # the offsets that entering it sets hold over its whole walk.
+    i_k = -1
+    query_inner = query
+    inner_leaf_offset = 0
+    inner_leaf_base = 0
+    while n_stack > 0:
         n_stack -= 1
         i_n = stack[n_stack]
-        node_min = bvh_tree_state.nodes_min[i_t, i_n]
-        node_max = bvh_tree_state.nodes_max[i_t, i_n]
-        is_hit = True
-        for j in qd.static(range(3)):
-            if query_min[j] > node_max[j] or query_max[j] < node_min[j]:
-                is_hit = False
-        if is_hit:
-            i_left = bvh_tree_state.nodes_left[i_t, i_n]
-            if i_left < 0:
-                i_a = bvh_tree_state.leaves_idx[i_t, i_n - (n_leaves - 1)]
-                if not filter(i_t, i_a, i_q, filter_ctx):
-                    n_tree_results = qd.atomic_add(query_results.trees_count[i_t], 1)
-                    if n_tree_results < query_results.triplets.shape[0] // query_results.trees_count.shape[0]:
-                        i_r = qd.atomic_add(query_results.count[0], 1)
-                        query_results.triplets[i_r] = gs.qd_ivec3(i_t, i_a, i_q)
-            else:
-                stack[n_stack] = bvh_tree_state.nodes_right[i_t, i_n]
-                n_stack += 1
-                stack[n_stack] = i_left
-                n_stack += 1
+        # A node of a bottom-level tree is stacked as -2 - i_n
+        is_top = i_n >= 0
+        i_n_node, query_node = i_n, query
+        node_min, node_max = qd.Vector.zero(gs.qd_float, 3), qd.Vector.zero(gs.qd_float, 3)
+        if is_top:
+            node_min, node_max = tree.nodes_min[i_row, i_n], tree.nodes_max[i_row, i_n]
+        if qd.static(visitor.is_instance_level):
+            if not is_top:
+                i_n_node = -2 - i_n
+                node_min = visitor.instances.tree.nodes_min[0, i_n_node]
+                node_max = visitor.instances.tree.nodes_max[0, i_n_node]
+                query_node = query_inner
+        # The inner visitor of an instance-level one tests the nodes of both levels
+        is_node_hit = False
+        if qd.static(visitor.is_instance_level):
+            is_node_hit = visitor.inner.is_node_hit(i_t, i_q, node_min, node_max, query_node, bound)
+        else:
+            is_node_hit = visitor.is_node_hit(i_t, i_q, node_min, node_max, query_node, bound)
+        if is_node_hit:
+            if is_top:
+                i_left = tree.nodes_left[i_row, i_n]
+                if i_left < 0:
+                    i_leaf = tree.leaves_idx[i_row, i_n - leaf_offset]
+                    if qd.static(not visitor.is_instance_level):
+                        bound = visitor.visit_leaf(i_t, i_q, -1, leaf_base + i_leaf, query, bound)
+                    else:
+                        i_tree, query_entered, leaf_base_entered = visitor.enter_instance(
+                            i_t, i_q, i_leaf, query, bound
+                        )
+                        if i_tree >= 0:
+                            i_k = i_leaf
+                            query_inner = query_entered
+                            inner_leaf_base = leaf_base_entered
+                            inner_leaf_offset = visitor.instances.trees_leaf_offset[i_tree]
+                            stack[n_stack] = -2 - visitor.instances.trees_root[i_tree]
+                            n_stack += 1
+                else:
+                    stack[n_stack] = tree.nodes_right[i_row, i_n]
+                    stack[n_stack + 1] = i_left
+                    n_stack += 2
+            if qd.static(visitor.is_instance_level):
+                if not is_top:
+                    i_left = visitor.instances.tree.nodes_left[0, i_n_node]
+                    if i_left < 0:
+                        i_leaf = visitor.instances.tree.leaves_idx[0, i_n_node - inner_leaf_offset]
+                        bound = visitor.inner.visit_leaf(i_t, i_q, i_k, inner_leaf_base + i_leaf, query_inner, bound)
+                    else:
+                        stack[n_stack] = -2 - visitor.instances.tree.nodes_right[0, i_n_node]
+                        stack[n_stack + 1] = -2 - i_left
+                        n_stack += 2
+    return bound
 
 
 @qd.func
-def func_bvh_query_leaves(query_state: BVHQueryState, filter: qd.template(), filter_ctx: qd.template()):
-    """Query every leaf box of a set against the tree of the same index in another set.
+def func_aabb_intersects_aabb(
+    a_min: qd.types.vector(3), a_max: qd.types.vector(3), b_min: qd.types.vector(3), b_max: qd.types.vector(3)
+) -> bool:
+    """Return whether two boxes overlap, touching ones included."""
+    is_hit = True
+    for j in qd.static(range(3)):
+        if a_min[j] > b_max[j] or a_max[j] < b_min[j]:
+            is_hit = False
+    return is_hit
 
-    See func_bvh_query_aabb for the results and their overflow.
+
+@qd.data_oriented
+class BoxQuery:
+    """The visitor of a box query, recording the (environment, element, query) triplets of the elements its box meets.
+
+    The query is the box (see Query). Each environment holds an equal share of the results, its count growing past
+    that share, the pairs beyond it dropped, so that a count above the share reports the overflow of that environment
+    while the others keep theirs. The caller zeroes `count` and `trees_count` before every query. A subclass drops some
+    elements or instances through `is_kept` and `is_instance_kept`.
     """
-    for i_t, i_q in qd.ndrange(query_state.leaves.aabbs_min.shape[0], query_state.leaves.aabbs_min.shape[1]):
-        query_min = query_state.leaves.aabbs_min[i_t, i_q]
-        query_max = query_state.leaves.aabbs_max[i_t, i_q]
-        func_bvh_query_aabb(i_t, i_q, query_min, query_max, query_state.tree, query_state.results, filter, filter_ctx)
+
+    is_instance_level = False
+
+    def __init__(self, results: BVHQueryResults) -> None:
+        self.results = results
+        self.Query = qd.types.struct(aabb_min=qd.types.vector(3, gs.qd_float), aabb_max=qd.types.vector(3, gs.qd_float))
+
+    @qd.func
+    def is_node_hit(
+        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+    ) -> bool:
+        return func_aabb_intersects_aabb(node_min, node_max, query.aabb_min, query.aabb_max)
+
+    @qd.func
+    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
+        return True
+
+    @qd.func
+    def is_instance_kept(self, i_t: int, i_q: int, i_k: int) -> bool:
+        return True
+
+    @qd.func
+    def to_frame(self, query, pos: qd.types.vector(3), quat: qd.types.vector(4)):
+        quat_inv = gu.qd_inv_quat(quat)
+        aabb_min, aabb_max = gu.qd_transform_aabb(
+            query.aabb_min, query.aabb_max, trans=-gu.qd_transform_by_quat(pos, quat_inv), quat=quat_inv
+        )
+        return self.Query(aabb_min=aabb_min, aabb_max=aabb_max)
+
+    @qd.func
+    def visit_leaf(self, i_t: int, i_q: int, i_k: int, i_a: int, query, bound: float) -> float:
+        if self.is_kept(i_t, i_q, i_k, i_a):
+            n_tree_results = qd.atomic_add(self.results.trees_count[i_t], 1)
+            if n_tree_results < self.results.triplets.shape[0] // self.results.trees_count.shape[0]:
+                i_r = qd.atomic_add(self.results.count[0], 1)
+                self.results.triplets[i_r] = gs.qd_ivec3(i_t, i_a, i_q)
+        return bound
+
+
+@qd.data_oriented
+class InstancesQuery:
+    """The visitor of the instances of packed trees posed in each environment that a query reaches, walking the tree of
+    each with its inner visitor, whose query it takes.
+
+    The inner visitor tests the nodes of both levels, gates the instances through `is_instance_kept(i_t, i_q, i_k)`,
+    returns the query in the frame of an instance through `to_frame(query, pos, quat)`, and visits the elements. It
+    reads the instances (see PackedInstances) and the state holding their poses, `pos` and `quat` per instance and
+    environment.
+    """
+
+    is_instance_level = True
+
+    def __init__(self, inner, instances: PackedInstances, instances_state) -> None:
+        self.inner = inner
+        self.instances = instances
+        self.instances_state = instances_state
+        self.Query = inner.Query
+
+    @qd.func
+    def enter_instance(self, i_t: int, i_q: int, i_k: int, query, bound: float):
+        i_tree = -1
+        query_local = query
+        if self.inner.is_instance_kept(i_t, i_q, i_k):
+            i_tree = self.instances.instances_tree_idx[i_k]
+            query_local = self.inner.to_frame(
+                query, self.instances_state.pos[i_k, i_t], self.instances_state.quat[i_k, i_t]
+            )
+        return i_tree, query_local, self.instances.instances_leaf_base[i_k]
+
+
+@qd.func
+def func_bvh_query_leaves(leaves: BVHLeaves, tree: BVHTreeState, visitor: qd.template()):
+    """Query every leaf box of a set against the tree of the same index in another set (see BoxQuery)."""
+    for i_t, i_q in qd.ndrange(leaves.aabbs_min.shape[0], leaves.aabbs_min.shape[1]):
+        func_bvh_traverse(
+            i_t,
+            i_q,
+            i_root=0,
+            leaf_offset=tree.leaves_idx.shape[1] - 1,
+            leaf_base=0,
+            query=visitor.Query(aabb_min=leaves.aabbs_min[i_t, i_q], aabb_max=leaves.aabbs_max[i_t, i_q]),
+            bound=0.0,
+            tree=tree,
+            visitor=visitor,
+        )
