@@ -36,7 +36,7 @@ from genesis.engine.numerics.bcoo import (
     func_add_by_key,
     func_add_triplet,
     func_read_entry,
-    func_report_triplet_demand,
+    func_set_n_triplets,
     func_write_triplet,
 )
 from genesis.engine.numerics.exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
@@ -3484,9 +3484,7 @@ def func_mpm_assemble(
     n_valid = mpm_state.sorted_particles.n_valid[None]
     for _ in range(1):
         newton_rows.n_rows[None] = n_nodes
-        func_report_triplet_demand(
-            newton_rows.matrix, n_nodes + STENCIL_PAIRS * mpm_state.sorted_particles.n_tasks[None]
-        )
+        func_set_n_triplets(newton_rows.matrix, n_nodes + STENCIL_PAIRS * mpm_state.sorted_particles.n_tasks[None])
     for i_n in range(n_nodes):
         i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
         newton_rows.rows_env[i_n] = i_b

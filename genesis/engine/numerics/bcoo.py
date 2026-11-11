@@ -21,15 +21,12 @@ class BCOOMatrixScratch(Data, kind=DataKind.SCRATCH):
     """
     A sparse block matrix as the blocks its writers give it (the triplets), and as their sums by position (the entries).
 
-    A writer owns the slots of its triplets and writes each one whole. `n_triplets_demanded` counts the triplets the
-    writers ask for, of which the first `n_triplets` fit, `has_triplet_overflow` telling the matrix to grow. A symmetric
-    matrix keeps the blocks of its upper triangle alone. The entries are sorted by row then column.
+    A writer owns the slots of its triplets and writes each one whole, the slots past the capacity dropping their blocks.
+    A symmetric matrix keeps the blocks of its upper triangle alone. The entries are sorted by row then column.
     """
 
     n_triplets: qd.Tensor = field(int, shape=(), ndarray=True)
     n_padded_triplets: qd.Tensor = field(int, shape=(), ndarray=True)
-    n_triplets_demanded: qd.Tensor = field(int, shape=(), ndarray=True)
-    has_triplet_overflow: qd.Tensor = field(int, shape=(), ndarray=True)
     triplets_row: qd.Tensor = field(int, shape=(TRIPLETS,), ndarray=True)
     triplets_col: qd.Tensor = field(int, shape=(TRIPLETS,), ndarray=True)
     triplets_value: qd.Tensor = field(float, shape=(TRIPLETS * BLOCK_SCALARS,), ndarray=True)
@@ -91,13 +88,11 @@ def func_add_by_key(i_key: int, value, out: qd.template(), n_components: qd.temp
 
 
 @qd.func
-def func_report_triplet_demand(matrix: BCOOMatrixScratch, n_triplets_demanded: int):
-    """Set the triplets the writers ask for, those that fit and the padded extent of their sort."""
-    n_triplets = qd.min(n_triplets_demanded, matrix.triplets_row.shape[0])
-    matrix.n_triplets_demanded[()] = n_triplets_demanded
-    matrix.n_triplets[()] = n_triplets
-    matrix.n_padded_triplets[()] = qd.min((n_triplets + 63) // 64 * 64, matrix.triplets_key.shape[0])
-    matrix.has_triplet_overflow[()] = gs.qd_int(n_triplets_demanded > matrix.triplets_row.shape[0])
+def func_set_n_triplets(matrix: BCOOMatrixScratch, n_triplets: int):
+    """Set the triplets the writers give, within the capacity, and the padded extent of their sort."""
+    n_triplets_kept = qd.min(n_triplets, matrix.triplets_row.shape[0])
+    matrix.n_triplets[()] = n_triplets_kept
+    matrix.n_padded_triplets[()] = qd.min((n_triplets_kept + 63) // 64 * 64, matrix.triplets_key.shape[0])
 
 
 @qd.func
