@@ -1377,6 +1377,135 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
 
 
 @pytest.mark.required
+def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    FRICTION_EPS_V = 1e-2
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            friction_eps_v=FRICTION_EPS_V,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # Two vertical sheets crossing in plan view, the second one above the first, so that it falls onto it
+    sheets = [
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file=cloth_grid_obj_path,
+                scale=0.4,
+                pos=(0.0, 0.0, z),
+                euler=euler,
+            ),
+            material=gs.materials.FEM.Cloth(),
+        )
+        for euler, z in (((90.0, 0.0, 0.0), 0.23), ((90.0, 0.0, 90.0), 0.68))
+    ]
+    scene.build(n_envs=2)
+
+    # The sheets land within 0.6 s, then creep under the sliding velocity of their friction
+    for _ in range(160):
+        scene.step()
+    # The upper sheet rests on the lower one, both on the ground
+    for sheet in sheets:
+        assert (sheet.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+        assert (sheet.get_verts_vel().norm(dim=-1) < FRICTION_EPS_V).all()
+    assert (
+        sheets[1].get_verts_pos()[..., 2].max(dim=-1).values > sheets[0].get_verts_pos()[..., 2].max(dim=-1).values
+    ).all()
+
+    # The sheets never cross: their final shapes form a scene that passes the check of crossing cloths
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    faces = igl.read_triangle_mesh(cloth_grid_obj_path)[1]
+    for i_sheet, sheet in enumerate(sheets):
+        path = str(tmp_path / f"sheet{i_sheet}.obj")
+        igl.write_triangle_mesh(path, tensor_to_array(sheet.get_verts_pos()[0], dtype=gs.np_float), faces)
+        scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
+
+
+@pytest.mark.required
+def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
+    N_LENGTH, N_WIDTH = 24, 6
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -1.0, 0.4),
+            camera_lookat=(-0.15, 0.0, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_folded_obj_path,
+        ),
+        material=gs.materials.FEM.Cloth(),
+    )
+    scene.build()
+
+    # The vertices of the flat part of the lower layer of every row, and those of the upper layer above them
+    rows_start = np.arange(N_WIDTH + 1)[:, None] * (N_LENGTH + 1)
+    lower_idx = (rows_start + np.arange(10)).reshape(-1)
+    upper_idx = (rows_start + N_LENGTH - np.arange(10)).reshape(-1)
+    gaps_min = []
+    for _ in range(100):
+        scene.step()
+        verts_z = cloth.get_verts_pos()[..., 2]
+        gaps_min.append(float((verts_z[upper_idx] - verts_z[lower_idx]).min()))
+    # The upper layer falls onto the lower one once it lands and rests on it, never crossing it
+    assert min(gaps_min) > 0.0
+    assert gaps_min[-1] < 0.02
+
+
+@pytest.mark.required
+def test_cloth_contact_capacity_growth(cloth_grid_obj_path, show_viewer):
+    sheets_pos = []
+    for capacity in (1, 1000):
+        scene = gs.Scene(
+            ipc_options=gs.options.IPCOptions(
+                init_collision_pair_capacity=capacity,
+            ),
+            show_viewer=show_viewer,
+        )
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+        sheets = [
+            scene.add_entity(
+                morph=gs.morphs.Mesh(
+                    file=cloth_grid_obj_path,
+                    scale=0.4,
+                    pos=(0.0, 0.0, z),
+                    euler=euler,
+                ),
+                material=gs.materials.FEM.Cloth(),
+            )
+            for euler, z in (((90.0, 0.0, 0.0), 0.23), ((90.0, 0.0, 90.0), 0.68))
+        ]
+        scene.build()
+        for _ in range(50):
+            scene.step()
+        sheets_pos.append(torch.cat([sheet.get_verts_pos() for sheet in sheets]))
+    # The pairs beyond a capacity of one are kept, the capacity growing as the search finds them
+    assert_allclose(sheets_pos[0], sheets_pos[1], tol=gs.EPS)
+
+
+@pytest.mark.required
 def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     scene = gs.Scene(mpm_options=gs.options.MPMOptions(use_implicit_solver=True))
     scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
@@ -1410,4 +1539,15 @@ def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
 
     scene = gs.Scene(ipc_options=gs.options.IPCOptions(), coupler_options=gs.options.SAPCouplerOptions())
     with pytest.raises(gs.GenesisException, match="IPCOptions configure the contact of the cloth"):
+        scene.build()
+
+    scene = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    scene.add_entity(
+        morph=gs.morphs.Mesh(file=cloth_grid_obj_path, pos=(0.0, 0.0, 0.5)), material=gs.materials.FEM.Cloth()
+    )
+    scene.add_entity(
+        morph=gs.morphs.Mesh(file=cloth_grid_obj_path, pos=(0.0, 0.0, 0.5), euler=(90.0, 0.0, 0.0)),
+        material=gs.materials.FEM.Cloth(),
+    )
+    with pytest.raises(gs.GenesisException, match="The cloth starts crossed"):
         scene.build()

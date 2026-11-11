@@ -27,6 +27,34 @@ def cloth_grid_obj_path(asset_tmp_path):
 
 
 @pytest.fixture(scope="session")
+def cloth_folded_obj_path(asset_tmp_path):
+    """Write a 0.3 m wide cloth folded in two about the y axis: a lower layer at z = 0.1, 0.3 m long toward -x, a half
+    circle of radius 0.03 m, and an upper layer back above the lower one, 24 x 6 squares of two triangles each.
+
+    The vertex of index k along the length of a row lies above the one of index 24 - k for k < 10.
+    """
+    n_length, n_width, flat_length, radius = 24, 6, 0.3, 0.03
+    path = []
+    for s in np.linspace(0.0, 2.0 * flat_length + np.pi * radius, n_length + 1):
+        if s <= flat_length:
+            path.append((s - flat_length, 0.1))
+        elif s <= flat_length + np.pi * radius:
+            angle = (s - flat_length) / radius - 0.5 * np.pi
+            path.append((radius * np.cos(angle), 0.1 + radius + radius * np.sin(angle)))
+        else:
+            path.append((flat_length + np.pi * radius - s, 0.1 + 2.0 * radius))
+    verts = np.array([[x, (j / n_width - 0.5) * 0.3, z] for j in range(n_width + 1) for x, z in path])
+    faces = []
+    for j in range(n_width):
+        for i in range(n_length):
+            v00 = j * (n_length + 1) + i
+            faces += [[v00, v00 + 1, v00 + n_length + 1], [v00 + 1, v00 + n_length + 2, v00 + n_length + 1]]
+    path = str(asset_tmp_path / "cloth_folded.obj")
+    igl.write_triangle_mesh(path, verts, np.array(faces))
+    return path
+
+
+@pytest.fixture(scope="session")
 def coupled_sliders():
     """Build an MJCF holding a heavy and a light sphere, each on its own vertical slide joint.
 
