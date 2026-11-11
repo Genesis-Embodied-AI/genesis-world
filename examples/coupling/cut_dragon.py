@@ -37,7 +37,6 @@ def main():
             file="urdf/plane/plane.urdf",
             fixed=True,
         ),
-        material=gs.materials.Rigid(),
     )
     cutter = scene.add_entity(
         morph=gs.morphs.Mesh(

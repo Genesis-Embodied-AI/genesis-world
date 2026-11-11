@@ -38,17 +38,19 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
     )
 
     liquid = scene.add_entity(
-        material=gs.materials.SPH.Liquid(
-            mu=mu,
-            sampler="regular",
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+                vis_mode="particle",
+            ),
+            material=gs.materials.SPH.Liquid(
+                mu=mu,
+                sampler="regular",
+            ),
         ),
     )
 
@@ -381,12 +383,14 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
         morph=gs.morphs.Plane(),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * LIQUID_SIZE[2]),
-            size=LIQUID_SIZE,
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
+        options=gs.entities.SPH(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5 * LIQUID_SIZE[2]),
+                size=LIQUID_SIZE,
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=2)

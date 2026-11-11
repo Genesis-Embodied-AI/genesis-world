@@ -40,12 +40,14 @@ def main():
         gs.morphs.Plane(),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        ),
-        material=gs.materials.Rigid(
-            friction=1.0,
-            coup_friction=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            material=gs.materials.Rigid(
+                friction=1.0,
+                coup_friction=1.0,
+            ),
         ),
     )
     sphere = scene.add_entity(

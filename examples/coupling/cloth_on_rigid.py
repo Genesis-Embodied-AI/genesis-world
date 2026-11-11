@@ -37,17 +37,21 @@ def main():
     )
 
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=frictionless_rigid,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=frictionless_rigid,
+        ),
     )
 
     obj = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.2,
-            pos=(0.0, 0.0, 0.0),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Sphere(
+                radius=0.2,
+                pos=(0.0, 0.0, 0.0),
+                fixed=True,
+            ),
+            material=frictionless_rigid,
         ),
-        material=frictionless_rigid,
     )
 
     cloth = scene.add_entity(

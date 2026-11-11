@@ -70,16 +70,18 @@ def main():
     cube_size = 0.2
     cube_height = 0.3  # Height below cloth
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.25, 0, cube_height),
-            size=(cube_size, cube_size, cube_size),
-        ),
-        material=gs.materials.Rigid(
-            rho=500,
-            coup_type="ipc_only",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.3, 0.2, 0.8),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(-0.25, 0, cube_height),
+                size=(cube_size, cube_size, cube_size),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.3, 0.2, 0.8),
+            ),
+            material=gs.materials.Rigid(
+                rho=500,
+                coup_type="ipc_only",
+            ),
         ),
     )
 

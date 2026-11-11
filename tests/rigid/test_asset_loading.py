@@ -1214,8 +1214,9 @@ def test_align_mesh(show_viewer, tol):
         visualize_contact=True,
     )
     ghost_mango = scene.add_entity(
-        mango_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=mango_morph,
+        ),
     )
     # Heterogeneous entity sharing one link across a bowl and a mango variant. Each variant must be aligned to its own
     # geometry (link origin at that variant's COM) and report its own offset per environment. The bowl carries a
@@ -1339,8 +1340,9 @@ def test_align_urdf(show_viewer, tol):
         visualize_contact=True,
     )
     ghost_fork = scene.add_entity(
-        fork_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=fork_morph,
+        ),
     )
     scene.build()
 
@@ -1377,13 +1379,13 @@ def test_align_mixed_mass_raises():
         links_inertial=[{"mass": 1.0, "ixx": 0.01, "iyy": 0.01, "izz": 0.01, "origin_xyz": "0 0 0"}, None],
         joint_type="fixed",
     )
-    for material in (gs.materials.Rigid(), gs.materials.Kinematic()):
+    for options_cls in (gs.entities.Rigid, gs.entities.Kinematic):
         scene = gs.Scene(
             show_viewer=False,
             show_FPS=False,
         )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
-            scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
+            scene.add_entity(options=options_cls(morph=gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False)))
 
 
 @pytest.mark.required
@@ -1709,10 +1711,11 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     )
     # Kinematic heterogeneous URDF entity (same variants, different positions)
     het_kin = scene.add_entity(
-        morph=het_morph,
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.0, 0.0, 1.0, 0.4),
+        options=gs.entities.Kinematic(
+            morph=het_morph,
+            surface=gs.surfaces.Default(
+                color=(0.0, 0.0, 1.0, 0.4),
+            ),
         ),
     )
     # Free-floating single-link URDF objects with different off-center COMs. Unlike the articulated robots above (whose
@@ -1731,8 +1734,9 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     # Kinematic counterpart of the aligned free bodies. The COM/principal anchoring is applied in the base entity, so
     # for the same qpos a kinematic visualization and the rigid body it tracks must place identical world geometry.
     free_kin = scene.add_entity(
-        morph=free_morph,
-        material=gs.materials.Kinematic(),
+        options=gs.entities.Kinematic(
+            morph=free_morph,
+        ),
     )
     # A free entity whose two variants are identical, so the solver resolves a single shared offset and takes the
     # broadcast path (the base link offset) rather than the per-env variant offset. That shared base offset must still
@@ -1743,7 +1747,6 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     )
     free_dup = scene.add_entity(
         morph=dup_morph,
-        material=gs.materials.Rigid(),
     )
     # Free bodies whose root link is empty and whose mass lives on a fixed child (merge_fixed_links=False keeps the
     # wrapper). The empty root reads the gs.EPS placeholder and the child its authored mass.
@@ -2053,18 +2056,20 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
         vis_mode="collision",
     )
     ghost_mount = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.05, 0.05, 0.05),
-            pos=GHOST_MOUNT_POS,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.05, 0.05, 0.05),
+                pos=GHOST_MOUNT_POS,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     ghost_tool = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.02, 0.02, 0.02),
-            pos=(2.0, 2.0, 2.0),
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.02, 0.02, 0.02),
+                pos=(2.0, 2.0, 2.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     tool = scene.add_entity(
         gs.morphs.Sphere(

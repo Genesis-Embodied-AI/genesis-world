@@ -1419,11 +1419,12 @@ def test_object_repr():
         ),
     )
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Sphere(radius=0.1),
+        options=gs.entities.Kinematic(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+                gs.morphs.Sphere(radius=0.1),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     cam = scene.add_camera(
         res=(64, 64),

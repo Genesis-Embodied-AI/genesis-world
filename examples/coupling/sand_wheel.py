@@ -36,13 +36,15 @@ def main():
     )
 
     plane = scene.add_entity(
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.2,
-        ),
-        morph=gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.2,
+            ),
         ),
     )
     mat_wheel = gs.materials.Rigid(
@@ -50,50 +52,58 @@ def main():
         coup_softness=0.0,
     )
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, -0.2, 1.6),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, -0.2, 1.6),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            material=mat_wheel,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, 0.3, 1.2),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, 0.3, 1.2),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            material=mat_wheel,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, -0.3, 0.8),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, -0.3, 0.8),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            material=mat_wheel,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, 0.4, 0.4),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, 0.4, 0.4),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            material=mat_wheel,
         ),
     )
 

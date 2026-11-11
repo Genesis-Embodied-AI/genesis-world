@@ -200,21 +200,25 @@ def test_cloth_attach_rigid_link(show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.0,
+            ),
         ),
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.25, 0.25, box_height),
-            size=(0.25, 0.25, 0.25),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.25, 0.25, box_height),
+                size=(0.25, 0.25, 0.25),
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.0,
+            ),
         ),
     )
     cloth = scene.add_entity(
