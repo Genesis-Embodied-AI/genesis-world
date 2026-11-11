@@ -182,8 +182,7 @@ class KinematicSolver(Solver):
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The entity options the other
-        arguments were taken from are kept in the description as authored. The class of a given description
+        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
         says which kind it holds. Creation from a description reads no asset.
         """
         if desc is None:
