@@ -83,6 +83,16 @@ def test_particle_constraints(show_viewer, tol):
         ),
         material=gs.materials.MPM.Elastic(),
     )
+    # A block held by its middle slab, the particles on either side mirroring each other about it
+    mpm_held_block = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.5, -0.5, 0.3),
+            size=(0.1, 0.05, 0.05),
+        ),
+        material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
     scene.build(n_envs=2)
 
     # The mass of the particles follows the density at the precision of the simulation
@@ -131,6 +141,9 @@ def test_particle_constraints(show_viewer, tol):
     follower_pos_0 = mpm_follower.get_particles_pos()
     moving_box_pos_0 = moving_box.get_pos()
 
+    held_block_offset_x = mpm_held_block.init_particles[:, 0] - 0.5
+    mpm_held_block.set_free(np.abs(held_block_offset_x) > mpm_held_block.particle_size)
+
     for _ in range(30):
         scene.step()
 
@@ -146,6 +159,15 @@ def test_particle_constraints(show_viewer, tol):
     assert_allclose(moving_box_disp, (30 * scene.dt, 0.0, 0.0), tol=tol)
     follower_offset = mpm_follower.get_particles_pos() - follower_pos_0 - moving_box_disp[:, None]
     assert_allclose(follower_offset[..., :2], 0.0, tol=tol)
+
+    # The held particles zero the cells they touch once every particle scattered into them, whatever the order of the
+    # particles, so the sides of the block sag alike
+    held_block_pos = mpm_held_block.get_particles_pos()
+    assert_allclose(
+        held_block_pos[:, held_block_offset_x > 0.0, 2].mean(dim=-1),
+        held_block_pos[:, held_block_offset_x < 0.0, 2].mean(dim=-1),
+        tol=tol,
+    )
 
     # Restoring the checkpoint brings back unconstrained particles, which fall freely
     scene.sim.__setstate__(checkpoint_unconstrained)

@@ -244,7 +244,7 @@ class MPMConfig(Config):
     requires_grad: bool
     # Whether the rigid geoms separate the particles from the cells of the grid (see MPMParticlesCPIC)
     is_cpic: bool
-    # Whether the transfer to the grid and the coupling forces sum in a fixed order on GPU, with
+    # Whether the transfer to the grid and the coupling forces sum in a fixed order across threads, with
     # `use_deterministic_algorithms` (see kernel_transfer_particles_to_grid and MPMCouplingForces)
     is_deterministic: bool
 
@@ -444,12 +444,13 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         # When no material reads U, S, V, the transfer to the grid takes J from the determinant of the advected
         # deformation gradient, which spares the singular value decomposition. The backward pass reverses it alone.
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
+        # A single thread of the CPU sums each environment in a fixed order already
+        is_single_thread = gs.backend == gs.cpu and qd.cfg.cpu_max_num_threads == 1
         self.mpm_config = MPMConfig(
             is_svd_needed=self._requires_grad or any([material.needs_svd for material in self._materials]),
             requires_grad=self._requires_grad,
             is_cpic=self._enable_CPIC and self._sim.rigid_solver.is_active,
-            # The threads of the CPU sum each environment in a fixed order already
-            is_deterministic=gs.use_deterministic_algorithms and gs.backend != gs.cpu,
+            is_deterministic=gs.use_deterministic_algorithms and not is_single_thread,
         )
         self._mpm_materials = MPMMaterials(tuple(self._materials))
 
@@ -1070,18 +1071,13 @@ def kernel_transfer_particles_to_grid(
                                         mpm_state.grid.dirty_list[i_slot] = (
                                             cell[0] * grid_y + cell[1]
                                         ) * grid_z + cell[2]
-                        # The particles held in place act as boundary conditions of the grid. The zero races with the
-                        # scatter of the other particles, which the variant autodiff reverses defers past it instead.
-                        if qd.static(not is_backward):
-                            if not mpm_info.particles.is_free[i_p]:
-                                cell = base - grid_offset + offset
-                                mpm_state.grid.vel_in[cell[0], cell[1], cell[2], i_b] = qd.Vector.zero(gs.qd_float, 3)
 
     if qd.static(mpm_config.is_deterministic and not is_backward):
         func_sort_particles(mpm_state, mpm_info, mpm_config)
         func_gather_particles(mpm_state, mpm_info, mpm_config, is_g2p_backward=False)
-    elif qd.static(is_backward):
-        # The particles held in place zero the cells of their stencils once every particle scattered into them
+    else:
+        # The particles held in place act as boundary conditions of the grid, zeroing the cells of their stencils once
+        # every particle scattered into them, as the gather does (see func_gather_particles)
         for i_p, i_b in qd.ndrange(*mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles.F))):
             if mpm_state.particles.is_active[i_p, i_b] and not mpm_info.particles.is_free[i_p]:
                 base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)
