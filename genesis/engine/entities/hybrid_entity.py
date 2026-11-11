@@ -26,11 +26,7 @@ from .base_entity import Entity
 
 
 class MPMHybridPart(NamedTuple):
-    """
-    The soft part of a hybrid entity, as its entity registers it to the solver.
-
-    The fields are the arrays of RigidMPMHybridInfo but `particles_group_start`, in the same order.
-    """
+    """The soft part of a hybrid entity, which RigidMPMHybrid drives toward the links of its rigid part."""
 
     groups_link_idx: np.ndarray
     groups_geom_idx: np.ndarray
@@ -150,10 +146,10 @@ class HybridEntity(Entity):
             if isinstance(material_soft, gs.materials.MPM.Base):
                 n_particles = len(part_soft.init_particles)
                 self._mpm_hybrid_part = MPMHybridPart(
-                    groups_link_idx=np.asarray(link_idcs, dtype=gs.np_int),
-                    groups_geom_idx=np.asarray(geom_idcs, dtype=gs.np_int),
-                    groups_trans_local_to_global=np.asarray(trans_local_to_global, dtype=gs.np_float),
-                    groups_quat_local_to_global=np.asarray(quat_local_to_global, dtype=gs.np_float),
+                    groups_link_idx=np.asarray(link_idcs),
+                    groups_geom_idx=np.asarray(geom_idcs),
+                    groups_trans_local_to_global=np.asarray(trans_local_to_global),
+                    groups_quat_local_to_global=np.asarray(quat_local_to_global),
                     groups_damping=np.full(material_soft.n_groups, material.damping),
                     groups_soft_dv_coef=np.full(material_soft.n_groups, material.soft_dv_coef),
                     particles_idx=np.arange(part_soft.particle_start, part_soft.particle_start + n_particles),

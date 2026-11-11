@@ -543,7 +543,7 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                 skip_weak_normal=True,
             )
             if influence > legacy_coupler_info.influence_min[None]:
-                vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+                vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
                     i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
                 )
                 if is_colliding:
@@ -557,7 +557,6 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                         mpm_info,
                         is_exact=mpm_config.is_deterministic and not is_backward,
                     )
-                vel = vel_new
     return vel
 
 
@@ -599,12 +598,11 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
         skip_weak_normal=False,
     )
     if influence > legacy_coupler_info.influence_min[None]:
-        vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+        vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
             i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
         )
         if is_colliding:
             func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
-        vel = vel_new
 
     # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
     # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
