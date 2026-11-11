@@ -813,16 +813,17 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
 
 class NewtonOptions(Options):
     """
-    Options of the iterative solve of the implicit material point method (MPM) solver, which moves its particles over
-    every substep together with the rigid entities in contact with them.
+    Options of the iterative solve of the implicit material point method (MPM) solver and of the cloth, which moves
+    the particles or the cloth over every substep together with the rigid entities in contact with them.
 
-    The implicit solver is enabled by `MPMOptions.use_implicit_solver`.
+    The implicit MPM solver is enabled by `MPMOptions.use_implicit_solver`, and the cloth is solved this way whenever
+    the scene holds a `gs.materials.FEM.Cloth` entity.
 
     Parameters
     ----------
     velocity_tol : float, optional
         Convergence tolerance of the solve, in m/s: the solve of a substep stops once an iteration changes the velocity
-        of every MPM particle and of every rigid entity in contact with them by less than this value. A smaller value
+        of every MPM particle, cloth vertex and rigid entity in contact with them by less than this value. A smaller value
         gives a more accurate motion at the cost of more iterations per substep, and a larger one a faster but less
         accurate one. Defaults to 5e-2.
     max_iterations : int, optional
@@ -858,3 +859,28 @@ class NewtonOptions(Options):
     def model_post_init(self, context: Any) -> None:
         if self.line_search_shrink >= 1.0:
             gs.raise_exception(f"'line_search_shrink' must be below 1, got {self.line_search_shrink}.")
+
+
+class IPCOptions(Options):
+    """
+    Options of the incremental potential contact (IPC) of the cloth, which keeps it from crossing the surfaces it
+    touches.
+
+    The contact acts within a band of width 'd_hat' beyond the contact thickness of the cloth (see
+    `gs.materials.FEM.Cloth`), its repulsion growing without bound as the gap closes, so the cloth never reaches the
+    thickness.
+
+    Parameters
+    ----------
+    d_hat : float, optional
+        Width of the contact band, in m. A wider band starts pushing the cloth away earlier, which spreads the contact
+        over more substeps and eases the solve, at the cost of a visible gap: a cloth at rest hovers within the band.
+        Defaults to 1e-2.
+    friction_eps_v : float, optional
+        Sliding velocity below which the friction of a contact eases into static friction, in m/s. A smaller value holds
+        a resting cloth more firmly in place at the cost of a stiffer, harder solve, while a larger one lets it creep.
+        Defaults to 1e-2.
+    """
+
+    d_hat: PositiveFloat = 1e-2
+    friction_eps_v: PositiveFloat = 1e-2

@@ -10,6 +10,7 @@ from .renderers import Rasterizer, RendererOptions
 from .solvers import (
     BaseCouplerOptions,
     FEMOptions,
+    IPCOptions,
     KinematicOptions,
     LegacyCouplerOptions,
     MPMOptions,
@@ -42,6 +43,7 @@ class SceneOptions(Options):
     fem: FEMOptions = Field(default_factory=FEMOptions)
     pbd: PBDOptions = Field(default_factory=PBDOptions)
     newton: NewtonOptions = Field(default_factory=NewtonOptions)
+    ipc: IPCOptions = Field(default_factory=IPCOptions)
     coupler: BaseCouplerOptions = Field(default_factory=LegacyCouplerOptions)
     vis: VisOptions = Field(default_factory=VisOptions)
     viewer: ViewerOptions = Field(default_factory=ViewerOptions)

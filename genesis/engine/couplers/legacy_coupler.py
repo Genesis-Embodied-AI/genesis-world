@@ -371,7 +371,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
     @property
     def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
-        """Whether the rigid geoms couple with the MPM, SPH, PBD and FEM solvers, in this order."""
+        """Whether the rigid geoms couple with the MPM, SPH, PBD and FEM solvers, in this order.
+
+        The cloth solved by the Newton solver touches the rigid planes through its own contact (see
+        'FEMSolver.is_solved_in_global_newton'), apart from the coupler.
+        """
         return tuple(
             [
                 self.rigid_solver.is_active and solver.is_active and is_enabled
@@ -379,7 +383,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     (self.mpm_solver, self.options.rigid_mpm),
                     (self.sph_solver, self.options.rigid_sph),
                     (self.pbd_solver, self.options.rigid_pbd),
-                    (self.fem_solver, self.options.rigid_fem),
+                    (self.fem_solver, self.options.rigid_fem and not self.fem_solver.is_solved_in_global_newton),
                 )
             ]
         )
@@ -848,7 +852,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.legacy_coupler_info,
             )
 
-        if self.fem_solver.is_active:
+        if self.fem_solver.is_active and not self.fem_solver.is_solved_in_global_newton:
             kernel_fem_surface_force(
                 self.fem_solver.fem_state,
                 self.mpm_solver.mpm_state,

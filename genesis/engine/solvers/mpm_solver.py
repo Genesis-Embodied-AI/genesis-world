@@ -784,6 +784,9 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.mpm_state = self.data_manager.mpm_state
         self.mpm_info = self.data_manager.mpm_info
         self.particle_constraints = MPMParticleConstraints(unused=True)
+        # The Newton solve of a scene without the implicit solver reads a placeholder grid (see NewtonSolver)
+        if not is_implicit:
+            self.sparse_grid = MPMSparseGrid(unused=True)
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
             self.data_manager.errno,

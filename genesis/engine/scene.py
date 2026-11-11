@@ -30,6 +30,7 @@ from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     BaseCouplerOptions,
     FEMOptions,
+    IPCOptions,
     KinematicOptions,
     MPMOptions,
     NewtonOptions,
@@ -160,7 +161,9 @@ class Scene(RBC):
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
     newton_options : gs.options.NewtonOptions
         The options configuring the newton_solver (``scene.sim.NewtonSolver``), which solves every substep of the
-        implicit MPM solver together with the rigid entities in contact with its particles.
+        implicit MPM solver and of the cloth together with the rigid entities in contact with them.
+    ipc_options : gs.options.IPCOptions
+        The options configuring the incremental potential contact (IPC) of the cloth solved by the newton_solver.
     coupler_options : gs.options.CouplerOptions
         The options configuring the `coupler` between different solvers.
     vis_options : gs.options.VisOptions
@@ -188,6 +191,7 @@ class Scene(RBC):
         fem_options: FEMOptions | None = None,
         pbd_options: PBDOptions | None = None,
         newton_options: NewtonOptions | None = None,
+        ipc_options: IPCOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
@@ -209,6 +213,7 @@ class Scene(RBC):
             fem_options,
             pbd_options,
             newton_options,
+            ipc_options,
             coupler_options,
             vis_options,
             viewer_options,
@@ -229,6 +234,7 @@ class Scene(RBC):
                 fem=fem_options,
                 pbd=pbd_options,
                 newton=newton_options,
+                ipc=ipc_options,
                 coupler=coupler_options,
                 vis=vis_options,
                 viewer=viewer_options,

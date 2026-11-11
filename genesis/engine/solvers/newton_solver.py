@@ -1,15 +1,19 @@
 """
-Newton solver of the substeps of the implicit material point method (MPM) solver.
+Newton solver of the substeps of the implicit material point method (MPM) solver and of the cloth.
 
 The solver runs the Newton iterations, the preconditioned conjugate gradient and the line search. The terms of the
 energy and their solve come from the solvers that own them: the MPM solver for the nodes of its grid (see
-'func_mpm_assemble' in mpm_solver.py), the rigid solver for its dofs (see rigid/global_newton.py), and the coupling for
-the contacts between them (see couplers/mpm_rigid_global_newton.py).
+'func_mpm_assemble' in mpm_solver.py), the FEM solver for the vertices of the cloth (see 'func_cloth_assemble' in
+fem_solver.py), the rigid solver for its dofs (see rigid/global_newton.py), the coupling for the contacts between the
+particles and the rigid geoms (see couplers/mpm_rigid_global_newton.py), and the incremental potential contact of the
+cloth with the fixed planes (see ipc_contact.py), whose data the Newton solver holds.
 """
 
 from collections.abc import Iterator
 from enum import IntEnum, auto
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 import quadrants as qd
 
@@ -49,11 +53,23 @@ from genesis.engine.solvers.rigid.global_newton import (
     func_rigid_step_forward,
     func_rigid_update_constraint,
 )
+from genesis.engine.materials import FEM
 from genesis.options.solvers import LegacyCouplerOptions, NewtonOptions
 from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import qd_isfinite, qd_to_numpy
 
 from .base_solver import ErrorCode, Solver
+from .fem_solver import (
+    TRIANGLE_PAIRS,
+    HINGE_PAIRS,
+    FEMInfo,
+    FEMState,
+    func_cloth_assemble,
+    func_cloth_energy,
+    func_cloth_init_line_search,
+    func_cloth_step_forward,
+)
+from .ipc_contact import IPCInfo, IPCState, func_halfplanes_init_substep
 from .mpm_solver import (
     STENCIL_PAIRS,
     MPMInfo,
@@ -70,14 +86,17 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
-# The arrays of the dofs and of the links of the rigid solver in the Newton solve, which a solve without them leaves out
+# The arrays of the dofs and of the links of the rigid solver in the Newton solve, which a solve without them leaves out,
+# and those of the contact of the cloth with the fixed planes, which a scene without them leaves out
 RIGID = "rigid"
+IPC = "ipc"
 
 
 class NewtonErrorCode(ErrorCode):
     """The error flags the Newton solver writes in its errno (see 'Solver.register_errors')."""
 
     INVALID_SOLVE_NAN = auto()
+    INVALID_CONTACT_THICKNESS = auto()
 
 
 class NewtonFailure(IntEnum):
@@ -158,6 +177,11 @@ class NewtonConfig(Config):
     # Whether the rigid solver has constraint rows. Their cost then joins the energy and the factor of the Hessian of
     # its Newton constraint solver preconditions its dofs, its Gauss cost and the factor of its mass matrix otherwise.
     has_rigid_rows: bool
+    # Whether the nodes of the implicit MPM solver and the vertices of the cloth join the unknowns (see NewtonSegment),
+    # and whether the cloth touches fixed planes (see ipc_contact.py)
+    has_mpm: bool
+    has_cloth: bool
+    has_halfplanes: bool
 
 
 class NewtonData(Data):
@@ -169,20 +193,24 @@ class NewtonData(Data):
     rigid_dofs: NewtonRigidDofs = field(labels=RIGID)
     rigid_links: NewtonRigidLinks = field(labels=RIGID)
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
+    ipc_state: IPCState = field(labels=IPC)
+    ipc_info: IPCInfo = field(labels=IPC)
 
 
 class NewtonSolver(Solver):
     """
-    Solver of the substeps of the implicit material point method (MPM) solver by Newton iterations on their incremental
-    potential.
+    Solver of the substeps of the implicit material point method (MPM) solver and of the cloth by Newton iterations on
+    their incremental potential.
 
     The unknowns of a substep are the displacement of the nodes of the sparse grid of the MPM solver over it (see
     MPMSparseGrid), and when the rigid geoms couple with the particles, the accelerations of the dofs of the rigid
-    solver, whose constraint solve then joins the energy (see 'RigidSolver.is_solved_in_global_newton'). Every iteration
-    solves the projected Hessian against the gradient by a preconditioned conjugate gradient (PCG) and searches a step
-    along the direction that lowers the energy, every environment iterating until its own convergence. The solve runs
-    once every solver has prepared its substep and the coupler has run, and before the solvers finish it, since the MPM
-    solver moves its particles by the displacement solved and the rigid solver integrates the accelerations solved.
+    solver, whose constraint solve then joins the energy (see 'RigidSolver.is_solved_in_global_newton'), or the
+    positions of the vertices of the cloth at its end (see 'FEMSolver.is_solved_in_global_newton'), with their contacts
+    with the fixed planes of the scene. Every iteration solves the projected Hessian against the gradient by a
+    preconditioned conjugate gradient (PCG) and searches a step along the direction that lowers the energy, every
+    environment iterating until its own convergence. The solve runs once every solver has prepared its substep and the
+    coupler has run, and before the solvers finish it, since the MPM solver moves its particles by the displacement
+    solved, the FEM solver takes the positions solved and the rigid solver integrates the accelerations solved.
     """
 
     # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
@@ -197,33 +225,65 @@ class NewtonSolver(Solver):
         self.newton_config: NewtonConfig | None = None
         self.rigid_dofs: NewtonRigidDofs | None = None
         self.rigid_links: NewtonRigidLinks | None = None
+        self.ipc_state: IPCState | None = None
+        self.ipc_info: IPCInfo | None = None
         # The stiffness of the contacts that the factor of the rigid solver adds, made once the rigid solver is built
         self._rigid_contact_stiffness: RigidContactStiffness | None = None
         # The rows of the linear system, rebuilt with a larger capacity when the grid of the MPM solver outgrows them,
-        # and the rows they replaced, kept referenced with their arrays freed (see 'grow_linear_system')
+        # and the rows they replaced, kept referenced with their arrays freed (see 'grow_newton_rows')
         self.newton_rows: NewtonRows | None = None
         self._newton_rows_replaced: list[NewtonRows] = []
 
     @property
     def is_active(self) -> bool:
         mpm_solver = self._sim.mpm_solver
-        return mpm_solver.is_active and mpm_solver._use_implicit_solver
+        is_mpm_implicit = mpm_solver.is_active and mpm_solver._use_implicit_solver
+        return is_mpm_implicit or self._sim.fem_solver.is_solved_in_global_newton
 
     def build(self) -> None:
         super().build()
+        if "ipc" in self._scene.options.model_fields_set and not isinstance(
+            self._sim.coupler.options, LegacyCouplerOptions
+        ):
+            gs.raise_exception(
+                "IPCOptions configure the contact of the cloth solved by the Newton solver, which requires "
+                f"LegacyCouplerOptions, got {type(self._sim.coupler.options).__name__}."
+            )
         if not self.is_active:
             return
         if self._requires_grad:
             gs.raise_exception(
-                "Differentiable simulation ('requires_grad=True') is not supported by the implicit MPM solver: set "
-                "MPMOptions(use_implicit_solver=False)."
+                "Differentiable simulation ('requires_grad=True') is not supported by the Newton solver of the implicit "
+                "MPM solver and of the cloth: set MPMOptions(use_implicit_solver=False), and remove the "
+                "gs.materials.FEM.Cloth entities."
             )
         if not isinstance(self._sim.coupler.options, LegacyCouplerOptions):
             gs.raise_exception(
-                "The implicit MPM solver requires LegacyCouplerOptions, got "
+                "The Newton solver of the implicit MPM solver and of the cloth requires LegacyCouplerOptions, got "
                 f"{type(self._sim.coupler.options).__name__}."
             )
+        mpm_solver = self._sim.mpm_solver
+        fem_solver = self._sim.fem_solver
         rigid_solver = self._sim.rigid_solver
+        has_mpm = mpm_solver.is_active and mpm_solver._use_implicit_solver
+        has_cloth = fem_solver.is_solved_in_global_newton
+        halfplanes_geom_idx = []
+        if has_cloth:
+            if has_mpm:
+                gs.raise_exception(
+                    "The cloth is not supported together with the implicit MPM solver: set "
+                    "MPMOptions(use_implicit_solver=False)."
+                )
+            if not all([isinstance(entity.material, FEM.Cloth) for entity in fem_solver.entities]):
+                gs.raise_exception("The cloth is not supported together with volumetric FEM entities.")
+            for entity in rigid_solver.entities:
+                for geom in entity.geoms:
+                    if geom.type != gs.GEOM_TYPE.PLANE or not geom.is_fixed:
+                        gs.raise_exception(
+                            "The cloth supports fixed planes as the only rigid entities ('gs.morphs.Plane' fixed in "
+                            f"the world), got a geom of type {geom.type.name} in entity '{entity.name}'."
+                        )
+                    halfplanes_geom_idx.append(geom.idx)
         rigid_options = self._scene.options.rigid
         has_rigid_dofs = rigid_solver.is_solved_in_global_newton
         if has_rigid_dofs:
@@ -244,12 +304,23 @@ class NewtonSolver(Solver):
                         f"Coupling the rigid solver with the implicit MPM solver requires RigidOptions({requirement}), "
                         "or else LegacyCouplerOptions(rigid_mpm=False)."
                     )
+        has_halfplanes = len(halfplanes_geom_idx) > 0
         self.newton_config = NewtonConfig(
             has_rigid_dofs=has_rigid_dofs,
             has_rigid_rows=not rigid_options.disable_constraint,
+            has_mpm=has_mpm,
+            has_cloth=has_cloth,
+            has_halfplanes=has_halfplanes,
         )
+        ipc_options = self._scene.options.ipc
         self.data_manager = NewtonData(
-            sizes={"envs": self._B, "dofs": max(rigid_solver.n_dofs, 1), "links": max(rigid_solver.n_links, 1)},
+            sizes={
+                "envs": self._B,
+                "dofs": max(rigid_solver.n_dofs, 1),
+                "links": max(rigid_solver.n_links, 1),
+                "vertices": fem_solver.n_vertices,
+                "halfplanes": len(halfplanes_geom_idx),
+            },
             values=dict(
                 newton_info=dict(
                     max_iterations=self._options.max_iterations,
@@ -258,17 +329,23 @@ class NewtonSolver(Solver):
                     displacement_tol=self._options.velocity_tol * self._sim.substep_dt,
                     pcg_max_iterations=self._options.pcg_max_iterations,
                     pcg_tol=self._options.pcg_tol,
-                )
+                ),
+                ipc_info=dict(d_hat=ipc_options.d_hat, friction_eps_v=ipc_options.friction_eps_v, ccd_eta=0.2),
             ),
-            unused={RIGID: not has_rigid_dofs},
+            unused={RIGID: not has_rigid_dofs, IPC: not has_halfplanes},
         )
         # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
         self.register_errors(
             self.data_manager.errno,
             {
                 NewtonErrorCode.INVALID_SOLVE_NAN: (
-                    "The Newton solve of the implicit MPM solver produced values that are not finite. Please decrease "
-                    "the simulation timestep or adjust the material parameters."
+                    "The Newton solve of the implicit MPM solver or of the cloth produced values that are not finite. "
+                    "Please decrease the simulation timestep or adjust the material parameters."
+                ),
+                NewtonErrorCode.INVALID_CONTACT_THICKNESS: (
+                    "A vertex of the cloth lies within its contact thickness of a plane, where its contact is "
+                    "undefined. Start the cloth farther than its contact thickness from the planes, or lower "
+                    "gs.materials.FEM.Cloth(contact_thickness)."
                 ),
             },
         )
@@ -277,6 +354,10 @@ class NewtonSolver(Solver):
         self.newton_info = self.data_manager.newton_info
         self.rigid_dofs = self.data_manager.rigid_dofs
         self.rigid_links = self.data_manager.rigid_links
+        self.ipc_state = self.data_manager.ipc_state
+        self.ipc_info = self.data_manager.ipc_info
+        if has_halfplanes:
+            self.ipc_info.halfplanes_geom_idx.from_numpy(np.array(halfplanes_geom_idx, dtype=gs.np_int))
 
     @property
     def data(self) -> Iterator[DataItem]:
@@ -287,6 +368,9 @@ class NewtonSolver(Solver):
             if self.newton_config.has_rigid_dofs:
                 yield from iter_data(self.data_manager, "rigid_dofs")
                 yield from iter_data(self.data_manager, "rigid_links")
+            if self.newton_config.has_halfplanes:
+                yield from iter_data(self.data_manager, "ipc_info")
+                yield from iter_data(self.data_manager, "ipc_state")
             yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         if self.newton_rows is not None:
             yield from iter_data(self, "newton_rows")
@@ -296,30 +380,54 @@ class NewtonSolver(Solver):
 
     def substep_post_coupling(self) -> None:
         """
-        Solve the substep of the implicit material point method (MPM) solver before the solvers finish it, with that of
-        the rigid solver when it is solved in the global Newton solve (see 'RigidSolver.is_solved_in_global_newton').
+        Solve the substep of the implicit material point method (MPM) solver or of the cloth before the solvers finish
+        it, with that of the rigid solver when it is solved in the global Newton solve (see
+        'RigidSolver.is_solved_in_global_newton').
         """
         if not self.is_active:
             return
         mpm_solver = self._sim.mpm_solver
+        fem_solver = self._sim.fem_solver
         rigid_solver = self._sim.rigid_solver
         mpm_state, mpm_info, sparse_grid = mpm_solver.mpm_state, mpm_solver.mpm_info, mpm_solver.sparse_grid
+        fem_state, fem_info = fem_solver.fem_state, fem_solver.fem_info
         dyn_state, dyn_info, rigid_info = rigid_solver.dyn_state, rigid_solver.dyn_info, rigid_solver.rigid_info
         constraint_state = rigid_solver.constraint_solver.constraint_state
         errno = self._errno
         if self.newton_config.has_rigid_dofs and self._rigid_contact_stiffness is None:
             self._rigid_contact_stiffness = RigidContactStiffness(self.rigid_links, dyn_state.dofs, dyn_info.links)
         # The rows of every segment (see NewtonSegment): the nodes of the grid hold their kinetic block and the stencil
-        # blocks of the tasks of the assembly (see STENCIL_PAIRS in mpm_solver.py)
-        n_mpm_rows = int(qd_to_numpy(sparse_grid.n_blocks)) * 64
-        n_mpm_triplets = n_mpm_rows + STENCIL_PAIRS * int(qd_to_numpy(mpm_state.sorted_particles.n_tasks))
-        n_cloth_rows, n_cloth_triplets = 0, 0
+        # blocks of the tasks of the assembly (see STENCIL_PAIRS in mpm_solver.py), and the vertices of the cloth their
+        # diagonal block and the blocks of their triangles and hinges (see TRIANGLE_PAIRS in fem_solver.py)
+        n_mpm_rows, n_mpm_triplets, n_cloth_rows, n_cloth_triplets = 0, 0, 0, 0
+        if self.newton_config.has_mpm:
+            n_mpm_rows = int(qd_to_numpy(sparse_grid.n_blocks)) * 64
+            n_mpm_triplets = n_mpm_rows + STENCIL_PAIRS * int(qd_to_numpy(mpm_state.sorted_particles.n_tasks))
+        if self.newton_config.has_cloth:
+            n_cloth_rows = self._B * fem_solver.n_vertices
+            n_hinges = 0
+            if fem_solver.fem_config.has_quadratic_bending:
+                n_hinges += fem_info.cloth_quadratic_hinges.verts_idx.shape[0]
+            if fem_solver.fem_config.has_dihedral_bending:
+                n_hinges += fem_info.cloth_dihedral_hinges.verts_idx.shape[0]
+            n_cloth_triplets = n_cloth_rows + self._B * (
+                TRIANGLE_PAIRS * fem_info.cloth_triangles.verts_idx.shape[0] + HINGE_PAIRS * n_hinges
+            )
         self.newton_rows = grow_newton_rows(
             n_mpm_rows + n_cloth_rows, n_mpm_triplets + n_cloth_triplets, self.newton_rows, self._newton_rows_replaced
         )
-        args_state = (mpm_state, sparse_grid, self.rigid_dofs, self.rigid_links, dyn_state, constraint_state)
-        args_info = (mpm_info, dyn_info, rigid_info)
-        args_config = (mpm_solver.mpm_config, rigid_solver.rigid_config, self.newton_config)
+        args_state = (
+            mpm_state,
+            sparse_grid,
+            fem_state,
+            self.ipc_state,
+            self.rigid_dofs,
+            self.rigid_links,
+            dyn_state,
+            constraint_state,
+        )
+        args_info = (mpm_info, fem_info, self.ipc_info, dyn_info, rigid_info)
+        args_config = (mpm_solver.mpm_config, fem_solver.fem_config, rigid_solver.rigid_config, self.newton_config)
         kernel_init_substep(
             n_mpm_rows,
             n_mpm_triplets,
@@ -346,7 +454,19 @@ class NewtonSolver(Solver):
                     rigid_solver.rigid_config,
                     self.newton_config,
                 )
-            kernel_assemble_mpm(self.newton_rows, mpm_state, sparse_grid, mpm_info, mpm_solver.mpm_config)
+            kernel_assemble_rows(
+                self.newton_rows,
+                mpm_state,
+                sparse_grid,
+                fem_state,
+                self.ipc_state,
+                mpm_info,
+                fem_info,
+                self.ipc_info,
+                mpm_solver.mpm_config,
+                fem_solver.fem_config,
+                self.newton_config,
+            )
             assemble_bcoo_matrix(self.newton_rows.matrix, block_scalars=9)
             if self.newton_config.has_rigid_dofs:
                 kernel_assemble_rigid(
@@ -393,7 +513,7 @@ class NewtonSolver(Solver):
             if qd_to_numpy(self.newton_loops.has_failed_iterations):
                 kernel_clear_failed_iterations(self.newton_loops)
                 gs.logger.warning(
-                    "The Newton solve of the implicit MPM solver stopped before converging: raise "
+                    "The Newton solve of the implicit MPM solver or of the cloth stopped before converging: raise "
                     "NewtonOptions(max_iterations) or loosen NewtonOptions(velocity_tol)."
                 )
 
@@ -410,14 +530,19 @@ def func_add_energies(
     rigid_cost: qd.Tensor,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
@@ -426,35 +551,48 @@ def func_add_energies(
 
     `envs_mask` selects the environments, and `energies` holds their entries. The energy is the incremental potential of
     the particles, of their contacts with the rigid geoms and of the nodes, the particles and the nodes of an
-    environment following one another, and when the dofs of the rigid solver join the unknowns, the cost of the rigid
-    solver at their iterate, scaled by dt^4 to the units of the incremental potential.
+    environment following one another, or that of the cloth (see 'func_cloth_energy' in fem_solver.py), and when the
+    dofs of the rigid solver join the unknowns, the cost of the rigid solver at their iterate, scaled by dt^4 to the
+    units of the incremental potential.
     """
     if qd.static(newton_config.has_rigid_dofs):
         func_link_spatial_disp(rigid_dofs.x, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
-    n_valid = mpm_state.sorted_particles.n_valid[None]
-    qd.loop_config(block_dim=256)
-    for i_s in range((n_valid + 31) // 32 * 32):
-        i_b_key = gs.qd_int(-1)
-        energy = gs.qd_float(0.0)
-        if i_s < n_valid:
-            energy_contact = gs.qd_float(0.0)
-            if qd.static(mpm_config.has_rigid_contact):
-                energy_contact, gradient_contact, hessian_contact = func_contact_terms(
-                    i_s,
-                    mpm_state,
-                    sparse_grid,
-                    rigid_links,
-                    dyn_state,
-                    mpm_info,
-                    dyn_info,
-                    newton_config.has_rigid_dofs,
-                )
-            i_b, energy_particle = func_particle_energy(i_s, energy_contact, mpm_state, sparse_grid, mpm_info)
-            if envs_mask[i_b]:
-                i_b_key = i_b
-                energy = energy_particle
-        func_add_by_key(i_b_key, energy, energies)
-    func_mpm_kinetic_energy(energies, envs_mask, sparse_grid, mpm_info)
+    if qd.static(newton_config.has_mpm):
+        n_valid = mpm_state.sorted_particles.n_valid[None]
+        qd.loop_config(block_dim=256)
+        for i_s in range((n_valid + 31) // 32 * 32):
+            i_b_key = gs.qd_int(-1)
+            energy = gs.qd_float(0.0)
+            if i_s < n_valid:
+                energy_contact = gs.qd_float(0.0)
+                if qd.static(mpm_config.has_rigid_contact):
+                    energy_contact, gradient_contact, hessian_contact = func_contact_terms(
+                        i_s,
+                        mpm_state,
+                        sparse_grid,
+                        rigid_links,
+                        dyn_state,
+                        mpm_info,
+                        dyn_info,
+                        newton_config.has_rigid_dofs,
+                    )
+                i_b, energy_particle = func_particle_energy(i_s, energy_contact, mpm_state, sparse_grid, mpm_info)
+                if envs_mask[i_b]:
+                    i_b_key = i_b
+                    energy = energy_particle
+            func_add_by_key(i_b_key, energy, energies)
+        func_mpm_kinetic_energy(energies, envs_mask, sparse_grid, mpm_info)
+    if qd.static(newton_config.has_cloth):
+        func_cloth_energy(
+            energies,
+            envs_mask,
+            fem_state,
+            ipc_state,
+            fem_info,
+            ipc_info,
+            fem_config,
+            has_halfplanes=newton_config.has_halfplanes,
+        )
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_update_constraint(
             rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows
@@ -476,14 +614,19 @@ def kernel_init_substep(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
     errno: qd.Tensor,
@@ -495,14 +638,27 @@ def kernel_init_substep(
     The dofs of the rigid solver start as its constraint solve starts (see 'func_rigid_init_substep' in
     rigid/global_newton.py), and the links that the particles touch are constrained over the substep (see
     'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py). The rows of the substep are laid out from
-    the rows and the triplets of every segment (see NewtonSegment).
+    the rows and the triplets of every segment (see NewtonSegment). The contact of the cloth with the planes takes
+    their pose and the friction of the substep from its start (see 'func_halfplanes_init_substep' in ipc_contact.py).
     """
     for _ in range(1):
         func_set_segment(NewtonSegment.MPM_NODES, n_mpm_rows, n_mpm_triplets, newton_rows)
         func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets, newton_rows)
         newton_loops.is_newton_running[None] = 0
+    if qd.static(newton_config.has_halfplanes):
+        func_halfplanes_init_substep(
+            fem_state.vertices.pos,
+            fem_info.cloth_vertices.contact_thickness,
+            fem_info.cloth_vertices.contact_resistance,
+            ipc_state,
+            dyn_state,
+            ipc_info,
+            dyn_info,
+            penetration_errno=int(NewtonErrorCode.INVALID_CONTACT_THICKNESS),
+            errno=errno,
+        )
     for i_b in range(newton_envs.is_active.shape[0]):
-        is_active = (errno[i_b] & NewtonErrorCode.INVALID_SOLVE_NAN) == 0
+        is_active = errno[i_b] == 0
         newton_envs.is_active[i_b] = is_active
         newton_envs.is_converged[i_b] = False
         newton_envs.failure[i_b] = NewtonFailure.NONE
@@ -521,14 +677,19 @@ def kernel_init_substep(
         newton_envs.rigid_cost,
         mpm_state,
         sparse_grid,
+        fem_state,
+        ipc_state,
         rigid_dofs,
         rigid_links,
         dyn_state,
         constraint_state,
         mpm_info,
+        fem_info,
+        ipc_info,
         dyn_info,
         rigid_info,
         mpm_config,
+        fem_config,
         rigid_config,
         newton_config,
     )
@@ -567,16 +728,33 @@ def kernel_assemble_mpm_rigid_coupling(
 
 
 @qd.kernel
-def kernel_assemble_mpm(
+def kernel_assemble_rows(
     newton_rows: NewtonRows,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
+    newton_config: qd.template(),
 ):
-    """Assemble the rows of the nodes of the MPM solver at the current iterate (see 'func_mpm_assemble' in
-    mpm_solver.py)."""
-    func_mpm_assemble(newton_rows, mpm_state, sparse_grid, mpm_info, mpm_config)
+    """Assemble the rows of every segment at the current iterate: the nodes of the MPM solver (see 'func_mpm_assemble'
+    in mpm_solver.py) and the vertices of the cloth (see 'func_cloth_assemble' in fem_solver.py)."""
+    if qd.static(newton_config.has_mpm):
+        func_mpm_assemble(newton_rows, mpm_state, sparse_grid, mpm_info, mpm_config)
+    if qd.static(newton_config.has_cloth):
+        func_cloth_assemble(
+            newton_rows,
+            fem_state,
+            ipc_state,
+            fem_info,
+            ipc_info,
+            fem_config,
+            has_halfplanes=newton_config.has_halfplanes,
+        )
 
 
 @qd.kernel
@@ -584,14 +762,19 @@ def kernel_assemble_rigid(
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
     rigid_contact_stiffness: qd.template(),
@@ -628,15 +811,20 @@ def kernel_pcg_start(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     newton_info: NewtonInfo,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
@@ -848,14 +1036,19 @@ def kernel_pcg_loop(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
@@ -894,15 +1087,20 @@ def kernel_start_line_search(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     newton_info: NewtonInfo,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
@@ -910,23 +1108,37 @@ def kernel_start_line_search(
     Set the Newton direction of every environment still iterating, minus the solution of the preconditioned conjugate
     gradient (PCG), and start its line search from the full step.
 
-    An environment converges once its direction moves every particle and every dof by less than the tolerance, the step
-    being taken still. The first step stays short of the first zero volume of a liquid particle (see
-    'func_mpm_init_line_search' in mpm_solver.py).
+    An environment converges once its direction moves every particle, every vertex of the cloth and every dof by less
+    than the tolerance, the step being taken still. The first step stays short of the first zero volume of a liquid
+    particle (see 'func_mpm_init_line_search' in mpm_solver.py) and of the first contact of the cloth with a plane (see
+    'func_cloth_init_line_search' in fem_solver.py).
     """
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.max_displacement[i_b] = 0.0
         newton_envs.alpha[i_b] = 1.0
         newton_envs.n_line_search_iterations[i_b] = 0
-    func_mpm_init_line_search(
-        newton_rows,
-        newton_envs.is_active,
-        newton_envs.max_displacement,
-        newton_envs.alpha,
-        mpm_state,
-        sparse_grid,
-        mpm_info,
-    )
+    if qd.static(newton_config.has_mpm):
+        func_mpm_init_line_search(
+            newton_rows,
+            newton_envs.is_active,
+            newton_envs.max_displacement,
+            newton_envs.alpha,
+            mpm_state,
+            sparse_grid,
+            mpm_info,
+        )
+    if qd.static(newton_config.has_cloth):
+        func_cloth_init_line_search(
+            newton_rows,
+            newton_envs.is_active,
+            newton_envs.max_displacement,
+            newton_envs.alpha,
+            fem_state,
+            ipc_state,
+            fem_info,
+            ipc_info,
+            has_halfplanes=newton_config.has_halfplanes,
+        )
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_init_line_search(rigid_dofs, newton_envs.is_active, newton_envs.max_displacement)
     for _ in range(1):
@@ -948,25 +1160,33 @@ def kernel_line_search_trial(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     newton_info: NewtonInfo,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
     """
-    Move the nodes and the dofs of every environment still searching to the trial point of its step, and accept the step
-    once the energy there is at most the energy at the start point, or shrink it.
+    Move the nodes, the vertices of the cloth and the dofs of every environment still searching to the trial point of
+    its step, and accept the step once the energy there is at most the energy at the start point, or shrink it.
 
     A converged or failed environment takes its step at once, and an environment out of trials keeps its last one.
     """
-    func_mpm_step_forward(sparse_grid, newton_envs.is_line_search_active, newton_envs.alpha)
+    if qd.static(newton_config.has_mpm):
+        func_mpm_step_forward(sparse_grid, newton_envs.is_line_search_active, newton_envs.alpha)
+    if qd.static(newton_config.has_cloth):
+        func_cloth_step_forward(newton_envs.is_line_search_active, newton_envs.alpha, fem_state)
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_step_forward(rigid_dofs, newton_envs.is_line_search_active, newton_envs.alpha)
     for i_b in range(newton_envs.is_active.shape[0]):
@@ -977,14 +1197,19 @@ def kernel_line_search_trial(
         newton_envs.rigid_cost,
         mpm_state,
         sparse_grid,
+        fem_state,
+        ipc_state,
         rigid_dofs,
         rigid_links,
         dyn_state,
         constraint_state,
         mpm_info,
+        fem_info,
+        ipc_info,
         dyn_info,
         rigid_info,
         mpm_config,
+        fem_config,
         rigid_config,
         newton_config,
     )
@@ -1029,14 +1254,19 @@ def kernel_finish_rigid(
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    fem_state: FEMState,
+    ipc_state: IPCState,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    fem_info: FEMInfo,
+    ipc_info: IPCInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
+    fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
     errno: qd.Tensor,
