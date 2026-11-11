@@ -1,0 +1,19 @@
+genesis/engine/solvers/kinematic_solver.py
+  s_f2c643cefc552f::t_3b3cdc9cc55fb0 188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa3bf8f4bcb914d659292ed71b2b5dc99af24c2c",
+  "prompts": {},
+  "sessions": {
+    "s_f2c643cefc552f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a8f3f200055dc0d52",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
