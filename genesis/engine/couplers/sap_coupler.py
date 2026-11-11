@@ -5768,14 +5768,18 @@ class RigidFloorVertContactHandler(FloorContactMixin, RigidContactHandler):
         for i_v, i_b in qd.ndrange(verts_info.is_fixed.shape[0], n_envs, axes=qd.static(eoa(free_verts_state.pos))):
             if verts_info.is_fixed[i_v]:
                 continue
+            i_g = verts_info.geom_idx[i_v]
+            i_l = geoms_info.link_idx[i_g]
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            # Leave out the geoms of the variants the environment does not carry (see func_update_geoms)
+            if not (links_info.geom_start[I_l] <= i_g < links_info.geom_end[I_l]):
+                continue
             i_fv = verts_info.verts_state_idx[i_v]
             pos_v = free_verts_state.pos[i_fv, i_b]
             i_g_ground = sap_info.ground_geom_idx[None]
             distance = pos_v.z - geoms_state.pos[i_g_ground, i_b].z
             if distance > 0.0:
                 continue
-            i_g = verts_info.geom_idx[i_v]
-            i_l = geoms_info.link_idx[i_g]
             i_p = func_add_slot(
                 i_b,
                 self.contact_pairs.envs_n_pairs,
@@ -5841,7 +5845,8 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
             i_g = sap_info.rigid_volume_elems_geom_idx[i_e]
             i_l = geoms_info.link_idx[i_g]
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if links_info.is_fixed[I_l]:
+            # Leave out the geoms of the variants the environment does not carry (see func_update_geoms)
+            if links_info.is_fixed[I_l] or not (links_info.geom_start[I_l] <= i_g < links_info.geom_end[I_l]):
                 continue
             i_g_ground = sap_info.ground_geom_idx[None]
             ground_pos = geoms_state.pos[i_g_ground, i_b]

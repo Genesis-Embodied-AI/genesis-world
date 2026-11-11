@@ -584,6 +584,82 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
 
 @pytest.mark.required("sparse")
+@pytest.mark.parametrize("rigid_floor_contact_type", ["tet", "vert"])
+def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
+    SLAB_SIZE = (0.4, 0.4, 0.2)
+    CUBE_SIZE = (0.1, 0.1, 0.1)
+    RHO = 1000.0
+    GRAVITY = 9.81
+    DT = 1 / 60
+    SUBSTEPS = 2
+    SAP_TAUD = 0.1
+    SAP_BETA = 1.0
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_taud=SAP_TAUD,
+            sap_beta=SAP_BETA,
+            rigid_floor_contact_type=rigid_floor_contact_type,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    # A slab in the first environment and a small cube in the second, each starting slightly sunk into the ground. The
+    # second environment keeps the slab where it was last placed, sunk deep into the ground, which it must not touch.
+    variants = scene.add_entity(
+        morph=(
+            gs.morphs.Box(
+                size=SLAB_SIZE,
+                pos=(0.0, 0.0, 0.5 * SLAB_SIZE[2] - 0.002),
+            ),
+            gs.morphs.Box(
+                size=CUBE_SIZE,
+                pos=(0.0, 0.0, 0.5 * CUBE_SIZE[2] - 0.002),
+            ),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    for _ in range(70):
+        scene.step()
+
+    # Each environment rests still on its own variant
+    assert_allclose(variants.get_vel()[..., 2], 0.0, atol=1e-5)
+    assert_allclose(variants.get_ang(), 0.0, atol=1e-4)
+
+    if rigid_floor_contact_type == "vert":
+        # The four bottom corners are near-rigid contacts, whose regularization beta^2 / (4 pi^2) * |W| / 3 derives from
+        # the Delassus operator W = I / m + [r]x I^-1 [r]x^T of a corner at r from the center of mass. At rest, each of
+        # them carries the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight.
+        substep_dt = DT / SUBSTEPS
+        rest_depths = []
+        for size in (SLAB_SIZE, CUBE_SIZE):
+            mass = RHO * np.prod(size)
+            inertia = np.diag(mass / 12.0 * (np.sum(np.square(size)) - np.square(size)))
+            corner_cross = np.cross(0.5 * np.array((size[0], size[1], -size[2])), np.eye(3))
+            delassus = np.eye(3) / mass + corner_cross @ np.linalg.inv(inertia) @ corner_cross.T
+            regularization = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus) / 3.0
+            rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) * regularization / 4.0)
+        rest_heights = 0.5 * torch.tensor((SLAB_SIZE[2], CUBE_SIZE[2]), dtype=gs.tc_float, device=gs.device)
+        assert_allclose(rest_heights - variants.get_pos()[..., 2], rest_depths, rtol=5e-4)
+
+
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("enable_lagged_friction", [False, True])
 def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
     PLANE_HEIGHT = 0.1
