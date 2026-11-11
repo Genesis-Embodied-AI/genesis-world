@@ -108,6 +108,12 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     """
 
     influence_min: qd.Tensor = field(float, shape=())
+    # The tolerance relative to the speed of a particle within which it meets a bound of its velocity (see
+    # func_sph_particle_collide_with_rigid_geoms)
+    velocity_tol: qd.Tensor = field(float, shape=())
+    # The determinant of the Gram matrix of unit normals below which they count as dependent (see
+    # func_project_on_bounds)
+    normals_independence_min: qd.Tensor = field(float, shape=())
     animate_inv_dt: qd.Tensor = field(float, shape=())
     softness_min: qd.Tensor = field(float, shape=())
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
@@ -233,6 +239,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.legacy_coupler_info = LegacyCouplerInfo(
             values=dict(
                 influence_min=0.1,
+                velocity_tol=1e-6,
+                normals_independence_min=1e-6,
                 animate_inv_dt=min(1.0 / self.pbd_solver.substep_dt, 50.0),
                 softness_min=1e-10,
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
@@ -567,13 +575,196 @@ def func_point_vel_after_collisions_with_rigid_geoms(
 
 
 @qd.func
-def func_sph_particle_vel_after_collision_with_rigid_geom(
+def func_sph_particle_geom_bound(
     i_g: int,
     i_b: int,
-    pos_world: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    vel_free: qd.types.vector(3),
+    geoms_state: GeomsState,
+    links_state: LinksState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+    sdf_info: SDFInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
+    collider_config: qd.template(),
+):
+    """
+    Return the signed distance of an SPH particle to a rigid geom, the influence and the normal of the geom there, and
+    the lower bound the geom sets on the normal velocity of the particle, the velocity along the normal.
+
+    The bound keeps the normal velocity of the particle relative to the geom from turning inward beyond what its
+    restitution and its influence leave of it (see func_point_vel_after_collision_with_rigid_geom).
+    """
+    signed_dist, influence, normal_rigid = func_rigid_geom_influence(
+        i_g,
+        i_b,
+        pos,
+        geoms_state,
+        geoms_info,
+        rigid_info,
+        sdf_info,
+        legacy_coupler_info,
+        collider_config,
+        skip_weak_normal=False,
+    )
+    vel_rigid = func_vel_at_point(geoms_info.link_idx[i_g], i_b, pos, links_state)
+    rvel_normal = (vel_free - vel_rigid).dot(normal_rigid)
+    rvel_normal_bound = gs.qd_float(0.0)
+    if rvel_normal < 0.0:
+        rvel_normal_bound = rvel_normal * (1.0 - influence * (1.0 + geoms_info.coup_restitution[i_g]))
+    return signed_dist, influence, normal_rigid, normal_rigid.dot(vel_rigid) + rvel_normal_bound
+
+
+@qd.func
+def func_project_on_bounds(
+    vel_free: qd.types.vector(3),
+    normals: qd.types.matrix(4, 3),
+    bounds: qd.types.vector(4),
+    violation_tol: float,
+    legacy_coupler_info: LegacyCouplerInfo,
+    n_bounds: int,
+):
+    """
+    Return the velocity nearest to a free velocity that meets at most 4 lower bounds on its components along normals,
+    with the indices of the bounds met as equalities and their multipliers.
+
+    Where no velocity meets all the bounds, as for a particle squeezed between two approaching geoms, the bounds are
+    all lowered by the least common slack that lets a velocity meet them, which violates each of the opposing bounds by
+    the same amount. By duality, that slack is the largest weighted mean of the bounds over the non-negative weights
+    that sum to one and cancel the weighted sum of their normals. The nearest velocity then meets as equalities the
+    first set of at most 3 bounds whose multipliers are non-negative and whose solution meets all the others, the
+    solution of a strictly convex problem being unique.
+    """
+    slack = gs.qd_float(0.0)
+    for i_mask in range(16):
+        # The subsets of at least 2 of the bounds, as the columns of the normals and a row of ones, unused ones padded
+        mixing = qd.Matrix.zero(gs.qd_float, 4, 4)
+        n_subset = 0
+        for i_k in qd.static(range(4)):
+            if (i_mask >> i_k) & 1 and i_k < n_bounds:
+                for i_d in qd.static(range(3)):
+                    mixing[i_d, i_k] = normals[i_k, i_d]
+                mixing[3, i_k] = 1.0
+                n_subset = n_subset + 1
+        if n_subset >= 2 and i_mask < (1 << n_bounds):
+            gram = mixing.transpose() @ mixing
+            rhs = mixing.transpose() @ qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)
+            for i_k in qd.static(range(4)):
+                if not ((i_mask >> i_k) & 1):
+                    gram[i_k, i_k] = 1.0
+            if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
+                weights = gram.inverse() @ rhs
+                residual = (mixing @ weights - qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)).norm()
+                if weights.min() >= 0.0 and residual < legacy_coupler_info.normals_independence_min[None]:
+                    slack = qd.max(slack, weights.dot(bounds))
+    bounds_relaxed = bounds - slack * qd.Vector([1.0, 1.0, 1.0, 1.0], dt=gs.qd_float)
+
+    vel = vel_free
+    set_best = qd.Vector([-1, -1, -1], dt=gs.qd_int)
+    lambdas_best = qd.Vector.zero(gs.qd_float, 3)
+    violation_best = gs.qd_float(0.0)
+    is_found = False
+    # The sets are taken as (i_k0 <= i_k1 <= i_k2) of distinct indices, a repeated index ending the set
+    for i_k0 in range(n_bounds):
+        for i_k1 in range(i_k0, n_bounds):
+            for i_k2 in range(i_k1, n_bounds):
+                n_set = 1 + qd.select(i_k1 > i_k0, 1, 0) + qd.select(i_k2 > i_k1, 1, 0)
+                set_idx = qd.Vector([i_k0, i_k1, i_k2], dt=gs.qd_int)
+                if i_k2 > i_k1 and i_k1 == i_k0:
+                    n_set = 0
+                elif i_k1 > i_k0 and i_k2 == i_k1:
+                    set_idx = qd.Vector([i_k0, i_k1, -1], dt=gs.qd_int)
+                elif n_set == 1:
+                    set_idx = qd.Vector([i_k0, -1, -1], dt=gs.qd_int)
+                if n_set > 0 and (not is_found or violation_best > violation_tol):
+                    # The bounds of the set as columns, the unused ones left zero with identity equations
+                    normals_set = qd.Matrix.zero(gs.qd_float, 3, 3)
+                    bounds_set = qd.Vector.zero(gs.qd_float, 3)
+                    for i_s in qd.static(range(3)):
+                        if i_s < n_set:
+                            i_k = set_idx[i_s]
+                            for i_d in qd.static(range(3)):
+                                normals_set[i_d, i_s] = normals[i_k, i_d]
+                            bounds_set[i_s] = bounds_relaxed[i_k]
+                    gram = normals_set.transpose() @ normals_set
+                    rhs = bounds_set - normals_set.transpose() @ vel_free
+                    for i_s in qd.static(range(3)):
+                        if i_s >= n_set:
+                            gram[i_s, i_s] = 1.0
+                            rhs[i_s] = 0.0
+                    # The normals are unit vectors, so the determinant of their Gram matrix measures their independence
+                    if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
+                        lambdas_set = gram.inverse() @ rhs
+                        if lambdas_set.min() >= 0.0:
+                            vel_set = vel_free + normals_set @ lambdas_set
+                            violation = gs.qd_float(0.0)
+                            for i_k in range(n_bounds):
+                                normal_k = qd.Vector([normals[i_k, 0], normals[i_k, 1], normals[i_k, 2]])
+                                violation = qd.max(violation, bounds_relaxed[i_k] - normal_k.dot(vel_set))
+                            if not is_found or violation < violation_best:
+                                is_found = True
+                                violation_best = violation
+                                vel = vel_set
+                                set_best = set_idx
+                                lambdas_best = lambdas_set
+    return vel, set_best, lambdas_best
+
+
+@qd.func
+def func_active_frictions(
+    i_b: int,
+    pos: qd.types.vector(3),
     vel: qd.types.vector(3),
-    mass: float,
-    pressure: float,
+    active_geoms: qd.types.vector(3, dtype=gs.qd_int),
+    active_normals: qd.types.matrix(3, 3),
+    active_influences: qd.types.vector(3),
+    active_lambdas: qd.types.vector(3),
+    links_state: LinksState,
+    geoms_info: GeomsInfo,
+    rigid_info: RigidInfo,
+):
+    """
+    Return the velocity each active bound of an SPH particle takes back by the friction of its geom, as rows.
+
+    The friction of a geom takes back the tangential velocity relative to it by its coefficient times the normal
+    velocity change the geom caused before its restitution and its influence scaled it. The frictions of all the active
+    bounds are scaled down together so that none reverses the tangential velocity relative to its geom.
+    """
+    frictions = qd.Matrix.zero(gs.qd_float, 3, 3)
+    rvels_tan = qd.Matrix.zero(gs.qd_float, 3, 3)
+    friction_sum = qd.Vector.zero(gs.qd_float, 3)
+    for i_s in qd.static(range(3)):
+        i_g = active_geoms[i_s]
+        if i_g >= 0 and active_lambdas[i_s] > 0.0:
+            normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
+            rvel = vel - func_vel_at_point(geoms_info.link_idx[i_g], i_b, pos, links_state)
+            rvel_tan = rvel - rvel.dot(normal) * normal
+            rvel_tan_norm = rvel_tan.norm(rigid_info.EPS[None])
+            influence = active_influences[i_s]
+            rvel_normal_change = active_lambdas[i_s] / (influence * (1.0 + geoms_info.coup_restitution[i_g]))
+            friction = influence * qd.min(rvel_tan_norm, geoms_info.coup_friction[i_g] * rvel_normal_change)
+            for i_d in qd.static(range(3)):
+                frictions[i_s, i_d] = friction / rvel_tan_norm * rvel_tan[i_d]
+                rvels_tan[i_s, i_d] = rvel_tan[i_d]
+            friction_sum = friction_sum + friction / rvel_tan_norm * rvel_tan
+    # The largest share of the summed frictions that leaves the tangential velocity relative to each geom unreversed
+    scale = gs.qd_float(1.0)
+    for i_s in qd.static(range(3)):
+        if active_geoms[i_s] >= 0 and active_lambdas[i_s] > 0.0:
+            normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
+            rvel_tan = qd.Vector([rvels_tan[i_s, 0], rvels_tan[i_s, 1], rvels_tan[i_s, 2]])
+            friction_tan = friction_sum - friction_sum.dot(normal) * normal
+            friction_along = friction_tan.dot(rvel_tan)
+            if friction_along > rvel_tan.norm_sqr():
+                scale = qd.min(scale, rvel_tan.norm_sqr() / friction_along)
+    return frictions * scale
+
+
+@qd.func
+def func_sph_particle_collide_with_rigid_geoms(
+    i_p: int,
+    i_b: int,
+    sph_state: SPHState,
     geoms_state: GeomsState,
     links_state: LinksState,
     sph_info: SPHInfo,
@@ -586,66 +777,214 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
     collider_config: qd.template(),
 ):
     """
-    Return the velocity of an SPH particle colliding with a rigid geom.
+    Collide a sorted SPH particle with every rigid geom near it at once, and push the geoms by the static pressure.
 
-    The particle also pushes the geom by the static pressure of the liquid.
+    Each geom the particle lies close enough to bounds from below the normal velocity of the particle relative to the
+    geom (see func_sph_particle_geom_bound). The velocity of the particle is projected onto all these bounds jointly,
+    the nearest velocity meeting them all, which is the same whatever the order of the geoms and reproduces the
+    collision with a single geom. The friction of each geom then takes back the tangential velocity relative to it by
+    the share of the normal velocity change it caused, and a particle inside a geom is moved out to its surface. The
+    particle and each geom exchange the momentum of the velocity change the geom caused, with the static pressure the
+    particle pushes the geom with.
     """
-    # The pressure below also pushes the geom where the influence is too weak for the collision, which takes the normal
-    signed_dist, influence, normal_rigid = func_rigid_geom_influence(
-        i_g,
-        i_b,
-        pos_world,
-        geoms_state,
-        geoms_info,
-        rigid_info,
-        sdf_info,
-        legacy_coupler_info,
-        collider_config,
-        skip_weak_normal=False,
-    )
-    # The collision and the pressure push the geom at the particle, as one force
-    force = qd.Vector.zero(gs.qd_float, 3)
-    is_pushing = False
-    if influence > legacy_coupler_info.influence_min[None]:
-        vel, collision_force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
-            i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
-        )
-        if is_colliding:
-            force = collision_force
-            is_pushing = True
+    i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+    pos = sph_state.particles_reordered.pos[i_p, i_b]
+    vel_free = sph_state.particles_reordered.vel[i_p, i_b]
+    mass = sph_info.particles.mass[i_o]
+    pressure = sph_state.particles_reordered.p[i_p, i_b]
+    substep_dt = rigid_info.substep_dt[None]
+    violation_tol = legacy_coupler_info.velocity_tol[None] * (1.0 + vel_free.norm())
+    n_geoms = geoms_info.needs_coup.shape[0]
 
-    # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
-    # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
-    # surface and integrating the symmetric pressure force over the truncated kernel support yields the factor
-    # 2 * sigma(signed_dist), with sigma the kernel plane integral (see func_cubic_kernel_plane_integral in
-    # sph_solver.py). Sigma integrates to 1/2 across the support band, so a covering particle layer transmits
-    # exactly p per unit area: Archimedes buoyancy with no tuning constant. Fixed links are exempt: they cannot
-    # respond to the force, and the reaction is a conservative stiff kick that keeps fluid resting on them
-    # ringing forever, pumped by the acoustic pressure fluctuations of the fluid.
-    i_l = geoms_info.link_idx[i_g]
-    I_l = [i_l, i_b] if qd.static(legacy_coupler_config.is_links_info_batched) else i_l
-    if signed_dist < sph_info.support_radius[None] and pressure > 0 and not links_info.is_fixed[I_l]:
-        pressure_force = (
-            -2.0
-            * pressure
-            * sph_info.particle_volume[None]
-            * func_cubic_kernel_plane_integral(signed_dist, sph_info)
-            * normal_rigid
+    # The passes over the geoms take three stages. The first adds the static pressure the particle pushes each geom
+    # with to the free velocity, so that the bounds, set from the free velocity, apply to the velocity it leaves. The
+    # next ones each add a bound the current velocity violates to the active ones, at most 3 being active at the
+    # projection, the dimension of the velocity, and project the free velocity again onto these at most 4 bounds, which
+    # keeps the active ones. Once a pass finds every bound met, the friction of the active bounds is found, and a last
+    # pass gives each geom the momentum the particle lost to it, with the static pressure, in one wrench. A projection
+    # that has not converged by then keeps its last active bounds. The geometry stays put over the passes, so the first
+    # one keeps the geoms near the particle, and the later ones only visit these. With more near geoms than it keeps,
+    # the later passes visit every geom again, which gives the same velocity at the cost of querying their SDF again.
+    N_GEOMS_KEPT = qd.static(4)
+    kept_geoms = qd.Vector([-1] * N_GEOMS_KEPT, dt=gs.qd_int)
+    kept_dists = qd.Vector.zero(gs.qd_float, N_GEOMS_KEPT)
+    kept_influences = qd.Vector.zero(gs.qd_float, N_GEOMS_KEPT)
+    kept_normals = qd.Matrix.zero(gs.qd_float, N_GEOMS_KEPT, 3)
+    kept_bounds = qd.Vector.zero(gs.qd_float, N_GEOMS_KEPT)
+    n_kept = 0
+    is_kept_all = True
+    active_geoms = qd.Vector([-1, -1, -1], dt=gs.qd_int)
+    active_normals = qd.Matrix.zero(gs.qd_float, 3, 3)
+    active_bounds = qd.Vector.zero(gs.qd_float, 3)
+    active_influences = qd.Vector.zero(gs.qd_float, 3)
+    active_lambdas = qd.Vector.zero(gs.qd_float, 3)
+    active_frictions = qd.Matrix.zero(gs.qd_float, 3, 3)
+    vel_pressed = vel_free
+    vel = vel_free
+    pos_shift = qd.Vector.zero(gs.qd_float, 3)
+    is_pressure_pass = True
+    is_projected = False
+    is_done = False
+    # The pressure pass, at most 4 projection passes (3 additions to the active bounds and a check), and the last pass
+    N_PASSES_MAX = qd.static(6)
+    for i_pass in range(N_PASSES_MAX):
+        if not is_done:
+            is_last_pass = (is_projected and not is_pressure_pass) or i_pass == N_PASSES_MAX - 1
+            if is_last_pass:
+                active_frictions = func_active_frictions(
+                    i_b,
+                    pos,
+                    vel,
+                    active_geoms,
+                    active_normals,
+                    active_influences,
+                    active_lambdas,
+                    links_state,
+                    geoms_info,
+                    rigid_info,
+                )
+            is_projected = True
+            is_kept_used = not is_pressure_pass and is_kept_all
+            n_items = qd.select(is_kept_used, n_kept, n_geoms)
+            for i_item in range(n_items):
+                i_g = i_item
+                if is_kept_used:
+                    i_g = kept_geoms[i_item]
+                is_active = i_g == active_geoms[0] or i_g == active_geoms[1] or i_g == active_geoms[2]
+                is_visited = is_pressure_pass or is_last_pass or (is_projected and not is_active)
+                if geoms_info.needs_coup[i_g] and is_visited:
+                    signed_dist = gs.qd_float(0.0)
+                    influence = gs.qd_float(0.0)
+                    normal_g = qd.Vector.zero(gs.qd_float, 3)
+                    bound_g = gs.qd_float(0.0)
+                    if is_kept_used:
+                        signed_dist = kept_dists[i_item]
+                        influence = kept_influences[i_item]
+                        normal_g = qd.Vector(
+                            [kept_normals[i_item, 0], kept_normals[i_item, 1], kept_normals[i_item, 2]]
+                        )
+                        bound_g = kept_bounds[i_item]
+                    else:
+                        signed_dist, influence, normal_g, bound_g = func_sph_particle_geom_bound(
+                            i_g,
+                            i_b,
+                            pos,
+                            vel_free,
+                            geoms_state,
+                            links_state,
+                            geoms_info,
+                            rigid_info,
+                            sdf_info,
+                            legacy_coupler_info,
+                            collider_config,
+                        )
+                    is_bounding = influence > legacy_coupler_info.influence_min[None]
+                    if is_pressure_pass and (is_bounding or signed_dist < sph_info.support_radius[None]):
+                        if n_kept < N_GEOMS_KEPT:
+                            kept_geoms[n_kept] = i_g
+                            kept_dists[n_kept] = signed_dist
+                            kept_influences[n_kept] = influence
+                            for i_d in qd.static(range(3)):
+                                kept_normals[n_kept, i_d] = normal_g[i_d]
+                            kept_bounds[n_kept] = bound_g
+                            n_kept = n_kept + 1
+                        else:
+                            is_kept_all = False
+                    # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision
+                    # response transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle
+                    # pressure across the surface and integrating the symmetric pressure force over the truncated
+                    # kernel support yields the factor 2 * sigma(signed_dist), with sigma the kernel plane integral
+                    # (see func_cubic_kernel_plane_integral in sph_solver.py). Sigma integrates to 1/2 across the
+                    # support band, so a covering particle layer transmits exactly p per unit area: Archimedes
+                    # buoyancy with no tuning constant. Fixed links are exempt: they cannot respond to the force, and
+                    # the reaction is a conservative stiff kick that keeps fluid resting on them ringing forever,
+                    # pumped by the acoustic pressure fluctuations of the fluid.
+                    i_l = geoms_info.link_idx[i_g]
+                    I_l = [i_l, i_b] if qd.static(legacy_coupler_config.is_links_info_batched) else i_l
+                    force = qd.Vector.zero(gs.qd_float, 3)
+                    if signed_dist < sph_info.support_radius[None] and pressure > 0 and not links_info.is_fixed[I_l]:
+                        force = (
+                            -2.0
+                            * pressure
+                            * sph_info.particle_volume[None]
+                            * func_cubic_kernel_plane_integral(signed_dist, sph_info)
+                            * normal_g
+                        )
+                    if is_pressure_pass:
+                        vel_pressed = vel_pressed - force * (substep_dt / mass)
+                    elif not is_last_pass:
+                        if is_bounding and normal_g.dot(vel) < bound_g - violation_tol:
+                            # The active bounds and the violated one, the empty slots of the active set skipped
+                            normals = qd.Matrix.zero(gs.qd_float, 4, 3)
+                            bounds = qd.Vector.zero(gs.qd_float, 4)
+                            influences = qd.Vector.zero(gs.qd_float, 4)
+                            geoms = qd.Vector([-1, -1, -1, -1], dt=gs.qd_int)
+                            n_bounds = 0
+                            for i_a in qd.static(range(4)):
+                                i_g_a = i_g
+                                normal_a = normal_g
+                                bound_a = bound_g
+                                influence_a = influence
+                                if qd.static(i_a < 3):
+                                    i_g_a = active_geoms[i_a]
+                                    normal_a = qd.Vector(
+                                        [active_normals[i_a, 0], active_normals[i_a, 1], active_normals[i_a, 2]]
+                                    )
+                                    bound_a = active_bounds[i_a]
+                                    influence_a = active_influences[i_a]
+                                if i_g_a >= 0:
+                                    for i_d in qd.static(range(3)):
+                                        normals[n_bounds, i_d] = normal_a[i_d]
+                                    bounds[n_bounds] = bound_a
+                                    influences[n_bounds] = influence_a
+                                    geoms[n_bounds] = i_g_a
+                                    n_bounds = n_bounds + 1
+                            vel, set_idx, lambdas = func_project_on_bounds(
+                                vel_pressed, normals, bounds, violation_tol, legacy_coupler_info, n_bounds
+                            )
+                            active_geoms = qd.Vector([-1, -1, -1], dt=gs.qd_int)
+                            active_lambdas = qd.Vector.zero(gs.qd_float, 3)
+                            for i_s in qd.static(range(3)):
+                                i_k = set_idx[i_s]
+                                if i_k >= 0:
+                                    active_geoms[i_s] = geoms[i_k]
+                                    for i_d in qd.static(range(3)):
+                                        active_normals[i_s, i_d] = normals[i_k, i_d]
+                                    active_bounds[i_s] = bounds[i_k]
+                                    active_influences[i_s] = influences[i_k]
+                                    active_lambdas[i_s] = lambdas[i_s]
+                            is_projected = False
+                    else:
+                        is_pushing = force.norm_sqr() > 0.0
+                        for i_s in qd.static(range(3)):
+                            if active_geoms[i_s] == i_g:
+                                lambda_s = active_lambdas[i_s]
+                                friction_s = qd.Vector(
+                                    [active_frictions[i_s, 0], active_frictions[i_s, 1], active_frictions[i_s, 2]]
+                                )
+                                force = force - mass * (lambda_s * normal_g - friction_s) / substep_dt
+                                is_pushing = True
+                        if is_pushing:
+                            func_add_external_wrench(
+                                i_l, i_b, pos, force, links_state, legacy_coupler_config.is_external_wrench_exact
+                            )
+                        # The bounds only stop a particle moving into a geom, which would leave inside it a particle
+                        # already there, so the particle is moved out to the surface of every geom it lies within, the
+                        # moves adding up in any order
+                        if is_bounding and signed_dist < 0.0:
+                            pos_shift = pos_shift - signed_dist * normal_g
+            if is_pressure_pass:
+                vel = vel_pressed
+                is_projected = False
+            is_done = is_last_pass
+            is_pressure_pass = False
+    vel_friction = qd.Vector.zero(gs.qd_float, 3)
+    for i_s in qd.static(range(3)):
+        vel_friction = vel_friction + qd.Vector(
+            [active_frictions[i_s, 0], active_frictions[i_s, 1], active_frictions[i_s, 2]]
         )
-        force = force + pressure_force
-        is_pushing = True
-        vel = vel - pressure_force * (rigid_info.substep_dt[None] / mass)
-    if is_pushing:
-        func_add_external_wrench(
-            i_l,
-            i_b,
-            pos_world,
-            force,
-            links_state,
-            is_exact=legacy_coupler_config.is_external_wrench_exact,
-        )
-
-    return vel
+    sph_state.particles_reordered.vel[i_p, i_b] = vel - vel_friction
+    sph_state.particles_reordered.pos[i_p, i_b] = pos + pos_shift
 
 
 @qd.func
@@ -1028,29 +1367,21 @@ def kernel_sph_rigid(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.pos))
     ):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
-            # The normals follow the particles in the order of their index, which the sorted ones read through
-            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            for i_g in range(geoms_info.needs_coup.shape[0]):
-                if geoms_info.needs_coup[i_g]:
-                    vel = func_sph_particle_vel_after_collision_with_rigid_geom(
-                        i_g,
-                        i_b,
-                        sph_state.particles_reordered.pos[i_p, i_b],
-                        sph_state.particles_reordered.vel[i_p, i_b],
-                        sph_info.particles.mass[i_o],
-                        sph_state.particles_reordered.p[i_p, i_b],
-                        geoms_state,
-                        links_state,
-                        sph_info,
-                        geoms_info,
-                        links_info,
-                        rigid_info,
-                        sdf_info,
-                        legacy_coupler_info,
-                        legacy_coupler_config,
-                        collider_config,
-                    )
-                    sph_state.particles_reordered.vel[i_p, i_b] = vel
+            func_sph_particle_collide_with_rigid_geoms(
+                i_p,
+                i_b,
+                sph_state,
+                geoms_state,
+                links_state,
+                sph_info,
+                geoms_info,
+                links_info,
+                rigid_info,
+                sdf_info,
+                legacy_coupler_info,
+                legacy_coupler_config,
+                collider_config,
+            )
 
 
 @qd.func
