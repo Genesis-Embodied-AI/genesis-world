@@ -5,7 +5,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.parametrize(
@@ -98,6 +98,8 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
     for i_step in range(100):
         scene.step()
         raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
+        if i_step == 9:
+            particles_pos_replayed = liquid.get_particles_pos()
 
         # The liquid never enters the FEM block, whose surface holds it back like a wall. The particles next to a face
         # stand half a particle size off it, so none lies within the block shrunk by that much.
@@ -137,6 +139,12 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
     # The FEM block floats with the draft at which the weight of the liquid it displaces balances its own, up to the
     # smoothing of the surface by the kernel over half a particle size.
     assert_allclose(torch.stack(block_drafts).mean(dim=0), BLOCK_DENSITY_RATIO * BLOCK_SIZE, atol=0.5 * PARTICLE_SIZE)
+
+    # The rollout replays bit for bit, whatever the order in which the threads add up the forces on the rigid bodies
+    scene.reset()
+    for _ in range(10):
+        scene.step()
+    assert_equal(liquid.get_particles_pos(), particles_pos_replayed)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])

@@ -303,10 +303,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
         scene.step()
 
     duck.base_link.apply_external_torque((0, 1, 0), ref=gs.link_ref_frame.link_COM, local=True)
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[duck_link_idx, 0], 0, tol=gs.EPS)
-    assert_allclose(
-        rigid_solver.dyn_state.links.cfrc_applied_ang[duck_link_idx, 0], -duck_init_link_R[:, 1], tol=gs.EPS
-    )
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[duck_link_idx, 0], 0, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_input_ang[duck_link_idx, 0], -duck_init_link_R[:, 1], tol=gs.EPS)
 
     # A local force and a local application point are both expressed in the frame that 'ref' designates, which only
     # shows on a link whose inertial frame is rotated with respect to its own frame. The kernel rotates by quaternion
@@ -330,9 +328,9 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_link_R @ force_local
     point_world = base_link_pos + base_link_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
-        rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
+        rigid_solver.dyn_state.links.cfrc_input_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
         tol=5e-7,
     )
@@ -340,9 +338,9 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     # A world application point locates the point on its own, so it reproduces the local one it is derived from.
     rigid_solver.clear_external_force()
     base_link.apply_external_force(force_world, pos=point_world)
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
-        rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
+        rigid_solver.dyn_state.links.cfrc_input_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
         tol=5e-7,
     )
@@ -353,9 +351,9 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_inertial_R @ force_local
     point_world = base_link_COM + base_inertial_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_input_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
-        rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
+        rigid_solver.dyn_state.links.cfrc_input_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
         tol=5e-7,
     )

@@ -4,7 +4,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidInfo
+from genesis.grad.bridge import no_grad
 from genesis.utils.data import eoa
+from genesis.utils.simt import func_exact_sum_add, func_exact_sum_take
 
 
 @qd.func
@@ -819,7 +821,7 @@ def kernel_apply_links_external_wrench(
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(
-        links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.cfrc_applied_vel))
+        links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.cfrc_input_vel))
     ):
         force_i = qd.Vector([force[i_b_, i_l_, 0], force[i_b_, i_l_, 1], force[i_b_, i_l_, 2]], dt=gs.qd_float)
         torque_i = qd.Vector([torque[i_b_, i_l_, 0], torque[i_b_, i_l_, 1], torque[i_b_, i_l_, 2]], dt=gs.qd_float)
@@ -850,7 +852,7 @@ def kernel_apply_links_external_wrench_at_pos(
 ):
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(
-        links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.cfrc_applied_vel))
+        links_idx.shape[0], envs_idx.shape[0], axes=qd.static(eoa(dyn_state.links.cfrc_input_vel))
     ):
         pos_i = qd.Vector([pos[i_b_, i_l_, 0], pos[i_b_, i_l_, 1], pos[i_b_, i_l_, 2]], dt=gs.qd_float)
         force_i = qd.Vector([force[i_b_, i_l_, 0], force[i_b_, i_l_, 1], force[i_b_, i_l_, 2]], dt=gs.qd_float)
@@ -861,12 +863,61 @@ def kernel_apply_links_external_wrench_at_pos(
 
 
 @qd.func
-def func_apply_coupling_force(
+def func_apply_external_wrench(
     link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: LinksState
 ):
     torque = (pos - links_state.root_COM[link_idx, env_idx]).cross(force)
-    qd.atomic_sub(links_state.cfrc_coupling_ang[link_idx, env_idx], torque)
-    qd.atomic_sub(links_state.cfrc_coupling_vel[link_idx, env_idx], force)
+    qd.atomic_sub(links_state.cfrc_external_ang[link_idx, env_idx], torque)
+    qd.atomic_sub(links_state.cfrc_external_vel[link_idx, env_idx], force)
+
+
+@qd.func
+def func_add_external_wrench(
+    i_l: int,
+    i_b: int,
+    pos: qd.types.vector(3),
+    force: qd.types.vector(3),
+    links_state: LinksState,
+    is_exact: qd.template(),
+):
+    """
+    Apply a force at a point of a rigid link, its reaction on another solver.
+
+    With `is_exact`, the force and its torque add to the exact sums of the link, whatever the order of the terms, which
+    kernel_flush_external_wrenches adds to the link before the next substep reads it (see LinksState). Otherwise, they
+    add to the external wrench of the link directly, which the variant of a kernel that autodiff reverses requires, since
+    the reversal reads the adjoint of the external wrench of the link and not that of its sums.
+    """
+    if qd.static(is_exact):
+        torque = (pos - links_state.root_COM[i_l, i_b]).cross(force)
+        # A runtime loop over the components keeps a single inlined copy of the bin updates
+        for i_c in range(6):
+            term = gs.qd_float(0.0)
+            if i_c < 3:
+                term = -torque[i_c % 3]
+            else:
+                term = -force[i_c % 3]
+            func_exact_sum_add(6 * i_l + i_c, i_b, term, links_state.cfrc_external_sums)
+    else:
+        func_apply_external_wrench(i_l, i_b, pos, force, links_state)
+
+
+@no_grad
+@qd.kernel(fastcache=True)
+def kernel_flush_external_wrenches(links_state: LinksState):
+    """Add the exact sums of the external wrenches of the links to them, and empty the sums for the next substep."""
+    for i_l, i_b in qd.ndrange(*links_state.pos.shape):
+        frc_ang = qd.Vector.zero(gs.qd_float, 3)
+        frc_vel = qd.Vector.zero(gs.qd_float, 3)
+        # A runtime loop over the components keeps a single inlined copy of the bin reads
+        for i_c in range(6):
+            term = func_exact_sum_take(6 * i_l + i_c, i_b, links_state.cfrc_external_sums)
+            if i_c < 3:
+                frc_ang[i_c % 3] = term
+            else:
+                frc_vel[i_c % 3] = term
+        links_state.cfrc_external_ang[i_l, i_b] = links_state.cfrc_external_ang[i_l, i_b] + frc_ang
+        links_state.cfrc_external_vel[i_l, i_b] = links_state.cfrc_external_vel[i_l, i_b] + frc_vel
 
 
 @qd.kernel(fastcache=True)
@@ -880,7 +931,7 @@ def kernel_wakeup_coupled_links(
     """
     Wake the hibernated islands of links holding a pending coupling force.
 
-    Couplers accumulate forces into cfrc_coupling_* directly, bypassing the wake-aware public force API, while
+    Couplers accumulate forces into cfrc_external_* directly, bypassing the wake-aware public force API, while
     forward dynamics only consumes the forces of awake entities before clearing the field. Waking the receiving
     islands before the forces are consumed keeps hibernated links responsive to the other solvers and preserves
     the momentum exchange whose opposite half has already been applied on the coupled side.
@@ -890,8 +941,8 @@ def kernel_wakeup_coupled_links(
         *dyn_state.links.is_hibernated.shape, axes=qd.static(eoa(dyn_state.links.is_hibernated))
     ):
         if dyn_state.links.is_hibernated[i_l, i_b] and (
-            dyn_state.links.cfrc_coupling_vel[i_l, i_b].norm_sqr() > 0
-            or dyn_state.links.cfrc_coupling_ang[i_l, i_b].norm_sqr() > 0
+            dyn_state.links.cfrc_external_vel[i_l, i_b].norm_sqr() > 0
+            or dyn_state.links.cfrc_external_ang[i_l, i_b].norm_sqr() > 0
         ):
             func_wakeup_island(
                 constraint_state.island.links_island_idx[i_l, i_b],
@@ -943,17 +994,17 @@ def func_apply_link_external_wrench(
         else:
             arm = pos - dyn_state.links.root_COM[link_idx, env_idx]
 
-    dyn_state.links.cfrc_applied_vel[link_idx, env_idx] -= force
-    dyn_state.links.cfrc_applied_ang[link_idx, env_idx] -= torque + arm.cross(force)
+    dyn_state.links.cfrc_input_vel[link_idx, env_idx] -= force
+    dyn_state.links.cfrc_input_ang[link_idx, env_idx] -= torque + arm.cross(force)
 
 
 @qd.func
 def func_clear_external_force(dyn_state: DynState, rigid_config: qd.template()):
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.cfrc_applied_ang))):
-        dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.cfrc_input_ang))):
+        dyn_state.links.cfrc_input_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_input_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 # --------------------------------------------------------------------------------------

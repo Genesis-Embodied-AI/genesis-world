@@ -30,7 +30,6 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
-from .solvers.mpm_solver import kernel_flush_coupling_forces
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -536,11 +535,6 @@ class Simulator(RBC):
         # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
         if self._rigid_mpm_hybrid is not None:
             self._rigid_mpm_hybrid.update_soft_parts()
-        # The MPM grid and particles push the rigid links once all of them added their forces (see MPMCouplingForces)
-        if self.mpm_solver.is_active and self.mpm_solver.mpm_config.is_deterministic:
-            kernel_flush_coupling_forces(
-                self.rigid_solver.dyn_state.links, self.mpm_solver.mpm_state.coupling_forces, self.mpm_solver.mpm_info
-            )
 
     # -------------- pre coupling --------------
     def substep_pre_coupling(self):
