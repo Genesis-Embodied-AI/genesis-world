@@ -33,12 +33,7 @@ from genesis.utils.data import (
     iter_data,
     opt_in,
 )
-from genesis.utils.geom import (
-    PARTICLES,
-    SpatialHashGrid,
-    func_sort_particles_by_slot,
-    hash_grid_sizes,
-)
+from genesis.utils.geom import PARTICLES, SpatialHashGrid, func_sort_particles_by_slot, hash_grid_sizes
 from genesis.utils.misc import broadcast_tensor, qd_isfinite, qd_to_torch, qd_zero_grad
 from genesis.utils.sdf import SDFInfo
 
@@ -102,7 +97,7 @@ class MPMParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
     Jp: qd.Tensor = field(float, grad=True)
     is_active: qd.Tensor = field(bool)
     # The momentum per unit offset a particle gives the cells of its stencil, its stress and affine velocity together
-    affine: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, grad=True, labels=DETERMINISTIC)
+    affine: qd.Tensor = field((float, (3, 3)), kind=DataKind.SCRATCH, labels=DETERMINISTIC)
     # The velocity a particle gathers from the grid, before the boundary applies (see kernel_transfer_grid_to_particles)
     vel_tmp: qd.Tensor = field((float, 3), kind=DataKind.SCRATCH, grad=True, labels=GRAD)
     # The flat index of the lowest cell of the stencil of a particle, which tells apart the cells sharing a slot
@@ -157,7 +152,7 @@ class MPMParticlesCPIC(Data, kind=DataKind.STATE, shape=(PARTICLES, GEOMS, ENVS)
     cell_geom_idx: qd.Tensor = field(int, shape=(PARTICLES, 3, 3, 3, ENVS), kind=DataKind.SCRATCH)
 
 
-class MPMTiles(Data, kind=DataKind.DERIVED, shape=(TILES * ENVS_GROUPS,)):
+class MPMTiles(Data, kind=DataKind.SCRATCH, shape=(TILES * ENVS_GROUPS,)):
     """The cubic tiles of cells of the grid that the stencils of the particles cover, by group of environments."""
 
     # Whether the lowest cell of the stencil of some particle of the group lies in the tile
@@ -187,7 +182,7 @@ class MPMState(Data, kind=DataKind.STATE):
     grid: MPMGrid
     particles_cpic: MPMParticlesCPIC = field(labels=CPIC)
     # The particles sorted by the lowest cell of their stencil, a slot of the hash grid hashing each cell
-    hash_grid: SpatialHashGrid = field(labels=DETERMINISTIC)
+    hash_grid: SpatialHashGrid = field(kind=DataKind.SCRATCH)
     tiles: MPMTiles = field(labels=DETERMINISTIC)
     coupling_forces: MPMCouplingForces = field(labels=DETERMINISTIC)
 
@@ -280,13 +275,15 @@ class MPMData(Data):
                 coupling_force_bin_exp_min=-120,
                 coupling_force_bin_bits=40,
             )
-            hash_grid_values = dict(cell_size=solver._dx, grid_res=(grid_x, grid_y, grid_z))
-            values = dict(mpm_info=info_values, mpm_state=dict(hash_grid=hash_grid_values))
+            values = dict(mpm_info=info_values)
             unused = {
                 SPARSE_GRID_RESET: solver._requires_grad,
                 CPIC: not solver.mpm_config.is_cpic,
                 DETERMINISTIC: not solver.mpm_config.is_deterministic,
                 GRAD: not solver._requires_grad,
+                MPMData.mpm_state.hash_grid: not solver.mpm_config.is_deterministic,
+                # The flat index of a cell picks its slot (see func_sort_particles), so the grid of the hash goes unread
+                (MPMData.mpm_state.hash_grid.cell_size, MPMData.mpm_state.hash_grid.grid_res): True,
             }
         super().__init__(
             sizes=dict(
@@ -1029,7 +1026,7 @@ def kernel_transfer_particles_to_grid(
             )
             mass = mpm_info.particles.mass[i_p]
             affine = mpm_info.stress_scale[None] * stress + mass * mpm_state.particles.C[i_p, i_b]
-            if qd.static(mpm_config.is_deterministic):
+            if qd.static(mpm_config.is_deterministic and not is_backward):
                 mpm_state.particles.affine[i_p, i_b] = affine
 
             if qd.static(mpm_config.is_cpic or not mpm_config.is_deterministic or is_backward):
@@ -1068,9 +1065,8 @@ def kernel_transfer_particles_to_grid(
                                     if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
                                         i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
                                         grid_y, grid_z = mpm_state.grid.mass.shape[1], mpm_state.grid.mass.shape[2]
-                                        mpm_state.grid.dirty_list[i_slot] = (
-                                            cell[0] * grid_y + cell[1]
-                                        ) * grid_z + cell[2]
+                                        i_cell = (cell[0] * grid_y + cell[1]) * grid_z + cell[2]
+                                        mpm_state.grid.dirty_list[i_slot] = i_cell
 
     if qd.static(mpm_config.is_deterministic and not is_backward):
         func_sort_particles(mpm_state, mpm_info, mpm_config)
@@ -1226,9 +1222,8 @@ def func_gather_particles(
                     if mass_cell > 0.0:
                         if qd.atomic_or(mpm_state.grid.dirty_flag[cell[0], cell[1], cell[2]], 1) == 0:
                             i_slot = qd.atomic_add(mpm_state.grid.dirty_count[0], 1)
-                            mpm_state.grid.dirty_list[i_slot] = (cell[0] * grid_res[1] + cell[1]) * grid_res[2] + cell[
-                                2
-                            ]
+                            i_cell = (cell[0] * grid_res[1] + cell[1]) * grid_res[2] + cell[2]
+                            mpm_state.grid.dirty_list[i_slot] = i_cell
 
 
 @qd.func
@@ -1303,6 +1298,12 @@ def func_point_vel_after_two_way_collision_with_rigid_geom(
 
 
 @qd.func
+def func_add_particle_vel(i_p: int, i_b: int, vel: qd.types.vector(3), mpm_state: MPMState):
+    """Add a velocity to particle i_p of env i_b, as another coupling drives it."""
+    mpm_state.particles.vel[i_p, i_b] = mpm_state.particles.vel[i_p, i_b] + vel
+
+
+@qd.func
 def func_add_coupling_force(
     i_l: int,
     i_b: int,
@@ -1314,7 +1315,7 @@ def func_add_coupling_force(
     is_exact: qd.template(),
 ):
     """
-    Apply a force at a point of a rigid link, its reaction on the MPM particles or grid.
+    Apply `force` at `pos` to rigid link i_l, the reaction of the force the link applies the MPM particles or grid.
 
     With `is_exact`, the force and its torque add exactly to integer bins (see MPMCouplingForces), whatever the order
     of the terms, which kernel_flush_coupling_forces adds to the link. The cut of a term into bins is exact: from the
@@ -1393,8 +1394,8 @@ def func_gather_grid_velocity(
     Return the velocity and the affine velocity field an active particle gathers from the cells of its stencil.
 
     Under compatible particle-in-cell (CPIC), a cell separated from the particle by a rigid geom gives it the velocity
-    of the collision of the particle with the geom instead, which pushes the link of the geom (see
-    'func_point_vel_after_two_way_collision_with_rigid_geom').
+    of the collision of the particle with the geom instead, whose reaction pushes the link of the geom (see
+    func_add_coupling_force).
     """
     inv_dx = mpm_info.inv_dx[None]
     base, fx, w = func_quadratic_bspline_stencil(mpm_state.particles.pos[i_p, i_b], mpm_info)

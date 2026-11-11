@@ -1714,8 +1714,3 @@ def func_count_support(
         )
 
     return count
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.gjk_decomp")

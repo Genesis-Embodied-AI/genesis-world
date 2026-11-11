@@ -11,7 +11,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from . import support_field
 from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
 from .data import ColliderInfo, ColliderState
@@ -109,7 +109,6 @@ def func_plane_box_contact(
     i_gb: int,
     i_b: int,
     i_pair: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     dyn_info: DynInfo,
@@ -154,7 +153,7 @@ def func_plane_box_contact(
             n_con = 1
             contact_pos_0 = contact_pos
             tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
-                i_ga, i_gb, geoms_init_AABB, dyn_info
+                i_ga, i_gb, dyn_info, rigid_info
             )
             for i_v in range(dyn_info.geoms.vert_start[i_gb], dyn_info.geoms.vert_end[i_gb]):
                 # Plane-box pairs are sized with the convex cap (they are not in the large-contact mask), so the

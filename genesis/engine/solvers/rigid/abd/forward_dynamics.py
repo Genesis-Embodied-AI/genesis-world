@@ -2450,8 +2450,3 @@ def func_implicit_damping(dyn_state: DynState, dyn_info: DynInfo, rigid_info: Ri
                     dyn_state.dofs.acc[i_d, i_b] = (
                         dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qacc_damping_implicit[i_d, i_b]
                     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.rigid_solver_dynamics_decomp")

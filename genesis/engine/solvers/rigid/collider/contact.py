@@ -10,7 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidErrorCode, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
 from genesis.utils.misc import qd_isfinite
 
 from .constants import CONTACT_ORDER
@@ -581,7 +581,7 @@ def func_add_diff_contact_input(
 
 
 @qd.func
-def func_compute_geom_rbound(i_g: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_rbound(i_g: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     """Compute the bounding sphere radius for a geom, matching MuJoCo's geom_rbound."""
     geom_type = dyn_info.geoms.type[i_g]
     rbound = gs.qd_float(0.0)
@@ -600,31 +600,31 @@ def func_compute_geom_rbound(i_g: int, geoms_init_AABB: GeomsInitAABB, dyn_info:
         rbound = qd.sqrt(d0 * d0 + d1 * d1 + d2 * d2)
     else:
         # For mesh and other types, approximate as half AABB diagonal
-        rbound = 0.5 * (geoms_init_AABB[i_g, 7] - geoms_init_AABB[i_g, 0]).norm()
+        rbound = 0.5 * (rigid_info.geoms_init_AABB[i_g, 7] - rigid_info.geoms_init_AABB[i_g, 0]).norm()
     return rbound
 
 
 @qd.func
-def func_compute_geom_pair_scale(i_ga: int, i_gb: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_pair_scale(i_ga: int, i_gb: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     # Intrinsic length scale of a geom pair: half the smaller geom's world-aligned bounding-box diagonal. The
     # original (rest-pose) AABB is used so the scale is a constant independent of the current orientation, which
     # makes sense since the size of the geometries is an intrinsic property. Multiply by a relative tolerance to
     # turn it into an absolute one.
-    aabb_size_b = (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]).norm()
+    aabb_size_b = (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]).norm()
     aabb_size = aabb_size_b
     if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-        aabb_size_a = (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]).norm()
+        aabb_size_a = (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]).norm()
         aabb_size = qd.min(aabb_size_a, aabb_size_b)
 
     return 0.5 * aabb_size
 
 
 @qd.func
-def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, geoms_init_AABB: GeomsInitAABB, dyn_info: DynInfo):
+def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, dyn_info: DynInfo, rigid_info: RigidInfo):
     """Geom-pair length scale matching MuJoCo's formula: min(rbound_g1, rbound_g2). Multiply by a relative tolerance
     to recover MuJoCo's absolute tolerance."""
-    rbound_a = func_compute_geom_rbound(i_ga, geoms_init_AABB, dyn_info)
-    rbound_b = func_compute_geom_rbound(i_gb, geoms_init_AABB, dyn_info)
+    rbound_a = func_compute_geom_rbound(i_ga, dyn_info, rigid_info)
+    rbound_b = func_compute_geom_rbound(i_gb, dyn_info, rigid_info)
     return qd.min(rbound_a, rbound_b)
 
 
@@ -632,8 +632,8 @@ def func_compute_geom_pair_scale_mj(i_ga: int, i_gb: int, geoms_init_AABB: Geoms
 def func_compute_mc_tolerance(
     i_ga: int,
     i_gb: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     collider_info: ColliderInfo,
     rigid_config: qd.template(),
 ):
@@ -642,9 +642,9 @@ def func_compute_mc_tolerance(
     Shared by every convex narrowphase arm so the accepted contact set stays backend-independent. The relative
     tolerance scales with the reference engine's pair scale under MuJoCo compatibility and with the intrinsic pair
     scale otherwise."""
-    scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    scale = func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
     if qd.static(rigid_config.enable_mujoco_compatibility):
-        scale = func_compute_geom_pair_scale_mj(i_ga, i_gb, geoms_init_AABB, dyn_info)
+        scale = func_compute_geom_pair_scale_mj(i_ga, i_gb, dyn_info, rigid_info)
     return collider_info.mc_tolerance[None] * scale
 
 
@@ -654,7 +654,6 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -684,9 +683,9 @@ def func_contact_orthogonals(
         # by the volume of their respective bounding box.
         i_g = i_gb
         if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-            size_ga = geoms_init_AABB[i_ga, 7]
+            size_ga = rigid_info.geoms_init_AABB[i_ga, 7]
             volume_ga = size_ga[0] * size_ga[1] * size_ga[2]
-            size_gb = geoms_init_AABB[i_gb, 7]
+            size_gb = rigid_info.geoms_init_AABB[i_gb, 7]
             volume_gb = size_gb[0] * size_gb[1] * size_gb[2]
             i_g = i_ga if volume_ga < volume_gb else i_gb
 

@@ -608,7 +608,7 @@ class RasterizerContext:
             # Scale contact arrows by the parent link's overall size rather than the individual contacting geom, so
             # they stay legible on links built from many small convex-decomposition pieces. The per-geom init AABBs
             # are in each geom's local frame, so offset their corners by the geom pose to get the link-frame extent.
-            geoms_aabb = qd_to_numpy(self.sim.rigid_solver.geoms_init_AABB)
+            geoms_aabb = qd_to_numpy(self.sim.rigid_solver.rigid_info.geoms_init_AABB)
             self.links_init_AABB_size = np.zeros(self.sim.rigid_solver.n_links, dtype=gs.np_float)
             for link in self.sim.rigid_solver.links:
                 if link.n_geoms == 0:

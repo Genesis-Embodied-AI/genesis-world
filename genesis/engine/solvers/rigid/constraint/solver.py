@@ -6088,8 +6088,3 @@ def func_update_qacc(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
         constraint_state.is_warmstart[i_b] = True
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.constraint_solver_decomp")

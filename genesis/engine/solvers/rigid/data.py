@@ -713,6 +713,3 @@ class RigidData(Data):
             ),
             requires_grad=solver._requires_grad,
         )
-
-
-GeomsInitAABB = qd.Tensor

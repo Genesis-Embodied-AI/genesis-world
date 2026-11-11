@@ -22,7 +22,7 @@ import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.description import _balanced_variant_mapping
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.utils.data import ConfigItem, DataItem, iter_data, opt_in
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -370,7 +370,7 @@ class Collider:
         # The box of every link in its own frame, bounding the boxes of its geoms, whose pose in the link is fixed
         if self._solver.n_geoms > 0:
             geoms_corners = gu.transform_by_trans_quat(
-                qd_to_numpy(self._solver.geoms_init_AABB)[: self._solver.n_geoms],
+                qd_to_numpy(self._solver.rigid_info.geoms_init_AABB)[: self._solver.n_geoms],
                 np.array([geom.init_pos for geom in self._solver.geoms])[:, None],
                 np.array([geom.init_quat for geom in self._solver.geoms])[:, None].repeat(8, axis=1),
             )
@@ -910,7 +910,6 @@ class Collider:
         # launches the detection without a graph.
         kernel = kernel_detection_without_graph if self._solver._requires_grad else kernel_detection
         kernel(
-            self._solver.geoms_init_AABB,
             self._solver.dyn_state,
             self.collider_state,
             self.mpr.mpr_state,
@@ -1134,7 +1133,6 @@ class Collider:
 
     def backward_narrowphase(self):
         func_narrow_phase_diff_convex_vs_convex.grad(
-            self._solver.geoms_init_AABB,
             self._solver.dyn_state,
             self.collider_state,
             self.mpr.mpr_state,
@@ -1153,7 +1151,6 @@ class Collider:
 
 @qd.func
 def func_detection(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -1187,7 +1184,6 @@ def func_detection(
     """
     if qd.static(has_possible_pairs):
         func_broad_phase(
-            geoms_init_AABB,
             dyn_state,
             collider_state,
             constraint_state,
@@ -1200,7 +1196,6 @@ def func_detection(
         )
         if qd.static(split_narrowphase):
             func_narrowphase_contact0(
-                geoms_init_AABB,
                 dyn_state,
                 collider_state,
                 contact0_mpr_state,
@@ -1216,7 +1211,6 @@ def func_detection(
                 errno,
             )
             func_narrowphase_multicontact(
-                geoms_init_AABB,
                 dyn_state,
                 collider_state,
                 multicontact_mpr_state,
@@ -1234,7 +1228,6 @@ def func_detection(
             )
         elif qd.static(collider_config.has_non_box_plane_convex_convex):
             func_narrow_phase_convex_vs_convex(
-                geoms_init_AABB=geoms_init_AABB,
                 dyn_state=dyn_state,
                 collider_state=collider_state,
                 mpr_state=mpr_state,
@@ -1253,7 +1246,6 @@ def func_detection(
             )
         if qd.static(collider_config.has_convex_specialization):
             func_narrow_phase_convex_specializations(
-                geoms_init_AABB,
                 dyn_state,
                 collider_state,
                 dyn_info,
@@ -1265,7 +1257,6 @@ def func_detection(
             )
         if qd.static(collider_config.has_terrain):
             func_narrow_phase_any_vs_terrain(
-                geoms_init_AABB,
                 dyn_state,
                 collider_state,
                 multicontact_mpr_state,
@@ -1280,7 +1271,6 @@ def func_detection(
             )
         if qd.static(collider_config.has_nonconvex_nonterrain):
             func_narrow_phase_nonconvex_vs_nonterrain(
-                geoms_init_AABB,
                 dyn_state,
                 collider_state,
                 dyn_info,
@@ -1303,7 +1293,6 @@ def func_detection(
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_detection(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -1331,7 +1320,6 @@ def kernel_detection(
 ):
     """Detect the collisions of every environment, captured as one graph."""
     func_detection(
-        geoms_init_AABB=geoms_init_AABB,
         dyn_state=dyn_state,
         collider_state=collider_state,
         mpr_state=mpr_state,
@@ -1361,7 +1349,6 @@ def kernel_detection(
 
 @qd.kernel(fastcache=True)
 def kernel_detection_without_graph(
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     mpr_state: MPRState,
@@ -1389,7 +1376,6 @@ def kernel_detection_without_graph(
 ):
     """Detect the collisions of every environment without a graph (see Collider.detection)."""
     func_detection(
-        geoms_init_AABB=geoms_init_AABB,
         dyn_state=dyn_state,
         collider_state=collider_state,
         mpr_state=mpr_state,
@@ -1415,8 +1401,3 @@ def kernel_detection_without_graph(
         coop_dedup=coop_dedup,
         errno=errno,
     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.collider_decomp")
