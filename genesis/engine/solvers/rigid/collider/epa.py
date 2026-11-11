@@ -823,7 +823,7 @@ def func_epa_support(
 
     Parameters
     ----------
-    dir: gs.qd_vec3
+    dir: qd.types.vector(3)
         Vector from [ga] (obj1) to [gb] (obj2).
     """
     d = gs.qd_vec3(1, 0, 0)

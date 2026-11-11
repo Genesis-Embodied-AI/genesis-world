@@ -138,7 +138,7 @@ def func_support(
 
     Parameters:
     ----------
-    dir: gs.qd_vec3
+    dir: qd.types.vector(3)
         The direction in which to find the support points, from [ga] (obj 1) to [gb] (obj 2).
     """
     support_point_obj1 = gs.qd_vec3(0, 0, 0)

@@ -889,9 +889,9 @@ def func_clip_polygon(
     max_contacts: int
         Contact budget of the pair; a clipped polygon with more vertices reduces to its maximum-area quadrilateral
         when the budget is below 5, and truncates to the budget otherwise.
-    normal: gs.qd_vec3
+    normal: qd.types.vector(3)
         The normal of the clipping polygon.
-    approx_dir: gs.qd_vec3
+    approx_dir: qd.types.vector(3)
         Preferred separation direction for the clipping.
     """
     clipping_polygon = 1 if not edgecon1 else 2
