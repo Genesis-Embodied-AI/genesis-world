@@ -41,7 +41,7 @@ def exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
 
 @qd.func(requires_top_level=True)
 def func_cpu_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
-    N_CHUNKS = qd.static(256)
+    N_CHUNKS = qd.static(CPU_CHUNKS)
     qd.loop_config(name="exclusive_sum_cpu_chunks")
     for i_chunk in range(N_CHUNKS):
         chunk_size = (n_values[()] + N_CHUNKS - 1) // N_CHUNKS

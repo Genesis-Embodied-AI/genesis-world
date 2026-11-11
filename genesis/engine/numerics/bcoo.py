@@ -188,6 +188,8 @@ def func_sort_triplets(matrix: BCOOMatrixScratch):
 @qd.func(requires_top_level=True)
 def func_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
     """Sum the blocks of the sorted triplets into the entry of their position (see 'func_sort_triplets')."""
+    for _ in range(1):
+        matrix.n_entries[()] = 0
     qd.loop_config(name="bcoo_clear_entries")
     for i_value in range(matrix.n_triplets[()] * block_scalars):
         matrix.entries_value[i_value] = 0.0

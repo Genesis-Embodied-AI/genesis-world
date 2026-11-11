@@ -738,7 +738,10 @@ def func_pcg_iteration(
         if newton_envs.is_pcg_active[i_b]:
             p_dot_ap = newton_envs.p_dot_ap[i_b]
             pcg_alpha = gs.qd_float(0.0)
-            if qd.abs(p_dot_ap) > 0.0:
+            if not qd_isfinite(p_dot_ap):
+                newton_envs.is_pcg_active[i_b] = False
+                newton_envs.failure[i_b] = NewtonFailure.NON_FINITE
+            elif qd.abs(p_dot_ap) > 0.0:
                 pcg_alpha = newton_envs.rz[i_b] / p_dot_ap
             newton_envs.pcg_alpha[i_b] = pcg_alpha
         newton_envs.rz_new[i_b] = 0.0

@@ -209,104 +209,97 @@ def func_onesweep_pass(
     KEYS_PER_THREAD = qd.static(24)
     qd.loop_config(name="radix_sort_onesweep", block_dim=256)
     n_tiles = qd.max((n_keys[()] + TILE - 1) // TILE, 1)
-    for i_th in range(n_tiles * 256):
+    for _ in range(n_tiles * 256):
         qd.simt.block.sync()
         tid = qd.simt.block.thread_idx()
         n = n_keys[()]
-        i_blk = i_th // 256
         # The tiles take their turn in the order the blocks start, so that a tile only waits on tiles already running
         sh_tile_slot = qd.simt.block.SharedArray((1,), gs.qd_int)
         if tid == 0:
-            if i_blk < n_tiles:
-                sh_tile_slot[0] = qd.atomic_add(sorter.tile_counters[i_pass], 1)
-            else:
-                sh_tile_slot[0] = n_tiles
+            sh_tile_slot[0] = qd.atomic_add(sorter.tile_counters[i_pass], 1)
         qd.simt.block.sync()
 
         i_tile = sh_tile_slot[0]
-        if i_tile < n_tiles:
-            sh_block_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
-            sh_tile_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
-            sh_sorted_keys = qd.simt.block.SharedArray((TILE,), qd.u64)
-            sh_sorted_permutation = qd.simt.block.SharedArray((TILE,), gs.qd_int)
+        sh_block_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
+        sh_tile_prefixes = qd.simt.block.SharedArray((256,), gs.qd_int)
+        sh_sorted_keys = qd.simt.block.SharedArray((TILE,), qd.u64)
+        sh_sorted_permutation = qd.simt.block.SharedArray((TILE,), gs.qd_int)
 
-            keys32 = qd.Vector.zero(qd.u32, KEYS_PER_THREAD)
-            keys64 = qd.Vector.zero(qd.u64, KEYS_PER_THREAD)
-            digits = qd.Vector.zero(gs.qd_int, KEYS_PER_THREAD)
-            local_ranks = qd.Vector.zero(gs.qd_int, KEYS_PER_THREAD)
-            # A slot past the keys holds the largest key, which sorts last
-            for k in qd.static(range(KEYS_PER_THREAD)):
-                i_in = i_tile * TILE + (tid // 32) * KEYS_PER_THREAD * 32 + k * 32 + tid % 32
-                if qd.static(key_bits == 32):
-                    key32 = qd.u32(0xFFFFFFFF)
-                    if i_in < n:
-                        key32 = keys_in[i_in]
-                    keys32[k] = key32
-                    digits[k] = func_key_digit(i_pass, key32, key_bits)
-                else:
-                    key64 = qd.u64(0xFFFFFFFFFFFFFFFF)
-                    if i_in < n:
-                        key64 = keys_in[i_in]
-                    keys64[k] = key64
-                    digits[k] = func_key_digit(i_pass, key64, key_bits)
-
-            rank_metadata = func_rank_warp_striped_keys(digits, local_ranks, sh_block_prefixes)
-            local_count = rank_metadata[0]
-            # The padding of the last tile counts as keys of the last digit, which no tile publishes
-            if tid == 255:
-                local_count = local_count - qd.min(qd.max(i_tile * TILE + TILE - n, 0), TILE)
-            for k in qd.static(range(KEYS_PER_THREAD)):
-                i_in = i_tile * TILE + (tid // 32) * KEYS_PER_THREAD * 32 + k * 32 + tid % 32
+        keys32 = qd.Vector.zero(qd.u32, KEYS_PER_THREAD)
+        keys64 = qd.Vector.zero(qd.u64, KEYS_PER_THREAD)
+        digits = qd.Vector.zero(gs.qd_int, KEYS_PER_THREAD)
+        local_ranks = qd.Vector.zero(gs.qd_int, KEYS_PER_THREAD)
+        # A slot past the keys holds the largest key, which sorts last
+        for k in qd.static(range(KEYS_PER_THREAD)):
+            i_in = i_tile * TILE + (tid // 32) * KEYS_PER_THREAD * 32 + k * 32 + tid % 32
+            if qd.static(key_bits == 32):
+                key32 = qd.u32(0xFFFFFFFF)
                 if i_in < n:
-                    i_sorted = sh_block_prefixes[digits[k]] + local_ranks[k]
-                    if qd.static(key_bits == 32):
-                        sh_sorted_keys[i_sorted] = qd.u64(keys32[k])
-                    else:
-                        sh_sorted_keys[i_sorted] = keys64[k]
-                    sh_sorted_permutation[i_sorted] = permutation_in[i_in]
+                    key32 = keys_in[i_in]
+                keys32[k] = key32
+                digits[k] = func_key_digit(i_pass, key32, key_bits)
+            else:
+                key64 = qd.u64(0xFFFFFFFFFFFFFFFF)
+                if i_in < n:
+                    key64 = keys_in[i_in]
+                keys64[k] = key64
+                digits[k] = func_key_digit(i_pass, key64, key_bits)
 
-            # The keys of every digit in the tiles before this one, read back tile by tile until a tile holding them all
-            tile_prefix = gs.qd_int(0)
-            if tid < 256:
-                j_tile = i_tile - 1
-                is_prefix_complete = i_tile == 0
-                if i_tile > 0:
-                    sorter.lookback_partial[i_tile, tid] = local_count
-                    qd.simt.grid.mem_fence()
-                    qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 1)
-                while not is_prefix_complete:
-                    if j_tile < 0:
-                        is_prefix_complete = True
-                    else:
-                        status = qd.volatile_load(sorter.lookback_status[j_tile, tid])
-                        if status != 0:
-                            qd.simt.grid.mem_fence()
-                            if status == 2:
-                                tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_complete[j_tile, tid])
-                                is_prefix_complete = True
-                            else:
-                                tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_partial[j_tile, tid])
-                                j_tile = j_tile - 1
-                sorter.lookback_complete[i_tile, tid] = tile_prefix + local_count
+        rank_metadata = func_rank_warp_striped_keys(digits, local_ranks, sh_block_prefixes)
+        local_count = rank_metadata[0]
+        # The padding of the last tile counts as keys of the last digit, which no tile publishes
+        if tid == 255:
+            local_count = local_count - qd.min(qd.max(i_tile * TILE + TILE - n, 0), TILE)
+        for k in qd.static(range(KEYS_PER_THREAD)):
+            i_in = i_tile * TILE + (tid // 32) * KEYS_PER_THREAD * 32 + k * 32 + tid % 32
+            if i_in < n:
+                i_sorted = sh_block_prefixes[digits[k]] + local_ranks[k]
+                if qd.static(key_bits == 32):
+                    sh_sorted_keys[i_sorted] = qd.u64(keys32[k])
+                else:
+                    sh_sorted_keys[i_sorted] = keys64[k]
+                sh_sorted_permutation[i_sorted] = permutation_in[i_in]
+
+        # The keys of every digit in the tiles before this one, read back tile by tile until a tile holding them all
+        tile_prefix = gs.qd_int(0)
+        if tid < 256:
+            j_tile = i_tile - 1
+            is_prefix_complete = i_tile == 0
+            if i_tile > 0:
+                sorter.lookback_partial[i_tile, tid] = local_count
                 qd.simt.grid.mem_fence()
-                qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 2)
-                sh_tile_prefixes[tid] = tile_prefix
-            qd.simt.block.sync()
+                qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 1)
+            while not is_prefix_complete:
+                if j_tile < 0:
+                    is_prefix_complete = True
+                else:
+                    status = qd.volatile_load(sorter.lookback_status[j_tile, tid])
+                    if status != 0:
+                        qd.simt.grid.mem_fence()
+                        if status == 2:
+                            tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_complete[j_tile, tid])
+                            is_prefix_complete = True
+                        else:
+                            tile_prefix = tile_prefix + qd.volatile_load(sorter.lookback_partial[j_tile, tid])
+                            j_tile = j_tile - 1
+            sorter.lookback_complete[i_tile, tid] = tile_prefix + local_count
+            qd.simt.grid.mem_fence()
+            qd.atomic_exchange(sorter.lookback_status[i_tile, tid], 2)
+            sh_tile_prefixes[tid] = tile_prefix
+        qd.simt.block.sync()
 
-            n_tile_keys = qd.min(qd.max(n - i_tile * TILE, 0), TILE)
-            for k in qd.static(range(KEYS_PER_THREAD)):
-                i_sorted = k * 256 + tid
-                if i_sorted < n_tile_keys:
-                    key = sh_sorted_keys[i_sorted]
-                    i_digit = func_key_digit(i_pass, key, key_bits=64)
-                    i_out = (
-                        sorter.bins[i_pass, i_digit] + sh_tile_prefixes[i_digit] + i_sorted - sh_block_prefixes[i_digit]
-                    )
-                    if qd.static(key_bits == 32):
-                        keys_out[i_out] = qd.u32(key)
-                    else:
-                        keys_out[i_out] = key
-                    permutation_out[i_out] = sh_sorted_permutation[i_sorted]
+        n_tile_keys = qd.min(qd.max(n - i_tile * TILE, 0), TILE)
+        for k in qd.static(range(KEYS_PER_THREAD)):
+            i_sorted = k * 256 + tid
+            if i_sorted < n_tile_keys:
+                key = sh_sorted_keys[i_sorted]
+                i_digit = func_key_digit(i_pass, key, key_bits=64)
+                i_out = sorter.bins[i_pass, i_digit] + sh_tile_prefixes[i_digit] + i_sorted - sh_block_prefixes[i_digit]
+                if qd.static(key_bits == 32):
+                    keys_out[i_out] = qd.u32(key)
+                else:
+                    keys_out[i_out] = key
+                permutation_out[i_out] = sh_sorted_permutation[i_sorted]
         qd.simt.block.sync()
 
 

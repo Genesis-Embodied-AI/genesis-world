@@ -697,11 +697,11 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         (see NewtonOptions). Each of its substeps costs several iterations, which the larger time step pays back.
         Differentiable simulation, CPIC, custom materials and the contact with FEM, PBD and SPH entities require the
         explicit solver. The contact with moving rigid entities requires the pyramidal friction cone and the Newton
-        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions). Defaults
-        to False.
+        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions). A muscle
+        only contracts under the implicit solver: a negative actuation acts as zero. Defaults to False.
     wall_timeconst : float, optional
-        Time constant in seconds over which the walls of the domain push back the particles that penetrate them, at
-        least twice the substep. A smaller value gives stiffer walls that the particles penetrate less, at the cost of
+        Time constant in seconds over which the walls of the domain push back the particles that penetrate them, raised
+        to twice the substep when smaller. A smaller value gives stiffer walls that the particles penetrate less, but
         more iterations of the solve near the walls. Defaults to 0.01. Only used when `use_implicit_solver` is True.
     liquid_smoothing_velocity : float, optional
         Velocity in m/s under which the resistance of a liquid to compression fades in, its stiffness rising from zero
