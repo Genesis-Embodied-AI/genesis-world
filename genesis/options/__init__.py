@@ -1,9 +1,4 @@
-from .entities import (
-    FEMVertexSolverOptions,
-    Geom,
-    Link,
-    Vertex,
-)
+from .entities import Geom, Link, Vertex
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -26,7 +21,6 @@ __all__ = [
     "BaseCouplerOptions",
     "CoacdOptions",
     "FEMOptions",
-    "FEMVertexSolverOptions",
     "FoamOptions",
     "Geom",
     "IPCCouplerOptions",

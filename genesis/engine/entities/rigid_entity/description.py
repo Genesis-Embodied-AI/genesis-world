@@ -1482,16 +1482,34 @@ class KinematicEntityDescription(EntityDescription):
             if morph.visualization and not is_col:
                 vg_infos.append(g_info)
 
-        # The material the link and geom options give a collision geom is set before post-processing, which keeps geoms
-        # of different materials from fusing. Its density stays out of the authored ones, which anchor an aligned link
-        # where a kinematic entity of the same asset anchors it (see '_resolve_inertial').
+        # The link and geom options are set on the collision geoms before post-processing, so that geoms of different
+        # options never fuse. Their density stays out of the authored ones, which anchor an aligned link where a
+        # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options override the link
+        # options, and two selections of equal specificity giving one field of one geom raise an error. A selection by
+        # name may match no geom of this link, 'resolve' checking that it matches a geom of the entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
-        if isinstance(self.options, gs.entities.Rigid):
-            for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_path, geoms_name)):
-                if material is not None:
-                    g_info["material"] = material
-                    if material.rho is not None:
+        if isinstance(self.options, gs.entities.Rigid) and cg_infos:
+            link_name = link_path[-1]
+            link_fields, geoms_fields = {}, [{} for _ in cg_infos]
+            fields_options = []
+            geoms_options = list(self.options.geoms.items())
+            for link_index, link_options in self.options.links.items():
+                if link_index.matches(link_path):
+                    fields_options.append((link_fields, link_options, f"link '{link_name}'"))
+                    geoms_options.extend(link_options.geoms.items())
+            for geom_index, geom_options in geoms_options:
+                for i_g in geom_index.resolve(geoms_name):
+                    fields_options.append((geoms_fields[i_g], geom_options, f"geom {i_g} of link '{link_name}'"))
+            for fields, options, target in fields_options:
+                for name, value in options.model_dump(exclude={"geoms"}, exclude_unset=True, exclude_none=True).items():
+                    if name in fields:
+                        gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
+                    fields[name] = value
+            for g_info, geom_fields in zip(cg_infos, geoms_fields):
+                if link_fields or geom_fields:
+                    g_info["geom_options"] = gs.options.Geom(**{**link_fields, **geom_fields})
+                    if g_info["geom_options"].rho is not None:
                         resolution.links_path_with_density.add(link_path)
 
         # Post-process all collision meshes at once.
@@ -1593,8 +1611,8 @@ class KinematicEntityDescription(EntityDescription):
             # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain. The
             # density the geom options give weighs in the estimate alone (see '_resolve_geoms').
             dynamics_g_infos = [
-                {**g_info, "density": g_info["material"].rho}
-                if "material" in g_info and g_info["material"].rho is not None
+                {**g_info, "density": g_info["geom_options"].rho}
+                if "geom_options" in g_info and g_info["geom_options"].rho is not None
                 else g_info
                 for g_info in (cg_infos or vg_infos)
             ]
@@ -1764,18 +1782,18 @@ class RigidEntityDescription(KinematicEntityDescription):
         """
         cg_descs = []
         for g_info in cg_infos:
-            geom_material = g_info.get("material", gs.materials.Rigid())
+            geom_options = g_info.get("geom_options", gs.options.Geom())
             coefficients = []
             for geom_coefficient, material_coefficient, asset_coefficient, default_coefficient in (
-                (geom_material.friction, self.material.friction, g_info.get("friction"), gu.default_friction),
+                (geom_options.friction, self.material.friction, g_info.get("friction"), gu.default_friction),
                 (
-                    geom_material.friction_torsional,
+                    geom_options.friction_torsional,
                     self.material.friction_torsional,
                     g_info.get("friction_torsional"),
                     gu.default_friction_torsional,
                 ),
                 (
-                    geom_material.friction_rolling,
+                    geom_options.friction_rolling,
                     self.material.friction_rolling,
                     g_info.get("friction_rolling"),
                     gu.default_friction_rolling,
@@ -1797,7 +1815,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     mesh=g_info["mesh"],
                     contype=g_info["contype"],
                     conaffinity=g_info["conaffinity"],
-                    density=g_info.get("density") if geom_material.rho is None else geom_material.rho,
+                    density=g_info.get("density") if geom_options.rho is None else geom_options.rho,
                     friction=friction,
                     friction_torsional=friction_torsional,
                     friction_rolling=friction_rolling,

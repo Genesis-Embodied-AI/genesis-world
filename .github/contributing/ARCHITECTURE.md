@@ -104,13 +104,13 @@ scene.add_entity(options=gs.entities.MPM(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1
 scene.add_entity(options=gs.entities.SPH(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.SPH.Liquid()))
 ```
 
-Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms.
+Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms. The rigid description resolves the link and geom options, and the FEM entity the vertex options, so the options classes hold data alone.
 
 ```python
 scene.add_entity(
     options=gs.entities.Rigid(
         morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
-        links={"arm2": gs.options.Link(material=gs.materials.Rigid(friction=1.2))},
+        links={gs.LinkIndex.named("arm2"): gs.options.Link(friction=1.2)},
     )
 )
 ```

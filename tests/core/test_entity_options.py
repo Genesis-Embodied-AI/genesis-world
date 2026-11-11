@@ -59,9 +59,6 @@ def test_reject_material_for_solver():
     with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
         UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
     assert type(scene.add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
-    # The material of a link applies to its geoms alone, which leaves out the fields applying to the whole entity
-    with pytest.raises(gs.GenesisException, match="needs_coup"):
-        gs.options.Link(material=gs.materials.Rigid(needs_coup=False))
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
 
@@ -100,27 +97,19 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 gs.LinkIndex.subtree("base"): gs.options.Link(
                     geoms={
                         gs.GeomIndex.at(0): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction_torsional=0.02,
-                            ),
+                            friction_torsional=0.02,
                         ),
                     },
                 ),
                 gs.LinkIndex.subtree("arm1"): gs.options.Link(
-                    material=gs.materials.Rigid(
-                        friction_rolling=0.003,
-                    ),
+                    friction_rolling=0.003,
                 ),
-                "arm2": gs.options.Link(
-                    material=gs.materials.Rigid(
-                        rho=2000.0,
-                        friction=0.8,
-                    ),
+                gs.LinkIndex.named("arm2"): gs.options.Link(
+                    rho=2000.0,
+                    friction=0.8,
                     geoms={
                         gs.GeomIndex.at(0): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction=1.5,
-                            ),
+                            friction=1.5,
                         ),
                     },
                 ),
@@ -139,9 +128,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 ),
                 geoms={
                     gs.GeomIndex.all(): gs.options.Geom(
-                        material=gs.materials.Rigid(
-                            friction=friction,
-                        ),
+                        friction=friction,
                     ),
                 },
             ),
@@ -168,37 +155,27 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 gs.LinkIndex.subtree("body"): gs.options.Link(
                     geoms={
                         gs.GeomIndex.named("tip"): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction=1.2,
-                            ),
+                            friction=1.2,
                         ),
                     },
                 ),
-                "body": gs.options.Link(
+                gs.LinkIndex.named("body"): gs.options.Link(
                     geoms={
                         gs.GeomIndex.named("tor*"): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction=0.7,
-                            ),
+                            friction=0.7,
                         ),
                         gs.GeomIndex.at([False, True, False, False]): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction=1.5,
-                            ),
+                            friction=1.5,
                         ),
                         gs.GeomIndex.at(slice(1, 3)): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                friction_torsional=0.03,
-                            ),
+                            friction_torsional=0.03,
                         ),
                     },
                 ),
             },
             geoms={
                 gs.GeomIndex.named("*_cap"): gs.options.Geom(
-                    material=gs.materials.Rigid(
-                        friction_rolling=0.002,
-                    ),
+                    friction_rolling=0.002,
                 ),
             },
         ),
@@ -213,17 +190,13 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 recompute_inertia=True,
             ),
             links={
-                "body": gs.options.Link(
+                gs.LinkIndex.named("body"): gs.options.Link(
                     geoms={
                         gs.GeomIndex.at(0): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                rho=8000.0,
-                            ),
+                            rho=8000.0,
                         ),
                         gs.GeomIndex.at(1): gs.options.Geom(
-                            material=gs.materials.Rigid(
-                                rho=1000.0,
-                            ),
+                            rho=1000.0,
                         ),
                     },
                 ),
@@ -283,8 +256,8 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             options=gs.entities.Rigid(
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
                 geoms={
-                    gs.GeomIndex.all(): gs.options.Geom(material=gs.materials.Rigid(friction=1.0)),
-                    gs.GeomIndex.at(0): gs.options.Geom(material=gs.materials.Rigid(friction=2.0)),
+                    gs.GeomIndex.all(): gs.options.Geom(friction=1.0),
+                    gs.GeomIndex.at(0): gs.options.Geom(friction=2.0),
                 },
             )
         )
@@ -292,7 +265,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         scene.add_entity(
             options=gs.entities.Rigid(
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-                geoms={gs.GeomIndex.at(1): gs.options.Geom(material=gs.materials.Rigid(friction=1.0))},
+                geoms={gs.GeomIndex.at(1): gs.options.Geom(friction=1.0)},
             )
         )
     with pytest.raises(gs.GenesisException, match="equal specificity"):
@@ -300,17 +273,15 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             options=arm.options.model_copy(
                 update={
                     "links": {
-                        "arm*": gs.options.Link(material=gs.materials.Rigid(friction=1.0)),
-                        "arm2": gs.options.Link(material=gs.materials.Rigid(friction=2.0)),
+                        gs.LinkIndex.named("arm*"): gs.options.Link(friction=1.0),
+                        gs.LinkIndex.named("arm2"): gs.options.Link(friction=2.0),
                     }
                 }
             )
         )
     with pytest.raises(gs.GenesisException, match="No collision geom of the entity"):
         scene.add_entity(
-            options=arm.options.model_copy(
-                update={"geoms": {gs.GeomIndex.named("leg*"): gs.options.Geom(material=gs.materials.Rigid())}}
-            )
+            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.named("leg*"): gs.options.Geom()}})
         )
     with pytest.raises(gs.GenesisException, match="links_to_keep"):
         scene.add_entity(
@@ -318,9 +289,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         )
     with pytest.raises(gs.GenesisException, match="mesh or a primitive"):
         scene.add_entity(
-            options=arm.options.model_copy(
-                update={"geoms": {gs.GeomIndex.at(0): gs.options.Geom(material=gs.materials.Rigid(friction=1.0))}}
-            )
+            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(0): gs.options.Geom(friction=1.0)}})
         )
 
     scene.build(n_envs=2)
