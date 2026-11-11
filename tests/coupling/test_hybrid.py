@@ -210,6 +210,7 @@ def test_rigid_mpm_implicit_coupling(show_viewer):
             E=1e5,
             sampler="regular",
         ),
+        vis_mode="particle",
     )
     box_dropped = scene.add_entity(
         morph=gs.morphs.Box(
@@ -234,6 +235,7 @@ def test_rigid_mpm_implicit_coupling(show_viewer):
         material=gs.materials.MPM.Elastic(
             sampler="regular",
         ),
+        vis_mode="particle",
     )
     scene.build(n_envs=2)
     assert scene.sim.rigid_solver.is_solved_in_global_newton

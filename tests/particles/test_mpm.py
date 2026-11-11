@@ -310,6 +310,7 @@ def test_implicit_particle_constraints(show_viewer):
             size=(0.15, 0.15, 0.15),
         ),
         material=gs.materials.MPM.Elastic(),
+        vis_mode="particle",
     )
     moving_box = scene.add_entity(
         morph=gs.morphs.Box(
@@ -327,6 +328,7 @@ def test_implicit_particle_constraints(show_viewer):
             size=(0.05, 0.05, 0.05),
         ),
         material=gs.materials.MPM.Elastic(),
+        vis_mode="particle",
     )
     scene.build(n_envs=2)
     checkpoint_unconstrained = scene.sim.__getstate__()
@@ -396,6 +398,7 @@ def test_implicit_halt_on_nan(show_viewer):
             E=1e9,
             sampler="regular",
         ),
+        vis_mode="particle",
     )
     # A rigid box falling beside the block, whose dofs join the Newton solve
     box = scene.add_entity(

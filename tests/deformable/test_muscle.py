@@ -115,6 +115,7 @@ def test_implicit_mpm_muscle(n_envs, show_viewer):
             rho=10000.0,
             n_groups=4,
         ),
+        vis_mode="particle",
     )
     scene.build(n_envs=n_envs)
 
