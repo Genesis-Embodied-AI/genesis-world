@@ -519,7 +519,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
         members = {name: archive.read(name) for name in archive.namelist()}
     original = json.loads(members[MANIFEST_NAME])
     manifest = deepcopy(original)
-    manifest["schema"]["genesis.engine.entities.rigid_entity.description.RigidLinkDescription"].append("inertial_frame")
+    manifest["schema"]["RigidLinkDescription"].append("inertial_frame")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -529,7 +529,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
 
     # An enumeration member whose value moved means every value written under it names something else.
     manifest = deepcopy(original)
-    manifest["schema"]["genesis.constants.JOINT_TYPE"]["REVOLUTE"] = 7
+    manifest["schema"]["JOINT_TYPE"]["REVOLUTE"] = 7
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -540,12 +540,28 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     # A field a class gained since is not a mismatch: an option states which of its fields were given, and a
     # description field a file leaves out stands at the default it declares.
     manifest = deepcopy(original)
-    manifest["schema"]["genesis.engine.entities.rigid_entity.description.RigidLinkDescription"].remove("invweight")
+    manifest["schema"]["RigidLinkDescription"].remove("invweight")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
             archive.writestr(name, content)
     gs.Scene.load(exported)
+
+    # A file exported before entity options existed holds none, and its entities take the options of their material.
+    manifest = deepcopy(original)
+    for entity in manifest["held"]["scene"]["entities"]:
+        del entity["options"]
+    for name in [name for name in manifest["schema"] if name.startswith("entities.")]:
+        del manifest["schema"][name]
+    manifest["schema"]["RigidEntityDescription"].remove("options")
+    members[MANIFEST_NAME] = json.dumps(manifest).encode()
+    with zipfile.ZipFile(exported, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    scene = gs.Scene.load(exported)
+    for entity, entity_authored in zip(scene.entities, checkpoint_scene.entities):
+        assert isinstance(entity.options, gs.entities.Rigid)
+        assert entity.material == entity_authored.material
 
     # A file states a layout under each class name it holds. Anything else standing there is rejected before it is
     # read.
@@ -572,16 +588,6 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     # reaching a constructor.
     manifest = deepcopy(original)
     manifest["held"]["scene"] = 3
-    members[MANIFEST_NAME] = json.dumps(manifest).encode()
-    with zipfile.ZipFile(exported, "w") as archive:
-        for name, content in members.items():
-            archive.writestr(name, content)
-    with pytest.raises(gs.GenesisException, match="values a Genesis scene is not made of"):
-        gs.Scene.load(exported)
-
-    # Every entity is constructed from options, so a description holding none is rejected.
-    manifest = deepcopy(original)
-    del manifest["held"]["scene"]["entities"][0]["options"]
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():

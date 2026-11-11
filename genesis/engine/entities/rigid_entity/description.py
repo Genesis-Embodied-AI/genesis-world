@@ -25,6 +25,7 @@ import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.materials.base import Material
 from genesis.engine.mesh import InertialProperties
+from genesis.options.entities import get_entity_options_cls
 from genesis.options.indices import get_links_path
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
@@ -419,6 +420,15 @@ class KinematicEntityDescription(EntityDescription):
     variants: list[KinematicVariantDescription] = field(default_factory=list)
     attachment: KinematicAttachmentDescription | None = None
 
+    def __post_init__(self):
+        if self.options is None:
+            options_cls = get_entity_options_cls(self.material)
+            entity_fields = {"material": self.material, "surface": self.surface, "name": self.name}
+            entity_fields["morph"] = self.morphs[0] if len(self.morphs) == 1 else tuple(self.morphs)
+            if self.visualize_contact:
+                entity_fields["visualize_contact"] = True
+            self.options = options_cls(**entity_fields)
+
     @classmethod
     def resolve(
         cls,
@@ -475,6 +485,7 @@ class KinematicEntityDescription(EntityDescription):
                     morph.default_armature = None
 
         desc = cls(
+            material=options.material,
             morphs=morphs,
             surface=surface,
             visualize_contact=visualize_contact,
