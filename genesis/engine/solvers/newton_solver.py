@@ -298,6 +298,11 @@ class NewtonSolver(Solver):
         has_mpm = mpm_solver.is_active and mpm_solver._use_implicit_solver
         has_cloth = fem_solver.is_solved_in_global_newton
         halfplanes_geom_idx = []
+        if has_cloth and gs.qd_float == qd.f32:
+            gs.logger.warning(
+                "The cloth runs in single precision, where its contact with itself and with other cloths is less "
+                "reliable: use gs.init(precision='64')."
+            )
         if has_cloth:
             if has_mpm:
                 gs.raise_exception(

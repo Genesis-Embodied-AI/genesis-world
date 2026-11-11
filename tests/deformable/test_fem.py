@@ -1377,6 +1377,8 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
 
 
 @pytest.mark.required
+# The contact between cloths resolves its gaps in double precision, the precision of its reference
+@pytest.mark.precision("64")
 def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
     FRICTION_EPS_V = 1e-2
@@ -1434,6 +1436,8 @@ def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer
 
 
 @pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
 def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
     N_LENGTH, N_WIDTH = 24, 6
 
@@ -1473,6 +1477,8 @@ def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
 
 
 @pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
 def test_cloth_contact_capacity_growth(cloth_grid_obj_path, show_viewer):
     sheets_pos = []
     for capacity in (1, 1000):
@@ -1501,8 +1507,9 @@ def test_cloth_contact_capacity_growth(cloth_grid_obj_path, show_viewer):
         for _ in range(50):
             scene.step()
         sheets_pos.append(torch.cat([sheet.get_verts_pos() for sheet in sheets]))
-    # The pairs beyond a capacity of one are kept, the capacity growing as the search finds them
-    assert_allclose(sheets_pos[0], sheets_pos[1], tol=gs.EPS)
+    # The pairs beyond a capacity of one are kept, the capacity growing as the search finds them. The GPU sums the
+    # terms of the pairs atomically, in an order that follows the one in which the search finds them.
+    assert_allclose(sheets_pos[0], sheets_pos[1], atol=2e-8)
 
 
 @pytest.mark.required

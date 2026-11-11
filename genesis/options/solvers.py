@@ -868,7 +868,9 @@ class IPCOptions(Options):
 
     The contact acts within a band of width 'd_hat' beyond the contact thickness of the cloth (see
     `gs.materials.FEM.Cloth`), its repulsion growing without bound as the gap closes, so the cloth never reaches the
-    thickness.
+    thickness. The contact of the cloth with itself and with other cloths is reliable in double precision,
+    `gs.init(precision='64')`: in single precision, cloths at rest on one another creep and their motion depends on the
+    order in which their contacts are found.
 
     Parameters
     ----------

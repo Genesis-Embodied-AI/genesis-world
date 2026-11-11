@@ -19,12 +19,14 @@ from .base import Base
 
 class Cloth(Base):
     """
-    Cloth material for thin shell/membrane simulation, solved by the Newton solver of the scene with its contacts
-    against the fixed planes of the scene (see 'gs.options.IPCOptions'). Only accepts surface mesh morphs.
+    Cloth material for thin shell/membrane simulation, solved by the Newton solver of the scene with its contacts with
+    itself, with the other cloths and with the fixed planes of the scene (see 'gs.options.IPCOptions'). Only accepts
+    surface mesh morphs.
 
     The membrane resists stretch and shear separately (Baraff-Witkin), its stretch stiffening sharply past the rest
     length (strain limiting), with no Poisson effect. The bending resists the folding of every pair of adjacent
-    triangles.
+    triangles. The contact between cloths is reliable in double precision, `gs.init(precision='64')`, which a scene in
+    single precision recommends with a warning.
 
     Parameters
     ----------
