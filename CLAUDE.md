@@ -144,7 +144,7 @@
 - **Never remove or weaken an existing assertion or measurement to silence a failure** (local or CI). Report the failure with the data and ask. A threshold that only holds on one machine is a calibration problem.
 - **Bug fix PRs** must include a regression test that fails on `main` and passes with the fix, added to the test already covering the capability that broke.
 - **Never write a test that pins a known defect.** Tests assert observable physics and public API behavior, never implementation details.
-- **Never test a limitation, but do test that an unsupported input is handled.** A capability Genesis does not offer gets no test. Refusing an input it cannot handle is behavior, so a test asserts the refusal wherever proceeding would corrupt what the user gets.
+- **Never test a limitation, but do test that an invalid input is refused.** A capability Genesis does not offer yet gets no test, even when the code refuses it (weld equalities under the SAP coupler): that refusal is a temporary gap, not a specification. A test asserts a refusal only for an input that is invalid by nature (contradictory options, values outside their domain), whose refusal stays required once every feature exists.
 - **The source code never changes to accommodate a test.** A test configures what it needs through the public options before building the scene, never by writing solver attributes of a built scene. When a test breaks because the engine changed, the test is fixed.
 - **No deprecation tests.** Do not add unit tests that verify deprecation warnings are emitted.
 - Feature tests exercise the new behavior, not the internal warning machinery.

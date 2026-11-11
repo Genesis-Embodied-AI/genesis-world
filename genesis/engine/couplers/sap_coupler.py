@@ -1109,6 +1109,17 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active
         self._enable_fem_self_tet_contact &= self.fem_solver.is_active
 
+        # The coupler enforces the joint equalities of the rigid solver alone, unless constraints are disabled
+        if not self.rigid_solver._options.disable_constraint:
+            for entity in self.rigid_solver.entities:
+                unsupported_types = sorted({equality.type for equality in entity.equalities} - {gs.EQUALITY_TYPE.JOINT})
+                if unsupported_types:
+                    unsupported_names = ", ".join([equality_type.name.lower() for equality_type in unsupported_types])
+                    gs.raise_exception(
+                        f"SAPCoupler enforces joint equalities only, but entity '{entity.name}' holds "
+                        f"{unsupported_names} ones."
+                    )
+
         for equality in self.rigid_solver.equalities:
             if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
                 gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
@@ -1209,10 +1220,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 or self._rigid_rigid_contact_type == RigidRigidContactType.TET
             )
             has_tet_tables |= self._rigid_compliant
-            # The rigid solver leaves its equality constraints to this coupler, unless constraints are disabled
+            # The rigid solver leaves its joint equality constraints to this coupler, unless constraints are disabled
             # TODO: Dynamically added constraints are not supported for now
-            self._has_equality_constraints = (
-                self.rigid_solver.n_equalities > 0 and not self.rigid_solver._options.disable_constraint
+            self._has_equality_constraints = not self.rigid_solver._options.disable_constraint and any(
+                [equality.type == gs.EQUALITY_TYPE.JOINT for equality in self.rigid_solver.equalities]
             )
         has_rigid_rigid_contact = (
             self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
