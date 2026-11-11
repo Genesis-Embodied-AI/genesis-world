@@ -8,13 +8,17 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.materials.FEM.cloth import Cloth
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
+from genesis.utils.data import ENVS, Data, DataKind, field
 from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
 
 if TYPE_CHECKING:
@@ -90,7 +94,14 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
 
 
-class IPCCoupler(RBC):
+class IPCCouplerState(Data, kind=DataKind.STATE):
+    """Runtime state of the IPC coupler that Genesis holds, the IPC world holding the rest."""
+
+    # The error flags of each env, which no kernel of the coupler raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
+
+
+class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     Coupler class for handling Incremental Potential Contact (IPC) simulation coupling.
 
@@ -120,6 +131,7 @@ class IPCCoupler(RBC):
             )
 
         self.sim = simulator
+        self.ipc_coupler_state: IPCCouplerState | None = None
         self.options = options
 
         # Define some proxies for convenience
@@ -187,6 +199,9 @@ class IPCCoupler(RBC):
 
     def build(self) -> None:
         """Build IPC system"""
+        self.ipc_coupler_state = IPCCouplerState(sizes=dict(envs=self.sim._B))
+        self.build_errno(self.sim._B)
+        self.register_errors(self.ipc_coupler_state.errno, {})
         # IPC coupler builds a single IPC scene shared across all envs, so it requires
         # identical geometry topology (links, joints, geoms) across environments.
         # Batched info options allow per-env topology which is incompatible.
@@ -811,11 +826,11 @@ class IPCCoupler(RBC):
     # Section 2: Core implementation
     # ============================================================
 
-    def preprocess(self, f):
+    def preprocess(self):
         """Preprocessing step before coupling"""
         pass
 
-    def couple(self, f):
+    def couple(self):
         """
         Execute IPC coupling step with per-entity coupling types.
 

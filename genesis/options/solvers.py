@@ -104,23 +104,49 @@ class SAPCouplerOptions(BaseCouplerOptions):
     Parameters
     ----------
     n_sap_iterations : int, optional
-        Number of iterations for the SAP solver. Defaults to 5.
+        Maximum number of Newton iterations of the SAP solver in each substep, which stops earlier once it converges. A
+        smaller value bounds the cost of a substep, at the risk of returning velocities that do not satisfy the contacts
+        and that inject energy into resting contacts. Defaults to 100.
     n_pcg_iterations : int, optional
         Number of iterations for the Preconditioned Conjugate Gradient solver. Defaults to 100.
     n_linesearch_iterations : int, optional
-        Max number of iterations for the line search solver. Defaults to 10.
+        Maximum number of iterations of the exact line search of each Newton iteration, which stops earlier once it
+        meets its tolerance, usually within a few iterations. A smaller value bounds the cost of a Newton iteration, at
+        the risk of taking a step short of the minimum of the cost along the Newton direction, which can stall the
+        Newton iterations. Defaults to 100.
     sap_convergence_atol : float, optional
-        Absolute tolerance for SAP convergence. Defaults to 1e-6.
+        Absolute tolerance of the SAP solve on the norm of the gradient of its cost, in momentum units, added to the
+        relative one. A larger value stops the solves of scenes moving slowly earlier, at the cost of accuracy near
+        rest. Defaults to None, which leaves the relative tolerance alone.
     sap_convergence_rtol : float, optional
-        Relative tolerance for SAP convergence. Defaults to 1e-5.
+        Tolerance of the SAP solve on the norm of the gradient of its cost relative to the momentum of the scene. A
+        smaller value solves the contacts more accurately, so that resting contacts slip less within a step, at the cost
+        of more Newton iterations per substep. Defaults to None, which takes 1e-4 in double precision and 1e-3 in single
+        precision: single precision with its default runs fastest, while double precision solves about ten times more
+        accurately for a quarter to two thirds more Newton iterations. A solve also stops once its iterations no longer
+        decrease its cost, which bounds the accuracy any value can reach to the precision of the simulation.
     sap_taud : float, optional
         Dissipation time scale for SAP. Defaults to 0.1.
     sap_beta : float, optional
         Normal regularization parameter for SAP. Defaults to 1.0.
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
+    enable_lagged_friction : bool, optional
+        Whether the friction of each contact scales with its normal force of the previous substep rather than with the
+        normal force solved within the substep. Lagged friction keeps sliding bodies on the surface they slide on,
+        decelerating at the rate of Coulomb friction, where SAP friction lifts them off it at a speed growing with
+        their sliding speed. In exchange, the friction lags one substep behind changes of the normal force, so that it
+        grips harder on impact, and sticking contacts under load creep at a speed up to `stiction_tolerance`. Defaults
+        to True.
+    stiction_tolerance : float, optional
+        Sliding speed below which lagged friction holds a contact as sticking, in m/s. A smaller value lets sticking
+        contacts creep less, at the cost of more Newton iterations per substep. Ignored without lagged friction.
+        Defaults to 1e-4.
     pcg_threshold : float, optional
-        Threshold for the Preconditioned Conjugate Gradient solver. Defaults to 1e-6.
+        Threshold of the Preconditioned Conjugate Gradient solver on the squared residual of each Newton step, relative
+        to its initial value. A smaller value takes fewer and more accurate Newton steps, each costing more conjugate
+        gradient iterations, for the same converged result. A value below the square of the precision of the simulation
+        acts as that square. Defaults to 1e-2.
     linesearch_ftol : float, optional
         Line search sufficient value close to zero for exact linesearch. Defaults to 1e-6.
     linesearch_max_step_size : float, optional
@@ -145,17 +171,30 @@ class SAPCouplerOptions(BaseCouplerOptions):
         Vert would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
     enable_rigid_fem_contact : bool, optional
         Whether to enable coupling between rigid and FEM solvers. Defaults to True.
+    max_collision_pairs : int, optional
+        Maximum number of collision pairs of each kind of contact in each environment: the pairs of overlapping bounding
+        boxes the contact detection tests, and the pairs of elements, or of an element and the floor, that may touch. A
+        larger value covers larger or more finely meshed contact patches, at the cost of memory proportional to it and
+        to the number of environments, capped by the most pairs the scene can produce. Exceeding it at runtime halts
+        the simulation with an error naming this option. Defaults to 32768.
+    max_contacts : int, optional
+        Maximum number of contact points of each kind of contact in each environment. A larger value covers larger or
+        more finely meshed contact patches, at the cost of memory proportional to it and to the number of environments,
+        capped by the most contact points the scene can produce. Exceeding it at runtime halts the simulation with an
+        error naming this option. Defaults to 4096.
     """
 
-    n_sap_iterations: PositiveInt = 5
+    n_sap_iterations: PositiveInt = 100
     n_pcg_iterations: PositiveInt = 100
-    n_linesearch_iterations: PositiveInt = 10
-    sap_convergence_atol: PositiveFloat = 1e-6
-    sap_convergence_rtol: PositiveFloat = 1e-5
+    n_linesearch_iterations: PositiveInt = 100
+    sap_convergence_atol: PositiveFloat | None = None
+    sap_convergence_rtol: PositiveFloat | None = None
     sap_taud: PositiveFloat = 0.1
     sap_beta: PositiveFloat = 1.0
     sap_sigma: PositiveFloat = 1e-3
-    pcg_threshold: PositiveFloat = 1e-6
+    enable_lagged_friction: StrictBool = True
+    stiction_tolerance: PositiveFloat = 1e-4
+    pcg_threshold: PositiveFloat = 1e-2
     linesearch_ftol: PositiveFloat = 1e-6
     linesearch_max_step_size: PositiveFloat = 1.5
     hydroelastic_stiffness: PositiveFloat = 1e8
@@ -165,6 +204,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     rigid_floor_contact_type: Literal["tet", "vert", "none"] = "tet"
     enable_rigid_fem_contact: StrictBool = True
     rigid_rigid_contact_type: Literal["tet", "vert", "none"] = "tet"
+    max_collision_pairs: NonNegativeInt = 32768
+    max_contacts: NonNegativeInt = 4096
 
 
 class IPCCouplerOptions(BaseCouplerOptions):

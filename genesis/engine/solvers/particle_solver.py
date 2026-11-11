@@ -10,7 +10,15 @@ import genesis.utils.geom as gu
 from genesis.engine.state_change import StateChange, mutates
 from genesis.options.solvers import MPMOptions, PBDOptions, SPHOptions
 from genesis.utils.data import ENVS, Data, DataKind, Size, eoa, field
-from genesis.utils.geom import PARTICLES, SpatialHashGrid, func_hash_grid_to_slot, func_hash_pos_to_grid
+from genesis.utils.geom import (
+    PARTICLES,
+    SpatialHashGrid,
+    func_hash_cell_to_slot,
+    func_hash_grid_to_slot,
+    func_hash_n_cells,
+    func_hash_pos_to_grid,
+    func_hash_wrap_cell,
+)
 from genesis.utils.misc import indices_to_mask, qd_to_torch
 
 from .base_solver import VVERTS, GravityMixin, Solver, TimeBasedMixin, kernel_set_values
@@ -70,8 +78,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vverts: int | None = None
         self._n_vfaces: int | None = None
 
-        # The arrays of the particles the accessors read and write, held in frames by a solver that keeps its state in
-        # frames (see 'Solver.has_frames'), and those the rendering reads.
+        # The arrays of the particles the accessors read and write, and those the rendering reads
         self._particles_pos: qd.Tensor | None = None
         self._particles_vel: qd.Tensor | None = None
         self._particles_is_active: qd.Tensor | None = None
@@ -137,9 +144,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         poss, particles_idx, envs_idx = self._sanitize_io_variables(
             poss, particles_idx, self.n_particles, "particles_idx", envs_idx, (3,), batched_idx=True
         )
-        kernel_set_particles_pos(
-            particles_idx, envs_idx, poss, self._particles_pos, self._particles_vel, self.has_frames
-        )
+        kernel_set_particles_pos(particles_idx, envs_idx, poss, self._particles_pos, self._particles_vel)
         self._reset_particles(particles_idx, envs_idx, reset_deformation=True)
         # Overwriting the positions of the particles clears the errors their former state flagged
         self.clear_errno(envs_idx)
@@ -171,7 +176,7 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
         actives, particles_idx, envs_idx = self._sanitize_io_variables(
             actives, particles_idx, self.n_particles, "particles_idx", envs_idx, dtype=gs.tc_bool, batched_idx=True
         )
-        kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active, self.has_frames)
+        kernel_set_values(particles_idx, envs_idx, actives, self._particles_is_active)
         self._reset_particles(particles_idx, envs_idx, reset_deformation=False)
 
     def get_particles_active(self, particles_idx=None, envs_idx=None) -> torch.Tensor:
@@ -196,18 +201,12 @@ class ParticleSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def update_render_fields(self) -> None:
         """Update the particles and the visual vertices as drawn from the state of the particles."""
-        f = self._sim.cur_substep_local
         kernel_update_particles_render(
-            f,
-            self._particles_pos,
-            self._particles_vel,
-            self._particles_is_active,
-            self.particles_render,
-            self.has_frames,
+            self._particles_pos, self._particles_vel, self._particles_is_active, self.particles_render
         )
         if self.vverts_render is not None:
             kernel_update_vverts_render(
-                f, self._particles_pos, self.particles_render, self.vverts_render, self._vverts_support, self.has_frames
+                self._particles_pos, self.particles_render, self.vverts_render, self._vverts_support
             )
 
     @property
@@ -306,7 +305,6 @@ def kernel_set_particles_pos(
     poss: qd.types.ndarray(),
     particles_pos: qd.Tensor,
     particles_vel: qd.Tensor,
-    has_frames: qd.template(),
 ):
     """Set the position of some particles, at rest."""
     for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0], axes=qd.static(eoa(particles_pos))):
@@ -314,39 +312,33 @@ def kernel_set_particles_pos(
         i_b = envs_idx[i_b_]
         # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
-            I_p = [0, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-            particles_pos[I_p] = qd.Vector([poss[i_b_, i_p_, 0], poss[i_b_, i_p_, 1], poss[i_b_, i_p_, 2]])
-            particles_vel[I_p] = qd.Vector.zero(gs.qd_float, 3)
+            particles_pos[i_p, i_b] = qd.Vector([poss[i_b_, i_p_, 0], poss[i_b_, i_p_, 1], poss[i_b_, i_p_, 2]])
+            particles_vel[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)
 def kernel_update_particles_render(
-    f: int,
     particles_pos: qd.Tensor,
     particles_vel: qd.Tensor,
     particles_is_active: qd.Tensor,
     particles_render: ParticlesRender,
-    has_frames: qd.template(),
 ):
-    """Update the particles as drawn from their state, at the given frame for a solver holding its state in frames."""
+    """Update the particles as drawn from their state."""
     for i_p, i_b in qd.ndrange(*particles_render.pos.shape, axes=qd.static(eoa(particles_render.is_active))):
-        I_p = [f, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-        if particles_is_active[I_p]:
-            particles_render.pos[i_p, i_b] = particles_pos[I_p]
-            particles_render.vel[i_p, i_b] = particles_vel[I_p]
+        if particles_is_active[i_p, i_b]:
+            particles_render.pos[i_p, i_b] = particles_pos[i_p, i_b]
+            particles_render.vel[i_p, i_b] = particles_vel[i_p, i_b]
         else:
             particles_render.pos[i_p, i_b] = gu.qd_nowhere()
-        particles_render.is_active[i_p, i_b] = particles_is_active[I_p]
+        particles_render.is_active[i_p, i_b] = particles_is_active[i_p, i_b]
 
 
 @qd.kernel(fastcache=True)
 def kernel_update_vverts_render(
-    f: int,
     particles_pos: qd.Tensor,
     particles_render: ParticlesRender,
     vverts_render: VVertsRender,
     vverts_support: VVertsSupport,
-    has_frames: qd.template(),
 ):
     """Update the visual vertices as drawn from the particles supporting them, once the particles are."""
     for i_vv, i_b in qd.ndrange(*vverts_render.pos.shape, axes=qd.static(eoa(vverts_render.pos))):
@@ -355,8 +347,7 @@ def kernel_update_vverts_render(
         vvert_pos = qd.Vector.zero(gs.qd_float, 3)
         for k in qd.static(range(support_idxs.n)):
             i_p = support_idxs[k]
-            I_p = [f, i_p, i_b] if qd.static(has_frames) else [i_p, i_b]
-            vvert_pos += particles_pos[I_p] * support_weights[k]
+            vvert_pos += particles_pos[i_p, i_b] * support_weights[k]
         vverts_render.pos[i_vv, i_b] = vvert_pos
         i_p_first = support_idxs[0]
         vverts_render.is_active[i_vv, i_b] = particles_render.is_active[i_p_first, i_b]
@@ -380,11 +371,12 @@ def func_get_particles_mean_vel(
     The cube is centered at `pos` with half side `half_size`. The particles are searched for among the cells of the hash
     grid of the solver, `n_cells` along each axis from the one holding the lowest corner of the cube.
     """
-    base = func_hash_pos_to_grid(pos - half_size, hash_grid)
+    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos - half_size, hash_grid), hash_grid)
     vel_sum = qd.Vector.zero(gs.qd_float, 3)
     n_particles = 0
-    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
-        i_s = func_hash_grid_to_slot(base + offset, hash_grid)
+    n_cells_distinct = func_hash_n_cells(n_cells, hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells_distinct[0], n_cells_distinct[1], n_cells_distinct[2])):
+        i_s = func_hash_cell_to_slot(base + offset, hash_grid)
         i_p_start = hash_grid.slot_start[i_s, i_b]
         for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
             if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size:
@@ -412,9 +404,10 @@ def func_add_particles_momentum(
     Each particle that `particles_is_moved` selects gains the velocity `momentum` over its mass, which `particles_mass`
     holds by particle index.
     """
-    base = func_hash_pos_to_grid(pos - half_size, hash_grid)
-    for offset in qd.grouped(qd.ndrange(n_cells, n_cells, n_cells)):
-        i_s = func_hash_grid_to_slot(base + offset, hash_grid)
+    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos - half_size, hash_grid), hash_grid)
+    n_cells_distinct = func_hash_n_cells(n_cells, hash_grid)
+    for offset in qd.grouped(qd.ndrange(n_cells_distinct[0], n_cells_distinct[1], n_cells_distinct[2])):
+        i_s = func_hash_cell_to_slot(base + offset, hash_grid)
         i_p_start = hash_grid.slot_start[i_s, i_b]
         for i_p in range(i_p_start, i_p_start + hash_grid.slot_size[i_s, i_b]):
             if qd.abs(pos - particles_pos[i_p, i_b]).max() < half_size and particles_is_moved[i_p, i_b]:

@@ -350,12 +350,9 @@ class LaunchRecorder:
                     backward=_KERNELS_BACKWARD[kernel.func],
                     backward_args=args,
                     arrays_saved=[],
-                    restore=None,
                 )
             else:
-                entry = RecordedEntry(
-                    launches=[], is_autodiff=True, backward=None, backward_args=(), arrays_saved=[], restore=None
-                )
+                entry = RecordedEntry(launches=[], is_autodiff=True, backward=None, backward_args=(), arrays_saved=[])
             self.entries.append(entry)
         entry = self.entries[-1]
         entry.launches.append((kernel, args))
@@ -390,32 +387,17 @@ class LaunchRecorder:
         self._arrays_used_by_entry |= arrays_used
 
     @contextlib.contextmanager
-    def entry(
-        self,
-        backward: Callable[..., None] | None = None,
-        *args,
-        restore: Callable[[], None] | None = None,
-        autodiff: bool = False,
-    ) -> Iterator[None]:
+    def entry(self, backward: Callable[..., None] | None, *args) -> Iterator[None]:
         """
-        Record the kernels launched in the block as one entry.
+        Record the kernels launched in the block as one entry, reversed by `backward` called with `args`.
 
-        The launches are reversed by their autodiff when `autodiff` holds, by `backward` called with `args` otherwise,
-        None for launches without gradient. `restore` writes back, after the reversal, what the block overwrites in
-        arrays the recorder cannot see, such as the frames of a solver.
+        `backward` is None for launches without gradient.
         """
         assert not self._is_grouping, "A block recording one entry cannot open inside another."
         self._arrays_used |= self._arrays_used_by_entry
         self._arrays_used_by_entry.clear()
         self.entries.append(
-            RecordedEntry(
-                launches=[],
-                is_autodiff=autodiff,
-                backward=backward,
-                backward_args=args,
-                arrays_saved=[],
-                restore=restore,
-            )
+            RecordedEntry(launches=[], is_autodiff=False, backward=backward, backward_args=args, arrays_saved=[])
         )
         self._is_grouping = True
         try:
@@ -433,7 +415,7 @@ class LaunchRecorder:
         tensors_grad = {}
         # The zero-copy restores of consecutive entries flush once, before the next launch reading them
         is_sync_pending = False
-        for launches, is_autodiff, backward, backward_args, arrays_saved, restore in reversed(self.entries[start:stop]):
+        for launches, is_autodiff, backward, backward_args, arrays_saved in reversed(self.entries[start:stop]):
             if is_sync_pending and (is_autodiff or backward is not None):
                 torch.mps.synchronize()
                 is_sync_pending = False
@@ -456,8 +438,6 @@ class LaunchRecorder:
                 backward(*backward_args)
             for array, value in arrays_saved:
                 qd_from_torch(array, value)
-            if restore is not None:
-                restore()
             is_sync_pending |= bool(arrays_saved) and gs.use_zerocopy.is_supported and gs.backend == gs.metal
         if is_sync_pending:
             torch.mps.synchronize()
@@ -467,8 +447,7 @@ class LaunchRecorder:
 class RecordedEntry(NamedTuple):
     """
     An entry of a recorded step: its launches, whether autodiff reverses them, the backward reversing them otherwise
-    (None without gradient) with its arguments, the arrays it overwrites with their values before it, and the function
-    restoring what it overwrites that the recorder cannot save.
+    (None without gradient) with its arguments, and the arrays it overwrites with their values before it.
     """
 
     launches: list[tuple[Callable, tuple]]
@@ -476,7 +455,6 @@ class RecordedEntry(NamedTuple):
     backward: Callable[..., None] | None
     backward_args: tuple
     arrays_saved: list[tuple]
-    restore: Callable[[], None] | None
 
 
 @contextlib.contextmanager
@@ -540,9 +518,8 @@ class ReadOperation(Operation):
     """
     A query of the state, whose outputs are its tensors tracking gradients.
 
-    The backward pass hands their gradients, None for those the loss does not reach, to the `add_grad_from_state` of
-    the solver that read them, with the selection of the state they cover, which only the solver interprets. A state is
-    always queried between two steps, where its solver holds it in frame 0, which is where the gradient goes.
+    The backward pass hands their gradients, None for those the loss does not reach, to the `add_grad_from_state` of the
+    solver that read them, with the selection of the state they cover, which only the solver interprets.
     """
 
     def __init__(self, solver: "Solver", tensors: tuple[torch.Tensor, ...], selection):

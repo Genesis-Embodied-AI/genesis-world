@@ -91,7 +91,7 @@ def get_sph_density_pressure(scene, n_particles):
     # then compute density. This mirrors what happens in substep_pre_coupling.
     # We must reorder first because kernel_compute_rho operates on particles_reordered.
     kernel_reorder_particles(sph_solver.sph_state)
-    kernel_compute_rho(sph_solver.sph_state, sph_solver.sph_info)
+    kernel_compute_rho(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
 
     # Get density values from reordered particles (where kernel_compute_rho stores results)
     densities = qd_to_numpy(sph_solver.sph_state.particles_reordered.rho)[:n_particles, 0]
@@ -344,10 +344,54 @@ def test_resume_from_pickle(show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_pressure_carries_column_weight(show_viewer, pressure_solver):
+def test_dfsph_resting_liquid_stability(show_viewer):
+    LIQUID_HEIGHT = 0.1
+    GRAVITY = -9.81
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=10,
+            gravity=(0.0, 0.0, GRAVITY),
+        ),
+        sph_options=gs.options.SPHOptions(
+            pressure_solver="DFSPH",
+            lower_bound=(-0.1, -0.1, 0.0),
+            upper_bound=(0.1, 0.1, 0.5),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.3),
+            camera_lookat=(0.0, 0.0, 0.05),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5 * LIQUID_HEIGHT),
+            size=(0.2, 0.2, LIQUID_HEIGHT),
+        ),
+        material=gs.materials.SPH.Liquid(),
+    )
+    scene.build(n_envs=2)
+
+    # The liquid starts at rest at its rest density, so its particles only move as it settles under its own weight. The
+    # pressure the density solve carries over from one substep to the next must not push the particles apart.
+    for _ in range(50):
+        scene.step()
+        assert (liquid.get_particles_vel().norm(dim=-1) < 5e-2).all()
+
+
+@pytest.mark.required
+# The wide column settles for hundreds of steps, which the GPU affords, while the CPU runs the slab
+@pytest.mark.parametrize(
+    "pressure_solver, liquid_width, backend",
+    [("WCSPH", 0.3, gs.gpu), ("DFSPH", 0.3, gs.gpu), ("WCSPH", 0.02, gs.cpu), ("DFSPH", 0.02, gs.cpu)],
+)
+def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_width):
     GRAVITY = 9.81
-    LIQUID_SIZE = (0.3, 0.3, 0.5)
+    PARTICLE_SIZE = 0.02
+    LIQUID_SIZE = (0.3, liquid_width, 0.5)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -355,7 +399,7 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
             gravity=(0.0, 0.0, -GRAVITY),
         ),
         sph_options=gs.options.SPHOptions(
-            particle_size=0.02,
+            particle_size=PARTICLE_SIZE,
             pressure_solver=pressure_solver,
             lower_bound=(-0.5 * LIQUID_SIZE[0], -0.5 * LIQUID_SIZE[1], 0.0),
             upper_bound=(0.5 * LIQUID_SIZE[0], 0.5 * LIQUID_SIZE[1], 1.0),
@@ -381,27 +425,67 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     )
     scene.build(n_envs=2)
 
-    # The pressure at the bottom of a settled column carries the weight of the whole column, which is exactly
-    # the particle count times the particle weight spread over the column footprint. It must do so at every step
-    # once the column has settled. The tolerance absorbs the residual sloshing of the column and the wall pressure
-    # force from the floor, which relieves part of the compression that the WCSPH equation of state reads.
+    # The pressure at the bottom of a settled column carries the weight of the liquid above it. The column keeps
+    # sloshing, so the pressure only stays within a loose bound at every step once the column has settled, while its
+    # mean over whole periods of the sloshing matches the hydrostatic pressure. The periods are delimited by the steps
+    # where the pressure rises through its mean, which cancels the acoustic mode of the column whatever its frequency.
     sph_solver = scene.sph_solver
-    particle_mass = qd_to_numpy(sph_solver.sph_info.particles.mass)[0]
-    weight_per_area = sph_solver.n_particles * particle_mass * GRAVITY / (LIQUID_SIZE[0] * LIQUID_SIZE[1])
-    for i_step in range(100):
+    particle_weight = qd_to_numpy(sph_solver.sph_info.particles.mass)[0] * GRAVITY
+    footprint_area = LIQUID_SIZE[0] * LIQUID_SIZE[1]
+    weight_per_area = sph_solver.n_particles * particle_weight / footprint_area
+    # Under gravity tilted away from the vertical, the free surface settles normal to gravity, and the walls carry the
+    # hydrostatic pressure of the depth along gravity. The walls only carry a hydrostatic pressure with WCSPH, whose
+    # column takes longer to settle under tilted gravity than under vertical gravity, and the walls along y of a slab
+    # thinner than the support radius hold all its particles, which the ratio would then average over.
+    gravity_tilted = GRAVITY * np.array([np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))])
+    sph_solver.set_gravity(gravity_tilted, envs_idx=1)
+    rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    tilted_ratios = []
+    p_bottoms, p_middles, p_tops, p_hydrostatics = [], [], [], []
+    is_tilt_checked = pressure_solver == "WCSPH" and liquid_width > 2 * PARTICLE_SIZE
+    for i_step in range(300 if is_tilt_checked else 100):
         scene.step()
-        if i_step >= 80:
+        if is_tilt_checked and i_step >= 250:
+            pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
+            positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]
+            heights = positions @ (-gravity_tilted / GRAVITY)
+            depths = heights.max() + 0.5 * PARTICLE_SIZE - heights
+            is_wall = (positions[:, 2] < PARTICLE_SIZE) | (
+                np.abs(positions[:, :2]) > 0.5 * np.array(LIQUID_SIZE[:2]) - PARTICLE_SIZE
+            ).any(axis=-1)
+            is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
+            tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
+        if 50 <= i_step < 100:
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
             heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
             p_bottom = pressures[heights < 0.05].mean()
-            assert 0.4 * weight_per_area < p_bottom < 1.5 * weight_per_area
+            if i_step >= 80:
+                assert_allclose(p_bottom, weight_per_area, rtol=0.5)
+            p_bottoms.append(p_bottom)
+            p_middles.append(pressures[(heights >= 0.2) & (heights < 0.25)].mean())
+            p_tops.append(pressures[heights >= 0.3].mean())
+            # The weight of the liquid above each particle, half its own layer included, spread over the footprint
+            ranks = np.argsort(np.argsort(-heights))
+            p_hydrostatics.append(((ranks[heights < 0.05] + 0.5) * particle_weight / footprint_area).mean())
+    p_bottoms, p_middles, p_tops, p_hydrostatics = map(np.array, (p_bottoms, p_middles, p_tops, p_hydrostatics))
+    (rising_idx,) = np.nonzero((p_bottoms[:-1] < p_bottoms.mean()) & (p_bottoms[1:] >= p_bottoms.mean()))
+    window = slice(rising_idx[0] + 1, rising_idx[-1] + 1)
+
+    # The bound covers the scatter of the pressure of DFSPH from one step to the next, which its density tolerance
+    # leaves loosely set, over the window.
+    assert_allclose(p_bottoms[window].mean(), p_hydrostatics[window].mean(), rtol=0.1)
+
+    if is_tilt_checked:
+        assert_allclose(np.mean(tilted_ratios), 1.0, atol=2e-3)
+
+    # The liquid keeps the volume of the box it was sampled from, up to the compression of the column under its own
+    # weight, so its particles rest around the center of the box.
+    assert_allclose(liquid.get_particles_pos()[..., 2].mean(dim=-1), 0.5 * LIQUID_SIZE[2], atol=0.005)
 
     # The pressure must decrease with height, following the hydrostatic gradient. The factors are lower bounds
     # on the ratio of the hydrostatic depths at the band centers, with slack for pressure fluctuations.
-    p_middle = pressures[(heights >= 0.2) & (heights < 0.25)].mean()
-    p_top = pressures[heights >= 0.3].mean()
-    assert p_bottom > 1.5 * p_middle
-    assert p_middle > 2.0 * p_top
+    assert p_bottoms[window].mean() > 1.5 * p_middles[window].mean()
+    assert p_middles[window].mean() > 2.0 * p_tops[window].mean()
 
     # Stepping from a restored state must reproduce the continuous run bit-identically, whatever the order in which
     # parallel threads sort the particles into the cells of the neighbour search.
@@ -420,3 +504,55 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     for _ in range(5):
         scene.step()
     assert_equal(liquid.get_particles_pos(envs_idx=[0]), pos[[0]])
+
+    # The walls under a shallow pool carry the weight of that pool alone, so it moves like a pool far from any other
+    # liquid, whatever lies in the columns that the hash grid wraps onto its own, here a deep pool one period of the
+    # default hash grid away (150 cells of twice the particle size).
+    scene_pools = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-2,
+            substeps=10,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        sph_options=gs.options.SPHOptions(
+            particle_size=PARTICLE_SIZE,
+            pressure_solver=pressure_solver,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.0, -6.0, 2.0),
+            camera_lookat=(3.0, 0.0, 0.0),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene_pools.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.15),
+            size=(0.3, 0.3, 0.3),
+        ),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+        ),
+    )
+    wrapped_pool = scene_pools.add_entity(
+        morph=gs.morphs.Box(
+            pos=(6.0, 0.0, 0.03),
+            size=(0.3, 0.3, 0.06),
+        ),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+        ),
+    )
+    isolated_pool = scene_pools.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 1.0, 0.03),
+            size=(0.3, 0.3, 0.06),
+        ),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+        ),
+    )
+    scene_pools.build(n_envs=2)
+    for _ in range(3):
+        scene_pools.step()
+        assert_allclose(wrapped_pool.get_particles_vel(), isolated_pool.get_particles_vel(), atol=1e-3)

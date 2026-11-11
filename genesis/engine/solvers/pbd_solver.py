@@ -18,9 +18,13 @@ from genesis.utils.data import ENVS, Config, ConfigItem, Data, DataItem, DataKin
 from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
+    func_hash_cell_to_slot,
     func_hash_grid_to_slot,
+    func_hash_n_cells,
     func_hash_pos_to_grid,
     func_hash_sort_particles,
+    func_hash_wrap_cell,
+    hash_grid_sizes,
 )
 
 from .base_solver import VFACES, VVERTS, SimulatorState
@@ -115,6 +119,8 @@ class PBDState(Data, kind=DataKind.STATE):
     particles: PBDParticles
     particles_reordered: PBDParticles = field(kind=DataKind.SCRATCH)
     hash_grid: SpatialHashGrid
+    # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
 
 
 class PBDInfo(Data, kind=DataKind.CONSTANT):
@@ -163,6 +169,9 @@ class PBDConfig(Config):
 
 
 class PBDSolver(ParticleSolver):
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     material_cls = PBD.Base
 
     class MATERIAL(gs.IntEnum):
@@ -206,11 +215,12 @@ class PBDSolver(ParticleSolver):
         is_unused = not self.is_active
         sizes = dict(envs=self._B, particles=self._n_particles)
         self.pbd_state = PBDState(
-            sizes=dict(sizes, hash_slots=np.prod(self._hash_grid_res)),
+            sizes=dict(sizes, **hash_grid_sizes(math.prod(self._hash_grid_res))),
             values=dict(hash_grid=dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)),
             env_first=False,
             unused=is_unused,
         )
+        self.register_errors(self.pbd_state.errno, {})
         info_values = {}
         if self.is_active:
             # The kernels of the density and viscosity constraints have a support radius of one once the distances are
@@ -419,7 +429,7 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         if not self.is_active:
             return
         kernel_apply_external_force(self._sim.sim_state, self.pbd_state, self.pbd_info, self._force_fields)
@@ -438,7 +448,7 @@ class PBDSolver(ParticleSolver):
         kernel_solve_collision(self.pbd_state, self.pbd_info)
         kernel_compute_velocity(self.pbd_state, self.pbd_info)
 
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         if self.is_active:
             kernel_copy_from_reordered(self.pbd_state)
             kernel_solve_boundary_collision(self.pbd_state, self.pbd_info)
@@ -823,9 +833,13 @@ def kernel_solve_collision(pbd_state: PBDState, pbd_info: PBDInfo):
             i_o = pbd_state.hash_grid.particles_idx[i_p, i_b]
             material_type_i = pbd_info.particles.material_type[i_o]
             if material_type_i != PBDSolver.MATERIAL.PARTICLE:
-                base = func_hash_pos_to_grid(pbd_state.particles_reordered.pos[i_p, i_b], pbd_state.hash_grid)
-                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                base = func_hash_wrap_cell(
+                    func_hash_pos_to_grid(pbd_state.particles_reordered.pos[i_p, i_b], pbd_state.hash_grid) - 1,
+                    pbd_state.hash_grid,
+                )
+                n_cells = func_hash_n_cells(3, pbd_state.hash_grid)
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    i_s = func_hash_cell_to_slot(base + offset, pbd_state.hash_grid)
                     slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
                     for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
                         j_o = pbd_state.hash_grid.particles_idx[j_p, i_b]
@@ -883,12 +897,13 @@ def kernel_solve_density(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.
                 pos_i = pbd_state.particles_reordered.pos[i_p, i_b]
                 rho_rest = pbd_info.particles.rho_rest[i_o]
                 dist_scale = pbd_info.dist_scale[None]
-                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, pbd_state.hash_grid) - 1, pbd_state.hash_grid)
                 lower_sum = gs.qd_float(0.0)
                 rho = gs.qd_float(0.0)
                 spiky_i = qd.Vector.zero(gs.qd_float, 3)
-                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                n_cells = func_hash_n_cells(3, pbd_state.hash_grid)
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    i_s = func_hash_cell_to_slot(base + offset, pbd_state.hash_grid)
                     slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
                     for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
                         j_o = pbd_state.hash_grid.particles_idx[j_p, i_b]
@@ -918,10 +933,11 @@ def kernel_solve_density(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: qd.
                 dist_scale = pbd_info.dist_scale[None]
                 density_relaxation = pbd_info.particles.density_relaxation[i_o]
                 poly6_ref = func_poly6(pbd_info.s_corr_delta_q[None], pbd_info)
-                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, pbd_state.hash_grid) - 1, pbd_state.hash_grid)
                 dpos = pbd_state.particles_reordered.dpos[i_p, i_b]
-                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                n_cells = func_hash_n_cells(3, pbd_state.hash_grid)
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    i_s = func_hash_cell_to_slot(base + offset, pbd_state.hash_grid)
                     slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
                     for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
                         if i_p != j_p:
@@ -953,10 +969,11 @@ def kernel_solve_viscosity(pbd_state: PBDState, pbd_info: PBDInfo, pbd_config: q
                 pos_i = pbd_state.particles_reordered.pos[i_p, i_b]
                 dpos_i = pos_i - pbd_state.particles_reordered.ipos[i_p, i_b]
                 dist_scale = pbd_info.dist_scale[None]
-                base = func_hash_pos_to_grid(pos_i, pbd_state.hash_grid)
+                base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, pbd_state.hash_grid) - 1, pbd_state.hash_grid)
                 xsph_sum = qd.Vector.zero(gs.qd_float, 3)
-                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
-                    i_s = func_hash_grid_to_slot(base + offset, pbd_state.hash_grid)
+                n_cells = func_hash_n_cells(3, pbd_state.hash_grid)
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    i_s = func_hash_cell_to_slot(base + offset, pbd_state.hash_grid)
                     slot_start = pbd_state.hash_grid.slot_start[i_s, i_b]
                     for j_p in range(slot_start, pbd_state.hash_grid.slot_size[i_s, i_b] + slot_start):
                         pos_j = pbd_state.particles_reordered.pos[j_p, i_b]

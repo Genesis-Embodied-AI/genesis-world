@@ -363,8 +363,6 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, precisio
 
 
 @pytest.mark.required
-# The SAP coupler, one of the couplings refused, supports 64 bits precision alone
-@pytest.mark.precision("64")
 def test_reject_non_differentiable_solvers():
     box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))
     for materials, options, component_name in (

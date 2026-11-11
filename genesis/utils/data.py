@@ -189,9 +189,6 @@ ENVS = Size("envs")
 # The workers of a detection scratch: one per environment, or one per thread of a pass draining a queue of pairs. They
 # stand for the environments in the memory order of the arrays (see 'env_first' in Data).
 WORKERS = Size("workers")
-# The frames of substeps a solver holding its state in frames keeps, the first axis of the arrays held in frames (see
-# 'Solver.has_frames')
-FRAMES = Size("frames")
 
 
 class FieldRef:
@@ -791,15 +788,11 @@ class ArrayItem(NamedTuple):
 
     It is a quadrants array, or a torch tensor such as the step counts of the simulator, which a restore fills in place
     (see 'fill_data'). An unused array is a 0-d placeholder (see 'unused' in Data), which a restore leaves as built.
-    `is_framed` states that the array is declared held in frames in its struct (see 'field'). `envs_axis` is the last
-    index of the array, of its frame 0 for one held in frames, which the environments take in an array spanning them.
     """
 
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
-    is_framed: bool = False
-    envs_axis: int = 0
 
 
 class ScalarItem(NamedTuple):
@@ -837,11 +830,10 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     'grad'. A Python native scalar of an object outside any struct, such as a flag, yields an item of the given kind,
     which a restore sets back. A static config yields a ConfigItem. Anything else raises.
     """
-    # The attributes left to walk, depth first in declaration order, each with the kind and the declared shape it
-    # inherits, and its name
-    pending = [(owner, attr, kind, (), attr)]
+    # The attributes left to walk, depth first in declaration order, each with the kind it inherits and its name
+    pending = [(owner, attr, kind, attr)]
     while pending:
-        owner, attr, kind, shape, name = pending.pop()
+        owner, attr, kind, name = pending.pop()
         value = getattr(owner, attr)
         is_owner_struct = dataclasses.is_dataclass(owner) or isinstance(owner, tuple)
         if isinstance(value, Config):
@@ -849,16 +841,10 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-            is_framed = shape[:1] == (FRAMES,)
-            envs_axis = len(value.shape) - 1 - is_framed
-            yield ArrayItem(name, kind, value, is_framed, envs_axis)
+            yield ArrayItem(name, kind, value)
             if not isinstance(value, torch.Tensor) and value.has_grad():
-                yield ArrayItem(f"{name}.grad", kind, value.grad, is_framed, envs_axis)
+                yield ArrayItem(f"{name}.grad", kind, value.grad)
         elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
-            # A field takes the shape it states, else the default of its struct, else the shape the struct inherits,
-            # as the constructor of the struct resolves it (see 'Data')
-            if isinstance(value, Data) and value._shape is not None and not shape:
-                shape = value._shape
             if dataclasses.is_dataclass(value):
                 members = [(field.name, field.metadata.get(_SPEC, _FieldSpec())) for field in dataclasses.fields(value)]
             else:
@@ -869,13 +855,8 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
                 is_member_array = isinstance(member_value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
                 if stated_kind is None and kind is None and is_member_array:
                     stated_kind = type(value).kind
-                member_shape = spec.shape
-                if member_shape is None and isinstance(member_value, Data):
-                    member_shape = member_value._shape
-                if member_shape is None:
-                    member_shape = shape
                 member_kind = kind if stated_kind is None else stated_kind
-                pending.append((value, member, member_kind, member_shape, f"{name}.{member}"))
+                pending.append((value, member, member_kind, f"{name}.{member}"))
         elif isinstance(value, (bool, int, float)) and not is_owner_struct:
             if kind is None:
                 gs.raise_exception(f"'{attr}' holds a {type(value).__name__} that no annotation gives a kind.")
@@ -909,16 +890,13 @@ def iter_state_arrays(struct) -> Iterator[tuple[tuple[str, ...], qd.Tensor | qd.
             pending.append((value, (*path, field.name), field_kind, iter(dataclasses.fields(value))))
 
 
-def check_data(
-    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
-) -> list[DataItem]:
+def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> list[DataItem]:
     """Return the items 'fill_data' writes, rejecting a record made for another scene.
 
-    A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may
-    differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
-    and so does a name on one side only, since the record comes from another build or version. An unused array, of
-    shape () on either side, stays as built. With
-    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
+    A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may differ
+    otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises, and so
+    does a name on one side only, since the record comes from another build or version. An unused array, of shape () on
+    either side, stays as built.
     """
     items = tuple(items)
     unshared = sorted({item.name for item in items} ^ set(values))
@@ -941,8 +919,6 @@ def check_data(
             if tuple(array.shape) == () or tuple(value.shape) == element_shape:
                 continue
             shape, dtype = (*array.shape, *element_shape), array.dtype
-            if frame_only:
-                shape = shape[1:]
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
             scalar = getattr(item.owner, item.attr)
@@ -960,18 +936,30 @@ def check_data(
     return writes
 
 
-def fill_data(
-    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
-) -> None:
+def copy_data(items: Iterable[DataItem], *, to_torch: bool) -> dict[str, np.ndarray | torch.Tensor]:
+    """Copy the value of every item under its name, for 'fill_data' to write back.
+
+    An array is copied where it lives as a torch tensor with `to_torch`, else to a numpy array. A scalar is copied to a
+    0-d numpy array.
+    """
+    values = {}
+    for item in items:
+        if isinstance(item, ScalarItem):
+            values[item.name] = np.array(getattr(item.owner, item.attr))
+        else:
+            values[item.name] = data_to_array(item.array, to_torch=to_torch, copy=True)
+    return values
+
+
+def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> None:
     """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
     record made for another scene leaves the scene as it was.
 
     An array is filled in place, through its zero-copy view where one exists, so that a device-resident record stays on
     the device. On Metal these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once
-    before the next kernel. A scalar is set back as the Python native the host code reading it expects. With
-    `frame_only`, the frame 0 alone of each array is written (see 'check_data').
+    before the next kernel. A scalar is set back as the Python native the host code reading it expects.
     """
-    for item in check_data(items, values, frame_only=frame_only):
+    for item in check_data(items, values):
         value = values[item.name]
         if isinstance(item, ScalarItem):
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
@@ -988,12 +976,7 @@ def fill_data(
                 pass
         if view is not None:
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
-            (view[0] if frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
-        elif frame_only:
-            # Without zero-copy views, the array is written whole, its other frames as they are
-            frames = data_to_array(item.array, to_torch=True, copy=True)
-            frames[0] = value
-            item.array.from_torch(frames)
+            view.copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
         elif isinstance(value, torch.Tensor):
             item.array.from_torch(value)
         else:

@@ -803,8 +803,8 @@ def test_derived_substeps(show_viewer, tol):
     expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
 
-    # A differentiable scene holds the frames of the substeps of a step, as many as the rate a solver dt derives: the
-    # gradient of the position over one step reaches the velocity it started from through every one of them.
+    # A differentiable scene replays the substeps of a step, as many as the rate a solver dt derives: the gradient of
+    # the position over one step reaches the velocity it started from through every one of them.
     scene_differentiable = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,

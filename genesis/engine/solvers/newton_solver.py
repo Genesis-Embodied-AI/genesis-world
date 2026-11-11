@@ -173,6 +173,9 @@ class NewtonSolver(Solver):
     solver moves its particles by the displacement solved and the rigid solver integrates the accelerations solved.
     """
 
+    # Its whole state lives in the arrays 'data' yields (see 'CheckpointMixin')
+    is_checkpointable = True
+
     def __init__(self, scene: "Scene", sim: "Simulator", options: NewtonOptions) -> None:
         super().__init__(scene, sim, options)
         self.data_manager: NewtonData | None = None
@@ -265,10 +268,10 @@ class NewtonSolver(Solver):
         if self.newton_rows is not None:
             yield from iter_data(self, "newton_rows")
 
-    def substep_pre_coupling(self, f: int) -> None:
+    def substep_pre_coupling(self) -> None:
         pass
 
-    def substep_post_coupling(self, f: int) -> None:
+    def substep_post_coupling(self) -> None:
         """
         Solve the substep of the implicit material point method (MPM) solver before the solvers finish it, with that of
         the rigid solver when it is solved in the global Newton solve (see 'RigidSolver.is_solved_in_global_newton').
@@ -292,11 +295,10 @@ class NewtonSolver(Solver):
         args_state = (mpm_state, sparse_grid, self.rigid_dofs, self.rigid_links, dyn_state, constraint_state)
         args_info = (mpm_info, dyn_info, rigid_info)
         args_config = (mpm_solver.mpm_config, rigid_solver.rigid_config, self.newton_config)
-        kernel_init_substep(f, self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config, errno)
+        kernel_init_substep(self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config, errno)
         for _ in range(self._options.max_iterations):
             if mpm_solver.mpm_config.has_rigid_contact:
                 kernel_assemble_mpm_rigid_coupling(
-                    f,
                     mpm_state,
                     sparse_grid,
                     self.rigid_dofs,
@@ -307,11 +309,10 @@ class NewtonSolver(Solver):
                     rigid_solver.rigid_config,
                     self.newton_config,
                 )
-            kernel_assemble_mpm(f, self.newton_rows, mpm_state, sparse_grid, mpm_info, mpm_solver.mpm_config)
+            kernel_assemble_mpm(self.newton_rows, mpm_state, sparse_grid, mpm_info, mpm_solver.mpm_config)
             assemble_bcoo_matrix(self.newton_rows.matrix, block_scalars=9)
             if self.newton_config.has_rigid_dofs:
                 kernel_assemble_rigid(
-                    f,
                     self.newton_envs,
                     *args_state,
                     *args_info,
@@ -328,10 +329,9 @@ class NewtonSolver(Solver):
                 *args_config,
             )
             kernel_pcg_loop(
-                f, self.newton_rows, self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config
+                self.newton_rows, self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config
             )
             kernel_start_line_search(
-                f,
                 self.newton_rows,
                 self.newton_envs,
                 self.newton_loops,
@@ -342,7 +342,7 @@ class NewtonSolver(Solver):
             )
             while True:
                 kernel_line_search_trial(
-                    f, self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config
+                    self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config
                 )
                 if not qd_to_numpy(self.newton_loops.is_line_search_running):
                     break
@@ -368,7 +368,6 @@ class NewtonSolver(Solver):
 
 @qd.func(requires_top_level=True)
 def func_add_energies(
-    f: int,
     energies: qd.Tensor,
     envs_mask: qd.Tensor,
     rigid_cost: qd.Tensor,
@@ -404,7 +403,6 @@ def func_add_energies(
             energy_contact = gs.qd_float(0.0)
             if qd.static(mpm_config.has_rigid_contact):
                 energy_contact, gradient_contact, hessian_contact = func_contact_terms(
-                    f,
                     i_s,
                     mpm_state,
                     sparse_grid,
@@ -414,7 +412,7 @@ def func_add_energies(
                     dyn_info,
                     newton_config.has_rigid_dofs,
                 )
-            i_b, energy_particle = func_particle_energy(f, i_s, energy_contact, mpm_state, sparse_grid, mpm_info)
+            i_b, energy_particle = func_particle_energy(i_s, energy_contact, mpm_state, sparse_grid, mpm_info)
             if envs_mask[i_b]:
                 i_b_key = i_b
                 energy = energy_particle
@@ -432,7 +430,6 @@ def func_add_energies(
 
 @qd.kernel
 def kernel_init_substep(
-    f: int,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
@@ -472,9 +469,8 @@ def kernel_init_substep(
         func_rigid_init_substep(
             rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows
         )
-        func_mark_constrained_links(f, mpm_state, dyn_state, dyn_info)
+        func_mark_constrained_links(mpm_state, dyn_state, dyn_info)
     func_add_energies(
-        f,
         newton_envs.energy_start,
         newton_envs.is_active,
         newton_envs.rigid_cost,
@@ -500,7 +496,6 @@ def kernel_init_substep(
 
 @qd.kernel
 def kernel_assemble_mpm_rigid_coupling(
-    f: int,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     rigid_dofs: NewtonRigidDofs,
@@ -514,7 +509,6 @@ def kernel_assemble_mpm_rigid_coupling(
     """Stage the terms of the contacts of the particles with the rigid geoms at the current iterate (see
     'func_assemble_mpm_rigid_coupling' in couplers/mpm_rigid_global_newton.py)."""
     func_assemble_mpm_rigid_coupling(
-        f,
         mpm_state,
         sparse_grid,
         rigid_dofs,
@@ -529,7 +523,6 @@ def kernel_assemble_mpm_rigid_coupling(
 
 @qd.kernel
 def kernel_assemble_mpm(
-    f: int,
     newton_rows: NewtonRows,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
@@ -538,12 +531,11 @@ def kernel_assemble_mpm(
 ):
     """Assemble the rows of the nodes of the MPM solver at the current iterate (see 'func_mpm_assemble' in
     mpm_solver.py)."""
-    func_mpm_assemble(f, newton_rows, mpm_state, sparse_grid, mpm_info, mpm_config)
+    func_mpm_assemble(newton_rows, mpm_state, sparse_grid, mpm_info, mpm_config)
 
 
 @qd.kernel
 def kernel_assemble_rigid(
-    f: int,
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
@@ -574,7 +566,7 @@ def kernel_assemble_rigid(
         newton_envs.rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, has_rigid_rows
     )
     func_rigid_assemble_gradient(rigid_dofs, dyn_state, constraint_state, rigid_info, has_rigid_rows)
-    func_add_contact_link_terms(f, mpm_state, rigid_links, dyn_state, dyn_info)
+    func_add_contact_link_terms(mpm_state, rigid_links, dyn_state, dyn_info)
     func_link_force_to_dofs(rigid_dofs.gradient, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
     func_rigid_factor(constraint_state, rigid_info, rigid_config, rigid_contact_stiffness, has_rigid_rows)
 
@@ -670,7 +662,6 @@ def kernel_pcg_start(
 
 @qd.func(requires_top_level=True)
 def func_pcg_iteration(
-    f: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -702,7 +693,6 @@ def func_pcg_iteration(
         func_rigid_matvec(rigid_dofs, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows)
         func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
         func_contact_matvec(
-            f,
             newton_rows,
             newton_envs.is_pcg_active,
             mpm_state,
@@ -803,7 +793,6 @@ def func_pcg_iteration(
 
 @qd.kernel(graph=True)
 def kernel_pcg_loop(
-    f: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -826,7 +815,6 @@ def kernel_pcg_loop(
     """
     while qd.graph.do_while(newton_loops.is_pcg_running):
         func_pcg_iteration(
-            f,
             newton_rows,
             newton_envs,
             newton_loops,
@@ -851,7 +839,6 @@ def kernel_pcg_loop(
 
 @qd.kernel
 def kernel_start_line_search(
-    f: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -882,7 +869,6 @@ def kernel_start_line_search(
         newton_envs.alpha[i_b] = 1.0
         newton_envs.n_line_search_iterations[i_b] = 0
     func_mpm_init_line_search(
-        f,
         newton_rows,
         newton_envs.is_active,
         newton_envs.max_displacement,
@@ -908,7 +894,6 @@ def kernel_start_line_search(
 
 @qd.kernel
 def kernel_line_search_trial(
-    f: int,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
@@ -937,7 +922,6 @@ def kernel_line_search_trial(
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.energy_trial[i_b] = 0.0
     func_add_energies(
-        f,
         newton_envs.energy_trial,
         newton_envs.is_line_search_active,
         newton_envs.rigid_cost,

@@ -34,17 +34,17 @@ from genesis.engine.solvers.rigid.global_newton import (
 
 
 @qd.func
-def func_contact_arm(f: int, i_s: int, i_g: int, mpm_state: MPMState, dyn_state: DynState, dyn_info: DynInfo):
+def func_contact_arm(i_s: int, i_g: int, mpm_state: MPMState, dyn_state: DynState, dyn_info: DynInfo):
     """Return the link of the geom a sorted particle touches, the environment and the arm of the particle from the root
     center of mass of the link."""
-    i_p, i_b, cell = func_sorted_particle(i_s, mpm_state.particles.pos.shape[1], mpm_state.sorted_particles)
+    i_p, i_b, cell = func_sorted_particle(i_s, mpm_state.particles.pos.shape[0], mpm_state.sorted_particles)
     i_l = dyn_info.geoms.link_idx[i_g]
-    return i_l, i_b, mpm_state.particles.pos[f, i_p, i_b] - dyn_state.links.root_COM[i_l, i_b]
+    return i_l, i_b, mpm_state.particles.pos[i_p, i_b] - dyn_state.links.root_COM[i_l, i_b]
 
 
 @qd.func
 def func_contact_partner_disp(
-    f: int, i_s: int, mpm_state: MPMState, rigid_links: NewtonRigidLinks, dyn_state: DynState, dyn_info: DynInfo
+    i_s: int, mpm_state: MPMState, rigid_links: NewtonRigidLinks, dyn_state: DynState, dyn_info: DynInfo
 ):
     """
     Return the displacement of the point of the rigid link a sorted particle touches, from the spatial displacement of
@@ -53,14 +53,13 @@ def func_contact_partner_disp(
     disp = qd.Vector.zero(gs.qd_float, 3)
     i_g = mpm_state.rigid_contacts.geom_idx[i_s]
     if i_g >= 0:
-        i_l, i_b, r = func_contact_arm(f, i_s, i_g, mpm_state, dyn_state, dyn_info)
+        i_l, i_b, r = func_contact_arm(i_s, i_g, mpm_state, dyn_state, dyn_info)
         disp = func_point_motion(rigid_links.motion_vel[i_l, i_b], rigid_links.motion_ang[i_l, i_b], r)
     return disp
 
 
 @qd.func
 def func_contact_terms(
-    f: int,
     i_s: int,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
@@ -82,10 +81,10 @@ def func_contact_terms(
     gradient = qd.Vector.zero(gs.qd_float, 3)
     hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
     if mpm_state.rigid_contacts.geom_idx[i_s] >= 0:
-        _, disp = func_particle_displacement(f, i_s, sparse_grid.nodes_u, mpm_state, sparse_grid, mpm_info)
+        _, disp = func_particle_displacement(i_s, sparse_grid.nodes_u, mpm_state, sparse_grid, mpm_info)
         disp_partner = qd.Vector.zero(gs.qd_float, 3)
         if qd.static(has_rigid_dofs):
-            disp_partner = func_contact_partner_disp(f, i_s, mpm_state, rigid_links, dyn_state, dyn_info)
+            disp_partner = func_contact_partner_disp(i_s, mpm_state, rigid_links, dyn_state, dyn_info)
         energy_rows, gradient_rows, hessian_rows = func_pyramid_terms(
             mpm_state.rigid_contacts.normal[i_s],
             mpm_state.rigid_contacts.friction[i_s],
@@ -100,19 +99,18 @@ def func_contact_terms(
 
 
 @qd.func(requires_top_level=True)
-def func_mark_constrained_links(f: int, mpm_state: MPMState, dyn_state: DynState, dyn_info: DynInfo):
+def func_mark_constrained_links(mpm_state: MPMState, dyn_state: DynState, dyn_info: DynInfo):
     """Mark constrained over the substep every link whose geom holds the rows of the contact of a particle (see
     'LinksState.is_constrained' in rigid/data.py), as the contacts of the rigid solver mark theirs."""
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         i_g = mpm_state.rigid_contacts.geom_idx[i_s]
         if i_g >= 0:
-            i_l, i_b, _ = func_contact_arm(f, i_s, i_g, mpm_state, dyn_state, dyn_info)
+            i_l, i_b, _ = func_contact_arm(i_s, i_g, mpm_state, dyn_state, dyn_info)
             dyn_state.links.is_constrained[i_l, i_b] = True
 
 
 @qd.func(requires_top_level=True)
 def func_assemble_mpm_rigid_coupling(
-    f: int,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     rigid_dofs: NewtonRigidDofs,
@@ -137,7 +135,7 @@ def func_assemble_mpm_rigid_coupling(
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         if mpm_state.rigid_contacts.geom_idx[i_s] >= 0:
             _, gradient, hessian = func_contact_terms(
-                f, i_s, mpm_state, sparse_grid, rigid_links, dyn_state, mpm_info, dyn_info, has_rigid_dofs
+                i_s, mpm_state, sparse_grid, rigid_links, dyn_state, mpm_info, dyn_info, has_rigid_dofs
             )
             mpm_state.rigid_contacts.gradient[i_s] = gradient
             mpm_state.rigid_contacts.hessian[i_s] = hessian
@@ -145,7 +143,7 @@ def func_assemble_mpm_rigid_coupling(
 
 @qd.func(requires_top_level=True)
 def func_add_contact_link_terms(
-    f: int, mpm_state: MPMState, rigid_links: NewtonRigidLinks, dyn_state: DynState, dyn_info: DynInfo
+    mpm_state: MPMState, rigid_links: NewtonRigidLinks, dyn_state: DynState, dyn_info: DynInfo
 ):
     """Set the spatial force and the spatial stiffness of the contacts of the particles on every link, from the terms
     staged at the current iterate (see 'func_assemble_mpm_rigid_coupling')."""
@@ -155,7 +153,7 @@ def func_add_contact_link_terms(
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         i_g = mpm_state.rigid_contacts.geom_idx[i_s]
         if i_g >= 0:
-            i_l, i_b, r = func_contact_arm(f, i_s, i_g, mpm_state, dyn_state, dyn_info)
+            i_l, i_b, r = func_contact_arm(i_s, i_g, mpm_state, dyn_state, dyn_info)
             force = -mpm_state.rigid_contacts.gradient[i_s]
             qd.atomic_add(rigid_links.force_vel[i_l, i_b], force)
             qd.atomic_add(rigid_links.force_ang[i_l, i_b], r.cross(force))
@@ -166,7 +164,6 @@ def func_add_contact_link_terms(
 
 @qd.func(requires_top_level=True)
 def func_contact_matvec(
-    f: int,
     newton_rows: NewtonRows,
     envs_mask: qd.Tensor,
     mpm_state: MPMState,
@@ -185,14 +182,14 @@ def func_contact_matvec(
     of a particle are in the matrix of the rows already (see 'MPMRigidContacts.hessian' in mpm_solver.py).
     """
     func_clear_link_forces(rigid_links)
-    n_particles = mpm_state.particles.pos.shape[1]
+    n_particles = mpm_state.particles.pos.shape[0]
     inv_dx = mpm_info.inv_dx[None]
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         i_g = mpm_state.rigid_contacts.geom_idx[i_s]
         if i_g >= 0:
             i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
             if envs_mask[i_b]:
-                x_p = mpm_state.particles.pos[f, i_p, i_b]
+                x_p = mpm_state.particles.pos[i_p, i_b]
                 w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
                 slots = func_stencil_slots(i_b, cell, sparse_grid)
                 weights = qd.Vector(

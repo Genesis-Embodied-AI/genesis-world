@@ -24,12 +24,7 @@ def main():
         rigid_options=gs.options.RigidOptions(
             enable_self_collision=False,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(
-            sap_convergence_atol=1e-10,
-            sap_convergence_rtol=1e-10,
-            pcg_threshold=1e-10,
-            linesearch_ftol=1e-10,
-        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.3, 0.0, 0.1),
             camera_lookat=(0.65, 0.0, 0.1),

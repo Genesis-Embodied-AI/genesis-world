@@ -1120,6 +1120,8 @@ def _kernel_reset_with_template_args(kernel):
     kernel.used_py_dataclass_parameters_by_key_enforcing = {}
     kernel._struct_ndarray_launch_info_by_key = {}
     kernel._struct_primitive_launch_info_by_key = {}
+    kernel._mutable_nd_cached_key = None
+    kernel._mutable_nd_cached_val = []
 
 
 # FIXME: quadrants#1038 - a performance dispatcher keeps the arguments of its last call for the lifetime of the process,
@@ -1172,28 +1174,21 @@ def qd_isfinite(x):
         return qd.abs(x) < qd.math.inf
 
 
-def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) -> None:
+def qd_add_grad(value: qd.Tensor, grad: torch.Tensor) -> None:
     """Add a gradient to the adjoint of a Quadrants tensor, given in the layout of its getters (see 'qd_to_torch').
 
-    `row` selects one entry of the first axis, such as a frame of a solver holding its state in frames, the gradient
-    then covering that entry alone. On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the
-    next quadrants kernel reads the adjoint.
+    On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the next quadrants kernel reads the
+    adjoint.
     """
     value_grad = value.grad
     if gs.use_zerocopy.is_supported:
-        if row is None:
-            view = qd_to_torch(value_grad, transpose=True, copy=False)
-        else:
-            view = qd_to_torch(value_grad, row_mask=row, keepdim=False, copy=False)
+        view = qd_to_torch(value_grad, transpose=True, copy=False)
         view += grad
     else:
         # Without zero-copy views, the adjoint is read and written back whole, in its native layout
         n_dims = len(value_grad.shape)
         data = qd_to_torch(value_grad, copy=True)
-        if row is not None:
-            data[row] += grad
-        else:
-            data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
+        data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
         qd_from_torch(value_grad, data)
 
 

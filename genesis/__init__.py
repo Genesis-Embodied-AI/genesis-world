@@ -144,9 +144,11 @@ def init(
             raise_exception(f"Zero-copy not supported on {backend} backend.")
     use_zerocopy = ZeroCopyMode(_use_zerocopy)
 
-    # Reproducing a rollout means settling the runtime-measured choices the simulation would otherwise keep revisiting
-    # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying. If None, it is
-    # resolved from the array mode: disabled in performance mode (static arrays), enabled otherwise.
+    # Deterministic algorithms make a rollout repeat bit for bit from one run to the next, and keep environments in the
+    # same state identical. On GPU, they settle the choices the simulation would otherwise measure at runtime and sum in
+    # a fixed order what the threads would add in any order, at the cost of speed and memory, most of all when the
+    # environments drift apart. If None, it is resolved from the array mode: disabled in performance mode (static
+    # arrays), enabled otherwise.
     if use_deterministic_algorithms is None:
         use_deterministic_algorithms = _use_ndarray
     globals()["use_deterministic_algorithms"] = use_deterministic_algorithms

@@ -1,4 +1,3 @@
-import functools
 import weakref
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
@@ -11,16 +10,27 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import ArrayItem, DataItem, DataKind, iter_data
+from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
+from genesis.utils.warnings import warn_once
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
-from .couplers.rigid_mpm_hybrid import kernel_update_hybrid_soft_part
+from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import FEMSolver, KinematicSolver, MPMSolver, PBDSolver, RigidSolver, SPHSolver
-from .solvers.base_solver import GravityMixin, SimulatorState, Solver, TimeBasedMixin, kernel_set_time, merge_errno
+from .solvers.base_solver import (
+    CheckpointMixin,
+    ErrnoMixin,
+    GravityMixin,
+    SimulatorState,
+    Solver,
+    TimeBasedMixin,
+    kernel_set_time,
+    merge_errno,
+)
+from .solvers.mpm_solver import kernel_flush_coupling_forces
 from .solvers.newton_solver import NewtonSolver
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
@@ -77,9 +87,10 @@ class Simulator(RBC):
             # than with the context of the step being reversed when a deferred check reads them. The adjoints start
             # from zero.
             self._is_forward_ready = False
+            for component in self._active_systems:
+                component.update_errno()
+                component.check_errno()
             for solver in self._active_solvers:
-                solver.update_errno()
-                solver.check_errno()
                 solver.reset_grad()
             # One flush for the zero-copy writes of every solver (see qd_zero_grad in misc.py)
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
@@ -87,8 +98,8 @@ class Simulator(RBC):
 
         def end_backward_pass():
             # The errors the solvers flagged while replaying the rollout are raised once the pass is over
-            for solver in self._active_solvers:
-                solver.check_errno()
+            for component in self._active_systems:
+                component.check_errno()
 
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
@@ -119,8 +130,10 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
-        # The hybrid entities whose soft part follows its rigid links, updated after the coupling of every substep
-        self._hybrid_entities: list[HybridEntity] = []
+        # What runs in the scene in its own right: the active solvers, then the coupler when one is active
+        self._active_systems: list["ErrnoMixin | CheckpointMixin"] = []
+        # The soft parts of the hybrid entities following their rigid links, updated after the coupling of every substep
+        self._rigid_mpm_hybrid: RigidMPMHybrid | None = None
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -232,15 +245,33 @@ class Simulator(RBC):
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        # The SAP coupler solves every FEM vertex from its momentum residual, which the quadratic energy of the models
+        # of the implicit solver makes exact (see func_init_fem_reference_gradient in sap_coupler.py).
+        self.fem_solver._is_free_solve_skipped = isinstance(self._coupler, SAPCoupler)
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
+                self._active_systems.append(solver)
                 if not isinstance(solver, RigidSolver):
                     self._rigid_only = False
 
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
+        # The systems are listed as they are built, so that a scene whose build fails frees those built (see 'destroy')
+        self._active_systems.append(self._coupler)
         self._coupler.build()
+        # The errors and the checkpoints of every system are handled at each step without further checks
+        for system in self._active_systems:
+            if not isinstance(system, ErrnoMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support errno: solvers and couplers must report their errors "
+                    "through ErrnoMixin."
+                )
+            if not isinstance(system, CheckpointMixin):
+                gs.raise_exception(
+                    f"{type(system).__name__} does not support checkpoints: solvers and couplers must declare them "
+                    "through CheckpointMixin."
+                )
 
         # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
         # coupler declares it for the couplings it activated at build.
@@ -256,11 +287,14 @@ class Simulator(RBC):
                 )
 
         # hybrid
-        for entity in self._entities:
-            if isinstance(entity, HybridEntity):
-                entity.build()
-                if entity.part_soft_info is not None:
-                    self._hybrid_entities.append(entity)
+        hybrid_entities = [
+            entity
+            for entity in self._entities
+            if isinstance(entity, HybridEntity) and entity.mpm_hybrid_part is not None
+        ]
+        if hybrid_entities:
+            self._rigid_mpm_hybrid = RigidMPMHybrid(hybrid_entities, self.mpm_solver, self.rigid_solver)
+            self._rigid_mpm_hybrid.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
         # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
@@ -275,9 +309,8 @@ class Simulator(RBC):
         self._has_errno_flags = False
         if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
             self._errno_views = [
-                (solver._errno_latched.numpy(), qd_to_numpy(solver._errno, copy=False))
-                for solver in self._active_solvers
-                if solver._errno is not None
+                (component._errno_latched.numpy(), qd_to_numpy(component._errno, copy=False))
+                for component in self._active_systems
             ]
 
         self._step_timer.add_phases("physics", "sensors")
@@ -288,20 +321,25 @@ class Simulator(RBC):
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
         # They are gathered first, since 'data' reads the gradient of an array after yielding it.
-        for solver in self._active_solvers:
-            if type(solver).data is not Solver.data:
+        for system in self._active_systems:
+            if system.is_checkpointable:
                 arrays = [
                     item.array
-                    for item in solver.data
+                    for item in system.data
                     if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
                 ]
                 for array in arrays:
                     qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
-        for solver in self._active_solvers:
-            solver.set_state(state.solvers[type(solver).__name__], envs_idx)
+        """Put the given environments back in a state 'get_state' returned, all of them if None.
 
+        The states precede the restart, which starts the rollout of the autograd graph anew after them. A system holding
+        state outside its data, absent from the state, restarts alone (see 'CheckpointMixin').
+        """
+        for system in self._active_systems:
+            if system.is_checkpointable:
+                system.set_state(state.solvers[type(system).__name__], envs_idx)
         if envs_idx is None:
             self._steps.zero_()
         else:
@@ -320,40 +358,48 @@ class Simulator(RBC):
             torch.mps.synchronize()
         self._rollout_graph.restart()
         self._is_forward_ready = True
-        # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
+        # The cursor counts the substeps since the last restart, the clock of each environment being its step count
         self._cur_substep_global = 0
 
         # reset sensors state
         self._sensor_manager.reset(envs_idx=envs_idx)
 
     def data(self, kinds: frozenset[DataKind]) -> Iterator[DataItem]:
-        """Yield every item of the requested kinds that the simulator and its active solvers hold.
+        """Yield every item of the requested kinds that the simulator and its active systems hold.
 
-        The items of the simulator are named under 'Simulator', and the ones of a solver under its class name.
+        The items of the simulator are named under 'Simulator', those of a solver or the coupler under its class name.
         """
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         for item in iter_data(self, "steps", DataKind.STATE):
             if item.kind in kinds:
                 yield item._replace(name=f"Simulator.{item.name}")
-        for solver in self._active_solvers:
-            prefix = type(solver).__name__
-            for item in solver.data:
+        for system in self._active_systems:
+            prefix = type(system).__name__
+            for item in system.data:
                 if isinstance(item, DataItem) and item.kind in kinds:
                     yield item._replace(name=f"{prefix}.{item.name}")
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
-        if isinstance(self._coupler, IPCCoupler):
-            gs.raise_exception(
-                "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
-            )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            solvers={type(solver).__name__: solver.__getstate__() for solver in self._active_solvers},
+            solvers={type(system).__name__: system.__getstate__() for system in self._active_systems},
         )
+
+    def check_checkpoint(self, state: SimulatorCheckpoint) -> None:
+        """Raise unless a record holds the arrays of every active system as this simulation lays them out.
+
+        Every system checks its record before anything is touched, so a record from another scene leaves the simulation
+        as it was.
+        """
+        systems = {type(system).__name__: system for system in self._active_systems}
+        if set(state.solvers) != set(systems):
+            gs.raise_exception(
+                f"The checkpoint holds {sorted(state.solvers)} where this scene simulates {sorted(systems)}."
+            )
+        for name, system in systems.items():
+            record = state.solvers[name]
+            items = (item for item in system.data if isinstance(item, DataItem) and item.kind in record.kinds)
+            check_data(items, record.arrays)
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
         """Put the built simulation back in a state '__getstate__' read.
@@ -367,29 +413,32 @@ class Simulator(RBC):
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
         self._restart()
-        for solver in self._active_solvers:
-            solver.__setstate__(state.solvers[type(solver).__name__])
+        for system in self._active_systems:
+            system.__setstate__(state.solvers[type(system).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
 
     def check_errno(self, blocking: bool = True):
-        """Raise on the first error a solver flagged since the last reset of each env (see 'Solver.check_errno')."""
-        for solver in self._active_solvers:
-            solver.check_errno(blocking)
+        """Raise on the first error a solver or the coupler flagged since the last reset of each env.
+
+        See 'ErrnoMixin.check_errno'.
+        """
+        for component in self._active_systems:
+            component.check_errno(blocking)
 
     def get_error_envs_mask(self) -> torch.Tensor:
-        """Return whether each env flagged an error in any solver since its last reset."""
+        """Return whether each env flagged an error in any solver or the coupler since its last reset."""
         envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
-        for solver in self._active_solvers:
-            envs_mask |= solver.get_error_envs_mask()
+        for component in self._active_systems:
+            envs_mask |= component.get_error_envs_mask()
         return envs_mask
 
     def clear_errno(self, envs_idx=None):
-        """Clear the errors every solver flagged for the given envs, all of them if None."""
-        for solver in self._active_solvers:
-            solver.clear_errno(envs_idx)
+        """Clear the errors every solver and the coupler flagged for the given envs, all of them if None."""
+        for component in self._active_systems:
+            component.clear_errno(envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -409,7 +458,7 @@ class Simulator(RBC):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 self._steps += 1
                 for _ in range(self._substeps):
-                    self.rigid_solver.substep(self.cur_substep_local)
+                    self.rigid_solver.substep()
                     self._cur_substep_global += 1
                 self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
@@ -426,23 +475,19 @@ class Simulator(RBC):
                 if merge_errno(errno_out, errno_in):
                     self._has_errno_flags = True
         else:
-            for solver in self._active_solvers:
-                solver.update_errno()
+            for component in self._active_systems:
+                component.update_errno()
 
         # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
         with self._step_timer.phase("sensors"), torch.no_grad():
             self._sensor_manager.step()
 
     def _step(self):
-        """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
+        """Run the substeps of a step."""
         self._steps += 1
         for _ in range(self._substeps):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
-            if self.cur_substep_local == 0:
-                for solver in self._active_solvers:
-                    if solver.has_frames:
-                        solver.copy_frame(solver.n_frames - 1, 0)
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
@@ -453,11 +498,10 @@ class Simulator(RBC):
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
         reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
-        once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
-        environments go back to `steps_start`, the steps they counted before it.
+        once beforehand, to save the start of each of them. The clocks of the environments go back to `steps_start`, the
+        steps they counted before it.
         """
-        # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
-        # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
+        # The state is saved at the start of every substep but the first, whose start the boundary checkpoints hold
         differentiable_solvers = [solver for solver in self._active_solvers if solver.requires_grad]
         boundary_checkpoints = list(zip(differentiable_solvers, checkpoints))
         substeps_checkpoints = [boundary_checkpoints]
@@ -467,74 +511,51 @@ class Simulator(RBC):
         self._steps += 1
         restore_checkpoints(boundary_checkpoints)
         for _ in range(self._substeps - 1):
-            self.substep(self.cur_substep_local)
+            self.substep()
             self._cur_substep_global += 1
             substeps_checkpoints.append(
-                [
-                    (solver, solver.save_checkpoint(boundary_only=True))
-                    for solver in differentiable_solvers
-                    if not solver.has_frames
-                ]
+                [(solver, solver.save_checkpoint(boundary_only=True)) for solver in differentiable_solvers]
             )
-        # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
-        # the solvers holding their state in frames restore
-        framed_checkpoints = [(solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver.has_frames]
-        restore_frames = functools.partial(restore_checkpoints, framed_checkpoints)
         for i_substep in reversed(range(self._substeps)):
             self._cur_substep_global = substep_start + i_substep
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
             with LaunchRecorder() as recorder:
-                self.substep(self.cur_substep_local)
-                if is_last_substep:
-                    with recorder.entry(restore=restore_frames, autodiff=True):
-                        for solver in self._active_solvers:
-                            if solver.has_frames:
-                                solver.copy_frame(solver.n_frames - 1, 0)
-                    if self.rigid_solver.is_active:
-                        self.rigid_solver.clear_external_force()
+                self.substep()
+                if is_last_substep and self.rigid_solver.is_active:
+                    self.rigid_solver.clear_external_force()
             recorder.reverse()
         self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)
 
-    def substep(self, f):
+    def substep(self):
         # The kernels read the time of each environment from the simulator state, which keeps their launch context
         # cacheable
         i_substep = self._cur_substep_global % self._substeps
         kernel_set_time(i_substep, self._steps, self.sim_state, self._substeps, self._substep_dt)
-        self._coupler.preprocess(f)
-        self.substep_pre_coupling(f)
-        self._coupler.couple(f)
-        self.substep_post_coupling(f)
+        self._coupler.preprocess()
+        self.substep_pre_coupling()
+        self._coupler.couple()
+        self.substep_post_coupling()
         # The soft parts of the hybrid entities follow their rigid links once the soft particles left the grid
-        for entity in self._hybrid_entities:
-            soft_solver, rigid_solver = entity.solver_soft, entity.solver_rigid
-            kernel_update_hybrid_soft_part(
-                f,
-                entity.part_soft.particle_start,
-                soft_solver.substep_dt,
-                soft_solver.dt,
-                rigid_solver.dt,
-                entity.material.damping,
-                entity.material.soft_dv_coef,
-                entity.part_soft_info,
-                entity.part_soft_init_positions,
-                soft_solver.mpm_state,
-                rigid_solver.dyn_state.links,
-                soft_solver.mpm_info,
-                rigid_solver.dyn_info.geoms,
+        if self._rigid_mpm_hybrid is not None:
+            self._rigid_mpm_hybrid.update_soft_parts()
+        # The MPM grid and particles push the rigid links once all of them added their forces (see MPMCouplingForces)
+        if self.mpm_solver.is_active and self.mpm_solver.mpm_config.is_deterministic:
+            kernel_flush_coupling_forces(
+                self.rigid_solver.dyn_state.links, self.mpm_solver.mpm_state.coupling_forces, self.mpm_solver.mpm_info
             )
 
     # -------------- pre coupling --------------
-    def substep_pre_coupling(self, f):
+    def substep_pre_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_pre_coupling(f)
+            solver.substep_pre_coupling()
 
     # -------------- post coupling --------------
-    def substep_post_coupling(self, f):
+    def substep_post_coupling(self):
         for solver in self._active_solvers:
-            solver.substep_post_coupling(f)
+            solver.substep_post_coupling()
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -542,7 +563,9 @@ class Simulator(RBC):
 
     def get_state(self) -> SimState:
         """Return the state the simulation stands in, for 'reset' to restore (see 'Solver.get_state')."""
-        solvers_state = {type(solver).__name__: solver.get_state() for solver in self._active_solvers}
+        solvers_state = {
+            type(system).__name__: system.get_state() for system in self._active_systems if system.is_checkpointable
+        }
         return SimState(self.scene, self.cur_step_global, solvers_state)
 
     def set_gravity(self, gravity, envs_idx=None):
@@ -606,13 +629,9 @@ class Simulator(RBC):
 
     @property
     def cur_substep_local(self):
-        """
-        The frame the current substep starts from, among those the solvers hold.
-
-        The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
-        frames of one substep (see 'Solver.has_frames').
-        """
-        return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
+        """The current substep within the step. Deprecated: use 'cur_substep_global % substeps' instead."""
+        warn_once("'cur_substep_local' is deprecated and will be removed. Use 'cur_substep_global % substeps' instead.")
+        return self._cur_substep_global % self._substeps
 
     @property
     def step_timer(self) -> StepTimer:

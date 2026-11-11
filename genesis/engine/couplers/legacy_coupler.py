@@ -1,3 +1,5 @@
+import math
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -8,11 +10,12 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import func_impose_cube_boundary
-from genesis.engine.solvers.base_solver import SimulatorState
-from genesis.engine.solvers.fem_solver import FEMInfo, FEMState
+from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin, SimulatorState
+from genesis.engine.solvers.fem_solver import SURFACES, FEMInfo, FEMState
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
     MPMState,
+    func_add_coupling_force,
     func_point_vel_after_collision_with_rigid_geom,
     func_point_vel_after_two_way_collision_with_rigid_geom,
     func_quadratic_bspline_stencil,
@@ -22,11 +25,31 @@ from genesis.engine.solvers.pbd_solver import PBDInfo, PBDState
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
 from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
-from genesis.engine.solvers.sph_solver import SPHInfo, SPHState, func_cubic_kernel_plane_integral
+from genesis.engine.solvers.sph_solver import (
+    SPHBoundaryGhosts,
+    SPHInfo,
+    SPHState,
+    func_cubic_kernel_derivative,
+    func_cubic_kernel_plane_integral,
+    kernel_sum_boundary_ghosts,
+)
+from genesis.grad.bridge import reversed_with
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import ENVS, Config, Data, DataKind, Size, eoa, field, opt_in
-from genesis.utils.geom import SpatialHashGrid, qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, Size, eoa, field, iter_data, opt_in
+from genesis.utils.geom import (
+    PARTICLES,
+    SpatialHashGrid,
+    func_hash_cell_to_slot,
+    func_hash_n_cells,
+    func_hash_pos_to_grid,
+    func_hash_sort_particles,
+    func_hash_wrap_cell,
+    hash_grid_sizes,
+    qd_inv_transform_by_trans_quat,
+    qd_transform_by_trans_quat,
+)
+from genesis.utils.misc import tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 
@@ -39,6 +62,26 @@ PBD_PARTICLES = Size("pbd_particles")
 RIGID_PBD = "rigid_pbd"
 
 
+class FEMSPHBoundary(Data, kind=DataKind.SCRATCH):
+    """
+    The surface of the FEM entities as a moving boundary of the SPH liquid.
+
+    Each sample of a surface triangle has a ghost particle half a particle size inside the surface, which stands for the
+    layer of liquid one particle size thick under its share of the triangle and moves with the triangle.
+    """
+
+    ghosts: SPHBoundaryGhosts
+    # The impulse that the SPH particles give each ghost particle over the substep, which the vertices of its triangle
+    # take
+    ghosts_impulse: qd.Tensor = field((float, 3), shape=(PARTICLES, ENVS))
+    # The triangle of each sample, its barycentric coordinates in the rest triangle, and its share of the triangle area
+    samples_tri_idx: qd.Tensor = field(int, shape=(PARTICLES,), kind=DataKind.CONSTANT)
+    samples_bary: qd.Tensor = field((float, 3), shape=(PARTICLES,), kind=DataKind.CONSTANT)
+    samples_area_frac: qd.Tensor = field(float, shape=(PARTICLES,), kind=DataKind.CONSTANT)
+    # The samples of each surface triangle span tris_sample_start[i_s] to tris_sample_start[i_s + 1]
+    tris_sample_start: qd.Tensor = field(int, shape=(SURFACES + 1,), kind=DataKind.CONSTANT)
+
+
 class LegacyCouplerState(Data, kind=DataKind.STATE):
     """
     Runtime state of the legacy coupler.
@@ -47,10 +90,10 @@ class LegacyCouplerState(Data, kind=DataKind.STATE):
     `pbd_attach_link_idx`, -1 for none.
     """
 
-    pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD)
-    pbd_attach_local_pos: qd.Tensor = field(
-        (float, 3), shape=(PBD_PARTICLES, ENVS), kind=DataKind.INFO, labels=RIGID_PBD
-    )
+    # The error flags of each env, which no kernel of the coupler raises (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,))
+    pbd_attach_link_idx: qd.Tensor = field(int, shape=(PBD_PARTICLES, ENVS), labels=RIGID_PBD)
+    pbd_attach_local_pos: qd.Tensor = field((float, 3), shape=(PBD_PARTICLES, ENVS), labels=RIGID_PBD)
 
 
 class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
@@ -86,10 +129,14 @@ class LegacyCouplerConfig(Config):
     is_links_info_batched: bool
 
 
-class LegacyCoupler(RBC):
+class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
     """
+
+    # Its whole state, the error flags and the PBD particles attached to rigid links, lives in the arrays 'data'
+    # yields (see 'CheckpointMixin').
+    is_checkpointable = True
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -108,10 +155,25 @@ class LegacyCoupler(RBC):
         self.legacy_coupler_state: LegacyCouplerState | None = None
         self.legacy_coupler_info: LegacyCouplerInfo | None = None
         self.legacy_coupler_config: LegacyCouplerConfig | None = None
+        self.fem_sph_boundary: FEMSPHBoundary | None = None
         self._is_mpm_implicit = False
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any(self.rigid_couplings))
+        # The surfaces of the FEM entities are moving boundaries of the SPH liquid
+        opt_in(
+            SPHState.boundary,
+            cond=lambda: self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph,
+        )
+
+    @property
+    def data(self) -> Iterator[DataItem]:
+        """Yield every array the coupler holds, under the dotted name a checkpoint uses for it (see 'Solver.data')."""
+        # A coupler whose build failed holds no array
+        if self.legacy_coupler_state is None:
+            return
+        yield from iter_data(self, "legacy_coupler_state")
+        yield from iter_data(self, "fem_sph_boundary")
 
     @property
     def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
@@ -156,7 +218,7 @@ class LegacyCoupler(RBC):
             has_mpm_sph=has_mpm_sph,
             has_mpm_pbd=has_mpm_pbd,
             has_fem_mpm=has_fem_mpm,
-            has_fem_sph=self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph,
+            has_fem_sph=self.sph_solver.sph_config.has_boundary,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
         )
 
@@ -168,6 +230,8 @@ class LegacyCoupler(RBC):
         if has_rigid_pbd:
             self.legacy_coupler_state.pbd_attach_link_idx.fill(-1)
             self.legacy_coupler_state.pbd_attach_local_pos.fill(0.0)
+        self.build_errno(self.sim._B)
+        self.register_errors(self.legacy_coupler_state.errno, {})
 
         # The cells of the MPM grid reach the particles of the hash grid cells they overlap, plus one on each side
         mpm_sph_stencil_size = mpm_pbd_stencil_size = 0
@@ -185,12 +249,81 @@ class LegacyCoupler(RBC):
             )
         )
 
-        self.reset()
+        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
+            kernel_reset_mpm_rigid_normal(self.sim.scene._sanitize_envs_idx(None), self.mpm_solver.mpm_state)
+
+        self._build_fem_sph_boundary()
+
+    def _build_fem_sph_boundary(self) -> None:
+        if not self.legacy_coupler_config.has_fem_sph:
+            self.fem_sph_boundary = FEMSPHBoundary(unused=True)
+            return
+
+        # The samples split each surface triangle at rest by halving the longest edge of its parts until all their edges
+        # fit within a particle size, which keeps the samples of an elongated triangle as many as its length needs, and
+        # sit at the centroids of the parts.
+        tris_verts_pos = np.concatenate(
+            [
+                tensor_to_array(entity.init_positions, dtype=gs.np_float)[entity.surface_triangles]
+                for entity in self.fem_solver.entities
+            ]
+        )
+        n_tris = len(tris_verts_pos)
+        parts_tri_idx, parts_bary, parts_area_frac = (
+            np.arange(n_tris),
+            np.tile(np.eye(3), (n_tris, 1, 1)),
+            np.ones(n_tris),
+        )
+        samples_parts = []
+        while len(parts_tri_idx) > 0:
+            parts_verts_pos = parts_bary @ tris_verts_pos[parts_tri_idx]
+            parts_edges = np.linalg.norm(parts_verts_pos - np.roll(parts_verts_pos, -1, axis=1), axis=-1)
+            is_split = parts_edges.max(axis=-1) > self.sph_solver.particle_size
+            samples_parts.append(
+                (parts_tri_idx[~is_split], parts_bary[~is_split].mean(axis=1), parts_area_frac[~is_split])
+            )
+            # The longest edge runs from the corner i_a to the next one, i_b, opposite to the corner i_c
+            i_a = parts_edges[is_split].argmax(axis=-1)
+            i_b, i_c = (i_a + 1) % 3, (i_a + 2) % 3
+            bary = parts_bary[is_split]
+            idx = np.arange(len(bary))
+            mid = 0.5 * (bary[idx, i_a] + bary[idx, i_b])
+            parts_bary = np.concatenate(
+                [np.stack([bary[idx, i_a], mid, bary[idx, i_c]], 1), np.stack([mid, bary[idx, i_b], bary[idx, i_c]], 1)]
+            )
+            parts_tri_idx = np.tile(parts_tri_idx[is_split], 2)
+            parts_area_frac = np.tile(0.5 * parts_area_frac[is_split], 2)
+        samples_tri_idx, samples_bary, samples_area_frac = [np.concatenate(arrays) for arrays in zip(*samples_parts)]
+        samples_order = np.argsort(samples_tri_idx, kind="stable")
+        samples_tri_idx, samples_bary = samples_tri_idx[samples_order], samples_bary[samples_order]
+        samples_area_frac = samples_area_frac[samples_order]
+        tris_sample_start = np.concatenate([[0], np.cumsum(np.bincount(samples_tri_idx, minlength=n_tris))])
+
+        self.fem_sph_boundary = FEMSPHBoundary(
+            sizes=dict(
+                particles=len(samples_tri_idx),
+                envs=self.sim._B,
+                surfaces=n_tris,
+                **hash_grid_sizes(math.prod(self.sph_solver.hash_grid_res)),
+            ),
+            values=dict(
+                ghosts=dict(
+                    hash_grid=dict(
+                        cell_size=self.sph_solver.hash_grid_cell_size, grid_res=self.sph_solver.hash_grid_res
+                    )
+                )
+            ),
+            env_first={(FEMSPHBoundary.ghosts, FEMSPHBoundary.ghosts_impulse): False},
+        )
+        self.fem_sph_boundary.samples_tri_idx.from_numpy(samples_tri_idx.astype(gs.np_int))
+        self.fem_sph_boundary.samples_bary.from_numpy(samples_bary.astype(gs.np_float))
+        self.fem_sph_boundary.samples_area_frac.from_numpy(samples_area_frac.astype(gs.np_float))
+        self.fem_sph_boundary.tris_sample_start.from_numpy(tris_sample_start.astype(gs.np_int))
 
     def reset(self, envs_idx=None) -> None:
-        if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
-            envs_idx = self.sim.scene._sanitize_envs_idx(envs_idx)
-            kernel_reset_mpm_rigid_normal(envs_idx, self.mpm_solver.mpm_state)
+        # The MPM particles keep the rigid normals they saw in their state, which 'set_state' writes back before the
+        # restart, so the restart leaves them as restored.
+        pass
 
     # ------------------------------------------------------------------------------------
     # ------------------------------ PBD particles on links -------------------------------
@@ -215,11 +348,18 @@ class LegacyCoupler(RBC):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def preprocess(self, f: int) -> None:
+    def preprocess(self) -> None:
+        if self.legacy_coupler_config.has_fem_sph:
+            kernel_place_fem_sph_ghosts(
+                self.fem_solver.fem_state, self.fem_sph_boundary, self.fem_solver.fem_info, self.sph_solver.sph_info
+            )
+            kernel_sum_boundary_ghosts(
+                self.fem_sph_boundary.ghosts, self.sph_solver.sph_state, self.sph_solver.sph_info
+            )
+
         # preprocess for MPM CPIC
         if self.legacy_coupler_config.has_rigid_mpm and self.mpm_solver.enable_CPIC:
             kernel_mpm_surface_to_particle(
-                f,
                 self.mpm_solver.mpm_state,
                 self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_info.geoms,
@@ -228,11 +368,10 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.collider.collider_config,
             )
 
-    def couple(self, f: int) -> None:
+    def couple(self) -> None:
         # MPM <-> all others
         if self.mpm_solver.is_active and not self._is_mpm_implicit:
             kernel_mpm_grid_op(
-                f,
                 self.sim.sim_state,
                 self.mpm_solver.mpm_state,
                 self.sph_solver.sph_state,
@@ -246,9 +385,11 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.sdf.sdf_info,
                 self.legacy_coupler_info,
+                self.mpm_solver.mpm_config,
                 self.legacy_coupler_config,
                 self.rigid_solver.collider.collider_config,
                 self.mpm_solver.force_fields,
+                is_backward=False,
             )
 
         # SPH <-> Rigid
@@ -290,12 +431,12 @@ class LegacyCoupler(RBC):
 
         if self.fem_solver.is_active:
             kernel_fem_surface_force(
-                f,
                 self.fem_solver.fem_state,
                 self.mpm_solver.mpm_state,
                 self.sph_solver.sph_state,
                 self.rigid_solver.dyn_state.geoms,
                 self.rigid_solver.dyn_state.links,
+                self.fem_sph_boundary,
                 self.fem_solver.fem_info,
                 self.mpm_solver.mpm_info,
                 self.sph_solver.sph_info,
@@ -386,15 +527,24 @@ def func_point_vel_after_collisions_with_rigid_geoms(
     pos_world: qd.types.vector(3),
     vel: qd.types.vector(3),
     mass: float,
+    mpm_state: MPMState,
     geoms_state: GeomsState,
     links_state: LinksState,
+    mpm_info: MPMInfo,
     geoms_info: GeomsInfo,
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     legacy_coupler_info: LegacyCouplerInfo,
+    mpm_config: qd.template(),
     collider_config: qd.template(),
+    is_backward: qd.template(),
 ):
-    """Return the velocity of a point of the given mass once it collided with every rigid geom that couples."""
+    """
+    Return the velocity of a cell of the MPM grid of the given mass once it collided with every rigid geom that couples.
+
+    The momentum change of each collision pushes the link of the geom (see func_add_coupling_force), exactly with
+    `is_deterministic` (see MPMConfig), except in the variant autodiff reverses (`is_backward`).
+    """
     for i_g in range(geoms_info.needs_coup.shape[0]):
         if geoms_info.needs_coup[i_g]:
             _, influence, normal_rigid = func_rigid_geom_influence(
@@ -410,9 +560,21 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                 skip_weak_normal=True,
             )
             if influence > legacy_coupler_info.influence_min[None]:
-                vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+                vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
                     i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
                 )
+                if is_colliding:
+                    func_add_coupling_force(
+                        geoms_info.link_idx[i_g],
+                        i_b,
+                        pos_world,
+                        force,
+                        links_state,
+                        mpm_state.coupling_forces,
+                        mpm_info,
+                        is_exact=mpm_config.is_deterministic and not is_backward,
+                    )
+                vel = vel_new
     return vel
 
 
@@ -454,9 +616,12 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
         skip_weak_normal=False,
     )
     if influence > legacy_coupler_info.influence_min[None]:
-        vel = func_point_vel_after_two_way_collision_with_rigid_geom(
+        vel_new, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
             i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
         )
+        if is_colliding:
+            func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+        vel = vel_new
 
     # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
     # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
@@ -524,9 +689,9 @@ def func_mpm_cell_vel_after_exchange_with_particles(
     return vel
 
 
+@reversed_with(is_backward=True)
 @qd.kernel
 def kernel_mpm_grid_op(
-    f: int,
     sim_state: SimulatorState,
     mpm_state: MPMState,
     sph_state: SPHState,
@@ -540,17 +705,24 @@ def kernel_mpm_grid_op(
     rigid_info: RigidInfo,
     sdf_info: SDFInfo,
     legacy_coupler_info: LegacyCouplerInfo,
+    mpm_config: qd.template(),
     legacy_coupler_config: qd.template(),
     collider_config: qd.template(),
     force_fields: qd.template(),
+    is_backward: qd.template(),
 ):
-    """Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with."""
-    for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape[1:]):
-        mass_cell = mpm_state.grid.mass[f, i_x, i_y, i_z, i_b]
+    """
+    Update the velocity of the cells of the MPM grid, which the other solvers exchange momentum with.
+
+    The reactions of the rigid geoms add exactly to the coupling forces of their links with `is_deterministic` (see
+    MPMConfig), except in the variant autodiff reverses (`is_backward`).
+    """
+    for i_x, i_y, i_z, i_b in qd.ndrange(*mpm_state.grid.mass.shape):
+        mass_cell = mpm_state.grid.mass[i_x, i_y, i_z, i_b]
         if mass_cell > rigid_info.EPS[None]:
             #################### MPM grid op ####################
             # Momentum to velocity, then gravity
-            vel_mpm = (1 / mass_cell) * mpm_state.grid.vel_in[f, i_x, i_y, i_z, i_b]
+            vel_mpm = (1 / mass_cell) * mpm_state.grid.vel_in[i_x, i_y, i_z, i_b]
             vel_mpm += mpm_info.substep_dt[None] * mpm_info.gravity[i_b]
 
             pos = (qd.Vector([i_x, i_y, i_z]) + mpm_info.grid_offset[None]) * mpm_info.dx[None]
@@ -568,13 +740,17 @@ def kernel_mpm_grid_op(
                     pos,
                     vel_mpm,
                     mass_mpm,
+                    mpm_state,
                     geoms_state,
                     links_state,
+                    mpm_info,
                     geoms_info,
                     rigid_info,
                     sdf_info,
                     legacy_coupler_info,
+                    mpm_config,
                     collider_config,
+                    is_backward,
                 )
 
             #################### MPM <-> SPH, PBD ####################
@@ -611,12 +787,11 @@ def kernel_mpm_grid_op(
 
             #################### MPM boundary ####################
             _, vel_mpm = func_impose_cube_boundary(pos, vel_mpm, mpm_info.boundary)
-            mpm_state.grid.vel_out[f, i_x, i_y, i_z, i_b] = vel_mpm
+            mpm_state.grid.vel_out[i_x, i_y, i_z, i_b] = vel_mpm
 
 
 @qd.kernel
 def kernel_mpm_surface_to_particle(
-    f: int,
     mpm_state: MPMState,
     geoms_state: GeomsState,
     geoms_info: GeomsInfo,
@@ -626,15 +801,15 @@ def kernel_mpm_surface_to_particle(
 ):
     """Update the normal of the rigid geoms each active MPM particle sees, as long as it stays on the same side."""
     for i_p, i_b in qd.ndrange(
-        *mpm_state.particles.pos.shape[1:], axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
+        *mpm_state.particles.pos.shape, axes=qd.static(eoa(mpm_state.particles_cpic.rigid_normal))
     ):
-        if mpm_state.particles.is_active[f, i_p, i_b]:
+        if mpm_state.particles.is_active[i_p, i_b]:
             for i_g in range(mpm_state.particles_cpic.rigid_normal.shape[1]):
                 if geoms_info.needs_coup[i_g]:
                     sdf_normal = sdf.sdf_func_normal_world(
                         i_g,
                         i_b,
-                        mpm_state.particles.pos[f, i_p, i_b],
+                        mpm_state.particles.pos[i_p, i_b],
                         geoms_state,
                         geoms_info,
                         rigid_info,
@@ -648,12 +823,12 @@ def kernel_mpm_surface_to_particle(
 
 @qd.kernel
 def kernel_fem_surface_force(
-    f: int,
     fem_state: FEMState,
     mpm_state: MPMState,
     sph_state: SPHState,
     geoms_state: GeomsState,
     links_state: LinksState,
+    fem_sph_boundary: FEMSPHBoundary,
     fem_info: FEMInfo,
     mpm_info: MPMInfo,
     sph_info: SPHInfo,
@@ -665,15 +840,42 @@ def kernel_fem_surface_force(
     collider_config: qd.template(),
 ):
     """Update the velocity of the surface vertices of the FEM entities by their collisions with the other solvers."""
+    # The impulse of the SPH particles on each ghost particle of the surface, opposite to the impulse they take from it
+    # (see SPHBoundaryParticles)
+    if qd.static(legacy_coupler_config.has_fem_sph):
+        h, k = sph_info.support_radius[None], sph_info.kernel_coef[None]
+        for i_g, i_b in qd.ndrange(
+            *fem_sph_boundary.ghosts_impulse.shape, axes=qd.static(eoa(fem_sph_boundary.ghosts_impulse))
+        ):
+            impulse = qd.Vector.zero(gs.qd_float, 3)
+            ghost_pos = fem_sph_boundary.ghosts.particles.pos[i_g, i_b]
+            ghost_volume = fem_sph_boundary.ghosts.particles.volume[i_g, i_b]
+            gravity = sph_info.gravity[i_b]
+            base = func_hash_wrap_cell(func_hash_pos_to_grid(ghost_pos, sph_state.hash_grid) - 1, sph_state.hash_grid)
+            n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+            for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                i_slot = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
+                slot_start = sph_state.hash_grid.slot_start[i_slot, i_b]
+                for i_r in range(slot_start, slot_start + sph_state.hash_grid.slot_size[i_slot, i_b]):
+                    r = ghost_pos - sph_state.particles_reordered.pos[i_r, i_b]
+                    if r.norm() < h:
+                        i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
+                        grad = -ghost_volume * func_cubic_kernel_derivative(r, h, k, sph_info.kernel_dist_min[None])
+                        impulse_coef = sph_state.boundary.impulse_coef[
+                            i_p, i_b
+                        ] + sph_state.boundary.impulse_gravity_coef[i_p, i_b] * gravity.dot(r)
+                        impulse = impulse + impulse_coef * grad
+            fem_sph_boundary.ghosts_impulse[i_g, i_b] = impulse
+
     # TODO: all collisions are on vertices instead of surface and edge
     # Each surface vertex applies the couplings of its incident triangles in increasing triangle index, which
     # reproduces a serial sweep over the triangles without a write race on the vertices they share.
     for i_sv, i_b in qd.ndrange(
-        fem_info.surface_vertices.shape[0], fem_state.vertices.pos.shape[2], axes=qd.static(eoa(fem_state.vertices.vel))
+        fem_info.surface_vertices.shape[0], fem_state.vertices.pos.shape[1], axes=qd.static(eoa(fem_state.vertices.vel))
     ):
         i_v = fem_info.surface_vertices[i_sv]
-        pos = fem_state.vertices.pos[f, i_v, i_b]
-        vel_fem_sv = fem_state.vertices.vel[f + 1, i_v, i_b]
+        pos = fem_state.vertices.pos[i_v, i_b]
+        vel_fem_sv = fem_state.vertices.vel_next[i_v, i_b]
         i_tri_start = fem_info.surface_vertices_tri_start[i_sv]
         n_tris = fem_info.surface_vertices_tri_start[i_sv + 1] - i_tri_start
 
@@ -721,16 +923,16 @@ def kernel_fem_surface_force(
                                 links_state=links_state,
                             )
 
-        if qd.static(legacy_coupler_config.has_fem_mpm or legacy_coupler_config.has_fem_sph):
+        if qd.static(legacy_coupler_config.has_fem_mpm):
             for i_s_ in range(n_tris):
                 i_s = fem_info.surface_vertices_tri_idx[i_tri_start + i_s_]
                 mass = fem_info.surface_vertices_tri_mass_scaled[i_tri_start + i_s_] / fem_info.vol_scale[None]
 
                 tri2v = fem_info.surfaces.tri2v[i_s]
                 surface_normal = triangle_face_normal(
-                    fem_state.vertices.pos[f, tri2v[0], i_b],
-                    fem_state.vertices.pos[f, tri2v[1], i_b],
-                    fem_state.vertices.pos[f, tri2v[2], i_b],
+                    fem_state.vertices.pos[tri2v[0], i_b],
+                    fem_state.vertices.pos[tri2v[1], i_b],
+                    fem_state.vertices.pos[tri2v[2], i_b],
                     rigid_info.EPS[None],
                 )
 
@@ -746,7 +948,7 @@ def kernel_fem_surface_force(
                     mpm_base, _, mpm_w = func_quadratic_bspline_stencil(pos, mpm_info)
                     new_vel_fem_sv = vel_fem_sv
                     grid_shape = mpm_state.grid.mass.shape
-                    grid_res = qd.Vector([grid_shape[1], grid_shape[2], grid_shape[3]])
+                    grid_res = qd.Vector([grid_shape[0], grid_shape[1], grid_shape[2]])
                     dx = mpm_info.dx[None]
                     for mpm_offset in qd.static(qd.grouped(qd.ndrange(3, 3, 3))):
                         cell = mpm_base - mpm_info.grid_offset[None] + mpm_offset
@@ -755,7 +957,7 @@ def kernel_fem_surface_force(
                         mpm_grid_mass = gs.qd_float(0.0)
                         if is_cell_in_grid:
                             mpm_grid_mass = (
-                                mpm_state.grid.mass[f, cell[0], cell[1], cell[2], i_b]
+                                mpm_state.grid.mass[cell[0], cell[1], cell[2], i_b]
                                 / mpm_info.particle_volume_scale[None]
                             )
 
@@ -767,7 +969,7 @@ def kernel_fem_surface_force(
                         mpm_grid_pos = (cell + mpm_info.grid_offset[None]) * dx
                         signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
                         if is_cell_in_grid and signed_dist <= dx:
-                            vel_out = mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b]
+                            vel_out = mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b]
                             mass_mpm_at_cell = mpm_weight * mpm_grid_mass
                             vel_mpm += mpm_weight * vel_out
                             mass_mpm += mass_mpm_at_cell
@@ -778,7 +980,7 @@ def kernel_fem_surface_force(
                                     mpm_grid_mass / mass_fem_sv
                                 )
                                 qd.atomic_add(
-                                    mpm_state.grid.vel_out[f, cell[0], cell[1], cell[2], i_b], delta_mpm_vel_at_cell
+                                    mpm_state.grid.vel_out[cell[0], cell[1], cell[2], i_b], delta_mpm_vel_at_cell
                                 )
                                 new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
 
@@ -786,37 +988,24 @@ def kernel_fem_surface_force(
                     if mass_mpm > rigid_info.EPS[None]:
                         vel_fem_sv = new_vel_fem_sv
 
-                # FEM <-> SPH TODO: this doesn't work well
-                if qd.static(legacy_coupler_config.has_fem_sph):
-                    mass_fem_sv = mass / 4.0
-                    half_size = 0.5 * sph_state.hash_grid.cell_size[None]
-                    sph_vel, n_particles = func_get_particles_mean_vel(
-                        i_b,
-                        pos,
-                        sph_state.particles_reordered.pos,
-                        sph_state.particles_reordered.vel,
-                        sph_state.hash_grid,
-                        half_size,
-                        n_cells=2,
-                    )
-                    if n_particles > 0:
-                        # The tangential velocity is left out
-                        vel_old = vel_fem_sv
-                        vel_fem_sv = sph_vel.dot(surface_normal) * surface_normal
-                        func_add_particles_momentum(
-                            i_b,
-                            pos,
-                            -mass_fem_sv * (vel_fem_sv - vel_old),
-                            sph_state.particles_reordered.pos,
-                            sph_state.particles_reordered.vel,
-                            sph_state.particles_reordered.is_active,
-                            sph_info.particles.mass,
-                            sph_state.hash_grid,
-                            half_size,
-                            n_cells=2,
-                        )
+        # FEM <-> SPH, the vertex taking the impulses of the ghost particles of its triangles by its barycentric weight
+        if qd.static(legacy_coupler_config.has_fem_sph):
+            for i_s_ in range(n_tris):
+                i_s = fem_info.surface_vertices_tri_idx[i_tri_start + i_s_]
+                tri2v = fem_info.surfaces.tri2v[i_s]
+                for i_c in qd.static(range(3)):
+                    if tri2v[i_c] == i_v:
+                        for i_g in range(
+                            fem_sph_boundary.tris_sample_start[i_s], fem_sph_boundary.tris_sample_start[i_s + 1]
+                        ):
+                            vel_fem_sv = (
+                                vel_fem_sv
+                                + fem_sph_boundary.samples_bary[i_g][i_c]
+                                * fem_sph_boundary.ghosts_impulse[i_g, i_b]
+                                * fem_info.vertices.mass_inv[i_v]
+                            )
 
-        fem_state.vertices.vel[f + 1, i_v, i_b] = vel_fem_sv
+        fem_state.vertices.vel_next[i_v, i_b] = vel_fem_sv
 
 
 @qd.kernel
@@ -1012,3 +1201,39 @@ def kernel_pbd_rigid_solve_animate_particles_by_link(
             pos_correction = target_world_pos - pbd_state.particles_reordered.pos[i_r, i_b]
             corrective_vel = pos_correction * legacy_coupler_info.animate_inv_dt[None]
             pbd_state.particles_reordered.vel[i_r, i_b] = corrective_vel + target_world_vel
+
+
+@qd.kernel
+def kernel_place_fem_sph_ghosts(
+    fem_state: FEMState, fem_sph_boundary: FEMSPHBoundary, fem_info: FEMInfo, sph_info: SPHInfo
+):
+    """Place the ghost particles of the surface of the FEM entities at the start of the substep, and sort them."""
+    particle_size = sph_info.particle_size[None]
+    for i_g, i_b in qd.ndrange(
+        *fem_sph_boundary.ghosts.particles.pos.shape, axes=qd.static(eoa(fem_sph_boundary.ghosts.particles.pos))
+    ):
+        i_s = fem_sph_boundary.samples_tri_idx[i_g]
+        tri2v = fem_info.surfaces.tri2v[i_s]
+        bary = fem_sph_boundary.samples_bary[i_g]
+        pos = qd.Vector.zero(gs.qd_float, 3)
+        vel = qd.Vector.zero(gs.qd_float, 3)
+        for i_c in qd.static(range(3)):
+            i_v = tri2v[i_c]
+            pos = pos + bary[i_c] * fem_state.vertices.pos[i_v, i_b]
+            vel = vel + bary[i_c] * fem_state.vertices.vel[i_v, i_b]
+        i_v0, i_v1, i_v2 = tri2v[0], tri2v[1], tri2v[2]
+        pos_0 = fem_state.vertices.pos[i_v0, i_b]
+        area_normal = 0.5 * (fem_state.vertices.pos[i_v1, i_b] - pos_0).cross(fem_state.vertices.pos[i_v2, i_b] - pos_0)
+        area = area_normal.norm()
+        fem_sph_boundary.ghosts.particles.pos[i_g, i_b] = pos - (0.5 * particle_size / area) * area_normal
+        fem_sph_boundary.ghosts.particles.vel[i_g, i_b] = vel
+        fem_sph_boundary.ghosts.particles.volume[i_g, i_b] = (
+            fem_sph_boundary.samples_area_frac[i_g] * area * particle_size
+        )
+        fem_sph_boundary.ghosts.particles.is_active[i_g, i_b] = True
+
+    func_hash_sort_particles(
+        fem_sph_boundary.ghosts.particles.pos,
+        fem_sph_boundary.ghosts.particles.is_active,
+        fem_sph_boundary.ghosts.hash_grid,
+    )
