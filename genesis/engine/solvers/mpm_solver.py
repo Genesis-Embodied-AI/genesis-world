@@ -1332,7 +1332,8 @@ def func_gather_grid_velocity(
                         i_b,
                         pos,
                         force,
-                        links_state,
+                        torque=qd.Vector.zero(gs.qd_float, 3),
+                        links_state=links_state,
                         is_exact=mpm_config.is_deterministic,
                     )
 

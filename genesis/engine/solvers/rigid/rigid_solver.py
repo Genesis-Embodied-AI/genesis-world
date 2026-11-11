@@ -1273,7 +1273,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self):
-        from genesis.engine.couplers import SAPCoupler
+        from genesis.engine.couplers import IPCCoupler, SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
@@ -1288,8 +1288,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_flush_external_wrenches(self.dyn_state.links)
 
         # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
-        if self._use_hibernation and len(self.sim.active_solvers) > 1:
+        # kernel_wakeup_coupled_links in abd/misc.py). They exist when another solver is active, or when the IPC coupler
+        # couples rigid links with its own bodies.
+        is_ipc_coupled = isinstance(self.sim.coupler, IPCCoupler) and self.sim.coupler.has_any_rigid_coupling
+        if self._use_hibernation and (len(self.sim.active_solvers) > 1 or is_ipc_coupled):
             kernel_wakeup_coupled_links(
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
@@ -1535,7 +1537,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             Defaults to 'link_origin'.
         local: bool, optional
             Whether `force`, `torque` and `pos` are expressed in the coordinates of the `ref` frame rather than the
-            world frame. Defaults to False.
+            world frame, a convenience to set a world wrench from local coordinates. The wrench is converted to world
+            when the call is made and held constant in world over the substeps of the step, so it does not turn with the
+            link during the step. Defaults to False.
         """
         if force is None and torque is None:
             gs.raise_exception("Either 'force' or 'torque' must be specified.")

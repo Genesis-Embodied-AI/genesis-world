@@ -863,43 +863,36 @@ def kernel_apply_links_external_wrench_at_pos(
 
 
 @qd.func
-def func_apply_external_wrench(
-    link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: LinksState
-):
-    torque = (pos - links_state.root_COM[link_idx, env_idx]).cross(force)
-    qd.atomic_sub(links_state.cfrc_external_ang[link_idx, env_idx], torque)
-    qd.atomic_sub(links_state.cfrc_external_vel[link_idx, env_idx], force)
-
-
-@qd.func
 def func_add_external_wrench(
     i_l: int,
     i_b: int,
     pos: qd.types.vector(3),
     force: qd.types.vector(3),
+    torque: qd.types.vector(3),
     links_state: LinksState,
     is_exact: qd.template(),
 ):
     """
-    Apply a force at a point of a rigid link, its reaction on another solver.
+    Apply a force at a point of a rigid link and a couple, their reaction on another solver.
 
     With `is_exact`, the force and its torque add to the exact sums of the link, whatever the order of the terms, which
     kernel_flush_external_wrenches adds to the link before the next substep reads it (see LinksState). Otherwise, they
     add to the external wrench of the link directly, which the variant of a kernel that autodiff reverses requires, since
     the reversal reads the adjoint of the external wrench of the link and not that of its sums.
     """
+    moment = torque + (pos - links_state.root_COM[i_l, i_b]).cross(force)
     if qd.static(is_exact):
-        torque = (pos - links_state.root_COM[i_l, i_b]).cross(force)
         # A runtime loop over the components keeps a single inlined copy of the bin updates
         for i_c in range(6):
             term = gs.qd_float(0.0)
             if i_c < 3:
-                term = -torque[i_c % 3]
+                term = -moment[i_c % 3]
             else:
                 term = -force[i_c % 3]
             func_exact_sum_add(6 * i_l + i_c, i_b, term, links_state.cfrc_external_sums)
     else:
-        func_apply_external_wrench(i_l, i_b, pos, force, links_state)
+        qd.atomic_sub(links_state.cfrc_external_ang[i_l, i_b], moment)
+        qd.atomic_sub(links_state.cfrc_external_vel[i_l, i_b], force)
 
 
 @no_grad
@@ -994,8 +987,9 @@ def func_apply_link_external_wrench(
         else:
             arm = pos - dyn_state.links.root_COM[link_idx, env_idx]
 
-    dyn_state.links.cfrc_input_vel[link_idx, env_idx] -= force
-    dyn_state.links.cfrc_input_ang[link_idx, env_idx] -= torque + arm.cross(force)
+    # The same link may come several times in one call, the wrenches then adding up
+    qd.atomic_sub(dyn_state.links.cfrc_input_vel[link_idx, env_idx], force)
+    qd.atomic_sub(dyn_state.links.cfrc_input_ang[link_idx, env_idx], torque + arm.cross(force))
 
 
 @qd.func
