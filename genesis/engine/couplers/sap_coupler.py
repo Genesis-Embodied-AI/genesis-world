@@ -435,6 +435,10 @@ class SAPConstraintOrder(Data, kind=DataKind.SCRATCH):
     # Wrench of each share of the contacts of each link (see func_compute_link_wrench)
     links_wrench_force: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
     links_wrench_torque: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
+    # Patch key of each sorted constraint, and the rank of each one sorted by it in the sorted constraints (see
+    # kernel_sum_contact_patches)
+    patch_key: qd.Tensor = field(qd.u64, shape=(CONSTRAINT_SLOTS,))
+    patch_order: qd.Tensor = field(int, shape=(CONSTRAINT_SLOTS,))
 
 
 class SAPSolveLoops(Data, kind=DataKind.SCRATCH, shape=()):
@@ -518,6 +522,12 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     # Bits where the handler then the environment start in a constraint key (see kernel_order_constraints)
     constraints_key_shift: qd.Tensor = field(int, shape=())
     constraints_env_shift: qd.Tensor = field(int, shape=())
+    # The kinematic trees of the rigid solver, the bits of a body, and the bits where the handler then the environment
+    # start in a patch key (see kernel_sum_contact_patches)
+    n_rigid_trees: qd.Tensor = field(int, shape=())
+    patches_body_bits: qd.Tensor = field(int, shape=())
+    patches_handler_shift: qd.Tensor = field(int, shape=())
+    patches_env_shift: qd.Tensor = field(int, shape=())
     n_dofs: qd.Tensor = field(int, shape=())
     # The rigid ground plane, -1 without one (see 'SAPCoupler.build')
     ground_geom_idx: qd.Tensor = field(int, shape=())
@@ -589,6 +599,8 @@ class SAPContactInfo(Data, kind=DataKind.SCRATCH):
     G: qd.Tensor = field((float, (3, 3)))
     GJp: qd.Tensor = field((float, 3))
     dvc: qd.Tensor = field((float, 3))
+    # Total stiffness of the patch of the pair (see kernel_sum_contact_patches)
+    k_patch: qd.Tensor = field(float)
 
 
 class SAPContactPairs(Data, kind=DataKind.SCRATCH, shape=(CONTACT_PAIRS,)):
@@ -845,6 +857,8 @@ class SAPConfig(Config):
     # Key bits the device radix sort orders, and the base-256 logarithm of the key count
     constraints_sort_end_bit: int
     constraints_sort_log256: int
+    # Key bits the device radix sort orders in a patch key (see kernel_sum_contact_patches)
+    patches_sort_end_bit: int
 
 
 @qd.data_oriented
@@ -1354,8 +1368,14 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # of them a device holds, so that its kernels serve every scene.
         constraints_sort_end_bit = 16 * math.ceil((env_bits + handler_bits + key_bits) / 16)
         constraints_sort_log256 = max(1, math.ceil(math.log(max(n_slots, 2), 256)))
+        # A patch key is the environment, then the handler, then the two bodies of its pairs: the kinematic trees of the
+        # rigid solver, then the FEM entities, then the floor (see kernel_sum_contact_patches)
+        n_rigid_trees = self.rigid_solver.n_trees_ if self.rigid_solver.is_active else 0
+        patches_body_bits = (n_rigid_trees + len(self.fem_solver.entities)).bit_length()
+        assert env_bits + handler_bits + 2 * patches_body_bits <= 64
+        patches_sort_end_bit = 16 * math.ceil((env_bits + handler_bits + 2 * patches_body_bits) / 16)
         if gs.use_ndarray:
-            constraints_sort_end_bit = 64
+            constraints_sort_end_bit = patches_sort_end_bit = 64
             constraints_sort_log256 = max(constraints_sort_log256, 4)
         is_device_sort = gs.backend != gs.cpu
         # The chunks of the sorted constraints of each environment
@@ -1442,6 +1462,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     n_env_link_entries=n_env_link_entries,
                     constraints_key_shift=key_bits,
                     constraints_env_shift=key_bits + handler_bits,
+                    n_rigid_trees=n_rigid_trees,
+                    patches_body_bits=patches_body_bits,
+                    patches_handler_shift=2 * patches_body_bits,
+                    patches_env_shift=2 * patches_body_bits + handler_bits,
                     n_dofs=self.rigid_solver.n_dofs,
                     ground_geom_idx=ground_geom_idx,
                     substep_dt=self.sim._substep_dt,
@@ -1540,6 +1564,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             n_max_chain_dofs=n_max_chain_dofs,
             constraints_sort_end_bit=constraints_sort_end_bit,
             constraints_sort_log256=constraints_sort_log256,
+            patches_sort_end_bit=patches_sort_end_bit,
         )
 
         # The errors of each env, raised at the beginning of the next step (see 'ErrnoMixin.register_errors')
@@ -1641,6 +1666,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sap_data.errno,
         )
         kernel_order_constraints(self.sap_state, fem_solver.fem_info, self.sap_info, self.sap_config, *self.handlers)
+        kernel_sum_contact_patches(
+            self.sap_state, fem_solver.fem_info, rigid_solver.rigid_info, self.sap_info, self.sap_config, *self.handlers
+        )
 
     def couple(self):
         # Equality constraints bind the rigid dofs whether anything is in contact or not, and the solve gives the FEM
@@ -1920,6 +1948,36 @@ def kernel_update_contact(
     return n_contact_pairs > 0
 
 
+@qd.func
+def func_sort_env_keys(i_b: int, key: qd.Tensor, order: qd.Tensor, constraint_order: SAPConstraintOrder, n_passes: int):
+    """Sort the keys of the constraints of an environment with the slots they carry.
+
+    The radix sort is stable and orders 8 bits per pass over the n_passes lowest bytes of the keys.
+    """
+    i_s_start = constraint_order.envs_constraint_start[i_b]
+    i_s_end = constraint_order.envs_constraint_start[i_b + 1]
+    for i_pass in range(n_passes):
+        for i_d in range(256):
+            constraint_order.sort_histogram[i_d, i_b] = 0
+        for i_s in range(i_s_start, i_s_end):
+            i_d = qd.cast((key[i_s] >> qd.u64(8 * i_pass)) & qd.u64(255), gs.qd_int)
+            constraint_order.sort_histogram[i_d, i_b] = constraint_order.sort_histogram[i_d, i_b] + 1
+        i_n = i_s_start
+        for i_d in range(256):
+            n_digit = constraint_order.sort_histogram[i_d, i_b]
+            constraint_order.sort_histogram[i_d, i_b] = i_n
+            i_n = i_n + n_digit
+        for i_s in range(i_s_start, i_s_end):
+            i_d = qd.cast((key[i_s] >> qd.u64(8 * i_pass)) & qd.u64(255), gs.qd_int)
+            i_n = constraint_order.sort_histogram[i_d, i_b]
+            constraint_order.key_scratch[i_n] = key[i_s]
+            constraint_order.order_scratch[i_n] = order[i_s]
+            constraint_order.sort_histogram[i_d, i_b] = i_n + 1
+        for i_s in range(i_s_start, i_s_end):
+            key[i_s] = constraint_order.key_scratch[i_s]
+            order[i_s] = constraint_order.order_scratch[i_s]
+
+
 @qd.kernel
 def kernel_order_constraints(
     sap_state: SAPState,
@@ -2010,32 +2068,14 @@ def kernel_order_constraints(
                 )
                 sap_state.constraint_order.order[i_s] = sap_info.handlers_slot_start[i_h] + i_c
     if qd.static(gs.backend == gs.cpu):
-        n_passes = (sap_info.constraints_env_shift[None] + 7) // 8
         for i_b in range(n_envs):
-            i_s_start = sap_state.constraint_order.envs_constraint_start[i_b]
-            i_s_end = sap_state.constraint_order.envs_constraint_start[i_b + 1]
-            for i_pass in range(n_passes):
-                for i_d in range(256):
-                    sap_state.constraint_order.sort_histogram[i_d, i_b] = 0
-                for i_s in range(i_s_start, i_s_end):
-                    i_d = qd.cast((sap_state.constraint_order.key[i_s] >> qd.u64(8 * i_pass)) & qd.u64(255), gs.qd_int)
-                    sap_state.constraint_order.sort_histogram[i_d, i_b] = (
-                        sap_state.constraint_order.sort_histogram[i_d, i_b] + 1
-                    )
-                i_n = i_s_start
-                for i_d in range(256):
-                    n_digit = sap_state.constraint_order.sort_histogram[i_d, i_b]
-                    sap_state.constraint_order.sort_histogram[i_d, i_b] = i_n
-                    i_n = i_n + n_digit
-                for i_s in range(i_s_start, i_s_end):
-                    i_d = qd.cast((sap_state.constraint_order.key[i_s] >> qd.u64(8 * i_pass)) & qd.u64(255), gs.qd_int)
-                    i_n = sap_state.constraint_order.sort_histogram[i_d, i_b]
-                    sap_state.constraint_order.key_scratch[i_n] = sap_state.constraint_order.key[i_s]
-                    sap_state.constraint_order.order_scratch[i_n] = sap_state.constraint_order.order[i_s]
-                    sap_state.constraint_order.sort_histogram[i_d, i_b] = i_n + 1
-                for i_s in range(i_s_start, i_s_end):
-                    sap_state.constraint_order.key[i_s] = sap_state.constraint_order.key_scratch[i_s]
-                    sap_state.constraint_order.order[i_s] = sap_state.constraint_order.order_scratch[i_s]
+            func_sort_env_keys(
+                i_b,
+                sap_state.constraint_order.key,
+                sap_state.constraint_order.order,
+                sap_state.constraint_order,
+                n_passes=(sap_info.constraints_env_shift[None] + 7) // 8,
+            )
     else:
         radix_sort(
             sap_state.constraint_order.key,
@@ -2128,6 +2168,110 @@ def kernel_order_constraints(
                     sap_state.constraint_order.link_incidence_start[i_l - 1, i_b]
                 )
             sap_state.constraint_order.link_incidence_start[0, i_b] = i_n_start
+
+
+@qd.kernel
+def kernel_sum_contact_patches(
+    sap_state: SAPState,
+    fem_info: FEMInfo,
+    rigid_info: RigidInfo,
+    sap_info: SAPInfo,
+    sap_config: qd.template(),
+    fem_floor_tet_handler: qd.template(),
+    fem_floor_vert_handler: qd.template(),
+    fem_self_tet_handler: qd.template(),
+    rigid_floor_vert_handler: qd.template(),
+    rigid_floor_tet_handler: qd.template(),
+    rigid_rigid_tet_handler: qd.template(),
+    rigid_fem_tri_tet_handler: qd.template(),
+    equality_handler: qd.template(),
+):
+    """
+    Sum the stiffness of the contact pairs of every patch into each of its pairs.
+
+    A patch gathers the pairs of one handler between the same two bodies of one environment, a body being a kinematic
+    tree of the rigid solver, an FEM entity, or the floor. The constraints sort by their patch key from their sorted
+    order (see kernel_order_constraints), which the radix sort keeps among equal keys, so that each patch sums its pairs
+    in an order the detection leaves unchanged and the sum is reproducible bitwise.
+    """
+    handlers = qd.static(
+        SAPHandlers(
+            fem_floor_tet_handler,
+            fem_floor_vert_handler,
+            fem_self_tet_handler,
+            rigid_floor_vert_handler,
+            rigid_floor_tet_handler,
+            rigid_rigid_tet_handler,
+            rigid_fem_tri_tet_handler,
+            equality_handler,
+        )
+    )
+    constraint_handlers = qd.static(handlers.constraints)
+    n_envs = sap_state.constraint_order.envs_constraint_start.shape[0] - 1
+    n_sorted = sap_state.constraint_order.n_sorted[None]
+    body_shift = qd.u64(sap_info.patches_body_bits[None])
+    handler_shift = qd.u64(sap_info.patches_handler_shift[None])
+    env_shift = qd.u64(sap_info.patches_env_shift[None])
+
+    # The patch key of every sorted constraint, an equality constraint keeping the null pair of bodies
+    for i_s in range(n_sorted):
+        i_q = sap_state.constraint_order.order[i_s]
+        i_b = qd.cast(sap_state.constraint_order.key[i_s] >> qd.u64(sap_info.constraints_env_shift[None]), gs.qd_int)
+        patch_key = qd.u64(i_b) << env_shift
+        for i_h, handler in qd.static(enumerate(constraint_handlers)):
+            if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                patch_key = patch_key | (qd.u64(i_h) << handler_shift)
+                if qd.static(handler.n_rigid_sides + handler.n_fem_corners > 0):
+                    i_c = i_q - sap_info.handlers_slot_start[i_h]
+                    i_body0, i_body1 = handler.patch_bodies(i_c, fem_info, rigid_info, sap_info)
+                    patch_key = patch_key | (qd.u64(i_body0) << body_shift) | qd.u64(i_body1)
+        sap_state.constraint_order.patch_key[i_s] = patch_key
+        sap_state.constraint_order.patch_order[i_s] = i_s
+    if qd.static(gs.backend == gs.cpu):
+        for i_b in range(n_envs):
+            func_sort_env_keys(
+                i_b,
+                sap_state.constraint_order.patch_key,
+                sap_state.constraint_order.patch_order,
+                sap_state.constraint_order,
+                n_passes=(sap_info.patches_env_shift[None] + 7) // 8,
+            )
+    else:
+        radix_sort(
+            sap_state.constraint_order.patch_key,
+            sap_state.constraint_order.key_scratch,
+            sap_state.constraint_order.patch_order,
+            sap_state.constraint_order.order_scratch,
+            sap_state.constraint_order.sort_scratch,
+            sap_state.constraint_order.n_sorted,
+            key_dtype=qd.u64,
+            has_values=True,
+            end_bit=qd.static(sap_config.patches_sort_end_bit),
+            log256_max_n=qd.static(sap_config.constraints_sort_log256),
+        )
+
+    # The first constraint of each patch sums the stiffness of its pairs in their order, then gives it to each of them.
+    # The first pass sums, the second one writes.
+    for i_p in range(n_sorted):
+        if i_p == 0 or sap_state.constraint_order.patch_key[i_p] != sap_state.constraint_order.patch_key[i_p - 1]:
+            k_patch = gs.qd_float(0.0)
+            for i_pass in range(2):
+                for i_m in range(i_p, n_sorted):
+                    if (
+                        i_m > i_p
+                        and sap_state.constraint_order.patch_key[i_m] != sap_state.constraint_order.patch_key[i_p]
+                    ):
+                        break
+                    i_s = sap_state.constraint_order.patch_order[i_m]
+                    i_q = sap_state.constraint_order.order[i_s]
+                    for i_h, handler in qd.static(enumerate(constraint_handlers)):
+                        if qd.static(handler.n_rigid_sides + handler.n_fem_corners > 0):
+                            if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                                i_c = i_q - sap_info.handlers_slot_start[i_h]
+                                if i_pass == 0:
+                                    k_patch = k_patch + handler.contact_pairs.contact_info.k[i_c]
+                                else:
+                                    handler.contact_pairs.contact_info.k_patch[i_c] = k_patch
 
 
 @qd.kernel
@@ -4605,6 +4749,33 @@ class BaseContactHandler(RBC):
         return self.contact_pairs.key[i_c]
 
     @qd.func
+    def patch_bodies(self, i_c: int, fem_info: FEMInfo, rigid_info: RigidInfo, sap_info: SAPInfo):
+        """Return the two bodies a contact pair acts on, the lower one first (see kernel_sum_contact_patches)."""
+        n_trees = sap_info.n_rigid_trees[None]
+        # The floor takes the last body, which follows every tree and FEM entity
+        i_floor = (1 << sap_info.patches_body_bits[None]) - 1
+        i_body0 = i_floor
+        i_body1 = i_floor
+        for i_side in qd.static(range(self.n_rigid_sides)):
+            i_l = self.rigid_side_link(i_c, i_side)
+            # A static link belongs to no tree, the floor standing for it
+            i_t = rigid_info.links_tree_idx[i_l]
+            i_body = i_t if i_t >= 0 else i_floor
+            if i_side == 0:
+                i_body0 = i_body
+            else:
+                i_body1 = i_body
+        # The first corner of each tet, the second tet of a pair of FEM tets taking the last 4 corners
+        for i_tet in qd.static(range((self.n_fem_corners + 3) // 4)):
+            i_v = self.fem_corner_vertex(i_c, 4 * i_tet, fem_info)
+            i_entity = sap_info.fem_vertices_entity_idx[i_v]
+            if qd.static(self.n_rigid_sides + i_tet == 0):
+                i_body0 = n_trees + i_entity
+            else:
+                i_body1 = n_trees + i_entity
+        return qd.min(i_body0, i_body1), qd.max(i_body0, i_body1)
+
+    @qd.func
     def clear_contacts(self, i_b: int):
         """Forget the contact pairs, the candidates and the results of the box query of an environment, before its
         detection."""
@@ -4749,10 +4920,11 @@ class BaseContactHandler(RBC):
             W = self.compute_delassus(
                 i_p, fem_state, dofs_state, links_state, fem_info, links_info, rigid_info, sap_config
             )
-            w_rms = W.norm() / 3.0
-            Rn = qd.max(
-                sap_info.beta_factor[None] * w_rms, 1.0 / (dt * self.contact_pairs.contact_info.k[i_p] * (dt + taud))
-            )
+            # A near-rigid patch is as stiff as one contact, whatever the number of its pairs: each pair takes the
+            # regularization of the patch over its share of the stiffness of the patch.
+            k = self.contact_pairs.contact_info.k[i_p]
+            w_rms = W.norm() / 3.0 * self.contact_pairs.contact_info.k_patch[i_p] / k
+            Rn = qd.max(sap_info.beta_factor[None] * w_rms, 1.0 / (dt * k * (dt + taud)))
             Rt = sap_info.sigma[None] * w_rms
             self.contact_pairs.contact_info.Rn[i_p] = Rn
             self.contact_pairs.contact_info.Rt[i_p] = Rt
