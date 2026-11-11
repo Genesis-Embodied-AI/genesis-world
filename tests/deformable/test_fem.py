@@ -865,9 +865,7 @@ def test_vertex_options_fix_vertices(show_viewer, tol):
     # Vertex options fix the vertices they select at their initial positions. A box selects in the frame of the morph,
     # which the rotation of the morph turns into a side face of the entity.
     fixed_vertex_options = gs.options.Vertex(
-        solver_options=gs.options.FEMVertexSolverOptions(
-            is_fixed=True,
-        ),
+        is_fixed=True,
     )
     rotated_box = scene.add_entity(
         options=gs.entities.FEM(

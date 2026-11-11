@@ -287,10 +287,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 *entity._options.geoms.values(),
                 *(geom_options for link_options in links_options for geom_options in link_options.geoms.values()),
             ]
-            if any(
-                options.material is not None and options.material.rho is not None
-                for options in (*links_options, *geoms_options)
-            ):
+            if any(options.rho is not None for options in (*links_options, *geoms_options)):
                 gs.raise_exception(
                     f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
                     "the link and geom options cannot give a density."

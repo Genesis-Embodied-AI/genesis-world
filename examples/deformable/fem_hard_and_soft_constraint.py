@@ -81,9 +81,7 @@ def main():
             ),
             vertices={
                 gs.VertexIndex.in_box(lower=(-0.2, -0.03, -0.03), upper=(-0.2, 0.03, 0.03)): gs.options.Vertex(
-                    solver_options=gs.options.FEMVertexSolverOptions(
-                        is_fixed=True,
-                    ),
+                    is_fixed=True,
                 ),
             },
         ),

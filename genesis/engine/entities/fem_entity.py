@@ -354,8 +354,19 @@ class FEMEntity(Entity):
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
-        # The vertex options select vertices as the morph states them, relative to its position before its rotation
-        self._fixed_verts_idx_local = self._options.get_fixed_verts_idx(verts - self._morph.pos)
+        # The vertex options select vertices as the morph states them, relative to its position before its rotation.
+        # Two selections giving 'is_fixed' of one vertex stand at equal specificity, so neither can win.
+        verts_pos_morph = verts - self._morph.pos
+        verts_is_fixed = {}
+        for vertex_index, vertex_options in self._options.vertices.items():
+            if "is_fixed" in vertex_options.model_fields_set:
+                for i_v in vertex_index.resolve(verts_pos_morph):
+                    if i_v in verts_is_fixed:
+                        gs.raise_exception(f"Two selections of equal specificity give 'is_fixed' of vertex {i_v}.")
+                    verts_is_fixed[i_v] = vertex_options.is_fixed
+        self._fixed_verts_idx_local = np.array(
+            sorted(i_v for i_v, is_fixed in verts_is_fixed.items() if is_fixed), dtype=gs.np_int
+        )
 
         self.init_positions = torch.tensor(init_positions, dtype=gs.tc_float, device=gs.device)
         self.init_positions_COM_offset = torch.tensor(

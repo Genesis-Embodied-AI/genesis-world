@@ -406,10 +406,9 @@ class Scene(RBC):
                 surface.vis_mode = vis_mode
             if material is None:
                 material = gs.materials.Rigid()
-            options_classes = get_entity_options_cls(material)
-            if len(options_classes) != 1:
+            options_cls = get_entity_options_cls(material)
+            if options_cls is None:
                 gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
-            (options_cls,) = options_classes
             entity_fields = {"morph": morph, "material": material, "surface": surface, "name": name}
             if visualize_contact:
                 if options_cls is not gs.entities.Rigid:
@@ -877,10 +876,10 @@ class Scene(RBC):
         if options is None:
             if material is None:
                 gs.raise_exception("An emitter requires a material or entity options.")
-            options_classes = get_entity_options_cls(material)
-            if len(options_classes) != 1:
+            options_cls = get_entity_options_cls(material)
+            if options_cls is None:
                 gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
-            options = options_classes[0](material=material, surface=surface)
+            options = options_cls(material=material, surface=surface)
         elif material is not None or surface is not None:
             gs.raise_exception("Pass either entity options or a material and a surface, never both.")
         if not isinstance(options, (gs.entities.MPM, gs.entities.SPH)) and not (

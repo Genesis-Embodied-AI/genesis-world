@@ -1,16 +1,13 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar
 
-import numpy as np
-
-from pydantic import BeforeValidator, ConfigDict, Field, InstanceOf, StrictBool, model_validator
+from pydantic import ConfigDict, Field, InstanceOf, StrictBool, model_validator
 
 import genesis as gs
 from genesis.engine import materials
 from genesis.engine.materials.base import Material
-from genesis.typing import FrozenDictType
+from genesis.typing import FrozenDictType, ValidFloat
 
 from .indices import GeomIndex, LinkIndex, VertexIndex
 from .morphs import Mesh, Morph, Primitive
@@ -33,81 +30,18 @@ if TYPE_CHECKING:
 
 EntityT = TypeVar("EntityT", bound="Entity")
 
-# The fields of a rigid material that the options of a link or a geom honour, the others applying to the whole entity
-_LINK_MATERIAL_FIELDS = ("rho", "friction", "friction_torsional", "friction_rolling")
 
+def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
+    """Return the class of entity options of the solver simulating a material, or None if no solver simulates it.
 
-def _merge_fields(fields: dict, options: Options, target: str) -> None:
-    """Add the fields given explicitly in 'options' to 'fields', raising on a field already given for 'target'.
-
-    A field given as None leaves the value to the scope above, as one left unset does.
+    A material goes to the class of the nearest of its bases that the solvers of Genesis simulate, so a subclass a user
+    declares goes where the material it derives from goes.
     """
-    for name, value in options:
-        if name not in options.model_fields_set or value is None:
-            continue
-        if name in fields:
-            gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
-        fields[name] = value
-
-
-def _key_links_by_index(links):
-    """Key the link options by ``LinkIndex``, a name or a tuple of names standing for the links of those names."""
-    if not isinstance(links, Mapping):
-        return links
-    links_by_index = {}
-    for key, link_options in links.items():
-        if isinstance(key, str):
-            key = LinkIndex.named(key)
-        elif isinstance(key, tuple):
-            key = LinkIndex.named(*key)
-        links_by_index[key] = link_options
-    return links_by_index
-
-
-def _reject_material_entity_fields(material: "materials.Rigid", target: str) -> None:
-    """Raise an error naming the fields of the material of a link or a geom that apply to the whole entity."""
-    names = sorted(material.model_fields_set.difference(_LINK_MATERIAL_FIELDS))
-    if names:
-        gs.raise_exception(
-            f"The material of a {target} cannot honour {', '.join(names)}, which apply to the whole entity."
-        )
-
-
-def get_entity_options_cls(material: Material) -> tuple[type["BaseEntity"], ...]:
-    """Return the classes of entity options that Genesis declares admitting a material, in declaration order.
-
-    Each class admits the materials of its declared 'material' field. A material that the fields of several classes
-    admit goes to the classes whose field is the narrowest, such as ``gs.materials.Rigid`` to ``gs.entities.Rigid``
-    rather than ``gs.entities.Kinematic``. A subclass a user declares admits the materials of the class it derives from.
-    """
-    classes, pending = [], [BaseEntity]
-    while pending:
-        options_cls = pending.pop()
-        classes.append(options_cls)
-        pending.extend(reversed(options_cls.__subclasses__()))
-    # A narrower field names a material class that stands earlier in the method resolution order of the material
-    materials_mro = type(material).__mro__
-    mro_rank_by_cls = {}
-    for options_cls in classes:
-        # Private bases and their parametrizations by the entity class declare a material field too
-        if (
-            options_cls.__module__ != __name__
-            or options_cls.__name__.startswith("_")
-            or options_cls.__pydantic_generic_metadata__["origin"] is not None
-            or "material" not in options_cls.model_fields
-        ):
-            continue
-        annotation = options_cls.model_fields["material"].annotation
-        mro_ranks = [
-            materials_mro.index(material_cls)
-            for material_cls in get_args(annotation) or (annotation,)
-            if material_cls in materials_mro
-        ]
-        if mro_ranks:
-            mro_rank_by_cls[options_cls] = min(mro_ranks)
-    return tuple(
-        options_cls for options_cls, mro_rank in mro_rank_by_cls.items() if mro_rank == min(mro_rank_by_cls.values())
-    )
+    for material_cls in type(material).__mro__:
+        options_cls = _OPTIONS_CLS_BY_MATERIAL_CLS.get(material_cls)
+        if options_cls is not None:
+            return options_cls
+    return None
 
 
 class _FrozenOptions(Options):
@@ -154,12 +88,14 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
             return data
         material = data.get("material")
         if isinstance(material, Material) and "material" in cls.model_fields:
-            options_classes = get_entity_options_cls(material)
-            if not issubclass(cls, options_classes):
-                options_names = " or ".join(f"gs.entities.{options_cls.__name__}" for options_cls in options_classes)
+            options_cls = get_entity_options_cls(material)
+            if options_cls is None or not issubclass(cls, options_cls):
+                options_name = "the entity options of its solver"
+                if options_cls is not None:
+                    options_name = f"gs.entities.{options_cls.__name__}"
                 gs.raise_exception(
                     f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
-                    f"Pass it to {options_names or 'the entity options of its solver'} instead."
+                    f"Pass it to {options_name} instead."
                 )
         return data
 
@@ -169,52 +105,53 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         return self.morph if isinstance(self.morph, tuple) else (self.morph,)
 
 
-class Geom(_FrozenOptions):
+class _GeomFields(_FrozenOptions):
+    rho: ValidFloat | None = None
+    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
+    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+
+
+class Geom(_GeomFields):
     """Options of the collision geoms of a rigid entity that a ``gs.GeomIndex`` selects.
 
+    The fields given explicitly override those of the link and of the entity material for the selected geoms, while the
+    fields left unset keep theirs.
+
     Parameters
     ----------
-    material : gs.materials.Rigid | None, optional
-        The density and the friction coefficients given explicitly override those of the link and of the entity for
-        the selected geoms, while the fields left unset keep theirs. The friction coefficients apply to the contacts
-        of the geoms. The density estimates the mass and the inertia of a link the asset states none for, or of every
+    rho : float | None, optional
+        The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. The frame of an aligned body stays where the
-        densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects the density
-        on a link it simulates. The other fields of the material apply to the whole entity, so a geom rejects them.
-        If None, the geoms take the material of their link. Default is None.
+        densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects it on a link
+        it simulates. If None, the geoms take the density of their link. Default is None.
+    friction : float | None, optional
+        The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
+        the geoms take that of their link. Default is None.
+    friction_torsional : float | None, optional
+        The torsional friction coefficient (see ``gs.materials.Rigid.friction_torsional``). If None, the geoms take that
+        of their link. Default is None.
+    friction_rolling : float | None, optional
+        The rolling friction coefficient (see ``gs.materials.Rigid.friction_rolling``). If None, the geoms take that of
+        their link. Default is None.
     """
 
-    material: materials.Rigid | None = None
 
-    @model_validator(mode="after")
-    def _check_material(self) -> "Geom":
-        if self.material is not None:
-            _reject_material_entity_fields(self.material, "geom")
-        return self
+class Link(_GeomFields):
+    """Options of the links of a rigid entity that a ``gs.LinkIndex`` selects.
 
-
-class Link(_FrozenOptions):
-    """Options of the links of a rigid entity that a ``gs.LinkIndex`` or link names select.
+    The density and the friction coefficients given explicitly apply to every collision geom of the selected links,
+    overriding those of the entity material. If None, the links take those of the entity material. Parameters follow
+    ``gs.options.Geom``, plus the following.
 
     Parameters
     ----------
-    material : gs.materials.Rigid | None, optional
-        The density and the friction coefficients given explicitly override those of the entity for every collision
-        geom of the selected links (see ``gs.options.Geom.material``). If None, the links take the material of the
-        entity. Default is None.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
         The options of collision geoms of each selected link, a ``gs.GeomIndex`` counting the collision geoms of the
         link as its asset states them. They override the options of the link. Default is no geom options.
     """
 
-    material: materials.Rigid | None = None
     geoms: FrozenDictType[GeomIndex, Geom] = {}
-
-    @model_validator(mode="after")
-    def _check_material(self) -> "Link":
-        if self.material is not None:
-            _reject_material_entity_fields(self.material, "link")
-        return self
 
 
 class Rigid(BaseEntity["RigidEntity"]):
@@ -230,12 +167,11 @@ class Rigid(BaseEntity["RigidEntity"]):
     visualize_contact : bool, optional
         Whether to draw the contact forces applied to the entity as arrows in the viewer and rendered images. Each
         arrow is drawn every frame, so reserve it for the entities being inspected. Default is False.
-    links : dict[gs.LinkIndex | str | tuple[str, ...], gs.options.Link], optional
-        The options of the links each key selects, which override the material of the entity. A name or a tuple of
-        names stands for ``gs.LinkIndex.named(...)``. A link the asset parser merges into its parent has no name of
-        its own, so keep it with the 'links_to_keep' option of the morph to select it. Two keys selecting one link
-        stand at equal specificity whatever the number of links they name, so they cannot give one field. Default is
-        no link options.
+    links : dict[gs.LinkIndex, gs.options.Link], optional
+        The options of the links each key selects, which override the material of the entity. A link the asset parser
+        merges into its parent has no name of its own, so keep it with the 'links_to_keep' option of the morph to
+        select it. Two keys selecting one link stand at equal specificity whatever the number of links they name, so
+        they cannot give one field. Default is no link options.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
         The options of the collision geoms each key selects, which override those of the entity and the material of
         the links. They stand at the specificity of the geom options of the links, so the two giving one field of one
@@ -250,7 +186,7 @@ class Rigid(BaseEntity["RigidEntity"]):
 
     material: materials.Rigid = Field(default_factory=materials.Rigid)
     visualize_contact: StrictBool = False
-    links: Annotated[FrozenDictType[LinkIndex, Link], BeforeValidator(_key_links_by_index)] = {}
+    links: FrozenDictType[LinkIndex, Link] = {}
     geoms: FrozenDictType[GeomIndex, Geom] = {}
 
     @model_validator(mode="after")
@@ -263,36 +199,6 @@ class Rigid(BaseEntity["RigidEntity"]):
                 "them with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named', or through the options of their link instead."
             )
         return self
-
-    def get_geoms_material(self, link_path: tuple[str, ...], geoms_name: list[str]) -> list[materials.Rigid | None]:
-        """Return the material the link and geom options give each collision geom of a link, or None where none.
-
-        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``), and
-        'geoms_name' the names of the collision geoms of the link as its asset states them, which a ``gs.GeomIndex``
-        counts and matches. A material holds the fields given explicitly alone, those of the geom options overriding
-        those of the link options. Two selections of equal specificity giving one field of one geom raise an error.
-        A selection by name may match no geom of a given link, the description checking that it matches one of the
-        entity.
-        """
-        if not geoms_name:
-            return []
-        link_name = link_path[-1]
-        link_fields = {}
-        geoms_options = list(self.geoms.items())
-        for link_index, link_options in self.links.items():
-            if link_index.matches(link_path):
-                if link_options.material is not None:
-                    _merge_fields(link_fields, link_options.material, f"link '{link_name}'")
-                geoms_options.extend(link_options.geoms.items())
-        geoms_fields = [{} for _ in geoms_name]
-        for geom_index, geom_options in geoms_options:
-            if geom_options.material is not None:
-                for i_g in geom_index.resolve(geoms_name):
-                    _merge_fields(geoms_fields[i_g], geom_options.material, f"geom {i_g} of link '{link_name}'")
-        return [
-            materials.Rigid(**{**link_fields, **geom_fields}) if link_fields or geom_fields else None
-            for geom_fields in geoms_fields
-        ]
 
 
 class Kinematic(BaseEntity["KinematicEntity"]):
@@ -312,8 +218,8 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
 
 
-class FEMVertexSolverOptions(_FrozenOptions):
-    """Options of the finite element method (FEM) solver specific to vertices of an entity.
+class Vertex(_FrozenOptions):
+    """Options of the vertices of a deformable entity that a ``gs.VertexIndex`` selects.
 
     Parameters
     ----------
@@ -324,19 +230,6 @@ class FEMVertexSolverOptions(_FrozenOptions):
     """
 
     is_fixed: StrictBool = False
-
-
-class Vertex(_FrozenOptions):
-    """Options of the vertices of a deformable entity that a ``gs.VertexIndex`` selects.
-
-    Parameters
-    ----------
-    solver_options : FEMVertexSolverOptions | None, optional
-        The options of the solver specific to the selected vertices. If None, the vertices take the defaults of
-        ``FEMVertexSolverOptions``. Default is None.
-    """
-
-    solver_options: FEMVertexSolverOptions | None = None
 
 
 class FEM(BaseEntity["FEMEntity"]):
@@ -366,21 +259,6 @@ class FEM(BaseEntity["FEMEntity"]):
         if isinstance(self.material, materials.FEM.Cloth) and self.vertices:
             gs.raise_exception("gs.entities.FEM cannot honour 'vertices' for a Cloth material.")
         return self
-
-    def get_fixed_verts_idx(self, verts_pos: np.ndarray) -> np.ndarray:
-        """Return the sorted indices of the vertices the vertex options fix, given their positions in the morph frame.
-
-        Two selections of equal specificity giving 'is_fixed' of one vertex raise an error.
-        """
-        verts_fields = {}
-        for vertex_index, vertex_options in self.vertices.items():
-            solver_options = vertex_options.solver_options
-            if solver_options is not None and solver_options.model_fields_set:
-                for i_v in vertex_index.resolve(verts_pos):
-                    _merge_fields(verts_fields.setdefault(i_v, {}), solver_options, f"vertex {i_v}")
-        return np.array(
-            sorted(i_v for i_v, fields in verts_fields.items() if fields.get("is_fixed", False)), dtype=gs.np_int
-        )
 
 
 class _EmittableParticles(BaseEntity[EntityT]):
@@ -462,3 +340,15 @@ class Hybrid(BaseEntity["HybridEntity"]):
     """
 
     material: materials.Hybrid
+
+
+# The class of entity options each material class goes to, a material taking that of the nearest of its bases
+_OPTIONS_CLS_BY_MATERIAL_CLS: dict[type[Material], type[BaseEntity]] = {
+    materials.Rigid: Rigid,
+    materials.Kinematic: Kinematic,
+    materials.FEM.Base: FEM,
+    materials.MPM.Base: MPM,
+    materials.SPH.Base: SPH,
+    materials.PBD.Base: PBD,
+    materials.Hybrid: Hybrid,
+}
