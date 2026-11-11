@@ -1,0 +1,50 @@
+genesis/options/behaviors/__init__.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1
+tests/rigid/test_behaviors.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-155
+examples/rigid/latch_behavior.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-225
+genesis/engine/simulator.py
+  s_3df0cdc97c86dc::t_0913276a584db4 13-22,27,158-160,315-316,349,372-373,383-385,389,393-397,415-416,423-425,432-433
+genesis/engine/scene.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1032,1211-1215,2042
+genesis/engine/behaviors/base_behavior.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-100
+genesis/options/behaviors/options.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-12
+genesis/engine/behaviors/behavior_manager.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-49
+genesis/__init__.py
+  s_3df0cdc97c86dc::t_0913276a584db4 520
+genesis/recorders/trajectory.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1262,1266
+tests/rigid/test_serialization.py
+  s_3df0cdc97c86dc::t_0913276a584db4 842,844,849
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_3df0cdc97c86dc::t_0913276a584db4 31,237-241,574-595
+  s_3df0cdc97c86dc::t_3d4d470170724b 596
+genesis/options/entities.py
+  s_3df0cdc97c86dc::t_0913276a584db4 16,390,597-601
+genesis/engine/behaviors/__init__.py
+  s_3df0cdc97c86dc::t_0913276a584db4 1-2
+genesis/engine/solvers/kinematic_solver.py
+  s_3df0cdc97c86dc::t_0913276a584db4 10,211-216
+genesis/engine/states/solvers.py
+  s_3df0cdc97c86dc::t_0913276a584db4 18-19,36-37,42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c902ebc081d42240c2995e775a80db1328ffccd1",
+  "prompts": {},
+  "sessions": {
+    "s_3df0cdc97c86dc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e19a361e-b0b7-499a-92e3-7e0aa2f81931",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
