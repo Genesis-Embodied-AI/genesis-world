@@ -98,10 +98,25 @@ Location: `genesis/engine/materials/`
 An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`gs.entities.BaseEntity._solver_options_cls`) and admits the materials of that solver. `gs.entities.Hybrid` names no solver, since a hybrid entity adds a rigid entity and an MPM entity of their own. The flattened arguments of `Scene.add_entity` are a shorthand for the entity options its material is given to, `gs.entities.Rigid` when it is None.
 
 ```python
-scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))  # rigid
-scene.add_entity(options=gs.entities.Kinematic(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))))
-scene.add_entity(options=gs.entities.MPM(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()))
-scene.add_entity(options=gs.entities.SPH(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.SPH.Liquid()))
+# Rigid, through the flattened arguments
+scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))
+scene.add_entity(
+    options=gs.entities.Kinematic(
+        morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
+    ),
+)
+scene.add_entity(
+    options=gs.entities.MPM(
+        morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
+        material=gs.materials.MPM.Elastic(),
+    ),
+)
+scene.add_entity(
+    options=gs.entities.SPH(
+        morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)),
+        material=gs.materials.SPH.Liquid(),
+    ),
+)
 ```
 
 Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `gs.options.Link`, `gs.options.Geom` or `gs.options.Vertex`. They carry only the settings the solver already holds at that granularity: the density and friction of a collision geom, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms. The rigid description resolves the link and geom options, and the FEM entity the vertex options, so the options classes hold data alone.
@@ -110,8 +125,10 @@ Rigid entity options hold `links` and `geoms`, and FEM entity options hold `vert
 scene.add_entity(
     options=gs.entities.Rigid(
         morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
-        links={gs.LinkIndex.named("arm2"): gs.options.Link(friction=1.2)},
-    )
+        links={
+            gs.LinkIndex.named("arm2"): gs.options.Link(friction=1.2),
+        },
+    ),
 )
 ```
 
