@@ -128,7 +128,12 @@ class SAPCouplerOptions(BaseCouplerOptions):
     sap_taud : float, optional
         Dissipation time scale for SAP. Defaults to 0.1.
     sap_beta : float, optional
-        Normal regularization parameter for SAP. Defaults to 1.0.
+        Stiffness of the contacts of rigid bodies, as the time a resting body takes to settle on what it rests on, in
+        substeps. A smaller value makes the contacts stiffer, so that bodies sink less into each other and rock less
+        under a push, at the cost of a less robust solve that may take more iterations. A larger value softens them:
+        the penetration grows with the square of this value. On the vertex floor (`rigid_floor_contact_type="vert"`),
+        the fixed stiffness of each vertex also bounds how stiff the contact of a heavy body gets. Defaults to 0.125,
+        which keeps resting bodies less than a tenth of a millimeter deep at usual substeps.
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
     enable_lagged_friction : bool, optional
@@ -190,7 +195,7 @@ class SAPCouplerOptions(BaseCouplerOptions):
     sap_convergence_atol: PositiveFloat | None = None
     sap_convergence_rtol: PositiveFloat | None = None
     sap_taud: PositiveFloat = 0.1
-    sap_beta: PositiveFloat = 1.0
+    sap_beta: PositiveFloat = 0.125
     sap_sigma: PositiveFloat = 1e-3
     enable_lagged_friction: StrictBool = True
     stiction_tolerance: PositiveFloat = 1e-4

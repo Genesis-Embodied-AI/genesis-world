@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 import torch
 
+import trimesh
+
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -548,22 +551,28 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         scene.step()
     slider.set_dofs_velocity([1.0], dofs_idx_local=[0])
     push_force = 0.5 * MU * pushed.get_mass() * GRAVITY
-    slider_vel, slider_height, pushed_vel = [], [], []
+    slider_vel, slider_height, pushed_slip = [], [], []
     for _ in range(70):
         pushed.control_dofs_force(push_force[..., None], dofs_idx_local=[0])
         scene.step()
         slider_vel.append(tensor_to_array(slider.get_vel()))
         slider_height.append(tensor_to_array(slider.get_pos()[..., 2]) - PLANES_HEIGHT)
-        pushed_vel.append(tensor_to_array(pushed.get_vel()))
-    slider_vel, slider_height, pushed_vel = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_vel)
+        # The velocity of the center of the bottom face of the pushed box, where it slips on the ground
+        pushed_quat = pushed.get_quat()
+        bottom_arm = gu.transform_by_quat(
+            pushed_quat.new_tensor((0.0, 0.0, -0.05)).expand(*pushed_quat.shape[:-1], 3), pushed_quat
+        )
+        pushed_slip.append(tensor_to_array(pushed.get_vel() + torch.linalg.cross(pushed.get_ang(), bottom_arm)))
+    slider_vel, slider_height, pushed_slip = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_slip)
 
     # The sliding box stays on the ground, decelerating at the rate of Coulomb friction until it stops
     assert_allclose(slider_height, 0.05, atol=1e-3)
     assert_allclose(np.diff(slider_vel[:10, ..., 0], axis=0), -MU * GRAVITY * DT, tol=2e-3)
     assert_allclose(slider_vel[15:], 0.0, atol=1e-3)
 
-    # The pushed box sticks, creeping at most at the stiction tolerance
-    assert (np.linalg.norm(pushed_vel[..., :2], axis=-1) < 1e-4).all()
+    # The pushed box sticks, slipping at most at the stiction tolerance. Its center of mass moves faster while the box
+    # rocks on its compliant contact, which involves no slip.
+    assert (np.linalg.norm(pushed_slip[..., :2], axis=-1) < 1e-4).all()
 
     # All the entities must be still
     for entity in scene.entities:
@@ -585,7 +594,7 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize("rigid_floor_contact_type", ["tet", "vert"])
-def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
+def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_viewer):
     SLAB_SIZE = (0.4, 0.4, 0.2)
     CUBE_SIZE = (0.1, 0.1, 0.1)
     RHO = 1000.0
@@ -593,7 +602,9 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
     DT = 1 / 60
     SUBSTEPS = 2
     SAP_TAUD = 0.1
-    SAP_BETA = 1.0
+    SAP_BETA = 0.125
+    # Stiffness of each contact of the vertex floor
+    VERT_STIFFNESS = 1e6
     FRICTION_MU = 0.5
     STICTION_TOLERANCE = 1e-4
 
@@ -657,6 +668,22 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
             rho=RHO,
         ),
     )
+    # A small cube whose faces are split into 4 triangles, with 9 vertices on its bottom face instead of 4
+    cube_mesh = trimesh.creation.box(CUBE_SIZE)
+    refined_cube_mesh = cube_mesh.subdivide()
+    refined_cube_path = str(asset_tmp_path / "refined_cube.obj")
+    refined_cube_mesh.export(refined_cube_path)
+    refined_cube = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=refined_cube_path,
+            pos=(0.0, -0.6, 0.5 * CUBE_SIZE[2]),
+            decimate=False,
+            convexify=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
     # A slab pushed sideways by half the force that would make it slide
     pushed_slab = scene.add_entity(
         morph=gs.morphs.Box(
@@ -671,12 +698,12 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
     scene.build(n_envs=2)
 
     push_force = 0.5 * FRICTION_MU * RHO * np.prod(SLAB_SIZE) * GRAVITY
-    for _ in range(90):
+    for _ in range(100):
         pushed_slab.control_dofs_force(push_force, dofs_idx_local=0)
         scene.step()
 
-    # Each environment rests still on its own variant, and the dropped and tilted cubes rest still, flat on the ground
-    for entity in (variants, dropped_cube, tilted_cube):
+    # Each environment rests still on its own variant, and the other cubes rest still, flat on the ground
+    for entity in (variants, dropped_cube, tilted_cube, refined_cube):
         assert_allclose(entity.get_vel(), 0.0, atol=1e-5)
         assert_allclose(entity.get_ang(), 0.0, atol=1e-4)
         assert_allclose(entity.get_quat()[..., 1:3], 0.0, atol=1e-3)
@@ -684,29 +711,44 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
     # The pushed slab sticks, creeping at most at the stiction tolerance
     assert (torch.linalg.norm(pushed_slab.get_vel(), dim=-1) < STICTION_TOLERANCE).all()
 
-    # The four bottom corners of the vertex floor are near-rigid contacts, whose regularization beta^2 / (4 pi^2) * |W| / 3
-    # derives from the Delassus operator W = I / m + [r]x I^-1 [r]x^T of a corner at r from the center of mass. At rest,
-    # each of them carries the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The
-    # tet floor holds a body on more slices, closer to its center of mass, so it rests less deep.
+    # The contacts of a body at rest form one patch, regularized as one contact whatever their number. Each contact of
+    # stiffness k takes the regularization max(beta^2 / (4 pi^2) * |W| / 3 * K / k, 1 / (dt * k * (dt + taud))), from the
+    # Delassus operator W = I / m + [r]x I^-1 [r]x^T of the contact at r from the center of mass and the stiffness K of
+    # the patch, the near-rigid one for light bodies and the compliant one for heavy ones. At rest, each contact carries
+    # the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The vertex floor holds a
+    # box on the vertices of its bottom face, all of stiffness VERT_STIFFNESS. The tet floor holds it on slices spread
+    # over that face, closer to its center of mass than the corners, so that it rests less deep.
     substep_dt = DT / SUBSTEPS
     rest_depths = []
-    for size in (SLAB_SIZE, CUBE_SIZE):
+    for size, mesh in (
+        (SLAB_SIZE, trimesh.creation.box(SLAB_SIZE)),
+        (CUBE_SIZE, cube_mesh),
+        (CUBE_SIZE, refined_cube_mesh),
+    ):
         mass = RHO * np.prod(size)
         inertia = np.diag(mass / 12.0 * (np.sum(np.square(size)) - np.square(size)))
-        corner_cross = np.cross(0.5 * np.array((size[0], size[1], -size[2])), np.eye(3))
-        delassus = np.eye(3) / mass + corner_cross @ np.linalg.inv(inertia) @ corner_cross.T
-        regularization = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus) / 3.0
-        rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) * regularization / 4.0)
+        arms = mesh.vertices[np.isclose(mesh.vertices[:, 2], -0.5 * size[2])]
+        arms_cross = np.cross(arms[:, None], np.eye(3))
+        delassus = np.eye(3) / mass + arms_cross @ np.linalg.inv(inertia) @ arms_cross.transpose(0, 2, 1)
+        near_rigid_regularizations = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus, axis=(1, 2)) / 3.0
+        regularizations = np.maximum(
+            near_rigid_regularizations * len(arms), 1.0 / (substep_dt * VERT_STIFFNESS * (substep_dt + SAP_TAUD))
+        )
+        rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) / np.sum(1.0 / regularizations))
     rest_depths = torch.tensor(rest_depths, dtype=gs.tc_float, device=gs.device)
     rest_heights = 0.5 * torch.tensor((SLAB_SIZE[2], CUBE_SIZE[2]), dtype=gs.tc_float, device=gs.device)
+    # The tet floor bounds the depth of the refined cube by that of a cube held on its corners
+    refined_cube_rest_depth = rest_depths[2] if rigid_floor_contact_type == "vert" else rest_depths[1]
     for entity, entity_rest_heights, entity_rest_depths in (
-        (variants, rest_heights, rest_depths),
+        (variants, rest_heights, rest_depths[:2]),
         (dropped_cube, rest_heights[1], rest_depths[1]),
         (tilted_cube, rest_heights[1], rest_depths[1]),
+        (refined_cube, rest_heights[1], refined_cube_rest_depth),
     ):
         entity_depths = entity_rest_heights - entity.get_pos()[..., 2]
         if rigid_floor_contact_type == "vert":
-            assert_allclose(entity_depths, entity_rest_depths, rtol=5e-4)
+            # A few roundings of the height of a body in single precision take a share of its depth
+            assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
         else:
             assert ((entity_depths > 0.0) & (entity_depths < entity_rest_depths)).all()
 
