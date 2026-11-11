@@ -46,7 +46,7 @@ def get_entity_options_cls(material: Material) -> type["BaseEntity"] | None:
 
 class _FrozenOptions(Options):
     # Assigning to a field of options skips their validators, so the entity options and the options they nest are
-    # immutable, which keeps what their validators checked true and 'entity.options' as authored
+    # immutable, which keeps what their validators checked true
     model_config = ConfigDict(frozen=True)
 
 
@@ -54,8 +54,9 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits.
-    The options are immutable: derive a variant with ``model_copy(update=...)``. The scene keeps its own copy of them
-    as ``entity.options``, so one instance can construct several entities.
+    The options are immutable: derive a variant with ``model_copy(update=...)``. The entity is built from the morph
+    and the surface they hold, whose unset defaults it fills in, as when they are passed to ``Scene.add_entity``
+    directly.
 
     Parameters
     ----------
