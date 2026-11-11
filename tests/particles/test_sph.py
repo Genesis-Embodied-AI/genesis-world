@@ -443,8 +443,13 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
     tilted_ratios = []
     p_bottoms, p_middles, p_tops, p_hydrostatics = [], [], [], []
     is_tilt_checked = pressure_solver == "WCSPH" and liquid_width > 2 * PARTICLE_SIZE
-    for i_step in range(300 if is_tilt_checked else 100):
+    n_steps = 300 if is_tilt_checked else 100
+    for i_step in range(n_steps):
         scene.step()
+        if i_step >= n_steps - 10:
+            # The settled column only keeps a residual sloshing, far slower than a gravity wave over its depth
+            speeds = liquid.get_particles_vel()[0].norm(dim=-1)
+            assert (speeds < 0.05 * np.sqrt(GRAVITY * LIQUID_SIZE[2])).all()
         if is_tilt_checked and i_step >= 250:
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
             positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]

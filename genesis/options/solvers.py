@@ -758,7 +758,10 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     max_divergence_error : float, optional
         Maximum divergence error for DFSPH. Defaults to 0.1.
     max_density_error_percent : float, optional
-        Maximum density error *percent* for DFSPH, so 0.1 means 0.1%. Defaults to 0.05.
+        Average density error that DFSPH allows at the end of a substep, in percent of the rest density, so 0.1 means
+        0.1%. A lower value keeps the liquid closer to incompressible and its pressure steadier from one substep to the
+        next, at the cost of more solver iterations per substep. A larger value saves iterations, but lets the pressure
+        swing between substeps, which can shake a liquid at rest and the bodies it carries. Defaults to 0.01.
     max_divergence_solver_iterations : int, optional
         Maximum number of iterations for the divergence solver. Defaults to 100.
     max_density_solver_iterations : int, optional
@@ -777,7 +780,7 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
 
     # DFSPH parameters
     max_divergence_error: PositiveFloat = 0.1
-    max_density_error_percent: PositiveFloat = 0.05  # This is percent
+    max_density_error_percent: PositiveFloat = 0.01
     max_divergence_solver_iterations: PositiveInt = 100
     max_density_solver_iterations: PositiveInt = 100
 
