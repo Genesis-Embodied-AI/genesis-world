@@ -417,7 +417,7 @@ def build_grid(
     n_blocks_min: int = MIN_BLOCKS,
 ) -> MPMSparseGrid:
     """
-    Build the grid of the implicit solver over the active particles of a frame, sorted by cell, and return it.
+    Build the grid of the implicit solver over the active particles, sorted by cell, and return it.
 
     The grid is replaced by a larger one, of `n_blocks_min` blocks at least, whenever the particles need more blocks
     than it holds. A grid replaced keeps referenced in `sparse_grids_replaced`, with its arrays freed.
@@ -908,7 +908,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
                 # The first grid covers the blocks of the particles where they are added, with some slack, and grows
                 # once they outgrow it (see 'build_grid')
-                particles_pos = qd_to_numpy(self.mpm_state.particles.pos, col_mask=0, keepdim=False, transpose=True)
+                particles_pos = qd_to_numpy(self.mpm_state.particles.pos, transpose=True)
                 cells = np.floor(particles_pos * self._inv_dx).astype(gs.np_int)
                 envs = np.broadcast_to(np.arange(self._B)[:, None, None], (*cells.shape[:2], 1))
                 particle_blocks = np.unique(np.concatenate((envs, cells // BLOCK_DIM), axis=-1).reshape(-1, 4), axis=0)

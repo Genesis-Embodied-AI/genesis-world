@@ -157,6 +157,9 @@ class NewtonData(Data):
     newton_info: NewtonInfo
     rigid_dofs: NewtonRigidDofs = field(labels=RIGID)
     rigid_links: NewtonRigidLinks = field(labels=RIGID)
+    # The error flags of each env, which no kernel of the solver raises: a failed solve flags the environment in those
+    # of the MPM solver (see 'ErrnoMixin.register_errors')
+    errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
 
 class NewtonSolver(Solver):
@@ -250,6 +253,7 @@ class NewtonSolver(Solver):
             ),
             unused={RIGID: not has_rigid_dofs},
         )
+        self.register_errors(self.data_manager.errno, {})
         self.newton_envs = self.data_manager.newton_envs
         self.newton_loops = self.data_manager.newton_loops
         self.newton_info = self.data_manager.newton_info
@@ -265,6 +269,7 @@ class NewtonSolver(Solver):
             if self.newton_config.has_rigid_dofs:
                 yield from iter_data(self.data_manager, "rigid_dofs")
                 yield from iter_data(self.data_manager, "rigid_links")
+            yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         if self.newton_rows is not None:
             yield from iter_data(self, "newton_rows")
 
