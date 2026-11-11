@@ -67,7 +67,9 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     rigid_mpm : bool, optional
         Whether to enable coupling between rigid and MPM solvers. Defaults to True.
     rigid_sph : bool, optional
-        Whether to enable coupling between rigid and SPH solvers. Defaults to True.
+        Whether to enable coupling between rigid and SPH solvers. Defaults to True. The liquid sampled inside a coupled
+        rigid body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
+        Moving liquid inside a coupled body afterwards, for instance by setting its position, is unsupported.
     rigid_pbd : bool, optional
         Whether to enable coupling between rigid and PBD solvers. Defaults to True.
     rigid_fem : bool, optional
@@ -79,7 +81,9 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     fem_mpm : bool, optional
         Whether to enable coupling between FEM and MPM solvers. Defaults to True.
     fem_sph : bool, optional
-        Whether to enable coupling between FEM and SPH solvers. Defaults to True.
+        Whether to enable coupling between FEM and SPH solvers. Defaults to True. The liquid sampled inside a coupled
+        FEM body, or within half a particle size of its surface, is removed when the scene is built, with a warning.
+        Moving liquid inside a coupled body afterwards, for instance by setting its position, is unsupported.
     """
 
     rigid_mpm: StrictBool = True

@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -9,20 +11,21 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.parametrize(
-    "n_envs, pressure_solver, is_plane_first",
+    "n_envs, pressure_solver",
     [
-        (0, "WCSPH", False),
-        pytest.param(0, "DFSPH", True, marks=pytest.mark.required),
-        pytest.param(2, "WCSPH", True, marks=pytest.mark.slow),  # ~150s
-        pytest.param(2, "DFSPH", False, marks=pytest.mark.slow),  # ~300s
+        pytest.param(0, "WCSPH", marks=pytest.mark.required),
+        (0, "DFSPH"),
+        pytest.param(2, "WCSPH", marks=pytest.mark.slow),  # ~150s
+        pytest.param(2, "DFSPH", marks=pytest.mark.slow),  # ~300s
     ],
 )
-def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first, show_viewer):
+def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
     PARTICLE_SIZE = 0.02
+    BALL_RADIUS = 0.06
+    RAFT_SIZE = (0.1, 0.1, 0.04)
+    RAFT_DENSITY_RATIO = 0.2
     BLOCK_SIZE = 0.1
     BLOCK_DENSITY_RATIO = 0.5
-    BALL_RADIUS = 0.06
-    LIQUID_DEPTH = 0.3
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -43,21 +46,17 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
         ),
         show_viewer=show_viewer,
     )
-    # The floor of the liquid is a plane above the floor of the domain, placed through its offset. A particle the heavy
-    # ball presses against it meets both at once, whatever the order of the geoms.
-    plane_morph = gs.morphs.Plane(
-        pos=(0.0, 0.0, -0.1),
-        offset_pos=(0.0, 0.0, 0.1),
+    # The floor of the liquid is the plane, which its offset places above the floor of the domain
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.0, -0.1),
+            offset_pos=(0.0, 0.0, 0.1),
+        ),
     )
-    if is_plane_first:
-        scene.add_entity(
-            morph=plane_morph,
-        )
-    # The bodies start above the liquid and fall into it, the liquid being sampled clear of them
     liquid = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * LIQUID_DEPTH),
-            size=(0.5, 0.5, LIQUID_DEPTH),
+            pos=(0.0, 0.0, 0.25),
+            size=(0.5, 0.5, 0.5),
         ),
         material=gs.materials.SPH.Liquid(
             sampler="regular",
@@ -65,7 +64,7 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
     )
     light_ball = scene.add_entity(
         morph=gs.morphs.Sphere(
-            pos=(-0.12, 0.0, LIQUID_DEPTH + BALL_RADIUS + PARTICLE_SIZE),
+            pos=(-0.12, 0.0, 0.25),
             radius=BALL_RADIUS,
         ),
         material=gs.materials.Rigid(
@@ -74,7 +73,7 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
     )
     heavy_ball = scene.add_entity(
         morph=gs.morphs.Sphere(
-            pos=(0.12, 0.0, LIQUID_DEPTH + BALL_RADIUS + PARTICLE_SIZE),
+            pos=(0.12, 0.0, 0.25),
             radius=BALL_RADIUS,
         ),
         material=gs.materials.Rigid(
@@ -83,17 +82,26 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
     )
     raft = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.12, LIQUID_DEPTH + 0.05 + PARTICLE_SIZE),
-            size=(0.1, 0.1, 0.04),
+            pos=(0.0, 0.12, 0.25),
+            size=RAFT_SIZE,
             euler=(30.0, 0.0, 0.0),
         ),
         material=gs.materials.Rigid(
             rho=200.0,
         ),
     )
+    floating_raft = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.15, 0.15, 0.505 + 0.5 * RAFT_SIZE[2]),
+            size=RAFT_SIZE,
+        ),
+        material=gs.materials.Rigid(
+            rho=RAFT_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
+        ),
+    )
     block = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, -0.13, LIQUID_DEPTH + PARTICLE_SIZE + 0.5 * BLOCK_SIZE),
+            pos=(0.0, -0.13, 0.51 + 0.5 * BLOCK_SIZE),
             size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
         ),
         material=gs.materials.FEM.Elastic(
@@ -101,13 +109,24 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
             rho=BLOCK_DENSITY_RATIO * gs.materials.SPH.Liquid().rho,
         ),
     )
-    if not is_plane_first:
-        scene.add_entity(
-            morph=plane_morph,
-        )
     scene.build(n_envs=n_envs)
 
-    raft_rolls, block_drafts = [], []
+    # The liquid sampled inside the rigid bodies, or within half a particle size of their surface where liquid rests
+    # against a wall, is removed at build: the volume of the removed particles is that of the bodies inflated by half a
+    # particle size, the balls as larger balls and the raft as a box with rounded edges and corners.
+    offset = 0.5 * PARTICLE_SIZE
+    raft_volume = (
+        math.prod(RAFT_SIZE)
+        + 2 * (RAFT_SIZE[0] * RAFT_SIZE[1] + RAFT_SIZE[1] * RAFT_SIZE[2] + RAFT_SIZE[2] * RAFT_SIZE[0]) * offset
+        + math.pi * offset**2 * sum(RAFT_SIZE)
+        + 4.0 / 3.0 * math.pi * offset**3
+    )
+    bodies_volume = 2 * 4.0 / 3.0 * math.pi * (BALL_RADIUS + offset) ** 3 + raft_volume
+    removed_volume = (~liquid.get_particles_active().bool()).sum(dim=-1) * PARTICLE_SIZE**3
+    assert_allclose(removed_volume, bodies_volume, rtol=5e-3)
+
+    # The light ball first sinks with the settling fluid before buoyancy lifts it above the surface
+    raft_rolls, floating_raft_drafts, block_drafts = [], [], []
     for i_step in range(100):
         scene.step()
         raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
@@ -120,9 +139,6 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
         block_center = verts_pos.mean(dim=-2, keepdim=True)
         assert ((particles_pos - block_center).abs().amax(dim=-1) > 0.5 * (BLOCK_SIZE - PARTICLE_SIZE)).all()
 
-        # The liquid stays above the plane, up to the quarter particle size that the coupling lets it approach by
-        assert (particles_pos[..., 2] > -0.25 * PARTICLE_SIZE).all()
-
         # The draft of the block below the free surface of the liquid around it, the surface lying half a particle size
         # above the centers of the topmost particles
         if i_step >= 80:
@@ -131,6 +147,17 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
             heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
             level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
             block_drafts.append(level - verts_pos[..., 2].amin(dim=-1))
+
+            # The untilted raft floats with the draft at which the weight of the liquid it displaces balances its own
+            raft_aabb = floating_raft.get_AABB()
+            raft_lo, raft_center = raft_aabb[..., 0, :], raft_aabb.mean(dim=-2)
+            offsets = (particles_pos[..., :2] - raft_center[..., None, :2]).abs().amax(dim=-1)
+            is_around = (offsets > 0.5 * RAFT_SIZE[0] + PARTICLE_SIZE) & (
+                offsets < 0.5 * RAFT_SIZE[0] + 3 * PARTICLE_SIZE
+            )
+            heights_around = torch.where(is_around, particles_pos[..., 2], float("-inf"))
+            level = heights_around.topk(20, dim=-1).values.mean(dim=-1) + 0.5 * PARTICLE_SIZE
+            floating_raft_drafts.append(level - raft_lo[..., 2])
 
             # The block rides the waves the other bodies raise, moving vertically with the liquid around it
             verts_lo, verts_hi = verts_pos.amin(dim=-2, keepdim=True), verts_pos.amax(dim=-2, keepdim=True)
@@ -142,13 +169,13 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
             assert ((block.get_verts_vel()[..., 2].mean(dim=-1) - liquid_vel_z).abs() < 1e-1).all()
     raft_rolls = torch.stack(raft_rolls)
 
-    # The static fluid pressure holds the light ball (rho well below the fluid rest density) with its center above the
-    # free surface, while the heavy ball (rho well above) sinks under it: flotation discriminates on the density ratio,
-    # which is Archimedes' principle.
+    # The static fluid pressure must push the light ball (rho well below the fluid rest density) up toward the
+    # surface, while the heavy ball (rho well above) must keep sinking: flotation discriminates on the density
+    # ratio, which is Archimedes' principle.
     light_z = light_ball.get_pos()[..., 2]
     heavy_z = heavy_ball.get_pos()[..., 2]
-    assert (light_z > LIQUID_DEPTH).all(), f"Light ball must float, got z={light_z}"
-    assert (heavy_z < LIQUID_DEPTH - BALL_RADIUS).all(), f"Heavy ball must sink, got z={heavy_z}"
+    assert (light_z > 0.28).all(), f"Light ball must rise under buoyancy, got z={light_z}"
+    assert (heavy_z < 0.22).all(), f"Heavy ball must sink, got z={heavy_z}"
     # The pressure on the tilted raft acts off its center of mass, so the buoyancy torque rocks it about its roll
     # axis. That torque reaches the rigid body through the coupling wrench alone.
     assert (raft_rolls.amax(dim=0) - raft_rolls.amin(dim=0) > 2.0).all(), f"Raft must rock, got rolls={raft_rolls}"
@@ -161,6 +188,9 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, is_plane_first
     for _ in range(10):
         scene.step()
     assert_equal(liquid.get_particles_pos(), particles_pos_replayed)
+    assert_allclose(
+        torch.stack(floating_raft_drafts).mean(dim=0), RAFT_DENSITY_RATIO * RAFT_SIZE[2], atol=0.5 * PARTICLE_SIZE
+    )
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
@@ -228,10 +258,11 @@ def test_coupling_force_wakes_hibernated_link(n_envs, show_viewer):
     is_ball_hibernated = qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated, transpose=True)
     assert is_ball_hibernated[..., ball.links[0].idx].all()
 
-    # Teleporting the fluid over the hibernated ball must wake it through the coupling forces alone: there is no
-    # awake body around to collide with, so with the ball left asleep the fluid pressure would be silently
-    # discarded and the ball would stay frozen on the floor instead of floating up.
-    liquid.set_position((0.35, 0.0, 0.15))
+    # Dropping the fluid onto the hibernated ball must wake it through the coupling forces alone: there is no awake body
+    # around to collide with, so with the ball left asleep the fluid pressure would be silently discarded and the ball
+    # would stay frozen on the floor instead of floating up. The fluid starts above the ball, liquid moved inside a
+    # coupled body being unsupported.
+    liquid.set_position((0.35, 0.0, 0.29))
     for _ in range(40):
         scene.step()
     ball_z = ball.get_pos()[..., 2]

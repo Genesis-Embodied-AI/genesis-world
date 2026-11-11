@@ -96,39 +96,20 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
 class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
     """The moving boundaries around each SPH particle over the current substep, in the order of the particles."""
 
-    # The ghost particles of the boundaries around the particle, summed up as the walls of the domain (see
-    # func_wall_volume)
+    # The kernel volume of the solids behind the boundaries around the particle, with its gradient and first moment, in
+    # the units of the walls of the domain (see func_wall_volume and func_segment_volume)
     volume: qd.Tensor = field(float)
     volume_grad: qd.Tensor = field((float, 3))
     moment: qd.Tensor = field((float, (3, 3)))
-    # The volumes of the ghost particles times their velocity dotted with the kernel gradient, summed, which moves the
-    # density like the neighbors of the particle
+    # The velocity of the boundaries dotted with the gradient of their kernel volume, summed over the segments around the
+    # particle, which moves the density like the neighbors of the particle
     vel_flux: qd.Tensor = field(float)
-    # The particle pushes each ghost particle by `(impulse_coef + impulse_gravity_coef * gravity.dot(r)) * grad` over
-    # the substep, with `grad` the volume gradient of the ghost particle and `r` its offset from the particle
+    # The distance from the particle to the nearest surface of the moving boundaries, negative inside a body
+    surface_dist: qd.Tensor = field(float)
+    # The particle pushes each segment around it by `impulse_coef * grad + impulse_gravity_coef * moment @ gravity` over
+    # the substep, with `grad` and `moment` the volume gradient and the first moment of the segment
     impulse_coef: qd.Tensor = field(float)
     impulse_gravity_coef: qd.Tensor = field(float)
-
-
-class SPHGhostParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
-    """The ghost particles of a moving boundary over the current substep (see SPHBoundaryGhosts)."""
-
-    pos: qd.Tensor = field((float, 3))
-    vel: qd.Tensor = field((float, 3))
-    volume: qd.Tensor = field(float)
-    is_active: qd.Tensor = field(bool)
-
-
-class SPHBoundaryGhosts(Data, kind=DataKind.SCRATCH):
-    """
-    A moving boundary of a smoothed particle hydrodynamics (SPH) liquid, as liquid particles at rest relative to it.
-
-    Their owner places them and sorts them in `hash_grid` every substep, before the SPH solver sums them up around its
-    particles (see SPHBoundaryParticles).
-    """
-
-    particles: SPHGhostParticles
-    hash_grid: SpatialHashGrid
 
 
 class SPHState(Data, kind=DataKind.STATE):
@@ -177,7 +158,7 @@ class SPHInfo(Data, kind=DataKind.CONSTANT):
     particle_volume: qd.Tensor = field(float, shape=())
     support_radius: qd.Tensor = field(float, shape=())
     # The normalization of the cubic kernel
-    kernel_coef: qd.Tensor = field(float, shape=())
+    kernel_norm: qd.Tensor = field(float, shape=())
     # The distance below which the gradient of the cubic kernel is zero
     kernel_dist_min: qd.Tensor = field(float, shape=())
     # The squared distance that regularizes the viscosity of a pair of particles
@@ -312,7 +293,7 @@ class SPHSolver(ParticleSolver):
                 particle_size=self._particle_size,
                 particle_volume=self._particle_volume,
                 support_radius=self._support_radius,
-                kernel_coef=8.0 / np.pi / self._support_radius**3,
+                kernel_norm=8.0 / np.pi / self._support_radius**3,
                 kernel_dist_min=1e-5,
                 viscosity_eps=viscosity_eps,
                 # The color gradient of the particles deeper than the first two layers below the free surface is noise,
@@ -495,60 +476,141 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
 
 
 @qd.func
-def func_cubic_kernel(r_norm: float, h: float, k: float):
+def func_cubic_kernel(dist: float, support_radius: float, kernel_norm: float):
     """
     Return the cubic spline smoothing kernel at a distance.
 
-    `h` is the support radius of the kernel, and `k` its normalization.
+    `support_radius` is the support radius of the kernel (h in the SPH literature), and `kernel_norm` its
+    normalization.
     """
-    res = gs.qd_float(0.0)
-    q = r_norm / h
-    if q <= 1.0:
-        if q <= 0.5:
-            q2 = q**2
-            q3 = q2 * q
-            res = k * (6.0 * q3 - 6.0 * q2 + 1.0)
+    value = gs.qd_float(0.0)
+    dist_rel = dist / support_radius
+    if dist_rel <= 1.0:
+        if dist_rel <= 0.5:
+            q2 = dist_rel**2
+            q3 = q2 * dist_rel
+            value = kernel_norm * (6.0 * q3 - 6.0 * q2 + 1.0)
         else:
-            res = 2 * k * (1.0 - q) ** 3
-    return res
+            value = 2 * kernel_norm * (1.0 - dist_rel) ** 3
+    return value
 
 
 @qd.func
-def func_cubic_kernel_derivative(r: qd.types.vector(3), h: float, k: float, dist_min: float):
+def func_cubic_kernel_derivative(
+    offset: qd.types.vector(3), support_radius: float, kernel_norm: float, dist_min: float
+):
     """Return the gradient of the cubic spline smoothing kernel at a vector (see func_cubic_kernel)."""
-    res = qd.Vector.zero(gs.qd_float, 3)
-    r_norm = r.norm()
-    q = r_norm / h
-    if r_norm > dist_min and q <= 1.0:
-        grad_q = r / (r_norm * h)
-        if q <= 0.5:
-            res = 6.0 * k * q * (3.0 * q - 2.0) * grad_q
+    value = qd.Vector.zero(gs.qd_float, 3)
+    dist = offset.norm()
+    dist_rel = dist / support_radius
+    if dist > dist_min and dist_rel <= 1.0:
+        grad_q = offset / (dist * support_radius)
+        if dist_rel <= 0.5:
+            value = 6.0 * kernel_norm * dist_rel * (3.0 * dist_rel - 2.0) * grad_q
         else:
-            res = -6.0 * k * (1.0 - q) ** 2 * grad_q
-    return res
+            value = -6.0 * kernel_norm * (1.0 - dist_rel) ** 2 * grad_q
+    return value
 
 
 @qd.func
-def func_cubic_kernel_plane_integral(dist: float, sph_info: SPHInfo):
-    """
-    Return the integral of the cubic spline smoothing kernel over the plane at a distance from its center.
+def func_cubic_kernel_radial_integral(dist: float, support_radius: float, kernel_norm: float):
+    """Return the integral of the cubic spline smoothing kernel times r^2 from 0 to a distance."""
+    dist_rel = qd.min(dist / support_radius, 1.0)
+    u2 = dist_rel * dist_rel
+    u3 = u2 * dist_rel
+    value = gs.qd_float(0.0)
+    if dist_rel <= 0.5:
+        value = kernel_norm * (u3 * u3 - 1.2 * u3 * u2 + u3 / 3.0)
+    else:
+        value = kernel_norm * (0.5**6 - 1.2 * 0.5**5 + 0.5**3 / 3.0) + 2.0 * kernel_norm * (
+            (u3 / 3.0 - 0.75 * u2 * u2 + 0.6 * u3 * u2 - u3 * u3 / 6.0)
+            - (0.5**3 / 3.0 - 0.75 * 0.5**4 + 0.6 * 0.5**5 - 0.5**6 / 6.0)
+        )
+    return value * support_radius**3
 
-    Closed form of 2 * pi * int_{|dist|}^{h} W(r) r dr, with h the support radius. Its own integral along the plane
-    normal equals half the kernel normalization: int_{0}^{h} of this quantity over dist is exactly 1/2, which makes
-    forces weighted by it integrate to a per-unit-area magnitude over a covering layer of particles.
+
+@qd.func
+def func_segment_volume(
+    pos: qd.types.vector(3),
+    corners: qd.types.matrix(3, 3),
+    normal: qd.types.vector(3),
+    area: float,
+    quad_bary: qd.template(),
+    quad_weight: qd.template(),
+    support_radius: float,
+    kernel_norm: float,
+):
     """
-    res = gs.qd_float(0.0)
-    h = sph_info.support_radius[None]
-    q = qd.abs(dist) / h
-    if q <= 1.0:
-        q2 = q**2
-        q3 = q2 * q
-        if q <= 0.5:
-            res = 0.0875 - (1.2 * q3 * q2 - 1.5 * q2**2 + 0.5 * q2)
-        else:
-            res = 0.1 - (q2 - 2.0 * q3 + 1.5 * q2**2 - 0.4 * q3 * q2)
-        res = res * 16.0 / h
-    return res
+    Return the kernel volume of the solid behind a surface segment around a point, with its gradient and first moment.
+
+    These are the integrals over the solid of the kernel, of its gradient and of its gradient times the offset to the
+    point, taken to the segment by the divergence theorem and integrated over it by quadrature.
+    """
+    volume = gs.qd_float(0.0)
+    volume_grad = qd.Vector.zero(gs.qd_float, 3)
+    moment = qd.Matrix.zero(gs.qd_float, 3, 3)
+    corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
+    corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
+    corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
+    centroid = (corner_0 + corner_1 + corner_2) / 3.0
+    radius = qd.max((corner_0 - centroid).norm(), (corner_1 - centroid).norm(), (corner_2 - centroid).norm())
+    if (centroid - pos).norm() < support_radius + radius:
+        # The far field of the radial antiderivative is the solid angle of the segment, singular on the surface, which
+        # is taken in closed form (Van Oosterom and Strackee) and the smooth remainder by quadrature
+        for i_k in range(quad_weight.shape[0]):
+            offset = corners.transpose() @ quad_bary[i_k] - pos
+            dist = qd.max(offset.norm(), 1e-9)
+            weight = quad_weight[i_k] * area
+            volume = volume + weight * func_cubic_kernel_radial_integral(
+                dist, support_radius, kernel_norm
+            ) / dist**3 * offset.dot(normal)
+            grad = -weight * func_cubic_kernel(dist, support_radius, kernel_norm) * normal
+            volume_grad = volume_grad + grad
+            moment = moment + grad.outer_product(offset)
+        offset_0, offset_1, offset_2 = corner_0 - pos, corner_1 - pos, corner_2 - pos
+        dist_0, dist_1, dist_2 = offset_0.norm(), offset_1.norm(), offset_2.norm()
+        solid_angle = 2.0 * qd.atan2(
+            offset_0.dot(offset_1.cross(offset_2)),
+            dist_0 * dist_1 * dist_2
+            + offset_0.dot(offset_1) * dist_2
+            + offset_0.dot(offset_2) * dist_1
+            + offset_1.dot(offset_2) * dist_0,
+        )
+        volume = volume - solid_angle / (4.0 * qd.math.pi)
+    moment = moment + volume * qd.Matrix.identity(gs.qd_float, 3)
+    return volume, volume_grad, moment
+
+
+@qd.func
+def func_segment_dist(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3)):
+    """Return the distance from a point to a triangle."""
+    corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
+    corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
+    corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
+    normal = (corner_1 - corner_0).cross(corner_2 - corner_0)
+    normal = normal / qd.max(normal.norm(), 1e-30)
+    pos_proj = pos - (pos - corner_0).dot(normal) * normal
+    # The projection lies inside the triangle where it is on the inner side of its three edges
+    is_inside = (
+        (corner_1 - corner_0).cross(pos_proj - corner_0).dot(normal) >= 0.0
+        and (corner_2 - corner_1).cross(pos_proj - corner_1).dot(normal) >= 0.0
+        and (corner_0 - corner_2).cross(pos_proj - corner_2).dot(normal) >= 0.0
+    )
+    dist = qd.abs((pos - corner_0).dot(normal))
+    if not is_inside:
+        dist = gs.qd_float(1e9)
+        for i_e in qd.static(range(3)):
+            edge_start = corner_0 if i_e == 0 else (corner_1 if i_e == 1 else corner_2)
+            edge_end = corner_1 if i_e == 0 else (corner_2 if i_e == 1 else corner_0)
+            edge_param = qd.min(
+                qd.max(
+                    (pos - edge_start).dot(edge_end - edge_start) / qd.max((edge_end - edge_start).norm_sqr(), 1e-30),
+                    0.0,
+                ),
+                1.0,
+            )
+            dist = qd.min(dist, (pos - edge_start - edge_param * (edge_end - edge_start)).norm())
+    return dist
 
 
 @qd.func
@@ -567,14 +629,14 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
     # those beyond the upper wall on its own lattice, in this order, five at most since the lattice of the far wall is
     # offset from that of the nearest one. A thin domain alone pays for these nodes, which slow down every step.
     N_NODES_AXIS = qd.static(5 if sph_config.is_domain_thin else 4)
-    h, k = sph_info.support_radius[None], sph_info.kernel_coef[None]
+    support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
     particle_size, particle_volume = sph_info.particle_size[None], sph_info.particle_volume[None]
     volume = gs.qd_float(0.0)
     volume_grad = qd.Vector.zero(gs.qd_float, 3)
     moment = qd.Matrix.zero(gs.qd_float, 3, 3)
     dist_lower = pos - sph_info.boundary.lower[None]
     dist_upper = sph_info.boundary.upper[None] - pos
-    if qd.min(dist_lower.min(), dist_upper.min()) < h:
+    if qd.min(dist_lower.min(), dist_upper.min()) < support_radius:
         dist_near = qd.min(dist_lower, dist_upper)
         near_dir = qd.select(dist_lower <= dist_upper, 1.0, -1.0)
         lattice_start = qd.floor(dist_near / particle_size - 0.5 * (N_NODES_AXIS - 1), gs.qd_int)
@@ -582,11 +644,11 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
         n_inner = qd.Vector.zero(gs.qd_int, 3)
         n_upper = qd.Vector.zero(gs.qd_int, 3)
         if qd.static(sph_config.is_domain_thin):
-            n_lower = qd.max(qd.ceil((h - dist_lower) / particle_size - 0.5, gs.qd_int), 0)
-            n_upper = qd.max(qd.ceil((h - dist_upper) / particle_size - 0.5, gs.qd_int), 0)
-            lattice_start = qd.max(qd.floor((dist_near - h) / particle_size - 0.5, gs.qd_int) + 1, 0)
+            n_lower = qd.max(qd.ceil((support_radius - dist_lower) / particle_size - 0.5, gs.qd_int), 0)
+            n_upper = qd.max(qd.ceil((support_radius - dist_upper) / particle_size - 0.5, gs.qd_int), 0)
+            lattice_start = qd.max(qd.floor((dist_near - support_radius) / particle_size - 0.5, gs.qd_int) + 1, 0)
             lattice_end = qd.min(
-                qd.ceil((dist_near + h) / particle_size - 0.5, gs.qd_int),
+                qd.ceil((dist_near + support_radius) / particle_size - 0.5, gs.qd_int),
                 qd.floor((dist_lower + dist_upper) / particle_size - 0.5, gs.qd_int) + 1,
             )
             n_inner = qd.max(lattice_end - lattice_start, 0)
@@ -595,12 +657,12 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
                 [i_node // N_NODES_AXIS**2, i_node // N_NODES_AXIS % N_NODES_AXIS, i_node % N_NODES_AXIS], dt=gs.qd_int
             )
             # The offset to the node along each axis, and whether the node lies beyond a wall
-            r = near_dir * ((lattice_start + i_n + 0.5) * particle_size - dist_near)
+            offset = near_dir * ((lattice_start + i_n + 0.5) * particle_size - dist_near)
             is_ghost = (lattice_start + i_n < 0).any()
             if qd.static(sph_config.is_domain_thin):
                 is_lower = i_n < n_lower
                 is_upper = i_n >= n_lower + n_inner
-                r = qd.select(
+                offset = qd.select(
                     is_lower,
                     -dist_lower - (i_n + 0.5) * particle_size,
                     qd.select(
@@ -611,10 +673,12 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
                 )
                 is_ghost = (i_n < n_lower + n_inner + n_upper).all() and (is_lower | is_upper).any()
             if is_ghost:
-                grad = -particle_volume * func_cubic_kernel_derivative(r, h, k, sph_info.kernel_dist_min[None])
-                volume = volume + particle_volume * func_cubic_kernel(r.norm(), h, k)
+                grad = -particle_volume * func_cubic_kernel_derivative(
+                    offset, support_radius, kernel_norm, sph_info.kernel_dist_min[None]
+                )
+                volume = volume + particle_volume * func_cubic_kernel(offset.norm(), support_radius, kernel_norm)
                 volume_grad = volume_grad + grad
-                moment = moment + grad.outer_product(r)
+                moment = moment + grad.outer_product(offset)
     return volume, volume_grad, moment
 
 
@@ -650,8 +714,8 @@ def func_for_all_neighbors(
         i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
         slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
         for j_p in range(slot_start, sph_state.hash_grid.slot_size[i_s, i_b] + slot_start):
-            d_ij = pos_i - sph_state.particles_reordered.pos[j_p, i_b]
-            if i_p != j_p and d_ij.norm() < sph_info.support_radius[None]:
+            offset_ij = pos_i - sph_state.particles_reordered.pos[j_p, i_b]
+            if i_p != j_p and offset_ij.norm() < sph_info.support_radius[None]:
                 task(i_p, j_p, i_b, ret, sph_state, sph_info)
 
 
@@ -696,11 +760,13 @@ def kernel_copy_from_reordered(sph_state: SPHState):
 
 @qd.func
 def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo):
-    d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
-    h, k = sph_info.support_radius[None], sph_info.kernel_coef[None]
-    ret.den = ret.den + sph_info.particle_volume[None] * func_cubic_kernel(d_ij.norm(), h, k)
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    ret.density = ret.density + sph_info.particle_volume[None] * func_cubic_kernel(
+        offset_ij.norm(), support_radius, kernel_norm
+    )
     ret.normal = ret.normal + sph_info.particle_volume[None] * func_cubic_kernel_derivative(
-        d_ij, h, k, sph_info.kernel_dist_min[None]
+        offset_ij, support_radius, kernel_norm, sph_info.kernel_dist_min[None]
     )
 
 
@@ -712,13 +778,13 @@ def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
     ):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
             # Base density using the kernel at distance 0
-            h, k = sph_info.support_radius[None], sph_info.kernel_coef[None]
-            rho = sph_info.particle_volume[None] * func_cubic_kernel(0.0, h, k)
+            support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+            rho = sph_info.particle_volume[None] * func_cubic_kernel(0.0, support_radius, kernel_norm)
             wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
-            ret = qd.Struct(den=wall_volume, normal=wall_volume_grad)
+            ret = qd.Struct(density=wall_volume, normal=wall_volume_grad)
             func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_rho)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            sph_state.particles_reordered.rho[i_p, i_b] = (rho + ret.den) * sph_info.particles.rho[i_o]
+            sph_state.particles_reordered.rho[i_p, i_b] = (rho + ret.density) * sph_info.particles.rho[i_o]
             sph_state.particles_normal_reordered[i_p, i_b] = ret.normal
 
 
@@ -726,8 +792,8 @@ def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
 def func_task_compute_non_pressure_forces(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
-    d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
-    dist = d_ij.norm()
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    dist = offset_ij.norm()
     j_o = sph_state.hash_grid.particles_idx[j_p, i_b]
     mass_j = sph_info.particles.mass[j_o]
 
@@ -739,23 +805,23 @@ def func_task_compute_non_pressure_forces(
     if normal_i.norm() > normal_min and normal_j.norm() > normal_min:
         vol_j = mass_j / sph_state.particles_reordered.rho[j_p, i_b]
         grad_ij = func_cubic_kernel_derivative(
-            d_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+            offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
         )
         curvature = -vol_j * (normal_j.normalized() - normal_i.normalized()).dot(grad_ij)
         ret.acc += ret.surface_tension_i * curvature / sph_state.particles_reordered.rho[i_p, i_b] * normal_i
 
     # Viscosity, normalized by twice the dimension plus two
     viscosity_coef = 2 * (3 + 2)
-    v_ij = (sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]).dot(d_ij)
+    vel_ij = (sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]).dot(offset_ij)
     rho_j = sph_state.particles_reordered.rho[j_p, i_b]
     ret.acc += (
         viscosity_coef
         * ret.mu_i
         * (mass_j / rho_j)
-        * v_ij
+        * vel_ij
         / (dist**2 + sph_info.viscosity_eps[None])
         * func_cubic_kernel_derivative(
-            d_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+            offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
         )
     )
 
@@ -795,13 +861,13 @@ def func_task_compute_pressure_forces(
     dp_j = sph_state.particles_reordered.p[j_p, i_b] / sph_state.particles_reordered.rho[j_p, i_b] ** 2
 
     # The pressure force contribution, symmetric formula
-    d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     ret.acc += (
         -rho0_j
         * sph_info.particle_volume[None]
         * (ret.dp_i + dp_j)
         * func_cubic_kernel_derivative(
-            d_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+            offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
         )
     )
 
@@ -871,9 +937,15 @@ def kernel_compute_pressure_forces(
             wall_coef = rho0 * dp_i + p_wall_center / rho0
             wall_force = wall_coef * wall_volume_grad + wall_moment @ gravity
             if qd.static(sph_config.has_boundary):
-                # The moving boundaries take the opposite of the impulse their ghost particles give the particle
+                # The moving boundaries take the pressure of the particle instead, mirrored across the boundary: a column
+                # of liquid can end at a body floating on it, which would then take the pressure of the depth of the
+                # particle under the top of its column rather than under the free surface, and leave the liquid to
+                # compress until it carries the body by itself. The moving boundaries take the opposite of the impulse
+                # they give the particle.
+                boundary_coef = rho0 * dp_i + p_i / rho0
+                wall_force = wall_force + (boundary_coef - wall_coef) * sph_state.boundary.volume_grad[i_o, i_b]
                 impulse_scale = sph_info.substep_dt[None] * sph_info.particles.mass[i_o]
-                sph_state.boundary.impulse_coef[i_o, i_b] = impulse_scale * wall_coef
+                sph_state.boundary.impulse_coef[i_o, i_b] = impulse_scale * boundary_coef
                 sph_state.boundary.impulse_gravity_coef[i_o, i_b] = impulse_scale
             sph_state.particles_reordered.acc[i_p, i_b] = (
                 sph_state.particles_reordered.acc[i_p, i_b] + ret.acc - wall_force
@@ -916,9 +988,9 @@ def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
 def func_task_compute_dfsph_factor(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
-    d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     grad_j = -sph_info.particle_volume[None] * func_cubic_kernel_derivative(
-        d_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+        offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
     )
     ret.grad_sqr_sum = ret.grad_sqr_sum + grad_j.norm_sqr()
     ret.grad_p = ret.grad_p - grad_j
@@ -951,9 +1023,9 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
             wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             rho_rel = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.particles.rho[i_o]
-            w_ii = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_coef[None])
+            kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
             # The relative density of the liquid alone includes the particle itself, so it never vanishes
-            self_weight = sph_info.particle_volume[None] * w_ii / (rho_rel - wall_volume)
+            self_weight = sph_info.particle_volume[None] * kernel_self / (rho_rel - wall_volume)
             grad_p = ret.grad_p + wall_volume_grad
             sum_grad_p_k = ret.grad_sqr_sum + grad_p.dot(ret.grad_p + (1.0 + self_weight) * wall_volume_grad)
 
@@ -970,11 +1042,11 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
 def func_task_compute_density_rate(
     i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo
 ):
-    v_ij = sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]
-    x_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
-    ret.drho += sph_info.particle_volume[None] * v_ij.dot(
+    vel_ij = sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    ret.drho += sph_info.particle_volume[None] * vel_ij.dot(
         func_cubic_kernel_derivative(
-            x_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+            offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
         )
     )
     ret.n_neighbors += 1
@@ -1085,19 +1157,19 @@ def func_task_solver_iteration(
     # The stiffness already holds the inverse of the density, which is the same for every particle of a liquid
     k_j = sph_state.particles_k_reordered[j_p, i_b]
     k_sum = ret.k_i + k_j
-    d_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
+    offset_ij = sph_state.particles_reordered.pos[i_p, i_b] - sph_state.particles_reordered.pos[j_p, i_b]
     if qd.abs(k_sum) > sph_info.stiffness_eps[None]:
         grad_p_j = -sph_info.particle_volume[None] * func_cubic_kernel_derivative(
-            d_ij, sph_info.support_radius[None], sph_info.kernel_coef[None], sph_info.kernel_dist_min[None]
+            offset_ij, sph_info.support_radius[None], sph_info.kernel_norm[None], sph_info.kernel_dist_min[None]
         )
         ret.dv = ret.dv - ret.dv_scale * k_sum * grad_p_j
 
     # The stiffness and the position of the neighbors, weighted for the stiffness of the walls (see
     # kernel_solver_iteration)
-    w_ij = func_cubic_kernel(d_ij.norm(), sph_info.support_radius[None], sph_info.kernel_coef[None])
-    ret.weight_sum = ret.weight_sum + w_ij
-    ret.k_sum_w = ret.k_sum_w + w_ij * k_j
-    ret.pos_sum = ret.pos_sum + w_ij * sph_state.particles_reordered.pos[j_p, i_b]
+    kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
+    ret.weight_sum = ret.weight_sum + kernel_ij
+    ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
+    ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
 
 
 @qd.kernel(fastcache=True)
@@ -1120,14 +1192,14 @@ def kernel_solver_iteration(
                 dv_scale = sph_info.substep_dt[None]
             k_i = sph_state.particles_k_reordered[i_p, i_b]
             pos = sph_state.particles_reordered.pos[i_p, i_b]
-            w_ii = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_coef[None])
+            kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
             ret = qd.Struct(
                 dv=qd.Vector.zero(gs.qd_float, 3),
                 k_i=k_i,
                 dv_scale=dv_scale,
-                weight_sum=w_ii,
-                k_sum_w=w_ii * k_i,
-                pos_sum=w_ii * pos,
+                weight_sum=kernel_self,
+                k_sum_w=kernel_self * k_i,
+                pos_sum=kernel_self * pos,
             )
             func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_solver_iteration)
 
@@ -1144,7 +1216,7 @@ def kernel_solver_iteration(
                 wall_dv = -wall_moment @ gravity
             wall_dv = wall_dv + (k_i + k_wall_center) * wall_volume_grad
             if qd.static(sph_config.has_boundary):
-                # The moving boundaries take the opposite of the impulse their ghost particles give the particle
+                # The moving boundaries take the opposite of the impulse they give the particle
                 impulse_scale = dv_scale * sph_info.particles.mass[i_o]
                 impulse_coef = sph_state.boundary.impulse_coef[i_o, i_b] - impulse_scale * (k_i + k_wall_center)
                 sph_state.boundary.impulse_coef[i_o, i_b] = impulse_coef
@@ -1242,39 +1314,3 @@ def kernel_clear_particles_pressure(
         # See 'kernel_set_values' in base_solver.py
         if i_p >= 0:
             sph_state.particles.p[i_p, i_b] = 0.0
-
-
-@qd.kernel(fastcache=True)
-def kernel_sum_boundary_ghosts(boundary_ghosts: SPHBoundaryGhosts, sph_state: SPHState, sph_info: SPHInfo):
-    """Sum up the ghost particles of a moving boundary around every particle (see SPHBoundaryParticles)."""
-    h, k = sph_info.support_radius[None], sph_info.kernel_coef[None]
-    for i_p, i_b in qd.ndrange(*sph_state.particles.pos.shape, axes=qd.static(eoa(sph_state.boundary.volume))):
-        volume = gs.qd_float(0.0)
-        volume_grad = qd.Vector.zero(gs.qd_float, 3)
-        moment = qd.Matrix.zero(gs.qd_float, 3, 3)
-        vel_flux = gs.qd_float(0.0)
-        if sph_state.particles.is_active[i_p, i_b]:
-            pos = sph_state.particles.pos[i_p, i_b]
-            base = func_hash_wrap_cell(
-                func_hash_pos_to_grid(pos, boundary_ghosts.hash_grid) - 1, boundary_ghosts.hash_grid
-            )
-            n_cells = func_hash_n_cells(3, boundary_ghosts.hash_grid)
-            for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-                i_s = func_hash_cell_to_slot(base + offset, boundary_ghosts.hash_grid)
-                slot_start = boundary_ghosts.hash_grid.slot_start[i_s, i_b]
-                for i_r in range(slot_start, slot_start + boundary_ghosts.hash_grid.slot_size[i_s, i_b]):
-                    i_g = boundary_ghosts.hash_grid.particles_idx[i_r, i_b]
-                    r = boundary_ghosts.particles.pos[i_g, i_b] - pos
-                    if r.norm() < h:
-                        ghost_volume = boundary_ghosts.particles.volume[i_g, i_b]
-                        grad = -ghost_volume * func_cubic_kernel_derivative(r, h, k, sph_info.kernel_dist_min[None])
-                        volume = volume + ghost_volume * func_cubic_kernel(r.norm(), h, k)
-                        volume_grad = volume_grad + grad
-                        moment = moment + grad.outer_product(r)
-                        vel_flux = vel_flux + boundary_ghosts.particles.vel[i_g, i_b].dot(grad)
-        sph_state.boundary.volume[i_p, i_b] = volume
-        sph_state.boundary.volume_grad[i_p, i_b] = volume_grad
-        sph_state.boundary.moment[i_p, i_b] = moment
-        sph_state.boundary.vel_flux[i_p, i_b] = vel_flux
-        sph_state.boundary.impulse_coef[i_p, i_b] = 0.0
-        sph_state.boundary.impulse_gravity_coef[i_p, i_b] = 0.0
