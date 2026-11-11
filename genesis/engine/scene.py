@@ -424,8 +424,6 @@ class Scene(BuildableMixin, RBC):
             )
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
-        # Revalidated, since 'model_copy(update=...)' bypasses validation
-        options = type(options).model_validate(options)
         morph = options.morph
         material = options.material
         surface = options.surface
