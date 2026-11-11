@@ -693,6 +693,9 @@ class RigidFloorTetPairs(SAPContactPairs):
 class RigidFloorTetCandidates(SAPTetFloorCandidates):
     """The rigid tets crossing the floor."""
 
+    # Signed distance to the floor of the lowest volume vertex of each link below it, zero without any
+    links_distance_min: qd.Tensor = field(float, shape=(LINKS, ENVS))
+
 
 class RigidFemTriTetPairs(SAPFramedContactPairs):
     """The contact pairs of a rigid triangle and a FEM tet."""
@@ -5813,7 +5816,11 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
         n_contacts, n_candidates = get_contact_capacities(options, n_floor_volume_elems, n_floor_volume_elems)
         self.max_contact_candidates = n_candidates * simulator._B
         self.contact_candidates = RigidFloorTetCandidates(
-            sizes=dict(envs=simulator._B, contact_candidates=self.max_contact_candidates)
+            sizes=dict(
+                envs=simulator._B,
+                contact_candidates=self.max_contact_candidates,
+                links=simulator.rigid_solver.n_links,
+            )
         )
 
         self.max_contact_pairs = n_contacts * simulator._B
@@ -5838,6 +5845,11 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
+        for i_l, i_b in qd.ndrange(
+            *self.contact_candidates.links_distance_min.shape,
+            axes=qd.static(eoa(self.contact_candidates.links_distance_min)),
+        ):
+            self.contact_candidates.links_distance_min[i_l, i_b] = 0.0
         self.contact_candidates.n_candidates[None] = 0
         # TODO Check surface element only instead of all elements
         for i_e, i_b in qd.ndrange(
@@ -5858,6 +5870,7 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
                 distance[i] = sap_state.rigid_volume_verts[i_v, i_b].z - ground_pos.z
                 if distance[i] > 0.0:
                     intersection_code |= 1 << i
+            qd.atomic_min(self.contact_candidates.links_distance_min[i_l, i_b], distance.min())
 
             # check if the element intersect with the floor
             if intersection_code != 0 and intersection_code != 15:
@@ -5916,7 +5929,12 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
             if g <= sap_info.contact_gradient_rtol[None] * grad.norm():
                 continue
             rigid_k = total_area * g
-            rigid_phi0 = -pressure / g
+            # The near-rigid regularization of the supporting pairs holds the link deeper than the model does, a depth
+            # that -p/g extrapolates without bound where the gradient turns along the floor (g -> 0), at the slices of
+            # the tets of a side face. No point of the link is deeper than its lowest vertex.
+            i_g = sap_info.rigid_volume_elems_geom_idx[i_e]
+            i_l = geoms_info.link_idx[i_g]
+            rigid_phi0 = qd.max(-pressure / g, self.contact_candidates.links_distance_min[i_l, i_b])
             if rigid_k < sap_info.contact_stiffness_min[None] or rigid_phi0 > sap_info.contact_separation_max[None]:
                 continue
             i_p = func_add_slot(
@@ -5928,10 +5946,9 @@ class RigidFloorTetContactHandler(FloorContactMixin, RigidContactHandler):
                 errno=errno,
             )
             if i_p >= 0:
-                i_g = sap_info.rigid_volume_elems_geom_idx[i_e]
                 self.contact_pairs.batch_idx[i_p] = i_b
                 self.contact_pairs.key[i_p] = qd.u64(i_e)
-                self.contact_pairs.link_idx[i_p] = geoms_info.link_idx[i_g]
+                self.contact_pairs.link_idx[i_p] = i_l
                 self.contact_pairs.contact_pos[i_p] = centroid
                 self.contact_pairs.contact_info.k[i_p] = rigid_k
                 self.contact_pairs.contact_info.phi0[i_p] = rigid_phi0
