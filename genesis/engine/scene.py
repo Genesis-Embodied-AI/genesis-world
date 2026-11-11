@@ -1,5 +1,4 @@
 import collections.abc
-import copy
 import dataclasses
 import gc
 import hashlib
@@ -355,8 +354,8 @@ class Scene(RBC):
         """Add an entity to the scene, constructed from entity options or from individual arguments.
 
         The class of ``options`` decides the kind of entity and the solver simulating it, such as
-        ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``.
-        The entity keeps a copy of them as ``entity.options``, so one instance can construct several entities.
+        ``gs.entities.Rigid``, ``gs.entities.Kinematic`` or ``gs.entities.FEM``. The entity holds them as
+        ``entity.options``.
 
         The individual arguments are a shorthand for the options of the entities the material is given to, such as
         ``options=gs.entities.Rigid(...)`` for ``gs.materials.Rigid``, and stand for those options alone. Passing
@@ -423,15 +422,11 @@ class Scene(RBC):
             )
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
-        # Revalidated, since 'model_copy(update=...)' bypasses validation. The resolution below modifies the morphs and
-        # the surface it is given, so it works on copies of its own, the entity keeping copies of them as authored.
+        # Revalidated, since 'model_copy(update=...)' bypasses validation
         options = type(options).model_validate(options)
-        options = options.model_copy(
-            update={"morph": copy.deepcopy(options.morph), "surface": copy.deepcopy(options.surface)}
-        )
-        morph = copy.deepcopy(options.morph)
+        morph = options.morph
         material = options.material
-        surface = copy.deepcopy(options.surface)
+        surface = options.surface
         visualize_contact = isinstance(options, gs.entities.Rigid) and options.visualize_contact
         name = options.name
         if surface is None:
@@ -897,7 +892,7 @@ class Scene(RBC):
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
         if surface.vis_mode is None:
-            surface = surface.model_copy(update={"vis_mode": "particle"})
+            surface.vis_mode = "particle"
         if surface.vis_mode == "visual":
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 

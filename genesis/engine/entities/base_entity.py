@@ -21,9 +21,9 @@ class EntityDescription:
     """Base class of what one entity of a scene is created from, whatever the solver simulating it.
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
-    material the entity is simulated under is what every description holds. The options the entity was constructed from
-    stand here as authored, before any default was resolved. A file exported before entity options existed holds none,
-    and each kind of description then derives them from what it holds.
+    material the entity is simulated under is what every description holds, beside the options the entity was
+    constructed from. A file exported before entity options existed holds none, and each kind of description then
+    derives them from what it holds.
     """
 
     material: Material
@@ -121,7 +121,7 @@ class Entity(RBC):
 
     @property
     def options(self) -> gs.entities.BaseEntity:
-        """The options this entity was constructed from, as authored."""
+        """The options this entity was constructed from."""
         return self._options
 
     @property
