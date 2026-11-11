@@ -37,17 +37,19 @@ def test_mpm_rigid_push_grad(show_viewer):
         )
     )
     stick = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            scale=0.6,
-            pos=(0.5, 0.5, 0.05),
-            euler=(90.0, 0.0, 0.0),
-        ),
-        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
-        material=gs.materials.Rigid(
-            rho=1e6,
-            coup_friction=8.0,
-            gravity_compensation=1.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                scale=0.6,
+                pos=(0.5, 0.5, 0.05),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+            material=gs.materials.Rigid(
+                rho=1e6,
+                coup_friction=8.0,
+                gravity_compensation=1.0,
+            ),
         ),
     )
     obj = scene.add_entity(

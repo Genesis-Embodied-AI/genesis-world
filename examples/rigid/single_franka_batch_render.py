@@ -38,7 +38,10 @@ def main():
     plane = scene.add_entity(
         gs.morphs.Plane(),
         surface=gs.surfaces.Default(
-            diffuse_texture=gs.textures.BatchTexture.from_images(image_folder="textures"),
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path=("textures/checker.png", "urdf/plane/checker_blue.png"),
+                is_batched=True,
+            ),
         ),
     )
     franka = scene.add_entity(

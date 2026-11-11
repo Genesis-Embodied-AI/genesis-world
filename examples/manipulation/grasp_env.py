@@ -396,7 +396,6 @@ class Manipulator:
         self._num_envs = num_envs
         self._args = args
 
-        material: gs.materials.Rigid = gs.materials.Rigid()
         morph: gs.morphs.MJCF = gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
             pos=(0.0, 0.0, 0.0),
@@ -404,7 +403,6 @@ class Manipulator:
         )
         self._robot_entity: gs.Entity = scene.add_entity(
             morph=morph,
-            material=material,
         )
 
         self._gripper_open_dof = 0.04

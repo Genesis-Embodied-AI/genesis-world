@@ -55,10 +55,12 @@ def test_robot_grasp_fem(coup_type, show_viewer):
     )
 
     scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=0.8,
-            coup_type="ipc_only",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=gs.materials.Rigid(
+                coup_friction=0.8,
+                coup_type="ipc_only",
+            ),
         ),
     )
 
@@ -70,10 +72,12 @@ def test_robot_grasp_fem(coup_type, show_viewer):
         material_kwargs["coup_links"] = ("left_finger", "right_finger")
 
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda_non_overlap.xml",
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda_non_overlap.xml",
+            ),
+            material=gs.materials.Rigid(**material_kwargs),
         ),
-        material=gs.materials.Rigid(**material_kwargs),
     )
 
     box = scene.add_entity(
@@ -217,16 +221,18 @@ def test_cloth_corner_drag(n_envs, show_viewer):
     boxes = []
     for z_sign in (+1, -1):
         box = scene.add_entity(
-            gs.morphs.Box(
-                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-                pos=(-BOX_SIZE, z_sign * (0.5 * BOX_SIZE + GAP), -BOX_SIZE),
-            ),
-            material=gs.materials.Rigid(
-                coup_friction=0.8,
-                coup_type="two_way_soft_constraint",
-            ),
-            surface=gs.surfaces.Plastic(
-                color=(1.0, 0.0, 0.0, 1.0) if z_sign > 0 else (0.0, 1.0, 0.0, 1.0),
+            options=gs.entities.Rigid(
+                morph=gs.morphs.Box(
+                    size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                    pos=(-BOX_SIZE, z_sign * (0.5 * BOX_SIZE + GAP), -BOX_SIZE),
+                ),
+                surface=gs.surfaces.Plastic(
+                    color=(1.0, 0.0, 0.0, 1.0) if z_sign > 0 else (0.0, 1.0, 0.0, 1.0),
+                ),
+                material=gs.materials.Rigid(
+                    coup_friction=0.8,
+                    coup_type="two_way_soft_constraint",
+                ),
             ),
         )
         boxes.append(box)
@@ -324,21 +330,23 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
     for x_sign, y_sign in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
         for z_sign in (+1, -1):
             box = scene.add_entity(
-                gs.morphs.Box(
-                    size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-                    pos=(
-                        x_sign * (CLOTH_HALF - BOX_SIZE),
-                        y_sign * (CLOTH_HALF - BOX_SIZE),
-                        z_sign * (0.5 * BOX_SIZE + GAP),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                        pos=(
+                            x_sign * (CLOTH_HALF - BOX_SIZE),
+                            y_sign * (CLOTH_HALF - BOX_SIZE),
+                            z_sign * (0.5 * BOX_SIZE + GAP),
+                        ),
                     ),
-                ),
-                material=gs.materials.Rigid(
-                    rho=200.0,
-                    coup_friction=0.8,
-                    coup_type="two_way_soft_constraint",
-                ),
-                surface=gs.surfaces.Plastic(
-                    color=np.random.rand(3),
+                    surface=gs.surfaces.Plastic(
+                        color=np.random.rand(3),
+                    ),
+                    material=gs.materials.Rigid(
+                        rho=200.0,
+                        coup_friction=0.8,
+                        coup_type="two_way_soft_constraint",
+                    ),
                 ),
             )
             boxes.append(box)

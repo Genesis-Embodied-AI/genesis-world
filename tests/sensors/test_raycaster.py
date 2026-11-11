@@ -144,12 +144,14 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
 
     obstacle_1 = scene.add_entity(
-        gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     obstacle_2 = scene.add_entity(
@@ -310,25 +312,29 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     )
     plane = scene.add_entity(gs.morphs.Plane())
     kin_sphere = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.2,
-            pos=(0.0, 0.0, 0.5),
-            fixed=True,
-            enable_custom_vverts=True,
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=kin_raycastable,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.2,
+                pos=(0.0, 0.0, 0.5),
+                fixed=True,
+                enable_custom_vverts=True,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=kin_raycastable,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=str(urdf_path),
-            pos=(0.0, 0.0, 1.5),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.URDF(
+                file=str(urdf_path),
+                pos=(0.0, 0.0, 1.5),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     cam_kin = scene.add_sensor(
@@ -504,14 +510,16 @@ def test_cast_per_env_geoms(show_viewer, n_envs):
         )
     )
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(0.4, 0.4, 0.4),
-            pos=(6.0, 0.0, 0.5),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=True,
+        options=gs.entities.Kinematic(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.4, 0.4),
+                pos=(6.0, 0.0, 0.5),
+                fixed=True,
+                collision=False,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     movable_box = scene.add_entity(
@@ -630,25 +638,29 @@ def test_heterogeneous_object(show_viewer, tol):
     # variants are concentric obstacles of decreasing near-face distance, so each env's own variant is the farthest
     # hit. A missing mask is then observable as an env shadowing its variant with a nearer one belonging to another env.
     het_obstacle = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     # A box primitive puts its vgeom at the link origin, so these same-pos variants hold identical vgeom poses and
     # differ only in rest-pose vverts: the active vgeom range of each environment alone tells them apart.
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
-            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=True,
+        options=gs.entities.Kinematic(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
+                gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     movable_box = scene.add_entity(
@@ -723,14 +735,16 @@ def test_cast_fixed_and_moving_geoms(show_viewer, n_envs, tol):
         )
     )
     visual_box = scene.add_entity(
-        gs.morphs.Box(
-            size=(1.0, 1.0, 0.5),
-            pos=(0.0, 0.0, 0.25),
-            fixed=True,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
-            use_visual_raycasting=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                size=(1.0, 1.0, 0.5),
+                pos=(0.0, 0.0, 0.25),
+                fixed=True,
+                collision=False,
+            ),
+            material=gs.materials.Rigid(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     mount = scene.add_entity(

@@ -63,7 +63,6 @@ def main():
         ),
     )
     duck = scene.add_entity(
-        material=gs.materials.Rigid(),
         morph=gs.morphs.Mesh(
             file="meshes/duck.obj",
             scale=0.06,
@@ -75,7 +74,6 @@ def main():
         ),
     )
     box = scene.add_entity(
-        material=gs.materials.Rigid(),
         morph=gs.morphs.Box(
             size=(0.06, 0.06, 0.08),
             pos=BOX_POS,

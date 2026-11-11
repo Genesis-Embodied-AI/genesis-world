@@ -77,11 +77,13 @@ def main():
     if args.coup_type == "two_way_soft_constraint":
         franka_material_kwargs["coup_links"] = ("left_finger", "right_finger")
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda_non_overlap.xml",
-            pos=(0.0, 0.0, 0.005),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda_non_overlap.xml",
+                pos=(0.0, 0.0, 0.005),
+            ),
+            material=gs.materials.Rigid(**franka_material_kwargs),
         ),
-        material=gs.materials.Rigid(**franka_material_kwargs),
     )
 
     # Add cloths
@@ -140,18 +142,20 @@ def main():
             x = (i + 1.7) * grid_spacing
             y = (j - 1.5) * grid_spacing
             scene.add_entity(
-                morph=gs.morphs.Box(
-                    pos=(x, y, cube_height),
-                    size=(cube_size, cube_size, cube_size),
-                    fixed=True,
-                ),
-                material=gs.materials.Rigid(
-                    rho=500,
-                    coup_friction=0.5,
-                    coup_type="ipc_only",
-                ),
-                surface=gs.surfaces.Plastic(
-                    color=(0.8, 0.3, 0.2, 0.8),
+                options=gs.entities.Rigid(
+                    morph=gs.morphs.Box(
+                        pos=(x, y, cube_height),
+                        size=(cube_size, cube_size, cube_size),
+                        fixed=True,
+                    ),
+                    surface=gs.surfaces.Plastic(
+                        color=(0.8, 0.3, 0.2, 0.8),
+                    ),
+                    material=gs.materials.Rigid(
+                        rho=500,
+                        coup_friction=0.5,
+                        coup_type="ipc_only",
+                    ),
                 ),
             )
 

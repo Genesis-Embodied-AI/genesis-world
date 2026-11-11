@@ -51,12 +51,14 @@ def main():
     )
 
     cube = scene.add_entity(
-        material=frictionless_rigid,
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.0, 2.4),
-            size=(0.2, 0.2, 0.2),
-            euler=(30, 40, 0),
-            fixed=False,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 2.4),
+                size=(0.2, 0.2, 0.2),
+                euler=(30, 40, 0),
+                fixed=False,
+            ),
+            material=frictionless_rigid,
         ),
     )
 

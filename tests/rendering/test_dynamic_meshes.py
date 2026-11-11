@@ -61,24 +61,28 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
 
     # The planes of the environments tile the ground and stay within the camera frustum
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(2.0, 2.0),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(
+                plane_size=(2.0, 2.0),
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.0,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.5, 0.2),
-            size=(0.2, 0.2, 0.2),
-            euler=(30, 40, 0),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.5, 0.2),
+                size=(0.2, 0.2, 0.2),
+                euler=(30, 40, 0),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=True,
+                coup_friction=0.0,
+            ),
         ),
     )
     scene.add_entity(

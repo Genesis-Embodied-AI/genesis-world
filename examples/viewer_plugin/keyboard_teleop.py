@@ -55,12 +55,14 @@ if __name__ == "__main__":
     )
 
     robot = scene.add_entity(
-        material=gs.materials.Rigid(
-            gravity_compensation=1,
-        ),
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            euler=(0, 0, 0),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                euler=(0, 0, 0),
+            ),
+            material=gs.materials.Rigid(
+                gravity_compensation=1,
+            ),
         ),
     )
 

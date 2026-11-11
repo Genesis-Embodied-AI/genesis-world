@@ -48,10 +48,20 @@ def main():
     rigid_material = gs.materials.Rigid(needs_coup=True, coup_friction=0.0)
 
     # create ground plane
-    scene.add_entity(gs.morphs.Plane(), rigid_material)
+    scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Plane(),
+            material=rigid_material,
+        ),
+    )
 
     box_morph = gs.morphs.Box(pos=[0.25, 0.25, 0.25], size=[0.25, 0.25, 0.25])
-    box = scene.add_entity(box_morph, rigid_material)
+    box = scene.add_entity(
+        options=gs.entities.Rigid(
+            morph=box_morph,
+            material=rigid_material,
+        ),
+    )
 
     cloth_pos = (0.25, 0.25, 0.25 + 0.125 + particle_size)
     cloth_scale = 0.5
