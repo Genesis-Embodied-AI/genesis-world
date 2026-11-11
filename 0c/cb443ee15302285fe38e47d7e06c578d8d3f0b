@@ -1,0 +1,51 @@
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 281-292,313-319,330-339,341,347,351
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 52,998-1002,1004
+tests/rendering/test_batch_render.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 28-33
+genesis/engine/mesh.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 326,329-331,547
+examples/rigid/single_franka_batch_render.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 41-44
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 122-123,154-155,166-167,175-178,356-358,371
+genesis/vis/rasterizer_context.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 16,21,46-56,59-60,62,65,231-232,334-337,620-622,624-625,637,647-711,1419-1424,1428,1438-1440,1442-1444,1455,1458,1462-1466,1468
+tests/core/test_surface.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 65-68,75-94
+genesis/engine/texture.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 10,28-29,31-36,51-54,56,75,83,88-89,91,100,111-113,140-153,179-181,187,189-211
+genesis/options/surfaces.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 15,167-168,241-271,275-276,278-279,288,290,296,299,304,307-308,359,361-362,529-530,619-620,715-716
+genesis/vis/raytracer.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 351-352
+tests/rendering/test_offscreen.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 209,256-266,288-291,347,374-377,384,386-389,396-397,412-420,429-430,432-435,460-461,474-477,479-504,519-524,526-538
+genesis/vis/batch_renderer.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 138,140,142-146,150-151,154,156,162-165,167-169
+genesis/options/textures.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 16,21,71,75-81,84-97,100-104,115-118,124,129,134,138-139,141-142,150-154,157,161,166-167,170,178,189,194,196-226,228-264,266,273-274,296,309,316-317,322-325,327-329,335-337,339-340,363,369,371,375,409-414,417-418,422,425-432,434,437,442-451,453-454,462-466,477-482,497-499,522-524,532-547,562-566,586-588,591,593
+examples/rendering/dynamic_texture.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 4-5,39,44-47,59-61,94-95,99-101,107-109,116,176,182-184,234-235,249-251,283-286,297-298
+genesis/utils/serialization.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 205-206,211-217,219,299-303,544-546,559-560
+genesis/ext/pyrender/texture.py
+  s_c62ec9da443b15::t_1ed36d30bdb61c 243-245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ccb443ee15302285fe38e47d7e06c578d8d3f0b",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
