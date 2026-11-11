@@ -24,7 +24,13 @@ from genesis.utils.geom import (
     func_hash_wrap_cell,
     hash_grid_sizes,
 )
-from genesis.utils.simt import ExactSums, func_exact_sum_add, func_exact_sum_take, requires_deterministic_accumulation
+from genesis.utils.simt import (
+    ExactSums,
+    func_exact_sum_add,
+    func_exact_sum_take,
+    requires_deterministic_accumulation,
+    qd_block_sum,
+)
 
 from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
@@ -203,6 +209,9 @@ class SPHConfig(Config):
     has_boundary: bool
     # Whether the DFSPH solve sums its errors exactly, for a fixed order of the sums (see SPHEnvsSolve)
     is_deterministic: bool
+    # The base-2 logarithm of the lanes of a GPU subgroup tile that take a particle and its neighbors together, one CPU
+    # thread taking it alone (see func_for_all_neighbors)
+    log2_neighbor_lanes: int
 
 
 class SPHSolver(ParticleSolver):
@@ -296,6 +305,7 @@ class SPHSolver(ParticleSolver):
             and bool(np.any(self.boundary_upper - self.boundary_lower < 2 * self._support_radius)),
             has_boundary=self.is_active and is_opted_in(SPHState.boundary),
             is_deterministic=is_deterministic,
+            log2_neighbor_lanes=3 if gs.backend != gs.cpu else 0,
         )
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2
@@ -701,13 +711,21 @@ def func_boundary_volume(i_p: int, i_b: int, sph_state: SPHState, sph_info: SPHI
 
 @qd.func
 def func_for_all_neighbors(
-    i_p: int, i_b: int, ret: qd.template(), sph_state: SPHState, sph_info: SPHInfo, task: qd.template()
+    i_p: int,
+    i_b: int,
+    i_lane: int,
+    ret: qd.template(),
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    task: qd.template(),
+    n_lanes: qd.template(),
 ):
     """
     Run a task on every sorted particle within the support radius of a sorted particle, the particle itself excluded.
 
     `task` takes the indices of both particles, the environment, `ret`, the state and the info, in this order, and
-    accumulates its result in `ret`.
+    accumulates its result in `ret`. With `n_lanes` above one, the lanes of a subgroup tile take the particle together,
+    lane `i_lane` taking every `n_lanes`-th neighbor of each cell, and their shares of `ret` sum up after.
     """
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
     base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, sph_state.hash_grid) - 1, sph_state.hash_grid)
@@ -715,10 +733,13 @@ def func_for_all_neighbors(
     for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
         i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
         slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
-        for j_p in range(slot_start, sph_state.hash_grid.slot_size[i_s, i_b] + slot_start):
-            offset_ij = pos_i - sph_state.particles_reordered.pos[j_p, i_b]
-            if i_p != j_p and offset_ij.norm() < sph_info.support_radius[None]:
-                task(i_p, j_p, i_b, ret, sph_state, sph_info)
+        slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
+        for j_p_ in range((slot_size + n_lanes - 1) // n_lanes):
+            j_p = slot_start + j_p_ * n_lanes + i_lane
+            if j_p < slot_start + slot_size:
+                offset_ij = pos_i - sph_state.particles_reordered.pos[j_p, i_b]
+                if i_p != j_p and offset_ij.norm() < sph_info.support_radius[None]:
+                    task(i_p, j_p, i_b, ret, sph_state, sph_info)
 
 
 @qd.func
@@ -784,7 +805,7 @@ def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.te
             rho = sph_info.particle_volume[None] * func_cubic_kernel(0.0, support_radius, kernel_norm)
             wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             ret = qd.Struct(density=wall_volume, normal=wall_volume_grad)
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_rho)
+            func_for_all_neighbors(i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_rho, n_lanes=1)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             sph_state.particles_reordered.rho[i_p, i_b] = (rho + ret.density) * sph_info.particles.rho[i_o]
             sph_state.particles_normal_reordered[i_p, i_b] = ret.normal
@@ -844,7 +865,9 @@ def kernel_compute_non_pressure_forces(
                 surface_tension_i=sph_info.particles.surface_tension[i_o],
                 mu_i=sph_info.particles.mu[i_o],
             )
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_non_pressure_forces)
+            func_for_all_neighbors(
+                i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_non_pressure_forces, n_lanes=1
+            )
             sph_state.particles_reordered.acc[i_p, i_b] = force_fields.add_acc(
                 ret.acc,
                 sph_state.particles_reordered.pos[i_p, i_b],
@@ -910,7 +933,7 @@ def kernel_compute_pressure_forces(
             p_i = sph_state.particles_reordered.p[i_p, i_b]
             dp_i = p_i / sph_state.particles_reordered.rho[i_p, i_b] ** 2
             ret = qd.Struct(acc=qd.Vector.zero(gs.qd_float, 3), dp_i=dp_i)
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_pressure_forces)
+            func_for_all_neighbors(i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_pressure_forces, n_lanes=1)
 
             # Wall boundary condition: the ghost particles of the walls take the hydrostatic pressure of their depth
             # under the free surface of the liquid above the particle, and push the particle back through the symmetric
@@ -1017,7 +1040,7 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
             qd.atomic_add(sph_state.envs_solve.n_active[i_b], 1)
 
             ret = qd.Struct(grad_p=qd.Vector.zero(gs.qd_float, 3), grad_sqr_sum=gs.qd_float(0.0))
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_dfsph_factor)
+            func_for_all_neighbors(i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_dfsph_factor, n_lanes=1)
 
             # The walls, at rest, change the density of the particle by its own velocity, which they change with its own
             # stiffness and with the stiffness they take from it among the liquid around it (see
@@ -1065,18 +1088,29 @@ def func_compute_density_rate(
     relative density at the end of the substep. Each particle also gets the stiffness that the next Jacobi iteration
     applies to cancel it, and adds its error to that of its environment, summed for func_update_convergence.
     """
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.drho))
-    ):
-        if sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles = sph_state.particles_reordered.pos.shape[0]
+    for i_t in range(sph_state.particles_reordered.pos.shape[1] * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_p = i_t // N_LANES % n_particles
+        i_b = i_t // (N_LANES * n_particles)
+        is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
+        ret = qd.Struct(drho=gs.qd_float(0.0), n_neighbors=0)
+        if is_solved:
+            func_for_all_neighbors(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_density_rate, n_lanes=N_LANES
+            )
+        if qd.static(N_LANES > 1):
+            ret.drho = qd_block_sum(ret.drho, sph_config.log2_neighbor_lanes)
+            ret.n_neighbors = qd_block_sum(ret.n_neighbors, sph_config.log2_neighbor_lanes)
+        if is_solved and i_lane == 0:
             # The walls are at rest, while the moving boundaries carry their own velocity
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
-            drho_wall = sph_state.particles_reordered.vel[i_p, i_b].dot(wall_volume_grad)
+            ret.drho = ret.drho + sph_state.particles_reordered.vel[i_p, i_b].dot(wall_volume_grad)
             if qd.static(sph_config.has_boundary):
-                drho_wall = drho_wall - sph_state.boundary.vel_flux[i_o, i_b]
-            ret = qd.Struct(drho=drho_wall, n_neighbors=0)
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_density_rate)
+                ret.drho = ret.drho - sph_state.boundary.vel_flux[i_o, i_b]
             rho0 = sph_info.particles.rho[i_o]
             err = gs.qd_float(0.0)
             if qd.static(solve_density):
@@ -1194,25 +1228,45 @@ def func_solver_iteration(
         warm_start = is_first_pass
     else:
         is_iterating = not is_first_pass
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.vel))
-    ):
-        if is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
-            dv_scale = gs.qd_float(1.0)
-            if qd.static(solve_density):
-                dv_scale = sph_info.substep_dt[None]
-            k_i = sph_state.particles_k_reordered[i_p, i_b]
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles = sph_state.particles_reordered.pos.shape[0]
+    for i_t in range(sph_state.particles_reordered.pos.shape[1] * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_p = i_t // N_LANES % n_particles
+        i_b = i_t // (N_LANES * n_particles)
+        is_solved = (
+            is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
+        )
+        dv_scale = gs.qd_float(1.0)
+        if qd.static(solve_density):
+            dv_scale = sph_info.substep_dt[None]
+        k_i = sph_state.particles_k_reordered[i_p, i_b]
+        ret = qd.Struct(
+            dv=qd.Vector.zero(gs.qd_float, 3),
+            k_i=k_i,
+            dv_scale=dv_scale,
+            weight_sum=gs.qd_float(0.0),
+            k_sum_w=gs.qd_float(0.0),
+            pos_sum=qd.Vector.zero(gs.qd_float, 3),
+        )
+        if is_solved:
+            func_for_all_neighbors(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_solver_iteration, n_lanes=N_LANES
+            )
+        if qd.static(N_LANES > 1):
+            ret.weight_sum = qd_block_sum(ret.weight_sum, sph_config.log2_neighbor_lanes)
+            ret.k_sum_w = qd_block_sum(ret.k_sum_w, sph_config.log2_neighbor_lanes)
+            for i_d in qd.static(range(3)):
+                ret.dv[i_d] = qd_block_sum(ret.dv[i_d], sph_config.log2_neighbor_lanes)
+                ret.pos_sum[i_d] = qd_block_sum(ret.pos_sum[i_d], sph_config.log2_neighbor_lanes)
+        if is_solved and i_lane == 0:
+            # The particle itself weighs into the stiffness and the position its neighbors give the walls
             pos = sph_state.particles_reordered.pos[i_p, i_b]
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
-            ret = qd.Struct(
-                dv=qd.Vector.zero(gs.qd_float, 3),
-                k_i=k_i,
-                dv_scale=dv_scale,
-                weight_sum=kernel_self,
-                k_sum_w=kernel_self * k_i,
-                pos_sum=kernel_self * pos,
-            )
-            func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_solver_iteration)
+            ret.weight_sum = ret.weight_sum + kernel_self
+            ret.k_sum_w = ret.k_sum_w + kernel_self * k_i
+            ret.pos_sum = ret.pos_sum + kernel_self * pos
 
             # The ghost particles of the walls take the stiffness of the liquid around the particle (see
             # kernel_compute_pressure_forces). The warm start applies the pressure itself, which adds the hydrostatic
