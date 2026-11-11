@@ -6,11 +6,14 @@ driver proc/sysfs interface. The management libraries reach the devices through 
 compute runtime, so they report the GPUs actually allocated to the current process even inside a container
 whose proc/sysfs interface does not reflect that allocation (e.g. an attached or namespaced container). The
 management libraries are optional dependencies, so they are imported lazily and each backend is gated on
-is_available().
+is_available(). An AMD GPU whose ROCm install lacks AMD SMI is read from the topology of the ROCm kernel driver (KFD)
+instead, the one ROCm itself enumerates its devices from.
 """
 
+import os
 import warnings
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import psutil
 
@@ -171,6 +174,83 @@ class AmdBackend(GpuBackend):
         return usage
 
 
+def _read_kfd_properties(path: Path) -> dict[str, int]:
+    return {name: int(value) for name, value in [line.split() for line in path.read_text().splitlines() if line]}
+
+
+def _get_kfd_gpu_nodes() -> list[Path]:
+    """Return the KFD topology nodes of the GPUs the current process can use, in the order HIP numbers them.
+
+    The topology lists every GPU of the host, inside a container too. A GPU counts only if its render node exists, which
+    a container holds for the GPUs passed to it alone, and if ROCR_VISIBLE_DEVICES lists it, by index or by its 'GPU-'
+    UUID, when set. The nodes of the CPUs have no SIMD units. The selection of the test workers, which they make through
+    CUDA_VISIBLE_DEVICES, applies on top of these indices, as it does on those of AMD SMI.
+    """
+    nodes = []
+    for node in sorted(Path("/sys/class/kfd/kfd/topology/nodes").iterdir(), key=lambda node: int(node.name)):
+        properties = _read_kfd_properties(node / "properties")
+        if properties.get("simd_count", 0) > 0 and Path(f"/dev/dri/renderD{properties['drm_render_minor']}").exists():
+            nodes.append(node)
+    rocr_visible_devices = os.environ.get("ROCR_VISIBLE_DEVICES")
+    if rocr_visible_devices is not None:
+        nodes_unique_id = [_read_kfd_properties(node / "properties").get("unique_id") for node in nodes]
+        visible_nodes = []
+        for device in rocr_visible_devices.split(","):
+            if device.startswith("GPU-") and int(device[4:], 16) in nodes_unique_id:
+                visible_nodes.append(nodes[nodes_unique_id.index(int(device[4:], 16))])
+            elif device.isdigit() and int(device) < len(nodes):
+                visible_nodes.append(nodes[int(device)])
+        nodes = visible_nodes
+    return nodes
+
+
+class AmdKfdBackend(GpuBackend):
+    """AMD backend reading the topology of the ROCm kernel driver (KFD), for a ROCm install without AMD SMI."""
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return (
+            Path("/sys/class/kfd/kfd/topology/nodes").is_dir()
+            and os.access("/dev/kfd", os.R_OK | os.W_OK)
+            and not AmdBackend.is_available()
+            and bool(_get_kfd_gpu_nodes())
+        )
+
+    def __init__(self):
+        self._nodes = _get_kfd_gpu_nodes()
+
+    def get_device_count(self) -> int:
+        return len(self._nodes)
+
+    def get_device_vram_mib(self) -> tuple[int, ...]:
+        devices_vram_mib = []
+        for node in self._nodes:
+            banks = [_read_kfd_properties(bank / "properties") for bank in (node / "mem_banks").iterdir()]
+            devices_vram_mib.append(sum([bank["size_in_bytes"] for bank in banks]) >> 20)
+        return tuple(devices_vram_mib)
+
+    def get_device_index_from_uuid(self, device_uuid: str) -> int:
+        # The UUID HIP reports holds the hexadecimal digits of the unique id of the node as ASCII codes
+        try:
+            unique_id = int(bytes.fromhex(device_uuid.replace("-", "")).decode("ascii"), 16)
+        except ValueError:
+            return -1
+        for index, node in enumerate(self._nodes):
+            if _read_kfd_properties(node / "properties").get("unique_id") == unique_id:
+                return index
+        return -1
+
+    def get_per_process_vram_mib(self) -> dict[int, int]:
+        gpus_id = [(node / "gpu_id").read_text().strip() for node in self._nodes]
+        usage: dict[int, int] = {}
+        for proc in Path("/sys/class/kfd/kfd/proc").iterdir():
+            for gpu_id in gpus_id:
+                vram = proc / f"vram_{gpu_id}"
+                if vram.exists():
+                    usage[int(proc.name)] = usage.get(int(proc.name), 0) + (int(vram.read_text()) >> 20)
+        return usage
+
+
 def detect_gpu_backend() -> GpuBackend | None:
     """Return a fresh instance of the first available GPU backend, or None when no GPU backend is usable.
 
@@ -178,7 +258,7 @@ def detect_gpu_backend() -> GpuBackend | None:
     which keeps the backend valid in forked children (pytest-forked runs every test in one) where the parent's
     session and device handles would be stale.
     """
-    backend_classes = (NvidiaBackend, AmdBackend)
+    backend_classes = (NvidiaBackend, AmdBackend, AmdKfdBackend)
     available_backends = [backend_cls for backend_cls in backend_classes if backend_cls.is_available()]
 
     if not available_backends:

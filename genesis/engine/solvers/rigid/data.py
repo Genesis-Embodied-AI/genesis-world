@@ -558,8 +558,8 @@ class RigidConfig(Config):
     parallel_init: bool = False
     # Whether the walks of the kinematic trees and roots sweep them level by level (see func_sweep_links_by_level)
     enable_level_sweep: bool = False
-    # Lanes of the level sweep per env, a power of two dividing its blocks of 32 lanes. Four envs per block balance the
-    # lanes a narrow level leaves idle against the links a wide level serializes.
+    # Lanes of the level sweep per env, a power of two dividing its blocks of one subgroup of lanes. Eight lanes per env
+    # balance the lanes a narrow level leaves idle against the links a wide level serializes.
     level_sweep_n_lanes_per_env: int = 8
     broadphase_traversal: gs.broadphase_traversal = gs.broadphase_traversal.SAP
     enable_tiled_cholesky_mass_matrix: bool = False
@@ -585,10 +585,10 @@ class RigidConfig(Config):
     # Whether the constraint solver runs the subgroup-cooperative GPU kernels (linesearch refinement, friction rows,
     # mass-matrix assembly) on environment-first arrays (see COOPERATIVE_ROWS)
     enable_cooperative_constraint_kernels: bool = False
-    # Whether the noslip sweep of an island runs on a block of 32 lanes: its rows are colored so that the rows of a
-    # color touch disjoint mass blocks, and the lanes update the rows of a color in parallel, color after color (see
-    # func_noslip in noslip.py). The visit order differs from the one-thread sweep, and so do the iterates. See its
-    # resolution in the rigid solver.
+    # Whether the noslip sweep of an island runs on a block of one subgroup of lanes: its rows are colored so that the
+    # rows of a color touch disjoint mass blocks, and the lanes update the rows of a color in parallel, color after
+    # color (see func_noslip in noslip.py). The visit order differs from the one-thread sweep, and so do the iterates.
+    # See its resolution in the rigid solver.
     enable_cooperative_noslip: bool = False
     # Whether the arrays labeled COOPERATIVE_ROWS are stored environment-first, under the cooperative constraint
     # kernels, on CPU or under serialized execution. Loops whose order follows the memory order key on it, and the

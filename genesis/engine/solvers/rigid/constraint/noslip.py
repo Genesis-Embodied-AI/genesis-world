@@ -141,7 +141,7 @@ def func_color_rows_batch(i_b: int, i_island: int, tid: int, constraint_state: C
     never needs more colors than it has rows, whatever the contact pattern. The lanes reset the counters over the
     island's dofs beforehand, and the color count is readable by every lane on return.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
     n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
     dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
@@ -192,7 +192,7 @@ def func_refresh_qacc_batch(
     list regardless of the skyline dof reorder). The lanes of a cooperative block stride the dofs and scatter J^T f one
     color of rows at a time, the rows of a color touching disjoint dofs (see func_color_rows_batch).
     """
-    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    _K = qd.static(qd.simt.subgroup.group_size() if rigid_config.enable_cooperative_noslip else 1)
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
     n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
     dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
@@ -461,7 +461,7 @@ def func_noslip_batch(
     touch disjoint mass blocks (see func_color_rows_batch), so their updates read and write disjoint entries of qacc
     and the sweep stays a Gauss-Seidel process, every color seeing the updates of the colors before it.
     """
-    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    _K = qd.static(qd.simt.subgroup.group_size() if rigid_config.enable_cooperative_noslip else 1)
     EPS = rigid_info.EPS[None]
 
     ne = constraint_state.n_constraints_equality[i_b]
@@ -528,7 +528,7 @@ def func_dual_finish_batch(
     The refresh recomputes qfrc_constraint = J^T f and qacc = acc_smooth + M^{-1} J^T f exactly from the swept
     forces; the remaining work is copying them into the per-dof state.
     """
-    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    _K = qd.static(qd.simt.subgroup.group_size() if rigid_config.enable_cooperative_noslip else 1)
     func_refresh_qacc_batch(i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config)
 
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
@@ -556,10 +556,10 @@ def func_noslip(
 
     Islands are independent (A is block-diagonal by island and both phases touch only the island's own rows and dofs),
     so each (island, env) pair runs sweep and finish end-to-end, in one thread, or under enable_cooperative_noslip in
-    one block of 32 lanes sharing the island's rows by color (see func_color_rows_batch).
+    one block of one subgroup of lanes sharing the island's rows by color (see func_color_rows_batch).
     """
     _B = constraint_state.jac.shape[2]
-    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    _K = qd.static(qd.simt.subgroup.group_size() if rigid_config.enable_cooperative_noslip else 1)
 
     # max_islands bounds the per-env island count (at most one island per tree); the guard skips the unused tail.
     # Iterate islands-major so that consecutive GPU lanes sweep the same island index across consecutive envs: envs

@@ -335,9 +335,9 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
     The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate is the largest
-    multiple of 8 (keeping the padded row stride odd) that runs a given count of resident one-warp blocks, as bounded by
-    the shared memory of a compute unit and of a block, the driver reservation and allocation granularity per block and
-    the warp slots.
+    multiple of 8 (keeping the padded row stride odd) that runs a given count of resident blocks of one subgroup, as
+    bounded by the shared memory of a compute unit and of a block, the driver reservation and allocation granularity
+    per block and the subgroup slots.
 
     At most max_n_sizes candidates are kept, so that the static values of a kernel stay a small fixed set: those
     minimizing the mean drop in resident blocks that rounding a row count n up to the next kept size causes against its
@@ -354,10 +354,12 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     block_bytes = qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
     unit_bytes, reserved_bytes, granule_bytes, max_blocks = block_bytes, 0, 1, block_bytes // (8 * 9 * itemsize)
     if torch.cuda.is_available():
-        # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), whose slots bound the resident blocks.
+        # CUDA and ROCm alike: a block of these tiles is one subgroup (warp or wavefront), whose slots bound the
+        # resident blocks. The subgroup is the one the kernels run, which on AMDGPU is a 64-lane wavefront whatever the
+        # native width of the device.
         device_property = torch.cuda.get_device_properties(torch.cuda.current_device())
         unit_bytes = device_property.shared_memory_per_multiprocessor
-        max_blocks = device_property.max_threads_per_multi_processor // device_property.warp_size
+        max_blocks = device_property.max_threads_per_multi_processor // qd.simt.subgroup.group_size()
         if torch.version.hip:
             # FIXME: torch exposes no allocation granularity of the local data share (LDS), which AMD sets per
             # instruction set (see the LLVM AMDGPU usage guide), a block taking its shared memory in whole granules.

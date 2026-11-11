@@ -20,6 +20,7 @@ from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 from genesis.utils.data import Config, Data, DataKind, Size, field
 from genesis.utils.misc import get_gpu_core_count, qd_to_numpy
 
@@ -31,7 +32,7 @@ class BVH_SORT_KIND(IntEnum):
     DEVICE_RADIX = 0
     # The rank of each leaf among the keys of its tree (small trees)
     RANK = 1
-    # A radix sort per tree, its chunks in parallel (CPU, large trees)
+    # A radix sort per tree, its chunks in parallel (CPU and RDNA GPUs, large trees)
     PER_TREE_RADIX = 2
 
 
@@ -62,12 +63,12 @@ class BVHConfig(Config):
     sort_kind: int
     # BVH_FIT_KIND
     fit_kind: int
-    # SORT_MAX_CHUNKS capped by the CPU threads of quadrants
+    # SORT_MAX_CHUNKS, capped by the CPU threads of quadrants on CPU
     sort_max_chunks: int
 
 
 # Sizes of a set of linear bounding volume hierarchies (LBVH): its trees, the leaves of each tree, the slots of its
-# device-wide radix sort, the rows of chunk histograms of its host radix sort and the lanes of its extent reduction.
+# device-wide radix sort, the rows of chunk histograms of its per-tree radix sort and the lanes of its extent reduction.
 BVH_TREES = Size("bvh_trees")
 BVH_LEAVES = Size("bvh_leaves")
 # The nodes of each tree, 2 * n_leaves - 1 for a set and the sum of those of its trees for packed trees
@@ -169,8 +170,8 @@ RANK_SORT_MAX_LEAVES_CPU = 256
 RANK_SORT_LEAVES_PER_CORE = 0.75
 # Lanes reducing the extent of one tree, each over a strided slice of its leaves, folded by one thread per tree.
 TREE_EXTENT_LANES = 64
-# Most chunks of the leaves of one tree the host radix sort counts and scatters in parallel (see func_build_bvh). The
-# chunks bring parallelism to a build of few trees, a build of many trees being parallel over its trees already, and
+# Most chunks of the leaves of one tree the per-tree radix sort counts and scatters in parallel (see func_build_bvh).
+# The chunks bring parallelism to a build of few trees, a build of many trees being parallel over its trees already, and
 # every chunk costs a histogram of 256 bins per pass.
 SORT_MAX_CHUNKS = 64
 
@@ -219,9 +220,11 @@ def get_bvh_config(n_trees: int, n_leaves: int, n_trees_built: int | None = None
     if gs.use_ndarray:
         end_bit = 64
         log256_max_n = max(log256_max_n, 4)
+    # FIXME: quadrants#1096 - the device radix sort returns unsorted keys on RDNA GPUs, whose large trees take the
+    # radix sort per tree instead, at most SORT_MAX_CHUNKS threads sorting each tree.
     if is_rank_sort(n_trees_built, n_leaves):
         sort_kind = BVH_SORT_KIND.RANK
-    elif gs.backend == gs.cpu:
+    elif gs.backend == gs.cpu or su.has_mirrored_shuffles():
         sort_kind = BVH_SORT_KIND.PER_TREE_RADIX
     else:
         sort_kind = BVH_SORT_KIND.DEVICE_RADIX
@@ -239,7 +242,7 @@ def get_bvh_config(n_trees: int, n_leaves: int, n_trees_built: int | None = None
         log256_max_n=log256_max_n,
         sort_kind=sort_kind,
         fit_kind=fit_kind,
-        sort_max_chunks=min(SORT_MAX_CHUNKS, qd.cfg.cpu_max_num_threads),
+        sort_max_chunks=min(SORT_MAX_CHUNKS, qd.cfg.cpu_max_num_threads) if gs.backend == gs.cpu else SORT_MAX_CHUNKS,
     )
 
 
@@ -254,8 +257,8 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
         gs.raise_exception(f"A BVH set needs at least one leaf per tree, got {n_leaves}.")
     bvh_config = get_bvh_config(n_trees, n_leaves)
 
-    # The state: the scratch of the device-wide radix sort is sized by quadrants, the histograms of the host radix sort
-    # hold the chunks of every tree built (see func_build_bvh), and the lanes of the extent are fixed.
+    # The state: the scratch of the device-wide radix sort is sized by quadrants, the histograms of the per-tree radix
+    # sort hold the chunks of every tree built (see func_build_bvh), and the lanes of the extent are fixed.
     n_sort_scratch = 0
     if bvh_config.sort_kind == BVH_SORT_KIND.DEVICE_RADIX:
         n_sort_scratch = sort_scratch_slots(n_trees * n_leaves, bvh_config.log256_max_n)
@@ -495,12 +498,12 @@ def func_build_bvh(n_trees: int, bvh_state: BVHState, bvh_config: qd.template(),
         for i_k in range(n_trees * n_leaves):
             bvh_state.leaves_keys[i_k] = bvh_state.keys_scratch[i_k]
     else:
-        # A least-significant-digit radix sort of eight bits per pass on the host backend, the leaves of each tree
-        # split over chunks: the chunks count their digits and scatter their keys in parallel, one thread per tree
-        # turning the counts into offsets in between. The passes ping-pong between the keys and the scratch and end
-        # in the keys. The passes unroll statically: a loop of the kernel is parallel at its top level alone, so a
-        # runtime loop over the passes would serialize the chunks. Row i_h of sort_hist holds the histogram of chunk i_c
-        # of tree i_t, and a build of fewer trees than the set splits the same rows into more chunks.
+        # A least-significant-digit radix sort of eight bits per pass, the leaves of each tree split over chunks: the
+        # chunks count their digits and scatter their keys in parallel, one thread per tree turning the counts into
+        # offsets in between. The passes ping-pong between the keys and the scratch and end in the keys. The passes
+        # unroll statically: a loop of the kernel is parallel at its top level alone, so a runtime loop over the passes
+        # would serialize the chunks. Row i_h of sort_hist holds the histogram of chunk i_c of tree i_t, and a build of
+        # fewer trees than the set splits the same rows into more chunks.
         n_sort_chunks = qd.max(
             1, qd.min(qd.static(bvh_config.sort_max_chunks), bvh_state.sort_hist.shape[0] // n_trees)
         )

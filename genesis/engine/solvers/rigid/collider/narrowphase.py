@@ -109,6 +109,8 @@ def func_add_polytope_vertex_contacts_sdf(
     # su.qd_lane_vector_get), which keeps a block_dim-th of each in every lane instead of a full copy in local memory.
     n_max = qd.static(collider_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
     N_SLOTS = qd.static((n_max + block_dim - 1) // block_dim)
+    # The masks of the lanes of a block, one bit per lane
+    MASK_DTYPE = qd.u64 if block_dim > 32 else qd.u32
     EPS = rigid_info.EPS[None]
     gb_cell = sdf_info.geoms_info.sdf_cell_size[i_gb]
     margin = qd.min(qd.min(gb_cell[0], gb_cell[1]), gb_cell[2])
@@ -258,7 +260,7 @@ def func_add_polytope_vertex_contacts_sdf(
                 n_groups = qd.min(n_columns, 1)
         # Most columns are empty, so the batches jump from one non-empty column to the next through a ballot of the
         # lanes per row of columns.
-        lanes_column_left = qd.Vector.zero(qd.u32, N_COLUMN_SLOTS)
+        lanes_column_left = qd.Vector.zero(MASK_DTYPE, N_COLUMN_SLOTS)
         if qd.static(block_dim > 1):
             for i_k in qd.static(range(N_COLUMN_SLOTS)):
                 column_vert_range = su.qd_lane_local_get(columns_vert_range, i_k, block_dim)
@@ -397,7 +399,7 @@ def func_add_polytope_vertex_contacts_sdf(
                         is_inserted = is_in_band and pen_v > pen_weakest
                 # The lanes holding a vert to insert, taken in lane order, which is vert order
                 n_inserted = qd.cast(is_inserted, gs.qd_int)
-                lanes_inserted = qd.u32(0)
+                lanes_inserted = MASK_DTYPE(0)
                 if qd.static(block_dim > 1):
                     lanes_inserted = su.qd_block_ballot(is_inserted)
                     n_inserted = qd.cast(qd.math.popcnt(lanes_inserted), gs.qd_int)
@@ -649,7 +651,7 @@ def func_add_polytope_vertex_contacts_sdf(
         # Most slots are left empty by the scan, so on GPU the emission only visits the occupied ones, taken in slot
         # order from a ballot of the lanes per row of slots.
         n_emit_slots = n_max
-        lanes_occupied = qd.Vector.zero(qd.u32, N_SLOTS)
+        lanes_occupied = qd.Vector.zero(MASK_DTYPE, N_SLOTS)
         if qd.static(block_dim > 1):
             n_emit_slots = 0
             for i_k in qd.static(range(N_SLOTS)):
@@ -664,7 +666,7 @@ def func_add_polytope_vertex_contacts_sdf(
         is_batched = False
         if qd.static(block_dim > 1):
             is_batched = n_added + n_emit_slots <= n_max
-        lanes_emitted = qd.Vector.zero(qd.u32, N_SLOTS)
+        lanes_emitted = qd.Vector.zero(MASK_DTYPE, N_SLOTS)
         emit_pos = qd.Matrix.zero(gs.qd_float, N_SLOTS, 3)
         for i_emit in range(n_emit_slots):
             k = i_emit
@@ -684,7 +686,7 @@ def func_add_polytope_vertex_contacts_sdf(
                             is_repeated = True
                 if qd.static(block_dim > 1):
                     for i_k in qd.static(range(N_SLOTS)):
-                        if (lanes_emitted[i_k] >> qd.u32(tid)) & qd.u32(1) != 0:
+                        if (lanes_emitted[i_k] >> MASK_DTYPE(tid)) & MASK_DTYPE(1) != 0:
                             if (contact_pos_v - emit_pos[i_k, :]).norm() < tolerance:
                                 is_repeated = True
                     is_repeated = su.qd_block_any(is_repeated)
@@ -709,7 +711,7 @@ def func_add_polytope_vertex_contacts_sdf(
                     if is_batched:
                         su.qd_lane_slot_write(emit_pos, k, contact_pos_v, tid, block_dim)
                         lanes = su.qd_lane_local_get(lanes_emitted, k // block_dim, block_dim)
-                        lanes = lanes | (qd.u32(1) << qd.u32(k % block_dim))
+                        lanes = lanes | (MASK_DTYPE(1) << MASK_DTYPE(k % block_dim))
                         su.qd_lane_local_set(lanes_emitted, k // block_dim, lanes, block_dim)
                     else:
                         # The first lane writes the contacts of the block, whose slots every lane reads back. A new
@@ -784,9 +786,9 @@ def func_add_polytope_vertex_contacts_sdf(
                     n_emitted_before = 0
                     for i_k in range(N_SLOTS):
                         lanes = su.qd_lane_local_get(lanes_emitted, i_k, block_dim)
-                        if (lanes >> qd.u32(tid)) & qd.u32(1) != 0:
+                        if (lanes >> MASK_DTYPE(tid)) & MASK_DTYPE(1) != 0:
                             i_c = i_c_base + n_emitted_before
-                            lanes_before = lanes & ((qd.u32(1) << qd.u32(tid)) - qd.u32(1))
+                            lanes_before = lanes & ((MASK_DTYPE(1) << MASK_DTYPE(tid)) - MASK_DTYPE(1))
                             i_c = i_c + qd.cast(qd.math.popcnt(lanes_before), gs.qd_int)
                             if i_c < max_contacts:
                                 func_set_contact(
@@ -1516,6 +1518,8 @@ def func_contact_mpr_terrain(
     margin = gs.qd_float(0.0)
     n_max = qd.static(collider_config.n_contacts_per_convex_pair)
     N_PERTURBATIONS = qd.static(4)
+    # The masks of the lanes of a block, one bit per lane
+    MASK_DTYPE = qd.u64 if block_dim > 32 else qd.u32
 
     multi_contact = (
         qd.static(rigid_config.enable_multi_contact)
@@ -1722,7 +1726,7 @@ def func_contact_mpr_terrain(
                         # is a fictitious contact.
                         is_contact_candidate = i_detection == 0 or snap_fired
 
-                    lanes_candidate = qd.cast(is_contact_candidate, qd.u32)
+                    lanes_candidate = qd.cast(is_contact_candidate, MASK_DTYPE)
                     if qd.static(block_dim > 1):
                         lanes_candidate = su.qd_block_ballot(is_contact_candidate)
                     for _ in range(qd.cast(qd.math.popcnt(lanes_candidate), gs.qd_int)):
@@ -4022,7 +4026,7 @@ def func_narrowphase_multicontact(
     stay in shared memory until acceptance. Every stage has one call site so the detection and outline compile once.
     """
     N_PERTURBATIONS = qd.static(4)
-    BLOCK_DIM = qd.static(32)
+    BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
     qd.loop_config(name="narrowphase_multicontact", block_dim=BLOCK_DIM)
     for i_tid in range(collider_config.gpu_cores):
         i_lane = i_tid % BLOCK_DIM
@@ -4853,7 +4857,7 @@ def func_narrow_phase_any_vs_terrain(
     """
     if qd.static(collider_config.has_terrain):
         is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
-        BLOCK_DIM = qd.static(32 if is_coop else 1)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size() if is_coop else 1)
         _B = collider_state.active_buffer.shape[1]
         max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
         n_threads = collider_state.prism.shape[1]
@@ -4941,7 +4945,7 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
         # the pairs an env can hold, a block done early taking the next one. They run chunk by chunk over the envs,
         # which keeps the loaded chunks of envs with few pairs side by side.
         is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
-        BLOCK_DIM = qd.static(32 if is_coop else 1)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size() if is_coop else 1)
         _B = collider_state.active_buffer.shape[1]
         max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
         n_chunks = qd.max(qd.min((8 * collider_config.gpu_cores // BLOCK_DIM + _B - 1) // _B, max_broad_pairs), 1)

@@ -1048,11 +1048,11 @@ def func_sweep_links_by_level(
     for the fold of the composite inertia and of the link forces together, on the links of the awake roots, each link
     adding its children (see links_child_start in rigid/data.py). update_cacc applies to the accelerations alone.
 
-    A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
-    level among them, and the block syncs before the next level, whose links read their parent, or their children,
-    from it (see trees_levels_links_idx in rigid/data.py for the level tables).
+    A block of one subgroup of lanes (32 on CUDA and Metal, 64 on AMDGPU) holds envs of one tree or root, 8 lanes per
+    env. The lanes of an env split the links of a level among them, and the block syncs before the next level, whose
+    links read their parent, or their children, from it (see trees_levels_links_idx in rigid/data.py for the tables).
     """
-    BLOCK_DIM = qd.static(32)
+    BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
     N_LANES_PER_ENV = qd.static(rigid_config.level_sweep_n_lanes_per_env)
     N_ENVS_PER_BLOCK = qd.static(BLOCK_DIM // N_LANES_PER_ENV)
     IS_PER_ROOT = qd.static(sweep_pass not in (LINK_SWEEP_PASS.FORWARD_KINEMATICS, LINK_SWEEP_PASS.FORWARD_VELOCITY))

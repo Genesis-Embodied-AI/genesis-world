@@ -7,9 +7,6 @@ from genesis.utils.data import eoa
 from . import linesearch, solver
 from .data import ConstraintState
 
-# Shared-memory reduction block size for the _jv path.
-_JV_BLOCK = 32
-
 # Maximum allowed alpha (prevents divergence from degenerate steps).
 LS_ALPHA_MAX = 1e4
 
@@ -108,7 +105,7 @@ def _func_update_constraint_forces_batch(
     for the step applied to every row first, and under the elliptic cone the previous active flags are all captured
     before any is recomputed, see _func_update_constraint_forces.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_con = constraint_state.n_constraints[i_b]
     qd.simt.block.sync()
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction):
@@ -179,8 +176,10 @@ def _func_update_gradient(
     Where the solve is seeded one env per thread (see has_per_env_solve_seed in rigid/data.py), the Hessian of the env
     is assembled and factored first.
     """
+    # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+    BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
     _B = constraint_state.grad.shape[1]
-    qd.loop_config(name="update_gradient", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
+    qd.loop_config(name="update_gradient", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=BLOCK_DIM)
     for i_b in range(_B):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
             if qd.static(rigid_config.has_per_env_solve_seed):
@@ -209,7 +208,7 @@ def _func_islands_linesearch_and_apply(
     The first lane opens the iteration of the graph loop: it counts the iteration and ends the loop, which the search
     direction of any env that iterates on resumes (see _func_islands_update_search_direction).
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     _B = constraint_state.grad.shape[1]
     qd.loop_config(name="islands_linesearch", block_dim=_K)
     for i_flat in range(_B * _K):
@@ -277,7 +276,7 @@ def _func_islands_update_search_direction(
 
     An env that iterates on resumes the graph loop with the iterations left, every such env writing the same count.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     _B = constraint_state.grad.shape[1]
     qd.loop_config(name="islands_update_search_direction", block_dim=_K)
     for i_flat in range(_B * _K):

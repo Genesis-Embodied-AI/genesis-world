@@ -395,8 +395,8 @@ def _get_gpu_indices():
         # missing management library apart from a CPU-only machine.
         if any([Path(path).exists() for path in ("/dev/nvidiactl", "/dev/kfd")]):
             warnings.warn(
-                "GPU detected but no GPU management library available (neither NVML nor AMD SMI); multi-GPU support "
-                "will be disabled.",
+                "GPU detected but none of NVML, AMD SMI or the topology of the ROCm kernel driver is usable; multi-GPU "
+                "support will be disabled.",
                 stacklevel=2,
             )
 

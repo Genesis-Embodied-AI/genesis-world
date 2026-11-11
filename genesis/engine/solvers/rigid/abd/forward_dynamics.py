@@ -408,7 +408,7 @@ def func_compute_mass_matrix_and_link_force(
     # The cooperative assembly syncs the lanes of a block, which autodiff cannot reverse, so its reverse goes through
     # the rows of one thread each (see kernel_forward_dynamics_without_qacc)
     if qd.static(rigid_config.enable_cooperative_constraint_kernels and not is_backward):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
         for i_flat in range(n_trees * dyn_state.links.pos.shape[1] * BLOCK_DIM):
@@ -468,7 +468,7 @@ def func_compute_mass_matrix_masked(
 
     # See func_compute_mass_matrix_and_link_force
     if qd.static(rigid_config.enable_cooperative_constraint_kernels and not is_backward):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
         for i_flat in range(n_trees * envs_idx.shape[0] * BLOCK_DIM):
@@ -548,7 +548,7 @@ def func_factor_mass_tree_tiled(
         if tid == 0 and is_factored:
             if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                 has_damping = 1
-        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+        is_factored = su.qd_subgroup_first(has_damping) != 0
     if is_factored:
         # Each block owns its own scratch region [block_start, block_end), disjoint across trees too, so the scatter
         # stays race-free.
@@ -753,7 +753,7 @@ def func_factor_mass_tree_global(
         if tid == 0 and is_factored:
             if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                 has_damping = 1
-        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+        is_factored = su.qd_subgroup_first(has_damping) != 0
     if is_factored:
         # Factor each mass block of the tree in place in global memory, block-relative so shared indices stay >= 0
         tree_dof_start = rigid_info.trees_dof_start[i_t]
@@ -908,7 +908,7 @@ def func_factor_mass_tree_shared(
         if tid == 0 and is_factored:
             if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                 has_damping = 1
-        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+        is_factored = su.qd_subgroup_first(has_damping) != 0
     if is_factored:
         mass_mat = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, MAX_DOFS_PER_BLOCK + 1), gs.qd_float)
 
@@ -1050,7 +1050,7 @@ def func_factor_mass(
         )
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
         # Uncapped cooperative per-tree LDL^T, for a tree submatrix that does not fit in shared memory.
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
         for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
@@ -1064,7 +1064,7 @@ def func_factor_mass(
         for i_t, i_b in qd.ndrange(n_trees, _B, axes=qd.static(eoa(rigid_info.mass_mat_L))):
             func_factor_mass_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping)
     else:
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
         for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
@@ -1108,7 +1108,7 @@ def func_factor_mass_masked(
             qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
         )
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
         for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
@@ -1122,7 +1122,7 @@ def func_factor_mass_masked(
         for i_t, i_b_ in qd.ndrange(n_trees, _B, axes=qd.static(eoa(rigid_info.mass_mat_L))):
             func_factor_mass_tree(i_t, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping)
     else:
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
         for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
