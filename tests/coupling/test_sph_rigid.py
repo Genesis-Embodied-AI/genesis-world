@@ -17,6 +17,7 @@ from ..utils.assertions import assert_allclose, assert_equal
         pytest.param(2, marks=pytest.mark.slow),  # ~300s
     ],
 )
+@pytest.mark.parametrize("backend", [gs.gpu])
 def test_flotation_follows_density_ratio(n_envs, show_viewer):
     PARTICLE_SIZE = 0.02
     BALL_RADIUS = 0.06
