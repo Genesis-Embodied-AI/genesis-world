@@ -1,6 +1,24 @@
 import xml.etree.ElementTree as ET
 
+import numpy as np
 import pytest
+
+import igl
+
+
+@pytest.fixture(scope="session")
+def cloth_grid_obj_path(asset_tmp_path):
+    """Write a flat 1 m x 1 m square cloth in the xy plane, split into 8 x 8 squares of two triangles each."""
+    n = 8
+    verts = np.array([[i / n - 0.5, j / n - 0.5, 0.0] for j in range(n + 1) for i in range(n + 1)])
+    faces = []
+    for j in range(n):
+        for i in range(n):
+            v00 = j * (n + 1) + i
+            faces += [[v00, v00 + 1, v00 + n + 1], [v00 + 1, v00 + n + 2, v00 + n + 1]]
+    path = str(asset_tmp_path / "cloth_grid.obj")
+    igl.write_triangle_mesh(path, verts, np.array(faces))
+    return path
 
 
 @pytest.fixture(scope="session")

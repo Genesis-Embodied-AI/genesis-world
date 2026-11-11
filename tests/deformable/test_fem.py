@@ -1289,3 +1289,124 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
     assert_allclose(com_pos_z_f - com_pos_0[..., 2], com_pos_delta, tol=0.05)
     sphere_center = sphere.get_verts_pos()[..., sphere_center_idx, :]
     assert_allclose(sphere_center, sphere_target_poss, tol=tol)
+
+
+@pytest.mark.required
+def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
+    DT = 0.01
+    GRAVITY = 9.81
+    N_GRID = 8
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, 0.0, 1.0),
+            camera_lookat=(0.0, -0.5, 0.7),
+        ),
+        show_viewer=show_viewer,
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 1.0),
+        ),
+        material=gs.materials.FEM.Cloth(),
+    )
+    scene.build(n_envs=2)
+    # The two corners of the edge at y = -0.5, and the center of the cloth
+    pins_idx = [0, N_GRID]
+    center_idx = (N_GRID // 2) * (N_GRID + 1) + N_GRID // 2
+    cloth.set_vertex_constraints(verts_idx_local=pins_idx)
+
+    for i_step in range(1, 101):
+        scene.step()
+        verts_pos = cloth.get_verts_pos()
+        assert_allclose(verts_pos[:, pins_idx], cloth.init_positions[pins_idx], tol=gs.EPS)
+        # The center falls freely until the pull of the pins reaches it, as backward Euler integrates gravity
+        if i_step == 10:
+            assert_allclose(verts_pos[:, center_idx, 2], 1.0 - GRAVITY * DT**2 * i_step * (i_step + 1) / 2, atol=5e-6)
+    # The cloth swings down under the edge of its pins, past them
+    assert (verts_pos[:, center_idx, 1] < -0.5).all()
+    assert (verts_pos[:, center_idx, 2] < 1.0).all()
+    assert_allclose(verts_pos[0], verts_pos[1], tol=gs.EPS)
+
+
+@pytest.mark.required
+def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    D_HAT = 1e-2
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            d_hat=D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 0.5),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 0.05),
+        ),
+        material=gs.materials.FEM.Cloth(
+            contact_thickness=CONTACT_THICKNESS,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The cloth lands within a few substeps and never enters its contact thickness, then rests in the contact band
+    for _ in range(50):
+        scene.step()
+        assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+    verts_z = cloth.get_verts_pos()[..., 2]
+    assert (verts_z < CONTACT_THICKNESS + D_HAT).all()
+    assert_allclose(cloth.get_verts_vel(), 0.0, atol=1e-11)
+
+
+@pytest.mark.required
+def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
+    scene = gs.Scene(mpm_options=gs.options.MPMOptions(use_implicit_solver=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
+    )
+    with pytest.raises(gs.GenesisException, match="together with the implicit MPM solver"):
+        scene.build()
+
+    scene = gs.Scene()
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Mesh(file=box_obj_path, pos=(0.0, 0.0, 1.0)), material=gs.materials.FEM.Elastic())
+    with pytest.raises(gs.GenesisException, match="together with volumetric FEM entities"):
+        scene.build()
+
+    scene = gs.Scene()
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    with pytest.raises(gs.GenesisException, match="fixed planes as the only rigid entities"):
+        scene.build()
+
+    scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="requires_grad=True"):
+        scene.build()
+
+    scene = gs.Scene(coupler_options=gs.options.SAPCouplerOptions())
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    with pytest.raises(gs.GenesisException, match="requires LegacyCouplerOptions"):
+        scene.build()
+
+    scene = gs.Scene(ipc_options=gs.options.IPCOptions(), coupler_options=gs.options.SAPCouplerOptions())
+    with pytest.raises(gs.GenesisException, match="IPCOptions configure the contact of the cloth"):
+        scene.build()
