@@ -145,6 +145,8 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     # The largest extent of the segments of each environment over the substep, which bounds the reach of the particles
     # that look for the segments around them through the hash grid of their centroids
     segments_extent_max: qd.Tensor = field(float, shape=(ENVS,))
+    # The boundary each segment belongs to: its rigid geom, or its FEM entity numbered after the rigid geoms
+    segments_boundary_idx: qd.Tensor = field(int, shape=(PARTICLES,), kind=DataKind.CONSTANT)
 
 
 class LegacyCouplerState(Data, kind=DataKind.STATE):
@@ -173,6 +175,12 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     """
 
     influence_min: qd.Tensor = field(float, shape=())
+    # The tolerance relative to the speed of a particle within which it meets a bound of its velocity (see
+    # kernel_sph_boundaries_impulse)
+    velocity_tol: qd.Tensor = field(float, shape=())
+    # The determinant of the Gram matrix of unit normals below which they count as dependent (see
+    # func_project_on_bounds)
+    normals_independence_min: qd.Tensor = field(float, shape=())
     animate_inv_dt: qd.Tensor = field(float, shape=())
     softness_min: qd.Tensor = field(float, shape=())
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
@@ -385,6 +393,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.legacy_coupler_info = LegacyCouplerInfo(
             values=dict(
                 influence_min=0.1,
+                velocity_tol=1e-6,
+                normals_independence_min=1e-6,
                 animate_inv_dt=min(1.0 / self.pbd_solver.substep_dt, 50.0),
                 softness_min=1e-10,
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
@@ -527,6 +537,17 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             unused=dict(fem_sph=not has_fem_sph, rigid_sph=not has_rigid_sph),
         )
         self.sph_boundaries.quad_bary.from_numpy(quad_bary)
+        fem_tris_entity_idx = np.repeat(
+            np.arange(len(self.fem_solver.entities)),
+            [len(entity.surface_triangles) for entity in self.fem_solver.entities],
+        )
+        segments_boundary_idx = np.concatenate(
+            [
+                self.rigid_solver.n_geoms + fem_tris_entity_idx[fem_segments_tri_idx],
+                rigid_tris_geom_idx[rigid_segments_tri_idx],
+            ]
+        )
+        self.sph_boundaries.segments_boundary_idx.from_numpy(segments_boundary_idx.astype(gs.np_int))
         self.sph_boundaries.quad_weight.from_numpy(quad_weight)
         if has_fem_sph:
             self.sph_boundaries.fem_segments_tri_idx.from_numpy(fem_segments_tri_idx.astype(gs.np_int))
@@ -682,6 +703,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.sph_solver.sph_info,
                 self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.dyn_info.links,
+                self.legacy_coupler_info,
                 self.legacy_coupler_config,
             )
 
@@ -1504,6 +1526,103 @@ def kernel_place_sph_boundary_segments(
             sph_state.boundary.surface_dist[i_p, i_b] = surface_dist
             sph_state.boundary.impulse_coef[i_p, i_b] = 0.0
             sph_state.boundary.impulse_gravity_coef[i_p, i_b] = 0.0
+            sph_state.boundary.boundaries_idx[i_p, i_b] = qd.Vector([-1, -1, -1, -1], dt=gs.qd_int)
+            sph_state.boundary.boundaries_impulse_coef[i_p, i_b] = qd.Vector.zero(gs.qd_float, 4)
+
+
+@qd.func
+def func_project_on_bounds(
+    vel_free: qd.types.vector(3),
+    normals: qd.types.matrix(4, 3),
+    bounds: qd.types.vector(4),
+    violation_tol: float,
+    legacy_coupler_info: LegacyCouplerInfo,
+    n_bounds: int,
+):
+    """
+    Return the velocity nearest to a free velocity that meets at most 4 lower bounds on its components along normals,
+    with the indices of the bounds met as equalities and their multipliers.
+
+    Where no velocity meets all the bounds, as for a particle squeezed between two approaching boundaries, the bounds are
+    all lowered by the least common slack that lets a velocity meet them, which violates each of the opposing bounds by
+    the same amount. By duality, that slack is the largest weighted mean of the bounds over the non-negative weights
+    that sum to one and cancel the weighted sum of their normals. The nearest velocity then meets as equalities the
+    first set of at most 3 bounds whose multipliers are non-negative and whose solution meets all the others, the
+    solution of a strictly convex problem being unique.
+    """
+    slack = gs.qd_float(0.0)
+    for i_mask in range(16):
+        # The subsets of at least 2 of the bounds, as the columns of the normals and a row of ones, unused ones padded
+        mixing = qd.Matrix.zero(gs.qd_float, 4, 4)
+        n_subset = 0
+        for i_k in qd.static(range(4)):
+            if (i_mask >> i_k) & 1 and i_k < n_bounds:
+                for i_d in qd.static(range(3)):
+                    mixing[i_d, i_k] = normals[i_k, i_d]
+                mixing[3, i_k] = 1.0
+                n_subset = n_subset + 1
+        if n_subset >= 2 and i_mask < (1 << n_bounds):
+            gram = mixing.transpose() @ mixing
+            rhs = mixing.transpose() @ qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)
+            for i_k in qd.static(range(4)):
+                if not ((i_mask >> i_k) & 1):
+                    gram[i_k, i_k] = 1.0
+            if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
+                weights = gram.inverse() @ rhs
+                residual = (mixing @ weights - qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)).norm()
+                if weights.min() >= 0.0 and residual < legacy_coupler_info.normals_independence_min[None]:
+                    slack = qd.max(slack, weights.dot(bounds))
+    bounds_relaxed = bounds - slack * qd.Vector([1.0, 1.0, 1.0, 1.0], dt=gs.qd_float)
+
+    vel = vel_free
+    set_best = qd.Vector([-1, -1, -1], dt=gs.qd_int)
+    lambdas_best = qd.Vector.zero(gs.qd_float, 3)
+    violation_best = gs.qd_float(0.0)
+    is_found = False
+    # The sets are taken as (i_k0 <= i_k1 <= i_k2) of distinct indices, a repeated index ending the set
+    for i_k0 in range(n_bounds):
+        for i_k1 in range(i_k0, n_bounds):
+            for i_k2 in range(i_k1, n_bounds):
+                n_set = 1 + qd.select(i_k1 > i_k0, 1, 0) + qd.select(i_k2 > i_k1, 1, 0)
+                set_idx = qd.Vector([i_k0, i_k1, i_k2], dt=gs.qd_int)
+                if i_k2 > i_k1 and i_k1 == i_k0:
+                    n_set = 0
+                elif i_k1 > i_k0 and i_k2 == i_k1:
+                    set_idx = qd.Vector([i_k0, i_k1, -1], dt=gs.qd_int)
+                elif n_set == 1:
+                    set_idx = qd.Vector([i_k0, -1, -1], dt=gs.qd_int)
+                if n_set > 0 and (not is_found or violation_best > violation_tol):
+                    # The bounds of the set as columns, the unused ones left zero with identity equations
+                    normals_set = qd.Matrix.zero(gs.qd_float, 3, 3)
+                    bounds_set = qd.Vector.zero(gs.qd_float, 3)
+                    for i_s in qd.static(range(3)):
+                        if i_s < n_set:
+                            i_k = set_idx[i_s]
+                            for i_d in qd.static(range(3)):
+                                normals_set[i_d, i_s] = normals[i_k, i_d]
+                            bounds_set[i_s] = bounds_relaxed[i_k]
+                    gram = normals_set.transpose() @ normals_set
+                    rhs = bounds_set - normals_set.transpose() @ vel_free
+                    for i_s in qd.static(range(3)):
+                        if i_s >= n_set:
+                            gram[i_s, i_s] = 1.0
+                            rhs[i_s] = 0.0
+                    # The normals are unit vectors, so the determinant of their Gram matrix measures their independence
+                    if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
+                        lambdas_set = gram.inverse() @ rhs
+                        if lambdas_set.min() >= 0.0:
+                            vel_set = vel_free + normals_set @ lambdas_set
+                            violation = gs.qd_float(0.0)
+                            for i_k in range(n_bounds):
+                                normal_k = qd.Vector([normals[i_k, 0], normals[i_k, 1], normals[i_k, 2]])
+                                violation = qd.max(violation, bounds_relaxed[i_k] - normal_k.dot(vel_set))
+                            if not is_found or violation < violation_best:
+                                is_found = True
+                                violation_best = violation
+                                vel = vel_set
+                                set_best = set_idx
+                                lambdas_best = lambdas_set
+    return vel, set_best, lambdas_best
 
 
 @qd.kernel
@@ -1514,6 +1633,7 @@ def kernel_sph_boundaries_impulse(
     sph_info: SPHInfo,
     geoms_info: GeomsInfo,
     links_info: LinksInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
     legacy_coupler_config: qd.template(),
 ):
     """
@@ -1530,27 +1650,113 @@ def kernel_sph_boundaries_impulse(
 
     # A particle reaching the surface of a body loses the velocity that carries it into the body, relative to the
     # surface, the body taking the opposite impulse. The density solve holds the liquid off the body only where the
-    # particle has enough liquid neighbors, which a particle at the free surface lacks.
+    # particle has enough liquid neighbors, which a particle at the free surface lacks. Each boundary near the particle
+    # bounds the velocity along its own volume gradient, and the bounds are met jointly: a particle pressed between two
+    # boundaries, as under a body resting on another, meets both, where their summed gradient cancels along the
+    # direction between them. A particle inside a boundary is moved out to its surface, since the bound only stops it
+    # from moving further in.
+    N_BOUNDARIES = qd.static(4)
+    support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
     for i_r, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.vel))
     ):
         if sph_state.particles_reordered.is_active[i_r, i_b]:
             i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
-            volume_grad = sph_state.boundary.volume_grad[i_p, i_b]
-            grad_norm = volume_grad.norm()
-            surface_dist = sph_state.boundary.surface_dist[i_p, i_b]
-            if surface_dist < 0.25 * sph_info.particle_size[None] and grad_norm > 0.0:
-                vel = sph_state.particles_reordered.vel[i_r, i_b]
-                approach = (sph_state.boundary.vel_flux[i_p, i_b] - vel.dot(volume_grad)) / grad_norm
-                # A particle inside a body leaves it at the velocity that takes it back to the surface over a few
-                # substeps
-                approach_min = qd.max(-surface_dist, 0.0) / (4.0 * sph_info.substep_dt[None])
-                if approach < approach_min:
-                    coef = (approach - approach_min) / grad_norm
-                    sph_state.particles_reordered.vel[i_r, i_b] = vel + coef * volume_grad
-                    sph_state.boundary.impulse_coef[i_p, i_b] = (
-                        sph_state.boundary.impulse_coef[i_p, i_b] - sph_info.particles.mass[i_p] * coef
-                    )
+            grad_norm = sph_state.boundary.volume_grad[i_p, i_b].norm()
+            if sph_state.boundary.surface_dist[i_p, i_b] < 0.25 * sph_info.particle_size[None] and grad_norm > 0.0:
+                pos = sph_state.particles_reordered.pos[i_r, i_b]
+                vel_free = sph_state.particles_reordered.vel[i_r, i_b]
+                # The kernel volume, its gradient, the rate the moving segments change it and the distance to the
+                # surface of each boundary around the particle, those beyond the first 3 merged in the last slot
+                boundaries_idx = qd.Vector([-1] * N_BOUNDARIES, dt=gs.qd_int)
+                volumes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
+                volume_grads = qd.Matrix.zero(gs.qd_float, N_BOUNDARIES, 3)
+                vel_fluxes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
+                surface_dists = qd.Vector([1e9] * N_BOUNDARIES, dt=gs.qd_float)
+                n_boundaries = 0
+                reach = support_radius + sph_boundaries.segments_extent_max[i_b]
+                cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
+                cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
+                base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
+                n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
+                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                    i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
+                    slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
+                    for i_q in range(sph_boundaries.hash_grid.slot_size[i_slot, i_b]):
+                        i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
+                        corners = sph_boundaries.segments.corners[i_sg, i_b]
+                        seg_volume, seg_volume_grad, _ = func_segment_volume(
+                            pos,
+                            corners,
+                            sph_boundaries.segments.normal[i_sg, i_b],
+                            sph_boundaries.segments.area[i_sg, i_b],
+                            sph_boundaries.segments.extent[i_sg, i_b],
+                            sph_boundaries.quad_bary,
+                            sph_boundaries.quad_weight,
+                            support_radius,
+                            kernel_norm,
+                        )
+                        i_bd = sph_boundaries.segments_boundary_idx[i_sg]
+                        i_k = -1
+                        for i_s in qd.static(range(N_BOUNDARIES)):
+                            if boundaries_idx[i_s] == i_bd:
+                                i_k = i_s
+                        if i_k < 0:
+                            if n_boundaries < N_BOUNDARIES:
+                                i_k = n_boundaries
+                                boundaries_idx[i_k] = i_bd
+                                n_boundaries = n_boundaries + 1
+                            else:
+                                i_k = N_BOUNDARIES - 1
+                                boundaries_idx[i_k] = -2
+                        volumes[i_k] = volumes[i_k] + seg_volume
+                        for i_d in qd.static(range(3)):
+                            volume_grads[i_k, i_d] = volume_grads[i_k, i_d] + seg_volume_grad[i_d]
+                        vel_fluxes[i_k] = vel_fluxes[i_k] + sph_boundaries.segments.vel[i_sg, i_b].dot(seg_volume_grad)
+                        surface_dists[i_k] = qd.min(surface_dists[i_k], func_segment_dist(pos, corners))
+
+                # The approach velocity of the particle toward each boundary close to it, along the volume gradient
+                # of the boundary relative to its segments, is bounded from below by zero
+                normals = qd.Matrix.zero(gs.qd_float, 4, 3)
+                bounds = qd.Vector.zero(gs.qd_float, 4)
+                bounds_boundary = qd.Vector([-1, -1, -1, -1], dt=gs.qd_int)
+                n_bounds = 0
+                pos_shift = qd.Vector.zero(gs.qd_float, 3)
+                for i_s in qd.static(range(N_BOUNDARIES)):
+                    volume_grad = qd.Vector([volume_grads[i_s, 0], volume_grads[i_s, 1], volume_grads[i_s, 2]])
+                    boundary_grad_norm = volume_grad.norm()
+                    # The divergence theorem counts the kernel at the particle itself out of the volume of a solid
+                    # that encloses it, which turns it negative
+                    surface_dist = qd.select(volumes[i_s] < -1e-3, -surface_dists[i_s], surface_dists[i_s])
+                    if (
+                        i_s < n_boundaries
+                        and boundary_grad_norm > 0.0
+                        and surface_dist < 0.25 * sph_info.particle_size[None]
+                    ):
+                        normal = -volume_grad / boundary_grad_norm
+                        for i_d in qd.static(range(3)):
+                            normals[n_bounds, i_d] = normal[i_d]
+                        bounds[n_bounds] = -vel_fluxes[i_s] / boundary_grad_norm
+                        bounds_boundary[n_bounds] = i_s
+                        n_bounds = n_bounds + 1
+                        if surface_dist < 0.0:
+                            pos_shift = pos_shift - surface_dist * normal
+                violation_tol = legacy_coupler_info.velocity_tol[None] * (1.0 + vel_free.norm())
+                vel, set_idx, lambdas = func_project_on_bounds(
+                    vel_free, normals, bounds, violation_tol, legacy_coupler_info, n_bounds
+                )
+                # The multiplier of each bound met as an equality is the velocity the particle takes along its normal
+                impulse_coefs = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
+                for i_s in qd.static(range(3)):
+                    i_k = set_idx[i_s]
+                    if i_k >= 0:
+                        i_bs = bounds_boundary[i_k]
+                        volume_grad = qd.Vector([volume_grads[i_bs, 0], volume_grads[i_bs, 1], volume_grads[i_bs, 2]])
+                        impulse_coefs[i_bs] = sph_info.particles.mass[i_p] * lambdas[i_s] / volume_grad.norm()
+                sph_state.particles_reordered.vel[i_r, i_b] = vel
+                sph_state.particles_reordered.pos[i_r, i_b] = pos + pos_shift
+                sph_state.boundary.boundaries_idx[i_p, i_b] = boundaries_idx
+                sph_state.boundary.boundaries_impulse_coef[i_p, i_b] = impulse_coefs
 
     # Each segment takes the opposite of the impulse it gives the particles around it. On GPU, the lanes of a subgroup
     # take a segment together, striding the particles of each cell around it (see kernel_place_sph_boundary_segments).
@@ -1572,6 +1778,7 @@ def kernel_sph_boundaries_impulse(
             # The particles within the support radius of the segment lie within it plus the extent of the segment from its
             # centroid
             extent = sph_boundaries.segments.extent[i_sg, i_b]
+            i_bd = sph_boundaries.segments_boundary_idx[i_sg]
             reach = support_radius + extent
             cell_lo = func_hash_pos_to_grid(centroid - reach, sph_state.hash_grid)
             cell_hi = func_hash_pos_to_grid(centroid + reach, sph_state.hash_grid)
@@ -1598,9 +1805,19 @@ def kernel_sph_boundaries_impulse(
                         if seg_volume_grad.norm_sqr() > 0.0:
                             n_wet = n_wet + 1
                             i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
+                            # The impulse of the bound of the boundary of the segment, or of the merged boundaries
+                            boundaries_idx = sph_state.boundary.boundaries_idx[i_p, i_b]
+                            boundaries_impulse_coef = sph_state.boundary.boundaries_impulse_coef[i_p, i_b]
+                            impulse_coef = sph_state.boundary.impulse_coef[i_p, i_b]
+                            i_s_matched = qd.select(boundaries_idx[3] == -2, 3, -1)
+                            for i_s in qd.static(range(4)):
+                                if boundaries_idx[i_s] == i_bd:
+                                    i_s_matched = i_s
+                            if i_s_matched >= 0:
+                                impulse_coef = impulse_coef + boundaries_impulse_coef[i_s_matched]
                             impulse = (
                                 impulse
-                                + sph_state.boundary.impulse_coef[i_p, i_b] * seg_volume_grad
+                                + impulse_coef * seg_volume_grad
                                 + sph_state.boundary.impulse_gravity_coef[i_p, i_b] * (seg_moment @ gravity)
                             )
         if qd.static(N_LANES > 1):

@@ -80,6 +80,16 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
             rho=1500.0,
         ),
     )
+    # This ball starts above the liquid, falls into it and comes to rest on the plane, pressing the liquid under it
+    dropped_ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(-0.13, -0.13, 0.5 + BALL_RADIUS + PARTICLE_SIZE),
+            radius=BALL_RADIUS,
+        ),
+        material=gs.materials.Rigid(
+            rho=1500.0,
+        ),
+    )
     raft = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.12, 0.25),
@@ -138,6 +148,10 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
         verts_pos, particles_pos = block.get_verts_pos(), liquid.get_particles_pos()
         block_center = verts_pos.mean(dim=-2, keepdim=True)
         assert ((particles_pos - block_center).abs().amax(dim=-1) > 0.5 * (BLOCK_SIZE - PARTICLE_SIZE)).all()
+
+        # The liquid stays above the plane, the dropped ball pressing it against the plane included, up to the quarter
+        # particle size that the coupling lets it approach by
+        assert (particles_pos[..., 2] > -0.25 * PARTICLE_SIZE).all()
 
         # The draft of the block below the free surface of the liquid around it, the surface lying half a particle size
         # above the centers of the topmost particles

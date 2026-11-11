@@ -130,6 +130,11 @@ class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS))
     # the substep, with `grad` and `moment` the volume gradient and the first moment of the segment
     impulse_coef: qd.Tensor = field(float)
     impulse_gravity_coef: qd.Tensor = field(float)
+    # The particle pushes the segments of each of the boundaries it meets as an equality on top, by its coefficient times
+    # their volume gradient, the boundaries beyond the first 3 near the particle being merged as -2 (see
+    # kernel_sph_boundaries_impulse)
+    boundaries_idx: qd.Tensor = field((int, 4))
+    boundaries_impulse_coef: qd.Tensor = field((float, 4))
 
 
 class SPHState(Data, kind=DataKind.STATE):
