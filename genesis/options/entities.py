@@ -256,20 +256,14 @@ class Rigid(BaseEntity["RigidEntity"]):
             )
         return self
 
-    def has_link_density(self, link_path: tuple[str, ...]) -> bool:
-        """Whether the link and geom options give a density to a link or to one of its geoms.
-
-        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``).
-        """
-        geoms_options = list(self.geoms.values())
-        for link_index, link_options in self.links.items():
-            if link_index.matches(link_path):
-                if link_options.material is not None and link_options.material.rho is not None:
-                    return True
-                geoms_options.extend(link_options.geoms.values())
+    @property
+    def has_link_density(self) -> bool:
+        """Whether the link and geom options give a density to some link or geom."""
+        links_options = self.links.values()
+        geoms_options = [*self.geoms.values(), *(geom for link in links_options for geom in link.geoms.values())]
         return any(
-            geom_options.material is not None and geom_options.material.rho is not None
-            for geom_options in geoms_options
+            options.material is not None and options.material.rho is not None
+            for options in (*links_options, *geoms_options)
         )
 
     def get_geoms_material(self, link_path: tuple[str, ...], geoms_name: list[str]) -> list[materials.Rigid | None]:

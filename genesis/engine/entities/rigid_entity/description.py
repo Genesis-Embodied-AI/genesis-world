@@ -393,6 +393,8 @@ class Resolution:
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
     # The names of every collision geom as its asset states them, which the geom options of the entity select on
     geoms_name: list[str] = field(default_factory=list)
+    # The paths of the links whose link or geom options give a density to one of their collision geoms
+    links_path_with_density: set[tuple[str, ...]] = field(default_factory=set)
 
 
 @dataclass
@@ -1406,9 +1408,7 @@ class KinematicEntityDescription(EntityDescription):
             # A density the link or geom options give may move the center of mass off the anchor, which stays where a
             # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the solver reads the body as
             # unaligned, as it does once an attach extends it
-            if isinstance(self.options, gs.entities.Rigid) and any(
-                self.options.has_link_density(links_path[i_l]) for i_l in subtree
-            ):
+            if any(links_path[i_l] in resolution.links_path_with_density for i_l in subtree):
                 root.is_aligned = False
 
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent
@@ -1493,6 +1493,8 @@ class KinematicEntityDescription(EntityDescription):
             for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_path, geoms_name)):
                 if material is not None:
                     g_info["material"] = material
+                    if material.rho is not None:
+                        resolution.links_path_with_density.add(link_path)
 
         # Post-process all collision meshes at once.
         # Destroying the original geometries should be avoided if possible as it will change the way objects
