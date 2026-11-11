@@ -4,6 +4,9 @@ import genesis as gs
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.misc import qd_isfinite
 
+# The base-2 logarithm of the lanes of a block, the unit of the subgroup helpers below
+BLOCK_LOG2_LANES = 5
+
 
 def requires_deterministic_accumulation() -> bool:
     """Return whether the accumulations of parallel threads must be independent of the order of the threads.

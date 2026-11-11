@@ -50,7 +50,8 @@ class Rigid(Kinematic["RigidEntity"]):
     coup_softness : float, optional
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
     coup_restitution : float, optional
-        Restitution coefficient in collision coupling. Should be between 0 and 1. Default is 0.0.
+        Restitution coefficient in collision coupling. Should be between 0 and 1. Default is 0.0. The coupling with SPH
+        liquids depends on none of these three parameters.
     sdf_cell_size : float, optional
         Cell size in SDF grid in meters. Defines grid resolution. Default is 0.005.
     sdf_min_res : int, optional
