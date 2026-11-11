@@ -230,8 +230,7 @@ class RigidJointDescription:
 class KinematicLinkDescription:
     """Describe one link of an entity: the frame it stands at, the joints that move it, and the geoms it is drawn as.
 
-    'is_aligned' says that the link frame stands at the center of mass and on the principal axes of its body, which the
-    build anchors it on. A body whose link or geom options give a density keeps the anchored frame and is unaligned.
+    'is_aligned' says that the build moved the link frame onto the anchor its geoms share.
     """
 
     name: str
@@ -1406,8 +1405,7 @@ class KinematicEntityDescription(EntityDescription):
                     root.quat = gu.transform_quat_by_quat(principal_quat, root.quat)
 
             # A density the link or geom options give may move the center of mass off the anchor, which stays where a
-            # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the solver reads the body as
-            # unaligned, as it does once an attach extends it
+            # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the body is unaligned
             if any(links_path[i_l] in resolution.links_path_with_density for i_l in subtree):
                 root.is_aligned = False
 
