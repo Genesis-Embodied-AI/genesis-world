@@ -255,17 +255,23 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         scene.add_entity(
             options=gs.entities.Rigid(
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-                geoms={
-                    gs.GeomIndex.all(): gs.options.Geom(friction=1.0),
-                    gs.GeomIndex.at(0): gs.options.Geom(friction=2.0),
+                links={
+                    gs.LinkIndex.named("box_baselink"): gs.options.Link(
+                        geoms={gs.GeomIndex.at(0): gs.options.Geom(friction=2.0)}
+                    )
                 },
+                geoms={gs.GeomIndex.all(): gs.options.Geom(friction=1.0)},
             )
         )
     with pytest.raises(gs.GenesisException, match="selects no valid geom"):
         scene.add_entity(
             options=gs.entities.Rigid(
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
-                geoms={gs.GeomIndex.at(1): gs.options.Geom(friction=1.0)},
+                links={
+                    gs.LinkIndex.named("box_baselink"): gs.options.Link(
+                        geoms={gs.GeomIndex.at(1): gs.options.Geom(friction=1.0)}
+                    )
+                },
             )
         )
     with pytest.raises(gs.GenesisException, match="equal specificity"):
@@ -287,7 +293,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         scene.add_entity(
             options=arm.options.model_copy(update={"links": {gs.LinkIndex.named("arm3"): gs.options.Link()}})
         )
-    with pytest.raises(gs.GenesisException, match="mesh or a primitive"):
+    with pytest.raises(gs.GenesisException, match="by ordinal through the options of their link"):
         scene.add_entity(
             options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(0): gs.options.Geom(friction=1.0)}})
         )

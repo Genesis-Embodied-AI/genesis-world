@@ -10,7 +10,7 @@ from genesis.engine.materials.base import Material
 from genesis.typing import FrozenDictType, ValidFloat
 
 from .indices import GeomIndex, LinkIndex, VertexIndex
-from .morphs import Mesh, Morph, Primitive
+from .morphs import Morph
 from .options import Options
 from .solvers import FEMOptions, KinematicOptions, MPMOptions, PBDOptions, RigidOptions, SPHOptions
 from .surfaces import Surface
@@ -176,10 +176,9 @@ class Rigid(BaseEntity["RigidEntity"]):
         The options of the collision geoms each key selects, which override those of the entity and the material of
         the links. They stand at the specificity of the geom options of the links, so the two giving one field of one
         geom raise an error.
-        ``gs.GeomIndex.all()`` selects every collision geom of the entity, and ``gs.GeomIndex.named`` the geoms of the
-        given names in any of its links, raising if no link has one. A selection by ordinal requires a mesh or a
-        primitive morph, whose entity has a single link. Select the geoms of one link of another asset through 'links'
-        instead. Default is no geom options.
+        Each key is ``gs.GeomIndex.all()``, selecting every collision geom of the entity, or ``gs.GeomIndex.named``,
+        selecting the geoms of the given names in any of its links and raising if no link has one. Select geoms by
+        ordinal through the options of their link in 'links'. Default is no geom options.
     """
 
     _solver_options_cls = RigidOptions
@@ -191,12 +190,10 @@ class Rigid(BaseEntity["RigidEntity"]):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "Rigid":
-        if any(not geom_index.is_all and geom_index.names is None for geom_index in self.geoms) and not all(
-            isinstance(morph, (Mesh, Primitive)) for morph in self.morphs
-        ):
+        if any(not geom_index.is_all and geom_index.names is None for geom_index in self.geoms):
             gs.raise_exception(
-                "Geom options of an entity select geoms by ordinal only if its morph is a mesh or a primitive. Select "
-                "them with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named', or through the options of their link instead."
+                "Geom options of an entity select geoms with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named'. Select geoms "
+                "by ordinal through the options of their link."
             )
         return self
 
