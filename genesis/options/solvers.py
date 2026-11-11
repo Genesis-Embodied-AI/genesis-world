@@ -880,7 +880,74 @@ class IPCOptions(Options):
         Sliding velocity below which the friction of a contact eases into static friction, in m/s. A smaller value holds
         a resting cloth more firmly in place at the cost of a stiffer, harder solve, while a larger one lets it creep.
         Defaults to 1e-2.
+    ccd_bound : str, optional
+        How a step of the solve finds how far the cloth may move before touching: 'directional' bounds the motion by how
+        fast the gap between two surfaces closes, 'additive' by how far each surface moves in any direction. Both stop
+        at the same contact, 'directional' in fewer passes for cloth sliding over a surface. Defaults to 'directional'.
+    ccd_partition : bool, optional
+        Whether every group of cloths in contact with one another moves by a step of its own, as far as its own contacts
+        allow. Off, a contact anywhere in a scene shortens the step of every cloth in it, which slows the solve of
+        scenes with many separate cloths, without changing the motion it converges to. Defaults to True.
+    adaptive_kappa_mode : str, optional
+        Whether the stiffness of the contact grows where a cloth presses so hard into it that the gap nearly closes:
+        'per-vertex' stiffens the contacts of the vertices concerned, and relaxes them once they stay calm, 'off' keeps
+        the stiffness of the cloth material. A stiffer contact holds a heavy load at a wider gap, which keeps the solve
+        fast, at the cost of a contact force that depends on the past of the load. Defaults to 'per-vertex'.
+    adaptive_kappa_tick : str, optional
+        When the stiffness of the contact grows: 'newton' within the solve of a substep, as soon as a gap closes,
+        'frame' once per substep. Growing within the solve answers a sudden load at once, at the cost of a few more
+        iterations of that substep. Defaults to 'newton'.
+    adaptive_kappa_gap_ratio : float, optional
+        Gap below which a contact stiffens, as a fraction of 'd_hat' beyond the contact thickness. A larger ratio keeps
+        cloths farther apart under load, at the cost of stiffer contacts. Defaults to 0.01.
+    adaptive_kappa_grow : float, optional
+        Factor of the stiffness each time a contact stiffens, above 1. A larger factor opens a closing gap in fewer
+        steps, at the cost of a harder solve right after. Defaults to 2.
+    adaptive_kappa_max_scale : float, optional
+        Largest factor of the stiffness of the cloth material that a contact reaches. A larger one holds heavier loads,
+        at the cost of a harder solve under them. Defaults to 128.
+    adaptive_kappa_calm_time : float, optional
+        Time a stiffened contact holds its stiffness once its gap reopens, in s, before it relaxes. A longer time holds
+        a repeated load steadily, at the cost of a stiff contact that outlives it. Defaults to 0.3.
+    adaptive_kappa_relax_time : float, optional
+        Time constant of the relaxation of a stiffened contact back to the stiffness of the cloth material, in s. A
+        longer time relaxes more smoothly and more slowly. Defaults to 0.4.
+    adaptive_kappa_hysteresis : float, optional
+        Factor of 'adaptive_kappa_gap_ratio' up to which a contact keeps its stiffness without relaxing, at least 1. A
+        larger factor avoids stiffening and relaxing in turn under a varying load. Defaults to 2.
+    init_collision_pair_capacity : int, optional
+        Pairs of surfaces near enough to touch that the scene holds at first. More pairs grow the storage as the scene
+        needs, at the cost of repeating the search that found them, so a larger value saves that work in crowded scenes
+        at the cost of memory. Defaults to 1000.
+    capacity_grow_factor : float, optional
+        Factor of the storage of the pairs of surfaces over the pairs found when it grows, above 1. A larger factor
+        grows less often at the cost of memory. Defaults to 1.2.
+    intersection_check : bool, optional
+        Whether building the scene checks that no cloth crosses itself or another cloth, and raises an exception naming
+        the crossing edge and triangle. The solve cannot separate cloths that start crossed, so the check finds the
+        mistake at once, at the cost of a slower build. Defaults to False.
     """
 
     d_hat: PositiveFloat = 1e-2
     friction_eps_v: PositiveFloat = 1e-2
+    ccd_bound: Literal["directional", "additive"] = "directional"
+    ccd_partition: StrictBool = True
+    adaptive_kappa_mode: Literal["per-vertex", "off"] = "per-vertex"
+    adaptive_kappa_tick: Literal["newton", "frame"] = "newton"
+    adaptive_kappa_gap_ratio: PositiveFloat = 0.01
+    adaptive_kappa_grow: PositiveFloat = 2.0
+    adaptive_kappa_max_scale: PositiveFloat = 128.0
+    adaptive_kappa_calm_time: NonNegativeFloat = 0.3
+    adaptive_kappa_relax_time: PositiveFloat = 0.4
+    adaptive_kappa_hysteresis: PositiveFloat = 2.0
+    init_collision_pair_capacity: PositiveInt = 1000
+    capacity_grow_factor: PositiveFloat = 1.2
+    intersection_check: StrictBool = False
+
+    def model_post_init(self, context: Any) -> None:
+        if not self.adaptive_kappa_grow > 1.0:
+            gs.raise_exception(f"'adaptive_kappa_grow' must be above 1, got {self.adaptive_kappa_grow}.")
+        if not self.capacity_grow_factor > 1.0:
+            gs.raise_exception(f"'capacity_grow_factor' must be above 1, got {self.capacity_grow_factor}.")
+        if self.adaptive_kappa_hysteresis < 1.0:
+            gs.raise_exception(f"'adaptive_kappa_hysteresis' must be at least 1, got {self.adaptive_kappa_hysteresis}.")

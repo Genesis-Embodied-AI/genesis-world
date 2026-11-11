@@ -621,6 +621,40 @@ def func_candidate_reach(
 
 
 @qd.func
+def _func_swept_kdop(points, displacements):
+    lower = qd.Vector([1e300] * 7, dt=gs.qd_float)
+    upper = qd.Vector([-1e300] * 7, dt=gs.qd_float)
+    for i_v in qd.static(range(points.n)):
+        for i_end in qd.static(range(2)):
+            q = points[i_v, :] + i_end * displacements[i_v, :]
+            axes = qd.Vector(
+                [q[0], q[1], q[2], q[0] + q[1] + q[2], q[0] + q[1] - q[2], q[0] - q[1] + q[2], q[0] - q[1] - q[2]]
+            )
+            lower = qd.min(lower, axes)
+            upper = qd.max(upper, axes)
+    return lower, upper
+
+
+@qd.func
+def func_is_swept_within(points_a, points_b, displacements_a, displacements_b, distance: float) -> bool:
+    """Decide whether the two sides of a stencil may come within a distance of each other over a linear step.
+
+    Each side is bounded by the 14-sided discrete oriented polytope of its vertices at the start and at the end of the
+    step, along the axes x, y, z and the four diagonals of the cube. The sides are apart once their bounds are farther
+    than 'distance' along some axis, the unnormalized diagonals taking sqrt(3) times the distance.
+    """
+    SQRT3 = qd.static(1.7320508075688772)
+    lower_a, upper_a = _func_swept_kdop(points_a, displacements_a)
+    lower_b, upper_b = _func_swept_kdop(points_b, displacements_b)
+    is_apart = False
+    for k in qd.static(range(7)):
+        margin = qd.static(1.0 if k < 3 else SQRT3) * distance
+        if lower_a[k] - upper_b[k] > margin or lower_b[k] - upper_a[k] > margin:
+            is_apart = True
+    return not is_apart
+
+
+@qd.func
 def func_point_halfplane_candidate_reach(
     x: qd.types.vector(3),
     end: qd.types.vector(3),
