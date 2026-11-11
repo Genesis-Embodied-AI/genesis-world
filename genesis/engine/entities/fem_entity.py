@@ -155,14 +155,13 @@ class FEMEntity(Entity):
         morph,
         surface,
         idx,
+        options,
         v_start=0,
         el_start=0,
         s_start=0,
         vvert_start=0,
         vface_start=0,
         name: str | None = None,
-        *,
-        options,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 

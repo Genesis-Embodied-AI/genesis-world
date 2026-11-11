@@ -359,10 +359,9 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         material: "gs.materials.SPH.Base",
         morph: "gs.morphs.Morph",
         surface: "gs.surfaces.Surface",
+        options: "gs.entities.SPH",
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: "gs.entities.SPH",
         desc: None = None,
     ) -> "SPHEntity":
         entity = SPHEntity(

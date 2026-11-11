@@ -485,10 +485,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
         material: "gs.materials.MPM.Base",
         morph: "gs.morphs.Morph",
         surface: "gs.surfaces.Surface",
+        options: "gs.entities.MPM",
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: "gs.entities.MPM",
         desc: None = None,
     ) -> "MPMEntity":
         self.add_material(material)

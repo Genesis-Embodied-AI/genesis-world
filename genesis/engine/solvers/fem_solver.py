@@ -844,10 +844,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         material: "gs.materials.FEM.Base",
         morph: "gs.morphs.Morph",
         surface: "gs.surfaces.Surface",
+        options: "gs.entities.FEM",
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: "gs.entities.FEM",
         desc: None = None,
     ) -> "FEMEntity":
         entity = FEMEntity(

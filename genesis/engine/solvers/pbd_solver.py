@@ -363,10 +363,9 @@ class PBDSolver(ParticleSolver):
         material: "gs.materials.PBD.Base",
         morph: "gs.morphs.Morph",
         surface: "gs.surfaces.Surface",
+        options: "gs.entities.PBD",
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: "gs.entities.PBD",
         desc: None = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):

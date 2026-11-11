@@ -195,10 +195,9 @@ class KinematicSolver(Solver):
         material: Kinematic,
         morph: Morph | Sequence[Morph] | None,
         surface: "gs.surfaces.Surface | None",
+        options: "gs.entities.Kinematic",
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: "gs.entities.Kinematic",
         desc: KinematicEntityDescription | None = None,
     ) -> KinematicEntity:
         """Create an entity from its description.
@@ -216,9 +215,9 @@ class KinematicSolver(Solver):
                 surface,
                 self._options,
                 self._enable_mujoco_compatibility,
+                options,
                 visualize_contact,
                 name,
-                options=options,
             )
         else:
             for _, entity_cls in self._entity_classes:

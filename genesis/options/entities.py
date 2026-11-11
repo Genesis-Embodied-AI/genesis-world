@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 
 EntityT = TypeVar("EntityT", bound="Entity")
 
+# The fields of a rigid material that the options of a link or a geom honour, the others applying to the whole entity
+_LINK_MATERIAL_FIELDS = ("rho", "friction", "friction_torsional", "friction_rolling")
+
 
 def _merge_fields(fields: dict, options: Options, target: str) -> None:
     """Add the fields given explicitly in 'options' to 'fields', raising on a field already given for 'target'.
@@ -59,10 +62,6 @@ def _key_links_by_index(links):
             key = LinkIndex.named(*key)
         links_by_index[key] = link_options
     return links_by_index
-
-
-# The fields of a rigid material that the options of a link or a geom honour, the others applying to the whole entity
-_LINK_MATERIAL_FIELDS = ("rho", "friction", "friction_torsional", "friction_rolling")
 
 
 def _reject_material_entity_fields(material: "materials.Rigid", target: str) -> None:

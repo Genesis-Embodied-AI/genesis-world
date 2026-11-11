@@ -96,12 +96,11 @@ class ParticleEntity(Entity):
         particle_size,
         idx,
         particle_start,
+        options,
         vvert_start=None,
         vface_start=None,
         need_skinning=True,
         name: str | None = None,
-        *,
-        options,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 

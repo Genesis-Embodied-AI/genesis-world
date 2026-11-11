@@ -45,9 +45,8 @@ class Entity(BuildableMixin, RBC):
         solver,
         material,
         surface,
-        name: str | None = None,
-        *,
         options: gs.entities.BaseEntity,
+        name: str | None = None,
     ):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
@@ -121,12 +120,7 @@ class Entity(BuildableMixin, RBC):
 
     @property
     def options(self) -> gs.entities.BaseEntity:
-        """The options this entity was constructed from, as authored.
-
-        Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
-        is. The entity holds a copy of the options passed to 'Scene.add_entity', which may change or construct other
-        entities afterwards. What the scene resolved from them lives in 'desc'.
-        """
+        """The options this entity was constructed from."""
         return self._options.model_copy(deep=True)
 
     @property
