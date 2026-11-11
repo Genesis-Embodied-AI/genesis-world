@@ -45,6 +45,7 @@ from genesis.engine.solvers.fem_solver import (
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_block
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
+from genesis.engine.solvers.rigid.constraint.solver import func_mark_link_constrained
 from genesis.engine.solvers.rigid.data import (
     DOFS,
     GEOMS,
@@ -1704,6 +1705,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             kernel_update_vel(
                 fem_state,
                 dofs_state,
+                links_state,
                 self.sap_state,
                 self.sap_data.lagged_friction,
                 self.sap_info,
@@ -2252,6 +2254,7 @@ def kernel_compute_regularization(
 def kernel_update_vel(
     fem_state: FEMState,
     dofs_state: DofsState,
+    links_state: LinksState,
     sap_state: SAPState,
     lagged_friction: SAPLaggedFriction,
     sap_info: SAPInfo,
@@ -2270,7 +2273,8 @@ def kernel_update_vel(
     Write the velocities of the solve back to the solvers, flagging the environments whose solve stopped at its Newton
     iteration cap with a residual above CAP_RESIDUAL_MAX.
 
-    The environments still active at the end of the solve are those whose last convergence check failed. With lagged
+    The environments still active at the end of the solve are those whose last convergence check failed. The links
+    in contact are marked constrained, as the constraint assembly of the rigid solver marks its own. With lagged
     friction, the normal impulses of the contact pairs are stored for the next substep.
     """
     handlers = qd.static(
@@ -2295,6 +2299,17 @@ def kernel_update_vel(
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(sap_info.n_dofs[None], errno.shape[0], axes=qd.static(eoa(dofs_state.vel))):
             dofs_state.vel[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b]
+    if qd.static(sap_config.has_rigid_contacts):
+        # A free body in contact keeps the standard update, which carries the contact impulse (see
+        # func_midpoint_eligible)
+        for handler in qd.static(contact_handlers):
+            if qd.static(handler.n_rigid_sides > 0):
+                for i_c in range(handler.contact_pairs.n_pairs[None]):
+                    i_b = handler.contact_pairs.batch_idx[i_c]
+                    for i_side in qd.static(range(handler.n_rigid_sides)):
+                        i_l = handler.rigid_side_link(i_c, i_side)
+                        if i_l >= 0:
+                            func_mark_link_constrained(i_l, i_b, links_state)
     if qd.static(sap_config.enable_lagged_friction):
         # The key and the normal impulse of the contact pairs of every environment, in their sorted order, which the
         # next substep looks up. The contact handlers precede the equality constraints, so that the contact pairs of an

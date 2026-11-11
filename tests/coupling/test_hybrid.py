@@ -594,6 +594,8 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
     SUBSTEPS = 2
     SAP_TAUD = 0.1
     SAP_BETA = 1.0
+    FRICTION_MU = 0.5
+    STICTION_TOLERANCE = 1e-4
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -601,18 +603,15 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
             substeps=SUBSTEPS,
             gravity=(0.0, 0.0, -GRAVITY),
         ),
-        # The integrator that applies the contact torques of free bodies
-        rigid_options=gs.options.RigidOptions(
-            integrator=gs.integrator.Euler,
-        ),
         coupler_options=gs.options.SAPCouplerOptions(
             sap_taud=SAP_TAUD,
             sap_beta=SAP_BETA,
+            stiction_tolerance=STICTION_TOLERANCE,
             rigid_floor_contact_type=rigid_floor_contact_type,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.0, -1.0, 0.6),
-            camera_lookat=(0.0, 0.0, 0.1),
+            camera_pos=(1.5, -2.0, 1.0),
+            camera_lookat=(0.0, 0.2, 0.1),
         ),
         show_viewer=show_viewer,
         show_FPS=False,
@@ -647,15 +646,43 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
             rho=RHO,
         ),
     )
+    # A small cube released on one of its edges, tilted by 20 degrees
+    tilted_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=CUBE_SIZE,
+            pos=(-0.6, 0.0, 0.5 * CUBE_SIZE[2] * (np.cos(np.radians(20.0)) + np.sin(np.radians(20.0)))),
+            euler=(0.0, 20.0, 0.0),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    # A slab pushed sideways by half the force that would make it slide
+    pushed_slab = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=SLAB_SIZE,
+            pos=(0.0, 0.8, 0.5 * SLAB_SIZE[2]),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+            coup_friction=FRICTION_MU,
+        ),
+    )
     scene.build(n_envs=2)
 
+    push_force = 0.5 * FRICTION_MU * RHO * np.prod(SLAB_SIZE) * GRAVITY
     for _ in range(90):
+        pushed_slab.control_dofs_force(push_force, dofs_idx_local=0)
         scene.step()
 
-    # Each environment rests still on its own variant, and the dropped cube rests still
-    for entity in (variants, dropped_cube):
+    # Each environment rests still on its own variant, and the dropped and tilted cubes rest still, flat on the ground
+    for entity in (variants, dropped_cube, tilted_cube):
         assert_allclose(entity.get_vel(), 0.0, atol=1e-5)
         assert_allclose(entity.get_ang(), 0.0, atol=1e-4)
+        assert_allclose(entity.get_quat()[..., 1:3], 0.0, atol=1e-3)
+
+    # The pushed slab sticks, creeping at most at the stiction tolerance
+    assert (torch.linalg.norm(pushed_slab.get_vel(), dim=-1) < STICTION_TOLERANCE).all()
 
     # The four bottom corners of the vertex floor are near-rigid contacts, whose regularization beta^2 / (4 pi^2) * |W| / 3
     # derives from the Delassus operator W = I / m + [r]x I^-1 [r]x^T of a corner at r from the center of mass. At rest,
@@ -675,6 +702,7 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, show_viewer):
     for entity, entity_rest_heights, entity_rest_depths in (
         (variants, rest_heights, rest_depths),
         (dropped_cube, rest_heights[1], rest_depths[1]),
+        (tilted_cube, rest_heights[1], rest_depths[1]),
     ):
         entity_depths = entity_rest_heights - entity.get_pos()[..., 2]
         if rigid_floor_contact_type == "vert":

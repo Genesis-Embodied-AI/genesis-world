@@ -132,6 +132,7 @@ from .constraint.solver import (
     ConstraintSolver,
     func_add_equality_constraints,
     func_add_inequality_constraints,
+    func_clear_links_constrained,
     func_resolve_post,
     func_solve_body,
 )
@@ -3309,7 +3310,11 @@ def kernel_step_1(
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
 ):
-    """Run the first half of a substep on its own (see func_step_1)."""
+    """Run the first half of a substep on its own (see func_step_1).
+
+    The constraint involvement of the links is reset, which the constraint assembly or a coupler solving instead of it
+    marks back (see func_mark_link_constrained).
+    """
     func_step_1(
         dyn_state,
         constraint_state,
@@ -3320,6 +3325,7 @@ def kernel_step_1(
         is_forward_vel_updated,
         is_backward=False,
     )
+    func_clear_links_constrained(dyn_state.links, rigid_config)
 
 
 @qd.func
