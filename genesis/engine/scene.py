@@ -371,10 +371,9 @@ class Scene(RBC):
             connected by joints of the same names, types and numbers of degrees of freedom), while their geometry,
             inertia, link frames (e.g. a different 'scale', or a different pose for a fixed base) and joint parameters
             may differ.
-        material : gs.materials.Rigid | gs.materials.Kinematic | gs.materials.Hybrid | gs.materials.FEM.Base |
-        gs.materials.MPM.Base | gs.materials.PBD.Base | gs.materials.SPH.Base | None, optional
-            The material of the entity, which decides its kind and the solver simulating it. If None, use
-            ``gs.materials.Rigid()``.
+        material : gs.materials.Material | None, optional
+            The material of the entity. If None, use ``gs.materials.Rigid()``. It will be deprecated in favour of
+            ``options``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
         visualize_contact : bool | None, optional
@@ -519,9 +518,9 @@ class Scene(RBC):
         ----------
         morph : gs.morphs.USD | None, optional
             The stage to add to the scene.
-        material : gs.materials.Rigid | gs.materials.Kinematic | None, optional
-            The material of the entities of the stage, which decides whether they are rigid or kinematic. If None, use
-            ``gs.materials.Rigid()`` for all morphs.
+        material : gs.materials.Material | None, optional
+            The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs. It will be deprecated in
+            favour of ``options``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
         visualize_contact : bool | None, optional
@@ -840,9 +839,10 @@ class Scene(RBC):
 
         Parameters
         ----------
-        material : gs.materials.MPM.Base | gs.materials.SPH.Base | gs.materials.PBD.Liquid | gs.materials.PBD.Particle
-        | None, optional
-            The material of the emitted particles, which stands for the options of the entities it is given to.
+        material : gs.materials.Material | None, optional
+            The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
+            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`. It will be deprecated
+            in favour of ``options``.
         max_particles : int, optional
             The maximum number of particles the emitter holds at once, recycled once all are emitted. Each one costs
             memory and simulation time from the start, emitted or not. Default is 20000.
