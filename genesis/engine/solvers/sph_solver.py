@@ -26,11 +26,12 @@ from genesis.utils.geom import (
 )
 from genesis.utils.misc import get_gpu_core_count
 from genesis.utils.simt import (
+    BLOCK_LOG2_LANES,
     ExactSums,
     func_exact_sum_add,
     func_exact_sum_take,
-    requires_deterministic_accumulation,
     qd_block_sum,
+    requires_deterministic_accumulation,
 )
 
 from .base_solver import SimulatorState
@@ -307,7 +308,18 @@ class SPHSolver(ParticleSolver):
             and bool(np.any(self.boundary_upper - self.boundary_lower < 2 * self._support_radius)),
             has_boundary=self.is_active and is_opted_in(SPHState.boundary),
             is_deterministic=is_deterministic,
-            log2_neighbor_lanes=3 if 0 < self._n_particles * self._B <= get_gpu_core_count() else 0,
+            # The lanes of a tile stride the particles of each neighbor cell of the hash grid, so a tile takes one lane per
+            # particle a cell holds at rest, within a block of the subgroup helpers
+            log2_neighbor_lanes=(
+                max(
+                    0,
+                    min(
+                        BLOCK_LOG2_LANES, math.floor(math.log2((self._hash_grid_cell_size / self._particle_size) ** 3))
+                    ),
+                )
+                if 0 < self._n_particles * self._B <= get_gpu_core_count()
+                else 0
+            ),
         )
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2
@@ -428,13 +440,17 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
         kernel_reorder_particles(self.sph_state)
         kernel_compute_rho(self.sph_state, self.sph_info, self.sph_config)
         if self._pressure_solver == "WCSPH":
-            kernel_compute_non_pressure_forces(self._sim.sim_state, self.sph_state, self.sph_info, self._force_fields)
+            kernel_compute_non_pressure_forces(
+                self._sim.sim_state, self.sph_state, self.sph_info, self.sph_config, self._force_fields
+            )
             kernel_compute_pressure_forces(self.sph_state, self.sph_columns, self.sph_info, self.sph_config)
             kernel_advect_velocity(self.sph_state, self.sph_info)
         else:
             kernel_compute_dfsph_factor(self.sph_state, self.sph_info, self.sph_config)
             self._solve_incompressibility(solve_density=False)
-            kernel_compute_non_pressure_forces(self._sim.sim_state, self.sph_state, self.sph_info, self._force_fields)
+            kernel_compute_non_pressure_forces(
+                self._sim.sim_state, self.sph_state, self.sph_info, self.sph_config, self._force_fields
+            )
             kernel_predict_velocity(self.sph_state, self.sph_info)
             self._solve_incompressibility(solve_density=True)
 
@@ -629,13 +645,22 @@ def func_segment_dist(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3)):
 
 
 @qd.func
-def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.template()):
+def func_wall_volume(
+    i_lane: int,
+    pos: qd.types.vector(3),
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+    log2_n_lanes: qd.template(),
+    is_needed: bool,
+):
     """
     Return the kernel-weighted volume of the walls of the domain around a point, with its gradient and first moment.
 
     The walls stand for liquid particles at rest beyond the domain, on the lattice of the samplers continued from each
     wall. The first moment, of the gradient over the offsets to these ghost particles, turns a linear pressure field
-    over them into a force.
+    over them into a force. The 2**`log2_n_lanes` lanes of a subgroup tile share the nodes of the lattice, lane `i_lane`
+    taking every n-th node, and every lane gets the sum. Every lane of the tile calls it, the volume being zero where
+    `is_needed` is false.
     """
     # Without the ghost particles, the particles within the support radius of a wall lack neighbors, and the liquid
     # compresses until they make up for them. The support radius spans two particle sizes, so four nodes per axis on the
@@ -644,6 +669,7 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
     # those beyond the upper wall on its own lattice, in this order, five at most since the lattice of the far wall is
     # offset from that of the nearest one. A thin domain alone pays for these nodes, which slow down every step.
     N_NODES_AXIS = qd.static(5 if sph_config.is_domain_thin else 4)
+    N_LANES = qd.static(2**log2_n_lanes)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
     particle_size, particle_volume = sph_info.particle_size[None], sph_info.particle_volume[None]
     volume = gs.qd_float(0.0)
@@ -651,7 +677,7 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
     moment = qd.Matrix.zero(gs.qd_float, 3, 3)
     dist_lower = pos - sph_info.boundary.lower[None]
     dist_upper = sph_info.boundary.upper[None] - pos
-    if qd.min(dist_lower.min(), dist_upper.min()) < support_radius:
+    if is_needed and qd.min(dist_lower.min(), dist_upper.min()) < support_radius:
         dist_near = qd.min(dist_lower, dist_upper)
         near_dir = qd.select(dist_lower <= dist_upper, 1.0, -1.0)
         lattice_start = qd.floor(dist_near / particle_size - 0.5 * (N_NODES_AXIS - 1), gs.qd_int)
@@ -667,7 +693,8 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
                 qd.floor((dist_lower + dist_upper) / particle_size - 0.5, gs.qd_int) + 1,
             )
             n_inner = qd.max(lattice_end - lattice_start, 0)
-        for i_node in range(N_NODES_AXIS**3):
+        for i_node_ in range((N_NODES_AXIS**3 + N_LANES - 1) // N_LANES):
+            i_node = i_node_ * N_LANES + i_lane
             i_n = qd.Vector(
                 [i_node // N_NODES_AXIS**2, i_node // N_NODES_AXIS % N_NODES_AXIS, i_node % N_NODES_AXIS], dt=gs.qd_int
             )
@@ -687,23 +714,41 @@ def func_wall_volume(pos: qd.types.vector(3), sph_info: SPHInfo, sph_config: qd.
                     ),
                 )
                 is_ghost = (i_n < n_lower + n_inner + n_upper).all() and (is_lower | is_upper).any()
-            if is_ghost:
+            if is_ghost and i_node < N_NODES_AXIS**3:
                 grad = -particle_volume * func_cubic_kernel_derivative(
                     offset, support_radius, kernel_norm, sph_info.kernel_dist_min[None]
                 )
                 volume = volume + particle_volume * func_cubic_kernel(offset.norm(), support_radius, kernel_norm)
                 volume_grad = volume_grad + grad
                 moment = moment + grad.outer_product(offset)
+    if qd.static(N_LANES > 1):
+        volume = qd_block_sum(volume, log2_n_lanes)
+        for i_d in qd.static(range(3)):
+            volume_grad[i_d] = qd_block_sum(volume_grad[i_d], log2_n_lanes)
+            for j_d in qd.static(range(3)):
+                moment[i_d, j_d] = qd_block_sum(moment[i_d, j_d], log2_n_lanes)
     return volume, volume_grad, moment
 
 
 @qd.func
-def func_boundary_volume(i_p: int, i_b: int, sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
+def func_boundary_volume(
+    i_p: int,
+    i_b: int,
+    i_lane: int,
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+    log2_n_lanes: qd.template(),
+    is_needed: bool,
+):
     """
     Return the kernel-weighted volume of the walls and the moving boundaries around a sorted particle, with its gradient
     and first moment (see func_wall_volume and SPHBoundaryParticles).
     """
-    volume, volume_grad, moment = func_wall_volume(sph_state.particles_reordered.pos[i_p, i_b], sph_info, sph_config)
+    pos = sph_state.particles_reordered.pos[i_p, i_b]
+    volume, volume_grad, moment = func_wall_volume(
+        i_lane, pos, sph_info, sph_config, log2_n_lanes=log2_n_lanes, is_needed=is_needed
+    )
     if qd.static(sph_config.has_boundary):
         i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
         volume = volume + sph_state.boundary.volume[i_o, i_b]
@@ -799,19 +844,34 @@ def func_task_compute_rho(i_p: int, j_p: int, i_b: int, ret: qd.template(), sph_
 @qd.kernel(fastcache=True)
 def kernel_compute_rho(sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template()):
     """Compute the density and the color gradient of the sorted particles from their neighbours and the walls."""
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.rho))
-    ):
-        if sph_state.particles_reordered.is_active[i_p, i_b]:
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
+        is_active = sph_state.particles_reordered.is_active[i_p, i_b]
+        ret = qd.Struct(density=gs.qd_float(0.0), normal=qd.Vector.zero(gs.qd_float, 3))
+        if is_active:
+            func_for_all_neighbors(i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_rho, n_lanes=N_LANES)
+        if qd.static(N_LANES > 1):
+            ret.density = qd_block_sum(ret.density, sph_config.log2_neighbor_lanes)
+            for i_d in qd.static(range(3)):
+                ret.normal[i_d] = qd_block_sum(ret.normal[i_d], sph_config.log2_neighbor_lanes)
+        wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
+            i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_active
+        )
+        if is_active and i_lane == 0:
             # Base density using the kernel at distance 0
             support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
             rho = sph_info.particle_volume[None] * func_cubic_kernel(0.0, support_radius, kernel_norm)
-            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
-            ret = qd.Struct(density=wall_volume, normal=wall_volume_grad)
-            func_for_all_neighbors(i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_rho, n_lanes=1)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            sph_state.particles_reordered.rho[i_p, i_b] = (rho + ret.density) * sph_info.particles.rho[i_o]
-            sph_state.particles_normal_reordered[i_p, i_b] = ret.normal
+            sph_state.particles_reordered.rho[i_p, i_b] = (rho + wall_volume + ret.density) * sph_info.particles.rho[
+                i_o
+            ]
+            sph_state.particles_normal_reordered[i_p, i_b] = wall_volume_grad + ret.normal
 
 
 @qd.func
@@ -854,25 +914,39 @@ def func_task_compute_non_pressure_forces(
 
 @qd.kernel
 def kernel_compute_non_pressure_forces(
-    sim_state: SimulatorState, sph_state: SPHState, sph_info: SPHInfo, force_fields: qd.template()
+    sim_state: SimulatorState,
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+    force_fields: qd.template(),
 ):
     """Compute the acceleration of the sorted particles from gravity, surface tension, viscosity and force fields."""
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.acc))
-    ):
-        if sph_state.particles_reordered.is_active[i_p, i_b]:
-            # The parameters of the particle, read once for all its neighbors
-            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            ret = qd.Struct(
-                acc=sph_info.gravity[i_b],
-                surface_tension_i=sph_info.particles.surface_tension[i_o],
-                mu_i=sph_info.particles.mu[i_o],
-            )
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
+        is_active = sph_state.particles_reordered.is_active[i_p, i_b]
+        # The parameters of the particle, read once for all its neighbors
+        i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+        ret = qd.Struct(
+            acc=qd.Vector.zero(gs.qd_float, 3),
+            surface_tension_i=sph_info.particles.surface_tension[i_o],
+            mu_i=sph_info.particles.mu[i_o],
+        )
+        if is_active:
             func_for_all_neighbors(
-                i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_non_pressure_forces, n_lanes=1
+                i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_non_pressure_forces, n_lanes=N_LANES
             )
+        if qd.static(N_LANES > 1):
+            for i_d in qd.static(range(3)):
+                ret.acc[i_d] = qd_block_sum(ret.acc[i_d], sph_config.log2_neighbor_lanes)
+        if is_active and i_lane == 0:
             sph_state.particles_reordered.acc[i_p, i_b] = force_fields.add_acc(
-                ret.acc,
+                sph_info.gravity[i_b] + ret.acc,
                 sph_state.particles_reordered.pos[i_p, i_b],
                 sph_state.particles_reordered.vel[i_p, i_b],
                 sim_state.t[i_b],
@@ -945,7 +1019,16 @@ def kernel_compute_pressure_forces(
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             rho0 = sph_info.particles.rho[i_o]
             gravity = sph_info.gravity[i_b]
-            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
+            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
+                i_p,
+                i_b,
+                i_lane=0,
+                sph_state=sph_state,
+                sph_info=sph_info,
+                sph_config=sph_config,
+                log2_n_lanes=0,
+                is_needed=True,
+            )
             # The free surface lies half a particle size above the topmost particle of the column of the particle. The
             # slot of the column also holds the columns that the hash grid wraps onto it, which the cell filters out.
             surface_height = pos[2]
@@ -1036,19 +1119,32 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
         sph_state.envs_solve.is_solving[i_b] = True
         sph_state.envs_solve.n_active[i_b] = 0
 
-    for i_p, i_b in qd.ndrange(
-        *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.dfsph_factor))
-    ):
-        if sph_state.particles_reordered.is_active[i_p, i_b]:
+    # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
+    N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
+        is_active = sph_state.particles_reordered.is_active[i_p, i_b]
+        ret = qd.Struct(grad_p=qd.Vector.zero(gs.qd_float, 3), grad_sqr_sum=gs.qd_float(0.0))
+        if is_active:
+            func_for_all_neighbors(
+                i_p, i_b, i_lane, ret, sph_state, sph_info, func_task_compute_dfsph_factor, n_lanes=N_LANES
+            )
+        if qd.static(N_LANES > 1):
+            ret.grad_sqr_sum = qd_block_sum(ret.grad_sqr_sum, sph_config.log2_neighbor_lanes)
+            for i_d in qd.static(range(3)):
+                ret.grad_p[i_d] = qd_block_sum(ret.grad_p[i_d], sph_config.log2_neighbor_lanes)
+        # The walls, at rest, change the density of the particle by its own velocity, which they change with its own
+        # stiffness and with the stiffness they take from it among the liquid around it (see func_solver_iteration),
+        # weighted by its share of the kernel sum of the liquid.
+        wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
+            i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_active
+        )
+        if is_active and i_lane == 0:
             qd.atomic_add(sph_state.envs_solve.n_active[i_b], 1)
-
-            ret = qd.Struct(grad_p=qd.Vector.zero(gs.qd_float, 3), grad_sqr_sum=gs.qd_float(0.0))
-            func_for_all_neighbors(i_p, i_b, 0, ret, sph_state, sph_info, func_task_compute_dfsph_factor, n_lanes=1)
-
-            # The walls, at rest, change the density of the particle by its own velocity, which they change with its own
-            # stiffness and with the stiffness they take from it among the liquid around it (see
-            # func_solver_iteration), weighted by its share of the kernel sum of the liquid.
-            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             rho_rel = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.particles.rho[i_o]
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
@@ -1108,10 +1204,12 @@ def func_compute_density_rate(
         if qd.static(N_LANES > 1):
             ret.drho = qd_block_sum(ret.drho, sph_config.log2_neighbor_lanes)
             ret.n_neighbors = qd_block_sum(ret.n_neighbors, sph_config.log2_neighbor_lanes)
+        wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
+            i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_solved
+        )
         if is_solved and i_lane == 0:
             # The walls are at rest, while the moving boundaries carry their own velocity
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             ret.drho = ret.drho + sph_state.particles_reordered.vel[i_p, i_b].dot(wall_volume_grad)
             if qd.static(sph_config.has_boundary):
                 ret.drho = ret.drho - sph_state.boundary.vel_flux[i_o, i_b]
@@ -1265,6 +1363,9 @@ def func_solver_iteration(
             for i_d in qd.static(range(3)):
                 ret.dv[i_d] = qd_block_sum(ret.dv[i_d], sph_config.log2_neighbor_lanes)
                 ret.pos_sum[i_d] = qd_block_sum(ret.pos_sum[i_d], sph_config.log2_neighbor_lanes)
+        wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(
+            i_p, i_b, i_lane, sph_state, sph_info, sph_config, sph_config.log2_neighbor_lanes, is_solved
+        )
         if is_solved and i_lane == 0:
             # The particle itself weighs into the stiffness and the position its neighbors give the walls
             pos = sph_state.particles_reordered.pos[i_p, i_b]
@@ -1278,7 +1379,6 @@ def func_solver_iteration(
             # pressure of the body force between them, while the iterations correct it.
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             gravity = sph_info.gravity[i_b]
-            wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             k_wall_center = ret.k_sum_w / ret.weight_sum
             wall_dv = qd.Vector.zero(gs.qd_float, 3)
             if warm_start:
