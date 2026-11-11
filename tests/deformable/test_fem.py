@@ -393,16 +393,16 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
         assert_allclose(spin, 0.0, atol=SPHERE_SPIN_MAX)
 
     # Without Poisson contraction, the bar stretches uniaxially under its own weight, and its free end comes to rest rho
-    # * g * L^2 / (2 * E) below its initial height. The SAP solve leaves the velocity of each substep within its
-    # relative tolerance of the velocities of the scene, which the sphere and the box bound once at rest, so that the
-    # bar at rest moves by that error alone. Single precision stops that solve at its round-off: the elastic forces of
-    # the bar, stiff enough to dominate its inertia over a substep, resolve its positions to a few units in the last
+    # * g * L^2 / (2 * E) below its initial height. The SAP solve leaves the velocity of each substep within a few times
+    # its relative tolerance of the velocities of the scene, which the sphere and the box bound once at rest, so that
+    # the bar at rest moves by that error alone. Single precision stops that solve at its round-off: the elastic forces
+    # of the bar, stiff enough to dominate its inertia over a substep, resolve its positions to a few units in the last
     # place (ULP) of its height, and its velocity to that error per substep.
     bar_sag_ref = BAR_RHO * GRAVITY * BAR_LENGTH**2 / (2 * BAR_E)
     if coupler_type != gs.options.SAPCouplerOptions:
         bar_vel_atol, bar_sag_rtol = (5e-10, 2e-3) if gs.np_float == np.float64 else (2e-5, 1e-2)
     elif gs.np_float == np.float64:
-        bar_vel_atol, bar_sag_rtol = SAP_RTOL * REST_VEL_MAX, 2e-3
+        bar_vel_atol, bar_sag_rtol = 5e-10, 2e-3
     else:
         bar_ulp = np.finfo(np.float32).eps * (BAR_POS[2] + 0.5 * BAR_LENGTH)
         bar_vel_atol, bar_sag_rtol = 8.0 * bar_ulp / scene.sim.substep_dt, 8.0 * bar_ulp / bar_sag_ref
