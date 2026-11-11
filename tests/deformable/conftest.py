@@ -1,9 +1,14 @@
 import xml.etree.ElementTree as ET
 
-import numpy as np
 import pytest
 
-import igl
+from ..conftest import lazy_imports
+
+# Imported on first use (see pytest_sessionstart in tests/conftest.py)
+with lazy_imports():
+    import numpy as np
+
+    import igl
 
 
 @pytest.fixture(scope="session")
