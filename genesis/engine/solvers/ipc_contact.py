@@ -87,7 +87,8 @@ HALFPLANES_LABEL = "halfplanes"
 PARTITION = "partition"
 KAPPA = "kappa"
 
-# The triplets of the upper triangle of the Hessian of a pair, over its 4 vertices
+# The triplets of the upper triangle of the Hessian of a pair, over its 4 vertices. 'func_contact_assemble' declares the
+# same count as a local (see TRIANGLE_PAIRS in fem_solver.py).
 PAIR_TRIPLETS = 10
 
 
@@ -644,6 +645,8 @@ def func_contact_assemble(
     The barrier of a candidate pair writes its distance flag (see IPCPairs) and lowers the smallest gaps of its
     vertices with the adaptive stiffness. A fixed vertex takes no contact terms.
     """
+    # See PAIR_TRIPLETS at module level
+    PAIR_TRIPLETS = qd.static(10)
     n_vertices = fem_state.vertices.pos.shape[0]
     n_envs = fem_state.vertices.pos.shape[1]
     row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
@@ -877,7 +880,7 @@ def func_contact_init_substep(
             ipc_state.vertices_kappa.frame_min_gap[i_v, i_b] = ipc_info.min_gap_unrecorded[None]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_init_kappa(ipc_state: IPCState, ipc_info: IPCInfo):
     """Set the adaptive stiffness of every vertex to that of its material, without any gap recorded."""
     for i_v, i_b in qd.ndrange(*ipc_state.vertices_kappa.scale.shape):
@@ -887,7 +890,7 @@ def kernel_contact_init_kappa(ipc_state: IPCState, ipc_info: IPCInfo):
         ipc_state.vertices_kappa.iter_min_gap[i_v, i_b] = ipc_info.min_gap_unrecorded[None]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_kappa_iteration(envs_mask: qd.Tensor, ipc_state: IPCState, ipc_info: IPCInfo):
     """
     Stiffen the vertices of the environments selected whose gap collapsed over the last Newton iteration, at the start
@@ -1065,7 +1068,7 @@ def func_filter_hits(
                 )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_filter(
     pt_hits: BVHQueryResults,
     ee_hits: BVHQueryResults,
@@ -1161,7 +1164,7 @@ def func_set_friction_pairs(
                 friction_pairs.pt_normal_force[i_f] = normal_force
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_friction_pairs(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
@@ -1276,7 +1279,7 @@ def func_pairs_ccd(
                 func_bound_step(i_b, i_body_a, i_body_b, toc, alpha, ipc_state, newton_config.has_ccd_partition)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_ccd(
     envs_mask: qd.Tensor,
     alpha: qd.Tensor,
@@ -1322,7 +1325,7 @@ def kernel_contact_ccd(
     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_contact_partition(envs_mask: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, fem_info: FEMInfo):
     """
     Group the contact bodies of every environment selected by their links, and scale the Newton direction of the

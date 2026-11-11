@@ -27,7 +27,6 @@ from genesis.engine.couplers.mpm_rigid_global_newton import (
 )
 from genesis.engine.numerics.bcoo import assemble_bcoo_matrix, func_add_by_key
 from genesis.engine.numerics.newton_rows import (
-    N_SEGMENTS,
     NewtonRows,
     NewtonSegment,
     func_rows_matvec,
@@ -731,7 +730,7 @@ def func_add_energies(
                 energies[i_b] = energies[i_b] + dt * dt * dt * dt * rigid_cost[i_b]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_set_segments(
     n_mpm_rows: int, n_mpm_triplets: int, n_cloth_rows: int, n_cloth_triplets: int, newton_rows: NewtonRows
 ):
@@ -741,7 +740,7 @@ def kernel_set_segments(
         func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets, newton_rows)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_init_substep(
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -830,7 +829,7 @@ def kernel_init_substep(
     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_refresh_energy_start(
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
@@ -890,7 +889,7 @@ def kernel_refresh_energy_start(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_assemble_mpm_rigid_coupling(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
@@ -917,7 +916,7 @@ def kernel_assemble_mpm_rigid_coupling(
     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_assemble_rows(
     n_cloth_triplets: int,
     newton_rows: NewtonRows,
@@ -957,7 +956,7 @@ def kernel_assemble_rows(
         )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_assemble_rigid(
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
@@ -1006,7 +1005,7 @@ def kernel_assemble_rigid(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_pcg_start(
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
@@ -1045,7 +1044,7 @@ def kernel_pcg_start(
         newton_envs.is_pcg_active[i_b] = newton_envs.is_active[i_b]
         newton_envs.rz[i_b] = 0.0
         newton_envs.p_dot_ap[i_b] = 0.0
-    n_rows = newton_rows.segments_start[N_SEGMENTS]
+    n_rows = newton_rows.segments_start[newton_rows.segments_start.shape[0] - 1]
     qd.loop_config(block_dim=256)
     for i_r in range((n_rows + 31) // 32 * 32):
         i_b_key = gs.qd_int(-1)
@@ -1127,7 +1126,7 @@ def func_pcg_iteration(
     func_rows_matvec(
         newton_rows, newton_envs.is_pcg_active, newton_envs.p_dot_ap, qd.static(not newton_config.has_rigid_dofs)
     )
-    n_rows = newton_rows.segments_start[N_SEGMENTS]
+    n_rows = newton_rows.segments_start[newton_rows.segments_start.shape[0] - 1]
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_matvec(rigid_dofs, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows)
         func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
@@ -1233,7 +1232,7 @@ def func_pcg_iteration(
                 rigid_dofs.p[i_d, i_b] = rigid_dofs.z[i_d, i_b] + newton_envs.pcg_beta[i_b] * rigid_dofs.p[i_d, i_b]
 
 
-@qd.kernel(graph=True)
+@qd.kernel(graph=True, fastcache=True)
 def kernel_pcg_loop(
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
@@ -1286,7 +1285,7 @@ def kernel_pcg_loop(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_start_line_search(
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
@@ -1352,7 +1351,7 @@ def kernel_start_line_search(
         newton_envs.is_line_search_active[i_b] = is_active
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_line_search_trial(
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -1433,7 +1432,7 @@ def kernel_line_search_trial(
                 qd.atomic_max(newton_loops.is_line_search_running[None], 1)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_end_iteration(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, newton_info: NewtonInfo):
     """Stop every environment that converged or failed, or reached the iteration cap, which it latches as a failure."""
     for _ in range(1):
@@ -1451,7 +1450,7 @@ def kernel_end_iteration(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, new
                 qd.atomic_max(newton_loops.is_newton_running[None], 1)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_finish_rigid(
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
@@ -1494,7 +1493,7 @@ def kernel_finish_rigid(
     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_flag_failures(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, errno: qd.Tensor):
     """Flag the environments whose Newton solve met a value that is not finite, which keep the state of their particles,
     of their cloth and of the rigid solver until the error raises (see 'kernel_finish_rigid', 'kernel_mpm_g2p' in
@@ -1504,7 +1503,7 @@ def kernel_flag_failures(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, err
             qd.atomic_or(errno[i_b], NewtonErrorCode.INVALID_SOLVE_NAN)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_clear_failed_iterations(newton_loops: NewtonLoops):
     for _ in range(1):
         newton_loops.has_failed_iterations[None] = 0

@@ -7,7 +7,8 @@ from genesis.utils.data import Data, DataKind, Size, field
 
 # The values a tile of the GPU scan sums: 24 for each of its 128 threads
 TILE_VALUES = 24 * 128
-# The chunks of the CPU scan, each one summed and scanned by one thread
+# The chunks of the CPU scan, each one summed and scanned by one thread. 'func_cpu_exclusive_sum' declares the same
+# count as a local (see TRIANGLE_PAIRS in fem_solver.py).
 CPU_CHUNKS = 256
 
 SCAN_TILES = Size("scan_tiles")
@@ -41,7 +42,8 @@ def exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
 
 @qd.func(requires_top_level=True)
 def func_cpu_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
-    N_CHUNKS = qd.static(CPU_CHUNKS)
+    # See CPU_CHUNKS at module level
+    N_CHUNKS = qd.static(256)
     qd.loop_config(name="exclusive_sum_cpu_chunks")
     for i_chunk in range(N_CHUNKS):
         chunk_size = (n_values[()] + N_CHUNKS - 1) // N_CHUNKS
@@ -163,7 +165,7 @@ def func_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: 
         func_gpu_exclusive_sum(scanner, values, output, n_values)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
     """Write the exclusive prefix sum of values in a launch of its own (see 'func_exclusive_sum')."""
     func_exclusive_sum(scanner, values, output, n_values)

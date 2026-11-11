@@ -219,17 +219,17 @@ def func_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()
                 matrix.n_entries[()] = i_entry + 1
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compose_triplets_key(matrix: BCOOMatrixScratch):
     func_compose_triplets_key(matrix)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_mark_entry_ends(matrix: BCOOMatrixScratch):
     func_mark_entry_ends(matrix)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
     func_reduce_triplets(matrix, block_scalars)
 

@@ -99,7 +99,7 @@ def func_set_segment(i_seg: int, n_rows: int, n_triplets: int, newton_rows: Newt
     newton_rows.segments_triplet_start[i_seg] = triplet_start
     newton_rows.segments_start[i_seg + 1] = row_start + n_rows
     newton_rows.segments_triplet_start[i_seg + 1] = triplet_start + n_triplets
-    if i_seg == N_SEGMENTS - 1:
+    if i_seg == newton_rows.segments_start.shape[0] - 2:
         func_set_n_triplets(newton_rows.matrix, triplet_start + n_triplets)
 
 

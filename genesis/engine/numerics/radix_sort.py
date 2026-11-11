@@ -386,7 +386,7 @@ def func_radix_sort(
                 sorter.is_pass_running[()] = gs.qd_int(sorter.pass_idx[()] < sorter.bins.shape[0])
 
 
-@qd.kernel(graph=True)
+@qd.kernel(graph=True, fastcache=True)
 def kernel_radix_sort(
     sorter: RadixSortScratch,
     keys: qd.Tensor,

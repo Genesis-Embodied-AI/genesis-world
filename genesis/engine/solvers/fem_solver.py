@@ -3377,7 +3377,8 @@ def kernel_get_forces(
 # The cloth owns the segment of the rows of its vertices (see NewtonSegment in numerics/newton_rows.py), the row of a
 # vertex following those of the vertices of the previous environments. Its triplets are the diagonal block of every
 # row, then the upper triangle of the blocks of every triangle, of every quadratic hinge and of every dihedral hinge,
-# environment by environment.
+# environment by environment. 'func_cloth_assemble' declares the same counts as locals, the fast cache of a kernel
+# keying on the source of its funcs and missing the module globals they read.
 TRIANGLE_PAIRS = 6
 HINGE_PAIRS = 10
 
@@ -3457,6 +3458,9 @@ def func_cloth_assemble(newton_rows: NewtonRows, fem_state: FEMState, fem_info: 
     its triangles and of the bending of its hinges (see materials/FEM/cloth.py). A fixed vertex keeps an identity block
     and a zero gradient, so that its row moves it by nothing.
     """
+    # See TRIANGLE_PAIRS at module level
+    TRIANGLE_PAIRS = qd.static(6)
+    HINGE_PAIRS = qd.static(10)
     n_vertices = fem_state.vertices.pos.shape[0]
     n_envs = fem_state.vertices.pos.shape[1]
     i_seg = qd.static(int(NewtonSegment.CLOTH_VERTICES))

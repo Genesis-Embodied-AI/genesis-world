@@ -3308,7 +3308,7 @@ def kernel_mpm_g2p(
 # The nodes of the stencil of a particle, the corners of its cell (see 'func_q1_stencil'), and the blocks of the upper
 # triangle of the Hessian of a stencil, one per pair of nodes (a, b) with a <= b: 8 x 9 / 2 = 36. The Hessian of the
 # nodes holds the kinetic block of every node and the upper triangle of the stencil of every task of the assembly (see
-# 'kernel_list_cells').
+# 'kernel_list_cells'). 'func_mpm_assemble' declares the same counts as locals (see TRIANGLE_PAIRS in fem_solver.py).
 STENCIL_NODES = 8
 STENCIL_PAIRS = STENCIL_NODES * (STENCIL_NODES + 1) // 2
 
@@ -3360,6 +3360,9 @@ def func_mpm_assemble(
     The nodes own the first segment of the rows, the row and the first triplet of a node being its index (see
     NewtonSegment in genesis/engine/numerics/newton_rows.py).
     """
+    # See STENCIL_NODES at module level
+    STENCIL_NODES = qd.static(8)
+    STENCIL_PAIRS = qd.static(STENCIL_NODES * (STENCIL_NODES + 1) // 2)
     n_nodes = sparse_grid.n_blocks[None] * 64
     n_valid = mpm_state.sorted_particles.n_valid[None]
     for i_n in range(n_nodes):
