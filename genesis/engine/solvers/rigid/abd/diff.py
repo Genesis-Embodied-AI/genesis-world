@@ -12,7 +12,7 @@ from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode,
 from genesis.utils.data import eoa
 from genesis.utils.misc import qd_isfinite
 
-from .forward_dynamics import func_clear_coupling_wrench
+from .forward_dynamics import func_clear_external_wrench
 
 
 @qd.func
@@ -54,6 +54,6 @@ def func_copy_next_to_curr(dyn_state: DynState, rigid_info: RigidInfo, rigid_con
 def kernel_copy_next_to_curr_clear_coupling(
     dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
-    """Copy the integrated state to the current one, then clear the coupling wrench (see func_clear_coupling_wrench)."""
+    """Copy the integrated state to the current one, then clear the external wrench (see func_clear_external_wrench)."""
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
-    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
+    func_clear_external_wrench(dyn_state, dyn_info, rigid_info, rigid_config)

@@ -24,6 +24,7 @@ from genesis.utils.geom import (
     func_hash_wrap_cell,
     hash_grid_sizes,
 )
+from genesis.utils.simt import ExactSums, func_exact_sum_add, func_exact_sum_take, requires_deterministic_accumulation
 
 from .base_solver import SimulatorState
 from .particle_solver import ParticleSolver
@@ -35,6 +36,9 @@ if TYPE_CHECKING:
 
 # The arrays of divergence-free smoothed particle hydrodynamics (DFSPH), which the weakly compressible solver leaves out
 DFSPH = "dfsph"
+# The sums of the errors of the DFSPH solve, exact for a fixed order of the sums, or in any order otherwise
+DFSPH_EXACT = "dfsph_exact"
+DFSPH_ATOMIC = "dfsph_atomic"
 
 
 class SPHParticles(Data, kind=DataKind.STATE, shape=(PARTICLES, ENVS)):
@@ -77,13 +81,16 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     The convergence of the divergence and density solves of divergence-free smoothed particle hydrodynamics (DFSPH) in
     each environment.
 
-    `err` is the density error summed over the active particles, `n_active` the number of active particles, over which
-    it is averaged, and `is_solving` whether the environment iterates on.
+    `err` is the density error summed over the active particles, the same whatever the order of the terms so that the
+    solve iterates as many times from one run to the next, with deterministic algorithms, and `err_sum` the same sum
+    otherwise. `n_active` is the number of active particles, over which it is averaged, and `is_solving` whether the
+    environment iterates on.
     """
 
-    err: qd.Tensor = field(float)
-    n_active: qd.Tensor = field(int)
-    is_solving: qd.Tensor = field(bool)
+    err: ExactSums = field(labels=DFSPH_EXACT)
+    err_sum: qd.Tensor = field(float, labels=DFSPH_ATOMIC)
+    n_active: qd.Tensor = field(int, labels=DFSPH)
+    is_solving: qd.Tensor = field(bool, labels=DFSPH)
 
 
 class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
@@ -139,7 +146,7 @@ class SPHState(Data, kind=DataKind.STATE):
     particles_normal_reordered: qd.Tensor = field((float, 3), shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
     # The stiffness that the next Jacobi iteration of DFSPH applies, read by the neighbors of each sorted particle
     particles_k_reordered: qd.Tensor = field(float, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH, labels=DFSPH)
-    envs_solve: SPHEnvsSolve = field(labels=DFSPH)
+    envs_solve: SPHEnvsSolve
     # The moving boundaries around each particle, which a coupler opts in
     boundary: SPHBoundaryParticles = field(opt_in=True)
     hash_grid: SpatialHashGrid
@@ -200,6 +207,8 @@ class SPHConfig(Config):
     is_domain_thin: bool
     # Whether moving boundaries push on the particles (see SPHBoundaryParticles)
     has_boundary: bool
+    # Whether the DFSPH solve sums its errors exactly, for a fixed order of the sums (see SPHEnvsSolve)
+    is_deterministic: bool
 
 
 class SPHSolver(ParticleSolver):
@@ -242,19 +251,44 @@ class SPHSolver(ParticleSolver):
         super().build()
 
         is_dfsph = self._pressure_solver == "DFSPH"
-        unused_labels = dict(dfsph=not is_dfsph) if self.is_active else True
+        is_deterministic = requires_deterministic_accumulation()
+        unused_labels = {DFSPH: not is_dfsph} if self.is_active else True
         sizes = dict(envs=self._B, particles=self._n_particles)
         hash_grid_values = dict(cell_size=self._hash_grid_cell_size, grid_res=self._hash_grid_res)
         self.sph_state = SPHState(
             sizes=dict(
                 sizes,
+                # The density errors of an environment sum into one slot (see SPHEnvsSolve)
+                exact_sum_slots=1,
+                exact_sum_bins=2,
                 **hash_grid_sizes(math.prod(self._hash_grid_res)),
             ),
             values=dict(hash_grid=hash_grid_values),
-            env_first=False,
-            unused=unused_labels,
+            # The units of the bins of the exact sums span no environment
+            env_first={None: False, SPHState.envs_solve.err.bins_unit: None},
+            unused=(
+                {
+                    DFSPH: not is_dfsph,
+                    DFSPH_EXACT: not (is_dfsph and is_deterministic),
+                    DFSPH_ATOMIC: not (is_dfsph and not is_deterministic),
+                }
+                if self.is_active
+                else True
+            ),
         )
         self.register_errors(self.sph_state.errno, {})
+        if self.is_active and is_dfsph:
+            # TODO: Support per-particle density
+            # The rest density the incompressibility solves target, that of the first particle as the particles store it
+            density0 = float(gs.np_float(self._entities[0].material.rho))
+            density_err_tol = self._df_max_error_den * 0.01 * density0
+            divergence_err_tol = 1.0 / self.substep_dt * self._df_max_error_div * 0.01 * density0
+        if self.is_active and is_dfsph and is_deterministic:
+            # The lowest bin resolves 2^-20 of the lowest tolerance, the bins 2^32 apart (see ExactSums)
+            exp_min = math.floor(math.log2(min(density_err_tol, divergence_err_tol))) - 20
+            self.sph_state.envs_solve.err.bins_unit.from_numpy(
+                2.0 ** np.array([exp_min, exp_min + 32.0], dtype=gs.np_float)
+            )
         # The columns of the hash grid, one cell high
         columns_grid_res = (*self._hash_grid_res[:2], 1)
         self.sph_columns = SPHColumns(
@@ -267,6 +301,7 @@ class SPHSolver(ParticleSolver):
             is_domain_thin=self.is_active
             and bool(np.any(self.boundary_upper - self.boundary_lower < 2 * self._support_radius)),
             has_boundary=self.is_active and is_opted_in(SPHState.boundary),
+            is_deterministic=is_deterministic,
         )
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2
@@ -285,12 +320,9 @@ class SPHSolver(ParticleSolver):
                 surface_normal_min=0.2 / self._support_radius,
             )
         if self.is_active and is_dfsph:
-            # TODO: Support per-particle density
-            # The rest density the incompressibility solves target, that of the first particle as the particles store it
-            density0 = float(gs.np_float(self._entities[0].material.rho))
             info_values.update(
-                density_err_tol=self._df_max_error_den * 0.01 * density0,
-                divergence_err_tol=1.0 / self.substep_dt * self._df_max_error_div * 0.01 * density0,
+                density_err_tol=density_err_tol,
+                divergence_err_tol=divergence_err_tol,
                 stiffness_eps=1e-5,
                 # The DFSPH factor inverts the diagonal of the pressure system alone, and the stiffness of the neighbors
                 # of a particle adds up to as much again, so the diagonally scaled system has eigenvalues up to 2. A
@@ -379,13 +411,15 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
             kernel_solver_iteration(self.sph_state, self.sph_info, self.sph_config, solve_density, warm_start=True)
         kernel_compute_density_rate(self.sph_state, self.sph_info, self.sph_config, solve_density)
         n_envs_solving = kernel_update_convergence(
-            self.sph_state, self.sph_info, solve_density, can_stop=not solve_density
+            self.sph_state, self.sph_info, self.sph_config, solve_density, can_stop=not solve_density
         )
         n_iters = 0
         while n_envs_solving > 0 and n_iters < n_iters_max:
             kernel_solver_iteration(self.sph_state, self.sph_info, self.sph_config, solve_density, warm_start=False)
             kernel_compute_density_rate(self.sph_state, self.sph_info, self.sph_config, solve_density)
-            n_envs_solving = kernel_update_convergence(self.sph_state, self.sph_info, solve_density, can_stop=True)
+            n_envs_solving = kernel_update_convergence(
+                self.sph_state, self.sph_info, self.sph_config, solve_density, can_stop=True
+            )
             n_iters += 1
 
         gs.logger.debug(f"DFSPH - {'density' if solve_density else 'divergence'} solve iterations: {n_iters}")
@@ -900,7 +934,6 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
-        sph_state.envs_solve.err[i_b] = 0.0
         sph_state.envs_solve.n_active[i_b] = 0
 
     for i_p, i_b in qd.ndrange(
@@ -971,6 +1004,7 @@ def kernel_compute_density_rate(
             ret = qd.Struct(drho=drho_wall, n_neighbors=0)
             func_for_all_neighbors(i_p, i_b, ret, sph_state, sph_info, func_task_compute_density_rate)
             rho0 = sph_info.particles.rho[i_o]
+            err = gs.qd_float(0.0)
             if qd.static(solve_density):
                 drho = sph_state.particles_reordered.rho[i_p, i_b] / rho0 + sph_info.substep_dt[None] * ret.drho
                 sph_state.particles_reordered.drho[i_p, i_b] = drho
@@ -993,7 +1027,7 @@ def kernel_compute_density_rate(
                 err_rel = drho - 1.0
                 if kappa >= 0.0:
                     err_rel = qd.max(err_rel, 0.0)
-                qd.atomic_add(sph_state.envs_solve.err[i_b], rho0 * qd.abs(err_rel))
+                err = rho0 * qd.abs(err_rel)
             else:
                 # Only a positive divergence is corrected, and none where the neighbors of the particle are too few, the
                 # walls standing for neighbors
@@ -1002,7 +1036,11 @@ def kernel_compute_density_rate(
                     drho = 0.0
                 sph_state.particles_reordered.drho[i_p, i_b] = drho
                 sph_state.particles_k_reordered[i_p, i_b] = drho * sph_state.particles_reordered.dfsph_factor[i_p, i_b]
-                qd.atomic_add(sph_state.envs_solve.err[i_b], rho0 * drho)
+                err = rho0 * drho
+            if qd.static(sph_config.is_deterministic):
+                func_exact_sum_add(0, i_b, err, sph_state.envs_solve.err)
+            else:
+                qd.atomic_add(sph_state.envs_solve.err_sum[i_b], err)
 
 
 @qd.kernel(fastcache=True)
@@ -1016,7 +1054,6 @@ def kernel_predict_velocity(sph_state: SPHState, sph_info: SPHInfo):
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
-        sph_state.envs_solve.err[i_b] = 0.0
 
     dt = sph_info.substep_dt[None]
     for i_p, i_b in qd.ndrange(
@@ -1129,7 +1166,7 @@ def kernel_solver_iteration(
 
 @qd.kernel(fastcache=True)
 def kernel_update_convergence(
-    sph_state: SPHState, sph_info: SPHInfo, solve_density: qd.template(), can_stop: bool
+    sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template(), can_stop: bool
 ) -> int:
     """
     Return the number of environments whose divergence-free smoothed particle hydrodynamics (DFSPH) solve iterates on.
@@ -1139,16 +1176,21 @@ def kernel_update_convergence(
     summed by the density rate kernels is reset once read, for the next call.
     """
     n_envs_solving = 0
-    for i_b in range(sph_state.envs_solve.err.shape[0]):
+    for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
         if sph_state.envs_solve.is_solving[i_b]:
             err_tol = sph_info.divergence_err_tol[None]
             if qd.static(solve_density):
                 err_tol = sph_info.density_err_tol[None]
-            if can_stop and sph_state.envs_solve.err[i_b] <= err_tol * sph_state.envs_solve.n_active[i_b]:
+            err = gs.qd_float(0.0)
+            if qd.static(sph_config.is_deterministic):
+                err = func_exact_sum_take(0, i_b, sph_state.envs_solve.err)
+            else:
+                err = sph_state.envs_solve.err_sum[i_b]
+                sph_state.envs_solve.err_sum[i_b] = 0.0
+            if can_stop and err <= err_tol * sph_state.envs_solve.n_active[i_b]:
                 sph_state.envs_solve.is_solving[i_b] = False
             else:
                 qd.atomic_add(n_envs_solving, 1)
-            sph_state.envs_solve.err[i_b] = 0.0
     return n_envs_solving
 
 

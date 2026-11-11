@@ -15,7 +15,6 @@ from genesis.engine.solvers.fem_solver import SURFACES, FEMInfo, FEMState
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
     MPMState,
-    func_add_coupling_force,
     func_point_vel_after_collision_with_rigid_geom,
     func_point_vel_after_two_way_collision_with_rigid_geom,
     func_quadratic_bspline_stencil,
@@ -23,8 +22,8 @@ from genesis.engine.solvers.mpm_solver import (
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.pbd_solver import PBDInfo, PBDState
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
-from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidInfo
+from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench, func_apply_external_wrench
+from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidData, RigidInfo
 from genesis.engine.solvers.sph_solver import (
     SPHBoundaryGhosts,
     SPHInfo,
@@ -36,7 +35,7 @@ from genesis.engine.solvers.sph_solver import (
 from genesis.grad.bridge import reversed_with
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, Size, eoa, field, iter_data, opt_in
+from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, Size, eoa, field, is_opted_in, iter_data, opt_in
 from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
@@ -52,6 +51,7 @@ from genesis.utils.geom import (
 from genesis.utils.misc import tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
+from genesis.utils.simt import requires_deterministic_accumulation
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -127,6 +127,8 @@ class LegacyCouplerConfig(Config):
     has_fem_sph: bool
     # Whether the rigid links hold their info per environment (see 'RigidOptions.batch_links_info')
     is_links_info_batched: bool
+    # Whether the SPH liquid sums its forces on the rigid links exactly (see 'cfrc_external_sums' in LinksState)
+    is_external_wrench_exact: bool
 
 
 class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
@@ -159,6 +161,11 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
         opt_in(SDFInfo, cond=lambda: any(self.rigid_couplings))
+        # The SPH liquid sums its forces on the rigid links exactly when the order of the sums is fixed
+        opt_in(
+            RigidData.dyn_state.links.cfrc_external_sums,
+            cond=lambda: self.rigid_couplings[1] and requires_deterministic_accumulation(),
+        )
         # The surfaces of the FEM entities are moving boundaries of the SPH liquid
         opt_in(
             SPHState.boundary,
@@ -203,6 +210,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_mpm=self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm,
             has_fem_sph=self.sph_solver.sph_config.has_boundary,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
+            is_external_wrench_exact=has_rigid_sph and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums),
         )
 
         self.legacy_coupler_state = LegacyCouplerState(
@@ -525,7 +533,7 @@ def func_point_vel_after_collisions_with_rigid_geoms(
     """
     Return the velocity of a cell of the MPM grid of the given mass once it collided with every rigid geom that couples.
 
-    The momentum change of each collision pushes the link of the geom (see func_add_coupling_force), exactly with
+    The momentum change of each collision pushes the link of the geom (see func_add_external_wrench), exactly with
     `is_deterministic` (see MPMConfig), except in the variant autodiff reverses (`is_backward`).
     """
     for i_g in range(geoms_info.needs_coup.shape[0]):
@@ -547,14 +555,12 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                     i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
                 )
                 if is_colliding:
-                    func_add_coupling_force(
+                    func_add_external_wrench(
                         geoms_info.link_idx[i_g],
                         i_b,
                         pos_world,
                         force,
                         links_state,
-                        mpm_state.coupling_forces,
-                        mpm_info,
                         is_exact=mpm_config.is_deterministic and not is_backward,
                     )
     return vel
@@ -597,12 +603,16 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
         collider_config,
         skip_weak_normal=False,
     )
+    # The collision and the pressure push the geom at the particle, as one force
+    force = qd.Vector.zero(gs.qd_float, 3)
+    is_pushing = False
     if influence > legacy_coupler_info.influence_min[None]:
-        vel, force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
+        vel, collision_force, is_colliding = func_point_vel_after_two_way_collision_with_rigid_geom(
             i_g, i_b, pos_world, vel, mass, normal_rigid, influence, links_state, geoms_info, rigid_info
         )
         if is_colliding:
-            func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+            force = collision_force
+            is_pushing = True
 
     # Static fluid pressure pushes on the geom even at rest, where the velocity-gated collision response above
     # transfers nothing; this is what makes submerged geoms buoyant. Mirroring the particle pressure across the
@@ -622,8 +632,18 @@ def func_sph_particle_vel_after_collision_with_rigid_geom(
             * func_cubic_kernel_plane_integral(signed_dist, sph_info)
             * normal_rigid
         )
-        func_apply_coupling_force(i_l, i_b, pos_world, pressure_force, links_state)
+        force = force + pressure_force
+        is_pushing = True
         vel = vel - pressure_force * (rigid_info.substep_dt[None] / mass)
+    if is_pushing:
+        func_add_external_wrench(
+            i_l,
+            i_b,
+            pos_world,
+            force,
+            links_state,
+            is_exact=legacy_coupler_config.is_external_wrench_exact,
+        )
 
     return vel
 
@@ -896,7 +916,7 @@ def kernel_fem_surface_force(
                                 is_colliding_any = True
                             vel_fem_sv = vel_new
                         if is_colliding_any:
-                            func_apply_coupling_force(
+                            func_apply_external_wrench(
                                 geoms_info.link_idx[i_g],
                                 i_b,
                                 pos,
@@ -1068,7 +1088,7 @@ def func_pbd_collide_with_rigid_geom(
 
         delta_mv = mass * (new_vel - vel)
         force = -delta_mv / rigid_info.substep_dt[None]
-        func_apply_coupling_force(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+        func_apply_external_wrench(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
 
     return new_pos, new_vel
 

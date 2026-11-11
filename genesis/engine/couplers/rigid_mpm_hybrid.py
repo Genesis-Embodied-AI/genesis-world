@@ -8,13 +8,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities import HybridEntity
-from genesis.engine.solvers.mpm_solver import (
-    MPMInfo,
-    MPMSolver,
-    MPMState,
-    func_add_coupling_force,
-    func_add_particle_vel,
-)
+from genesis.engine.solvers.mpm_solver import MPMInfo, MPMSolver, MPMState, func_add_particle_vel
+from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GeomsInfo, LinksState
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.grad.bridge import reversed_with
@@ -63,7 +58,7 @@ def kernel_update_hybrid_soft_part(
 
     Each particle follows the link of its muscle group (see RigidMPMHybridInfo). The particles are read once the substep
     integrated them, past the grid-to-particle transfer. Their forces add exactly to the coupling forces of the links
-    with `is_deterministic` (see func_add_coupling_force), except in the variant autodiff reverses (`is_backward`).
+    with `is_deterministic` (see func_add_external_wrench), except in the variant autodiff reverses (`is_backward`).
     """
     for i_hp, i_b in qd.ndrange(
         rigid_mpm_hybrid_info.particles_idx.shape[0],
@@ -103,14 +98,12 @@ def kernel_update_hybrid_soft_part(
             # Soft-to-rigid coupling, the rigid time step integrating the force within the substep of the soft solver
             mass_real = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
             # The force on the link is the reaction of the force the link applies the particle
-            func_add_coupling_force(
+            func_add_external_wrench(
                 i_l,
                 i_b,
                 x_pos,
                 force=-mass_real * (vel_d / rigid_dt),
                 links_state=links_state,
-                coupling_forces=mpm_state.coupling_forces,
-                mpm_info=mpm_info,
                 is_exact=mpm_config.is_deterministic and not is_backward,
             )
 
