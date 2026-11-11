@@ -335,9 +335,10 @@ class SPHSolver(ParticleSolver):
                 # full Jacobi update leaves the mode alternating from one particle to the next undamped, and overshoots
                 # once the liquid compresses abruptly. Half the update cancels that mode, the others still converging.
                 jacobi_relaxation=0.5,
-                # FIXME: A larger share saves density iterations but raises the pressure scatter between substeps, which
-                # turns a thin slab unstable above a quarter. A better-converged warm start would remove this trade-off.
-                warm_start_scale=0.25,
+                # FIXME: A larger share saves more density iterations, but turns a thin slab unstable from three quarters
+                # on, for a reason not found yet: the excess of the carried-over pressure over hydrostatics neither drifts
+                # nor scatters more between neighbors than at half the share.
+                warm_start_scale=0.5,
                 factor_eps=1e-6,
                 n_neighbors_min=20,
             )
@@ -1160,8 +1161,10 @@ def kernel_predict_velocity(sph_state: SPHState, sph_info: SPHInfo):
     Advance the velocity of the sorted particles by their non-pressure acceleration, ahead of the density solve.
 
     Every environment takes part in the density solve that follows (see func_update_convergence). The warm start of
-    that solve applies part of the pressure carried over from the previous substep (see warm_start_scale in SPHInfo), to
-    the particles compressed at the start of the substep.
+    that solve applies part of the pressure carried over from the previous substep to every particle (see
+    warm_start_scale in SPHInfo). The density of a particle at rest deep in the liquid sits on either side of its rest
+    value, so warm-starting the compressed particles alone would drop the pressure of about half of them to zero, against
+    neighbors keeping it, and the pressure gradient between them would shake the liquid.
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
@@ -1182,9 +1185,7 @@ def kernel_predict_velocity(sph_state: SPHState, sph_info: SPHInfo):
 
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             rho0 = sph_info.particles.rho[i_o]
-            p = gs.qd_float(0.0)
-            if sph_state.particles_reordered.rho[i_p, i_b] > rho0:
-                p = sph_info.warm_start_scale[None] * sph_state.particles_reordered.p[i_p, i_b]
+            p = sph_info.warm_start_scale[None] * sph_state.particles_reordered.p[i_p, i_b]
             sph_state.particles_reordered.p[i_p, i_b] = p
             sph_state.particles_k_reordered[i_p, i_b] = -p / rho0
 
