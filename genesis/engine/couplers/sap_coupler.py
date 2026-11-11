@@ -1363,7 +1363,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         n_env_link_entries = sum(
             [handler.max_constraints // self._B * handler.n_rigid_sides for handler in self.handlers.constraints]
         )
-        has_rigid_contacts = n_env_link_entries > 0
+        # A contact moves rigid dofs only when the rigid solver holds any, a link without dofs being fixed
+        has_rigid_contacts = n_env_link_entries > 0 and self.rigid_solver.n_dofs > 0
         # The most dofs a link and its ancestors hold, which bounds the kinematic chain of a contact that
         # func_link_point_delassus keeps in registers, so that the bound is static. It snaps to a bounded set, and
         # outside performance mode to its largest value, whose kernels serve every scene.

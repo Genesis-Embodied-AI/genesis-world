@@ -887,6 +887,8 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     CUBE_HALFSIZE = 0.05
     CUBE_RHO = 1000.0
     CUBE_HYDROELASTIC_MODULUS = 1e5
+    PEDESTAL_HALFSIZE = 0.05
+    BALL_RADIUS = 0.03
     GRAVITY = 9.81
 
     scene = gs.Scene(
@@ -947,6 +949,21 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         )
         for i in range(2)
     ]
+    # A ball resting on a fixed rigid pedestal, the rigid solver holding no dofs
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, 0.3, PEDESTAL_HALFSIZE),
+            size=(2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE),
+            fixed=True,
+        ),
+    )
+    ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(-0.3, 0.3, 2 * PEDESTAL_HALFSIZE + BALL_RADIUS),
+            radius=BALL_RADIUS,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
     scene.build()
 
     # Run simulation
@@ -973,6 +990,11 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     cubes_overlap_ref = 4.0 * CUBE_RHO * GRAVITY * CUBE_HALFSIZE**2 / CUBE_HYDROELASTIC_MODULUS
     cubes_overlap_ref *= (2.0 * CUBE_HALFSIZE / (2.0 * CUBE_HALFSIZE - cubes_overlap_ref)) ** 2
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
+
+    # The ball settles on the pedestal.
+    # FIXME: No closed form gives this depth: the elastic flattening of the ball and its pressure field near the contact
+    # depend on its TetGen mesh. A mesher-independent ball mesh and the elastic contact solution would make it derivable.
+    assert_allclose(2 * PEDESTAL_HALFSIZE - ball.get_verts_pos()[..., 2].min(), 2.42e-4, rtol=5e-2)
 
 
 @pytest.mark.required("sparse")
