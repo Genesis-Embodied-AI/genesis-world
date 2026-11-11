@@ -9,6 +9,7 @@ import genesis as gs
 import numpy as np
 
 from examples.probability.model import Config, Forecast, State, Trial, perturb_observation, sample_launch
+from examples.probability.vectors import Diagnostics, Layers
 from examples.probability.world import World
 
 
@@ -18,6 +19,7 @@ class Command:
     config: Config | None = None
     amount: int = 0
     auto_forecast: bool = True
+    layers: Layers | None = None
 
 
 @dataclass
@@ -39,6 +41,7 @@ class Frame:
     phase: str
     seed: int
     kind: str
+    diagnostics: Diagnostics
 
 
 class Engine:
@@ -48,6 +51,7 @@ class Engine:
         self.shadow: World | None = None
         self.stopping = False
         self.pending: list[Command] = []
+        self.layers = Layers()
         self.configure(config)
 
     def configure(self, config: Config):
@@ -70,15 +74,21 @@ class Engine:
         self.paused = False
         self.auto_forecast = True
         self.next_checkpoint = 0
-        self.camera_offset = np.array([0.4, -0.55, 0.4])
+        self.camera_offset = np.array([0.7, -0.9, 0.6])
         self.publish_frame()
         self.events.put(Event("ready", "Ready. Start a throw or run a batch."))
 
     def publish_frame(self, terminal: bool = False):
         state = self.world.state()
-        self.world.camera.set_pose(pos=state.position[0] + self.camera_offset, lookat=state.position[0])
-        frame = Frame(self.world.image(), self.world.elapsed, state.position[0].tolist(),
-                      state.velocity[0].tolist(), self.phase, self.seed, self.config.kind)
+        diagnostics = self.world.diagnostics()
+        target = diagnostics.center
+        if self.layers.initial_pose or self.layers.initial_linear or self.layers.initial_angular:
+            target = (diagnostics.center + diagnostics.initial_center) / 2
+        separation = np.linalg.norm(diagnostics.center - target)
+        offset = self.camera_offset * max(1.0, separation / 0.3)
+        self.world.camera.set_pose(pos=target + offset, lookat=target)
+        frame = Frame(self.world.image(diagnostics, self.layers), self.world.elapsed, state.position[0].tolist(),
+                      state.velocity[0].tolist(), self.phase, self.seed, self.config.kind, diagnostics)
         if terminal:
             self.events.put(Event("terminal", frame=frame))
             return
@@ -191,8 +201,13 @@ class Engine:
         elif command.action == "batch":
             self.batch(command.amount)
         elif command.action == "camera":
-            self.camera_offset = np.array([0.2, -0.28, 0.22]) if command.amount else np.array([0.7, -1., 0.7])
+            self.camera_offset = np.array([0.45, -0.6, 0.45]) if command.amount else np.array([0.9, -1.2, 0.8])
             self.publish_frame()
+        elif command.action == "layers":
+            assert command.layers is not None
+            self.layers = command.layers
+            self.publish_frame()
+            self.events.put(Event("layers", "Vector layers updated."))
 
     def run(self):
         checkpoints = (0.0, 0.3, 0.65)

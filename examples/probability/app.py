@@ -20,6 +20,10 @@ from imgui_bundle import hello_imgui, imgui, immapp, immvision, implot
 from PIL import Image
 
 from examples.probability.model import Config, Forecast, Results, sample_launch, wilson_interval
+from examples.probability.vectors import (
+    ANGULAR_COLOR, CONTACT_COLOR, FLOOR_COLOR, INITIAL_ANGULAR_COLOR, INITIAL_LINEAR_COLOR, LINEAR_COLOR,
+    NORMAL_COLOR, SLIP_COLOR, SLIP_THRESHOLD, STICK_COLOR, TRAIL_COLOR, Layers,
+)
 from examples.probability.worker import Command, Frame, worker
 from examples.probability.world import World
 
@@ -73,6 +77,10 @@ class Dashboard:
         self.failed = False
         self.status = "Starting Genesis. The first launch compiles kernels."
         self.auto_forecast = True
+        self.layers = Layers()
+        self.graph_height = 360
+        self.expanded_graphs = False
+        self.fit_graphs = True
         self.batch_count = 128
         self.kind_index = 0 if config.kind == "coin" else 1
         self.protocol_index = 0 if config.protocol == "isotropic" else 1
@@ -89,7 +97,7 @@ class Dashboard:
         self.process = context.Process(target=worker, args=(config, gpu, self.commands, self.events, self.frames))
         self.process.start()
         self.params = hello_imgui.RunnerParams()
-        self.params.app_window_params.window_title = "Genesis | Probability Lab"
+        self.params.app_window_params.window_title = "Genesis | Probability Lab - Live vectors"
         self.params.app_window_params.window_geometry.size = (1360, 900)
         self.params.ini_disable = True
         self.params.fps_idling.fps_idle = 30
@@ -214,6 +222,100 @@ class Dashboard:
         if self.config.protocol == "face_up":
             imgui.text_colored((1, .75, .3, 1), "Face-up launch breaks the symmetric reference assumptions.")
 
+    def vector_controls(self):
+        imgui.separator_text("LIVE VECTORS / LEGEND")
+        entries = (
+            ("floor_normals", "Floor normals", FLOOR_COLOR, self.layers.floor_normals),
+            ("initial_pose", "Start ghost + RGB axes", TRAIL_COLOR, self.layers.initial_pose),
+            ("trail", "COM trail", TRAIL_COLOR, self.layers.trail),
+            ("initial_linear", "Initial v (m/s)", INITIAL_LINEAR_COLOR, self.layers.initial_linear),
+            ("initial_angular", "Initial omega (rad/s)", INITIAL_ANGULAR_COLOR, self.layers.initial_angular),
+            ("contact_points", "Contact points", CONTACT_COLOR, self.layers.contact_points),
+            ("linear", "Current v (m/s)", LINEAR_COLOR, self.layers.linear),
+            ("angular", "Current omega (rad/s)", ANGULAR_COLOR, self.layers.angular),
+            ("normal_forces", "Normal forces (N)", NORMAL_COLOR, self.layers.normal_forces),
+            ("friction_forces", "Friction forces (N)", SLIP_COLOR, self.layers.friction_forces),
+        )
+        changed_layers = False
+        if imgui.begin_table("vector_layers", 3, imgui.TableFlags_.sizing_stretch_same):
+            for i, (field, label, color, value) in enumerate(entries):
+                if i % 3 == 0:
+                    imgui.table_next_row()
+                imgui.table_set_column_index(i % 3)
+                imgui.push_style_color(imgui.Col_.text, color[:3] + (1.,))
+                changed, enabled = imgui.checkbox(label, value)
+                imgui.pop_style_color()
+                if changed:
+                    self.layers = replace(self.layers, **{field: enabled})
+                    changed_layers = True
+            imgui.end_table()
+        imgui.text_colored(STICK_COLOR, "Green: sticking*  |  Orange: slipping*")
+        imgui.text_wrapped(f"*Measured tangential contact speed threshold: {SLIP_THRESHOLD:g} m/s; "
+                           "a diagnostic, not a solver mode flag. Axes: X red, Y green, Z blue.")
+        imgui.text(f"Scales: v {self.layers.velocity_scale:g} m per m/s; "
+                   f"omega {self.layers.angular_scale:g} m per rad/s; F {self.layers.force_scale:g} m per N.")
+        imgui.text_disabled(f"Normals are unit directions drawn 0.08 m long. Arrow length capped at "
+                            f"{self.layers.arrow_limit:g} m; numeric values are never capped.")
+        if imgui.collapsing_header("Adjust vector scales"):
+            for field, label, value, lower, upper in (
+                ("velocity_scale", "Velocity scale (m per m/s)", self.layers.velocity_scale, .02, .5),
+                ("angular_scale", "Spin scale (m per rad/s)", self.layers.angular_scale, .002, .05),
+                ("force_scale", "Force scale (m per N)", self.layers.force_scale, .02, 2.),
+            ):
+                changed, value = imgui.slider_float(label, value, lower, upper)
+                if changed:
+                    self.layers = replace(self.layers, **{field: value})
+                    changed_layers = True
+        if changed_layers:
+            self.send(Command("layers", layers=self.layers))
+
+    def physical_readout(self):
+        if self.frame is None:
+            return
+        data = self.frame.diagnostics
+        imgui.separator_text("MEASURED PHYSICS / WORLD FRAME")
+        imgui.text(f"Floor: plane  |  normal ({data.floor_normal[0]:.2f}, {data.floor_normal[1]:.2f}, "
+                   f"{data.floor_normal[2]:.2f})")
+        imgui.text_disabled("Checker squares: 0.10 m. Color texture has no height or roughness geometry.")
+        imgui.text(f"Static / kinetic friction: shared mu = {data.friction:.3f} (dimensionless)")
+        imgui.text_disabled(f"Floor mu {data.floor_friction:.3f}; object mu {data.entity_friction:.3f}. "
+                            "Genesis has no separate mu_s / mu_k settings here.")
+        imgui.text_colored(LINEAR_COLOR, f"v = ({data.linear[0]:+.3f}, {data.linear[1]:+.3f}, "
+                          f"{data.linear[2]:+.3f}) m/s   |v| = {np.linalg.norm(data.linear):.3f}")
+        imgui.text_colored(ANGULAR_COLOR, f"omega = ({data.angular[0]:+.2f}, {data.angular[1]:+.2f}, "
+                          f"{data.angular[2]:+.2f}) rad/s   |omega| = {np.linalg.norm(data.angular):.3f}")
+        if imgui.collapsing_header("Starting pose and velocity (frozen for this throw)"):
+            p, q = data.initial_center, data.initial_quaternion
+            imgui.text(f"COM0 = ({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}) m")
+            imgui.text(f"q0 [w,x,y,z] = ({q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f})")
+            for label, value, unit in (("v0", data.initial_linear, "m/s"),
+                                       ("omega0", data.initial_angular, "rad/s")):
+                imgui.text(f"{label} = ({value[0]:+.3f}, {value[1]:+.3f}, {value[2]:+.3f}) {unit} "
+                           f" |{label}| = {np.linalg.norm(value):.3f}")
+        imgui.text(f"Floor contacts: {len(data.contacts)}  |  sample step {data.contact_time:.2f} s")
+        imgui.text_disabled("Forces/points: latest solver substep. Velocities: current frame state.")
+        if not data.contacts:
+            imgui.text_disabled("No floor contact: no contact-force arrows.")
+        elif imgui.begin_table("contact_readout", 5, imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_h):
+            for heading in ("Point xyz (m)", "|Fn| (N)", "|Ft| (N)", "Slip (m/s)", "State*"):
+                imgui.table_setup_column(heading)
+            imgui.table_headers_row()
+            for contact in data.contacts:
+                p = contact.position
+                values = (f"{p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f}",
+                          f"{np.linalg.norm(contact.normal_force):.4f}",
+                          f"{np.linalg.norm(contact.friction_force):.4f}",
+                          f"{np.linalg.norm(contact.slip_velocity):.4f}", contact.regime)
+                imgui.table_next_row()
+                for col, value in enumerate(values):
+                    imgui.table_set_column_index(col)
+                    imgui.text(value)
+            imgui.end_table()
+        force_max = max((max(np.linalg.norm(c.normal_force), np.linalg.norm(c.friction_force))
+                         for c in data.contacts), default=0)
+        if force_max * self.layers.force_scale > self.layers.arrow_limit:
+            imgui.text_colored(SLIP_COLOR, "Force arrows are capped; see full magnitudes in the table.")
+
     def simulation(self, width: float):
         imgui.text_colored((.35, .85, .84, 1), "01  /  PHYSICS WORLD")
         imgui.same_line()
@@ -228,6 +330,11 @@ class Dashboard:
             speed = np.linalg.norm(self.frame.velocity[:3])
             spin = np.linalg.norm(self.frame.velocity[3:])
             imgui.text(f"Height {self.frame.position[2]:.3f} m    Speed {speed:.2f} m/s    Spin {spin:.2f} rad/s")
+            contacts = self.frame.diagnostics.contacts
+            normal = np.sum([c.normal_force for c in contacts], axis=0) if contacts else np.zeros(3)
+            tangent = np.sum([c.friction_force for c in contacts], axis=0) if contacts else np.zeros(3)
+            imgui.text(f"{len(contacts)} contacts   |sum Fn| {np.linalg.norm(normal):.4f} N   "
+                       f"|sum Ft| {np.linalg.norm(tangent):.4f} N   mu {self.frame.diagnostics.friction:.3f}")
         else:
             imgui.dummy((width - 25, 290))
             imgui.text_wrapped(self.status)
@@ -262,10 +369,50 @@ class Dashboard:
         imgui.end_disabled()
         if self.busy and imgui.button("Cancel calculation"):
             self.send(Command("cancel"))
-        self.controls()
+        self.vector_controls()
+        if imgui.collapsing_header("Force magnitudes, floor and starting-pose details"):
+            self.physical_readout()
+        if imgui.collapsing_header("Experiment settings / reset"):
+            self.controls()
         if self.saved_path:
             imgui.text_wrapped(f"Saved: {self.saved_path}")
         imgui.text_disabled("Close this window to stop. Completed trials are saved automatically.")
+
+    def forecast_plot(self, height: float):
+        labels = self.config.labels
+        reference = 1 / len(labels)
+        if implot.begin_plot("Forecast over simulated time", (-1, height)):
+            implot.setup_axes("Observation time (s)", "P(face)")
+            implot.setup_legend(implot.Location_.north, implot.LegendFlags_.horizontal | implot.LegendFlags_.outside)
+            max_time = max(1.0, max((forecast.at_time for forecast in self.current_forecasts), default=0.0))
+            if self.fit_graphs:
+                implot.setup_axes_limits(0, max_time, 0, 1, imgui.Cond_.always)
+            if self.current_forecasts:
+                x = np.array([f.at_time for f in self.current_forecasts], dtype=float)
+                spec = implot.Spec(line_weight=2.5, marker=implot.Marker_.circle)
+                for i, label in enumerate(labels):
+                    implot.plot_line(label, x, np.array([f.probabilities[i] for f in self.current_forecasts]), spec)
+                implot.plot_line("Unresolved", x,
+                                 np.array([f.unresolved / f.samples for f in self.current_forecasts]), spec)
+            implot.plot_line("Fair", np.array([0., max_time]), np.array([reference, reference]))
+            implot.end_plot()
+
+    def frequency_plot(self, height: float):
+        labels = self.config.labels
+        reference = 1 / len(labels)
+        total = int(self.results.counts.sum())
+        if implot.begin_plot("Frequency across completed trials", (-1, height)):
+            implot.setup_axes("Valid settled trials", "Frequency")
+            implot.setup_legend(implot.Location_.north, implot.LegendFlags_.horizontal | implot.LegendFlags_.outside)
+            if self.fit_graphs:
+                implot.setup_axes_limits(1, max(10, total), 0, 1, imgui.Cond_.always)
+            outcomes = np.array([trial.outcome for trial in self.results.trials if trial.outcome >= 0])
+            if total:
+                x = np.arange(1, total + 1, dtype=float)
+                for i, label in enumerate(labels):
+                    implot.plot_line(label, x, np.cumsum(outcomes == i) / x, implot.Spec(line_weight=2.5))
+            implot.plot_line("Fair", np.array([1., float(max(10, total))]), np.array([reference, reference]))
+            implot.end_plot()
 
     def probabilities(self):
         labels = self.config.labels
@@ -273,6 +420,13 @@ class Dashboard:
         imgui.text_colored((1, .77, .35, 1), "02  /  PROBABILITY")
         imgui.text(f"Fair reference: {reference:.2%} per face")
         imgui.text_wrapped("A reference to test, not a rule imposed on the physics.")
+        if imgui.button("Enlarge graphs"):
+            self.expanded_graphs = True
+        imgui.same_line()
+        _, self.fit_graphs = imgui.checkbox("Auto-fit axes", self.fit_graphs)
+        imgui.set_next_item_width(180)
+        _, self.graph_height = imgui.slider_int("Minimum chart height", self.graph_height, 280, 600)
+        chart_height = max(self.graph_height, imgui.get_window_height() * 0.29)
         imgui.separator_text("CURRENT-ROLL FORECAST")
         if self.current_forecasts:
             forecast = self.current_forecasts[-1]
@@ -292,17 +446,7 @@ class Dashboard:
         imgui.text_disabled(f"State error: {self.config.position_sigma * 1000:g} mm, "
                             f"{np.degrees(self.config.angle_sigma):.2f} deg, "
                             f"{self.config.velocity_sigma:g} m/s, {self.config.spin_sigma:g} rad/s")
-        if implot.begin_plot("Forecast over simulated time", (-1, 260)):
-            implot.setup_axes("Observation time (s)", "P(face)")
-            implot.setup_legend(implot.Location_.north, implot.LegendFlags_.horizontal | implot.LegendFlags_.outside)
-            max_time = max(1.0, self.frame.seconds if self.frame is not None else 1.0)
-            implot.setup_axes_limits(0, max_time, 0, 1, imgui.Cond_.always)
-            if self.current_forecasts:
-                x = np.array([f.at_time for f in self.current_forecasts], dtype=float)
-                for i, label in enumerate(labels):
-                    implot.plot_line(label, x, np.array([f.probabilities[i] for f in self.current_forecasts]))
-            implot.plot_line("Fair", np.array([0., max_time]), np.array([reference, reference]))
-            implot.end_plot()
+        self.forecast_plot(chart_height)
         imgui.separator_text("OBSERVED OUTCOMES")
         counts = self.results.counts
         total = int(counts.sum())
@@ -320,17 +464,7 @@ class Dashboard:
                     imgui.table_set_column_index(i)
                     imgui.text(value)
             imgui.end_table()
-        if implot.begin_plot("Frequency across completed trials", (-1, 260)):
-            implot.setup_axes("Valid settled trials", "Frequency")
-            implot.setup_legend(implot.Location_.north, implot.LegendFlags_.horizontal | implot.LegendFlags_.outside)
-            implot.setup_axes_limits(1, max(10, total), 0, 1, imgui.Cond_.always)
-            outcomes = np.array([trial.outcome for trial in self.results.trials if trial.outcome >= 0])
-            if total:
-                x = np.arange(1, total + 1, dtype=float)
-                for i, label in enumerate(labels):
-                    implot.plot_line(label, x, np.cumsum(outcomes == i) / x)
-            implot.plot_line("Fair", np.array([1., float(max(10, total))]), np.array([reference, reference]))
-            implot.end_plot()
+        self.frequency_plot(chart_height)
         p = self.results.p_value
         imgui.text(f"Chi-square p = {p:.3f} (exploratory)" if p is not None
                    else "More valid trials needed for chi-square.")
@@ -345,9 +479,11 @@ class Dashboard:
         imgui.same_line()
         imgui.text_disabled("Physics -> observations -> probabilities")
         imgui.text_wrapped(self.status)
+        if self.smoke:
+            imgui.text_disabled("Automated validation is running; this window closes when it finishes.")
         imgui.separator()
         width = imgui.get_content_region_avail().x
-        left = width * .64
+        left = width * .56
         imgui.begin_child("Simulation", (left, 0), imgui.ChildFlags_.borders)
         self.simulation(left - 20)
         imgui.end_child()
@@ -355,6 +491,17 @@ class Dashboard:
         imgui.begin_child("Data", (0, 0), imgui.ChildFlags_.borders)
         self.probabilities()
         imgui.end_child()
+        if self.expanded_graphs:
+            imgui.set_next_window_size((1200, 900), imgui.Cond_.first_use_ever)
+            imgui.set_next_window_bg_alpha(1.0)
+            visible, self.expanded_graphs = imgui.begin("Expanded probability graphs", self.expanded_graphs)
+            if visible:
+                imgui.text("Resize this window. Turn off Auto-fit axes to pan and zoom the plots.")
+                _, self.fit_graphs = imgui.checkbox("Auto-fit axes##expanded", self.fit_graphs)
+                height = max(260, (imgui.get_content_region_avail().y - 20) / 2)
+                self.forecast_plot(height)
+                self.frequency_plot(height)
+            imgui.end()
         if self.smoke:
             if self.failed or time.monotonic() - self.started > 360:
                 self.failed = True

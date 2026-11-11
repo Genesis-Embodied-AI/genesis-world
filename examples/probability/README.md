@@ -14,7 +14,8 @@ first use of an object or batch size may take a minute to compile. The window
 shows progress. Close the window, or press Alt+F4, to stop the worker and save
 completed trials. No separate Genesis viewer window or screen capture is used.
 
-1. Select Coin or Die and press **Apply / reset experiment**. The previous
+1. Open **Experiment settings / reset**, select Coin or Die and press
+   **Apply / reset experiment**. The previous
    experiment is exported before resetting; different configurations are never
    pooled in one frequency table.
 2. Press **Flip coin** or **Roll die**. Pause/resume, step one physical timestep,
@@ -46,6 +47,65 @@ Python 3.12 and the installed CUDA PyTorch build. CPU mode is available by omitt
 
 For direct commands, use the cache environment variables in the launcher on a
 restricted Windows environment. They avoid writing caches outside the project.
+
+## Live vector layers and larger graphs
+
+The **Live vectors / legend** checkboxes independently show the floor normals,
+starting-pose ghost and axes, initial/current linear and angular velocity,
+contact points, normal/friction forces, and centre-of-mass (COM) trail. Pause and
+step are useful for inspecting impacts. Changing a layer or display scale also
+updates a paused frame. Overlays are render-only debug geometry and cannot
+participate in collisions or change inertia.
+
+All arrows use world coordinates. Velocity arrows start at the measured COM;
+initial arrows and the translucent gold ghost remain at the launch state. RGB
+axes mean X/Y/Z, and the initial quaternion readout is wxyz. The floor is the
+actual flat collision plane, with 0.10 m checker squares as a color texture;
+the checks do not create bumps. Pale blue unit normals are drawn 0.08 m long
+and follow the plane's normal and orientation.
+
+| Layer | Color | Default display scale |
+| --- | --- | --- |
+| Current linear velocity | Cyan | 0.12 m per m/s |
+| Current angular velocity | Magenta | 0.012 m per rad/s |
+| Initial linear/angular velocity | Blue/violet | Same respective scales |
+| Contact points | Yellow | Point markers |
+| Contact normal force | Blue | 1 m per N |
+| Tangential friction force | Green when sticking; orange when slipping | 1 m per N |
+| Starting pose / COM trail | Gold | Actual pose / measured trajectory |
+
+**Adjust vector scales** changes only arrow lengths. Arrows longer than 0.45 m
+are capped, with a warning in the detailed readout; numeric magnitudes remain
+uncapped. Zero vectors have no direction and are not drawn. Open **Force
+magnitudes, floor and starting-pose details** for velocity components, initial
+pose, friction coefficients and a per-contact table with force magnitudes in N,
+positions in m, and slip speed in m/s.
+
+For each rendered frame, public Genesis getters supply COM velocities, world
+angular velocity and actual solver contact forces on the coin/die. With contact
+normal `n`, the displayed decomposition is `Fn = (F dot n) n`, `Ft = F - Fn`.
+Friction arrows use this measured `Ft`, not an assumed `mu * |Fn|`. Contact-point
+velocity is `v_COM + omega cross (point - COM)`, relative to the floor; its
+tangential component determines the color. Tangential speed above 0.005 m/s is
+labelled slipping. This is a display diagnostic, not a native solver mode flag.
+Unloaded contacts are gray-blue. Forces and points describe the latest solver
+substep, while velocities describe the current frame state, up to one 0.005 s
+substep later at the default timestep. Rolling/torsional contact torques are not
+drawn by these translational force arrows.
+
+This Genesis contact model has **one shared sliding friction coefficient**,
+not independently configurable static and kinetic coefficients. Both are shown
+as shared `mu`; the contact coefficient follows the engine's
+`max(floor_mu, object_mu, 0.01)` rule. The existing pyramidal friction-cone
+solver and physical parameters are unchanged.
+
+The probability panel now uses 44% of the window width. Charts have thicker
+lines, marked forecast samples and a minimum height of 360 pixels, increasing
+with a taller window. Use **Minimum chart height** or **Enlarge graphs** for
+larger plots. The enlarged window is resizable; turn off **Auto-fit axes** to
+pan and zoom either plot. The forecast graph fits the available observation
+times and includes unresolved futures, so probability mass remains visible
+when a simulated coin stays on its edge or exceeds the time limit.
 
 ## What 50/50 and 1/6 mean
 
@@ -139,6 +199,10 @@ massless/non-colliding markings and physical drops of both coin faces and all si
 die faces. The GPU contact tests use 80 steps, checking rest, height, finite
 velocity, mass and face identity. They do not assert that a random finite batch
 must have equal counts.
+Vector tests check force decomposition on a tilted normal, rolling contact
+without slip, arrow scaling without changing measurements, world-frame angular
+velocity, frozen initial-state readouts and contact-force sums against the
+independent net-contact getter and the object's weight.
 
 ```powershell
 $env:PYTHONUTF8='1'
@@ -160,9 +224,17 @@ throws. Use the headless `--batch` command for a fixed-size experiment.
 
 ### Verified locally on 2026-11-11
 
-- The targeted pytest suite passed: **14 cases**, including both GPU contact tests.
+- The targeted pytest suite passed: **18 cases**, including both GPU contact tests
+  and world-frame vector diagnostics.
 - Both GUI smoke runs completed, exported their data, produced inspected
-  framebuffer images and exited their workers cleanly.
+  framebuffer images and exited their workers cleanly (65 trials and four
+  forecasts each). Additional runs exercised the enlarged graphs window for
+  both objects, including the coin's unresolved-probability curve.
+- A rendered sliding-coin probe showed opposing tangential force during slip
+  and about 0.1962 N total upward force at rest, matching the 20 g coin's weight.
+  Turning all overlay layers off changed the image without changing the
+  physical position, orientation or velocity. The starting-pose ghost, contact
+  arrows and floor normals were inspected in camera renders.
 - A separate worker integration check passed coin -> die -> coin reconfiguration,
   a 17-trial batch (including GPU chunk padding), cancellation, face-up settings
   and shutdown with a final frame pending.
