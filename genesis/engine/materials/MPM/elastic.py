@@ -86,9 +86,53 @@ def func_diagonal_matrix(v: qd.types.vector(3)):
 
 
 @qd.func
+def func_diagonal(M: qd.types.matrix(3, 3)):
+    """Return the diagonal of a matrix, the inverse of 'func_diagonal_matrix'."""
+    return qd.Vector([M[0, 0], M[1, 1], M[2, 2]], dt=gs.qd_float)
+
+
+@qd.func
+def func_product(v: qd.types.vector(3)):
+    """Return the product of the components of a vector."""
+    return v[0] * v[1] * v[2]
+
+
+@qd.func
+def func_pair_firsts(v: qd.types.vector(3)):
+    """Return the component of the first axis of every pair of principal axes."""
+    return qd.Vector([v[0], v[0], v[1]], dt=gs.qd_float)
+
+
+@qd.func
+def func_pair_seconds(v: qd.types.vector(3)):
+    """Return the component of the second axis of every pair of principal axes."""
+    return qd.Vector([v[1], v[2], v[2]], dt=gs.qd_float)
+
+
+@qd.func
+def func_pair_entries(M: qd.types.matrix(3, 3)):
+    """Return the entry of a matrix in the row of the first axis and the column of the second axis of every pair."""
+    return qd.Vector([M[0, 1], M[0, 2], M[1, 2]], dt=gs.qd_float)
+
+
+@qd.func
+def func_pair_matrix(v: qd.types.vector(3)):
+    """Return the symmetric matrix of zero diagonal holding a quantity of every pair of principal axes at the rows and
+    the columns of its axes, the inverse of 'func_pair_entries'."""
+    return qd.Matrix(
+        [
+            [0.0, v[0], v[1]],
+            [v[0], 0.0, v[2]],
+            [v[1], v[2], 0.0],
+        ],
+        dt=gs.qd_float,
+    )
+
+
+@qd.func
 def func_cofactor(v: qd.types.vector(3)):
-    """Return the product of the two other components of every component of a vector, the gradient of the product of
-    all three."""
+    """Return the product of the two other components of every component of a vector, the gradient of the product of all
+    three."""
     return qd.Vector([v[1] * v[2], v[0] * v[2], v[0] * v[1]], dt=gs.qd_float)
 
 
@@ -110,8 +154,8 @@ def func_compression_penalty(
     sigma: qd.types.vector(3), mu: float, lam: float, sigma_min: float, stiffness_ratio: float
 ):
     """
-    Return the penalty against the compression of the singular values below a floor, with its gradient and the
-    diagonal of its Hessian.
+    Return the penalty against the compression of the singular values below a floor, with its gradient and the diagonal
+    of its Hessian.
 
     The penalty acts below `sigma_min`, at a stiffness of `stiffness_ratio` times the Young's modulus. It keeps an
     elastic material from collapsing where its own energy grows too slowly under compression (Stomakhin et al. 2012).
@@ -131,7 +175,7 @@ def func_compression_penalty(
 @qd.func
 def func_fixed_corotated_principal(sigma: qd.types.vector(3), mu: float, lam: float):
     """Return the fixed corotated energy density, its gradient and its Hessian in the signed singular values."""
-    J = sigma[0] * sigma[1] * sigma[2]
+    J = func_product(sigma)
     cofactor = func_cofactor(sigma)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + 0.5 * lam * (J - 1.0) ** 2
     g = 2.0 * mu * (sigma - 1.0) + lam * (J - 1.0) * cofactor
@@ -150,7 +194,7 @@ def func_stable_neohookean_principal(sigma: qd.types.vector(3), mu: float, lam: 
     if lam_s > 0.0:
         alpha = 1.0 + mu_s / lam_s - mu_s / (4.0 * lam_s)
     psi_rest = 0.5 * lam_s * (1.0 - alpha) ** 2 - 0.5 * mu_s * qd.log(4.0)
-    J = sigma[0] * sigma[1] * sigma[2]
+    J = func_product(sigma)
     cofactor = func_cofactor(sigma)
     I_C = sigma.dot(sigma)
     barrier = 1.0 / (I_C + 1.0)
@@ -170,19 +214,16 @@ def func_isotropic_pair_eigenvalues(sigma: qd.types.vector(3), g: qd.types.vecto
     The flip eigenvalue of two equal singular values is its limit, from the Hessian in the singular values.
     """
     EPS_PAIR = qd.static(1e-6)
-    twist = qd.Vector.zero(gs.qd_float, 3)
-    flip = qd.Vector.zero(gs.qd_float, 3)
-    for k in qd.static(range(3)):
-        i, j = qd.static(((0, 1), (0, 2), (1, 2))[k])
-        sigma_diff = sigma[i] - sigma[j]
-        if qd.abs(sigma_diff) > EPS_PAIR:
-            flip[k] = (g[i] - g[j]) / sigma_diff
-        else:
-            flip[k] = A[i, i] - A[i, j]
-        sigma_sum = sigma[i] + sigma[j]
-        if qd.abs(sigma_sum) < EPS_PAIR:
-            sigma_sum = EPS_PAIR if sigma_sum >= 0.0 else -EPS_PAIR
-        twist[k] = (g[i] + g[j]) / sigma_sum
+    sigma_diff = func_pair_firsts(sigma) - func_pair_seconds(sigma)
+    is_distinct = qd.abs(sigma_diff) > EPS_PAIR
+    flip = qd.select(
+        is_distinct,
+        (func_pair_firsts(g) - func_pair_seconds(g)) / qd.select(is_distinct, sigma_diff, 1.0),
+        func_pair_firsts(func_diagonal(A)) - func_pair_entries(A),
+    )
+    sigma_sum = func_pair_firsts(sigma) + func_pair_seconds(sigma)
+    sigma_sum = qd.select(qd.abs(sigma_sum) < EPS_PAIR, qd.select(sigma_sum >= 0.0, EPS_PAIR, -EPS_PAIR), sigma_sum)
+    twist = (func_pair_firsts(g) + func_pair_seconds(g)) / sigma_sum
     return twist, flip
 
 
@@ -195,13 +236,9 @@ def func_isotropic_projected_modes(sigma: qd.types.vector(3), g: qd.types.vector
     Each mode of the Hessian is clamped at zero: the eigenvalues of the block, and the twist and flip eigenvalues of
     every pair, whose half sum and half difference are alpha and beta (see 'func_isotropic_pair_block').
     """
-    S = 0.5 * (A + A.transpose())
     twist, flip = func_isotropic_pair_eigenvalues(sigma, g, A)
-    eigenvalues, Q = qd.sym_eig(S, gs.qd_float)
-    S_projected = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for k in qd.static(range(3)):
-        eigenvector = Q[:, k]
-        S_projected += qd.max(eigenvalues[k], 0.0) * eigenvector.outer_product(eigenvector)
+    eigenvalues, Q = qd.sym_eig(0.5 * (A + A.transpose()), gs.qd_float)
+    S_projected = Q @ func_diagonal_matrix(qd.max(eigenvalues, 0.0)) @ Q.transpose()
     twist = qd.max(twist, 0.0)
     flip = qd.max(flip, 0.0)
     return S_projected, 0.5 * (flip + twist), 0.5 * (flip - twist)
@@ -220,13 +257,12 @@ def func_isotropic_pair_block(
     'func_isotropic_projected_modes'.
 
     `r_a` and `r_b` are the gradients of the weights of the nodes, times the deformation gradient at the start of the
-    substep, expressed in the frame V.
+    substep, expressed in the frame V. The block of the singular values couples the diagonal entries of the deformation
+    gradient in that frame, and the 2x2 block [[alpha, beta], [beta, alpha]] of every pair of principal axes couples its
+    two entries off the diagonal.
     """
-    Z = S * r_a.outer_product(r_b)
-    for k in qd.static(range(3)):
-        i, j = qd.static(((0, 1), (0, 2), (1, 2))[k])
-        Z[i, i] += alpha[k] * r_a[j] * r_b[j]
-        Z[j, j] += alpha[k] * r_a[i] * r_b[i]
-        Z[i, j] += beta[k] * r_a[j] * r_b[i]
-        Z[j, i] += beta[k] * r_a[i] * r_b[j]
-    return Z
+    return (
+        S * r_a.outer_product(r_b)
+        + func_diagonal_matrix(func_pair_matrix(alpha) @ (r_a * r_b))
+        + func_pair_matrix(beta) * r_b.outer_product(r_a)
+    )

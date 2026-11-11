@@ -236,7 +236,7 @@ def test_rigid_mpm_implicit_coupling(show_viewer):
         ),
     )
     scene.build(n_envs=2)
-    assert scene.sim.newton_solver.is_rigid_deferred
+    assert scene.sim.rigid_solver.is_solved_in_global_newton
 
     box_dropped.set_dofs_velocity(((0.0,) * 6, (0.0, 0.0, -1.0, 0.0, 0.0, 0.0)))
     cube.set_velocity(((0.0, 0.0, 0.0), (0.0, 0.0, -1.0)))

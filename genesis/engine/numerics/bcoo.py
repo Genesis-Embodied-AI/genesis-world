@@ -91,7 +91,7 @@ def func_add_by_key(i_key: int, value, out: qd.template(), n_components: qd.temp
 
 
 @qd.func
-def func_report_triplet_demand(n_triplets_demanded: int, matrix: BCOOMatrixScratch):
+def func_report_triplet_demand(matrix: BCOOMatrixScratch, n_triplets_demanded: int):
     """Set the triplets the writers ask for, those that fit and the padded extent of their sort."""
     n_triplets = qd.min(n_triplets_demanded, matrix.triplets_row.shape[0])
     matrix.n_triplets_demanded[()] = n_triplets_demanded
@@ -101,7 +101,7 @@ def func_report_triplet_demand(n_triplets_demanded: int, matrix: BCOOMatrixScrat
 
 
 @qd.func
-def func_write_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
+def func_write_triplet(matrix: BCOOMatrixScratch, i_t: int, i_r: int, j_r: int, block, is_symmetric: qd.template()):
     """
     Write a block in a triplet slot, the slots past the capacity dropping it.
 
@@ -123,7 +123,7 @@ def func_write_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixSc
 
 
 @qd.func
-def func_add_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixScratch, is_symmetric: qd.template()):
+def func_add_triplet(matrix: BCOOMatrixScratch, i_t: int, i_r: int, j_r: int, block, is_symmetric: qd.template()):
     """Add a block to the triplet slot that the same thread wrote for the same row and column (see
     'func_write_triplet')."""
     if i_t < matrix.triplets_row.shape[0]:
@@ -137,7 +137,7 @@ def func_add_triplet(i_t: int, i_r: int, j_r: int, block, matrix: BCOOMatrixScra
 
 
 @qd.func
-def func_read_entry(i_entry: int, matrix: BCOOMatrixScratch, block_rows: qd.template(), block_cols: qd.template()):
+def func_read_entry(matrix: BCOOMatrixScratch, i_entry: int, block_rows: qd.template(), block_cols: qd.template()):
     """Return the row, the column and the block of an entry."""
     block = qd.Matrix.zero(gs.qd_float, block_rows, block_cols)
     for k, j in qd.static(qd.ndrange(block_rows, block_cols)):
@@ -176,17 +176,17 @@ def func_sort_triplets(matrix: BCOOMatrixScratch):
     """Sort the triplets by row then column and number the entries their positions make up."""
     func_compose_triplets_key(matrix)
     func_radix_sort(
+        matrix.sorter,
         matrix.triplets_key,
         matrix.keys_buffer,
         matrix.triplets_source_idx,
         matrix.sources_idx_buffer,
         matrix.n_padded_triplets,
-        matrix.sorter,
         key_bits=64,
     )
     func_mark_entry_ends(matrix)
     func_exclusive_sum(
-        matrix.triplets_is_entry_end, matrix.triplets_entry_idx, matrix.n_padded_triplets, matrix.scanner
+        matrix.scanner, matrix.triplets_is_entry_end, matrix.triplets_entry_idx, matrix.n_padded_triplets
     )
 
 
@@ -242,17 +242,17 @@ def sort_triplets(matrix: BCOOMatrixScratch) -> None:
     shared by every matrix on their own."""
     kernel_compose_triplets_key(matrix)
     kernel_radix_sort(
+        matrix.sorter,
         matrix.triplets_key,
         matrix.keys_buffer,
         matrix.triplets_source_idx,
         matrix.sources_idx_buffer,
         matrix.n_padded_triplets,
-        matrix.sorter,
         key_bits=64,
     )
     kernel_mark_entry_ends(matrix)
     kernel_exclusive_sum(
-        matrix.triplets_is_entry_end, matrix.triplets_entry_idx, matrix.n_padded_triplets, matrix.scanner
+        matrix.scanner, matrix.triplets_is_entry_end, matrix.triplets_entry_idx, matrix.n_padded_triplets
     )
 
 

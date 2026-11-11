@@ -18,9 +18,9 @@ class ExclusiveSumScratch(Data, kind=DataKind.SCRATCH):
     """
     The workspace of an exclusive prefix sum.
 
-    A GPU tile takes its turn from `tile_counter` and publishes its sum in `partial`, then its sum and that of the
-    tiles before it in `complete`, `status` telling which one it holds (decoupled look-back). The CPU scan holds the sum
-    of the chunks before every chunk in `partial`.
+    A GPU tile takes its turn from `tile_counter` and publishes its sum in `partial`, then its sum and that of the tiles
+    before it in `complete`, `status` telling which one it holds (decoupled look-back). The CPU scan holds the sum of
+    the chunks before every chunk in `partial`.
     """
 
     status: qd.Tensor = field(int, shape=(SCAN_TILES,), ndarray=True)
@@ -40,7 +40,7 @@ def exclusive_sum_sizes(capacity: int) -> dict[Size, int]:
 
 
 @qd.func(requires_top_level=True)
-def func_cpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor, scanner: ExclusiveSumScratch):
+def func_cpu_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
     N_CHUNKS = qd.static(256)
     qd.loop_config(name="exclusive_sum_cpu_chunks")
     for i_chunk in range(N_CHUNKS):
@@ -66,7 +66,7 @@ def func_cpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Te
 
 
 @qd.func(requires_top_level=True)
-def func_gpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor, scanner: ExclusiveSumScratch):
+def func_gpu_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
     TILE = qd.static(3072)
     VALUES_PER_THREAD = qd.static(24)
     qd.loop_config(name="exclusive_sum_clear_tiles", block_dim=128)
@@ -81,8 +81,8 @@ def func_gpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Te
         tid = qd.simt.block.thread_idx()
         i_blk = i_th // 128
         if i_blk < n_tiles:
-            # The tiles take their turn in the order the blocks start, so that a tile only waits on
-            # tiles already running
+            # The tiles take their turn in the order the blocks start, so that a tile only waits on tiles already
+            # running
             sh_tile_slot = qd.simt.block.SharedArray((1,), gs.qd_int)
             if tid == 0:
                 sh_tile_slot[0] = qd.atomic_add(scanner.tile_counter[()], 1)
@@ -151,19 +151,19 @@ def func_gpu_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Te
 
 
 @qd.func(requires_top_level=True)
-def func_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor, scanner: ExclusiveSumScratch):
+def func_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
     """
     Write the exclusive prefix sum of the leading values of an array into another.
 
     The sum covers the first `n_values[()]` values of `values` and lands in `output`.
     """
     if qd.static(gs.backend == gs.cpu):
-        func_cpu_exclusive_sum(values, output, n_values, scanner)
+        func_cpu_exclusive_sum(scanner, values, output, n_values)
     else:
-        func_gpu_exclusive_sum(values, output, n_values, scanner)
+        func_gpu_exclusive_sum(scanner, values, output, n_values)
 
 
 @qd.kernel
-def kernel_exclusive_sum(values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor, scanner: ExclusiveSumScratch):
+def kernel_exclusive_sum(scanner: ExclusiveSumScratch, values: qd.Tensor, output: qd.Tensor, n_values: qd.Tensor):
     """Write the exclusive prefix sum of values in a launch of its own (see 'func_exclusive_sum')."""
-    func_exclusive_sum(values, output, n_values, scanner)
+    func_exclusive_sum(scanner, values, output, n_values)

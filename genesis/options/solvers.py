@@ -656,8 +656,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         (see NewtonOptions). Each of its substeps costs several iterations, which the larger time step pays back.
         Differentiable simulation, CPIC, custom materials and the contact with FEM, PBD and SPH entities require the
         explicit solver. The contact with moving rigid entities requires the pyramidal friction cone and the Newton
-        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions).
-        Defaults to False.
+        constraint solver of the rigid solver, with hibernation and noslip iterations off (see RigidOptions). Defaults
+        to False.
     wall_timeconst : float, optional
         Time constant in seconds over which the walls of the domain push back the particles that penetrate them, at
         least twice the substep. A smaller value gives stiffer walls that the particles penetrate less, at the cost of
@@ -665,9 +665,9 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     liquid_smoothing_velocity : float, optional
         Velocity in m/s under which the resistance of a liquid to compression fades in, its stiffness rising from zero
         to its bulk modulus over the compression the liquid undergoes at that velocity over a substep. A larger value
-        lets the solve of a liquid near rest take fewer iterations, but softens the liquid more. If None, resolved
-        based on the tolerance of the solve: 'NewtonOptions.velocity_tol', under which the solve does not resolve the
-        motion anyway. Defaults to None. Only used when `use_implicit_solver` is True.
+        lets the solve of a liquid near rest take fewer iterations, but softens the liquid more. If None, resolved based
+        on the tolerance of the solve: 'NewtonOptions.velocity_tol', the smallest velocity the solve resolves. Defaults
+        to None. Only used when `use_implicit_solver` is True.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional

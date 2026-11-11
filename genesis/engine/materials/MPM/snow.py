@@ -7,7 +7,7 @@ import genesis as gs
 from genesis.typing import PositiveFloat
 
 from .base import SamplerType
-from .elastic import func_diagonal_matrix
+from .elastic import func_diagonal, func_diagonal_matrix
 from .elasto_plastic import ElastoPlastic, func_clamp_return_map
 
 
@@ -55,9 +55,7 @@ class Snow(ElastoPlastic):
 
     @qd.func
     def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
-        sigma_new, Jp_new = func_snow_return_map(
-            qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float), Jp, self.yield_lower, self.yield_higher
-        )
+        sigma_new, Jp_new = func_snow_return_map(func_diagonal(S), Jp, self.yield_lower, self.yield_higher)
         S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
@@ -88,7 +86,6 @@ def func_snow_return_map(sigma: qd.types.vector(3), Jp: float, yield_lower: floa
     """Return the singular values of the deformation gradient of snow after its return map (see
     'func_clamp_return_map'), and its plastic volume ratio, which takes the volume the clamp removed."""
     sigma_new = func_clamp_return_map(sigma, yield_lower, yield_higher)
-    Jp_new = Jp
-    for k in qd.static(range(3)):
-        Jp_new *= sigma[k] / sigma_new[k]
-    return sigma_new, Jp_new
+    ratio = sigma / sigma_new
+    # Multiplied in turn, which keeps the results of the explicit solver to the last bit
+    return sigma_new, Jp * ratio[0] * ratio[1] * ratio[2]

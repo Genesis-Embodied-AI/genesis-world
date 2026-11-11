@@ -8,7 +8,7 @@ import genesis as gs
 from genesis.typing import PositiveFloat, ValidFloat
 
 from .base import Base, SamplerType
-from .elastic import func_diagonal_matrix
+from .elastic import func_diagonal, func_diagonal_matrix
 
 
 @qd.data_oriented
@@ -46,9 +46,7 @@ class Sand(Base):
 
     @qd.func
     def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp):
-        sigma_new, Jp_new = func_sand_return_map(
-            qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float), Jp, self.mu, self.lam, self.alpha
-        )
+        sigma_new, Jp_new = func_sand_return_map(func_diagonal(S), Jp, self.mu, self.lam, self.alpha)
         S_new = func_diagonal_matrix(sigma_new)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
@@ -97,17 +95,10 @@ def func_extended_hencky_principal(sigma: qd.types.vector(3), mu: float, lam: fl
     The log of a singular value below `sigma_min` continues by its tangent line, which keeps the energy finite as a
     singular value goes to zero or below.
     """
-    log_stretch = qd.Vector.zero(gs.qd_float, 3)
-    dlog_stretch = qd.Vector.zero(gs.qd_float, 3)
-    d2log_stretch = qd.Vector.zero(gs.qd_float, 3)
-    for k in qd.static(range(3)):
-        if sigma[k] >= sigma_min:
-            log_stretch[k] = qd.log(sigma[k])
-            dlog_stretch[k] = 1.0 / sigma[k]
-            d2log_stretch[k] = -1.0 / (sigma[k] * sigma[k])
-        else:
-            log_stretch[k] = qd.log(sigma_min) + (sigma[k] - sigma_min) / sigma_min
-            dlog_stretch[k] = 1.0 / sigma_min
+    sigma_log = qd.max(sigma, sigma_min)
+    log_stretch = qd.log(sigma_log) + qd.min(sigma - sigma_min, 0.0) / sigma_min
+    dlog_stretch = 1.0 / sigma_log
+    d2log_stretch = -(sigma >= sigma_min).cast(gs.qd_float) * dlog_stretch * dlog_stretch
     trace = log_stretch.sum()
     tau = 2.0 * mu * log_stretch + lam * trace
     psi = mu * log_stretch.dot(log_stretch) + 0.5 * lam * trace * trace

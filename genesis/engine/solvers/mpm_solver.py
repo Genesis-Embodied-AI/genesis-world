@@ -15,11 +15,14 @@ from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.materials.MPM.base import MPMModel, MPMPlasticity
 from genesis.engine.materials.MPM.elastic import (
+    func_cofactor,
     func_compression_penalty,
+    func_diagonal,
     func_diagonal_matrix,
     func_fixed_corotated_principal,
     func_isotropic_pair_block,
     func_isotropic_projected_modes,
+    func_product,
     func_stable_neohookean_principal,
 )
 from genesis.engine.materials.MPM.elasto_plastic import func_clamp_return_map, func_von_mises_return_map
@@ -27,6 +30,15 @@ from genesis.engine.materials.MPM.liquid import func_liquid_principal, func_liqu
 from genesis.engine.materials.MPM.muscle import func_muscle_fibre_terms
 from genesis.engine.materials.MPM.sand import func_extended_hencky_principal, func_sand_return_map
 from genesis.engine.materials.MPM.snow import func_snow_hardening, func_snow_return_map
+from genesis.engine.numerics.bcoo import (
+    BCOOMatrixScratch,
+    bcoo_matrix_sizes,
+    func_add_by_key,
+    func_add_triplet,
+    func_read_entry,
+    func_report_triplet_demand,
+    func_write_triplet,
+)
 from genesis.engine.numerics.exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
 from genesis.engine.numerics.hash_table import (
     HashTableScratch,
@@ -45,7 +57,6 @@ from genesis.engine.numerics.soft_contact import (
     func_contact_sol_params,
     func_pyramid_coefficient,
     func_pyramid_rows,
-    func_pyramid_terms,
 )
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import func_apply_coupling_force
@@ -79,7 +90,7 @@ from genesis.utils.misc import (
     qd_zero_grad,
 )
 from genesis.utils.sdf import SDFInfo
-from genesis.utils.simt import qd_block_max, qd_block_shuffle, qd_block_sum
+from genesis.utils.simt import qd_block_max, qd_block_shuffle, qd_block_sum, qd_segmented_sum, qd_slot_neighbors
 
 from .base_solver import ErrorCode, SimulatorState, kernel_set_actu
 from .particle_solver import ParticleSolver
@@ -253,13 +264,13 @@ class MPMSortedParticles(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,))
 class MPMRigidContacts(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
     """
     The contact of every sorted particle with the nearest rigid geom that couples with the particles, under the implicit
-    solver, staged from the state at the start of the substep (see 'kernel_stage_particle_rows').
+    solver, predicted from the state at the start of the substep (see 'kernel_mpm_predict').
 
     `geom_idx` is the geom, -1 for none, which leaves the other arrays unset. `stiffness` and `target` are the rows of
     the friction pyramid of the contact (see 'func_pyramid_rows'), of outward normal `normal` and friction `friction`.
-    `gradient` and `hessian` are those of its rows in the displacement of the particle relative to the geom, staged at
-    the last assembly of the Newton solve, which the rigid solver takes its share of when it solves its substep within
-    the Newton solve (see genesis/engine/solvers/newton_solver.py).
+    `gradient` and `hessian` are those of its rows in the displacement of the particle relative to the point of the geom
+    it touches, at the current iterate of the Newton solve, which the MPM solver and the rigid solver map onto their own
+    unknowns (see 'kernel_assemble_mpm_rigid_coupling' in newton_solver.py).
     """
 
     geom_idx: qd.Tensor = field(int, ndarray=True)
@@ -345,7 +356,7 @@ class MPMSparseGrid(Data, kind=DataKind.SCRATCH):
     nodes_diagonal: qd.Tensor = field((float, (3, 3)), shape=(BLOCKS * BLOCK_CELLS,), ndarray=True)
 
 
-def update_sparse_grid(
+def build_grid(
     f: int,
     mpm_state: "MPMState",
     sparse_grid: MPMSparseGrid | None,
@@ -355,7 +366,7 @@ def update_sparse_grid(
     n_blocks_min: int = MIN_BLOCKS,
 ) -> MPMSparseGrid:
     """
-    Sort the active particles of a frame by cell and lay the sparse grid over them, and return the grid.
+    Build the grid of the implicit solver over the active particles of a frame, sorted by cell, and return it.
 
     The grid is replaced by a larger one, of `n_blocks_min` blocks at least, whenever the particles need more blocks
     than it holds. A grid replaced keeps referenced in `sparse_grids_replaced`, with its arrays freed.
@@ -381,12 +392,12 @@ def update_sparse_grid(
             )
         kernel_list_blocks(mpm_state, sparse_grid)
         kernel_radix_sort(
+            sparse_grid.neighbors_sorter,
             sparse_grid.neighbors_key,
             sparse_grid.neighbors_key_buffer,
             sparse_grid.neighbors_source_idx,
             sparse_grid.neighbors_source_idx_buffer,
             sparse_grid.n_neighbor_keys,
-            sparse_grid.neighbors_sorter,
             key_bits=64,
         )
         kernel_publish_blocks(sparse_grid)
@@ -760,8 +771,9 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 for material in self._materials:
                     if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
                         gs.raise_exception(
-                            "The implicit MPM solver supports the Elastic, ElastoPlastic, Liquid, Muscle, Sand and Snow "
-                            f"materials alone, got {type(material).__name__}: set MPMOptions(use_implicit_solver=False)."
+                            "The implicit MPM solver supports the Elastic, ElastoPlastic, Liquid, Muscle, Sand and "
+                            f"Snow materials alone, got {type(material).__name__}: set "
+                            "MPMOptions(use_implicit_solver=False)."
                         )
                     model = MPMModel.FIXED_COROTATED
                     plasticity = MPMPlasticity.NONE
@@ -820,14 +832,14 @@ Please decrease the simulation timestep or adjust the material parameters."""
                     array.from_numpy(np.array(values, dtype=gs.np_float if array.dtype == gs.qd_float else gs.np_int))
 
                 # The first grid covers the blocks of the particles where they are added, with some slack, and grows
-                # once they outgrow it (see 'update_sparse_grid')
+                # once they outgrow it (see 'build_grid')
                 particles_pos = qd_to_numpy(self.mpm_state.particles.pos, col_mask=0, keepdim=False, transpose=True)
                 cells = np.floor(particles_pos * self._inv_dx).astype(gs.np_int)
                 envs = np.broadcast_to(np.arange(self._B)[:, None, None], (*cells.shape[:2], 1))
                 particle_blocks = np.unique(np.concatenate((envs, cells // BLOCK_DIM), axis=-1).reshape(-1, 4), axis=0)
                 octant = np.array([[0, (a >> 2) & 1, (a >> 1) & 1, a & 1] for a in range(8)])
                 n_blocks = len(np.unique((particle_blocks[:, None] + octant).reshape(-1, 4), axis=0))
-                self.sparse_grid = update_sparse_grid(
+                self.sparse_grid = build_grid(
                     f=0,
                     mpm_state=self.mpm_state,
                     sparse_grid=None,
@@ -836,7 +848,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
                     sparse_grids_replaced=self._sparse_grids_replaced,
                     n_blocks_min=2 * n_blocks,
                 )
-                kernel_transfer_to_sparse_grid(
+                kernel_mpm_p2g(
                     f=0,
                     mpm_state=self.mpm_state,
                     sparse_grid=self.sparse_grid,
@@ -845,11 +857,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
                     force_fields=self.force_fields,
                 )
                 kernel_contact_invweight(
-                    f=0,
-                    mpm_state=self.mpm_state,
-                    sparse_grid=self.sparse_grid,
-                    mpm_info=self.mpm_info,
-                    mpm_config=self.mpm_config,
+                    f=0, mpm_state=self.mpm_state, sparse_grid=self.sparse_grid, mpm_info=self.mpm_info
                 )
             else:
                 # See: https://github.com/taichi-dev/taichi_elements/blob/d19678869a28b09a32ef415b162e35dc929b792d/engine/mpm_solver.py#L84
@@ -925,14 +933,12 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def substep_pre_coupling(self, f: int) -> None:
         if self._use_implicit_solver:
             # The Newton solve of the substep moves the nodes (see NewtonSolver), from the grid laid over the particles
-            self.sparse_grid = update_sparse_grid(
+            self.sparse_grid = build_grid(
                 f, self.mpm_state, self.sparse_grid, self.mpm_info, self._errno, self._sparse_grids_replaced
             )
-            kernel_transfer_to_sparse_grid(
-                f, self.mpm_state, self.sparse_grid, self._sim.sim_state, self.mpm_info, self.force_fields
-            )
+            kernel_mpm_p2g(f, self.mpm_state, self.sparse_grid, self._sim.sim_state, self.mpm_info, self.force_fields)
             rigid_solver = self._sim.rigid_solver
-            kernel_stage_particle_rows(
+            kernel_mpm_predict(
                 f,
                 self.mpm_state,
                 rigid_solver.dyn_state.links,
@@ -946,7 +952,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
                 self.mpm_config,
                 rigid_solver.collider.collider_config,
                 self._is_constrained,
-                self._sim.newton_solver.is_rigid_deferred,
+                rigid_solver.is_solved_in_global_newton,
             )
             return
         if self._requires_grad:
@@ -972,7 +978,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
     def substep_post_coupling(self, f: int) -> None:
         if self._use_implicit_solver:
-            kernel_transfer_from_sparse_grid(f, self.mpm_state, self.sparse_grid, self.mpm_info, self._errno)
+            kernel_mpm_g2p(f, self.mpm_state, self.sparse_grid, self.mpm_info, self._errno)
             kernel_freeze_invalid_envs(f, self.mpm_state, self._errno)
             return
         rigid_solver = self._sim.rigid_solver
@@ -1878,8 +1884,8 @@ def func_backward_svd(
 # --------------------- implicit solver: sparse grid and stencils --------------------
 # ------------------------------------------------------------------------------------
 
-# The implicit solver moves the particles by the displacement over the substep of the nodes of the grid around them,
-# the trilinear (Q1) interpolation over the 8 nodes of the cell of a particle, the node of the lower corner of a cell
+# The implicit solver moves the particles by the displacement over the substep of the nodes of the grid around them, the
+# trilinear (Q1) interpolation over the 8 nodes of the cell of a particle, the node of the lower corner of a cell
 # standing for the cell. The nodes live in blocks of 4 x 4 x 4 cells, which the sparse grid allocates where the
 # particles reach (see MPMSparseGrid).
 
@@ -1939,10 +1945,7 @@ def func_q1_node_weight(offset, fx: qd.types.vector(3), inv_dx: float):
     offset_float = offset.cast(gs.qd_float)
     axes_w = offset_float * fx + (1.0 - offset_float) * (1.0 - fx)
     axes_dw = (2.0 * offset_float - 1.0) * inv_dx
-    return (
-        axes_w[0] * axes_w[1] * axes_w[2],
-        axes_dw * qd.Vector([axes_w[1] * axes_w[2], axes_w[0] * axes_w[2], axes_w[0] * axes_w[1]], dt=gs.qd_float),
-    )
+    return func_product(axes_w), axes_dw * func_cofactor(axes_w)
 
 
 @qd.func
@@ -1979,7 +1982,7 @@ def func_stencil_slots(i_b: int, cell, sparse_grid: MPMSparseGrid):
     slots = qd.Vector.zero(gs.qd_int, 8)
     for a in qd.static(range(8)):
         node = cell + func_node_offset(a)
-        i_blk = func_lookup_hash(func_block_key(i_b, node >> 2), sparse_grid.hash_table)
+        i_blk = func_lookup_hash(sparse_grid.hash_table, func_block_key(i_b, node >> 2))
         slots[a] = i_blk * 64 + func_cell_local(node)
     return slots
 
@@ -1997,12 +2000,12 @@ def func_gather_stencil(slots, nodes_values: qd.Tensor):
 
 @qd.func
 def func_cell_particles(i_b: int, cell, i_lane: int, sparse_grid: MPMSparseGrid, is_lanes: qd.template()):
-    """Return the range of the sorted slots of the particles of a cell, looked up once and shared by the lanes of a
-    warp when the lanes gather a node together."""
+    """Return the range of the sorted slots of the particles of a cell, looked up once and shared by the lanes of a warp
+    when the lanes gather a node together."""
     i_s_start = gs.qd_int(0)
     i_s_end = gs.qd_int(0)
     if i_lane == 0:
-        i_blk = func_lookup_hash(func_block_key(i_b, cell >> 2), sparse_grid.hash_table)
+        i_blk = func_lookup_hash(sparse_grid.hash_table, func_block_key(i_b, cell >> 2))
         if i_blk >= 0:
             i_n = i_blk * 64 + func_cell_local(cell)
             i_s_start = sparse_grid.nodes_cell_start[i_n]
@@ -2043,12 +2046,12 @@ def kernel_sort_particles(f: int, mpm_state: MPMState, mpm_info: MPMInfo, errno:
     for _ in range(1):
         mpm_state.sorted_particles.n_keys[None] = mpm_state.sorted_particles.keys.shape[0]
     func_radix_sort(
+        mpm_state.sorted_particles.sorter,
         mpm_state.sorted_particles.keys,
         mpm_state.sorted_particles.keys_buffer,
         mpm_state.sorted_particles.particles_idx,
         mpm_state.sorted_particles.particles_idx_buffer,
         mpm_state.sorted_particles.n_keys,
-        mpm_state.sorted_particles.sorter,
         key_bits=64,
     )
 
@@ -2091,8 +2094,8 @@ def kernel_list_blocks(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
 
 @qd.kernel
 def kernel_publish_blocks(sparse_grid: MPMSparseGrid):
-    """Number the distinct blocks of the sorted neighbor keys in increasing key and insert them in the hash table,
-    the blocks past the capacity flagging the grid to grow."""
+    """Number the distinct blocks of the sorted neighbor keys in increasing key and insert them in the hash table, the
+    blocks past the capacity flagging the grid to grow."""
     func_clear_hash(sparse_grid.hash_table)
     for i_key in range(sparse_grid.n_neighbor_keys[None]):
         is_block_start = 1
@@ -2101,17 +2104,17 @@ def kernel_publish_blocks(sparse_grid: MPMSparseGrid):
                 is_block_start = 0
         sparse_grid.neighbors_is_block_start[i_key] = is_block_start
     func_exclusive_sum(
+        sparse_grid.neighbors_scanner,
         sparse_grid.neighbors_is_block_start,
         sparse_grid.neighbors_block_idx,
         sparse_grid.n_neighbor_keys,
-        sparse_grid.neighbors_scanner,
     )
     for i_key in range(sparse_grid.n_neighbor_keys[None]):
         if sparse_grid.neighbors_is_block_start[i_key] != 0:
             i_blk = sparse_grid.neighbors_block_idx[i_key]
             if i_blk < sparse_grid.blocks_key.shape[0]:
                 sparse_grid.blocks_key[i_blk] = sparse_grid.neighbors_key[i_key]
-                func_insert_hash(sparse_grid.neighbors_key[i_key], i_blk, sparse_grid.hash_table)
+                func_insert_hash(sparse_grid.hash_table, sparse_grid.neighbors_key[i_key], i_blk)
     for _ in range(1):
         n_keys = sparse_grid.n_neighbor_keys[None]
         n_blocks_demanded = gs.qd_int(0)
@@ -2145,16 +2148,16 @@ def kernel_list_cells(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
         mpm_state.sorted_particles.is_cell_start[i_s] = is_cell_start
         mpm_state.sorted_particles.is_task_start[i_s] = is_task_start
     func_exclusive_sum(
+        mpm_state.sorted_particles.cells_scanner,
         mpm_state.sorted_particles.is_cell_start,
         mpm_state.sorted_particles.cells_idx,
         mpm_state.sorted_particles.n_valid,
-        mpm_state.sorted_particles.cells_scanner,
     )
     func_exclusive_sum(
+        mpm_state.sorted_particles.tasks_scanner,
         mpm_state.sorted_particles.is_task_start,
         mpm_state.sorted_particles.tasks_idx,
         mpm_state.sorted_particles.n_valid,
-        mpm_state.sorted_particles.tasks_scanner,
     )
     for _ in range(1):
         mpm_state.sorted_particles.n_cells[None] = 0
@@ -2179,7 +2182,7 @@ def kernel_list_cells(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
     for i_cell in range(mpm_state.sorted_particles.n_cells[None]):
         i_s_start = mpm_state.sorted_particles.cells_start[i_cell]
         key = mpm_state.sorted_particles.keys[i_s_start]
-        i_blk = func_lookup_hash(key >> qd.u64(6), sparse_grid.hash_table)
+        i_blk = func_lookup_hash(sparse_grid.hash_table, key >> qd.u64(6))
         if i_blk >= 0:
             i_n = i_blk * 64 + gs.qd_int(key & qd.u64(63))
             sparse_grid.nodes_cell_start[i_n] = i_s_start
@@ -2187,7 +2190,7 @@ def kernel_list_cells(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
 
 
 @qd.kernel
-def kernel_transfer_to_sparse_grid(
+def kernel_mpm_p2g(
     f: int,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
@@ -2266,8 +2269,12 @@ def func_elastic_principal(
     extension_sigma_min: float,
     extension_stiffness: float,
 ):
-    """Return the energy density of a material of a model (see 'MPMModel'), its gradient and its Hessian in the signed
-    singular values, the elastic solids resisting further compression past `extension_sigma_min`."""
+    """
+    Return the energy density of a material of a model (see 'MPMModel'), its gradient and its Hessian in the signed
+    singular values.
+
+    The elastic solids resist further compression past `extension_sigma_min`.
+    """
     psi = gs.qd_float(0.0)
     g = qd.Vector.zero(gs.qd_float, 3)
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -2310,7 +2317,7 @@ def func_plastic_return_map(
         F_new = func_liquid_return_map(F, liquid_J_min)
     elif plasticity != MPMPlasticity.NONE:
         U, S, V = gu.qd_svd(F)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+        sigma = func_diagonal(S)
         sigma_new = sigma
         is_yielding = True
         if plasticity == MPMPlasticity.VON_MISES:
@@ -2357,18 +2364,12 @@ def func_walls_terms(
     Return the energy, the gradient and the Hessian of the rows of the walls of the domain on the displacement of a
     particle (see 'MPMSortedParticles.walls_stiffness').
 
-    Every axis k holds a frictionless row of normal `sign[k]`.
+    Every axis k holds a frictionless row of normal `sign[k]`, active while the displacement leaves the gap short of the
+    target.
     """
-    energy = gs.qd_float(0.0)
-    gradient = qd.Vector.zero(gs.qd_float, 3)
-    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for k in qd.static(range(3)):
-        gap = sign[k] * disp[k] - target[k]
-        if stiffness[k] > 0.0 and gap < 0.0:
-            energy += 0.5 * stiffness[k] * gap * gap
-            gradient[k] += stiffness[k] * gap * sign[k]
-            hessian[k, k] += stiffness[k]
-    return energy, gradient, hessian
+    gap = sign * disp - target
+    stiffness_active = stiffness * (gap < 0.0).cast(gs.qd_float)
+    return 0.5 * stiffness_active.dot(gap * gap), stiffness_active * gap * sign, func_diagonal_matrix(stiffness_active)
 
 
 @qd.func
@@ -2387,22 +2388,14 @@ def func_particle_material(i_mat: int, Jp: float, mpm_info: MPMInfo):
 
 @qd.func
 def func_particle_point_terms(
-    i_s: int,
-    x: qd.types.vector(3),
-    disp: qd.types.vector(3),
-    disp_partner: qd.types.vector(3),
-    sorted_particles: MPMSortedParticles,
-    rigid_contacts: MPMRigidContacts,
-    mpm_config: qd.template(),
+    i_s: int, x: qd.types.vector(3), disp: qd.types.vector(3), sorted_particles: MPMSortedParticles
 ):
     """
     Return the energy, the gradient and the Hessian of the terms acting on the displacement of a sorted particle over
-    the substep, and the gradient and the Hessian of its contact alone.
+    the substep.
 
-    The particle at x moves by `disp`. The terms come from the rows staged at its slot: the spring of its constraint,
-    the walls of the domain and its contact with a rigid geom (see 'kernel_stage_particle_rows'). The contact acts on
-    the displacement relative to the point of the geom it touches, which moves by `disp_partner` beyond the motion its
-    rows already follow.
+    The particle at x moves by `disp`. The terms come from the rows staged at its slot: the spring of its constraint and
+    the walls of the domain (see 'kernel_mpm_predict').
     """
     energy_spring, gradient_spring, curvature_spring = func_spring_terms(
         sorted_particles.constraint_spring[i_s],
@@ -2421,40 +2414,27 @@ def func_particle_point_terms(
     energy = energy_spring + energy_walls
     gradient = gradient_spring + gradient_walls
     hessian = curvature_spring * qd.Matrix.identity(gs.qd_float, 3) + hessian_walls
-    gradient_rigid = qd.Vector.zero(gs.qd_float, 3)
-    hessian_rigid = qd.Matrix.zero(gs.qd_float, 3, 3)
-    if qd.static(mpm_config.has_rigid_contact):
-        if rigid_contacts.geom_idx[i_s] >= 0:
-            energy_rigid, gradient_contact, hessian_contact = func_pyramid_terms(
-                rigid_contacts.normal[i_s],
-                rigid_contacts.friction[i_s],
-                rigid_contacts.stiffness[i_s],
-                rigid_contacts.target[i_s],
-                disp - disp_partner,
-            )
-            energy += energy_rigid
-            gradient_rigid = gradient_contact
-            hessian_rigid = hessian_contact
-    return energy, gradient + gradient_rigid, hessian + hessian_rigid, gradient_rigid, hessian_rigid
+    return energy, gradient, hessian
 
 
 @qd.func
 def func_particle_stencil_terms(
     f: int,
     i_s: int,
-    disp_partner: qd.types.vector(3),
+    gradient_contact: qd.types.vector(3),
+    hessian_contact: qd.types.matrix(3, 3),
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     mpm_info: MPMInfo,
-    mpm_config: qd.template(),
 ):
     """
     Return the terms of the Hessian of the incremental potential of a sorted particle on the nodes of its stencil, at
     the displacement of the nodes, and stage the factors of its gradient at its slot.
 
-    The particle contributes its elastic energy, the energy of the fibres of a muscle, and the terms acting on its own
-    displacement (see 'func_particle_point_terms', for `disp_partner`). The block of the nodes a and b is
-    'func_stencil_pair_block' of the terms returned. A fixed node takes no part.
+    The particle contributes its elastic energy, the energy of the fibres of a muscle, the terms acting on its own
+    displacement (see 'func_particle_point_terms'), and the gradient and the Hessian of its contact with a rigid geom in
+    that displacement (see 'MPMRigidContacts.gradient'). The block of the nodes a and b is 'func_stencil_pair_block' of
+    the terms returned. A fixed node takes no part.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
@@ -2472,7 +2452,7 @@ def func_particle_stencil_terms(
     i_mat = mpm_info.particles.material_idx[i_p]
     model, plasticity, mu, lam = func_particle_material(i_mat, mpm_state.particles.Jp[f, i_p, i_b], mpm_info)
     U, S, V = gu.qd_svd(F_trial)
-    sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+    sigma = func_diagonal(S)
     psi, g, A = func_elastic_principal(
         model,
         sigma,
@@ -2492,20 +2472,13 @@ def func_particle_stencil_terms(
     S_block, alpha, beta = func_isotropic_projected_modes(sigma, g, A)
 
     # The terms on the displacement of the particle, sum_a w_a u_a
-    energy_point, point_gradient, point_hessian, gradient_rigid, hessian_rigid = func_particle_point_terms(
-        i_s,
-        x_p,
-        u_nodes.transpose() @ w,
-        disp_partner,
-        mpm_state.sorted_particles,
-        mpm_state.rigid_contacts,
-        mpm_config,
+    energy_point, point_gradient, point_hessian = func_particle_point_terms(
+        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles
     )
+    point_gradient += gradient_contact
+    point_hessian += hessian_contact
     mpm_state.sorted_particles.stress_factor[i_s] = scale * (P + P_fibre) @ F.transpose()
     mpm_state.sorted_particles.point_gradient[i_s] = point_gradient
-    if qd.static(mpm_config.has_rigid_contact):
-        mpm_state.rigid_contacts.gradient[i_s] = gradient_rigid
-        mpm_state.rigid_contacts.hessian[i_s] = hessian_rigid
 
     # The rows r_a = grad w_a^T F V of the stencil in the frame V, the weights of the rank-one fibre term, and the
     # weights of the terms on the displacement, all zero on a fixed node
@@ -2538,16 +2511,10 @@ def func_stencil_pair_block(
 
 @qd.func
 def func_particle_energy(
-    f: int,
-    i_s: int,
-    disp_partner: qd.types.vector(3),
-    mpm_state: MPMState,
-    sparse_grid: MPMSparseGrid,
-    mpm_info: MPMInfo,
-    mpm_config: qd.template(),
+    f: int, i_s: int, energy_contact: float, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo
 ):
-    """Return the energy of a sorted particle in the incremental potential at the displacement of the nodes (see
-    'func_particle_stencil_terms')."""
+    """Return the energy of a sorted particle in the incremental potential at the displacement of the nodes, with the
+    energy of its contact with a rigid geom (see 'func_particle_stencil_terms')."""
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
     dt = mpm_info.substep_dt[None]
@@ -2561,7 +2528,7 @@ def func_particle_energy(
     U, S, V = gu.qd_svd(F_trial)
     psi, g, A = func_elastic_principal(
         model,
-        qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float),
+        func_diagonal(S),
         mu,
         lam,
         mpm_info.hencky_sigma_min[None],
@@ -2575,31 +2542,26 @@ def func_particle_energy(
         mpm_info.particles.muscle_direction[i_p],
         F_trial,
     )
-    energy_point, point_gradient, point_hessian, gradient_rigid, hessian_rigid = func_particle_point_terms(
-        i_s,
-        x_p,
-        u_nodes.transpose() @ w,
-        disp_partner,
-        mpm_state.sorted_particles,
-        mpm_state.rigid_contacts,
-        mpm_config,
+    energy_point, point_gradient, point_hessian = func_particle_point_terms(
+        i_s, x_p, u_nodes.transpose() @ w, mpm_state.sorted_particles
     )
+    energy_point += energy_contact
     scale = mpm_info.particle_volume[None] / mpm_info.particle_volume_scale[None] * dt * dt
     return i_b, scale * (psi + psi_fibre) + energy_point
 
 
 @qd.func
-def func_particle_displacement_update(
-    f: int, i_s: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo
+def func_particle_displacement(
+    f: int, i_s: int, nodes_disp: qd.Tensor, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo
 ):
-    """Return the environment of a sorted particle and the update of its displacement along the Newton direction,
-    sum_a w_a du_a."""
+    """Return the environment of a sorted particle and its displacement sum_a w_a u_a from a displacement of the nodes,
+    their iterate or their update along the Newton direction."""
     n_particles = mpm_state.particles.pos.shape[1]
     inv_dx = mpm_info.inv_dx[None]
     i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
     w, _ = func_q1_stencil(mpm_state.particles.pos[f, i_p, i_b] * inv_dx - cell.cast(gs.qd_float), inv_dx)
-    du_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), sparse_grid.nodes_du)
-    return i_b, du_nodes.transpose() @ w
+    disp_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), nodes_disp)
+    return i_b, disp_nodes.transpose() @ w
 
 
 @qd.func
@@ -2704,7 +2666,7 @@ def func_particle_inversion_step_cap(
 
 
 @qd.kernel
-def kernel_stage_particle_rows(
+def kernel_mpm_predict(
     f: int,
     mpm_state: MPMState,
     links_state: LinksState,
@@ -2718,18 +2680,19 @@ def kernel_stage_particle_rows(
     mpm_config: qd.template(),
     collider_config: qd.template(),
     is_constrained: qd.template(),
-    is_rigid_deferred: qd.template(),
+    is_rigid_solved_in_global_newton: qd.template(),
 ):
     """
-    Stage at the slot of every active sorted particle the rows of the walls of the domain, of its contact with a rigid
-    geom and of the spring of its constraint, from the state at the start of the substep.
+    Predict the constraints of every active sorted particle over the substep from the state at its start.
 
-    A particle gets the row of the nearer wall of an axis within the band of the wall (see 'func_contact_band_width'),
-    and the rows of the friction pyramid of the nearest rigid geom of its env that couples with the particles within the
-    band of the geom, its gap being its signed distance short of the softness of the geom. The stiffness of a row comes from the
-    inverse weight of the particle along its normal, and that of the link of the geom. The target of a spring moves with
-    the link of the particle at its velocity over the substep. The links stand where the substep starts when the rigid
-    solver solves it within the Newton solve (`is_rigid_deferred`), and where it ends otherwise.
+    The constraints hold over the Newton solve: the rows of the walls of the domain, of the contact of the particle with
+    a rigid geom and of the spring of its particle constraint, at the slot of the particle. A particle gets the row of
+    the nearer wall of an axis within the band of the wall (see 'func_contact_band_width'), and the rows of the friction
+    pyramid of the nearest rigid geom of its env that couples with the particles within the band of the geom, its gap
+    being its signed distance short of the softness of the geom. The stiffness of a row comes from the inverse weight of
+    the particle along its normal, and that of the link of the geom. The target of a spring moves with the link of the
+    particle at its velocity over the substep. The links stand at the start of the substep when the global Newton solve
+    solves the rigid solver (`is_rigid_solved_in_global_newton`), at its end otherwise.
     """
     n_particles = mpm_state.particles.pos.shape[1]
     dt = mpm_info.substep_dt[None]
@@ -2846,7 +2809,7 @@ def kernel_stage_particle_rows(
                 mass = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
                 spring = dt * dt * stiffness_spring
                 damping = dt * 2.0 * qd.sqrt(stiffness_spring * mass)
-        if qd.static(is_rigid_deferred):
+        if qd.static(is_rigid_solved_in_global_newton):
             target_pos = target_pos + target_disp
         mpm_state.sorted_particles.constraint_spring[i_s] = spring
         mpm_state.sorted_particles.constraint_damping[i_s] = damping
@@ -2855,9 +2818,7 @@ def kernel_stage_particle_rows(
 
 
 @qd.kernel
-def kernel_contact_invweight(
-    f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, mpm_config: qd.template()
-):
+def kernel_contact_invweight(f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo):
     """
     Compute the inverse weight of every active particle in its contact rows at rest, from the diagonal blocks of the
     Hessian of the nodes of its stencil.
@@ -2876,7 +2837,13 @@ def kernel_contact_invweight(
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
             func_particle_stencil_terms(
-                f, i_s, qd.Vector.zero(gs.qd_float, 3), mpm_state, sparse_grid, mpm_info, mpm_config
+                f,
+                i_s,
+                qd.Vector.zero(gs.qd_float, 3),
+                qd.Matrix.zero(gs.qd_float, 3, 3),
+                mpm_state,
+                sparse_grid,
+                mpm_info,
             )
         )
         for a in qd.static(range(8)):
@@ -2907,9 +2874,7 @@ def kernel_contact_invweight(
 
 
 @qd.kernel
-def kernel_transfer_from_sparse_grid(
-    f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, errno: qd.Tensor
-):
+def kernel_mpm_g2p(f: int, mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, errno: qd.Tensor):
     """
     Move every active particle to the next frame by the displacement of the nodes of its stencil (grid-to-particle
     transfer), then apply the return map of its material.
@@ -2962,3 +2927,353 @@ def kernel_transfer_from_sparse_grid(
             mpm_state.particles.Jp[f + 1, i_p, i_b] = mpm_state.particles.Jp[f, i_p, i_b]
             mpm_state.particles.actu[f + 1, i_p, i_b] = mpm_state.particles.actu[f, i_p, i_b]
         mpm_state.particles.is_active[f + 1, i_p, i_b] = mpm_state.particles.is_active[f, i_p, i_b]
+
+
+# ------------------------------------------------------------------------------------
+# -------------------------------- global Newton solve -------------------------------
+# ------------------------------------------------------------------------------------
+
+# The rows of the linear system of the global Newton solve, one per node of the sparse grid of the implicit solver
+ROWS = Size("rows")
+# The smallest capacity of the rows, and the slack of a capacity grown past an overflow
+MIN_ROWS = 64 * 64
+ROWS_GROWTH_FACTOR = 1.2
+# The nodes of the stencil of a particle, the corners of its cell (see 'func_q1_stencil'), and the blocks of the upper
+# triangle of the Hessian of a stencil, one per pair of nodes (a, b) with a <= b: 8 x 9 / 2 = 36
+STENCIL_NODES = 8
+STENCIL_PAIRS = STENCIL_NODES * (STENCIL_NODES + 1) // 2
+
+
+class NewtonRows(Data, kind=DataKind.SCRATCH, shape=(ROWS,)):
+    """
+    The linear system of the Newton iterations, one row of 3 unknowns per node of the sparse grid, and its solve.
+
+    `gradient` is the gradient of the incremental potential at the current iterate, the right-hand side, `solution` the
+    solution of the Hessian against it, and `r`, `z`, `p` and `Ap` the residual, the preconditioned residual, the search
+    direction and its product with the Hessian of the preconditioned conjugate gradient (PCG). `jacobi` holds the
+    inverses of the diagonal blocks of the Hessian, the block Jacobi preconditioner. `rows_env` is the environment of
+    every row, the rows of an environment following one another. The matrix holds the upper triangle of the Hessian.
+    """
+
+    n_rows: qd.Tensor = field(int, shape=(), ndarray=True)
+    rows_env: qd.Tensor = field(int, ndarray=True)
+    gradient: qd.Tensor = field((float, 3), ndarray=True)
+    solution: qd.Tensor = field((float, 3), ndarray=True)
+    r: qd.Tensor = field((float, 3), ndarray=True)
+    z: qd.Tensor = field((float, 3), ndarray=True)
+    p: qd.Tensor = field((float, 3), ndarray=True)
+    Ap: qd.Tensor = field((float, 3), ndarray=True)
+    jacobi: qd.Tensor = field((float, (3, 3)), ndarray=True)
+    matrix: BCOOMatrixScratch
+
+
+def grow_linear_system(
+    n_rows: int, n_tasks: int, newton_rows: NewtonRows | None, newton_rows_replaced: list[NewtonRows]
+) -> NewtonRows:
+    """
+    Return the rows of the linear system of the substep, grown past the nodes of the grid and the triplets of their
+    Hessian: the rows given if they hold them, larger ones otherwise.
+
+    The Hessian holds the kinetic block of every node and the upper triangle of the 8 x 8 blocks of the stencil of every
+    task of the assembly (see 'kernel_list_cells'). Rows replaced stay referenced in `newton_rows_replaced`, with their
+    arrays freed.
+    """
+    n_triplets = n_rows + STENCIL_PAIRS * n_tasks
+    if newton_rows is not None:
+        if newton_rows.rows_env.shape[0] >= n_rows and newton_rows.matrix.triplets_row.shape[0] >= n_triplets:
+            return newton_rows
+        # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct
+        # could take over from a dead one, so the rows replaced stay referenced, with their arrays freed.
+        for _, array in iter_state_arrays(newton_rows):
+            qd_destroy_data(array)
+        newton_rows_replaced.append(newton_rows)
+    max_rows = max(int(np.ceil(n_rows * ROWS_GROWTH_FACTOR)), MIN_ROWS)
+    max_triplets = max(int(np.ceil(n_triplets * ROWS_GROWTH_FACTOR)), MIN_ROWS)
+    return NewtonRows(sizes={ROWS: max_rows, NewtonRows.matrix: bcoo_matrix_sizes(max_triplets, block_shape=(3, 3))})
+
+
+@qd.func
+def func_staged_contact_terms(i_s: int, mpm_state: MPMState, mpm_config: qd.template()):
+    """Return the gradient and the Hessian of the contact of a sorted particle with a rigid geom staged at the current
+    iterate (see 'kernel_assemble_mpm_rigid_coupling' in newton_solver.py), zero for a particle in no contact."""
+    gradient = qd.Vector.zero(gs.qd_float, 3)
+    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if qd.static(mpm_config.has_rigid_contact):
+        if mpm_state.rigid_contacts.geom_idx[i_s] >= 0:
+            gradient = mpm_state.rigid_contacts.gradient[i_s]
+            hessian = mpm_state.rigid_contacts.hessian[i_s]
+    return gradient, hessian
+
+
+@qd.func
+def func_node_kinetic_energy(
+    mass: float, is_fixed: int, u: qd.types.vector(3), vel_free: qd.types.vector(3), dt: float
+):
+    """Return the kinetic energy of a node in the incremental potential, 1/2 m |u - dt v_free|^2, zero for a fixed node
+    or a node without mass."""
+    energy = gs.qd_float(0.0)
+    if mass > 0.0 and is_fixed == 0:
+        energy = 0.5 * mass * (u - dt * vel_free).norm_sqr()
+    return energy
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_assemble(
+    f: int,
+    newton_rows: NewtonRows,
+    mpm_state: MPMState,
+    sparse_grid: MPMSparseGrid,
+    mpm_info: MPMInfo,
+    mpm_config: qd.template(),
+):
+    """
+    Assemble the gradient and the projected Hessian of the incremental potential of the MPM solver at the displacement
+    of the nodes.
+
+    Every node takes its kinetic block, an identity on a fixed node, whose unknown stays zero, and on a node without
+    mass, whose unknown the elastic terms of the particles around it set. Every task of the sorted particles (see
+    'kernel_list_cells') writes the blocks of the upper triangle of the stencil of its cell (see STENCIL_PAIRS), summed
+    over its particles: the lanes of a warp sum them on GPU, and one thread walks the particles of a cell on CPU. The
+    gradient of a node then gathers the factors its particles staged. A particle in contact with a rigid geom adds the
+    terms of its contact staged at the current iterate (see 'func_staged_contact_terms').
+    """
+    n_nodes = sparse_grid.n_blocks[None] * 64
+    n_valid = mpm_state.sorted_particles.n_valid[None]
+    for _ in range(1):
+        newton_rows.n_rows[None] = n_nodes
+        func_report_triplet_demand(
+            newton_rows.matrix, n_nodes + STENCIL_PAIRS * mpm_state.sorted_particles.n_tasks[None]
+        )
+    for i_n in range(n_nodes):
+        i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
+        newton_rows.rows_env[i_n] = i_b
+        mass = sparse_grid.nodes_mass[i_n]
+        if mass <= 0.0 or sparse_grid.nodes_is_fixed[i_n] != 0:
+            mass = 1.0
+        func_write_triplet(
+            newton_rows.matrix, i_n, i_n, i_n, mass * qd.Matrix.identity(gs.qd_float, 3), is_symmetric=True
+        )
+
+    # The pairs of nodes (a, b) of the upper triangle of a stencil, a <= b, in the order of the triplets of a task
+    pairs_a = qd.Vector([a for a in range(STENCIL_NODES) for b in range(a, STENCIL_NODES)], dt=gs.qd_int)
+    pairs_b = qd.Vector([b for a in range(STENCIL_NODES) for b in range(a, STENCIL_NODES)], dt=gs.qd_int)
+    if qd.static(gs.backend == gs.cpu):
+        for i_cell in range(mpm_state.sorted_particles.n_cells[None]):
+            i_s_start = mpm_state.sorted_particles.cells_start[i_cell]
+            i_t_start = n_nodes + STENCIL_PAIRS * mpm_state.sorted_particles.tasks_idx[i_s_start]
+            for i_s in range(i_s_start, mpm_state.sorted_particles.cells_start[i_cell + 1]):
+                gradient_contact, hessian_contact = func_staged_contact_terms(i_s, mpm_state, mpm_config)
+                slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
+                    func_particle_stencil_terms(
+                        f, i_s, gradient_contact, hessian_contact, mpm_state, sparse_grid, mpm_info
+                    )
+                )
+                for i_pair in range(STENCIL_PAIRS):
+                    a = pairs_a[i_pair]
+                    b = pairs_b[i_pair]
+                    block_ab = func_stencil_pair_block(
+                        a, b, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian
+                    )
+                    if i_s == i_s_start:
+                        func_write_triplet(
+                            newton_rows.matrix, i_t_start + i_pair, slots[a], slots[b], block_ab, is_symmetric=True
+                        )
+                    else:
+                        func_add_triplet(
+                            newton_rows.matrix, i_t_start + i_pair, slots[a], slots[b], block_ab, is_symmetric=True
+                        )
+    else:
+        qd.loop_config(block_dim=128)
+        for i_s in range((n_valid + 31) // 32 * 32):
+            tid = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+            is_valid = i_s < n_valid
+            # A lane past the particles takes the terms of the last one and adds nothing, every lane taking part in the
+            # sums of the warp
+            i_s_clamped = qd.min(i_s, n_valid - 1)
+            i_task = gs.qd_int(-1)
+            if is_valid:
+                i_task = mpm_state.sorted_particles.tasks_idx[i_s]
+            i_task_prev, i_task_next = qd_slot_neighbors(tid, i_task)
+            gradient_contact, hessian_contact = func_staged_contact_terms(i_s_clamped, mpm_state, mpm_config)
+            slots, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian = (
+                func_particle_stencil_terms(
+                    f, i_s_clamped, gradient_contact, hessian_contact, mpm_state, sparse_grid, mpm_info
+                )
+            )
+            for i_pair in range(STENCIL_PAIRS):
+                a = pairs_a[i_pair]
+                b = pairs_b[i_pair]
+                block_ab = gs.qd_float(is_valid) * func_stencil_pair_block(
+                    a, b, r_frame, U, S_block, alpha, beta, fibre_weights, point_weights, point_hessian
+                )
+                is_tail = False
+                for j, k in qd.static(qd.ndrange(3, 3)):
+                    block_jk, is_tail = qd_segmented_sum(tid, i_task, i_task_prev, i_task_next, block_ab[j, k])
+                    block_ab[j, k] = block_jk
+                if is_tail:
+                    func_write_triplet(
+                        newton_rows.matrix,
+                        n_nodes + STENCIL_PAIRS * i_task + i_pair,
+                        slots[a],
+                        slots[b],
+                        block_ab,
+                        is_symmetric=True,
+                    )
+
+    # The gradient of every node: its kinetic term and the factors staged by the particles of the cells around it
+    N_LANES = qd.static(1 if gs.backend == gs.cpu else 32)
+    n_particles = mpm_state.particles.pos.shape[1]
+    inv_dx = mpm_info.inv_dx[None]
+    dt = mpm_info.substep_dt[None]
+    qd.loop_config(block_dim=128)
+    for i_th in range(n_nodes * N_LANES):
+        i_lane = gs.qd_int(0)
+        if qd.static(N_LANES > 1):
+            i_lane = gs.qd_int(qd.simt.subgroup.invocation_id()) & 31
+        i_n = i_th // N_LANES
+        i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
+        node = block * 4 + func_local_cell(i_n % 64)
+        gradient = qd.Vector.zero(gs.qd_float, 3)
+        for a in range(8):
+            offset = func_node_offset(a)
+            cell = node - offset
+            i_s_start, i_s_end = func_cell_particles(i_b, cell, i_lane, sparse_grid, is_lanes=N_LANES > 1)
+            for i_chunk_ in range((i_s_end - i_s_start + N_LANES - 1) // N_LANES):
+                i_s = i_s_start + i_chunk_ * N_LANES + i_lane
+                if i_s < i_s_end:
+                    i_p = mpm_state.sorted_particles.particles_idx[i_s] - i_b * n_particles
+                    x_p = mpm_state.particles.pos[f, i_p, i_b]
+                    w, grad_w = func_q1_node_weight(offset, x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
+                    gradient += (
+                        w * mpm_state.sorted_particles.point_gradient[i_s]
+                        + mpm_state.sorted_particles.stress_factor[i_s] @ grad_w
+                    )
+        if qd.static(N_LANES > 1):
+            for d in qd.static(range(3)):
+                gradient[d] = qd_block_sum(gradient[d])
+        if i_lane == 0:
+            mass = sparse_grid.nodes_mass[i_n]
+            gradient_node = qd.Vector.zero(gs.qd_float, 3)
+            if sparse_grid.nodes_is_fixed[i_n] == 0:
+                u = sparse_grid.nodes_u[i_n]
+                gradient_node = gradient + mass * (u - dt * sparse_grid.nodes_vel_free[i_n])
+            newton_rows.gradient[i_n] = gradient_node
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_kinetic_energy(energies: qd.Tensor, envs_mask: qd.Tensor, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo):
+    """Add the kinetic energy of the nodes at their displacement into the entry of every environment selected, the nodes
+    of an environment following one another (see 'func_node_kinetic_energy')."""
+    n_nodes = sparse_grid.n_blocks[None] * 64
+    qd.loop_config(block_dim=256)
+    for i_n in range((n_nodes + 31) // 32 * 32):
+        i_b_key = gs.qd_int(-1)
+        energy = gs.qd_float(0.0)
+        if i_n < n_nodes:
+            i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
+            if envs_mask[i_b]:
+                i_b_key = i_b
+                energy = func_node_kinetic_energy(
+                    sparse_grid.nodes_mass[i_n],
+                    sparse_grid.nodes_is_fixed[i_n],
+                    sparse_grid.nodes_u[i_n],
+                    sparse_grid.nodes_vel_free[i_n],
+                    mpm_info.substep_dt[None],
+                )
+        func_add_by_key(i_b_key, energy, energies)
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_precond_invert(newton_rows: NewtonRows):
+    """Invert the diagonal blocks of the rows into their block Jacobi preconditioner, every block equilibrated to a unit
+    diagonal, which keeps the inverse accurate for the rows of very different stiffness."""
+    for i_entry in range(newton_rows.matrix.n_entries[None]):
+        i_r, j_r, block = func_read_entry(newton_rows.matrix, i_entry, block_rows=3, block_cols=3)
+        if i_r == j_r:
+            diagonal = func_diagonal(block)
+            scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
+            scaling = scale.outer_product(scale)
+            inverse = qd.Matrix.identity(gs.qd_float, 3)
+            if (block * scaling).determinant() > 0.0:
+                inverse = (block * scaling).inverse()
+            newton_rows.jacobi[i_r] = inverse * scaling
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_matvec(newton_rows: NewtonRows, envs_mask: qd.Tensor, p_dot_ap: qd.Tensor, has_p_dot_ap: qd.template()):
+    """
+    Add the product Ap of the matrix of the rows with the search direction of every environment selected, the upper
+    triangle standing for the transposed blocks of the lower one.
+
+    With `has_p_dot_ap`, p . Ap of every environment adds to its entry in `p_dot_ap` along, in the energy form.
+    """
+    n_entries = newton_rows.matrix.n_entries[None]
+    qd.loop_config(block_dim=256)
+    for i_entry in range((n_entries + 31) // 32 * 32):
+        i_r_key = gs.qd_int(-1)
+        i_b_key = gs.qd_int(-1)
+        product = qd.Vector.zero(gs.qd_float, 3)
+        energy = gs.qd_float(0.0)
+        if i_entry < n_entries:
+            i_r, j_r, block = func_read_entry(newton_rows.matrix, i_entry, block_rows=3, block_cols=3)
+            i_b = newton_rows.rows_env[i_r]
+            if envs_mask[i_b]:
+                i_r_key = i_r
+                i_b_key = i_b
+                p_col = newton_rows.p[j_r]
+                product = block @ p_col
+                energy = p_col.dot(product)
+                if i_r != j_r:
+                    p_row = newton_rows.p[i_r]
+                    qd.atomic_add(newton_rows.Ap[j_r], block.transpose() @ p_row)
+                    energy = 2.0 * p_row.dot(product)
+        func_add_by_key(i_r_key, product, newton_rows.Ap, n_components=3)
+        if qd.static(has_p_dot_ap):
+            func_add_by_key(i_b_key, energy, p_dot_ap)
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_init_line_search(
+    f: int,
+    newton_rows: NewtonRows,
+    envs_mask: qd.Tensor,
+    max_displacement: qd.Tensor,
+    alpha: qd.Tensor,
+    mpm_state: MPMState,
+    sparse_grid: MPMSparseGrid,
+    mpm_info: MPMInfo,
+):
+    """
+    Set the Newton direction of the nodes of every environment selected, minus the solution of the linear solve, from
+    their start point.
+
+    The largest update of the displacement of a particle adds to the entry of its environment in `max_displacement`. The
+    step of an environment in `alpha` stays short of the first zero volume of a liquid particle, which
+    'func_particle_inversion_step_cap' finds along the direction.
+    """
+    for i_n in range(newton_rows.n_rows[None]):
+        i_b = newton_rows.rows_env[i_n]
+        if envs_mask[i_b]:
+            sparse_grid.nodes_du[i_n] = -newton_rows.solution[i_n]
+            sparse_grid.nodes_u_start[i_n] = sparse_grid.nodes_u[i_n]
+    for i_s in range(mpm_state.sorted_particles.n_valid[None]):
+        i_b, du = func_particle_displacement(f, i_s, sparse_grid.nodes_du, mpm_state, sparse_grid, mpm_info)
+        if envs_mask[i_b]:
+            qd.atomic_max(max_displacement[i_b], qd.max(qd.abs(du).max(), 0.0))
+            is_capped, alpha_cap = func_particle_inversion_step_cap(f, i_s, mpm_state, sparse_grid, mpm_info)
+            if is_capped:
+                qd.atomic_min(alpha[i_b], alpha_cap)
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_step_forward(sparse_grid: MPMSparseGrid, envs_mask: qd.Tensor, alpha: qd.Tensor):
+    """
+    Move the nodes of every environment selected to the trial point of its step along the Newton direction.
+
+    The step of an environment is its entry in `alpha`.
+    """
+    n_rows = sparse_grid.n_blocks[None] * 64
+    for i_n in range(n_rows):
+        i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
+        if envs_mask[i_b]:
+            sparse_grid.nodes_u[i_n] = sparse_grid.nodes_u_start[i_n] + alpha[i_b] * sparse_grid.nodes_du[i_n]

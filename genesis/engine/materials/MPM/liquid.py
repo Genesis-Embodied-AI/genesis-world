@@ -6,7 +6,7 @@ from pydantic import StrictBool
 import genesis as gs
 
 from .base import Base
-from .elastic import func_cofactor, func_cofactor_jacobian
+from .elastic import func_cofactor, func_cofactor_jacobian, func_product
 
 
 @qd.data_oriented
@@ -94,7 +94,7 @@ def func_liquid_principal(sigma: qd.types.vector(3), mu: float, lam: float, band
     The energy sums a viscous shear term of modulus `mu` and the volume term (see 'func_liquid_volume_terms').
     """
     cofactor = func_cofactor(sigma)
-    psi_volume, dpsi, d2psi = func_liquid_volume_terms(sigma[0] * sigma[1] * sigma[2], lam, band)
+    psi_volume, dpsi, d2psi = func_liquid_volume_terms(func_product(sigma), lam, band)
     psi = mu * (sigma - 1.0).dot(sigma - 1.0) + psi_volume
     g = 2.0 * mu * (sigma - 1.0) + dpsi * cofactor
     A = 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3)

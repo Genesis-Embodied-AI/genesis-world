@@ -16,9 +16,9 @@ def func_soft_row(sol_params: qd.types.vector(7), phi: float, vel: float, diag_c
     Return the stiffness and the target of a soft row of a contact point.
 
     The row stands for the soft constraint of the rigid solver of solver parameters `sol_params` at the gap `phi` and
-    the normal velocity `vel`, `diag_coef` being the inverse weight of the point along the row. Its energy is
-    1/2 stiffness (n . u - target)^2 while the displacement u of the point over the substep `dt` leaves the gap short of
-    the target.
+    the normal velocity `vel`, `diag_coef` being the inverse weight of the point along the row. Its energy in the
+    displacement u of the point over the substep `dt` is 1/2 stiffness (n . u - target)^2 while n . u stays short of the
+    target, which leaves the gap short of the target of the row.
     """
     imp, aref = gu.imp_aref(sol_params, phi, vel, phi)
     diag = qd.max(diag_coef * (1.0 - imp) / imp, gs.EPS)
@@ -31,8 +31,8 @@ def func_band_row(sol_params: qd.types.vector(7), phi: float, vel: float, diag_c
     Return the stiffness and the target of the soft row of a contact point within the band of its partner.
 
     A point at a negative gap takes the soft row of its penetration (see 'func_soft_row'). A point at a positive gap
-    takes the stiffness of the row at rest, the edge of the range, and the gap as target, so that it reaches the
-    surface by the end of the substep at most.
+    takes the stiffness of the row at rest, the edge of the range, and the gap as target, so that it reaches the surface
+    by the end of the substep at most.
     """
     # The row at rest is chosen at runtime, so that the soft row is inlined once
     phi_row = gs.qd_float(0.0)
@@ -113,15 +113,15 @@ def func_pyramid_rows(
     partner over the substep at its velocity `vel_partner`, so that the rows act on the displacement of the point alone.
     """
     directions = func_pyramid_directions(normal, friction)
+    vel_rows = directions @ vel_rel
     stiffness = qd.Vector.zero(gs.qd_float, directions.n)
     target = qd.Vector.zero(gs.qd_float, directions.n)
     # The rows are looped at runtime, so that the soft row is inlined once
     for k in range(directions.n):
-        direction = qd.Vector([directions[k, d] for d in qd.static(range(3))], dt=gs.qd_float)
-        stiffness_k, target_k = func_band_row(sol_params, phi, direction.dot(vel_rel), diag_coef, dt)
+        stiffness_k, target_k = func_band_row(sol_params, phi, vel_rows[k], diag_coef, dt)
         stiffness[k] = stiffness_k
-        target[k] = target_k + dt * direction.dot(vel_partner)
-    return stiffness, target
+        target[k] = target_k
+    return stiffness, target + dt * (directions @ vel_partner)
 
 
 @qd.func
@@ -135,20 +135,6 @@ def func_contact_invweight(
 
 
 @qd.func
-def func_soft_row_terms(direction: qd.types.vector(3), stiffness: float, target: float, u_rel: qd.types.vector(3)):
-    """Return the energy, the gradient and the Hessian of a soft row in the displacement of its contact point."""
-    energy = gs.qd_float(0.0)
-    gradient = qd.Vector.zero(gs.qd_float, 3)
-    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
-    gap = direction.dot(u_rel) - target
-    if stiffness > 0.0 and gap < 0.0:
-        energy = 0.5 * stiffness * gap * gap
-        gradient = stiffness * gap * direction
-        hessian = stiffness * direction.outer_product(direction)
-    return energy, gradient, hessian
-
-
-@qd.func
 def func_pyramid_terms(
     normal: qd.types.vector(3),
     friction: float,
@@ -156,15 +142,16 @@ def func_pyramid_terms(
     target: qd.types.vector(PYRAMID_ROWS),
     u_rel: qd.types.vector(3),
 ):
-    """Return the energy, the gradient and the Hessian of the soft rows of the friction pyramid of a contact point in
-    its displacement relative to its partner (see 'func_soft_row_terms')."""
+    """
+    Return the energy, the gradient and the Hessian of the soft rows of the friction pyramid of a contact point in its
+    displacement relative to its partner.
+
+    A row of direction d holds the energy 1/2 stiffness (d . u_rel - target)^2 while the displacement leaves the gap
+    short of the target, and nothing beyond.
+    """
     directions = func_pyramid_directions(normal, friction)
-    energy = gs.qd_float(0.0)
-    gradient = qd.Vector.zero(gs.qd_float, 3)
-    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for k in qd.static(range(directions.n)):
-        energy_k, gradient_k, hessian_k = func_soft_row_terms(directions[k, :], stiffness[k], target[k], u_rel)
-        energy += energy_k
-        gradient += gradient_k
-        hessian += hessian_k
-    return energy, gradient, hessian
+    gaps = directions @ u_rel - target
+    stiffness_active = stiffness * (gaps < 0.0).cast(gs.qd_float)
+    forces = stiffness_active * gaps
+    rows_scaled = stiffness_active.outer_product(qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)) * directions
+    return 0.5 * forces.dot(gaps), directions.transpose() @ forces, directions.transpose() @ rows_scaled

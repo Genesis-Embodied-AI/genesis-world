@@ -31,8 +31,8 @@ SamplerType = Annotated[str, BeforeValidator(_validate_sampler)]
 
 
 class MPMModel(IntEnum):
-    """The energy density of a material under the implicit solver, a function of the singular values of its
-    deformation gradient (see 'MPMOptions.use_implicit_solver')."""
+    """The energy density of a material under the implicit solver, a function of the singular values of its deformation
+    gradient (see 'MPMOptions.use_implicit_solver')."""
 
     FIXED_COROTATED = 0
     STABLE_NEOHOOKEAN = 1

@@ -25,7 +25,7 @@ def hash_table_sizes(capacity: int) -> dict[Size, int]:
 
 
 @qd.func
-def func_hash_slot(key: qd.u64, table: HashTableScratch):
+def func_hash_slot(table: HashTableScratch, key: qd.u64):
     """Return the home slot of a key, a 64-bit avalanche mix of it masked to the slots."""
     h = key
     h = h ^ (h >> qd.u64(33))
@@ -35,10 +35,10 @@ def func_hash_slot(key: qd.u64, table: HashTableScratch):
 
 
 @qd.func
-def func_insert_hash(key: qd.u64, value: int, table: HashTableScratch):
+def func_insert_hash(table: HashTableScratch, key: qd.u64, value: int):
     """Insert a key with its value, the table holding at least one empty slot."""
     n_slots = table.keys.shape[0]
-    i_slot = func_hash_slot(key, table)
+    i_slot = func_hash_slot(table, key)
     is_inserted = False
     while not is_inserted:
         key_previous = qd.atomic_cas(table.keys[i_slot], qd.u64(0xFFFFFFFFFFFFFFFF), key)
@@ -50,10 +50,10 @@ def func_insert_hash(key: qd.u64, value: int, table: HashTableScratch):
 
 
 @qd.func
-def func_lookup_hash(key: qd.u64, table: HashTableScratch):
+def func_lookup_hash(table: HashTableScratch, key: qd.u64):
     """Return the value of a key, -1 for a key the table does not hold."""
     n_slots = table.keys.shape[0]
-    i_slot = func_hash_slot(key, table)
+    i_slot = func_hash_slot(table, key)
     value = gs.qd_int(-1)
     is_searching = True
     while is_searching:

@@ -133,8 +133,8 @@ class LegacyCoupler(RBC):
         has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
         has_mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
         has_fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
-        # The Newton solve of the implicit MPM solver couples it with the rigid geoms (see NewtonSolver), which leaves
-        # the grid of the explicit solver to no coupling
+        # The Newton solve couples the implicit MPM solver with the rigid geoms (see NewtonSolver), and the grid
+        # operations of the coupler run for the explicit solver alone
         self._is_mpm_implicit = self.mpm_solver.is_active and self.mpm_solver._use_implicit_solver
         if self._is_mpm_implicit:
             for is_coupled, name, option in (

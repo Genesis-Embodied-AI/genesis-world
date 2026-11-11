@@ -7,7 +7,7 @@ import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Base
-from .elastic import func_diagonal_matrix
+from .elastic import func_diagonal, func_diagonal_matrix
 
 
 @qd.data_oriented
@@ -46,7 +46,7 @@ class ElastoPlastic(Base):
     def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
-        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+        sigma = func_diagonal(S)
         if qd.static(self.use_von_mises):
             S_new = qd.max(S, 0.05)  # to prevent NaN
             sigma_new, is_yielding = func_von_mises_return_map(sigma, self.mu, self.von_mises_yield_stress)

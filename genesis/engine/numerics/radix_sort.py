@@ -140,7 +140,7 @@ def func_clear_bins(sorter: RadixSortScratch):
 
 
 @qd.func(requires_top_level=True)
-def func_count_digits(keys: qd.Tensor, n_keys: qd.Tensor, sorter: RadixSortScratch, key_bits: qd.template()):
+def func_count_digits(sorter: RadixSortScratch, keys: qd.Tensor, n_keys: qd.Tensor, key_bits: qd.template()):
     """Count the digits of every pass over the keys, by blocks counting in shared memory."""
     N_PASSES = qd.static(key_bits // 8)
     KEYS_PER_THREAD = qd.static(16)
@@ -183,7 +183,7 @@ def func_scan_bins(sorter: RadixSortScratch):
 
 
 @qd.func(requires_top_level=True)
-def func_clear_lookback(i_pass: int, n_keys: qd.Tensor, sorter: RadixSortScratch):
+def func_clear_lookback(sorter: RadixSortScratch, i_pass: int, n_keys: qd.Tensor):
     qd.loop_config(name="radix_sort_clear_lookback", block_dim=256)
     n_tiles = qd.max((n_keys[()] + 6143) // 6144, 1)
     for i_th in range(n_tiles * 256):
@@ -195,13 +195,13 @@ def func_clear_lookback(i_pass: int, n_keys: qd.Tensor, sorter: RadixSortScratch
 
 @qd.func(requires_top_level=True)
 def func_onesweep_pass(
+    sorter: RadixSortScratch,
     i_pass: int,
     keys_in: qd.Tensor,
     keys_out: qd.Tensor,
     permutation_in: qd.Tensor,
     permutation_out: qd.Tensor,
     n_keys: qd.Tensor,
-    sorter: RadixSortScratch,
     key_bits: qd.template(),
 ):
     """Scatter the keys and the permutation by their digit of a pass, ranking the tiles in their order of arrival."""
@@ -312,13 +312,13 @@ def func_onesweep_pass(
 
 @qd.func(requires_top_level=True)
 def func_cpu_pass(
+    sorter: RadixSortScratch,
     i_pass: qd.template(),
     keys_in: qd.Tensor,
     keys_out: qd.Tensor,
     permutation_in: qd.Tensor,
     permutation_out: qd.Tensor,
     n_keys: qd.Tensor,
-    sorter: RadixSortScratch,
     key_bits: qd.template(),
 ):
     """Scatter the keys and the permutation by their digit of a pass, chunk by chunk."""
@@ -351,42 +351,42 @@ def func_cpu_pass(
 
 @qd.func(requires_top_level=True)
 def func_radix_sort(
+    sorter: RadixSortScratch,
     keys: qd.Tensor,
     keys_buffer: qd.Tensor,
     permutation: qd.Tensor,
     permutation_buffer: qd.Tensor,
     n_keys: qd.Tensor,
-    sorter: RadixSortScratch,
     key_bits: qd.template(),
 ):
     """
     Sort the leading keys of an array stably together with their permutation, in place.
 
-    The sort covers the first `n_keys[()]` keys. The buffers hold the output of every other pass. The passes are even
-    in number, so the sorted keys land back in the input arrays. The GPU passes run in a loop of the graph, which the
+    The sort covers the first `n_keys[()]` keys. The buffers hold the output of every other pass. The passes are even in
+    number, so the sorted keys land back in the input arrays. The GPU passes run in a loop of the graph, which the
     kernel of the caller must declare (see 'kernel_radix_sort').
     """
     if qd.static(gs.backend == gs.cpu):
         for i_pass in qd.static(range(key_bits // 8)):
             if qd.static(i_pass % 2 == 0):
-                func_cpu_pass(i_pass, keys, keys_buffer, permutation, permutation_buffer, n_keys, sorter, key_bits)
+                func_cpu_pass(sorter, i_pass, keys, keys_buffer, permutation, permutation_buffer, n_keys, key_bits)
             else:
-                func_cpu_pass(i_pass, keys_buffer, keys, permutation_buffer, permutation, n_keys, sorter, key_bits)
+                func_cpu_pass(sorter, i_pass, keys_buffer, keys, permutation_buffer, permutation, n_keys, key_bits)
     else:
         func_clear_bins(sorter)
-        func_count_digits(keys, n_keys, sorter, key_bits)
+        func_count_digits(sorter, keys, n_keys, key_bits)
         func_scan_bins(sorter)
         for _ in range(1):
             sorter.pass_idx[()] = 0
             sorter.is_pass_running[()] = 1
         while qd.graph.do_while(sorter.is_pass_running):
-            func_clear_lookback(sorter.pass_idx[()], n_keys, sorter)
+            func_clear_lookback(sorter, sorter.pass_idx[()], n_keys)
             func_onesweep_pass(
-                sorter.pass_idx[()], keys, keys_buffer, permutation, permutation_buffer, n_keys, sorter, key_bits
+                sorter, sorter.pass_idx[()], keys, keys_buffer, permutation, permutation_buffer, n_keys, key_bits
             )
-            func_clear_lookback(sorter.pass_idx[()] + 1, n_keys, sorter)
+            func_clear_lookback(sorter, sorter.pass_idx[()] + 1, n_keys)
             func_onesweep_pass(
-                sorter.pass_idx[()] + 1, keys_buffer, keys, permutation_buffer, permutation, n_keys, sorter, key_bits
+                sorter, sorter.pass_idx[()] + 1, keys_buffer, keys, permutation_buffer, permutation, n_keys, key_bits
             )
             for _ in range(1):
                 sorter.pass_idx[()] = sorter.pass_idx[()] + 2
@@ -395,13 +395,13 @@ def func_radix_sort(
 
 @qd.kernel(graph=True)
 def kernel_radix_sort(
+    sorter: RadixSortScratch,
     keys: qd.Tensor,
     keys_buffer: qd.Tensor,
     permutation: qd.Tensor,
     permutation_buffer: qd.Tensor,
     n_keys: qd.Tensor,
-    sorter: RadixSortScratch,
     key_bits: qd.template(),
 ):
     """Sort keys stably together with their permutation in a launch of its own (see 'func_radix_sort')."""
-    func_radix_sort(keys, keys_buffer, permutation, permutation_buffer, n_keys, sorter, key_bits)
+    func_radix_sort(sorter, keys, keys_buffer, permutation, permutation_buffer, n_keys, key_bits)
