@@ -535,6 +535,7 @@ def func_segment_volume(
     corners: qd.types.matrix(3, 3),
     normal: qd.types.vector(3),
     area: float,
+    extent: float,
     quad_bary: qd.template(),
     quad_weight: qd.template(),
     support_radius: float,
@@ -553,8 +554,7 @@ def func_segment_volume(
     corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
     corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
     centroid = (corner_0 + corner_1 + corner_2) / 3.0
-    radius = qd.max((corner_0 - centroid).norm(), (corner_1 - centroid).norm(), (corner_2 - centroid).norm())
-    if (centroid - pos).norm() < support_radius + radius:
+    if (centroid - pos).norm() < support_radius + extent:
         # The far field of the radial antiderivative is the solid angle of the segment, singular on the surface, which
         # is taken in closed form (Van Oosterom and Strackee) and the smooth remainder by quadrature
         for i_k in range(quad_weight.shape[0]):

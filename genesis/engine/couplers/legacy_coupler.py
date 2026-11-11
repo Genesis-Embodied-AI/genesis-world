@@ -43,7 +43,6 @@ from genesis.utils.geom import (
     PARTICLES,
     SpatialHashGrid,
     func_hash_cell_to_slot,
-    func_hash_n_cells,
     func_hash_pos_to_grid,
     func_hash_sort_particles,
     func_hash_wrap_cell,
@@ -55,7 +54,14 @@ from genesis.utils.geom import (
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
-from genesis.utils.simt import ExactSums, func_exact_sum_add, func_exact_sum_take, requires_deterministic_accumulation
+from genesis.utils.simt import (
+    ExactSums,
+    func_exact_sum_add,
+    func_exact_sum_take,
+    requires_deterministic_accumulation,
+    qd_block_min,
+    qd_block_sum,
+)
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
@@ -93,6 +99,8 @@ class SPHSegments(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
     vel: qd.Tensor = field((float, 3))
     area: qd.Tensor = field(float)
     is_active: qd.Tensor = field(bool)
+    # The largest distance from the centroid of the segment to its corners
+    extent: qd.Tensor = field(float)
 
 
 class SPHBoundaries(Data, kind=DataKind.SCRATCH):
@@ -134,6 +142,9 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     links_added_mass: qd.Tensor = field(float, shape=(RIGID_LINKS, ENVS), labels=RIGID_SPH)
     # The added mass of each link summed over its segments, the same whatever the order of the segments
     links_added_mass_sums: ExactSums = field(labels=RIGID_SPH)
+    # The largest extent of the segments of each environment over the substep, which bounds the reach of the particles
+    # that look for the segments around them through the hash grid of their centroids
+    segments_extent_max: qd.Tensor = field(float, shape=(ENVS,))
 
 
 class LegacyCouplerState(Data, kind=DataKind.STATE):
@@ -183,6 +194,8 @@ class LegacyCouplerConfig(Config):
     is_links_info_batched: bool
     # Whether the SPH liquid sums its forces on the rigid links exactly (see 'cfrc_external_sums' in LinksState)
     is_external_wrench_exact: bool
+    # Whether the lanes of a GPU subgroup take a particle together, where one CPU thread takes it alone
+    enable_cooperative_kernels: bool
 
 
 def split_triangles(
@@ -344,6 +357,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_sph=self.has_fem_sph,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
             is_external_wrench_exact=has_rigid_sph and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums),
+            enable_cooperative_kernels=gs.backend != gs.cpu,
         )
 
         self.legacy_coupler_state = LegacyCouplerState(
@@ -492,16 +506,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 **hash_grid_sizes(math.prod(self.sph_solver.hash_grid_res)),
             ),
             values=dict(
-                # A segment reaches the support radius beyond its centroid plus its own extent, at most a particle size
-                # with the deformation of the FEM surfaces, so that a particle finds every segment it overlaps within
-                # the cells around its own
-                hash_grid=dict(
-                    cell_size=max(
-                        self.sph_solver.hash_grid_cell_size,
-                        self.sph_solver.support_radius + self.sph_solver.particle_size,
-                    ),
-                    grid_res=self.sph_solver.hash_grid_res,
-                ),
+                hash_grid=dict(cell_size=self.sph_solver.hash_grid_cell_size, grid_res=self.sph_solver.hash_grid_res),
                 rho_rest=max([entity.material.rho for entity in self.sph_solver.entities]),
             ),
             env_first={
@@ -1349,6 +1354,9 @@ def kernel_place_sph_boundary_segments(
     The segments are sorted in their hash grid, which every particle reads to sum up the segments around it (see
     SPHBoundaryParticles).
     """
+    for i_b in range(sph_boundaries.segments_extent_max.shape[0]):
+        sph_boundaries.segments_extent_max[i_b] = 0.0
+
     n_fem_segments = 0
     if qd.static(legacy_coupler_config.has_fem_sph):
         n_fem_segments = sph_boundaries.fem_segments_tri_idx.shape[0]
@@ -1406,15 +1414,28 @@ def kernel_place_sph_boundary_segments(
         sph_boundaries.segments.vel[i_sg, i_b] = vel
         sph_boundaries.segments.area[i_sg, i_b] = area
         sph_boundaries.segments.is_active[i_sg, i_b] = is_active
+        # A deformed FEM segment may stretch beyond its extent at rest
+        extent = qd.sqrt(
+            qd.max((corner_0 - centroid).norm_sqr(), (corner_1 - centroid).norm_sqr(), (corner_2 - centroid).norm_sqr())
+        )
+        sph_boundaries.segments.extent[i_sg, i_b] = extent
+        if is_active:
+            qd.atomic_max(sph_boundaries.segments_extent_max[i_b], extent)
 
     func_hash_sort_particles(
         sph_boundaries.segments.centroid, sph_boundaries.segments.is_active, sph_boundaries.hash_grid
     )
 
     # The kernel volume of the solids behind the segments around each particle, its gradient and first moment, and the
-    # rate at which the moving segments change it (see SPHBoundaryParticles)
+    # rate at which the moving segments change it (see SPHBoundaryParticles). On GPU, the lanes of a subgroup take a
+    # particle together, striding the segments of each cell around it, then sum their shares along a fixed tree.
+    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_kernels else 1)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
-    for i_p, i_b in qd.ndrange(*sph_state.particles.pos.shape, axes=qd.static(eoa(sph_state.boundary.volume))):
+    n_particles = sph_state.particles.pos.shape[0]
+    for i_t in range(sph_state.particles.pos.shape[1] * n_particles * N_LANES):
+        i_lane = i_t % N_LANES
+        i_p = i_t // N_LANES % n_particles
+        i_b = i_t // (N_LANES * n_particles)
         volume = gs.qd_float(0.0)
         volume_grad = qd.Vector.zero(gs.qd_float, 3)
         moment = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1422,45 +1443,61 @@ def kernel_place_sph_boundary_segments(
         surface_dist = gs.qd_float(1e9)
         if sph_state.particles.is_active[i_p, i_b]:
             pos = sph_state.particles.pos[i_p, i_b]
-            base = func_hash_wrap_cell(
-                func_hash_pos_to_grid(pos, sph_boundaries.hash_grid) - 1, sph_boundaries.hash_grid
-            )
-            n_cells = func_hash_n_cells(3, sph_boundaries.hash_grid)
+            # The segments overlapping the support radius of the particle have their centroid within it plus their extent
+            reach = support_radius + sph_boundaries.segments_extent_max[i_b]
+            cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
+            cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
+            base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
+            n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
             for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
                 i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
                 slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
-                for i_q in range(slot_start, slot_start + sph_boundaries.hash_grid.slot_size[i_slot, i_b]):
-                    i_sg = sph_boundaries.hash_grid.particles_idx[i_q, i_b]
-                    seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
-                        pos,
-                        sph_boundaries.segments.corners[i_sg, i_b],
-                        sph_boundaries.segments.normal[i_sg, i_b],
-                        sph_boundaries.segments.area[i_sg, i_b],
-                        sph_boundaries.quad_bary,
-                        sph_boundaries.quad_weight,
-                        support_radius,
-                        kernel_norm,
-                    )
-                    volume = volume + seg_volume
-                    volume_grad = volume_grad + seg_volume_grad
-                    moment = moment + seg_moment
-                    vel_flux = vel_flux + sph_boundaries.segments.vel[i_sg, i_b].dot(seg_volume_grad)
-                    surface_dist = qd.min(
-                        surface_dist, func_segment_dist(pos, sph_boundaries.segments.corners[i_sg, i_b])
-                    )
+                slot_size = sph_boundaries.hash_grid.slot_size[i_slot, i_b]
+                for i_q_ in range((slot_size + N_LANES - 1) // N_LANES):
+                    i_q = i_q_ * N_LANES + i_lane
+                    if i_q < slot_size:
+                        i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
+                        seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
+                            pos,
+                            sph_boundaries.segments.corners[i_sg, i_b],
+                            sph_boundaries.segments.normal[i_sg, i_b],
+                            sph_boundaries.segments.area[i_sg, i_b],
+                            sph_boundaries.segments.extent[i_sg, i_b],
+                            sph_boundaries.quad_bary,
+                            sph_boundaries.quad_weight,
+                            support_radius,
+                            kernel_norm,
+                        )
+                        volume = volume + seg_volume
+                        volume_grad = volume_grad + seg_volume_grad
+                        moment = moment + seg_moment
+                        vel_flux = vel_flux + sph_boundaries.segments.vel[i_sg, i_b].dot(seg_volume_grad)
+                        surface_dist = qd.min(
+                            surface_dist, func_segment_dist(pos, sph_boundaries.segments.corners[i_sg, i_b])
+                        )
+        if qd.static(N_LANES > 1):
+            # The lanes sum scalars alone
+            volume = qd_block_sum(volume)
+            vel_flux = qd_block_sum(vel_flux)
+            surface_dist = qd_block_min(surface_dist)
+            for i_d in qd.static(range(3)):
+                volume_grad[i_d] = qd_block_sum(volume_grad[i_d])
+                for i_e in qd.static(range(3)):
+                    moment[i_d, i_e] = qd_block_sum(moment[i_d, i_e])
         # The divergence theorem counts the kernel at the particle itself out of the volume of a solid that encloses it,
         # which turns it negative
         if volume < -1e-3:
             volume = volume + 1.0
             surface_dist = -surface_dist
         volume = qd.min(qd.max(volume, 0.0), 1.0)
-        sph_state.boundary.volume[i_p, i_b] = volume
-        sph_state.boundary.volume_grad[i_p, i_b] = volume_grad
-        sph_state.boundary.moment[i_p, i_b] = moment
-        sph_state.boundary.vel_flux[i_p, i_b] = vel_flux
-        sph_state.boundary.surface_dist[i_p, i_b] = surface_dist
-        sph_state.boundary.impulse_coef[i_p, i_b] = 0.0
-        sph_state.boundary.impulse_gravity_coef[i_p, i_b] = 0.0
+        if i_lane == 0:
+            sph_state.boundary.volume[i_p, i_b] = volume
+            sph_state.boundary.volume_grad[i_p, i_b] = volume_grad
+            sph_state.boundary.moment[i_p, i_b] = moment
+            sph_state.boundary.vel_flux[i_p, i_b] = vel_flux
+            sph_state.boundary.surface_dist[i_p, i_b] = surface_dist
+            sph_state.boundary.impulse_coef[i_p, i_b] = 0.0
+            sph_state.boundary.impulse_gravity_coef[i_p, i_b] = 0.0
 
 
 @qd.kernel
@@ -1509,46 +1546,65 @@ def kernel_sph_boundaries_impulse(
                         sph_state.boundary.impulse_coef[i_p, i_b] - sph_info.particles.mass[i_p] * coef
                     )
 
-    # Each segment takes the opposite of the impulse it gives the particles around it
-    for i_sg, i_b in qd.ndrange(
-        *sph_boundaries.segments_impulse.shape, axes=qd.static(eoa(sph_boundaries.segments_impulse))
-    ):
+    # Each segment takes the opposite of the impulse it gives the particles around it. On GPU, the lanes of a subgroup
+    # take a segment together, striding the particles of each cell around it (see kernel_place_sph_boundary_segments).
+    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_kernels else 1)
+    n_segments = sph_boundaries.segments_impulse.shape[0]
+    for i_t in range(sph_boundaries.segments_impulse.shape[1] * n_segments * N_LANES):
+        i_lane = i_t % N_LANES
+        i_sg = i_t // N_LANES % n_segments
+        i_b = i_t // (N_LANES * n_segments)
         impulse = qd.Vector.zero(gs.qd_float, 3)
-        is_wet = False
+        n_wet = 0
         if sph_boundaries.segments.is_active[i_sg, i_b]:
             centroid = sph_boundaries.segments.centroid[i_sg, i_b]
             corners = sph_boundaries.segments.corners[i_sg, i_b]
             normal = sph_boundaries.segments.normal[i_sg, i_b]
             area = sph_boundaries.segments.area[i_sg, i_b]
             gravity = sph_info.gravity[i_b]
-            # The particles within the support radius of the segment lie within two cells of the one of its centroid
-            base = func_hash_wrap_cell(func_hash_pos_to_grid(centroid, sph_state.hash_grid) - 2, sph_state.hash_grid)
-            n_cells = func_hash_n_cells(5, sph_state.hash_grid)
+            # The particles within the support radius of the segment lie within it plus the extent of the segment from its
+            # centroid
+            extent = sph_boundaries.segments.extent[i_sg, i_b]
+            reach = support_radius + extent
+            cell_lo = func_hash_pos_to_grid(centroid - reach, sph_state.hash_grid)
+            cell_hi = func_hash_pos_to_grid(centroid + reach, sph_state.hash_grid)
+            base = func_hash_wrap_cell(cell_lo, sph_state.hash_grid)
+            n_cells = qd.min(cell_hi - cell_lo + 1, sph_state.hash_grid.grid_res[None])
             for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
                 i_slot = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
                 slot_start = sph_state.hash_grid.slot_start[i_slot, i_b]
-                for i_r in range(slot_start, slot_start + sph_state.hash_grid.slot_size[i_slot, i_b]):
-                    seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
-                        sph_state.particles_reordered.pos[i_r, i_b],
-                        corners,
-                        normal,
-                        area,
-                        sph_boundaries.quad_bary,
-                        sph_boundaries.quad_weight,
-                        support_radius,
-                        kernel_norm,
-                    )
-                    if seg_volume_grad.norm_sqr() > 0.0:
-                        is_wet = True
-                        i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
-                        impulse = (
-                            impulse
-                            + sph_state.boundary.impulse_coef[i_p, i_b] * seg_volume_grad
-                            + sph_state.boundary.impulse_gravity_coef[i_p, i_b] * (seg_moment @ gravity)
+                slot_size = sph_state.hash_grid.slot_size[i_slot, i_b]
+                for i_r_ in range((slot_size + N_LANES - 1) // N_LANES):
+                    i_r = slot_start + i_r_ * N_LANES + i_lane
+                    if i_r < slot_start + slot_size:
+                        seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
+                            sph_state.particles_reordered.pos[i_r, i_b],
+                            corners,
+                            normal,
+                            area,
+                            extent,
+                            sph_boundaries.quad_bary,
+                            sph_boundaries.quad_weight,
+                            support_radius,
+                            kernel_norm,
                         )
-        sph_boundaries.segments_impulse[i_sg, i_b] = impulse
-        if qd.static(legacy_coupler_config.has_rigid_sph):
-            sph_boundaries.segments_is_wet[i_sg, i_b] = is_wet
+                        if seg_volume_grad.norm_sqr() > 0.0:
+                            n_wet = n_wet + 1
+                            i_p = sph_state.hash_grid.particles_idx[i_r, i_b]
+                            impulse = (
+                                impulse
+                                + sph_state.boundary.impulse_coef[i_p, i_b] * seg_volume_grad
+                                + sph_state.boundary.impulse_gravity_coef[i_p, i_b] * (seg_moment @ gravity)
+                            )
+        if qd.static(N_LANES > 1):
+            # The lanes sum scalars alone
+            n_wet = qd_block_sum(n_wet)
+            for i_d in qd.static(range(3)):
+                impulse[i_d] = qd_block_sum(impulse[i_d])
+        if i_lane == 0:
+            sph_boundaries.segments_impulse[i_sg, i_b] = impulse
+            if qd.static(legacy_coupler_config.has_rigid_sph):
+                sph_boundaries.segments_is_wet[i_sg, i_b] = n_wet > 0
 
     # The links of the rigid geoms take the impulse of their wet segments, and the mass of the liquid one particle size
     # thick over them as added mass (see 'links_added_mass')
