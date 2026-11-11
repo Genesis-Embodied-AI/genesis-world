@@ -1,0 +1,31 @@
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_c96de259e1bd7d 388-389,1397,1480-1481
+genesis/options/entities.py
+  s_c62ec9da443b15::t_c96de259e1bd7d 259-263,265-266
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_1375c4311c4902 429-432,434-438
+  s_c62ec9da443b15::t_1dbee578c1588d 444
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_d41c0022bf3a59 39,173,344-345,349,352,359-360
+  s_c62ec9da443b15::t_fffc55338f4e6b 5,346-348,350
+genesis/engine/solvers/fem_solver.py
+  s_c62ec9da443b15::t_fffc55338f4e6b 796-799
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c62ec9da443b15::t_c96de259e1bd7d 572-576
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6dbb6e543bb8b98109e6f5b4748bfd2b3fd05105",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
