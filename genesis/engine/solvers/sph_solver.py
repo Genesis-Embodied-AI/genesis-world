@@ -1092,11 +1092,12 @@ def func_compute_density_rate(
     """
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
-    n_particles = sph_state.particles_reordered.pos.shape[0]
-    for i_t in range(sph_state.particles_reordered.pos.shape[1] * n_particles * N_LANES):
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
         i_lane = i_t % N_LANES
-        i_p = i_t // N_LANES % n_particles
-        i_b = i_t // (N_LANES * n_particles)
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         ret = qd.Struct(drho=gs.qd_float(0.0), n_neighbors=0)
         if is_solved:
@@ -1232,11 +1233,12 @@ def func_solver_iteration(
         is_iterating = not is_first_pass
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
-    n_particles = sph_state.particles_reordered.pos.shape[0]
-    for i_t in range(sph_state.particles_reordered.pos.shape[1] * n_particles * N_LANES):
+    n_particles, n_envs = sph_state.particles_reordered.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
         i_lane = i_t % N_LANES
-        i_p = i_t // N_LANES % n_particles
-        i_b = i_t // (N_LANES * n_particles)
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
         is_solved = (
             is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         )

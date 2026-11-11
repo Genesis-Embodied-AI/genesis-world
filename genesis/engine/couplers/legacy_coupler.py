@@ -1436,11 +1436,12 @@ def kernel_place_sph_boundary_segments(
     # particle together, striding the segments of each cell around it, then sum their shares along a fixed tree.
     N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_particles else 1)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
-    n_particles = sph_state.particles.pos.shape[0]
-    for i_t in range(sph_state.particles.pos.shape[1] * n_particles * N_LANES):
+    n_particles, n_envs = sph_state.particles.pos.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_particles * N_LANES):
         i_lane = i_t % N_LANES
-        i_p = i_t // N_LANES % n_particles
-        i_b = i_t // (N_LANES * n_particles)
+        i_b = i_t // N_LANES % n_envs
+        i_p = i_t // (N_LANES * n_envs)
         volume = gs.qd_float(0.0)
         volume_grad = qd.Vector.zero(gs.qd_float, 3)
         moment = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1554,11 +1555,12 @@ def kernel_sph_boundaries_impulse(
     # Each segment takes the opposite of the impulse it gives the particles around it. On GPU, the lanes of a subgroup
     # take a segment together, striding the particles of each cell around it (see kernel_place_sph_boundary_segments).
     N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_segments else 1)
-    n_segments = sph_boundaries.segments_impulse.shape[0]
-    for i_t in range(sph_boundaries.segments_impulse.shape[1] * n_segments * N_LANES):
+    n_segments, n_envs = sph_boundaries.segments_impulse.shape
+    # The environments run fastest, as the arrays keep them innermost
+    for i_t in range(n_envs * n_segments * N_LANES):
         i_lane = i_t % N_LANES
-        i_sg = i_t // N_LANES % n_segments
-        i_b = i_t // (N_LANES * n_segments)
+        i_b = i_t // N_LANES % n_envs
+        i_sg = i_t // (N_LANES * n_envs)
         impulse = qd.Vector.zero(gs.qd_float, 3)
         n_wet = 0
         if sph_boundaries.segments.is_active[i_sg, i_b]:
