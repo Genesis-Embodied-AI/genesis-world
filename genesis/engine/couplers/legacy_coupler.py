@@ -59,6 +59,7 @@ from genesis.utils.simt import (
     func_exact_sum_add,
     func_exact_sum_take,
     requires_deterministic_accumulation,
+    qd_block_max,
     qd_block_min,
     qd_block_sum,
 )
@@ -1571,6 +1572,9 @@ def kernel_place_sph_boundary_segments(
         moment = qd.Matrix.zero(gs.qd_float, 3, 3)
         vel_flux = gs.qd_float(0.0)
         surface_dist = gs.qd_float(1e9)
+        # The lowest and highest boundary of the segments around the particle
+        boundary_lo = sph_boundaries.segments_boundary_idx.shape[0]
+        boundary_hi = -1
         if sph_state.particles.is_active[i_p, i_b]:
             pos = sph_state.particles.pos[i_p, i_b]
             # The segments overlapping the support radius of the particle have their centroid within it plus their extent
@@ -1605,11 +1609,17 @@ def kernel_place_sph_boundary_segments(
                         surface_dist = qd.min(
                             surface_dist, func_segment_dist(pos, sph_boundaries.segments.corners[i_sg, i_b])
                         )
+                        if seg_volume_grad.norm_sqr() > 0.0:
+                            i_bd = sph_boundaries.segments_boundary_idx[i_sg]
+                            boundary_lo = qd.min(boundary_lo, i_bd)
+                            boundary_hi = qd.max(boundary_hi, i_bd)
         if qd.static(N_LANES > 1):
             # The lanes sum scalars alone
             volume = qd_block_sum(volume)
             vel_flux = qd_block_sum(vel_flux)
             surface_dist = qd_block_min(surface_dist)
+            boundary_lo = qd_block_min(boundary_lo)
+            boundary_hi = qd_block_max(boundary_hi)
             for i_d in qd.static(range(3)):
                 volume_grad[i_d] = qd_block_sum(volume_grad[i_d])
                 for i_e in qd.static(range(3)):
@@ -1628,8 +1638,9 @@ def kernel_place_sph_boundary_segments(
             sph_state.boundary.surface_dist[i_p, i_b] = surface_dist
             sph_state.boundary.impulse_coef[i_p, i_b] = 0.0
             sph_state.boundary.impulse_gravity_coef[i_p, i_b] = 0.0
-            sph_state.boundary.boundaries_idx[i_p, i_b] = qd.Vector([-1, -1, -1, -1], dt=gs.qd_int)
+            sph_state.boundary.boundaries_idx[i_p, i_b] = qd.Vector([boundary_lo, -1, -1, -1], dt=gs.qd_int)
             sph_state.boundary.boundaries_impulse_coef[i_p, i_b] = qd.Vector.zero(gs.qd_float, 4)
+            sph_state.boundary.has_several_boundaries[i_p, i_b] = boundary_hi > boundary_lo
 
 
 @qd.func
@@ -1768,54 +1779,74 @@ def kernel_sph_boundaries_impulse(
             if sph_state.boundary.surface_dist[i_p, i_b] < 0.25 * sph_info.particle_size[None] and grad_norm > 0.0:
                 pos = sph_state.particles_reordered.pos[i_r, i_b]
                 vel_free = sph_state.particles_reordered.vel[i_r, i_b]
-                # The kernel volume, its gradient, the rate the moving segments change it and the distance to the
-                # surface of each boundary around the particle, those beyond the first 3 merged in the last slot
-                boundaries_idx = qd.Vector([-1] * N_BOUNDARIES, dt=gs.qd_int)
+                # The kernel volume, its gradient, the rate the moving segments change it and the signed distance to
+                # the surface of each boundary around the particle, those beyond the first 3 merged in the last slot.
+                # A particle around a single boundary takes them from its sums over all the segments around it.
+                boundaries_idx = sph_state.boundary.boundaries_idx[i_p, i_b]
                 volumes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
                 volume_grads = qd.Matrix.zero(gs.qd_float, N_BOUNDARIES, 3)
                 vel_fluxes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
                 surface_dists = qd.Vector([1e9] * N_BOUNDARIES, dt=gs.qd_float)
-                n_boundaries = 0
-                reach = support_radius + sph_boundaries.segments_extent_max[i_b]
-                cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
-                cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
-                base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
-                n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
-                for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-                    i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
-                    slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
-                    for i_q in range(sph_boundaries.hash_grid.slot_size[i_slot, i_b]):
-                        i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
-                        corners = sph_boundaries.segments.corners[i_sg, i_b]
-                        seg_volume, seg_volume_grad, _ = func_segment_volume(
-                            pos,
-                            corners,
-                            sph_boundaries.segments.normal[i_sg, i_b],
-                            sph_boundaries.segments.area[i_sg, i_b],
-                            sph_boundaries.segments.extent[i_sg, i_b],
-                            sph_boundaries.quad_bary,
-                            sph_boundaries.quad_weight,
-                            support_radius,
-                            kernel_norm,
-                        )
-                        i_bd = sph_boundaries.segments_boundary_idx[i_sg]
-                        i_k = -1
-                        for i_s in qd.static(range(N_BOUNDARIES)):
-                            if boundaries_idx[i_s] == i_bd:
-                                i_k = i_s
-                        if i_k < 0:
-                            if n_boundaries < N_BOUNDARIES:
-                                i_k = n_boundaries
-                                boundaries_idx[i_k] = i_bd
-                                n_boundaries = n_boundaries + 1
-                            else:
-                                i_k = N_BOUNDARIES - 1
-                                boundaries_idx[i_k] = -2
-                        volumes[i_k] = volumes[i_k] + seg_volume
-                        for i_d in qd.static(range(3)):
-                            volume_grads[i_k, i_d] = volume_grads[i_k, i_d] + seg_volume_grad[i_d]
-                        vel_fluxes[i_k] = vel_fluxes[i_k] + sph_boundaries.segments.vel[i_sg, i_b].dot(seg_volume_grad)
-                        surface_dists[i_k] = qd.min(surface_dists[i_k], func_segment_dist(pos, corners))
+                volume_grad = sph_state.boundary.volume_grad[i_p, i_b]
+                for i_d in qd.static(range(3)):
+                    volume_grads[0, i_d] = volume_grad[i_d]
+                vel_fluxes[0] = sph_state.boundary.vel_flux[i_p, i_b]
+                surface_dists[0] = sph_state.boundary.surface_dist[i_p, i_b]
+                n_boundaries = 1
+                if sph_state.boundary.has_several_boundaries[i_p, i_b]:
+                    boundaries_idx = qd.Vector([-1] * N_BOUNDARIES, dt=gs.qd_int)
+                    volume_grads = qd.Matrix.zero(gs.qd_float, N_BOUNDARIES, 3)
+                    vel_fluxes = qd.Vector.zero(gs.qd_float, N_BOUNDARIES)
+                    surface_dists = qd.Vector([1e9] * N_BOUNDARIES, dt=gs.qd_float)
+                    n_boundaries = 0
+                    reach = support_radius + sph_boundaries.segments_extent_max[i_b]
+                    cell_lo = func_hash_pos_to_grid(pos - reach, sph_boundaries.hash_grid)
+                    cell_hi = func_hash_pos_to_grid(pos + reach, sph_boundaries.hash_grid)
+                    base = func_hash_wrap_cell(cell_lo, sph_boundaries.hash_grid)
+                    n_cells = qd.min(cell_hi - cell_lo + 1, sph_boundaries.hash_grid.grid_res[None])
+                    for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
+                        i_slot = func_hash_cell_to_slot(base + offset, sph_boundaries.hash_grid)
+                        slot_start = sph_boundaries.hash_grid.slot_start[i_slot, i_b]
+                        for i_q in range(sph_boundaries.hash_grid.slot_size[i_slot, i_b]):
+                            i_sg = sph_boundaries.hash_grid.particles_idx[slot_start + i_q, i_b]
+                            corners = sph_boundaries.segments.corners[i_sg, i_b]
+                            seg_volume, seg_volume_grad, _ = func_segment_volume(
+                                pos,
+                                corners,
+                                sph_boundaries.segments.normal[i_sg, i_b],
+                                sph_boundaries.segments.area[i_sg, i_b],
+                                sph_boundaries.segments.extent[i_sg, i_b],
+                                sph_boundaries.quad_bary,
+                                sph_boundaries.quad_weight,
+                                support_radius,
+                                kernel_norm,
+                            )
+                            if seg_volume_grad.norm_sqr() > 0.0:
+                                i_bd = sph_boundaries.segments_boundary_idx[i_sg]
+                                i_k = -1
+                                for i_s in qd.static(range(N_BOUNDARIES)):
+                                    if boundaries_idx[i_s] == i_bd:
+                                        i_k = i_s
+                                if i_k < 0:
+                                    if n_boundaries < N_BOUNDARIES:
+                                        i_k = n_boundaries
+                                        boundaries_idx[i_k] = i_bd
+                                        n_boundaries = n_boundaries + 1
+                                    else:
+                                        i_k = N_BOUNDARIES - 1
+                                        boundaries_idx[i_k] = -2
+                                volumes[i_k] = volumes[i_k] + seg_volume
+                                for i_d in qd.static(range(3)):
+                                    volume_grads[i_k, i_d] = volume_grads[i_k, i_d] + seg_volume_grad[i_d]
+                                vel_fluxes[i_k] = vel_fluxes[i_k] + sph_boundaries.segments.vel[i_sg, i_b].dot(
+                                    seg_volume_grad
+                                )
+                                surface_dists[i_k] = qd.min(surface_dists[i_k], func_segment_dist(pos, corners))
+                    # The divergence theorem counts the kernel at the particle itself out of the volume of a solid
+                    # that encloses it, which turns it negative
+                    for i_s in qd.static(range(N_BOUNDARIES)):
+                        if volumes[i_s] < -1e-3:
+                            surface_dists[i_s] = -surface_dists[i_s]
 
                 # The approach velocity of the particle toward each boundary close to it, along the volume gradient
                 # of the boundary relative to its segments, is bounded from below by zero
@@ -1827,9 +1858,7 @@ def kernel_sph_boundaries_impulse(
                 for i_s in qd.static(range(N_BOUNDARIES)):
                     volume_grad = qd.Vector([volume_grads[i_s, 0], volume_grads[i_s, 1], volume_grads[i_s, 2]])
                     boundary_grad_norm = volume_grad.norm()
-                    # The divergence theorem counts the kernel at the particle itself out of the volume of a solid
-                    # that encloses it, which turns it negative
-                    surface_dist = qd.select(volumes[i_s] < -1e-3, -surface_dists[i_s], surface_dists[i_s])
+                    surface_dist = surface_dists[i_s]
                     if (
                         i_s < n_boundaries
                         and boundary_grad_norm > 0.0

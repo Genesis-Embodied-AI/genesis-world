@@ -129,6 +129,8 @@ class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS))
     # kernel_sph_boundaries_impulse)
     boundaries_idx: qd.Tensor = field((int, 4))
     boundaries_impulse_coef: qd.Tensor = field((float, 4))
+    # Whether the segments around the particle belong to several boundaries
+    has_several_boundaries: qd.Tensor = field(bool)
 
 
 class SPHState(Data, kind=DataKind.STATE):
