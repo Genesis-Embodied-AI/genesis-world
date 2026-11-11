@@ -2,6 +2,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
+import torch
 import trimesh
 
 import genesis as gs
@@ -35,6 +36,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
     ET.SubElement(body, "geom", name="torus", type="mesh", mesh="torus")
     ET.SubElement(body, "geom", name="top_cap", type="box", size="0.03 0.03 0.03", pos="0 0 0.1")
     ET.SubElement(body, "geom", name="bottom_cap", type="sphere", size="0.03", pos="0 0 -0.1")
+    ET.SubElement(body, "geom", name="ring", type="mesh", mesh="torus", pos="0 0.3 0")
     tip = ET.SubElement(body, "body", name="tip", pos="0 0 0.2")
     ET.SubElement(tip, "joint", type="hinge")
     ET.SubElement(tip, "geom", name="tip", type="capsule", size="0.02 0.03")
@@ -168,7 +170,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                                 friction=0.7,
                             ),
                         ),
-                        gs.GeomIndex.at([False, True, False]): gs.options.Geom(
+                        gs.GeomIndex.at([False, True, False, False]): gs.options.Geom(
                             material=gs.materials.Rigid(
                                 friction=1.5,
                             ),
@@ -339,17 +341,22 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
     # The pieces of the decomposed torus take the options of its name, the box those of the mask and of the slice, and
     # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity and the
-    # capsule of the child link the name its subtree selection gives
-    torus_pieces = [geom for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
-    assert len(torus_pieces) > 1
+    # capsule of the child link the name its subtree selection gives. The ring, given no options, keeps the friction
+    # of the entity, its pieces fusing with none of the torus.
+    meshes_friction = torch.stack(
+        [geom.get_friction() for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
+    )
+    assert len(meshes_friction) > 2
+    assert_allclose(meshes_friction.unique(), (0.3, 0.7), tol=gs.EPS)
     geoms_friction = {
-        gs.GEOM_TYPE.MESH: (0.7, 0.01, 0.0005),
+        gs.GEOM_TYPE.MESH: (None, 0.01, 0.0005),
         gs.GEOM_TYPE.BOX: (1.5, 0.03, 0.002),
         gs.GEOM_TYPE.SPHERE: (0.3, 0.03, 0.002),
         gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.0005),
     }
     for geom in mixed_geoms_body.geoms:
         friction, friction_torsional, friction_rolling = geoms_friction[geom.type]
-        assert_allclose(geom.get_friction(), friction, tol=gs.EPS)
+        if friction is not None:
+            assert_allclose(geom.get_friction(), friction, tol=gs.EPS)
         assert_allclose(geom.get_friction_torsional(), friction_torsional, tol=gs.EPS)
         assert_allclose(geom.get_friction_rolling(), friction_rolling, tol=gs.EPS)

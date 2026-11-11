@@ -6,7 +6,6 @@ import torch
 
 import genesis as gs
 from genesis.constants import link_ref_frame
-from genesis.options.indices import get_links_path
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch
@@ -224,12 +223,6 @@ class KinematicEntity(Entity):
         self._is_built: bool = False
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
-
-        # The names from the root of the kinematic tree down to each link, by local link index, which the link options
-        # select on (see 'gs.LinkIndex')
-        self._links_path = get_links_path(
-            [l_desc.name for l_desc in desc.links], [l_desc.parent_idx for l_desc in desc.links]
-        )
 
         self._load_model()
 

@@ -426,25 +426,22 @@ class Scene(RBC):
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
         # Revalidated, since 'model_copy(update=...)' bypasses validation. The resolution below modifies the morphs and
-        # the surface it is given, so the entity keeps copies of them as authored.
-        resolved_options = type(options).model_validate(options)
-        options = resolved_options.model_copy(
-            update={
-                "morph": copy.deepcopy(resolved_options.morph),
-                "surface": copy.deepcopy(resolved_options.surface),
-            }
+        # the surface it is given, so it works on copies of its own, the entity keeping copies of them as authored.
+        options = type(options).model_validate(options)
+        options = options.model_copy(
+            update={"morph": copy.deepcopy(options.morph), "surface": copy.deepcopy(options.surface)}
         )
-        morph = resolved_options.morph
-        material = resolved_options.material
-        surface = resolved_options.surface
-        visualize_contact = isinstance(resolved_options, gs.entities.Rigid) and resolved_options.visualize_contact
-        name = resolved_options.name
+        morph = copy.deepcopy(options.morph)
+        material = options.material
+        surface = copy.deepcopy(options.surface)
+        visualize_contact = isinstance(options, gs.entities.Rigid) and options.visualize_contact
+        name = options.name
         if surface is None:
             # assign a local surface, otherwise modification will apply on global default surface
             surface = gs.surfaces.Default()
 
         # some morph should not smooth surface normal
-        if isinstance(resolved_options.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
+        if isinstance(options.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
             surface.smooth = False
 
         if surface.double_sided is None:
