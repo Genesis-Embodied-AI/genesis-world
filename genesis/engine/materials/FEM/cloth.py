@@ -222,7 +222,12 @@ def func_quadratic_bending_energy(
     'Q' is the bending form of the hinge at rest (Bergou et al. 2006), symmetric and positive semi-definite, of zero row
     sums, and 'stiffness' k its flexural rigidity.
     """
-    return 0.5 * stiffness * (positions * (Q @ positions)).sum()
+    # Zero row sums make the energy translation invariant: positions relative to the first vertex give the same value
+    # without the cancellation of absolute coordinates, which buries the decrease of the line search in rounding.
+    positions_rel = qd.Matrix(
+        [[positions[i, k] - positions[0, k] for k in qd.static(range(3))] for i in qd.static(range(4))]
+    )
+    return 0.5 * stiffness * (positions_rel * (Q @ positions_rel)).sum()
 
 
 @qd.func
@@ -235,7 +240,11 @@ def func_quadratic_bending_gradient_hessian(
     The Hessian is k Q_ab times the identity, constant and positive semi-definite. Returns the 12-vector gradient and
     the 12x12 Hessian.
     """
-    vertices_gradient = stiffness * (Q @ positions)
+    # Relative positions, as in func_quadratic_bending_energy
+    positions_rel = qd.Matrix(
+        [[positions[i, k] - positions[0, k] for k in qd.static(range(3))] for i in qd.static(range(4))]
+    )
+    vertices_gradient = stiffness * (Q @ positions_rel)
     gradient = qd.Vector([vertices_gradient[i // 3, i % 3] for i in qd.static(range(12))])
     hessian = qd.Matrix(
         [
