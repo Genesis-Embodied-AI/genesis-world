@@ -30,16 +30,9 @@ from genesis.engine.materials.MPM.liquid import func_liquid_principal, func_liqu
 from genesis.engine.materials.MPM.muscle import func_muscle_fibre_terms
 from genesis.engine.materials.MPM.sand import func_extended_hencky_principal, func_sand_return_map
 from genesis.engine.materials.MPM.snow import func_snow_hardening, func_snow_return_map
-from genesis.engine.numerics.bcoo import (
-    BCOOMatrixScratch,
-    bcoo_matrix_sizes,
-    func_add_by_key,
-    func_add_triplet,
-    func_read_entry,
-    func_set_n_triplets,
-    func_write_triplet,
-)
+from genesis.engine.numerics.bcoo import func_add_by_key, func_add_triplet, func_write_triplet
 from genesis.engine.numerics.exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
+from genesis.engine.numerics.newton_rows import NewtonRows
 from genesis.engine.numerics.radix_sort import RadixSortScratch, func_radix_sort, kernel_radix_sort, radix_sort_sizes
 from genesis.engine.numerics.soft_contact import (
     PYRAMID_ROWS,
@@ -3309,63 +3302,12 @@ def kernel_mpm_g2p(
 # -------------------------------- global Newton solve -------------------------------
 # ------------------------------------------------------------------------------------
 
-# The rows of the linear system of the global Newton solve, one per node of the sparse grid of the implicit solver
-ROWS = Size("rows")
-# The smallest capacity of the rows, and the slack of a capacity grown past an overflow
-MIN_ROWS = 64 * 64
-ROWS_GROWTH_FACTOR = 1.2
 # The nodes of the stencil of a particle, the corners of its cell (see 'func_q1_stencil'), and the blocks of the upper
-# triangle of the Hessian of a stencil, one per pair of nodes (a, b) with a <= b: 8 x 9 / 2 = 36
+# triangle of the Hessian of a stencil, one per pair of nodes (a, b) with a <= b: 8 x 9 / 2 = 36. The Hessian of the
+# nodes holds the kinetic block of every node and the upper triangle of the stencil of every task of the assembly (see
+# 'kernel_list_cells').
 STENCIL_NODES = 8
 STENCIL_PAIRS = STENCIL_NODES * (STENCIL_NODES + 1) // 2
-
-
-class NewtonRows(Data, kind=DataKind.SCRATCH, shape=(ROWS,)):
-    """
-    The linear system of the Newton iterations, one row of 3 unknowns per node of the sparse grid, and its solve.
-
-    `gradient` is the gradient of the incremental potential at the current iterate, the right-hand side, `solution` the
-    solution of the Hessian against it, and `r`, `z`, `p` and `Ap` the residual, the preconditioned residual, the search
-    direction and its product with the Hessian of the preconditioned conjugate gradient (PCG). `jacobi` holds the
-    inverses of the diagonal blocks of the Hessian, the block Jacobi preconditioner. `rows_env` is the environment of
-    every row, the rows of an environment following one another. The matrix holds the upper triangle of the Hessian.
-    """
-
-    n_rows: qd.Tensor = field(int, shape=(), ndarray=True)
-    rows_env: qd.Tensor = field(int, ndarray=True)
-    gradient: qd.Tensor = field((float, 3), ndarray=True)
-    solution: qd.Tensor = field((float, 3), ndarray=True)
-    r: qd.Tensor = field((float, 3), ndarray=True)
-    z: qd.Tensor = field((float, 3), ndarray=True)
-    p: qd.Tensor = field((float, 3), ndarray=True)
-    Ap: qd.Tensor = field((float, 3), ndarray=True)
-    jacobi: qd.Tensor = field((float, (3, 3)), ndarray=True)
-    matrix: BCOOMatrixScratch
-
-
-def grow_linear_system(
-    n_rows: int, n_tasks: int, newton_rows: NewtonRows | None, newton_rows_replaced: list[NewtonRows]
-) -> NewtonRows:
-    """
-    Return the rows of the linear system of the substep, grown past the nodes of the grid and the triplets of their
-    Hessian: the rows given if they hold them, larger ones otherwise.
-
-    The Hessian holds the kinetic block of every node and the upper triangle of the 8 x 8 blocks of the stencil of every
-    task of the assembly (see 'kernel_list_cells'). Rows replaced stay referenced in `newton_rows_replaced`, with their
-    arrays freed.
-    """
-    n_triplets = n_rows + STENCIL_PAIRS * n_tasks
-    if newton_rows is not None:
-        if newton_rows.rows_env.shape[0] >= n_rows and newton_rows.matrix.triplets_row.shape[0] >= n_triplets:
-            return newton_rows
-        # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct
-        # could take over from a dead one, so the rows replaced stay referenced, with their arrays freed.
-        for _, array in iter_state_arrays(newton_rows):
-            qd_destroy_data(array)
-        newton_rows_replaced.append(newton_rows)
-    max_rows = max(int(np.ceil(n_rows * ROWS_GROWTH_FACTOR)), MIN_ROWS)
-    max_triplets = max(int(np.ceil(n_triplets * ROWS_GROWTH_FACTOR)), MIN_ROWS)
-    return NewtonRows(sizes={ROWS: max_rows, NewtonRows.matrix: bcoo_matrix_sizes(max_triplets, block_shape=(3, 3))})
 
 
 @qd.func
@@ -3411,12 +3353,12 @@ def func_mpm_assemble(
     over its particles: the lanes of a warp sum them on GPU, and one thread walks the particles of a cell on CPU. The
     gradient of a node then gathers the factors its particles staged. A particle in contact with a rigid geom adds the
     terms of its contact staged at the current iterate (see 'func_staged_contact_terms').
+
+    The nodes own the first segment of the rows, the row and the first triplet of a node being its index (see
+    NewtonSegment in genesis/engine/numerics/newton_rows.py).
     """
     n_nodes = sparse_grid.n_blocks[None] * 64
     n_valid = mpm_state.sorted_particles.n_valid[None]
-    for _ in range(1):
-        newton_rows.n_rows[None] = n_nodes
-        func_set_n_triplets(newton_rows.matrix, n_nodes + STENCIL_PAIRS * mpm_state.sorted_particles.n_tasks[None])
     for i_n in range(n_nodes):
         i_b, block = func_block_of_key(sparse_grid.blocks_key[i_n // 64])
         newton_rows.rows_env[i_n] = i_b
@@ -3557,55 +3499,6 @@ def func_mpm_kinetic_energy(energies: qd.Tensor, envs_mask: qd.Tensor, sparse_gr
 
 
 @qd.func(requires_top_level=True)
-def func_mpm_precond_invert(newton_rows: NewtonRows):
-    """Invert the diagonal blocks of the rows into their block Jacobi preconditioner, every block equilibrated to a unit
-    diagonal, which keeps the inverse accurate for the rows of very different stiffness."""
-    for i_entry in range(newton_rows.matrix.n_entries[None]):
-        i_r, j_r, block = func_read_entry(newton_rows.matrix, i_entry, block_rows=3, block_cols=3)
-        if i_r == j_r:
-            diagonal = func_diagonal(block)
-            scale = qd.select(diagonal > 0.0, 1.0 / qd.sqrt(qd.select(diagonal > 0.0, diagonal, 1.0)), 1.0)
-            scaling = scale.outer_product(scale)
-            inverse = qd.Matrix.identity(gs.qd_float, 3)
-            if (block * scaling).determinant() > 0.0:
-                inverse = (block * scaling).inverse()
-            newton_rows.jacobi[i_r] = inverse * scaling
-
-
-@qd.func(requires_top_level=True)
-def func_mpm_matvec(newton_rows: NewtonRows, envs_mask: qd.Tensor, p_dot_ap: qd.Tensor, has_p_dot_ap: qd.template()):
-    """
-    Add the product Ap of the matrix of the rows with the search direction of every environment selected, the upper
-    triangle standing for the transposed blocks of the lower one.
-
-    With `has_p_dot_ap`, p . Ap of every environment adds to its entry in `p_dot_ap` along, in the energy form.
-    """
-    n_entries = newton_rows.matrix.n_entries[None]
-    qd.loop_config(block_dim=256)
-    for i_entry in range((n_entries + 31) // 32 * 32):
-        i_r_key = gs.qd_int(-1)
-        i_b_key = gs.qd_int(-1)
-        product = qd.Vector.zero(gs.qd_float, 3)
-        energy = gs.qd_float(0.0)
-        if i_entry < n_entries:
-            i_r, j_r, block = func_read_entry(newton_rows.matrix, i_entry, block_rows=3, block_cols=3)
-            i_b = newton_rows.rows_env[i_r]
-            if envs_mask[i_b]:
-                i_r_key = i_r
-                i_b_key = i_b
-                p_col = newton_rows.p[j_r]
-                product = block @ p_col
-                energy = p_col.dot(product)
-                if i_r != j_r:
-                    p_row = newton_rows.p[i_r]
-                    qd.atomic_add(newton_rows.Ap[j_r], block.transpose() @ p_row)
-                    energy = 2.0 * p_row.dot(product)
-        func_add_by_key(i_r_key, product, newton_rows.Ap, n_components=3)
-        if qd.static(has_p_dot_ap):
-            func_add_by_key(i_b_key, energy, p_dot_ap)
-
-
-@qd.func(requires_top_level=True)
 def func_mpm_init_line_search(
     newton_rows: NewtonRows,
     envs_mask: qd.Tensor,
@@ -3623,7 +3516,7 @@ def func_mpm_init_line_search(
     step of an environment in `alpha` stays short of the first zero volume of a liquid particle, which
     'func_particle_inversion_step_cap' finds along the direction.
     """
-    for i_n in range(newton_rows.n_rows[None]):
+    for i_n in range(sparse_grid.n_blocks[None] * 64):
         i_b = newton_rows.rows_env[i_n]
         if envs_mask[i_b]:
             sparse_grid.nodes_du[i_n] = -newton_rows.solution[i_n]

@@ -22,6 +22,15 @@ from genesis.engine.couplers.mpm_rigid_global_newton import (
     func_mark_constrained_links,
 )
 from genesis.engine.numerics.bcoo import assemble_bcoo_matrix, func_add_by_key
+from genesis.engine.numerics.newton_rows import (
+    N_SEGMENTS,
+    NewtonRows,
+    NewtonSegment,
+    func_rows_matvec,
+    func_rows_precond_invert,
+    func_set_segment,
+    grow_newton_rows,
+)
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.engine.solvers.rigid.global_newton import (
@@ -46,18 +55,15 @@ from genesis.utils.misc import qd_isfinite, qd_to_numpy
 
 from .base_solver import ErrorCode, Solver
 from .mpm_solver import (
+    STENCIL_PAIRS,
     MPMInfo,
     MPMSparseGrid,
     MPMState,
-    NewtonRows,
     func_mpm_assemble,
     func_mpm_init_line_search,
     func_mpm_kinetic_energy,
-    func_mpm_matvec,
-    func_mpm_precond_invert,
     func_mpm_step_forward,
     func_particle_energy,
-    grow_linear_system,
 )
 
 if TYPE_CHECKING:
@@ -303,16 +309,30 @@ class NewtonSolver(Solver):
         errno = self._errno
         if self.newton_config.has_rigid_dofs and self._rigid_contact_stiffness is None:
             self._rigid_contact_stiffness = RigidContactStiffness(self.rigid_links, dyn_state.dofs, dyn_info.links)
-        self.newton_rows = grow_linear_system(
-            int(qd_to_numpy(sparse_grid.n_blocks)) * 64,
-            int(qd_to_numpy(mpm_state.sorted_particles.n_tasks)),
-            self.newton_rows,
-            self._newton_rows_replaced,
+        # The rows of every segment (see NewtonSegment): the nodes of the grid hold their kinetic block and the stencil
+        # blocks of the tasks of the assembly (see STENCIL_PAIRS in mpm_solver.py)
+        n_mpm_rows = int(qd_to_numpy(sparse_grid.n_blocks)) * 64
+        n_mpm_triplets = n_mpm_rows + STENCIL_PAIRS * int(qd_to_numpy(mpm_state.sorted_particles.n_tasks))
+        n_cloth_rows, n_cloth_triplets = 0, 0
+        self.newton_rows = grow_newton_rows(
+            n_mpm_rows + n_cloth_rows, n_mpm_triplets + n_cloth_triplets, self.newton_rows, self._newton_rows_replaced
         )
         args_state = (mpm_state, sparse_grid, self.rigid_dofs, self.rigid_links, dyn_state, constraint_state)
         args_info = (mpm_info, dyn_info, rigid_info)
         args_config = (mpm_solver.mpm_config, rigid_solver.rigid_config, self.newton_config)
-        kernel_init_substep(self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config, errno)
+        kernel_init_substep(
+            n_mpm_rows,
+            n_mpm_triplets,
+            n_cloth_rows,
+            n_cloth_triplets,
+            self.newton_rows,
+            self.newton_envs,
+            self.newton_loops,
+            *args_state,
+            *args_info,
+            *args_config,
+            errno,
+        )
         for _ in range(self._options.max_iterations):
             if mpm_solver.mpm_config.has_rigid_contact:
                 kernel_assemble_mpm_rigid_coupling(
@@ -447,6 +467,11 @@ def func_add_energies(
 
 @qd.kernel
 def kernel_init_substep(
+    n_mpm_rows: int,
+    n_mpm_triplets: int,
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
@@ -469,9 +494,12 @@ def kernel_init_substep(
 
     The dofs of the rigid solver start as its constraint solve starts (see 'func_rigid_init_substep' in
     rigid/global_newton.py), and the links that the particles touch are constrained over the substep (see
-    'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py).
+    'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py). The rows of the substep are laid out from
+    the rows and the triplets of every segment (see NewtonSegment).
     """
     for _ in range(1):
+        func_set_segment(NewtonSegment.MPM_NODES, n_mpm_rows, n_mpm_triplets, newton_rows)
+        func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets, newton_rows)
         newton_loops.is_newton_running[None] = 0
     for i_b in range(newton_envs.is_active.shape[0]):
         is_active = (errno[i_b] & NewtonErrorCode.INVALID_SOLVE_NAN) == 0
@@ -615,16 +643,17 @@ def kernel_pcg_start(
     """
     Start the preconditioned conjugate gradient (PCG) of the environments still iterating from a zero solution.
 
-    The preconditioner inverts the diagonal blocks of the rows (see 'func_mpm_precond_invert' in mpm_solver.py) and the
-    block of the dofs by its factor. An environment stops once r . z falls below `pcg_tol` times its value at the start,
-    and fails its Newton solve once r . z is not finite, which a value that is not finite in its rows or its dofs makes.
+    The preconditioner inverts the diagonal blocks of the rows (see 'func_rows_precond_invert' in numerics/newton_rows.py)
+    and the block of the dofs by its factor. An environment stops once r . z falls below `pcg_tol` times its value at
+    the start, and fails its Newton solve once r . z is not finite, which a value that is not finite in its rows or its
+    dofs makes.
     """
-    func_mpm_precond_invert(newton_rows)
+    func_rows_precond_invert(newton_rows)
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.is_pcg_active[i_b] = newton_envs.is_active[i_b]
         newton_envs.rz[i_b] = 0.0
         newton_envs.p_dot_ap[i_b] = 0.0
-    n_rows = newton_rows.n_rows[None]
+    n_rows = newton_rows.segments_start[N_SEGMENTS]
     qd.loop_config(block_dim=256)
     for i_r in range((n_rows + 31) // 32 * 32):
         i_b_key = gs.qd_int(-1)
@@ -697,15 +726,16 @@ def func_pcg_iteration(
     """
     Run one iteration of the preconditioned conjugate gradient (PCG) of the environments still solving.
 
-    The product of the Hessian with the search direction is that of the rows (see 'func_mpm_matvec' in mpm_solver.py),
-    in the energy form p . Ap of every environment without the dofs. When the dofs of the rigid solver join the
-    unknowns, it adds their block (see 'func_rigid_matvec' in rigid/global_newton.py) and the coupling of the contacts
-    of the particles with the links (see 'func_contact_matvec' in couplers/mpm_rigid_global_newton.py).
+    The product of the Hessian with the search direction is that of the rows (see 'func_rows_matvec' in
+    numerics/newton_rows.py), in the energy form p . Ap of every environment without the dofs. When the dofs of the
+    rigid solver join the unknowns, it adds their block (see 'func_rigid_matvec' in rigid/global_newton.py) and the
+    coupling of the contacts of the particles with the links (see 'func_contact_matvec' in
+    couplers/mpm_rigid_global_newton.py).
     """
-    func_mpm_matvec(
+    func_rows_matvec(
         newton_rows, newton_envs.is_pcg_active, newton_envs.p_dot_ap, qd.static(not newton_config.has_rigid_dofs)
     )
-    n_rows = newton_rows.n_rows[None]
+    n_rows = newton_rows.segments_start[N_SEGMENTS]
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_matvec(rigid_dofs, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows)
         func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)

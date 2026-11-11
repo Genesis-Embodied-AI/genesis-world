@@ -32,7 +32,7 @@ class NewtonRigidDofs(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
 
     `qacc` is the acceleration of x and `Ma` its product with the mass matrix, at which the rigid solver updates its
     constraint state (see 'func_rigid_update_constraint'). The other vectors are those of the rows (see 'NewtonRows' in
-    mpm_solver.py): the gradient, the solution, the residual, the preconditioned residual, the search direction and its
+    numerics/newton_rows.py): the gradient, the solution, the residual, the preconditioned residual, the search direction and its
     product with the Hessian of the preconditioned conjugate gradient (PCG), and the start point and the direction of
     the line search.
     """

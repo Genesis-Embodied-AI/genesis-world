@@ -11,12 +11,12 @@ preconditioned conjugate gradient.
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.numerics.newton_rows import NewtonRows
 from genesis.engine.numerics.soft_contact import func_pyramid_terms
 from genesis.engine.solvers.mpm_solver import (
     MPMInfo,
     MPMSparseGrid,
     MPMState,
-    NewtonRows,
     func_particle_displacement,
     func_q1_stencil,
     func_sorted_particle,
