@@ -1437,11 +1437,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         constraint_state = self.constraint_solver.constraint_state
-        # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise (see
-        # "Pure read-write data accessors on the hot path" in CLAUDE.md). gs.use_zerocopy encodes every zero-copy
-        # availability condition for these buffers (standalone dense allocations with DLPack-supported dtypes; the
-        # platform gates live in gs.init). torch (MPS) and quadrants do not share a compute stream on Metal, so the
-        # writes are flushed before the next kernels (see set_base_links_quat).
+        # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise.
+        # gs.use_zerocopy encodes every zero-copy availability condition for these buffers (standalone dense allocations
+        # with DLPack-supported dtypes; the platform gates live in gs.init). torch (MPS) and quadrants do not share a
+        # compute stream on Metal, so the writes are flushed before the next kernels (see set_base_links_quat).
         if gs.use_zerocopy:
             acc_grad = qd_to_torch(self.dyn_state.dofs.acc.grad, copy=False)
             dL_dqacc = qd_to_torch(constraint_state.dL_dqacc, copy=False)
