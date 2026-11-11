@@ -757,9 +757,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception(
                     "Only approximate_implicitfast integrator is supported yet when requires_grad is True."
                 )
-            from genesis.engine.couplers import SAPCoupler, IPCCoupler
+            from genesis.engine.couplers import SAPCoupler
 
-            if isinstance(self.sim.coupler, (SAPCoupler, IPCCoupler)):
+            if isinstance(self.sim.coupler, SAPCoupler):
                 gs.raise_exception(
                     f"{type(self.sim.coupler).__name__} is not supported yet when requires_grad is True."
                 )
@@ -1275,7 +1275,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self):
-        from genesis.engine.couplers import IPCCoupler, SAPCoupler
+        from genesis.engine.couplers import SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
@@ -1290,10 +1290,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_flush_external_wrenches(self.dyn_state.links)
 
         # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They exist when another solver is active, or when the IPC coupler
-        # couples rigid links with its own bodies.
-        is_ipc_coupled = isinstance(self.sim.coupler, IPCCoupler) and self.sim.coupler.has_any_rigid_coupling
-        if self._use_hibernation and (len(self.sim.active_solvers) > 1 or is_ipc_coupled):
+        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
+        if self._use_hibernation and len(self.sim.active_solvers) > 1:
             kernel_wakeup_coupled_links(
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
@@ -1595,16 +1593,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def substep_pre_coupling(self):
         if self.is_active:
-            # Skip rigid body computation when using IPCCoupler (IPC handles rigid simulation)
-            from genesis.engine.couplers import IPCCoupler
-
-            if isinstance(self.sim.coupler, IPCCoupler):
-                # If any rigid entity is coupled to IPC, skip pre-coupling rigid simulation
-                # The rigid simulation will be done in post-coupling phase instead
-                if self.sim.coupler.has_any_rigid_coupling:
-                    return
-
-            # Run Genesis rigid simulation step for non-IPC couplers
             self.substep()
 
     def reset_grad(self):
@@ -1618,7 +1606,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             qd_zero_grad(self.dyn_state.entities)
 
     def substep_post_coupling(self):
-        from genesis.engine.couplers import SAPCoupler, IPCCoupler
+        from genesis.engine.couplers import SAPCoupler
 
         if not self.is_active:
             return
@@ -1638,11 +1626,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._options.noslip_iterations > 0,
                 self._errno,
             )
-        elif isinstance(self.sim.coupler, IPCCoupler):
-            # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
-            # Collision exclusion for IPC-coupled links is handled in the collider at build time.
-            if self.sim.coupler.has_any_rigid_coupling:
-                self.substep()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

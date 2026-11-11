@@ -889,12 +889,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
 
     def add_cloth(self, v_start: int, s_start: int, verts: np.ndarray, tri2v: np.ndarray, tri2el: np.ndarray) -> None:
-        """
-        Add cloth vertices and surface triangles to the solver, for position tracking and coupling only.
-
-        Cloth elements and mass are owned by the incremental potential contact (IPC) coupler, so the vertex info holds
-        placeholder values and each surface triangle references itself as element.
-        """
+        """Add the vertices and the surface triangles of a cloth entity at rest, each triangle referencing itself as
+        element."""
         kernel_add_cloth(v_start, s_start, verts, tri2v, tri2el, self.fem_state, self.fem_info)
 
     def add_vverts(
@@ -915,12 +911,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def substep_pre_coupling(self) -> None:
         if not self.is_active:
-            return
-        # The IPC coupler simulates the FEM entities itself. Imported here to avoid a circular dependency, the couplers
-        # depending on the solvers.
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self._sim.coupler, IPCCoupler):
             return
         links_state = self._sim.rigid_solver.dyn_state.links
         if self._use_implicit_solver:
@@ -1066,8 +1056,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         Get the internal elastic force on every vertex, computed from the current state.
 
         The force of each element follows the material model of the solver in use, and the forces of a body sum to zero.
-        Damping, gravity and contact forces are left out. With the incremental potential contact (IPC) coupler, which
-        simulates the FEM entities itself, it raises an exception.
+        Damping, gravity and contact forces are left out.
 
         Returns
         -------
@@ -1076,12 +1065,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         """
         if not self.is_active:
             return None
-        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
-        from genesis.engine.couplers import IPCCoupler
-
-        # The IPC coupler simulates the FEM entities with its own models, and leaves the elements of Cloth ones empty.
-        if isinstance(self._sim.coupler, IPCCoupler):
-            gs.raise_exception("The internal forces of FEM entities are not available with the IPC coupler.")
 
         # The linear corotated model takes the rotation of each element from the current state
         if self._use_implicit_solver:
@@ -1220,11 +1203,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
             )
-        # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
-        from genesis.engine.couplers import IPCCoupler
-
-        if isinstance(self._sim.coupler, IPCCoupler):
-            gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
         if not self._is_constraints_initialized:
             self.init_constraints()
 

@@ -8,14 +8,14 @@ import genesis as gs
 from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
-from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
+from genesis.options.solvers import LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
 from genesis.utils.misc import indices_to_mask, qd_destroy_data, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 from genesis.utils.warnings import warn_once
 
-from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers import LegacyCoupler, SAPCoupler
 from .couplers.rigid_mpm_hybrid import RigidMPMHybrid
 from .entities import HybridEntity
 from .sensors import SensorManager
@@ -139,12 +139,10 @@ class Simulator(RBC):
             self._coupler = SAPCoupler(self, options.coupler)
         elif isinstance(options.coupler, LegacyCouplerOptions):
             self._coupler = LegacyCoupler(self, options.coupler)
-        elif isinstance(options.coupler, IPCCouplerOptions):
-            self._coupler = IPCCoupler(self, options.coupler)
         else:
             gs.raise_exception(
-                f"Coupler options {options.coupler} not supported. Please use SAPCouplerOptions, "
-                "LegacyCouplerOptions, or IPCCouplerOptions."
+                f"Coupler options {options.coupler} not supported. Please use SAPCouplerOptions or "
+                "LegacyCouplerOptions."
             )
 
         # entities
@@ -242,8 +240,7 @@ class Simulator(RBC):
         self.sim_state = SimulatorState(sizes=dict(envs=self._B))
 
         # solvers
-        # IPCCoupler needs full substep flow for pre/post coupling phases
-        self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, SAPCoupler)
         # The SAP coupler solves every FEM vertex from its momentum residual, which the quadratic energy of the models
         # of the implicit solver makes exact (see func_init_fem_reference_gradient in sap_coupler.py).
         self.fem_solver._is_free_solve_skipped = isinstance(self._coupler, SAPCoupler)
