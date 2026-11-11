@@ -818,6 +818,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             # The vertices the vertex options fix are held at their initial positions from the first substep on
             for entity in self._entities:
                 if entity._fixed_verts_idx_local.size > 0:
+                    # 'add_entity' already enabled the vertex constraints of the implicit solver for these vertices
+                    assert self._enable_vertex_constraints or not self._use_implicit_solver
                     self._set_vertex_constraints(entity._fixed_verts_idx_local + entity._v_start)
 
         self._build_gravity(self.fem_info.gravity)
