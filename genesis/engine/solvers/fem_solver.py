@@ -40,6 +40,7 @@ from genesis.grad.bridge import custom_backward, no_grad
 from genesis.options.morphs import Morph
 from genesis.options.solvers import FEMOptions
 from genesis.options.surfaces import Surface
+from genesis.typing import IndexType
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -1203,12 +1204,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @mutates(StateChange.MODEL)
     def set_vertex_constraints(
         self,
-        verts_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        verts_idx: IndexType | None = None,
         target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
         link_idx: int = -1,
         is_soft_constraint: bool = False,
         stiffness: float = 0.0,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        envs_idx: IndexType | None = None,
     ) -> None:
         """
         Constrain some vertices to target positions, or to follow a rigid link.
@@ -1235,12 +1236,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def _set_vertex_constraints(
         self,
-        verts_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        verts_idx: IndexType | None = None,
         target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
         link_idx: int = -1,
         is_soft_constraint: bool = False,
         stiffness: float = 0.0,
-        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        envs_idx: IndexType | None = None,
     ) -> None:
         """Constrain some vertices (see 'set_vertex_constraints'), also before the scene is built."""
         # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
