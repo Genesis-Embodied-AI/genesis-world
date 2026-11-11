@@ -40,13 +40,6 @@ from genesis.engine.numerics.bcoo import (
     func_write_triplet,
 )
 from genesis.engine.numerics.exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
-from genesis.engine.numerics.hash_table import (
-    HashTableScratch,
-    func_clear_hash,
-    func_insert_hash,
-    func_lookup_hash,
-    hash_table_sizes,
-)
 from genesis.engine.numerics.radix_sort import RadixSortScratch, func_radix_sort, kernel_radix_sort, radix_sort_sizes
 from genesis.engine.numerics.soft_contact import (
     PYRAMID_ROWS,
@@ -246,10 +239,11 @@ class MPMSortedParticles(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,))
 
     A particle is keyed by its environment, its block and its cell in the block (see 'func_particle_key'), and
     `particles_idx` holds the particle of every sorted slot, flattened as `i_b * n_particles + i_p`, the inactive ones
-    last. The first `n_valid` slots are active. `cells_idx` numbers the cell of every slot among the cells, whose first
-    slots `cells_start` lists. The slots of a cell are split into tasks of a warp at most on GPU, `tasks_idx` numbering
-    the task of every slot, the assembly of the Hessian taking one per task. The terms of the Newton solve that act on
-    the displacement of a particle are staged at its slot (see genesis/engine/solvers/newton_solver.py).
+    last. The first `n_valid` slots are active. `blocks_idx` numbers the block of every slot among the particle blocks
+    (see 'MPMSparseGrid'). `cells_idx` numbers the cell of every slot among the cells, whose first slots `cells_start`
+    lists. The slots of a cell are split into tasks of a warp at most on GPU, `tasks_idx` numbering the task of every
+    slot, the assembly of the Hessian taking one per task. The terms of the Newton solve that act on the displacement of
+    a particle are staged at its slot (see genesis/engine/solvers/newton_solver.py).
     """
 
     keys: qd.Tensor = field(qd.u64, ndarray=True)
@@ -257,6 +251,9 @@ class MPMSortedParticles(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,))
     particles_idx: qd.Tensor = field(int, ndarray=True)
     particles_idx_buffer: qd.Tensor = field(int, ndarray=True)
     sorter: RadixSortScratch
+    is_block_start: qd.Tensor = field(int, ndarray=True)
+    blocks_idx: qd.Tensor = field(int, ndarray=True)
+    blocks_scanner: ExclusiveSumScratch
     is_cell_start: qd.Tensor = field(int, ndarray=True)
     cells_idx: qd.Tensor = field(int, ndarray=True)
     cells_scanner: ExclusiveSumScratch
@@ -369,8 +366,11 @@ class MPMSparseGrid(Data, kind=DataKind.SCRATCH):
     The blocks of the sparse grid of the implicit solver, rebuilt every substep from the particles, with their nodes.
 
     The blocks are those of the cells of the particles, the particle blocks, and the blocks of the positive octant
-    around them, which hold the nodes of their cells (the neighbor blocks). `blocks_key` lists them in increasing key,
-    the hash table mapping a key to its block. A node is numbered `i_blk * BLOCK_CELLS + i_cell_local` (see
+    around them, which hold the nodes of their cells (the neighbor blocks). `particle_blocks_key` lists the particle
+    blocks and `blocks_key` all the blocks, both in increasing key. The sort of the neighbor blocks gives the block of
+    every offset `func_node_offset(a)` from every particle block j at `particle_blocks_neighbor_idx[8 * j + a]`, and the
+    block of the particle block lying at that offset below every block i at `blocks_particle_neighbor_idx[8 * i + a]`,
+    -1 where none lies. A node is numbered `i_blk * BLOCK_CELLS + i_cell_local` (see
     'func_cell_local'), the cell of its lower corner holding the sorted particles from `nodes_cell_start` to
     `nodes_cell_end`. `n_blocks_demanded` counts the blocks the particles need, `has_overflow` telling the grid to grow
     past its capacity. The node arrays hold the mass and the free velocity the particles give the nodes,
@@ -392,8 +392,9 @@ class MPMSparseGrid(Data, kind=DataKind.SCRATCH):
     neighbors_is_block_start: qd.Tensor = field(int, shape=(8 * PARTICLE_BLOCKS,), ndarray=True)
     neighbors_block_idx: qd.Tensor = field(int, shape=(8 * PARTICLE_BLOCKS,), ndarray=True)
     neighbors_scanner: ExclusiveSumScratch
+    particle_blocks_neighbor_idx: qd.Tensor = field(int, shape=(8 * PARTICLE_BLOCKS,), ndarray=True)
     blocks_key: qd.Tensor = field(qd.u64, shape=(BLOCKS,), ndarray=True)
-    hash_table: HashTableScratch
+    blocks_particle_neighbor_idx: qd.Tensor = field(int, shape=(8 * BLOCKS,), ndarray=True)
     nodes_cell_start: qd.Tensor = field(int, shape=(BLOCKS * BLOCK_CELLS,), ndarray=True)
     nodes_cell_end: qd.Tensor = field(int, shape=(BLOCKS * BLOCK_CELLS,), ndarray=True)
     nodes_mass: qd.Tensor = field(float, shape=(BLOCKS * BLOCK_CELLS,), ndarray=True)
@@ -437,7 +438,6 @@ def build_grid(
                     PARTICLE_BLOCKS: n_blocks,
                     MPMSparseGrid.neighbors_sorter: radix_sort_sizes(key_bits=64, capacity=8 * n_blocks),
                     MPMSparseGrid.neighbors_scanner: exclusive_sum_sizes(8 * n_blocks),
-                    MPMSparseGrid.hash_table: hash_table_sizes(n_blocks),
                 }
             )
         kernel_list_blocks(mpm_state, sparse_grid)
@@ -618,6 +618,7 @@ class MPMData(Data):
                 "materials": max(len(solver._materials), 1),
                 "sorted_particles": n_sorted_particles,
                 MPMData.mpm_state.sorted_particles.sorter: radix_sort_sizes(key_bits=64, capacity=n_sorted_particles),
+                MPMData.mpm_state.sorted_particles.blocks_scanner: exclusive_sum_sizes(n_sorted_particles),
                 MPMData.mpm_state.sorted_particles.cells_scanner: exclusive_sum_sizes(n_sorted_particles),
                 MPMData.mpm_state.sorted_particles.tasks_scanner: exclusive_sum_sizes(n_sorted_particles),
             },
@@ -2349,6 +2350,12 @@ def func_node_offset(a: int):
 
 
 @qd.func
+def func_offset_idx(offset):
+    """Return the index of an offset of the positive octant (see 'func_node_offset')."""
+    return (offset[0] << 2) | (offset[1] << 1) | offset[2]
+
+
+@qd.func
 def func_cell_local(cell):
     """Return the index of a cell or of a node in its block."""
     return ((cell[0] & 3) << 4) | ((cell[1] & 3) << 2) | (cell[2] & 3)
@@ -2429,12 +2436,13 @@ def func_sorted_particle(i_s: int, n_particles: int, sorted_particles: MPMSorted
 
 
 @qd.func
-def func_stencil_slots(i_b: int, cell, sparse_grid: MPMSparseGrid):
-    """Return the slots of the 8 nodes of a cell, all of which the sparse grid holds."""
+def func_stencil_slots(i_s: int, cell, sorted_particles: MPMSortedParticles, sparse_grid: MPMSparseGrid):
+    """Return the slots of the 8 nodes of the cell of a sorted slot, all of which the sparse grid holds."""
+    i_pblk = sorted_particles.blocks_idx[i_s]
     slots = qd.Vector.zero(gs.qd_int, 8)
     for a in qd.static(range(8)):
         node = cell + func_node_offset(a)
-        i_blk = func_lookup_hash(sparse_grid.hash_table, func_block_key(i_b, node >> 2))
+        i_blk = sparse_grid.particle_blocks_neighbor_idx[8 * i_pblk + func_offset_idx((node >> 2) - (cell >> 2))]
         slots[a] = i_blk * 64 + func_cell_local(node)
     return slots
 
@@ -2451,13 +2459,13 @@ def func_gather_stencil(slots, nodes_values: qd.Tensor):
 
 
 @qd.func
-def func_cell_particles(i_b: int, cell, i_lane: int, sparse_grid: MPMSparseGrid, is_lanes: qd.template()):
-    """Return the range of the sorted slots of the particles of a cell, looked up once and shared by the lanes of a warp
-    when the lanes gather a node together."""
+def func_cell_particles(i_n: int, node, cell, i_lane: int, sparse_grid: MPMSparseGrid, is_lanes: qd.template()):
+    """Return the range of the sorted slots of the particles of a cell of which a node is a node, looked up once and
+    shared by the lanes of a warp when the lanes gather the node together."""
     i_s_start = gs.qd_int(0)
     i_s_end = gs.qd_int(0)
     if i_lane == 0:
-        i_blk = func_lookup_hash(sparse_grid.hash_table, func_block_key(i_b, cell >> 2))
+        i_blk = sparse_grid.blocks_particle_neighbor_idx[8 * (i_n // 64) + func_offset_idx((node >> 2) - (cell >> 2))]
         if i_blk >= 0:
             i_n = i_blk * 64 + func_cell_local(cell)
             i_s_start = sparse_grid.nodes_cell_start[i_n]
@@ -2509,8 +2517,8 @@ def kernel_sort_particles(mpm_state: MPMState, mpm_info: MPMInfo, errno: qd.Tens
 
 @qd.kernel
 def kernel_list_blocks(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
-    """Count the active sorted particles, list the distinct blocks of their cells, and the 8 blocks of the positive
-    octant of each, which hold the nodes of its cells."""
+    """Count the active sorted particles, number the distinct blocks of their cells in increasing key, and list the 8
+    blocks of the positive octant of each, which hold the nodes of its cells."""
     n_slots = mpm_state.sorted_particles.keys.shape[0]
     for _ in range(1):
         mpm_state.sorted_particles.n_valid[None] = 0
@@ -2518,19 +2526,33 @@ def kernel_list_blocks(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
         sparse_grid.has_overflow[None] = 0
     for i_s in range(n_slots):
         key = mpm_state.sorted_particles.keys[i_s]
+        is_block_start = 0
         if key != qd.u64(0xFFFFFFFFFFFFFFFF):
             is_last_valid = i_s == n_slots - 1
             if not is_last_valid:
                 is_last_valid = mpm_state.sorted_particles.keys[i_s + 1] == qd.u64(0xFFFFFFFFFFFFFFFF)
             if is_last_valid:
                 mpm_state.sorted_particles.n_valid[None] = i_s + 1
-            is_block_start = i_s == 0
-            if not is_block_start:
-                is_block_start = (mpm_state.sorted_particles.keys[i_s - 1] >> qd.u64(6)) != (key >> qd.u64(6))
-            if is_block_start:
-                i_blk = qd.atomic_add(sparse_grid.n_particle_blocks[None], 1)
-                if i_blk < sparse_grid.particle_blocks_key.shape[0]:
-                    sparse_grid.particle_blocks_key[i_blk] = key >> qd.u64(6)
+            is_block_start = 1
+            if i_s > 0:
+                if (mpm_state.sorted_particles.keys[i_s - 1] >> qd.u64(6)) == (key >> qd.u64(6)):
+                    is_block_start = 0
+        mpm_state.sorted_particles.is_block_start[i_s] = is_block_start
+    func_exclusive_sum(
+        mpm_state.sorted_particles.blocks_scanner,
+        mpm_state.sorted_particles.is_block_start,
+        mpm_state.sorted_particles.blocks_idx,
+        mpm_state.sorted_particles.n_keys,
+    )
+    for i_s in range(mpm_state.sorted_particles.n_valid[None]):
+        # The exclusive sum counts the starts before a slot, the start of the slot itself opening its block
+        i_pblk = mpm_state.sorted_particles.blocks_idx[i_s] + mpm_state.sorted_particles.is_block_start[i_s] - 1
+        mpm_state.sorted_particles.blocks_idx[i_s] = i_pblk
+        if mpm_state.sorted_particles.is_block_start[i_s] != 0:
+            if i_pblk < sparse_grid.particle_blocks_key.shape[0]:
+                sparse_grid.particle_blocks_key[i_pblk] = mpm_state.sorted_particles.keys[i_s] >> qd.u64(6)
+        if i_s == mpm_state.sorted_particles.n_valid[None] - 1:
+            sparse_grid.n_particle_blocks[None] = i_pblk + 1
     for _ in range(1):
         n_particle_blocks = sparse_grid.n_particle_blocks[None]
         if n_particle_blocks > sparse_grid.particle_blocks_key.shape[0]:
@@ -2545,9 +2567,9 @@ def kernel_list_blocks(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
 
 @qd.kernel
 def kernel_publish_blocks(sparse_grid: MPMSparseGrid):
-    """Number the distinct blocks of the sorted neighbor keys in increasing key and insert them in the hash table, the
-    blocks past the capacity flagging the grid to grow."""
-    func_clear_hash(sparse_grid.hash_table)
+    """Number the distinct blocks of the sorted neighbor keys in increasing key, the blocks past the capacity flagging
+    the grid to grow, and give every particle block the blocks of its positive octant and every block the particle
+    blocks of its negative octant (see 'MPMSparseGrid')."""
     for i_key in range(sparse_grid.n_neighbor_keys[None]):
         is_block_start = 1
         if i_key > 0:
@@ -2561,11 +2583,14 @@ def kernel_publish_blocks(sparse_grid: MPMSparseGrid):
         sparse_grid.n_neighbor_keys,
     )
     for i_key in range(sparse_grid.n_neighbor_keys[None]):
-        if sparse_grid.neighbors_is_block_start[i_key] != 0:
-            i_blk = sparse_grid.neighbors_block_idx[i_key]
-            if i_blk < sparse_grid.blocks_key.shape[0]:
+        # The exclusive sum counts the starts before a key, the start of the key itself opening its block
+        i_blk = sparse_grid.neighbors_block_idx[i_key] + sparse_grid.neighbors_is_block_start[i_key] - 1
+        if i_blk < sparse_grid.blocks_key.shape[0]:
+            if sparse_grid.neighbors_is_block_start[i_key] != 0:
                 sparse_grid.blocks_key[i_blk] = sparse_grid.neighbors_key[i_key]
-                func_insert_hash(sparse_grid.hash_table, sparse_grid.neighbors_key[i_key], i_blk)
+        else:
+            i_blk = -1
+        sparse_grid.particle_blocks_neighbor_idx[sparse_grid.neighbors_source_idx[i_key]] = i_blk
     for _ in range(1):
         n_keys = sparse_grid.n_neighbor_keys[None]
         n_blocks_demanded = gs.qd_int(0)
@@ -2577,6 +2602,15 @@ def kernel_publish_blocks(sparse_grid: MPMSparseGrid):
         sparse_grid.n_blocks[None] = qd.min(n_blocks_demanded, sparse_grid.blocks_key.shape[0])
         if n_blocks_demanded > sparse_grid.blocks_key.shape[0]:
             sparse_grid.has_overflow[None] = 1
+    for i_entry in range(8 * sparse_grid.n_blocks[None]):
+        sparse_grid.blocks_particle_neighbor_idx[i_entry] = -1
+    # A block lies at a single offset from a particle block below it, so every entry has one writer
+    for i_entry in range(sparse_grid.n_neighbor_keys[None]):
+        i_blk = sparse_grid.particle_blocks_neighbor_idx[i_entry]
+        if i_blk >= 0:
+            sparse_grid.blocks_particle_neighbor_idx[8 * i_blk + (i_entry & 7)] = (
+                sparse_grid.particle_blocks_neighbor_idx[i_entry - (i_entry & 7)]
+            )
 
 
 @qd.kernel
@@ -2633,11 +2667,10 @@ def kernel_list_cells(mpm_state: MPMState, sparse_grid: MPMSparseGrid):
     for i_cell in range(mpm_state.sorted_particles.n_cells[None]):
         i_s_start = mpm_state.sorted_particles.cells_start[i_cell]
         key = mpm_state.sorted_particles.keys[i_s_start]
-        i_blk = func_lookup_hash(sparse_grid.hash_table, key >> qd.u64(6))
-        if i_blk >= 0:
-            i_n = i_blk * 64 + gs.qd_int(key & qd.u64(63))
-            sparse_grid.nodes_cell_start[i_n] = i_s_start
-            sparse_grid.nodes_cell_end[i_n] = mpm_state.sorted_particles.cells_start[i_cell + 1]
+        i_blk = sparse_grid.particle_blocks_neighbor_idx[8 * mpm_state.sorted_particles.blocks_idx[i_s_start]]
+        i_n = i_blk * 64 + gs.qd_int(key & qd.u64(63))
+        sparse_grid.nodes_cell_start[i_n] = i_s_start
+        sparse_grid.nodes_cell_end[i_n] = mpm_state.sorted_particles.cells_start[i_cell + 1]
 
 
 @qd.kernel
@@ -2674,7 +2707,7 @@ def kernel_mpm_p2g(
         for a in range(8):
             offset = func_node_offset(a)
             cell = node - offset
-            i_s_start, i_s_end = func_cell_particles(i_b, cell, i_lane, sparse_grid, is_lanes=N_LANES > 1)
+            i_s_start, i_s_end = func_cell_particles(i_n, node, cell, i_lane, sparse_grid, is_lanes=N_LANES > 1)
             for i_chunk_ in range((i_s_end - i_s_start + N_LANES - 1) // N_LANES):
                 i_s = i_s_start + i_chunk_ * N_LANES + i_lane
                 if i_s < i_s_end:
@@ -2891,7 +2924,7 @@ def func_particle_stencil_terms(
     i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
     x_p = mpm_state.particles.pos[i_p, i_b]
     w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
-    slots = func_stencil_slots(i_b, cell, sparse_grid)
+    slots = func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid)
     u_nodes = func_gather_stencil(slots, sparse_grid.nodes_u)
     movable = qd.Vector([gs.qd_float(sparse_grid.nodes_is_fixed[slots[a]] == 0) for a in qd.static(range(8))])
 
@@ -2970,7 +3003,9 @@ def func_particle_energy(
     i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
     x_p = mpm_state.particles.pos[i_p, i_b]
     w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
-    u_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), sparse_grid.nodes_u)
+    u_nodes = func_gather_stencil(
+        func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid), sparse_grid.nodes_u
+    )
     F_trial = (qd.Matrix.identity(gs.qd_float, 3) + u_nodes.transpose() @ grad_w) @ mpm_state.particles.F[i_p, i_b]
     i_mat = mpm_info.particles.material_idx[i_p]
     model, plasticity, mu, lam = func_particle_material(i_mat, mpm_state.particles.Jp[i_p, i_b], mpm_info)
@@ -3009,7 +3044,7 @@ def func_particle_displacement(
     inv_dx = mpm_info.inv_dx[None]
     i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
     w, _ = func_q1_stencil(mpm_state.particles.pos[i_p, i_b] * inv_dx - cell.cast(gs.qd_float), inv_dx)
-    disp_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), nodes_disp)
+    disp_nodes = func_gather_stencil(func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid), nodes_disp)
     return i_b, disp_nodes.transpose() @ w
 
 
@@ -3096,7 +3131,7 @@ def func_particle_inversion_step_cap(i_s: int, mpm_state: MPMState, sparse_grid:
     if mpm_info.materials.model[i_mat] == MPMModel.LIQUID:
         inv_dx = mpm_info.inv_dx[None]
         _, grad_w = func_q1_stencil(mpm_state.particles.pos[i_p, i_b] * inv_dx - cell.cast(gs.qd_float), inv_dx)
-        slots = func_stencil_slots(i_b, cell, sparse_grid)
+        slots = func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid)
         F = mpm_state.particles.F[i_p, i_b]
         F_trial = (
             qd.Matrix.identity(gs.qd_float, 3) + func_gather_stencil(slots, sparse_grid.nodes_u).transpose() @ grad_w
@@ -3311,7 +3346,7 @@ def kernel_contact_invweight(mpm_state: MPMState, sparse_grid: MPMSparseGrid, mp
         i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
         if i_b == 0:
             w, _ = func_q1_stencil(mpm_state.particles.pos[i_p, i_b] * inv_dx - cell.cast(gs.qd_float), inv_dx)
-            slots = func_stencil_slots(i_b, cell, sparse_grid)
+            slots = func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid)
             invweight = qd.Matrix.zero(gs.qd_float, 3, 3)
             for a in qd.static(range(8)):
                 invweight += w[a] * w[a] * sparse_grid.nodes_diagonal[slots[a]].inverse()
@@ -3338,7 +3373,9 @@ def kernel_mpm_g2p(
         if newton_errno[i_b] == 0:
             x_p = mpm_state.particles.pos[i_p, i_b]
             w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
-            u_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), sparse_grid.nodes_u)
+            u_nodes = func_gather_stencil(
+                func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid), sparse_grid.nodes_u
+            )
             vel = u_nodes.transpose() @ w / dt
             C = u_nodes.transpose() @ grad_w / dt
             i_mat = mpm_info.particles.material_idx[i_p]
@@ -3578,7 +3615,7 @@ def func_mpm_assemble(
         for a in range(8):
             offset = func_node_offset(a)
             cell = node - offset
-            i_s_start, i_s_end = func_cell_particles(i_b, cell, i_lane, sparse_grid, is_lanes=N_LANES > 1)
+            i_s_start, i_s_end = func_cell_particles(i_n, node, cell, i_lane, sparse_grid, is_lanes=N_LANES > 1)
             for i_chunk_ in range((i_s_end - i_s_start + N_LANES - 1) // N_LANES):
                 i_s = i_s_start + i_chunk_ * N_LANES + i_lane
                 if i_s < i_s_end:

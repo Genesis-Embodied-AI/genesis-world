@@ -191,7 +191,7 @@ def func_contact_matvec(
             if envs_mask[i_b]:
                 x_p = mpm_state.particles.pos[i_p, i_b]
                 w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
-                slots = func_stencil_slots(i_b, cell, sparse_grid)
+                slots = func_stencil_slots(i_s, cell, mpm_state.sorted_particles, sparse_grid)
                 weights = qd.Vector(
                     [w[a] * gs.qd_float(sparse_grid.nodes_is_fixed[slots[a]] == 0) for a in qd.static(range(8))]
                 )
