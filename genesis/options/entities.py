@@ -1,7 +1,7 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar, get_args
 
 import numpy as np
 
@@ -76,21 +76,36 @@ def _reject_material_entity_fields(material: "materials.Rigid", target: str) -> 
 def get_entity_options_cls(material: Material) -> tuple[type["BaseEntity"], ...]:
     """Return the public classes of the entity options admitting a material, in declaration order.
 
-    Each class admits the materials of its declared 'material' field, except those it excludes explicitly.
+    Each class admits the materials of its declared 'material' field. A material that the fields of several classes
+    admit goes to the classes whose field is the narrowest, such as ``gs.materials.Rigid`` to ``gs.entities.Rigid``
+    rather than ``gs.entities.Kinematic``.
     """
     classes, pending = [], [BaseEntity]
     while pending:
         options_cls = pending.pop()
         classes.append(options_cls)
         pending.extend(reversed(options_cls.__subclasses__()))
-    # Private bases and their parametrizations by the entity class declare a material field too
+    # A narrower field names a material class that stands earlier in the method resolution order of the material
+    materials_mro = type(material).__mro__
+    mro_rank_by_cls = {}
+    for options_cls in classes:
+        # Private bases and their parametrizations by the entity class declare a material field too
+        if (
+            options_cls.__name__.startswith("_")
+            or options_cls.__pydantic_generic_metadata__["origin"] is not None
+            or "material" not in options_cls.model_fields
+        ):
+            continue
+        annotation = options_cls.model_fields["material"].annotation
+        mro_ranks = [
+            materials_mro.index(material_cls)
+            for material_cls in get_args(annotation) or (annotation,)
+            if material_cls in materials_mro
+        ]
+        if mro_ranks:
+            mro_rank_by_cls[options_cls] = min(mro_ranks)
     return tuple(
-        options_cls
-        for options_cls in classes
-        if not options_cls.__name__.startswith("_")
-        and options_cls.__pydantic_generic_metadata__["origin"] is None
-        and "material" in options_cls.model_fields
-        and options_cls._admits(material)
+        options_cls for options_cls, mro_rank in mro_rank_by_cls.items() if mro_rank == min(mro_rank_by_cls.values())
     )
 
 
@@ -125,19 +140,11 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     # The class of the scene options configuring the solver that simulates the entity, or None for an entity simulated
     # by no solver of its own, such as a hybrid entity, whose parts are entities of their own
     _solver_options_cls: ClassVar[type[Options] | None] = None
-    # The materials the 'material' field accepts by type that belong to the entity options of another solver
-    _excluded_materials: ClassVar[tuple[type[Material], ...]] = ()
 
     # Checked by instance alone, since validation would run the validators of 'Morph' on the sequence of morphs
     morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(strict=False)]
     surface: Surface | None = None
     name: str | None = None
-
-    @classmethod
-    def _admits(cls, material: Material) -> bool:
-        return isinstance(material, cls.model_fields["material"].annotation) and not isinstance(
-            material, cls._excluded_materials
-        )
 
     @model_validator(mode="before")
     @classmethod
@@ -145,14 +152,14 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         if not isinstance(data, dict):
             return data
         material = data.get("material")
-        if isinstance(material, Material) and "material" in cls.model_fields and not cls._admits(material):
-            options_names = " or ".join(
-                f"gs.entities.{options_cls.__name__}" for options_cls in get_entity_options_cls(material)
-            )
-            gs.raise_exception(
-                f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
-                f"Pass it to {options_names or 'the entity options of its solver'} instead."
-            )
+        if isinstance(material, Material) and "material" in cls.model_fields:
+            options_classes = get_entity_options_cls(material)
+            if cls not in options_classes:
+                options_names = " or ".join(f"gs.entities.{options_cls.__name__}" for options_cls in options_classes)
+                gs.raise_exception(
+                    f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
+                    f"Pass it to {options_names or 'the entity options of its solver'} instead."
+                )
         return data
 
     @property
@@ -298,7 +305,6 @@ class Kinematic(BaseEntity["KinematicEntity"]):
     """
 
     _solver_options_cls = KinematicOptions
-    _excluded_materials = (materials.Rigid,)
 
     material: materials.Kinematic = Field(default_factory=materials.Kinematic)
 
