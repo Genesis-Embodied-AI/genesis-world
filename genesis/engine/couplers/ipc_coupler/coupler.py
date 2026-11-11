@@ -568,7 +568,7 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     self._ipc_abd = AffineBodyConstitution()
                     self._ipc_constitution_tabular.insert(self._ipc_abd)
 
-                # An affine body holds the density of its entity alone, over every link merged into it
+                # FIXME: Support per link/geom density for IPC coupler
                 links_options = entity._options.links.values()
                 geoms_options = [
                     *entity._options.geoms.values(),
