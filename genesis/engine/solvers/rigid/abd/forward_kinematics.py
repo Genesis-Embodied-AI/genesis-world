@@ -566,10 +566,10 @@ def func_update_geom_aabb(
     if is_carried:
         g_pos = dyn_state.geoms.pos[i_g, i_b]
         g_quat = dyn_state.geoms.quat[i_g, i_b]
-        for i_corner in qd.static(range(8)):
-            corner_pos = gu.qd_transform_by_trans_quat(rigid_info.geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
-            lower = qd.min(lower, corner_pos)
-            upper = qd.max(upper, corner_pos)
+        # The first and last corners are the lower and upper ones (see kernel_init_geom_fields)
+        lower, upper = gu.qd_transform_aabb(
+            rigid_info.geoms_init_AABB[i_g, 0], rigid_info.geoms_init_AABB[i_g, 7], g_pos, g_quat
+        )
 
     dyn_state.geoms.aabb_min[i_g, i_b] = lower
     dyn_state.geoms.aabb_max[i_g, i_b] = upper

@@ -366,7 +366,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     scene.step()
 
     # Each camera at x=-1 along its own z-row looks along +x. The center pixel hits the closest point of its target
-    # sphere at x=-0.2 -> depth 0.8. For cam_rigid this comes from the visual BVH (not the collision capsule). When
+    # sphere at x=-0.2 -> depth 0.8. For cam_rigid this comes from the visual mesh (not the collision capsule). When
     # the kinematic entity opts out of raycasting, cam_kin sees nothing and returns the no_hit_value (max_range=5.0).
     NO_HIT = 5.0  # max_range
     kin_at_origin = 0.8 if kin_raycastable else NO_HIT
@@ -374,22 +374,12 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     assert_allclose(cam_kin.read_image()[..., 15, 20], kin_at_origin, tol=1e-2)
     assert_allclose(cam_rigid.read_image()[..., 15, 20], 0.8, tol=1e-2)
 
-    # Every entity is fixed, so each visual BVH is static (maybe_static) and rebuilt only when a GEOMETRY change is
-    # pending; nothing is pending after the baseline step, so an idle step would rebuild none of them.
-    visual_entries = [entry for entry in cam_kin._shared_context.bvh_contexts if entry.raycast_mask is not None]
-    assert visual_entries and all(entry.maybe_static for entry in visual_entries)
-    assert all(not entry.rebuild_subscriber.pending for entry in visual_entries)
-
     # Scale the kinematic sphere by 2x around its center via per-vertex set_vverts. The new radius is 0.4, so the
     # closest point becomes x=-0.4 and the depth at the center pixel drops to 0.6. Scaling perturbs each vvert by a
     # different amount, so only the correct vvert-to-state mapping yields 0.6. cam_rigid is unaffected.
     fk_vverts = tensor_to_array(kin_sphere.get_vverts())
     center = np.array([0.0, 0.0, 0.5], dtype=np.float32)
     kin_sphere.set_vverts((fk_vverts - center) * 2.0 + center)
-    if kin_raycastable:
-        # set_vverts is a GEOMETRY change, so the otherwise-skipped static visual BVH is flagged for rebuild.
-        kin_visual = next(entry for entry in visual_entries if entry.solver is scene.sim.kinematic_solver)
-        assert kin_visual.rebuild_subscriber.pending
     scene.step()
     assert_allclose(cam_kin.read_image()[..., 15, 20], kin_scaled, tol=1e-2)
     assert_allclose(cam_rigid.read_image()[..., 15, 20], 0.8, tol=1e-2)
@@ -480,15 +470,8 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
     expected_distances = front_positions - sensor_positions[:, 0]
     assert_allclose(lidar_distances, expected_distances, tol=tol)
 
-    # All links are fixed, so the collision BVH is static: rebuilt only when a set_pos invalidates it, never on an
-    # ordinary step. The per-env obstacle geometry differs here, so it groups into one tree per env.
-    collision_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None)
-    assert collision_bvh.maybe_static
-    assert collision_bvh.n_trees == 2
-
-    # Make the obstacle geometry identical across envs (sensors still differ in x): the static BVH regroups to a
-    # single shared tree read by every env. The set_pos calls must invalidate the static BVH, otherwise the cast
-    # keeps casting against the stale per-env trees.
+    # Make the obstacle geometry identical across envs (sensors still differ in x): the set_pos calls must reach the
+    # cast, otherwise it keeps casting against the stale poses.
     shared_sensor_positions = np.array([[0.0, 0.0, 0.5], [0.5, 0.0, 0.5]], dtype=gs.np_float)
     sensor_mount.set_pos(shared_sensor_positions)
     obstacle_1.set_pos((SHARED_OBSTACLE_1_X, 0.0, 0.5))
@@ -496,15 +479,13 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
 
     scene.step()
 
-    assert collision_bvh.n_trees == 1
-
     shared_distances = lidar.read().distances[:, 0, 0]
     shared_expected = min(SHARED_OBSTACLE_1_X - 0.1, SHARED_OBSTACLE_2_X - 0.025) - shared_sensor_positions[:, 0]
     assert_allclose(shared_distances, shared_expected, tol=tol)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(4, marks=pytest.mark.required)])
-def test_shared_static_bvh_regroup(show_viewer, n_envs):
+def test_cast_per_env_geoms(show_viewer, n_envs):
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(gs.morphs.Plane())
     box = scene.add_entity(
@@ -522,8 +503,6 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
             collision=False,
         )
     )
-    # The visual box lives on the kinematic solver, whose links are all fixed: its visual BVH is static and groups
-    # across envs even though the rigid solver hosts a movable entity.
     visual_box = scene.add_entity(
         gs.morphs.Box(
             size=(0.4, 0.4, 0.4),
@@ -551,57 +530,34 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
     scene.build(n_envs=n_envs)
     scene.step()
 
-    # Env-identical static geometry collapses to a single tree read by every env, for the static collision subset
-    # (its verts are batched, so the collapse comes from the geometry signature) and the visual BVH alike.
-    static_bvh = next(entry for entry in lidar._shared_context.collision_bvh_contexts if entry.maybe_static)
-    visual_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is not None)
-    assert not static_bvh.is_env_uniform
-    assert visual_bvh.maybe_static
-    assert static_bvh.n_trees == 1
-    assert visual_bvh.n_trees == 1
     assert_allclose(lidar.read().distances[..., 0, 0], 0.8, tol=5e-3)
-    # A regroup at runtime keeps the BVH sets allocated at build, which the compiled kernels are specialized for
-    static_bvh_state = static_bvh.bvh_state
-    visual_bvh_state = visual_bvh.bvh_state
 
     if n_envs > 0:
-        # A per-env set_pos on the fixed box diverges the envs: the static subset must regroup to one tree per
-        # distinct geometry so each env reads its own moved box. The env order is deliberately non-monotonic in x,
-        # so any confusion between the env -> tree routing and the env backing a tree's geometry shifts the
-        # distances. The visual geometry stays env-identical through its regroup, so it keeps a single tree.
+        # A per-env set_pos on the fixed box diverges the envs, each env reading its own moved box. The env order is
+        # deliberately non-monotonic in x, so any confusion between environments shifts the distances.
         box.set_pos(np.array([[1.0, 0.0, 0.5], [4.0, 0.0, 0.5], [3.0, 0.0, 0.5], [2.0, 0.0, 0.5]], dtype=gs.np_float))
         scene.step()
-        assert static_bvh.n_trees == n_envs
-        assert visual_bvh.n_trees == 1
-        assert static_bvh.bvh_state is static_bvh_state
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 2.8, 1.8), tol=5e-3)
 
-        # A per-env set_pos on the visual box splits the visual BVH into one tree per distinct geometry - two here,
-        # with interleaved env membership - and the merge picks the visual hit where it is the closest.
+        # A per-env set_pos on the visual box, with interleaved env membership: the merge picks the visual hit where
+        # it is the closest.
         visual_box.set_pos(
             np.array([[6.0, 0.0, 0.5], [6.0, 0.0, 0.5], [1.5, 0.0, 0.5], [6.0, 0.0, 0.5]], dtype=gs.np_float)
         )
         scene.step()
-        assert visual_bvh.n_trees == 2
-        assert visual_bvh.bvh_state is visual_bvh_state
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 1.3, 1.8), tol=5e-3)
 
-        # Diverge the movable box per env (off the ray corridor), then restore the static box to identical poses:
-        # the static grouping signature reads only its own subset's verts, so the diverged movable verts cannot keep
-        # the merged static tree split.
+        # Diverge the movable box per env (off the ray corridor), then restore the fixed box to identical poses
         movable_box.set_pos(
             np.array([[3.0, 2.0, 0.5], [4.0, 2.0, 0.5], [5.0, 2.0, 0.5], [6.0, 2.0, 0.5]], dtype=gs.np_float)
         )
         box.set_pos((1.0, 0.0, 0.5))
         scene.step()
-        assert static_bvh.n_trees == 1
         assert_allclose(lidar.read().distances[:, 0, 0], 0.8, tol=5e-3)
 
-        # An identical reset restores the built geometry and merges everything back to one shared tree each.
+        # A reset restores the built geometry
         scene.reset()
         scene.step()
-        assert static_bvh.n_trees == 1
-        assert visual_bvh.n_trees == 1
         assert_allclose(lidar.read().distances[:, 0, 0], 0.8, tol=5e-3)
 
 
@@ -683,10 +639,8 @@ def test_heterogeneous_object(show_viewer, tol):
             use_visual_raycasting=True,
         ),
     )
-    # Every link of the kinematic solver is fixed, so its visual BVH is static and groups envs by geometry. A box
-    # primitive puts its vgeom at the link origin, so these same-pos variants hold identical vgeom poses and differ
-    # only in rest-pose vverts, which are shared across envs: the active vgeom range is the sole discriminator the
-    # grouping signature can read.
+    # A box primitive puts its vgeom at the link origin, so these same-pos variants hold identical vgeom poses and
+    # differ only in rest-pose vverts: the active vgeom range of each environment alone tells them apart.
     scene.add_entity(
         morph=(
             gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
@@ -697,8 +651,6 @@ def test_heterogeneous_object(show_viewer, tol):
             use_visual_raycasting=True,
         ),
     )
-    # A movable entity parked off the ray's path: it makes the solver mixed, so the heterogeneous variants are served
-    # through the static subset of the split collision BVH.
     movable_box = scene.add_entity(
         gs.morphs.Box(
             size=(0.05, 0.4, 0.4),
@@ -721,45 +673,30 @@ def test_heterogeneous_object(show_viewer, tol):
     distances = lidar.read().distances[:, 0, 0]
     assert_allclose(distances, (0.9, 0.9, 0.8, 0.8, 0.7, 0.7), tol=5e-3)
 
-    # The static subset groups envs by identical geometry while keeping the rebuild skip: 3 distinct variants across
-    # 6 envs yield 3 trees, each env casting against its own variant's tree.
-    collision_entries = [entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None]
-    assert len(collision_entries) == 2
-    static_bvh = next(entry for entry in collision_entries if entry.maybe_static)
-    assert static_bvh.n_trees == 3
-
-    # The static BVH is rebuilt only when its geometry actually changes - exactly what is necessary, nothing more: an
-    # idle step records no change (rebuild skipped), while a set_pos records a pending change (rebuild scheduled).
-    subscriber = static_bvh.rebuild_subscriber
-    scene.step()
-    assert not subscriber.pending
-    het_obstacle.set_pos((1.0, 0.0, 0.5))
-    assert subscriber.pending
-
-    # The movable box slides into the ray's path: the dynamic subset merges its closer hit identically in every env,
-    # in front of each env's own static variant.
+    # The movable box slides into the ray's path: its closer hit wins identically in every env, in front of each
+    # env's own variant.
     movable_box.set_pos((0.5, 0.0, 0.5))
     scene.step()
     assert_allclose(lidar.read().distances[:, 0, 0], 0.475, tol=5e-3)
 
-    # And back out: each env again sees exactly its own variant through the (skipped) static subset.
+    # And back out: each env again sees exactly its own variant.
     movable_box.set_pos((3.0, 2.0, 0.5))
     scene.step()
     assert_allclose(lidar.read().distances[:, 0, 0], (0.9, 0.9, 0.8, 0.8, 0.7, 0.7), tol=5e-3)
 
-    # Sending the rigid variants out of range leaves the kinematic ones as the nearest hit, cast through one grouped
-    # static tree per distinct variant, so each env still reads its own.
+    # Sending the rigid variants out of range leaves the kinematic ones as the nearest hit, each env still reading
+    # its own.
     het_obstacle.set_pos((10.0, 0.0, 0.5))
     scene.step()
     assert_allclose(lidar.read().distances[:, 0, 0], (3.9, 3.9, 3.8, 3.8, 3.7, 3.7), tol=5e-3)
 
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
-def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
+def test_cast_fixed_and_moving_geoms(show_viewer, n_envs, tol):
     MOUNT_Z = 3.0
-    STATIC_TOP_Z = 1.0
+    FIXED_TOP_Z = 1.0
     VISUAL_TOP_Z = 0.5
-    DYNAMIC_TOP_Z = 2.4  # dynamic box (edge 0.4) centered at z=2.2
+    MOVABLE_TOP_Z = 2.4  # movable box (edge 0.4) centered at z=2.2
     FAR_POS = (5.0, 5.0, 0.2)
     NO_HIT = -1.0  # below max_range on purpose: a miss must still lose the merge against any real hit
     DT = 0.01
@@ -777,7 +714,7 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
         ),
         show_viewer=show_viewer,
     )
-    static_box = scene.add_entity(
+    fixed_box = scene.add_entity(
         gs.morphs.Box(
             size=(1.0, 1.0, 1.0),
             pos=(0.0, 0.0, 0.5),
@@ -804,14 +741,14 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
             collision=False,
         )
     )
-    dynamic_box = scene.add_entity(
+    movable_box = scene.add_entity(
         gs.morphs.Box(
             size=(0.4, 0.4, 0.4),
             pos=FAR_POS,
         )
     )
-    # Tactile cluster: a movable sensor pad resting 0.5mm into a fixed table (static tree) with a movable box pressed
-    # through it (dynamic tree), so its probes hold candidates in both trees.
+    # Tactile cluster: a movable sensor pad resting 0.5mm into a fixed table with a movable box pressed
+    # through it, so its probes hold candidates on both.
     table = scene.add_entity(
         gs.morphs.Box(
             size=(0.4, 0.4, 0.1),
@@ -875,29 +812,16 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
         assert_allclose(sensor.read().distances, expected, tol=tol)
         assert_allclose(distances_only_sensor.read().distances, expected, tol=tol)
 
-    # The solver mixes static (fixed-link) and dynamic (movable-link) collision faces, so its collision mesh is split
-    # into one compacted BVH per group; the visual box contributes a third, visual entry.
-    collision_entries = [entry for entry in sensor._shared_context.bvh_contexts if entry.raycast_mask is None]
-    assert len(collision_entries) == 2
-    static_entry = next(entry for entry in collision_entries if entry.maybe_static)
-    dynamic_entry = next(entry for entry in collision_entries if not entry.maybe_static)
-    assert static_entry.faces_idx is not None and dynamic_entry.faces_idx is not None
-    # The static box declines batched fixed verts, so the static tree's build inputs are env-independent and the
-    # shared read across envs holds by construction, sparing the per-rebuild AABB comparison.
-    assert static_entry.is_env_uniform
-    assert not dynamic_entry.is_env_uniform
-
-    # Dynamic box parked far away: the ray hits the static box top through the static BVH; the closer static hit
-    # must survive the dynamic (miss) and visual (farther hit) merge passes.
+    # Movable box parked far away: the ray hits the fixed box top, the closer collision hit surviving the merge with
+    # the farther visual hit.
     scene.step()
-    assert_distances(MOUNT_Z - STATIC_TOP_Z)
+    assert_distances(MOUNT_Z - FIXED_TOP_Z)
 
-    # Tactile probes fold both trees by the globally nearest triangle. The contact response of the step above
-    # displaced the interpenetrating movable pair, so their poses are restored, and the candidate contact pairs
-    # (pad-table, pad-box) detected anew at them, before sampling the sensors alone. Probe 1 is nearer to the table
-    # face (0.5mm outside, static tree) than to the box bottom (1.5mm inside): a fold selecting by deepest penetration
-    # instead of smallest signed-distance magnitude would report the box's larger depth. Probe 2 is nearest to the
-    # box's x side face (2mm inside, dynamic tree).
+    # Tactile probes pick the globally nearest triangle. The contact response of the step above displaced the
+    # interpenetrating movable pair, so their poses are restored, and the candidate contact pairs (pad-table, pad-box)
+    # detected anew at them, before sampling the sensors alone. Probe 1 is nearer to the table face (0.5mm outside)
+    # than to the box bottom (1.5mm inside): a choice by deepest penetration instead of smallest signed-distance
+    # magnitude would report the larger depth of the box. Probe 2 is nearest to the x side face of the box (2mm inside).
     pad.set_pos((*TACTILE_POS, PAD_POS_Z))
     tactile_box.set_pos((*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02))
     scene.rigid_solver.detect_collision()
@@ -915,69 +839,56 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
     pad.set_pos((*TACTILE_POS, 1.0))
     tactile_box.set_pos((10.0, 3.0, 1.0))
 
-    # Dynamic box under the ray, above the static box: the closer dynamic hit wins the merge. Its set_pos cannot
-    # move the fixed links, so the link-filtered subscription must never even flag the static tree.
-    dynamic_box.set_pos((0.0, 0.0, DYNAMIC_TOP_Z - 0.2))
-    assert not static_entry.rebuild_subscriber.pending
+    # Movable box under the ray, above the fixed box: the closer movable hit wins
+    movable_box.set_pos((0.0, 0.0, MOVABLE_TOP_Z - 0.2))
     scene.step()
-    assert_distances(MOUNT_Z - DYNAMIC_TOP_Z)
+    assert_distances(MOUNT_Z - MOVABLE_TOP_Z)
 
-    # Dynamic box parked again: back to the static hit (the dynamic BVH tracked the motion).
-    dynamic_box.set_pos(FAR_POS)
+    # Movable box parked again: back to the fixed hit.
+    movable_box.set_pos(FAR_POS)
     scene.step()
-    assert_distances(MOUNT_Z - STATIC_TOP_Z)
+    assert_distances(MOUNT_Z - FIXED_TOP_Z)
 
-    # Teleporting the static box is an explicit set_pos on otherwise-static geometry: it must flag the skipped static
-    # BVH for rebuild, after which the ray falls through to the visual box - a first-pass miss followed by a last-pass
-    # hit, the ordering that would report NO_HIT if a miss stamped it before the merge completed.
-    static_box.set_pos((5.0, -5.0, 0.5))
-    assert static_entry.rebuild_subscriber.pending
+    # Teleporting the fixed box lets the ray fall through to the visual box: a first-pass miss followed by a
+    # last-pass hit, the ordering that would report NO_HIT if a miss stamped it before the merge completed.
+    fixed_box.set_pos((5.0, -5.0, 0.5))
     scene.step()
     assert_distances(MOUNT_Z - VISUAL_TOP_Z)
 
-    # Same ordering with the hit coming from the middle (dynamic) pass instead of the last (visual) one.
-    dynamic_box.set_pos((0.0, 0.0, DYNAMIC_TOP_Z - 0.2))
+    # Same ordering with the hit coming from the collision pass instead of the visual one.
+    movable_box.set_pos((0.0, 0.0, MOVABLE_TOP_Z - 0.2))
     scene.step()
-    assert_distances(MOUNT_Z - DYNAMIC_TOP_Z)
+    assert_distances(MOUNT_Z - MOVABLE_TOP_Z)
 
     # Move everything out of the ray's path: only a miss on every pass settles to no_hit_value.
     visual_box.set_pos((5.0, 0.0, 0.25))
-    dynamic_box.set_pos(FAR_POS)
+    movable_box.set_pos(FAR_POS)
     scene.step()
     assert_distances(NO_HIT)
 
-    # Physics-driven motion: a constant downward velocity moves the dynamic box without any GEOMETRY event, so the
-    # static BVH keeps skipping its rebuild (nothing pending, nothing flagged) while the dynamic BVH tracks the fall.
-    dynamic_box.set_pos((0.0, 0.0, DYNAMIC_TOP_Z - 0.2))
-    dynamic_box.set_dofs_velocity((0.0, 0.0, -1.0), dofs_idx_local=slice(0, 3))
+    # Physics-driven motion: a constant downward velocity moves the movable box without any GEOMETRY event, and the
+    # cast tracks the fall.
+    movable_box.set_pos((0.0, 0.0, MOVABLE_TOP_Z - 0.2))
+    movable_box.set_dofs_velocity((0.0, 0.0, -1.0), dofs_idx_local=slice(0, 3))
     scene.step()
-    assert_distances(MOUNT_Z - DYNAMIC_TOP_Z + DT, tol=tol)
-    assert static_entry.maybe_static
-    assert not static_entry.needs_rebuild
-    assert not static_entry.rebuild_subscriber.pending
+    assert_distances(MOUNT_Z - MOVABLE_TOP_Z + DT, tol=tol)
     scene.step()
-    assert_distances(MOUNT_Z - DYNAMIC_TOP_Z + 2 * DT, tol=tol)
+    assert_distances(MOUNT_Z - MOVABLE_TOP_Z + 2 * DT, tol=tol)
 
-    # A reset restores the initial poses, possibly of fixed links (here the teleported static box), so it must
-    # rebuild the static tree; static entries resume skipping on subsequent steps.
+    # A reset restores the initial poses, the teleported fixed box included
     scene.reset()
     scene.step()
-    assert_distances(MOUNT_Z - STATIC_TOP_Z)
+    assert_distances(MOUNT_Z - FIXED_TOP_Z)
 
-    # Identical fixed geometry in every env: the static subset collapses to a single shared tree, while the dynamic
-    # subset keeps one tree per env by construction.
-    assert static_entry.n_trees == 1
-    assert dynamic_entry.n_trees == max(n_envs, 1)
-
-    # The dynamic box behind the static one: the nearer static hit wins over a farther hit of the other set
-    dynamic_box.set_pos((0.0, 0.0, -0.5))
+    # The movable box behind the fixed one: the nearer fixed hit wins
+    movable_box.set_pos((0.0, 0.0, -0.5))
     scene.step()
-    assert_distances(MOUNT_Z - STATIC_TOP_Z)
+    assert_distances(MOUNT_Z - FIXED_TOP_Z)
 
-    # The viewer picks through the same trees: a ray down from the mount meets the dynamic box moved in front on the
+    # The viewer picks through the same trees: a ray down from the mount meets the movable box moved in front on the
     # collision meshes, and the visual box on the meshes opted into visual raycasting
-    dynamic_box.set_pos((0.0, 0.0, DYNAMIC_TOP_Z - 0.2))
+    movable_box.set_pos((0.0, 0.0, MOVABLE_TOP_Z - 0.2))
     scene.step()
-    for use_visual_geom, top_z in ((False, DYNAMIC_TOP_Z), (True, VISUAL_TOP_Z)):
+    for use_visual_geom, top_z in ((False, MOVABLE_TOP_Z), (True, VISUAL_TOP_Z)):
         hit = Raycaster(scene, use_visual_geom=use_visual_geom).cast((0.0, 0.0, MOUNT_Z), (0.0, 0.0, -1.0))
         assert_allclose(hit.distance, MOUNT_Z - top_z, tol=tol)

@@ -4,8 +4,18 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
-from genesis.engine.bvh import BVHQueryResults, BVHQueryState
+from genesis.engine.bvh import (
+    BoxQuery,
+    BVHLeaves,
+    BVHPackedTrees,
+    BVHQueryResults,
+    BVHTreeState,
+    build_bvh,
+    build_packed_bvh,
+    func_bvh_query_leaves,
+    func_bvh_traverse,
+    get_bvh_data,
+)
 from genesis.utils.misc import qd_to_numpy
 
 from ..utils.assertions import assert_equal
@@ -82,18 +92,14 @@ def test_build_tree(bvh):
 def test_query(bvh):
     bvh_state, bvh_config = bvh
     n_trees, n_leaves = bvh_state.leaves.aabbs_min.shape
-    query_state = BVHQueryState(
-        leaves=bvh_state.leaves,
-        tree=bvh_state.tree,
-        results=BVHQueryResults(sizes=dict(query_results=n_trees * n_leaves * n_leaves, bvh_trees=n_trees)),
-    )
+    box_query = BoxQuery(BVHQueryResults(sizes=dict(query_results=n_trees * n_leaves * n_leaves, bvh_trees=n_trees)))
 
     @qd.kernel
-    def query_leaves(query_state: BVHQueryState):
-        query_state.results.count[0] = 0
-        for i_t in range(query_state.results.trees_count.shape[0]):
-            query_state.results.trees_count[i_t] = 0
-        func_bvh_query_leaves(query_state, func_no_filter, 0)
+    def query_leaves(leaves: BVHLeaves, tree: BVHTreeState, visitor: qd.template()):
+        visitor.results.count[0] = 0
+        for i_t in range(visitor.results.trees_count.shape[0]):
+            visitor.results.trees_count[i_t] = 0
+        func_bvh_query_leaves(leaves, tree, visitor)
 
     leaves_min = qd_to_numpy(bvh_state.leaves.aabbs_min)
     leaves_max = qd_to_numpy(bvh_state.leaves.aabbs_max)
@@ -101,23 +107,65 @@ def test_query(bvh):
     is_hit &= (leaves_max[:, :, None] >= leaves_min[:, None]).all(axis=-1)
 
     # Every leaf queried against its own tree finds exactly the leaves its box meets, itself included
-    query_leaves(query_state)
-    assert_equal(qd_to_numpy(query_state.results.trees_count), is_hit.sum(axis=(1, 2)))
-    count = qd_to_numpy(query_state.results.count)[0]
-    triplets = qd_to_numpy(query_state.results.triplets)[:count]
+    query_leaves(bvh_state.leaves, bvh_state.tree, box_query)
+    assert_equal(qd_to_numpy(box_query.results.trees_count), is_hit.sum(axis=(1, 2)))
+    count = qd_to_numpy(box_query.results.count)[0]
+    triplets = qd_to_numpy(box_query.results.triplets)[:count]
     is_found = np.zeros((n_trees, n_leaves, n_leaves), dtype=bool)
     is_found[triplets[:, 0], triplets[:, 1], triplets[:, 2]] = True
     assert_equal(is_found, is_hit)
 
+    # Trees of unequal leaf counts packed in one set, over the first leaves of each tree, each of these leaves queried
+    # against the packed tree of its own tree, find the same leaves among them
+    trees_n_leaves = np.array([max(n_leaves - i_t, 1) for i_t in range(n_trees)], dtype=gs.np_int)
+    trees_leaf_start = np.cumsum(trees_n_leaves) - trees_n_leaves
+    trees = build_packed_bvh(
+        [leaves_min[i_t, :n] for i_t, n in enumerate(trees_n_leaves)],
+        [leaves_max[i_t, :n] for i_t, n in enumerate(trees_n_leaves)],
+    )
+
+    @qd.kernel
+    def query_packed_leaves(
+        trees_n_leaves: qd.types.ndarray(),
+        trees_leaf_start: qd.types.ndarray(),
+        leaves: BVHLeaves,
+        trees: BVHPackedTrees,
+        visitor: qd.template(),
+    ):
+        visitor.results.count[0] = 0
+        for i_t in range(visitor.results.trees_count.shape[0]):
+            visitor.results.trees_count[i_t] = 0
+        for i_t, i_q in qd.ndrange(leaves.aabbs_min.shape[0], leaves.aabbs_min.shape[1]):
+            if i_q < trees_n_leaves[i_t]:
+                i_root = trees.trees_root[i_t]
+                leaf_offset = trees.trees_leaf_offset[i_t]
+                func_bvh_traverse(
+                    i_t,
+                    i_q,
+                    i_root,
+                    leaf_offset,
+                    leaf_base=-trees_leaf_start[i_t],
+                    query=visitor.Query(aabb_min=leaves.aabbs_min[i_t, i_q], aabb_max=leaves.aabbs_max[i_t, i_q]),
+                    bound=0.0,
+                    tree=trees.tree,
+                    visitor=visitor,
+                )
+
+    is_packed = np.arange(n_leaves) < trees_n_leaves[:, None]
+    is_hit_packed = is_hit & is_packed[:, :, None] & is_packed[:, None]
+    query_packed_leaves(trees_n_leaves, trees_leaf_start, bvh_state.leaves, trees, box_query)
+    assert_equal(qd_to_numpy(box_query.results.trees_count), is_hit_packed.sum(axis=(1, 2)))
+    count = qd_to_numpy(box_query.results.count)[0]
+    triplets = qd_to_numpy(box_query.results.triplets)[:count]
+    is_found[:] = False
+    is_found[triplets[:, 0], triplets[:, 1], triplets[:, 2]] = True
+    assert_equal(is_found, is_hit_packed)
+
     # A result list holding one pair per tree keeps the first pair of every tree, a genuine one, and reports the
     # overflow of each tree with more.
-    short_query_state = BVHQueryState(
-        leaves=bvh_state.leaves,
-        tree=bvh_state.tree,
-        results=BVHQueryResults(sizes=dict(query_results=n_trees, bvh_trees=n_trees)),
-    )
-    query_leaves(short_query_state)
-    assert_equal(qd_to_numpy(short_query_state.results.trees_count), is_hit.sum(axis=(1, 2)))
-    triplets = qd_to_numpy(short_query_state.results.triplets)
+    short_box_query = BoxQuery(BVHQueryResults(sizes=dict(query_results=n_trees, bvh_trees=n_trees)))
+    query_leaves(bvh_state.leaves, bvh_state.tree, short_box_query)
+    assert_equal(qd_to_numpy(short_box_query.results.trees_count), is_hit.sum(axis=(1, 2)))
+    triplets = qd_to_numpy(short_box_query.results.triplets)
     assert_equal(np.sort(triplets[:, 0]), np.arange(n_trees))
     assert is_hit[triplets[:, 0], triplets[:, 1], triplets[:, 2]].all()

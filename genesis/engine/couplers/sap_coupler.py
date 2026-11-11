@@ -1,4 +1,3 @@
-import dataclasses
 import math
 import textwrap
 from collections.abc import Iterator
@@ -21,11 +20,16 @@ from genesis.constants import IntEnum
 from genesis.engine.bvh import (
     BVHLeaves,
     BVHQueryResults,
-    BVHQueryState,
+    BVHState,
+    BoxQuery,
+    InstancesQuery,
     build_bvh,
+    build_packed_instances,
+    func_aabb_intersects_aabb,
     func_bvh_query_leaves,
-    func_no_filter,
+    func_bvh_traverse,
     get_bvh_data,
+    kernel_build_instances_tree,
 )
 from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin, ErrorCode
 from genesis.engine.solvers.fem_solver import (
@@ -72,6 +76,7 @@ from genesis.utils.data import (
     iter_data,
 )
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.raycast_qd import get_solver_meshes
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
@@ -83,15 +88,6 @@ class SAPErrorCode(ErrorCode):
     OVERFLOW_CANDIDATE_CONTACTS = auto()
     OVERFLOW_CONTACTS = auto()
     INVALID_SOLVE = auto()
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SAPContactQueriesState:
-    """The box queries of the SAP coupler, one per contact handler traversing a tree (see SAPCoupler._init_bvh)."""
-
-    fem_self: BVHQueryState
-    rigid_tri: BVHQueryState
-    rigid_tet: BVHQueryState
 
 
 MARCHING_TETS_EDGE_TABLE = (
@@ -276,10 +272,9 @@ class ConstraintSum(IntEnum):
                 return ()
 
 
-# The vertices and elements of the tetrahedral volume meshes of the rigid geoms, and the rigid triangles touching FEM
+# The vertices and elements of the tetrahedral volume meshes of the rigid geoms
 RIGID_VOLUME_VERTS = Size("rigid_volume_verts")
 RIGID_VOLUME_ELEMS = Size("rigid_volume_elems")
-RIGID_TRI_FACES = Size("rigid_tri_faces")
 # The FEM entities, the chunks of the FEM vertices then of the rigid dofs, and of the FEM elements (see CHUNK_SIZE)
 FEM_ENTITIES = Size("fem_entities")
 VERTEX_CHUNKS = Size("vertex_chunks")
@@ -303,8 +298,6 @@ FEM = "fem"
 RIGID = "rigid"
 FEM_PRESSURE = "fem_pressure"
 RIGID_VOLUME = "rigid_volume"
-RIGID_RIGID = "rigid_rigid"
-RIGID_FEM = "rigid_fem"
 TET_TABLES = "tet_tables"
 RIGID_CONTACTS = "rigid_contacts"
 HOST_SORT = "host_sort"
@@ -501,9 +494,6 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     rigid_volume_elems: qd.Tensor = field((int, 4), shape=(RIGID_VOLUME_ELEMS,), labels=RIGID_VOLUME)
     rigid_volume_elems_geom_idx: qd.Tensor = field(int, shape=(RIGID_VOLUME_ELEMS,), labels=RIGID_VOLUME)
     rigid_pressure_gradient_rest: qd.Tensor = field((float, 3), shape=(RIGID_VOLUME_ELEMS,), labels=RIGID_VOLUME)
-    # The collision pairs of the rigid collider at build (see collision_pair_idx in ColliderInfo)
-    rigid_collision_pair_idx: qd.Tensor = field(int, shape=(GEOMS, GEOMS), labels=RIGID_RIGID)
-    rigid_tri_faces_idx: qd.Tensor = field(int, shape=(RIGID_TRI_FACES,), labels=RIGID_FEM)
     # The edges of a tet cut by a plane, by the code of the vertices above it, and the vertices of the edges of a tet
     marching_tets_edge_table: qd.Tensor = field((int, 4), shape=(len(MARCHING_TETS_EDGE_TABLE),), labels=TET_TABLES)
     tet_edges: qd.Tensor = field((int, 2), shape=(len(TET_EDGES),), labels=TET_TABLES)
@@ -567,6 +557,8 @@ CONTACT_PAIRS = Size("contact_pairs")
 CONTACT_CANDIDATES = Size("contact_candidates")
 ENV_JOINT_EQUALITIES = Size("env_joint_equalities")
 JOINT_EQUALITIES = Size("joint_equalities")
+# The tets of the geoms of the rigid-rigid contacts
+RIGID_RIGID_TETS = Size("rigid_rigid_tets")
 
 
 class SAPContactInfo(Data, kind=DataKind.SCRATCH):
@@ -745,6 +737,14 @@ class RigidRigidTetCandidates(SAPContactCandidates):
     distance0: qd.Tensor = field((float, 4))
 
 
+class RigidRigidGeoms(Data, kind=DataKind.CONSTANT):
+    """The geoms of the tets of the rigid-rigid contacts, and the pairs of geoms that may collide."""
+
+    tets_geom_idx: qd.Tensor = field(int, shape=(RIGID_RIGID_TETS,))
+    # From the collision pairs of the rigid collider at build (see ColliderInfo)
+    geoms_is_pair: qd.Tensor = field(bool, shape=(GEOMS, GEOMS))
+
+
 class SAPConstraintInfo(Data, kind=DataKind.SCRATCH):
     """The regularized model of each joint equality constraint, and the iterates of the solve at it."""
 
@@ -800,6 +800,14 @@ class SAPData(Data):
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
 
+class RigidVolume(NamedTuple):
+    """The tetrahedral volume of a rigid geom, in the frame of the geom."""
+
+    geom_idx: int
+    verts: np.ndarray
+    elems: np.ndarray
+
+
 class SAPHandlers(NamedTuple):
     """The handlers of the constraints of the SAP coupler in the order the kernels run them, None for an absent one."""
 
@@ -828,9 +836,7 @@ class SAPConfig(Config):
     has_equality_constraints: bool
     has_fem_contacts: bool
     has_rigid_contacts: bool
-    has_rigid_tet_tree: bool
     enable_fem_self_tet_contact: bool
-    enable_rigid_fem_contact: bool
     enable_lagged_friction: bool
     enable_vertex_constraints: bool
     batch_links_info: bool
@@ -844,38 +850,65 @@ class SAPConfig(Config):
     constraints_sort_log256: int
 
 
-@qd.func
-def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, fem_topology: qd.template()) -> bool:
-    """Drop a pair of FEM surface tets once per unordered pair, and the pairs sharing a vertex.
+@qd.data_oriented
+class FEMSurfaceTetsQuery(BoxQuery):
+    """The visitor of the box query of the FEM surface tets against their own tree, keeping each unordered pair once and
+    dropping the pairs sharing a vertex.
 
-    `fem_topology` holds the surface elements and the vertices of the elements of the FEM solver (see FEMInfo).
+    It reads the surface elements and the vertices of the elements of the FEM solver (see FEMInfo).
     """
-    surface_elements = qd.static(fem_topology[0])
-    el2v = qd.static(fem_topology[1])
-    is_dropped = i_a >= i_q
-    i_ea = surface_elements[i_a]
-    i_eq = surface_elements[i_q]
-    i_av = el2v[i_ea]
-    i_qv = el2v[i_eq]
-    for i, j in qd.static(qd.ndrange(4, 4)):
-        if i_av[i] == i_qv[j]:
-            is_dropped = True
-    return is_dropped
+
+    def __init__(self, results: BVHQueryResults, fem_info: FEMInfo) -> None:
+        super().__init__(results)
+        self.fem_info = fem_info
+
+    @qd.func
+    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
+        is_kept = i_a < i_q
+        i_ea = self.fem_info.surface_elements[i_a]
+        i_eq = self.fem_info.surface_elements[i_q]
+        i_av = self.fem_info.elements.el2v[i_ea]
+        i_qv = self.fem_info.elements.el2v[i_eq]
+        for i, j in qd.static(qd.ndrange(4, 4)):
+            if i_av[i] == i_qv[j]:
+                is_kept = False
+        return is_kept
 
 
-@qd.func
-def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, rigid_tets_pairs: qd.template()) -> bool:
-    """Drop a pair of rigid tets whose geoms hold no collision pair.
+@qd.data_oriented
+class RigidTetsQuery(BoxQuery):
+    """The visitor of the box query of a rigid tet against the tets of the other geoms of the rigid-rigid contacts.
 
-    `rigid_tets_pairs` holds the geoms of the rigid volume elements and the collision pairs of the geoms (see SAPInfo).
-    The tree and the queries hold the same tets, so every pair of geoms is found in both orders, the one of increasing
-    geom index alone being kept.
+    Each pair of geoms that may collide is found once, the tet of the higher geom querying the tree of the lower one.
+    The query is the four vertices of the tet, one per row, and their box, which tests the nodes. It reads the geom of
+    each queried tet and the pairs of geoms that may collide (see RigidRigidGeoms).
     """
-    elems_geom_idx = qd.static(rigid_tets_pairs[0])
-    collision_pair_idx = qd.static(rigid_tets_pairs[1])
-    i_ag = elems_geom_idx[i_a]
-    i_qg = elems_geom_idx[i_q]
-    return i_ag >= i_qg or collision_pair_idx[i_ag, i_qg] == -1
+
+    def __init__(self, results: BVHQueryResults, rigid_geoms: RigidRigidGeoms) -> None:
+        super().__init__(results)
+        self.rigid_geoms = rigid_geoms
+        self.Query = qd.types.struct(
+            verts=qd.types.matrix(4, 3, gs.qd_float),
+            aabb_min=qd.types.vector(3, gs.qd_float),
+            aabb_max=qd.types.vector(3, gs.qd_float),
+        )
+
+    @qd.func
+    def is_instance_kept(self, i_t: int, i_q: int, i_k: int) -> bool:
+        i_g = self.rigid_geoms.tets_geom_idx[i_q]
+        return i_k < i_g and self.rigid_geoms.geoms_is_pair[i_k, i_g]
+
+    @qd.func
+    def to_frame(self, query, pos: qd.types.vector(3), quat: qd.types.vector(4)):
+        verts = qd.Matrix.zero(gs.qd_float, 4, 3)
+        aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+        aabb_max = -aabb_min
+        for i in qd.static(range(4)):
+            vert = gu.qd_inv_transform_by_trans_quat(query.verts[i, :], pos, quat)
+            verts[i, :] = vert
+            aabb_min = qd.min(aabb_min, vert)
+            aabb_max = qd.max(aabb_max, vert)
+        return self.Query(verts=verts, aabb_min=aabb_min, aabb_max=aabb_max)
 
 
 class FEMFloorContactType(IntEnum):
@@ -1153,14 +1186,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self._fem_floor_contact_type = FEMFloorContactType.NONE
             self._rigid_floor_contact_type = RigidFloorContactType.NONE
 
-        # The rigid triangles touching FEM leave the ground plane out (see 'ground_geom_idx' above)
-        rigid_tri_faces_idx = [
-            i_f
-            for geom in self.rigid_solver.geoms
-            if geom.idx != ground_geom_idx
-            for i_f in range(geom.face_start, geom.face_end)
-        ]
-        self._enable_rigid_fem_contact &= len(rigid_tri_faces_idx) > 0
+        # The rigid geoms touching FEM leave the ground plane out (see 'ground_geom_idx' above)
+        self._enable_rigid_fem_contact &= any(
+            [geom.idx != ground_geom_idx and geom.n_faces > 0 for geom in self.rigid_solver.geoms]
+        )
 
         has_tet_tables = False
         if self.fem_solver.is_active:
@@ -1242,9 +1271,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
                 )
 
-        # The geoms of the rigid-rigid contacts come first, the tree of their tets spanning the first elements
+        # The geoms of the rigid-rigid contacts come first, their tets spanning the first elements
         rigid_volume = dict(verts=[], elems=[], verts_geom_idx=[], elems_geom_idx=[], pressure_field=[])
-        n_rigid_volume_verts = n_rigid_volume_elems = n_rigid_rigid_volume_elems = n_floor_volume_elems = 0
+        rigid_rigid_volumes = []
+        n_rigid_volume_verts = n_rigid_volume_elems = n_floor_volume_elems = 0
         if self._rigid_compliant:
             floor_only_geoms = [geom for geom in floor_geoms if geom not in rigid_rigid_geoms]
             rigid_rigid_geoms_idx = {geom.idx for geom in rigid_rigid_geoms}
@@ -1261,7 +1291,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     compute_pressure_field(verts, geom.init_verts, geom.init_faces, self.options.hydroelastic_stiffness)
                 )
                 if geom.idx in rigid_rigid_geoms_idx:
-                    n_rigid_rigid_volume_elems += len(elems)
+                    rigid_rigid_volumes.append(RigidVolume(geom.idx, verts, elems))
                 if not geom.link.is_fixed:
                     n_floor_volume_elems += len(elems)
                 n_rigid_volume_verts += len(verts)
@@ -1288,11 +1318,15 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             if has_rigid_rigid_contact:
                 contact_handlers.append(
                     RigidRigidTetContactHandler(
-                        self.sim, options, n_rigid_volume_elems, rigid_volume_elems_geom_idx, collision_pair_idx
+                        self.sim,
+                        options,
+                        n_rigid_volume_elems,
+                        rigid_rigid_volumes,
+                        collision_pair_idx,
                     )
                 )
         if self._enable_rigid_fem_contact:
-            contact_handlers.append(RigidFemTriTetContactHandler(self.sim, options))
+            contact_handlers.append(RigidFemTriTetContactHandler(self.sim, options, ground_geom_idx))
         self.contact_handlers = tuple(contact_handlers)
         if self._has_equality_constraints:
             self.equality_constraint_handler = RigidConstraintHandler(self.sim)
@@ -1400,10 +1434,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             elements=self.fem_solver.n_elements,
             dofs=self.rigid_solver.n_dofs,
             links=self.rigid_solver.n_links,
-            geoms=self.rigid_solver.n_geoms,
             rigid_volume_verts=n_rigid_volume_verts,
             rigid_volume_elems=n_rigid_volume_elems,
-            rigid_tri_faces=len(rigid_tri_faces_idx),
             fem_entities=len(entities_n_vertices),
             vertex_chunks=n_vertex_chunks,
             vertex_dof_chunks=n_vertex_chunks + n_dof_chunks,
@@ -1474,8 +1506,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid=not self.rigid_solver.is_active,
                 fem_pressure=not self._has_fem_pressure,
                 rigid_volume=not self._rigid_compliant,
-                rigid_rigid=not has_rigid_rigid_contact,
-                rigid_fem=not self._enable_rigid_fem_contact,
                 tet_tables=not has_tet_tables,
                 rigid_contacts=not has_rigid_contacts,
                 host_sort=is_device_sort,
@@ -1494,10 +1524,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             sap_info.rigid_volume_elems.from_numpy(np.concatenate(rigid_volume["elems"], dtype=gs.np_int))
             sap_info.rigid_volume_elems_geom_idx.from_numpy(rigid_volume_elems_geom_idx)
             kernel_compute_rigid_pressure_gradient_rest(sap_info)
-        if has_rigid_rigid_contact:
-            sap_info.rigid_collision_pair_idx.from_numpy(collision_pair_idx)
-        if self._enable_rigid_fem_contact:
-            sap_info.rigid_tri_faces_idx.from_numpy(np.array(rigid_tri_faces_idx, dtype=gs.np_int))
         if has_tet_tables:
             sap_info.marching_tets_edge_table.from_numpy(np.array(MARCHING_TETS_EDGE_TABLE, dtype=gs.np_int))
             sap_info.tet_edges.from_numpy(np.array(TET_EDGES, dtype=gs.np_int))
@@ -1524,9 +1550,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_equality_constraints=self._has_equality_constraints,
             has_fem_contacts=n_env_fem_entries > 0,
             has_rigid_contacts=has_rigid_contacts,
-            has_rigid_tet_tree=has_rigid_rigid_contact,
             enable_fem_self_tet_contact=self._enable_fem_self_tet_contact,
-            enable_rigid_fem_contact=self._enable_rigid_fem_contact,
             enable_lagged_friction=self._enable_lagged_friction,
             enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
@@ -1574,7 +1598,13 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             },
         )
 
-        self._init_bvh(n_rigid_rigid_volume_elems)
+        # The tree of the FEM surface tets, which the FEM self contacts and the rigid-FEM contacts query, the contact
+        # kernel taking it as an argument, so a scene without these contacts holds placeholders
+        has_fem_tet_tree = self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact
+        n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
+        self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
+            self.sim._B, n_tets, is_active=has_fem_tet_tree
+        )
 
     def reset(self, envs_idx=None):
         # The state of the coupler, its errors included, is written back by 'set_state', which precedes the restart
@@ -1589,68 +1619,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         yield from iter_data(self.sap_data, "errno", DataKind.STATE)
         if self._enable_lagged_friction:
             yield from iter_data(self.sap_data, "lagged_friction")
-
-    def _init_bvh(self, n_rigid_tets: int) -> None:
-        """Allocate the tree set and the box query of each contact handler traversing a tree."""
-        # The contact kernel takes the queries as one struct, so a disabled handler keeps its members, switched off. The
-        # surface tet boxes serve the self-contact tree and the rigid triangle query alike.
-        handlers = {type(contact): contact for contact in self.contact_handlers}
-        has_fem_tet_tree = self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact
-        n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
-        self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
-            self.sim._B, n_tets, is_active=has_fem_tet_tree
-        )
-        # The results of the query of a handler take the capacity of its candidates, each environment holding an equal
-        # share of them (see func_bvh_query_aabb).
-        fem_self = handlers.get(FEMSelfTetContactHandler)
-        # The surface tets of each environment queried against their own tree
-        fem_self_query = BVHQueryState(
-            leaves=self.fem_surface_tet_bvh_state.leaves,
-            tree=self.fem_surface_tet_bvh_state.tree,
-            results=BVHQueryResults(
-                sizes=dict(
-                    query_results=0 if fem_self is None else fem_self.max_contact_candidates, bvh_trees=self.sim._B
-                ),
-                unused=fem_self is None,
-            ),
-        )
-
-        n_rigid_tris = self.sap_info.rigid_tri_faces_idx.shape[0] if self._enable_rigid_fem_contact else 0
-        self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(
-            self.sim._B, n_rigid_tris, is_active=self._enable_rigid_fem_contact
-        )
-        rigid_fem = handlers.get(RigidFemTriTetContactHandler)
-        # The surface tets of each environment queried against the rigid triangle tree of that environment
-        rigid_tri_query = BVHQueryState(
-            leaves=self.fem_surface_tet_bvh_state.leaves,
-            tree=self.rigid_tri_bvh_state.tree,
-            results=BVHQueryResults(
-                sizes=dict(
-                    query_results=0 if rigid_fem is None else rigid_fem.max_contact_candidates, bvh_trees=self.sim._B
-                ),
-                unused=rigid_fem is None,
-            ),
-        )
-
-        rigid_rigid = handlers.get(RigidRigidTetContactHandler)
-        self.rigid_tet_bvh_state, self.rigid_tet_bvh_config = get_bvh_data(
-            self.sim._B, n_rigid_tets, is_active=rigid_rigid is not None
-        )
-        # The rigid tets of each environment queried against their own tree
-        rigid_tet_query = BVHQueryState(
-            leaves=self.rigid_tet_bvh_state.leaves,
-            tree=self.rigid_tet_bvh_state.tree,
-            results=BVHQueryResults(
-                sizes=dict(
-                    query_results=0 if rigid_rigid is None else rigid_rigid.max_contact_candidates,
-                    bvh_trees=self.sim._B,
-                ),
-                unused=rigid_rigid is None,
-            ),
-        )
-        self.contact_queries_state = SAPContactQueriesState(
-            fem_self=fem_self_query, rigid_tri=rigid_tri_query, rigid_tet=rigid_tet_query
-        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- Main ----------------------------------------
@@ -1675,19 +1643,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             )
         if self._enable_fem_self_tet_contact:
             build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
-        if self._enable_rigid_fem_contact:
-            kernel_compute_rigid_tri_aabb(
-                rigid_solver.dyn_state.free_verts,
-                rigid_solver.dyn_state.fixed_verts,
-                self.rigid_tri_bvh_state.leaves,
-                rigid_solver.dyn_info.faces,
-                rigid_solver.dyn_info.verts,
-                self.sap_info,
-            )
-            build_bvh(self.rigid_tri_bvh_state, self.rigid_tri_bvh_config, eps=gs.EPS)
-        if self.sap_config.has_rigid_tet_tree:
-            kernel_compute_rigid_tet_aabb(self.sap_state, self.rigid_tet_bvh_state.leaves, self.sap_info)
-            build_bvh(self.rigid_tet_bvh_state, self.rigid_tet_bvh_config, eps=gs.EPS)
+        for contact in (self.handlers.rigid_rigid_tet, self.handlers.rigid_fem_tri_tet):
+            if contact is not None:
+                contact.update_geoms_tree(rigid_solver.dyn_state.geoms)
 
         self.has_contact = kernel_update_contact(
             fem_solver.fem_state,
@@ -1695,7 +1653,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             rigid_solver.dyn_state.free_verts,
             rigid_solver.dyn_state.fixed_verts,
             self.sap_state,
-            self.contact_queries_state,
+            self.fem_surface_tet_bvh_state,
             fem_solver.fem_info,
             rigid_solver.dyn_info.links,
             rigid_solver.dyn_info.faces,
@@ -1908,55 +1866,6 @@ def kernel_compute_fem_surface_tet_aabb(fem_state: FEMState, bvh_leaves: BVHLeav
         bvh_leaves.aabbs_max[i_b, i_se] = leaf_max
 
 
-@qd.kernel
-def kernel_compute_rigid_tri_aabb(
-    free_verts_state: VertsState,
-    fixed_verts_state: VertsState,
-    bvh_leaves: BVHLeaves,
-    faces_info: FacesInfo,
-    verts_info: VertsInfo,
-    sap_info: SAPInfo,
-):
-    """Fit the box of every rigid triangle touching FEM, the leaves of the trees of the rigid-FEM contacts."""
-    for i_t, i_b in qd.ndrange(
-        sap_info.rigid_tri_faces_idx.shape[0], bvh_leaves.aabbs_min.shape[0], axes=qd.static(eoa(free_verts_state.pos))
-    ):
-        i_f = sap_info.rigid_tri_faces_idx[i_t]
-        tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for i in qd.static(range(3)):
-            i_v = faces_info.verts_idx[i_f][i]
-            i_fv = verts_info.verts_state_idx[i_v]
-            if verts_info.is_fixed[i_v]:
-                tri_vertices[:, i] = fixed_verts_state.pos[i_fv]
-            else:
-                tri_vertices[:, i] = free_verts_state.pos[i_fv, i_b]
-        pos_v0, pos_v1, pos_v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
-
-        bvh_leaves.aabbs_min[i_b, i_t] = qd.min(pos_v0, pos_v1, pos_v2)
-        bvh_leaves.aabbs_max[i_b, i_t] = qd.max(pos_v0, pos_v1, pos_v2)
-
-
-@qd.kernel
-def kernel_compute_rigid_tet_aabb(sap_state: SAPState, bvh_leaves: BVHLeaves, sap_info: SAPInfo):
-    """Fit the box of every rigid tet of the rigid-rigid contacts, the leaves of their trees.
-
-    The geoms of the rigid-rigid contacts come first in the rigid volume, their tets spanning the leaves of the trees.
-    """
-    for i_e, i_b in qd.ndrange(
-        bvh_leaves.aabbs_min.shape[1], bvh_leaves.aabbs_min.shape[0], axes=qd.static(eoa(sap_state.rigid_volume_verts))
-    ):
-        i_v0 = sap_info.rigid_volume_elems[i_e][0]
-        i_v1 = sap_info.rigid_volume_elems[i_e][1]
-        i_v2 = sap_info.rigid_volume_elems[i_e][2]
-        i_v3 = sap_info.rigid_volume_elems[i_e][3]
-        pos_v0 = sap_state.rigid_volume_verts[i_v0, i_b]
-        pos_v1 = sap_state.rigid_volume_verts[i_v1, i_b]
-        pos_v2 = sap_state.rigid_volume_verts[i_v2, i_b]
-        pos_v3 = sap_state.rigid_volume_verts[i_v3, i_b]
-        bvh_leaves.aabbs_min[i_b, i_e] = qd.min(pos_v0, pos_v1, pos_v2, pos_v3)
-        bvh_leaves.aabbs_max[i_b, i_e] = qd.max(pos_v0, pos_v1, pos_v2, pos_v3)
-
-
 # ------------------------------------------------------------------------------------
 # ------------------------------------ Contacts --------------------------------------
 # ------------------------------------------------------------------------------------
@@ -1969,7 +1878,7 @@ def kernel_update_contact(
     free_verts_state: VertsState,
     fixed_verts_state: VertsState,
     sap_state: SAPState,
-    contact_queries_state: SAPContactQueriesState,
+    fem_tets_state: BVHState,
     fem_info: FEMInfo,
     links_info: LinksInfo,
     faces_info: FacesInfo,
@@ -2018,12 +1927,6 @@ def kernel_update_contact(
     for i_b in range(errno.shape[0]):
         for contact in qd.static(contact_handlers):
             contact.clear_contacts(i_b)
-        if qd.static(sap_config.enable_fem_self_tet_contact):
-            contact_queries_state.fem_self.results.trees_count[i_b] = 0
-        if qd.static(sap_config.enable_rigid_fem_contact):
-            contact_queries_state.rigid_tri.results.trees_count[i_b] = 0
-        if qd.static(sap_config.has_rigid_tet_tree):
-            contact_queries_state.rigid_tet.results.trees_count[i_b] = 0
     n_contact_pairs = 0
     for contact in qd.static(contact_handlers):
         contact.detection(
@@ -2032,7 +1935,7 @@ def kernel_update_contact(
             fixed_verts_state,
             geoms_state,
             sap_state,
-            contact_queries_state,
+            fem_tets_state,
             fem_info,
             links_info,
             verts_info,
@@ -4678,6 +4581,8 @@ class BaseContactHandler(RBC):
 
     # Whether the handler collects contact candidates before its contact pairs
     has_candidates = False
+    # Whether the handler queries a tree, its results cleared with its contacts
+    has_query = False
     # The FEM vertices and the rigid links each contact pair acts on, see RigidConstraintHandler, and the FEM entities
     # whose rigid motions it acts on (see coarse_hessian).
     n_fem_corners = 0
@@ -4714,10 +4619,13 @@ class BaseContactHandler(RBC):
 
     @qd.func
     def clear_contacts(self, i_b: int):
-        """Forget the contact pairs and the candidates of an environment, before its detection."""
+        """Forget the contact pairs, the candidates and the results of the box query of an environment, before its
+        detection."""
         self.contact_pairs.envs_n_pairs[i_b] = 0
         if qd.static(self.has_candidates):
             self.contact_candidates.envs_n_candidates[i_b] = 0
+        if qd.static(self.has_query):
+            self.query_results.trees_count[i_b] = 0
 
     @qd.func
     def contact_impulse(self, i_c: int, op: qd.template()):
@@ -4955,6 +4863,28 @@ class BaseContactHandler(RBC):
                 G[2, 2] = mu_factor * R_inv[2]
             cost = 0.5 * gamma.dot(R * gamma)
         return cost, gamma, G
+
+
+class GeomsTreeMixin:
+    """The tree of the rigid geoms of each environment of a contact handler querying the meshes of the geoms.
+
+    The handler holds the tree (`geoms_tree`, `geoms_tree_config`), the geom it leaves out, -1 for none
+    (`excluded_geom_idx`), and its query, an instance query over the geoms (`query`).
+    """
+
+    def update_geoms_tree(self, geoms_state: GeomsState) -> None:
+        """Build the tree of the geoms of each environment from their boxes."""
+        # The forward kinematics of the rigid solver refits the box of each geom with its pose (see
+        # func_update_geom_aabb), before the coupler reads it.
+        kernel_build_instances_tree(
+            self.excluded_geom_idx,
+            geoms_state.aabb_min,
+            geoms_state.aabb_max,
+            self.geoms_tree,
+            self.query.instances,
+            self.geoms_tree_config,
+            eps=gs.EPS,
+        )
 
 
 @qd.data_oriented
@@ -5214,7 +5144,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -5406,6 +5336,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     """
 
     has_candidates = True
+    has_query = True
     n_fem_corners = 8
     n_coarse_sides = 2
 
@@ -5426,6 +5357,12 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         self.max_contact_pairs = n_contacts * simulator._B
         self.contact_pairs = FEMSelfTetPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
 
+        # The pairs of surface tets that the tets of each environment find in their own tree
+        self.query_results = BVHQueryResults(
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+        )
+        self.query = FEMSurfaceTetsQuery(self.query_results, fem_solver.fem_info)
+
     @qd.func
     def detection(
         self,
@@ -5434,7 +5371,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -5445,18 +5382,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
-        contact_queries_state.fem_self.results.count[0] = 0
-        func_bvh_query_leaves(
-            contact_queries_state.fem_self,
-            func_filter_fem_surface_tets,
-            qd.static((fem_info.surface_elements, fem_info.elements.el2v)),
-        )
-        func_flag_query_overflow(contact_queries_state.fem_self.results, errno)
+        self.query_results.count[0] = 0
+        func_bvh_query_leaves(fem_tets_state.leaves, fem_tets_state.tree, self.query)
+        func_flag_query_overflow(self.query_results, errno)
 
         # The candidates, the pairs of tets crossing their equal-pressure plane
         self.contact_candidates.n_candidates[None] = 0
-        for i_r in range(contact_queries_state.fem_self.results.count[0]):
-            i_b, i_sa, i_sq = contact_queries_state.fem_self.results.triplets[i_r]
+        for i_r in range(self.query_results.count[0]):
+            i_b, i_sa, i_sq = self.query_results.triplets[i_r]
             i_a = fem_info.surface_elements[i_sa]
             i_q = fem_info.surface_elements[i_sq]
             i_v0 = fem_info.elements.el2v[i_a][0]
@@ -5738,7 +5671,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -5855,7 +5788,7 @@ class RigidFloorVertContactHandler(RigidContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -5924,7 +5857,7 @@ class RigidFloorTetContactHandler(RigidContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -6034,7 +5967,7 @@ class RigidFloorTetContactHandler(RigidContactHandler):
 
 
 @qd.data_oriented
-class RigidFemTriTetContactHandler(RigidContactHandler):
+class RigidFemTriTetContactHandler(GeomsTreeMixin, RigidContactHandler):
     """
     Class for handling contact between rigid triangles and FEM tets in a simulation using hydroelastic model.
 
@@ -6042,9 +5975,10 @@ class RigidFemTriTetContactHandler(RigidContactHandler):
     """
 
     has_candidates = True
+    has_query = True
     n_fem_corners = 4
 
-    def __init__(self, simulator: "Simulator", options: SAPCouplerOptions) -> None:
+    def __init__(self, simulator: "Simulator", options: SAPCouplerOptions, ground_geom_idx: int) -> None:
         fem_solver = simulator.fem_solver
         rigid_solver = simulator.rigid_solver
         self.name = "RigidFemTriTetContactHandler"
@@ -6060,6 +5994,19 @@ class RigidFemTriTetContactHandler(RigidContactHandler):
         )
         self.max_contact_pairs = n_contacts * simulator._B
         self.contact_pairs = RigidFemTriTetPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
+
+        # The tree of the geoms of each environment but the ground (see FEMFloorContactType), and the pairs of a surface
+        # tet and a triangle that the tets of each environment find through it in the tree of the mesh of each geom
+        self.geoms_tree, self.geoms_tree_config = get_bvh_data(simulator._B, rigid_solver.n_geoms)
+        self.excluded_geom_idx = ground_geom_idx
+        self.query_results = BVHQueryResults(
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+        )
+        self.query = InstancesQuery(
+            BoxQuery(self.query_results),
+            get_solver_meshes(rigid_solver, is_visual=False),
+            rigid_solver.dyn_state.geoms,
+        )
 
     @qd.func
     def rigid_side_sign(self, i_side: int):
@@ -6080,7 +6027,7 @@ class RigidFemTriTetContactHandler(RigidContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -6091,15 +6038,14 @@ class RigidFemTriTetContactHandler(RigidContactHandler):
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
-        contact_queries_state.rigid_tri.results.count[0] = 0
-        func_bvh_query_leaves(contact_queries_state.rigid_tri, func_no_filter, filter_ctx=0)
-        func_flag_query_overflow(contact_queries_state.rigid_tri.results, errno)
+        self.query_results.count[0] = 0
+        func_bvh_query_leaves(fem_tets_state.leaves, self.geoms_tree.tree, self.query)
+        func_flag_query_overflow(self.query_results, errno)
 
         # The candidates, the pairs of a rigid triangle and a FEM surface tet crossing its plane
         self.contact_candidates.n_candidates[None] = 0
-        for i_r in range(contact_queries_state.rigid_tri.results.count[0]):
-            i_b, i_t, i_sq = contact_queries_state.rigid_tri.results.triplets[i_r]
-            i_a = sap_info.rigid_tri_faces_idx[i_t]
+        for i_r in range(self.query_results.count[0]):
+            i_b, i_a, i_sq = self.query_results.triplets[i_r]
             i_q = fem_info.surface_elements[i_sq]
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
@@ -6316,7 +6262,7 @@ class RigidFemTriTetContactHandler(RigidContactHandler):
 
 
 @qd.data_oriented
-class RigidRigidTetContactHandler(RigidRigidContactHandler):
+class RigidRigidTetContactHandler(GeomsTreeMixin, RigidRigidContactHandler):
     """
     Class for handling contact between Rigid bodies using hydroelastic model.
 
@@ -6326,22 +6272,27 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
 
     has_candidates = True
 
+    has_query = True
+
     def __init__(
         self,
         simulator: "Simulator",
         options: SAPCouplerOptions,
         n_rigid_volume_elems: int,
-        rigid_volume_elems_geom_idx: np.ndarray,
+        rigid_volumes: list[RigidVolume],
         collision_pair_idx: np.ndarray,
     ) -> None:
+        rigid_solver = simulator.rigid_solver
         self.name = "RigidRigidTetContactHandler"
         # The key of a pair is its two tets
         self.element_bits = max(1, n_rigid_volume_elems - 1).bit_length()
         self.key_bits = 2 * self.element_bits
         # Each pair of tets of two geoms that may collide gives one candidate and one contact at most
-        geoms_n_tets = np.bincount(rigid_volume_elems_geom_idx, minlength=simulator.rigid_solver.n_geoms)
-        is_pair = np.triu((collision_pair_idx >= 0) | (collision_pair_idx.T >= 0), k=1)
-        n_pairs_max = int((np.outer(geoms_n_tets, geoms_n_tets) * is_pair).sum())
+        geoms_n_tets = np.zeros(rigid_solver.n_geoms, dtype=gs.np_int)
+        for volume in rigid_volumes:
+            geoms_n_tets[volume.geom_idx] = len(volume.elems)
+        geoms_is_pair = (collision_pair_idx >= 0) | (collision_pair_idx.T >= 0)
+        n_pairs_max = int(np.triu(np.outer(geoms_n_tets, geoms_n_tets) * geoms_is_pair, k=1).sum())
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
         self.max_contact_candidates = n_candidates * simulator._B
         self.contact_candidates = RigidRigidTetCandidates(
@@ -6351,6 +6302,35 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         self.max_contact_pairs = n_contacts * simulator._B
         self.contact_pairs = RigidRigidTetPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
 
+        # The tets of the geoms, the first elements of the rigid volumes, in the frame of their geom, a tree per
+        # distinct mesh, and the tree of the geoms of each environment
+        geoms_volume = {volume.geom_idx: volume for volume in rigid_volumes}
+        geoms_tet_start = np.cumsum(geoms_n_tets) - geoms_n_tets
+        geoms_tets = [
+            geoms_volume[i_g].verts[geoms_volume[i_g].elems] if i_g in geoms_volume else np.zeros((0, 4, 3))
+            for i_g in range(rigid_solver.n_geoms)
+        ]
+        tets_instances = build_packed_instances(
+            geoms_tet_start.tolist(),
+            [tets.min(axis=1) for tets in geoms_tets],
+            [tets.max(axis=1) for tets in geoms_tets],
+        )
+        self.rigid_geoms = RigidRigidGeoms(
+            sizes=dict(rigid_rigid_tets=int(geoms_n_tets.sum()), geoms=rigid_solver.n_geoms)
+        )
+        self.rigid_geoms.tets_geom_idx.from_numpy(
+            np.repeat(np.arange(rigid_solver.n_geoms, dtype=gs.np_int), geoms_n_tets)
+        )
+        self.rigid_geoms.geoms_is_pair.from_numpy(geoms_is_pair)
+        self.geoms_tree, self.geoms_tree_config = get_bvh_data(simulator._B, rigid_solver.n_geoms)
+        self.excluded_geom_idx = -1
+        self.query_results = BVHQueryResults(
+            sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
+        )
+        self.query = InstancesQuery(
+            RigidTetsQuery(self.query_results, self.rigid_geoms), tets_instances, rigid_solver.dyn_state.geoms
+        )
+
     @qd.func
     def detection(
         self,
@@ -6359,7 +6339,7 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         fixed_verts_state: VertsState,
         geoms_state: GeomsState,
         sap_state: SAPState,
-        contact_queries_state: SAPContactQueriesState,
+        fem_tets_state: BVHState,
         fem_info: FEMInfo,
         links_info: LinksInfo,
         verts_info: VertsInfo,
@@ -6370,18 +6350,36 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
-        contact_queries_state.rigid_tet.results.count[0] = 0
-        func_bvh_query_leaves(
-            contact_queries_state.rigid_tet,
-            func_filter_rigid_tets,
-            qd.static((sap_info.rigid_volume_elems_geom_idx, sap_info.rigid_collision_pair_idx)),
-        )
-        func_flag_query_overflow(contact_queries_state.rigid_tet.results, errno)
+        # The tets of each geom against the tets of the lower geoms it may collide with, in their frame
+        self.query_results.count[0] = 0
+        for i_b, i_q in qd.ndrange(n_envs, self.rigid_geoms.tets_geom_idx.shape[0]):
+            verts = qd.Matrix.zero(gs.qd_float, 4, 3)
+            for i in qd.static(range(4)):
+                i_v = sap_info.rigid_volume_elems[i_q][i]
+                verts[i, :] = sap_state.rigid_volume_verts[i_v, i_b]
+            aabb_min = qd.Vector(
+                [qd.min(verts[0, j], verts[1, j], verts[2, j], verts[3, j]) for j in qd.static(range(3))]
+            )
+            aabb_max = qd.Vector(
+                [qd.max(verts[0, j], verts[1, j], verts[2, j], verts[3, j]) for j in qd.static(range(3))]
+            )
+            func_bvh_traverse(
+                i_b,
+                i_q,
+                i_root=0,
+                leaf_offset=self.geoms_tree.tree.leaves_idx.shape[1] - 1,
+                leaf_base=0,
+                query=self.query.Query(verts=verts, aabb_min=aabb_min, aabb_max=aabb_max),
+                bound=0.0,
+                tree=self.geoms_tree.tree,
+                visitor=self.query,
+            )
+        func_flag_query_overflow(self.query_results, errno)
 
         # The candidates, the pairs of tets crossing their equal-pressure plane
         self.contact_candidates.n_candidates[None] = 0
-        for i_r in range(contact_queries_state.rigid_tet.results.count[0]):
-            i_b, i_a, i_q = contact_queries_state.rigid_tet.results.triplets[i_r]
+        for i_r in range(self.query_results.count[0]):
+            i_b, i_a, i_q = self.query_results.triplets[i_r]
             i_v0 = sap_info.rigid_volume_elems[i_a][0]
             i_v1 = sap_info.rigid_volume_elems[i_q][1]
             x0 = sap_state.rigid_volume_verts[i_v0, i_b]
