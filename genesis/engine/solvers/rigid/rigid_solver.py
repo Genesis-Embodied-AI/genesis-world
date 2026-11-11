@@ -1127,8 +1127,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.dyn_info.dofs.dof_length.from_numpy(dof_length)
 
     def _init_geom_fields(self):
-        self.geoms_init_AABB = self.rigid_info.geoms_init_AABB
-
         if self.n_geoms > 0:
             geoms = self.geoms
             geoms_sol_params = np.array([geom.desc.sol_params for geom in geoms], dtype=gs.np_float)
@@ -1203,9 +1201,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
                 np.array(geoms_is_hollow, dtype=gs.np_bool),
-                self.geoms_init_AABB,
                 self.dyn_state,
                 self.dyn_info,
+                self.rigid_info,
                 self.rigid_config,
             )
 
