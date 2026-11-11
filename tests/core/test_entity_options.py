@@ -51,6 +51,14 @@ def test_reject_material_for_solver():
         gs.entities.MPM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
     with pytest.raises(gs.GenesisException, match="gs.entities.Rigid"):
         gs.entities.Kinematic(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
+
+    # A subclass a user declares admits the materials of its base, which the shorthand keeps giving to the base
+    class UserRigid(gs.entities.Rigid):
+        pass
+
+    with pytest.raises(gs.GenesisException, match="gs.entities.Kinematic"):
+        UserRigid(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
+    assert type(scene.add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
     # The material of a link applies to its geoms alone, which leaves out the fields applying to the whole entity
     with pytest.raises(gs.GenesisException, match="needs_coup"):
         gs.options.Link(material=gs.materials.Rigid(needs_coup=False))
@@ -88,6 +96,16 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 friction=0.5,
             ),
             links={
+                # An ordinal selects in every link of the subtree holding collision geoms, the root holding none
+                gs.LinkIndex.subtree("base"): gs.options.Link(
+                    geoms={
+                        gs.GeomIndex.at(0): gs.options.Geom(
+                            material=gs.materials.Rigid(
+                                friction_torsional=0.02,
+                            ),
+                        ),
+                    },
+                ),
                 gs.LinkIndex.subtree("arm1"): gs.options.Link(
                     material=gs.materials.Rigid(
                         friction_rolling=0.003,
@@ -105,13 +123,6 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                             ),
                         ),
                     },
-                ),
-            },
-            geoms={
-                gs.GeomIndex.all(): gs.options.Geom(
-                    material=gs.materials.Rigid(
-                        friction_torsional=0.02,
-                    ),
                 ),
             },
         ),

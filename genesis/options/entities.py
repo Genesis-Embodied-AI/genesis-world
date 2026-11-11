@@ -74,11 +74,11 @@ def _reject_material_entity_fields(material: "materials.Rigid", target: str) -> 
 
 
 def get_entity_options_cls(material: Material) -> tuple[type["BaseEntity"], ...]:
-    """Return the public classes of the entity options admitting a material, in declaration order.
+    """Return the classes of entity options that Genesis declares admitting a material, in declaration order.
 
     Each class admits the materials of its declared 'material' field. A material that the fields of several classes
     admit goes to the classes whose field is the narrowest, such as ``gs.materials.Rigid`` to ``gs.entities.Rigid``
-    rather than ``gs.entities.Kinematic``.
+    rather than ``gs.entities.Kinematic``. A subclass a user declares admits the materials of the class it derives from.
     """
     classes, pending = [], [BaseEntity]
     while pending:
@@ -91,7 +91,8 @@ def get_entity_options_cls(material: Material) -> tuple[type["BaseEntity"], ...]
     for options_cls in classes:
         # Private bases and their parametrizations by the entity class declare a material field too
         if (
-            options_cls.__name__.startswith("_")
+            options_cls.__module__ != __name__
+            or options_cls.__name__.startswith("_")
             or options_cls.__pydantic_generic_metadata__["origin"] is not None
             or "material" not in options_cls.model_fields
         ):
@@ -154,7 +155,7 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
         material = data.get("material")
         if isinstance(material, Material) and "material" in cls.model_fields:
             options_classes = get_entity_options_cls(material)
-            if cls not in options_classes:
+            if not issubclass(cls, options_classes):
                 options_names = " or ".join(f"gs.entities.{options_cls.__name__}" for options_cls in options_classes)
                 gs.raise_exception(
                     f"gs.entities.{cls.__name__} cannot take material {type(material).__name__} of another solver. "
@@ -273,6 +274,8 @@ class Rigid(BaseEntity["RigidEntity"]):
         A selection by name may match no geom of a given link, the description checking that it matches one of the
         entity.
         """
+        if not geoms_name:
+            return []
         link_name = link_path[-1]
         link_fields = {}
         geoms_options = list(self.geoms.items())
