@@ -1,0 +1,107 @@
+examples/coupling/cloth_attached_to_rigid.py
+  s_c62ec9da443b15::t_927fa533cd69df 51-56,59-64
+examples/coupling/cloth_on_rigid.py
+  s_c62ec9da443b15::t_2dae23c060971a 40-43,47-53
+examples/coupling/grasp_soft_cube.py
+  s_c62ec9da443b15::t_cec31891c98373 51-57
+examples/coupling/sand_wheel.py
+  s_c62ec9da443b15::t_d8604f2f5ddddf 39-47,55-64,69-78,83-92,97-106
+examples/coupling/sph_rigid.py
+  s_c62ec9da443b15::t_ece8c97367fa51 54-61
+examples/deformable/differentiable_push.py
+  s_c62ec9da443b15::t_089d4164df6b5c 40-55
+examples/ipc/ipc_momentum.py
+  s_c62ec9da443b15::t_35d441cd7b7f42 54-67
+examples/ipc/ipc_objects_falling.py
+  s_c62ec9da443b15::t_3c86e3b20c8edd 73-84
+examples/ipc/ipc_robot_cloth_teleop.py
+  s_c62ec9da443b15::t_ca739013cbaa62 80-85,145-158
+examples/kinematic/go2_kinematic.py
+  s_c62ec9da443b15::t_f52ba08192b435 43-51
+examples/rendering/demo.py
+  s_c62ec9da443b15::t_8961f0b3e5cf0c 38-44,50-59,65-73,78-86,91-99,104-112,117-125,130-138,143-148,153-163
+examples/rigid/diffik_controller.py
+  s_c62ec9da443b15::t_7cbd881a143f86 34-36,42-45,52-59
+examples/rigid/grasp_bottle.py
+  s_c62ec9da443b15::t_4892aed8b39f42 45,47-56
+examples/rigid/gravity_compensation.py
+  s_c62ec9da443b15::t_69d8b3a2648054 30-37,41-48
+examples/rigid/ik_custom_chain.py
+  s_c62ec9da443b15::t_09e89fec2608f4 25-32,37-44
+examples/rigid/ik_duck.py
+  s_c62ec9da443b15::t_d78222b9405321 26-31,36-44
+examples/rigid/ik_franka.py
+  s_c62ec9da443b15::t_0174e86e236943 26-29,34-41
+examples/rigid/ik_franka_batched.py
+  s_c62ec9da443b15::t_880819e966c775 27-29,32-35,40-47
+examples/rigid/ik_shadow_hand.py
+  s_c62ec9da443b15::t_10ffcb8be07ecd 25-32,37-44,48-55,59-66
+examples/sap_coupling/franka_grasp_fem_sphere.py
+  s_c62ec9da443b15::t_3313ac662e4a99 43-50
+examples/sap_coupling/franka_grasp_rigid_cube.py
+  s_c62ec9da443b15::t_c8dbebe2ee1117 39-46,50-58
+examples/sensors/depth_camera_custom_vverts.py
+  s_c62ec9da443b15::t_d14d5d0aabf65e 65-77,86-97
+examples/tutorials/advanced_worm.py
+  s_c62ec9da443b15::t_14b7452433fd7a 34-38
+examples/viewer_plugin/keyboard_teleop.py
+  s_c62ec9da443b15::t_92b9babb53bbfc 58-65
+examples/viewer_plugin/mesh_point_selector.py
+  s_c62ec9da443b15::t_82209ea3c9bce0 266-278,282-292
+examples/viewer_plugin/mouse_interaction.py
+  s_c62ec9da443b15::t_488d9c68a3e654 42-50,54-63,70-78
+tests/benchmarks/test_rigid.py
+  s_c62ec9da443b15::t_c703e94f967f80 295-299
+tests/deformable/test_muscle.py
+  s_c62ec9da443b15::t_13074c1d76bfd0 33-37
+tests/grad/test_hybrid_push.py
+  s_c62ec9da443b15::t_c0333e0ac2abfe 40-52
+tests/integration/test_integration.py
+  s_c62ec9da443b15::t_57fb5719bdebfe 247-254
+tests/ipc/test_deformable.py
+  s_c62ec9da443b15::t_3ac1647fa37cc5 58-63,75-79,224-235,333-348
+tests/ipc/test_rigid.py
+  s_c62ec9da443b15::t_d51e4fbe74d834 88-99,224-229,236-246,296-301,308-316,358-362,366-375,379-388,392-401,476-481,506-518,623-635,763-768,773-781,897-904
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_e7e2d3af9029f8 439-444
+tests/particles/test_pbd.py
+  s_c62ec9da443b15::t_ef0b89382f898f 203-208,213-221
+tests/particles/test_sph.py
+  s_c62ec9da443b15::t_2763f42ac17359 41-52,373-380
+tests/rendering/test_dynamic_meshes.py
+  s_c62ec9da443b15::t_29a7cc56db628f 64-71,75-85
+tests/rendering/test_interactive_viewer.py
+  s_c62ec9da443b15::t_70496a4fbf9da1 476-484,497-506,511-518
+tests/rigid/test_api.py
+  s_c62ec9da443b15::t_bb87069e73a233 1422-1426
+tests/rigid/test_asset_loading.py
+  s_c62ec9da443b15::t_e45573604454f3 1217-1219,1343-1345,1382,1388,1714-1718,1737-1739,2059-2063,2067-2071
+tests/rigid/test_dynamics.py
+  s_c62ec9da443b15::t_aa0473fc9853d6 24-27
+tests/rigid/test_friction.py
+  s_c62ec9da443b15::t_87566344d83ba7 202-204
+tests/rigid/test_heterogeneous.py
+  s_c62ec9da443b15::t_73762e64cd4102 488-490
+tests/rigid/test_kinematics.py
+  s_c62ec9da443b15::t_b153672e1f14de 783-789,793-800,907-914,967-970
+tests/sensors/test_camera.py
+  s_c62ec9da443b15::t_55798d438d3163 67-76
+tests/sensors/test_raycaster.py
+  s_c62ec9da443b15::t_27ced1060b0f29 147-154,315-325,329-337,513-522,641-649,655-663,738-747
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c1ebe3c1c3e966c1a19f6187e6ad52611dfbf28a",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
