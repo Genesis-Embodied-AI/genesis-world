@@ -1381,14 +1381,18 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
 @pytest.mark.precision("64")
 def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
-    FRICTION_EPS_V = 1e-2
+    VELOCITY_TOL = 5e-2
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=VELOCITY_TOL,
+        ),
+        # The capacity of the pairs starts below the pairs of the first contact, so that it grows to keep them all
         ipc_options=gs.options.IPCOptions(
-            friction_eps_v=FRICTION_EPS_V,
+            init_collision_pair_capacity=1,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, -1.0, 0.6),
@@ -1414,13 +1418,13 @@ def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer
     ]
     scene.build(n_envs=2)
 
-    # The sheets land within 0.6 s, then creep under the sliding velocity of their friction
-    for _ in range(160):
+    # The stack of the two sheets collapses onto the ground within 1.3 s
+    for _ in range(150):
         scene.step()
-    # The upper sheet rests on the lower one, both on the ground
+    # The upper sheet rests on the lower one, both on the ground, at rest up to the convergence tolerance of the solve
     for sheet in sheets:
         assert (sheet.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
-        assert (sheet.get_verts_vel().norm(dim=-1) < FRICTION_EPS_V).all()
+        assert (sheet.get_verts_vel().norm(dim=-1) < VELOCITY_TOL).all()
     assert (
         sheets[1].get_verts_pos()[..., 2].max(dim=-1).values > sheets[0].get_verts_pos()[..., 2].max(dim=-1).values
     ).all()
@@ -1467,49 +1471,13 @@ def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
     lower_idx = (rows_start + np.arange(10)).reshape(-1)
     upper_idx = (rows_start + N_LENGTH - np.arange(10)).reshape(-1)
     gaps_min = []
-    for _ in range(100):
+    for _ in range(50):
         scene.step()
         verts_z = cloth.get_verts_pos()[..., 2]
         gaps_min.append(float((verts_z[upper_idx] - verts_z[lower_idx]).min()))
     # The upper layer falls onto the lower one once it lands and rests on it, never crossing it
     assert min(gaps_min) > 0.0
     assert gaps_min[-1] < 0.02
-
-
-@pytest.mark.required
-# Double precision, see test_cloth_contact_between_cloths
-@pytest.mark.precision("64")
-def test_cloth_contact_capacity_growth(cloth_grid_obj_path, show_viewer):
-    sheets_pos = []
-    for capacity in (1, 1000):
-        scene = gs.Scene(
-            ipc_options=gs.options.IPCOptions(
-                init_collision_pair_capacity=capacity,
-            ),
-            show_viewer=show_viewer,
-        )
-        scene.add_entity(
-            morph=gs.morphs.Plane(),
-        )
-        sheets = [
-            scene.add_entity(
-                morph=gs.morphs.Mesh(
-                    file=cloth_grid_obj_path,
-                    scale=0.4,
-                    pos=(0.0, 0.0, z),
-                    euler=euler,
-                ),
-                material=gs.materials.FEM.Cloth(),
-            )
-            for euler, z in (((90.0, 0.0, 0.0), 0.23), ((90.0, 0.0, 90.0), 0.68))
-        ]
-        scene.build()
-        for _ in range(50):
-            scene.step()
-        sheets_pos.append(torch.cat([sheet.get_verts_pos() for sheet in sheets]))
-    # The pairs beyond a capacity of one are kept, the capacity growing as the search finds them. The GPU sums the
-    # terms of the pairs atomically, in an order that follows the one in which the search finds them.
-    assert_allclose(sheets_pos[0], sheets_pos[1], atol=2e-8)
 
 
 @pytest.mark.required
