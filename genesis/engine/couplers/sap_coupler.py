@@ -1285,10 +1285,16 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             floor_only_geoms = [geom for geom in floor_geoms if geom not in rigid_rigid_geoms]
             rigid_rigid_geoms_idx = {geom.idx for geom in rigid_rigid_geoms}
             for geom in (*rigid_rigid_geoms, *floor_only_geoms):
-                volume = geom.trimesh.volume
-                tet_cfg = {"nobisect": False, "maxvolume": volume / 100}
-                mesh_verts, mesh_elems = eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg)
-                verts, elems = eu.split_all_surface_tets(mesh_verts, mesh_elems)
+                # The linear pressure field over the tets of a box or a cylinder is exact (see convex_mesh_to_elements).
+                # A curved geom has one region per face, too many to fan into compact tets, so it keeps TetGen.
+                if geom.type in (gs.GEOM_TYPE.BOX, gs.GEOM_TYPE.CYLINDER):
+                    verts, elems = eu.convex_mesh_to_elements(geom.init_verts, geom.init_faces)
+                    # The clipping of the contact polygons by a tet takes its vertices in positive orientation
+                    edges = verts[elems[:, 1:]] - verts[elems[:, :1]]
+                    assert (np.einsum("ij,ij->i", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2]) > 0.0).all()
+                else:
+                    tet_cfg = {"nobisect": False, "maxvolume": geom.trimesh.volume / 100}
+                    verts, elems = eu.split_all_surface_tets(*eu.mesh_to_elements(geom.trimesh, tet_cfg=tet_cfg))
                 rigid_volume["verts"].append(verts)
                 rigid_volume["elems"].append(elems + n_rigid_volume_verts)
                 rigid_volume["verts_geom_idx"].append(np.full(len(verts), geom.idx, dtype=gs.np_int))

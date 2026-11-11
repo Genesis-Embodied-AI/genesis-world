@@ -461,6 +461,7 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
 def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     PLANES_HEIGHT = (0.1, 0.3)
     BOX_HALFHEIGHT = 0.1
+    BALL_RADIUS = 0.05
     DT = 1 / 60
     GRAVITY = 9.81
     MU = 0.5
@@ -520,6 +521,13 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         ),
         material=gs.materials.Rigid(
             coup_friction=MU,
+        ),
+    )
+    # A ball resting on the box, away from the robots, its tets fanned from its center
+    ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=BALL_RADIUS,
+            pos=(0.1, 0.12, PLANES_HEIGHT[0] + 2 * BOX_HALFHEIGHT + BALL_RADIUS),
         ),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
@@ -582,6 +590,10 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     box_pos = tensor_to_array(box.get_pos())
     assert_allclose(box_pos[..., :2], 0.0, atol=2e-3)
     assert_allclose(box_pos[..., 2] - PLANES_HEIGHT, BOX_HALFHEIGHT, atol=2e-3)
+
+    # The ball rests on the box, sunk less than a millimeter into it
+    ball_depth = box_pos[..., 2] + BOX_HALFHEIGHT - tensor_to_array(ball.get_pos())[..., 2] + BALL_RADIUS
+    assert ((ball_depth > 0.0) & (ball_depth < 1e-3)).all()
 
     # The box, and both robots should be laying on top of each other
     robot_1_aabb = tensor_to_array(robot_1.get_AABB())
@@ -711,46 +723,65 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
     # The pushed slab sticks, creeping at most at the stiction tolerance
     assert (torch.linalg.norm(pushed_slab.get_vel(), dim=-1) < STICTION_TOLERANCE).all()
 
-    # The contacts of a body at rest form one patch, regularized as one contact whatever their number. Each contact of
-    # stiffness k takes the regularization max(beta^2 / (4 pi^2) * |W| / 3 * K / k, 1 / (dt * k * (dt + taud))), from the
-    # Delassus operator W = I / m + [r]x I^-1 [r]x^T of the contact at r from the center of mass and the stiffness K of
-    # the patch, the near-rigid one for light bodies and the compliant one for heavy ones. At rest, each contact carries
-    # the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The vertex floor holds a
-    # box on the vertices of its bottom face, all of stiffness VERT_STIFFNESS. The tet floor holds it on slices spread
-    # over that face, closer to its center of mass than the corners, so that it rests less deep.
+    # The contacts of a body at rest form one patch. Each contact of stiffness k takes the regularization
+    # max(beta^2 / (4 pi^2) * |W| / 3 * K / k, 1 / (dt * k * (dt + taud))), from the Delassus operator
+    # W = I / m + [r]x I^-1 [r]x^T of the contact at r from the center of mass and the stiffness K of the patch. At rest,
+    # each carries the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The vertex
+    # floor holds a box on the vertices of its bottom face, the tet floor a cube on the 8 slices of the tets of its bottom
+    # face (see convex_mesh_to_elements), solved for by a few fixed-point iterations.
     substep_dt = DT / SUBSTEPS
+    is_bottom = np.isclose(cube_mesh.triangles[..., 2], -0.5 * CUBE_SIZE[2]).all(axis=-1)
+    bottom_triangles = cube_mesh.triangles[is_bottom, :, :2]
+    # The depths of the slab, the cube and the refined cube on the vertex floor, or on the tet floor for the cube, and
+    # of the cube on the vertex floor
     rest_depths = []
-    for size, mesh in (
-        (SLAB_SIZE, trimesh.creation.box(SLAB_SIZE)),
-        (CUBE_SIZE, cube_mesh),
-        (CUBE_SIZE, refined_cube_mesh),
+    for size, mesh, is_sliced in (
+        (SLAB_SIZE, trimesh.creation.box(SLAB_SIZE), False),
+        (CUBE_SIZE, cube_mesh, rigid_floor_contact_type == "tet"),
+        (CUBE_SIZE, refined_cube_mesh, False),
+        (CUBE_SIZE, cube_mesh, False),
     ):
         mass = RHO * np.prod(size)
         inertia = np.diag(mass / 12.0 * (np.sum(np.square(size)) - np.square(size)))
-        arms = mesh.vertices[np.isclose(mesh.vertices[:, 2], -0.5 * size[2])]
-        arms_cross = np.cross(arms[:, None], np.eye(3))
-        delassus = np.eye(3) / mass + arms_cross @ np.linalg.inv(inertia) @ arms_cross.transpose(0, 2, 1)
-        near_rigid_regularizations = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus, axis=(1, 2)) / 3.0
-        regularizations = np.maximum(
-            near_rigid_regularizations * len(arms), 1.0 / (substep_dt * VERT_STIFFNESS * (substep_dt + SAP_TAUD))
-        )
-        rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) / np.sum(1.0 / regularizations))
+        if is_sliced:
+            corners_points = 0.5 * bottom_triangles + bottom_triangles.sum(axis=1, keepdims=True) / 6.0
+            points = np.concatenate([corners_points.reshape(-1, 2), bottom_triangles.mean(axis=1)])
+        else:
+            points = mesh.vertices[np.isclose(mesh.vertices[:, 2], -0.5 * size[2]), :2]
+        rest_depth = 0.0
+        for _ in range(5):
+            shrink = 1.0 - 2.0 * rest_depth / size[2] if is_sliced else 1.0
+            arms_height = rest_depth - 0.5 * size[2] if is_sliced else -0.5 * size[2]
+            arms = np.concatenate([shrink * points, np.full((len(points), 1), arms_height)], axis=-1)
+            arms_cross = np.cross(arms[:, None], np.eye(3))
+            delassus = np.eye(3) / mass + arms_cross @ np.linalg.inv(inertia) @ arms_cross.transpose(0, 2, 1)
+            regularizations = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus, axis=(1, 2)) / 3.0 * len(arms)
+            if not is_sliced:
+                regularizations = np.maximum(
+                    regularizations, 1.0 / (substep_dt * VERT_STIFFNESS * (substep_dt + SAP_TAUD))
+                )
+            rest_depth = mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) / np.sum(1.0 / regularizations)
+        rest_depths.append(rest_depth)
     rest_depths = torch.tensor(rest_depths, dtype=gs.tc_float, device=gs.device)
     rest_heights = 0.5 * torch.tensor((SLAB_SIZE[2], CUBE_SIZE[2]), dtype=gs.tc_float, device=gs.device)
-    # The tet floor bounds the depth of the refined cube by that of a cube held on its corners
-    refined_cube_rest_depth = rest_depths[2] if rigid_floor_contact_type == "vert" else rest_depths[1]
     for entity, entity_rest_heights, entity_rest_depths in (
         (variants, rest_heights, rest_depths[:2]),
         (dropped_cube, rest_heights[1], rest_depths[1]),
         (tilted_cube, rest_heights[1], rest_depths[1]),
-        (refined_cube, rest_heights[1], refined_cube_rest_depth),
+        (refined_cube, rest_heights[1], rest_depths[2]),
     ):
         entity_depths = entity_rest_heights - entity.get_pos()[..., 2]
-        if rigid_floor_contact_type == "vert":
-            # A few roundings of the height of a body in single precision take a share of its depth
-            assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
-        else:
-            assert ((entity_depths > 0.0) & (entity_depths < entity_rest_depths)).all()
+        if rigid_floor_contact_type == "tet" and entity is refined_cube:
+            # The refined cube, a mesh, takes the tets of TetGen, which hold it less deep than the corners of the cube
+            assert ((entity_depths > 0.0) & (entity_depths < rest_depths[3])).all()
+            continue
+        if rigid_floor_contact_type == "tet" and entity is variants:
+            # The tet floor holds the slab of the first environment near-rigid on the many slices along its edges too,
+            # less deep than the compliant corners of the vertex floor
+            assert 0.0 < entity_depths[0] < rest_depths[0]
+            entity_depths, entity_rest_depths = entity_depths[1:], entity_rest_depths[1:]
+        # A few roundings of the height of a body in single precision take a share of its depth
+        assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
 
 
 @pytest.mark.required("sparse")
