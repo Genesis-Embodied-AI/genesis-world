@@ -560,7 +560,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
             archive.writestr(name, content)
     scene = gs.Scene.load(exported)
     for entity, entity_authored in zip(scene.entities, checkpoint_scene.entities):
-        assert isinstance(entity.options, gs.entities.Rigid)
+        assert type(entity.options) is type(entity_authored.options)
         assert entity.material == entity_authored.material
 
     # A file states a layout under each class name it holds. Anything else standing there is rejected before it is
