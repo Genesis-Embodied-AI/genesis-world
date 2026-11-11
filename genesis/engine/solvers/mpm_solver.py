@@ -108,7 +108,6 @@ class MPMErrorCode(ErrorCode):
     """The error flags the material point method (MPM) solver writes in its errno (see 'Solver.register_errors')."""
 
     INVALID_VELOCITY_NAN = auto()
-    INVALID_NEWTON_NAN = auto()
     OVERFLOW_GRID_RANGE = auto()
 
 
@@ -819,10 +818,6 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
                     """Invalid MPM particle velocities causing 'nan' or 'inf'.
 Please decrease the simulation timestep or adjust the material parameters."""
                 ),
-                MPMErrorCode.INVALID_NEWTON_NAN: (
-                    "The Newton solve of the implicit MPM solver produced values that are not finite. Please decrease "
-                    "the simulation timestep or adjust the material parameters."
-                ),
                 MPMErrorCode.OVERFLOW_GRID_RANGE: (
                     "MPM particles have positions that are not finite, or left the range the sparse grid of the "
                     "implicit solver indexes."
@@ -1048,7 +1043,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
 
     def substep_post_coupling(self) -> None:
         if self._use_implicit_solver:
-            kernel_mpm_g2p(self.mpm_state, self.sparse_grid, self.mpm_info, self._errno)
+            kernel_mpm_g2p(self.mpm_state, self.sparse_grid, self.mpm_info, self._errno, self._sim.newton_solver._errno)
             kernel_copy_next_to_curr(self.mpm_state, self._errno)
             return
         rigid_solver = self._sim.rigid_solver
@@ -3324,20 +3319,23 @@ def kernel_contact_invweight(mpm_state: MPMState, sparse_grid: MPMSparseGrid, mp
 
 
 @qd.kernel
-def kernel_mpm_g2p(mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, errno: qd.Tensor):
+def kernel_mpm_g2p(
+    mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MPMInfo, errno: qd.Tensor, newton_errno: qd.Tensor
+):
     """
     Move every active particle into the next state by the displacement of the nodes of its stencil (grid-to-particle
     transfer), then apply the return map of its material (see 'kernel_copy_next_to_curr').
 
-    The particles of an environment whose Newton solve failed keep their state, and so do the inactive particles. A
-    velocity that is not finite flags the environment of the particle.
+    The particles of an environment that the Newton solver flagged keep their state, and so do the inactive particles
+    (see 'kernel_flag_failures' in newton_solver.py). A velocity that is not finite flags the environment of the
+    particle.
     """
     n_particles, n_envs = mpm_state.particles.pos.shape
     inv_dx = mpm_info.inv_dx[None]
     dt = mpm_info.substep_dt[None]
     for i_s in range(mpm_state.sorted_particles.n_valid[None]):
         i_p, i_b, cell = func_sorted_particle(i_s, n_particles, mpm_state.sorted_particles)
-        if (errno[i_b] & MPMErrorCode.INVALID_NEWTON_NAN) == 0:
+        if newton_errno[i_b] == 0:
             x_p = mpm_state.particles.pos[i_p, i_b]
             w, grad_w = func_q1_stencil(x_p * inv_dx - cell.cast(gs.qd_float), inv_dx)
             u_nodes = func_gather_stencil(func_stencil_slots(i_b, cell, sparse_grid), sparse_grid.nodes_u)
@@ -3365,7 +3363,7 @@ def kernel_mpm_g2p(mpm_state: MPMState, sparse_grid: MPMSparseGrid, mpm_info: MP
             mpm_state.particles.Jp_next[i_p, i_b] = Jp_new
     for i_p, i_b in qd.ndrange(n_particles, n_envs):
         is_kept = not mpm_state.particles.is_active[i_p, i_b]
-        if (errno[i_b] & MPMErrorCode.INVALID_NEWTON_NAN) != 0:
+        if newton_errno[i_b] != 0:
             is_kept = True
         if is_kept:
             mpm_state.particles.pos_next[i_p, i_b] = mpm_state.particles.pos[i_p, i_b]

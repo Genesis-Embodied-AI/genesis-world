@@ -8,7 +8,7 @@ the contacts between them (see couplers/mpm_rigid_global_newton.py).
 """
 
 from collections.abc import Iterator
-from enum import IntEnum
+from enum import IntEnum, auto
 from typing import TYPE_CHECKING
 
 import quadrants as qd
@@ -44,9 +44,8 @@ from genesis.options.solvers import LegacyCouplerOptions, NewtonOptions
 from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, field, iter_data
 from genesis.utils.misc import qd_isfinite, qd_to_numpy
 
-from .base_solver import Solver
+from .base_solver import ErrorCode, Solver
 from .mpm_solver import (
-    MPMErrorCode,
     MPMInfo,
     MPMSparseGrid,
     MPMState,
@@ -67,6 +66,12 @@ if TYPE_CHECKING:
 
 # The arrays of the dofs and of the links of the rigid solver in the Newton solve, which a solve without them leaves out
 RIGID = "rigid"
+
+
+class NewtonErrorCode(ErrorCode):
+    """The error flags the Newton solver writes in its errno (see 'Solver.register_errors')."""
+
+    INVALID_SOLVE_NAN = auto()
 
 
 class NewtonFailure(IntEnum):
@@ -157,8 +162,6 @@ class NewtonData(Data):
     newton_info: NewtonInfo
     rigid_dofs: NewtonRigidDofs = field(labels=RIGID)
     rigid_links: NewtonRigidLinks = field(labels=RIGID)
-    # The error flags of each env, which no kernel of the solver raises: a failed solve flags the environment in those
-    # of the MPM solver (see 'ErrnoMixin.register_errors')
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
 
 
@@ -253,7 +256,16 @@ class NewtonSolver(Solver):
             ),
             unused={RIGID: not has_rigid_dofs},
         )
-        self.register_errors(self.data_manager.errno, {})
+        # The errors of each env, raised at the beginning of the next step (see 'Solver.register_errors')
+        self.register_errors(
+            self.data_manager.errno,
+            {
+                NewtonErrorCode.INVALID_SOLVE_NAN: (
+                    "The Newton solve of the implicit MPM solver produced values that are not finite. Please decrease "
+                    "the simulation timestep or adjust the material parameters."
+                ),
+            },
+        )
         self.newton_envs = self.data_manager.newton_envs
         self.newton_loops = self.data_manager.newton_loops
         self.newton_info = self.data_manager.newton_info
@@ -288,7 +300,7 @@ class NewtonSolver(Solver):
         mpm_state, mpm_info, sparse_grid = mpm_solver.mpm_state, mpm_solver.mpm_info, mpm_solver.sparse_grid
         dyn_state, dyn_info, rigid_info = rigid_solver.dyn_state, rigid_solver.dyn_info, rigid_solver.rigid_info
         constraint_state = rigid_solver.constraint_solver.constraint_state
-        errno = mpm_solver._errno
+        errno = self._errno
         if self.newton_config.has_rigid_dofs and self._rigid_contact_stiffness is None:
             self._rigid_contact_stiffness = RigidContactStiffness(self.rigid_links, dyn_state.dofs, dyn_info.links)
         self.newton_rows = grow_linear_system(
@@ -462,7 +474,7 @@ def kernel_init_substep(
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
     for i_b in range(newton_envs.is_active.shape[0]):
-        is_active = (errno[i_b] & MPMErrorCode.INVALID_NEWTON_NAN) == 0
+        is_active = (errno[i_b] & NewtonErrorCode.INVALID_SOLVE_NAN) == 0
         newton_envs.is_active[i_b] = is_active
         newton_envs.is_converged[i_b] = False
         newton_envs.failure[i_b] = NewtonFailure.NONE
@@ -1003,7 +1015,7 @@ def kernel_finish_rigid(
     'RigidInfo.is_env_frozen').
     """
     for i_b in range(rigid_info.is_env_frozen.shape[0]):
-        rigid_info.is_env_frozen[i_b] = (errno[i_b] & MPMErrorCode.INVALID_NEWTON_NAN) != 0
+        rigid_info.is_env_frozen[i_b] = (errno[i_b] & NewtonErrorCode.INVALID_SOLVE_NAN) != 0
     func_rigid_finish(
         newton_envs.rigid_cost,
         rigid_dofs,
@@ -1021,7 +1033,7 @@ def kernel_flag_failures(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, err
     and of the rigid solver until the error raises (see 'kernel_finish_rigid' and 'kernel_mpm_g2p' in mpm_solver.py)."""
     for i_b in range(newton_envs.is_active.shape[0]):
         if newton_envs.failure[i_b] == NewtonFailure.NON_FINITE:
-            qd.atomic_or(errno[i_b], MPMErrorCode.INVALID_NEWTON_NAN)
+            qd.atomic_or(errno[i_b], NewtonErrorCode.INVALID_SOLVE_NAN)
 
 
 @qd.kernel
