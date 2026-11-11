@@ -587,12 +587,14 @@ def func_segment_dist(pos: qd.types.vector(3), corners: qd.types.matrix(3, 3)):
     corner_0 = qd.Vector([corners[0, 0], corners[0, 1], corners[0, 2]])
     corner_1 = qd.Vector([corners[1, 0], corners[1, 1], corners[1, 2]])
     corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
-    normal = (corner_1 - corner_0).cross(corner_2 - corner_0)
-    normal = normal / qd.max(normal.norm(), 1e-30)
+    area_normal = (corner_1 - corner_0).cross(corner_2 - corner_0)
+    normal = area_normal / qd.max(area_normal.norm(), gs.EPS)
     pos_proj = pos - (pos - corner_0).dot(normal) * normal
-    # The projection lies inside the triangle where it is on the inner side of its three edges
+    # The projection lies inside the triangle where it is on the inner side of its three edges, a degenerate triangle
+    # having no inside
     is_inside = (
-        (corner_1 - corner_0).cross(pos_proj - corner_0).dot(normal) >= 0.0
+        area_normal.norm() > gs.EPS
+        and (corner_1 - corner_0).cross(pos_proj - corner_0).dot(normal) >= 0.0
         and (corner_2 - corner_1).cross(pos_proj - corner_1).dot(normal) >= 0.0
         and (corner_0 - corner_2).cross(pos_proj - corner_2).dot(normal) >= 0.0
     )

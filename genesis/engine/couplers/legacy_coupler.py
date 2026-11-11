@@ -552,10 +552,20 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
         particles_pos = qd_to_numpy(self.sph_solver.sph_state.particles.pos, transpose=True)[0]
         is_inside = np.zeros((len(particles_pos), self.sim._B), dtype=bool)
+        # The variants of a heterogeneous entity may start at other poses in the environments where they are active, so
+        # each group of environments takes the poses of its first one
+        geoms_pos_envs = qd_to_numpy(self.rigid_solver.dyn_state.geoms.pos, transpose=True)
+        geoms_quat_envs = qd_to_numpy(self.rigid_solver.dyn_state.geoms.quat, transpose=True)
         tris_is_active, envs_tris_group = np.unique(geoms_is_active[rigid_tris_geom_idx].T, axis=0, return_inverse=True)
         for i_group, tris_is_active_group in enumerate(tris_is_active):
+            i_env = np.flatnonzero(envs_tris_group.reshape(-1) == i_group)[0]
+            group_tris_verts_pos_world = gu.transform_by_trans_quat(
+                rigid_tris_verts_pos,
+                geoms_pos_envs[i_env, rigid_tris_geom_idx, None],
+                geoms_quat_envs[i_env, rigid_tris_geom_idx, None],
+            )
             tris_verts_pos = np.concatenate(
-                [fem_tris_verts_pos, rigid_tris_verts_pos_world[tris_is_active_group & rigid_tris_is_closed]]
+                [fem_tris_verts_pos, group_tris_verts_pos_world[tris_is_active_group & rigid_tris_is_closed]]
             )
             if len(tris_verts_pos) == 0:
                 continue
