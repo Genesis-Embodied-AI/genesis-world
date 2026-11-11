@@ -377,6 +377,7 @@ class NewtonSolver(Solver):
                     ee_parallel_tolerance=1e-6,
                     ee_type_parallel_tolerance=1e-14,
                     friction_parallel_ratio=1e-3,
+                    intersection_tolerance=1e-12,
                     kappa_gap_ratio=ipc_options.adaptive_kappa_gap_ratio,
                     kappa_grow=ipc_options.adaptive_kappa_grow,
                     kappa_max_scale=ipc_options.adaptive_kappa_max_scale,
@@ -490,6 +491,21 @@ class NewtonSolver(Solver):
         # The broad phase reads the triangles and the edges of the cloth, which the FEM solver builds after this one
         if self.newton_config.has_cloth and self.ipc_contact is None:
             self.ipc_contact = IPCContact(self._B, fem_solver.n_vertices, fem_info, self._scene.options.ipc)
+            if self._scene.options.ipc.intersection_check:
+                intersections = self.ipc_contact.find_intersections(fem_state, fem_info, self.ipc_info)
+                if len(intersections) > 0:
+                    i_b, i_e, i_t = intersections[0]
+                    edge = qd_to_numpy(fem_info.cloth_edges.verts_idx)[i_e]
+                    tri = qd_to_numpy(fem_info.cloth_triangles.verts_idx)[i_t]
+                    entities_v_start = np.array([entity.v_start for entity in fem_solver.entities])
+                    edge_entity = fem_solver.entities[np.searchsorted(entities_v_start, edge[0], side="right") - 1]
+                    tri_entity = fem_solver.entities[np.searchsorted(entities_v_start, tri[0], side="right") - 1]
+                    gs.raise_exception(
+                        f"The cloth starts crossed at {len(intersections)} edges: in environment {i_b}, the edge of "
+                        f"the vertices {(edge - edge_entity.v_start).tolist()} of entity '{edge_entity.name}' crosses "
+                        f"the triangle of the vertices {(tri - tri_entity.v_start).tolist()} of entity "
+                        f"'{tri_entity.name}'. The contact keeps crossed cloths crossed: place them apart."
+                    )
         contact = self.ipc_contact
         ipc_pairs, friction_pairs = self._ipc_pairs_unused, self._friction_pairs_unused
         if contact is not None:

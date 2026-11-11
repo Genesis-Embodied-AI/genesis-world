@@ -18,6 +18,8 @@ the adaptive stiffness, the stiffness of a pair grows with the closing of its ga
 
 import math
 
+import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -63,6 +65,7 @@ from genesis.engine.ipc.friction import (
     func_point_point_friction_frame,
     func_point_triangle_friction_frame,
 )
+from genesis.engine.ipc.intersection import func_edge_triangle_intersect
 from genesis.engine.numerics.bcoo import func_add_by_key, func_write_triplet
 from genesis.engine.numerics.newton_rows import NewtonRows, NewtonSegment
 from genesis.engine.solvers.fem_solver import FEMInfo, FEMState, func_add_stencil_terms
@@ -170,6 +173,8 @@ class IPCInfo(Data, kind=DataKind.CONSTANT):
     ee_parallel_tolerance: qd.Tensor = field(float, shape=())
     ee_type_parallel_tolerance: qd.Tensor = field(float, shape=())
     friction_parallel_ratio: qd.Tensor = field(float, shape=())
+    # The relative tolerance of the test of an edge crossing a triangle (see 'func_edge_triangle_intersect')
+    intersection_tolerance: qd.Tensor = field(float, shape=())
     kappa_gap_ratio: qd.Tensor = field(float, shape=())
     kappa_grow: qd.Tensor = field(float, shape=())
     kappa_max_scale: qd.Tensor = field(float, shape=())
@@ -246,6 +251,55 @@ class EdgeEdgeQuery(BoxQuery):
                 if edge_q[i] == edge_a[j]:
                     is_kept = False
         return is_kept
+
+
+@qd.data_oriented
+class EdgeTriangleQuery(BoxQuery):
+    """The box query of the edges of the cloth against its triangles, keeping the edges that cross a triangle they do not
+    share a vertex with (see 'func_edge_triangle_intersect' in genesis/engine/ipc/intersection.py)."""
+
+    def __init__(
+        self,
+        results: BVHQueryResults,
+        edges_verts_idx: qd.Tensor,
+        triangles_verts_idx: qd.Tensor,
+        positions: qd.Tensor,
+        tolerance: qd.Tensor,
+    ) -> None:
+        super().__init__(results)
+        self.edges_verts_idx = edges_verts_idx
+        self.triangles_verts_idx = triangles_verts_idx
+        self.positions = positions
+        self.tolerance = tolerance
+
+    @qd.func
+    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
+        edge = self.edges_verts_idx[i_q]
+        tri = self.triangles_verts_idx[i_a]
+        is_kept = True
+        for i, j in qd.static(qd.ndrange(2, 3)):
+            if edge[i] == tri[j]:
+                is_kept = False
+        if is_kept:
+            is_kept = func_edge_triangle_intersect(
+                self.positions[tri[0], i_t],
+                self.positions[tri[1], i_t],
+                self.positions[tri[2], i_t],
+                self.positions[edge[0], i_t],
+                self.positions[edge[1], i_t],
+                self.tolerance[None],
+            )
+        return is_kept
+
+
+@qd.kernel
+def kernel_contact_intersections(edges_query: BVHLeaves, triangles_tree: BVHTreeState, visitor: qd.template()):
+    """Collect the edges of the cloth that cross one of its triangles, in every environment (see EdgeTriangleQuery)."""
+    for _ in range(1):
+        visitor.results.count[0] = 0
+    for i_b in range(visitor.results.trees_count.shape[0]):
+        visitor.results.trees_count[i_b] = 0
+    func_bvh_query_leaves(edges_query, triangles_tree, visitor)
 
 
 # ------------------------------------------------------------------------------------
@@ -1415,6 +1469,43 @@ class IPCContact:
                 capacity = self._grown_capacity(max(n_pt, n_ee), capacity)
                 self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
         self.n_pairs = (n_pt, n_ee)
+
+    def find_intersections(self, fem_state: FEMState, fem_info: FEMInfo, ipc_info: IPCInfo) -> np.ndarray:
+        """Return the (environment, edge, triangle) triplets of the edges of the cloth that cross one of its triangles at
+        the positions of its vertices, in no particular order."""
+        kernel_contact_boxes(
+            fem_state,
+            fem_info,
+            self._triangles_bvh.state.leaves,
+            self._edges_bvh.state.leaves,
+            self._points_query,
+            self._edges_query,
+            False,
+        )
+        build_bvh(self._triangles_bvh.state, self._triangles_bvh.config, eps=gs.EPS)
+        capacity = self._pt_hits.triplets.shape[0]
+        triplets = np.zeros((0, 3), dtype=gs.np_int)
+        is_complete = False
+        while not is_complete:
+            hits = BVHQueryResults(sizes=dict(query_results=capacity, bvh_trees=self._n_envs))
+            visitor = EdgeTriangleQuery(
+                hits,
+                fem_info.cloth_edges.verts_idx,
+                fem_info.cloth_triangles.verts_idx,
+                fem_state.vertices.pos_next,
+                ipc_info.intersection_tolerance,
+            )
+            kernel_contact_intersections(self._edges_query, self._triangles_bvh.state.tree, visitor)
+            share = capacity // self._n_envs
+            n_hits = int(qd_to_numpy(hits.trees_count).max())
+            is_complete = n_hits <= share
+            if is_complete:
+                # The hits are (environment, triangle, edge) triplets
+                triplets = qd_to_numpy(hits.triplets, copy=True)[: int(qd_to_numpy(hits.count)[0]), (0, 2, 1)]
+            else:
+                capacity = self._grown_capacity(n_hits, share) * self._n_envs
+            self._retire(hits)
+        return triplets
 
     def set_friction_pairs(
         self, fem_state: FEMState, fem_info: FEMInfo, ipc_info: IPCInfo, penetration_errno: int, errno: qd.Tensor
