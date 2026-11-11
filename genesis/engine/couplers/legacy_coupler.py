@@ -418,15 +418,23 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         geoms_quat = qd_to_numpy(self.rigid_solver.dyn_state.geoms.quat, transpose=True)[0, rigid_tris_geom_idx, None]
         rigid_tris_verts_pos_world = gu.transform_by_trans_quat(rigid_tris_verts_pos, geoms_pos, geoms_quat)
         # The fixed geoms, a terrain far larger than the domain among them, keep their segments within the domain alone,
-        # where the walls of the domain do not already bound the liquid
+        # where the walls of the domain do not already bound the liquid. A plane keeps its segments up to the support
+        # radius beyond the walls, so that the liquid next to a wall feels all of the plane under it.
+        rigid_tris_is_plane = np.repeat(
+            [geom.type == gs.GEOM_TYPE.PLANE for geom in geoms], [len(geom.init_faces) for geom in geoms]
+        )
+        rigid_tris_margin = np.where(rigid_tris_is_plane, self.sph_solver.support_radius, 0.0)
         segments_parts = []
-        for is_fixed in (False, True):
-            (tris_idx,) = np.nonzero(rigid_tris_is_fixed == is_fixed)
+        for is_fixed, is_plane in ((False, False), (False, True), (True, False), (True, True)):
+            (tris_idx,) = np.nonzero((rigid_tris_is_fixed == is_fixed) & (rigid_tris_is_plane == is_plane))
+            margin = self.sph_solver.support_radius if is_plane else 0.0
             tri_idx, corners_bary = split_triangles(
                 rigid_tris_verts_pos[tris_idx],
                 self.sph_solver.particle_size,
                 rigid_tris_verts_pos_world[tris_idx],
-                (self.sph_solver.boundary_lower, self.sph_solver.boundary_upper) if is_fixed else None,
+                (self.sph_solver.boundary_lower - margin, self.sph_solver.boundary_upper + margin)
+                if is_fixed
+                else None,
             )
             segments_parts.append((tris_idx[tri_idx], corners_bary))
         rigid_segments_tri_idx, rigid_segments_corners_bary = [
@@ -435,9 +443,10 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         segments_centroid_world = np.einsum(
             "ni,nij->nj", rigid_segments_corners_bary.mean(axis=1), rigid_tris_verts_pos_world[rigid_segments_tri_idx]
         )
+        segments_margin = rigid_tris_margin[rigid_segments_tri_idx, None]
         is_in_domain = (
-            (segments_centroid_world > self.sph_solver.boundary_lower)
-            & (segments_centroid_world < self.sph_solver.boundary_upper)
+            (segments_centroid_world > self.sph_solver.boundary_lower - segments_margin)
+            & (segments_centroid_world < self.sph_solver.boundary_upper + segments_margin)
         ).all(axis=-1)
         is_kept = is_in_domain | ~rigid_tris_is_fixed[rigid_segments_tri_idx]
         rigid_segments_tri_idx, rigid_segments_corners_bary = (
