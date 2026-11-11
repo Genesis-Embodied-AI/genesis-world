@@ -490,11 +490,21 @@ class Scene(RBC):
     def add_stage(
         self,
         morph: gs.morphs.USD,
-        material: gs.materials.Kinematic | None = ...,
+        material: gs.materials.Rigid | None = ...,
         surface: Surface | None = ...,
         visualize_contact: bool | None = ...,
         vis_mode: Literal["visual", "collision"] | None = ...,
     ) -> list["RigidEntity"]: ...
+
+    @overload
+    def add_stage(
+        self,
+        morph: gs.morphs.USD,
+        material: gs.materials.Kinematic,
+        surface: Surface | None = ...,
+        visualize_contact: Literal[False] | None = ...,
+        vis_mode: Literal["visual", "collision"] | None = ...,
+    ) -> list[KinematicEntity]: ...
 
     @gs.assert_unbuilt
     def add_stage(

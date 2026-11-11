@@ -281,6 +281,21 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
+            # FIXME: Support per link/geom density for IPC coupler
+            links_options = entity._options.links.values()
+            geoms_options = [
+                *entity._options.geoms.values(),
+                *(geom_options for link_options in links_options for geom_options in link_options.geoms.values()),
+            ]
+            if any(
+                options.material is not None and options.material.rho is not None
+                for options in (*links_options, *geoms_options)
+            ):
+                gs.raise_exception(
+                    f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
+                    "the link and geom options cannot give a density."
+                )
+
             # Resolve link filter from material
             link_filter_names = entity.material.coup_links
             if link_filter_names is not None:
@@ -568,20 +583,6 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     self._ipc_abd = AffineBodyConstitution()
                     self._ipc_constitution_tabular.insert(self._ipc_abd)
 
-                # FIXME: Support per link/geom density for IPC coupler
-                links_options = entity._options.links.values()
-                geoms_options = [
-                    *entity._options.geoms.values(),
-                    *(geom_options for link_options in links_options for geom_options in link_options.geoms.values()),
-                ]
-                if any(
-                    options.material is not None and options.material.rho is not None
-                    for options in (*links_options, *geoms_options)
-                ):
-                    gs.raise_exception(
-                        f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
-                        "the link and geom options cannot give a density."
-                    )
                 rho = entity.material.rho
                 if rho is None:
                     if entity.solver._enable_mujoco_compatibility:
