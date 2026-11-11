@@ -314,6 +314,19 @@ def test_deformable_parallel(show_viewer):
     assert final_cloth_pos[..., 2].min() > -1e-5
     assert final_water_pos[..., 2].min() > -1e-5
 
+    # The liquid at rest on a rigid floor stands half a particle size above it, up to the discretization of the boundary
+    # FIXME: Within a support radius of a wall, the ghost lattice and the continuous plane disagree on the boundary
+    # volume, which lowers the corner layer. Replacing the wall lattice by exact boundaries removes it.
+    sph_solver = scene.sph_solver
+    water_pos = tensor_to_array(final_water_pos)
+    is_middle = (
+        (water_pos[..., :2] > sph_solver.boundary_lower[:2] + sph_solver.support_radius)
+        & (water_pos[..., :2] < sph_solver.boundary_upper[:2] - sph_solver.support_radius)
+    ).all(axis=-1)
+    is_bottom_middle = is_middle & (water_pos[..., 2] < sph_solver.particle_size)
+    bottom_height = (water_pos[..., 2] * is_bottom_middle).sum(axis=-1) / is_bottom_middle.sum(axis=-1)
+    assert_allclose(bottom_height, 0.5 * sph_solver.particle_size, atol=0.1 * sph_solver.particle_size)
+
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
     assert_allclose(entity_fem.get_verts_vel(), 0, atol=1e-3)

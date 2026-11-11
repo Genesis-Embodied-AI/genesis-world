@@ -255,6 +255,36 @@ def split_triangles(
     return parts_tri_idx[parts_order], parts_bary[parts_order]
 
 
+def clip_triangles(tris_verts_pos: np.ndarray, tris_verts_dist: np.ndarray) -> np.ndarray:
+    """
+    Clip triangles to the side of a plane where the signed distance to the plane is nonpositive.
+
+    `tris_verts_dist` is the signed distance of each vertex of the triangles to the plane. Return the vertices of the
+    triangles making up the clipped parts, wound as the triangle they come from.
+    """
+    is_in = tris_verts_dist < 0.0
+    n_in = np.count_nonzero(is_in, axis=-1)
+    # The vertices turn so that the first one lies alone on its side of the plane
+    vert_first = np.where(n_in == 1, is_in.argmax(axis=-1), (~is_in).argmax(axis=-1))
+    verts_order = (vert_first[:, None] + np.arange(3)) % 3
+    verts_dist = np.take_along_axis(tris_verts_dist, verts_order, axis=-1)
+    verts_pos = np.take_along_axis(tris_verts_pos, verts_order[..., None], axis=-2)
+    # The points where the edges from the first vertex cross the plane, on the triangles that it cuts
+    is_cut = (n_in == 1) | (n_in == 2)
+    dists_diff = verts_dist[:, :1] - verts_dist[:, 1:]
+    edges_param = np.divide(verts_dist[:, :1], dists_diff, out=np.zeros_like(dists_diff), where=is_cut[:, None])
+    cross_pos = verts_pos[:, :1] + edges_param[..., None] * (verts_pos[:, 1:] - verts_pos[:, :1])
+    # A triangle with two vertices inside keeps a quad, split in two triangles, the second one being empty when its
+    # first vertex lies on the plane
+    clipped_parts = (
+        (n_in == 3, verts_pos),
+        (n_in == 1, np.stack([verts_pos[:, 0], cross_pos[:, 0], cross_pos[:, 1]], axis=1)),
+        (n_in == 2, np.stack([cross_pos[:, 0], verts_pos[:, 1], verts_pos[:, 2]], axis=1)),
+        ((n_in == 2) & (verts_dist[:, 0] > 0.0), np.stack([cross_pos[:, 0], verts_pos[:, 2], cross_pos[:, 1]], axis=1)),
+    )
+    return np.concatenate([parts_verts_pos[is_kept] for is_kept, parts_verts_pos in clipped_parts])
+
+
 class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
     """
     This class handles all the coupling between different solvers. LegacyCoupler will be deprecated in the future.
@@ -442,27 +472,24 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         for geom in geoms:
             if geom.active_envs_mask is not None:
                 geoms_is_active[geom.idx] = tensor_to_array(geom.active_envs_mask)
-        geoms_pos = qd_to_numpy(self.rigid_solver.dyn_state.geoms.pos, transpose=True)[0, rigid_tris_geom_idx, None]
-        geoms_quat = qd_to_numpy(self.rigid_solver.dyn_state.geoms.quat, transpose=True)[0, rigid_tris_geom_idx, None]
-        rigid_tris_verts_pos_world = gu.transform_by_trans_quat(rigid_tris_verts_pos, geoms_pos, geoms_quat)
+        geoms_pos = qd_to_numpy(self.rigid_solver.dyn_state.geoms.pos, transpose=True)[0]
+        geoms_quat = qd_to_numpy(self.rigid_solver.dyn_state.geoms.quat, transpose=True)[0]
+        rigid_tris_verts_pos_world = gu.transform_by_trans_quat(
+            rigid_tris_verts_pos, geoms_pos[rigid_tris_geom_idx, None], geoms_quat[rigid_tris_geom_idx, None]
+        )
         # The fixed geoms, a terrain far larger than the domain among them, keep their segments within the domain alone,
-        # where the walls of the domain do not already bound the liquid. A plane keeps its segments up to the support
-        # radius beyond the walls, so that the liquid next to a wall feels all of the plane under it.
+        # where the walls of the domain do not already bound the liquid. The planes take their segments apart.
         rigid_tris_is_plane = np.repeat(
             [geom.type == gs.GEOM_TYPE.PLANE for geom in geoms], [len(geom.init_faces) for geom in geoms]
         )
-        rigid_tris_margin = np.where(rigid_tris_is_plane, self.sph_solver.support_radius, 0.0)
         segments_parts = []
-        for is_fixed, is_plane in ((False, False), (False, True), (True, False), (True, True)):
-            (tris_idx,) = np.nonzero((rigid_tris_is_fixed == is_fixed) & (rigid_tris_is_plane == is_plane))
-            margin = self.sph_solver.support_radius if is_plane else 0.0
+        for is_fixed in (False, True):
+            (tris_idx,) = np.nonzero((rigid_tris_is_fixed == is_fixed) & ~rigid_tris_is_plane)
             tri_idx, corners_bary = split_triangles(
                 rigid_tris_verts_pos[tris_idx],
                 self.sph_solver.particle_size,
                 rigid_tris_verts_pos_world[tris_idx],
-                (self.sph_solver.boundary_lower - margin, self.sph_solver.boundary_upper + margin)
-                if is_fixed
-                else None,
+                (self.sph_solver.boundary_lower, self.sph_solver.boundary_upper) if is_fixed else None,
             )
             segments_parts.append((tris_idx[tri_idx], corners_bary))
         rigid_segments_tri_idx, rigid_segments_corners_bary = [
@@ -471,20 +498,96 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         segments_centroid_world = np.einsum(
             "ni,nij->nj", rigid_segments_corners_bary.mean(axis=1), rigid_tris_verts_pos_world[rigid_segments_tri_idx]
         )
-        segments_margin = rigid_tris_margin[rigid_segments_tri_idx, None]
         is_in_domain = (
-            (segments_centroid_world > self.sph_solver.boundary_lower - segments_margin)
-            & (segments_centroid_world < self.sph_solver.boundary_upper + segments_margin)
+            (segments_centroid_world > self.sph_solver.boundary_lower)
+            & (segments_centroid_world < self.sph_solver.boundary_upper)
         ).all(axis=-1)
         is_kept = is_in_domain | ~rigid_tris_is_fixed[rigid_segments_tri_idx]
         rigid_segments_tri_idx, rigid_segments_corners_bary = (
             rigid_segments_tri_idx[is_kept],
             rigid_segments_corners_bary[is_kept],
         )
-        has_rigid_sph = has_rigid_sph and len(rigid_segments_tri_idx) > 0
-        rigid_segments_corners = np.einsum(
-            "nci,nij->ncj", rigid_segments_corners_bary, rigid_tris_verts_pos[rigid_segments_tri_idx]
+        segments_geom_idx_parts = [rigid_tris_geom_idx[rigid_segments_tri_idx]]
+        segments_corners_parts = [
+            np.einsum("nci,nij->ncj", rigid_segments_corners_bary, rigid_tris_verts_pos[rigid_segments_tri_idx])
+        ]
+        # A plane bounds the half-space behind it, which the walls of the domain cut, their ghost particles standing for
+        # the liquid beyond them (see func_wall_volume). The segments of the plane cover the boundary of the solid behind
+        # it within the domain, so that the kernel volume of the walls and that of the plane add up without overlap: the
+        # plane within the domain, wound about its normal into the liquid, and the faces of the domain behind the plane,
+        # wound about their normal out of the domain. These faces stop at the support radius from the plane, beyond which
+        # no particle in front of the plane reaches them.
+        boundary_lower, boundary_upper = self.sph_solver.boundary_lower, self.sph_solver.boundary_upper
+        domain_corners_pos = np.stack(
+            np.meshgrid(*zip(boundary_lower, boundary_upper), indexing="ij"), axis=-1
+        ).reshape((-1, 3))
+        # The corner 4 * i_x + 2 * i_y + i_z lies at the upper bound along the axes whose index is one. The edges of the
+        # domain join the corners that differ along one axis, and its faces are split in two triangles.
+        domain_edges = np.array(
+            [[i_c, i_c | axis_bit] for axis_bit in (1, 2, 4) for i_c in range(8) if not i_c & axis_bit]
         )
+        domain_faces_verts_pos = domain_corners_pos[
+            np.array(
+                [
+                    [0, 1, 3],
+                    [0, 3, 2],
+                    [4, 6, 7],
+                    [4, 7, 5],
+                    [0, 4, 5],
+                    [0, 5, 1],
+                    [2, 3, 7],
+                    [2, 7, 6],
+                    [0, 2, 6],
+                    [0, 6, 4],
+                    [1, 5, 7],
+                    [1, 7, 3],
+                ]
+            )
+        ]
+        for geom in geoms:
+            if geom.type == gs.GEOM_TYPE.PLANE:
+                geom_pos, geom_quat = geoms_pos[geom.idx], geoms_quat[geom.idx]
+                normal = gu.transform_by_quat(geom.data[:3], geom_quat)
+                # The plane cuts the domain along the convex polygon through the points where it crosses the edges of
+                # the domain, fanned out in triangles from its first vertex by their angle about the normal of the plane
+                edges_verts_dist = ((domain_corners_pos - geom_pos) @ normal)[domain_edges]
+                edges_verts_pos = domain_corners_pos[domain_edges]
+                is_crossed = (edges_verts_dist[:, 0] < 0.0) != (edges_verts_dist[:, 1] < 0.0)
+                edges_dist, edges_pos = edges_verts_dist[is_crossed], edges_verts_pos[is_crossed]
+                edges_param = edges_dist[:, :1] / (edges_dist[:, :1] - edges_dist[:, 1:])
+                polygon_pos = np.unique(edges_pos[:, 0] + edges_param * (edges_pos[:, 1] - edges_pos[:, 0]), axis=0)
+                polygon_offsets = polygon_pos - polygon_pos.mean(axis=0)
+                tangent = polygon_offsets[0] / np.linalg.norm(polygon_offsets[0])
+                polygon_pos = polygon_pos[
+                    np.argsort(
+                        np.arctan2(polygon_offsets @ np.cross(normal, tangent), polygon_offsets @ tangent),
+                        kind="stable",
+                    )
+                ]
+                plane_tris_verts_pos = np.stack(
+                    [
+                        np.broadcast_to(polygon_pos[0], (len(polygon_pos) - 2, 3)),
+                        polygon_pos[1:-1],
+                        polygon_pos[2:],
+                    ],
+                    axis=1,
+                )
+                faces_tris_verts_pos = clip_triangles(
+                    domain_faces_verts_pos, (domain_faces_verts_pos - geom_pos) @ normal
+                )
+                faces_tris_verts_pos = clip_triangles(
+                    faces_tris_verts_pos,
+                    -self.sph_solver.support_radius - (faces_tris_verts_pos - geom_pos) @ normal,
+                )
+                tris_verts_pos = np.concatenate([plane_tris_verts_pos, faces_tris_verts_pos])
+                tri_idx, corners_bary = split_triangles(tris_verts_pos, self.sph_solver.particle_size)
+                segments_corners_parts.append(
+                    gu.inv_transform_by_trans_quat(corners_bary @ tris_verts_pos[tri_idx], geom_pos, geom_quat)
+                )
+                segments_geom_idx_parts.append(np.full(len(tri_idx), geom.idx, dtype=gs.np_int))
+        rigid_segments_geom_idx = np.concatenate(segments_geom_idx_parts)
+        rigid_segments_corners = np.concatenate(segments_corners_parts)
+        has_rigid_sph = has_rigid_sph and len(rigid_segments_geom_idx) > 0
 
         # Radon's 7-point rule on the triangle, exact up to degree 5
         sqrt_15 = math.sqrt(15.0)
@@ -508,12 +611,12 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         self.sph_boundaries = SPHBoundaries(
             sizes=dict(
-                particles=len(fem_segments_tri_idx) + len(rigid_segments_tri_idx),
+                particles=len(fem_segments_tri_idx) + len(rigid_segments_geom_idx),
                 envs=self.sim._B,
                 quad_points=len(quad_weight),
                 fem_segments=len(fem_segments_tri_idx),
                 surfaces=len(fem_tris_verts_pos),
-                rigid_segments=len(rigid_segments_tri_idx),
+                rigid_segments=len(rigid_segments_geom_idx),
                 rigid_links=self.rigid_solver.n_links,
                 rigid_geoms=self.rigid_solver.n_geoms,
                 exact_sum_slots=self.rigid_solver.n_links,
@@ -544,7 +647,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         segments_boundary_idx = np.concatenate(
             [
                 self.rigid_solver.n_geoms + fem_tris_entity_idx[fem_segments_tri_idx],
-                rigid_tris_geom_idx[rigid_segments_tri_idx],
+                rigid_segments_geom_idx,
             ]
         )
         self.sph_boundaries.segments_boundary_idx.from_numpy(segments_boundary_idx.astype(gs.np_int))
@@ -554,7 +657,6 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sph_boundaries.fem_segments_corners_bary.from_numpy(fem_segments_corners_bary.astype(gs.np_float))
             self.sph_boundaries.tris_segment_start.from_numpy(tris_segment_start.astype(gs.np_int))
         if has_rigid_sph:
-            rigid_segments_geom_idx = rigid_tris_geom_idx[rigid_segments_tri_idx]
             self.sph_boundaries.rigid_segments_geom_idx.from_numpy(rigid_segments_geom_idx)
             self.sph_boundaries.rigid_segments_corners.from_numpy(rigid_segments_corners.astype(gs.np_float))
             # Units from 2^-40 kg up to 2^24 kg, 2^32 apart (see ExactSums)
