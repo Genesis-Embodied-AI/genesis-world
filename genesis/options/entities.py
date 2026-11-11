@@ -1,6 +1,8 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, TypeVar
+import copy
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Self, TypeVar
 
 from pydantic import ConfigDict, Field, InstanceOf, StrictBool, model_validator
 
@@ -49,6 +51,17 @@ class _FrozenOptions(Options):
     # immutable, which keeps what their validators checked true
     model_config = ConfigDict(frozen=True)
 
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        """Return a copy of these options with the fields 'update' gives, validated as a new instance would be.
+
+        The fields given explicitly stay given, so the copy inherits from its context only what the original left
+        unset. 'deep' copies the values held as well.
+        """
+        fields = {name: getattr(self, name) for name in self.model_fields_set}
+        if deep:
+            fields = copy.deepcopy(fields)
+        return type(self)(**fields, **(update or {}))
+
 
 class BaseEntity(_FrozenOptions, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
@@ -69,9 +82,6 @@ class BaseEntity(_FrozenOptions, Generic[EntityT]):
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph.
     """
-
-    # Validated again wherever an instance is handed over, since 'model_copy(update=...)' derives a variant unvalidated
-    model_config = ConfigDict(revalidate_instances="always")
 
     # The class of the scene options configuring the solver that simulates the entity, or None for an entity simulated
     # by no solver of its own, such as a hybrid entity, whose parts are entities of their own
