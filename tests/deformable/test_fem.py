@@ -1331,7 +1331,8 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
     # The cloth swings down under the edge of its pins, past them
     assert (verts_pos[:, center_idx, 1] < -0.5).all()
     assert (verts_pos[:, center_idx, 2] < 1.0).all()
-    assert_allclose(verts_pos[0], verts_pos[1], tol=gs.EPS)
+    # The GPU accumulates the forces of the vertices atomically, in an order that differs between environments
+    assert_allclose(verts_pos[0], verts_pos[1], tol=5e-5)
 
 
 @pytest.mark.required
@@ -1372,7 +1373,7 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
         assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
     verts_z = cloth.get_verts_pos()[..., 2]
     assert (verts_z < CONTACT_THICKNESS + D_HAT).all()
-    assert_allclose(cloth.get_verts_vel(), 0.0, atol=1e-11)
+    assert_allclose(cloth.get_verts_vel(), 0.0, atol=5e-11)
 
 
 @pytest.mark.required

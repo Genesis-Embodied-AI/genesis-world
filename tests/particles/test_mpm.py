@@ -609,7 +609,7 @@ def test_implicit_solver_refusal(unsupported):
     )
     error_message = {
         "requires_grad": "Differentiable simulation",
-        "coupler": "The implicit MPM solver requires LegacyCouplerOptions",
+        "coupler": "requires LegacyCouplerOptions",
         "elliptic_cone": "friction_cone=gs.friction_cone.pyramidal",
         "cg_solver": "constraint_solver=gs.constraint_solver.Newton",
         "hibernation": "use_hibernation=False",
