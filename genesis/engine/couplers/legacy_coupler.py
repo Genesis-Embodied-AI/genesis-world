@@ -55,7 +55,7 @@ from genesis.utils.geom import (
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
-from genesis.utils.simt import requires_deterministic_accumulation
+from genesis.utils.simt import ExactSums, func_exact_sum_add, func_exact_sum_take, requires_deterministic_accumulation
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
@@ -119,9 +119,6 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     rigid_segments_corners: qd.Tensor = field(
         (float, (3, 3)), shape=(RIGID_SEGMENTS,), kind=DataKind.CONSTANT, labels=RIGID_SPH
     )
-    # The rigid segments of each link span links_segment_start[i_l] to links_segment_start[i_l + 1], the segments being
-    # sorted by link
-    links_segment_start: qd.Tensor = field(int, shape=(RIGID_LINKS + 1,), kind=DataKind.CONSTANT, labels=RIGID_SPH)
     # Whether each geom takes part in each environment, the variants of a heterogeneous entity being active in some alone
     geoms_is_active: qd.Tensor = field(bool, shape=(RIGID_GEOMS, ENVS), kind=DataKind.CONSTANT, labels=RIGID_SPH)
     # Whether liquid lies around each segment over the substep
@@ -135,6 +132,8 @@ class SPHBoundaries(Data, kind=DataKind.SCRATCH):
     # FIXME: The added mass also slows down the transients of a light body. Compensating it with the force of the added
     # mass at the previous acceleration of the link, which would restore them, makes the light thin bodies diverge again.
     links_added_mass: qd.Tensor = field(float, shape=(RIGID_LINKS, ENVS), labels=RIGID_SPH)
+    # The added mass of each link summed over its segments, the same whatever the order of the segments
+    links_added_mass_sums: ExactSums = field(labels=RIGID_SPH)
 
 
 class LegacyCouplerState(Data, kind=DataKind.STATE):
@@ -454,20 +453,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             rigid_segments_corners_bary[is_kept],
         )
         has_rigid_sph = has_rigid_sph and len(rigid_segments_tri_idx) > 0
-        # The segments are sorted by link, so that each link sums its own in a fixed order (see 'links_segment_start')
-        geoms_link_idx = np.zeros(self.rigid_solver.n_geoms, dtype=gs.np_int)
-        for geom in geoms:
-            geoms_link_idx[geom.idx] = geom.link.idx
-        rigid_segments_link_idx = geoms_link_idx[rigid_tris_geom_idx[rigid_segments_tri_idx]]
-        rigid_segments_order = np.argsort(rigid_segments_link_idx, kind="stable")
-        rigid_segments_tri_idx = rigid_segments_tri_idx[rigid_segments_order]
         rigid_segments_corners = np.einsum(
-            "nci,nij->ncj",
-            rigid_segments_corners_bary[rigid_segments_order],
-            rigid_tris_verts_pos[rigid_segments_tri_idx],
-        )
-        links_segment_start = np.searchsorted(
-            rigid_segments_link_idx[rigid_segments_order], np.arange(self.rigid_solver.n_links + 1)
+            "nci,nij->ncj", rigid_segments_corners_bary, rigid_tris_verts_pos[rigid_segments_tri_idx]
         )
 
         # Radon's 7-point rule on the triangle, exact up to degree 5
@@ -500,6 +487,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid_segments=len(rigid_segments_tri_idx),
                 rigid_links=self.rigid_solver.n_links,
                 rigid_geoms=self.rigid_solver.n_geoms,
+                exact_sum_slots=self.rigid_solver.n_links,
+                exact_sum_bins=3,
                 **hash_grid_sizes(math.prod(self.sph_solver.hash_grid_res)),
             ),
             values=dict(
@@ -537,7 +526,10 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             rigid_segments_geom_idx = rigid_tris_geom_idx[rigid_segments_tri_idx]
             self.sph_boundaries.rigid_segments_geom_idx.from_numpy(rigid_segments_geom_idx)
             self.sph_boundaries.rigid_segments_corners.from_numpy(rigid_segments_corners.astype(gs.np_float))
-            self.sph_boundaries.links_segment_start.from_numpy(links_segment_start.astype(gs.np_int))
+            # Units from 2^-40 kg up to 2^24 kg, 2^32 apart (see ExactSums)
+            self.sph_boundaries.links_added_mass_sums.bins_unit.from_numpy(
+                2.0 ** np.array([-40.0, -8.0, 24.0], dtype=gs.np_float)
+            )
             self.sph_boundaries.geoms_is_active.from_numpy(geoms_is_active)
 
         # The liquid sampled inside a coupled body, or closer to its surface than the half particle size at which liquid
@@ -1559,38 +1551,47 @@ def kernel_sph_boundaries_impulse(
             sph_boundaries.segments_is_wet[i_sg, i_b] = is_wet
 
     # The links of the rigid geoms take the impulse of their wet segments, and the mass of the liquid one particle size
-    # thick over them as added mass (see 'links_added_mass'). Each link sums its own segments, which lie next to one
-    # another, in their order.
+    # thick over them as added mass (see 'links_added_mass')
     if qd.static(legacy_coupler_config.has_rigid_sph):
         particle_size = sph_info.particle_size[None]
+        for i_rs, i_b in qd.ndrange(
+            sph_boundaries.rigid_segments_geom_idx.shape[0],
+            sph_boundaries.links_added_mass.shape[1],
+            axes=qd.static(eoa(sph_boundaries.links_added_mass)),
+        ):
+            i_sg = n_fem_segments + i_rs
+            if sph_boundaries.segments_is_wet[i_sg, i_b]:
+                i_g = sph_boundaries.rigid_segments_geom_idx[i_rs]
+                i_l = geoms_info.link_idx[i_g]
+                segment_mass = sph_boundaries.rho_rest[None] * sph_boundaries.segments.area[i_sg, i_b] * particle_size
+                func_exact_sum_add(i_l, i_b, segment_mass, sph_boundaries.links_added_mass_sums)
         for i_l, i_b in qd.ndrange(
             *sph_boundaries.links_added_mass.shape, axes=qd.static(eoa(sph_boundaries.links_added_mass))
         ):
+            sph_boundaries.links_added_mass[i_l, i_b] = func_exact_sum_take(
+                i_l, i_b, sph_boundaries.links_added_mass_sums
+            )
+        for i_rs, i_b in qd.ndrange(
+            sph_boundaries.rigid_segments_geom_idx.shape[0],
+            sph_boundaries.links_added_mass.shape[1],
+            axes=qd.static(eoa(sph_boundaries.links_added_mass)),
+        ):
+            i_sg = n_fem_segments + i_rs
+            i_g = sph_boundaries.rigid_segments_geom_idx[i_rs]
+            i_l = geoms_info.link_idx[i_g]
             I_l = [i_l, i_b] if qd.static(legacy_coupler_config.is_links_info_batched) else i_l
-            i_sg_start = n_fem_segments + sph_boundaries.links_segment_start[i_l]
-            i_sg_end = n_fem_segments + sph_boundaries.links_segment_start[i_l + 1]
-            added_mass = gs.qd_float(0.0)
-            for i_sg in range(i_sg_start, i_sg_end):
-                if sph_boundaries.segments_is_wet[i_sg, i_b]:
-                    segment_volume = sph_boundaries.segments.area[i_sg, i_b] * particle_size
-                    added_mass = added_mass + sph_boundaries.rho_rest[None] * segment_volume
-            sph_boundaries.links_added_mass[i_l, i_b] = added_mass
-            if not links_info.is_fixed[I_l]:
+            if sph_boundaries.segments_is_wet[i_sg, i_b] and not links_info.is_fixed[I_l]:
                 mass = links_info.inertial_mass[I_l]
-                for i_sg in range(i_sg_start, i_sg_end):
-                    if sph_boundaries.segments_is_wet[i_sg, i_b]:
-                        segment_mass = (
-                            sph_boundaries.rho_rest[None] * sph_boundaries.segments.area[i_sg, i_b] * particle_size
-                        )
-                        force = (
-                            sph_boundaries.segments_impulse[i_sg, i_b] / sph_info.substep_dt[None]
-                            - segment_mass * sph_info.gravity[i_b]
-                        ) * (mass / (mass + added_mass))
-                        func_add_external_wrench(
-                            i_l,
-                            i_b,
-                            sph_boundaries.segments.centroid[i_sg, i_b],
-                            force,
-                            links_state,
-                            legacy_coupler_config.is_external_wrench_exact,
-                        )
+                segment_mass = sph_boundaries.rho_rest[None] * sph_boundaries.segments.area[i_sg, i_b] * particle_size
+                force = (
+                    sph_boundaries.segments_impulse[i_sg, i_b] / sph_info.substep_dt[None]
+                    - segment_mass * sph_info.gravity[i_b]
+                ) * (mass / (mass + sph_boundaries.links_added_mass[i_l, i_b]))
+                func_add_external_wrench(
+                    i_l,
+                    i_b,
+                    sph_boundaries.segments.centroid[i_sg, i_b],
+                    force,
+                    links_state,
+                    legacy_coupler_config.is_external_wrench_exact,
+                )
