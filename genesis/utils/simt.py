@@ -336,8 +336,10 @@ class ExactSums(Data, kind=DataKind.SCRATCH, shape=(EXACT_SUM_SLOTS, EXACT_SUM_B
     bins_hi: qd.Tensor = field(int)
     # The unit of each bin, a power of two, in increasing order
     bins_unit: qd.Tensor = field(float, shape=(EXACT_SUM_BINS,), kind=DataKind.CONSTANT)
-    # Whether a term of each slot is 'inf' or 'nan', which no bin can hold, so that the sum is 'nan'
-    slots_is_nonfinite: qd.Tensor = field(bool, shape=(EXACT_SUM_SLOTS, ENVS))
+    # The sum of the terms of each slot that are 'inf' or 'nan', which no bin can hold and which the sum takes, 0 without
+    # any. It is the same whatever the order of the terms, 'nan' absorbing every term and the infinities of opposite
+    # signs giving 'nan'.
+    slots_nonfinite: qd.Tensor = field(float, shape=(EXACT_SUM_SLOTS, ENVS))
 
 
 @qd.func
@@ -350,7 +352,7 @@ def func_exact_sum_add(i_s: int, i_b: int, value: float, exact_sums: ExactSums):
     halves, the low half carrying into the high one.
     """
     if not qd_isfinite(value):
-        exact_sums.slots_is_nonfinite[i_s, i_b] = True
+        qd.atomic_add(exact_sums.slots_nonfinite[i_s, i_b], value)
     remainder = qd.select(qd_isfinite(value), value, 0.0)
     for k_ in range(exact_sums.bins_unit.shape[0]):
         k = exact_sums.bins_unit.shape[0] - 1 - k_
@@ -369,7 +371,7 @@ def func_exact_sum_take(i_s: int, i_b: int, exact_sums: ExactSums):
     """
     Return the sum of a slot of exact sums, from the highest bin down, and empty the slot for the next sum.
 
-    The sum is 'nan' if a term was 'inf' or 'nan', for the reader to detect.
+    The sum is 'inf' or 'nan' if a term was, for the reader to detect.
     """
     total = gs.qd_float(0.0)
     for k_ in range(exact_sums.bins_unit.shape[0]):
@@ -380,7 +382,6 @@ def func_exact_sum_take(i_s: int, i_b: int, exact_sums: ExactSums):
         total = total + qd.cast(count, gs.qd_float) * exact_sums.bins_unit[k]
         exact_sums.bins_lo[i_s, k, i_b] = 0
         exact_sums.bins_hi[i_s, k, i_b] = 0
-    if exact_sums.slots_is_nonfinite[i_s, i_b]:
-        total = qd.math.nan
-        exact_sums.slots_is_nonfinite[i_s, i_b] = False
+    total = total + exact_sums.slots_nonfinite[i_s, i_b]
+    exact_sums.slots_nonfinite[i_s, i_b] = 0.0
     return total
