@@ -24,6 +24,7 @@ from genesis.utils.geom import (
     func_hash_wrap_cell,
     hash_grid_sizes,
 )
+from genesis.utils.misc import get_gpu_core_count
 from genesis.utils.simt import (
     ExactSums,
     func_exact_sum_add,
@@ -209,8 +210,9 @@ class SPHConfig(Config):
     has_boundary: bool
     # Whether the DFSPH solve sums its errors exactly, for a fixed order of the sums (see SPHEnvsSolve)
     is_deterministic: bool
-    # The base-2 logarithm of the lanes of a GPU subgroup tile that take a particle and its neighbors together, one CPU
-    # thread taking it alone (see func_for_all_neighbors)
+    # The base-2 logarithm of the lanes of a GPU subgroup tile that take a particle and its neighbors together, one thread
+    # taking it alone on CPU and once the particles of every environment outnumber the GPU cores, which one thread per
+    # particle already saturates (see func_for_all_neighbors)
     log2_neighbor_lanes: int
 
 
@@ -305,7 +307,7 @@ class SPHSolver(ParticleSolver):
             and bool(np.any(self.boundary_upper - self.boundary_lower < 2 * self._support_radius)),
             has_boundary=self.is_active and is_opted_in(SPHState.boundary),
             is_deterministic=is_deterministic,
-            log2_neighbor_lanes=3 if gs.backend != gs.cpu else 0,
+            log2_neighbor_lanes=3 if 0 < self._n_particles * self._B <= get_gpu_core_count() else 0,
         )
         info_values = {}
         viscosity_eps = 0.01 * self._support_radius**2

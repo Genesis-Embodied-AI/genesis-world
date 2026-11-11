@@ -51,7 +51,7 @@ from genesis.utils.geom import (
     qd_transform_by_quat,
     qd_transform_by_trans_quat,
 )
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.misc import get_gpu_core_count, qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import triangle_face_normal
 from genesis.utils.sdf import SDFInfo
 from genesis.utils.simt import (
@@ -194,8 +194,11 @@ class LegacyCouplerConfig(Config):
     is_links_info_batched: bool
     # Whether the SPH liquid sums its forces on the rigid links exactly (see 'cfrc_external_sums' in LinksState)
     is_external_wrench_exact: bool
-    # Whether the lanes of a GPU subgroup take a particle together, where one CPU thread takes it alone
-    enable_cooperative_kernels: bool
+    # Whether the lanes of a GPU subgroup take a particle of the SPH liquid together, and a segment of its boundaries,
+    # one thread taking it alone on CPU and once the particles, or the segments, of every environment outnumber the GPU
+    # cores, which one thread each already saturates
+    enable_cooperative_particles: bool
+    enable_cooperative_segments: bool
 
 
 def split_triangles(
@@ -346,6 +349,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         has_mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
         has_mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
         has_rigid_sph = self._build_sph_boundaries(self.rigid_sph_geoms)
+        n_segments = self.sph_boundaries.segments_impulse.shape[0] if has_rigid_sph or self.has_fem_sph else 0
         self.legacy_coupler_config = LegacyCouplerConfig(
             has_rigid_mpm=has_rigid_mpm,
             has_rigid_sph=has_rigid_sph,
@@ -357,7 +361,8 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_sph=self.has_fem_sph,
             is_links_info_batched=self.rigid_solver.rigid_config.batch_links_info,
             is_external_wrench_exact=has_rigid_sph and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums),
-            enable_cooperative_kernels=gs.backend != gs.cpu,
+            enable_cooperative_particles=0 < self.sph_solver.n_particles * self.sim._B <= get_gpu_core_count(),
+            enable_cooperative_segments=0 < n_segments * self.sim._B <= get_gpu_core_count(),
         )
 
         self.legacy_coupler_state = LegacyCouplerState(
@@ -1429,7 +1434,7 @@ def kernel_place_sph_boundary_segments(
     # The kernel volume of the solids behind the segments around each particle, its gradient and first moment, and the
     # rate at which the moving segments change it (see SPHBoundaryParticles). On GPU, the lanes of a subgroup take a
     # particle together, striding the segments of each cell around it, then sum their shares along a fixed tree.
-    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_kernels else 1)
+    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_particles else 1)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
     n_particles = sph_state.particles.pos.shape[0]
     for i_t in range(sph_state.particles.pos.shape[1] * n_particles * N_LANES):
@@ -1548,7 +1553,7 @@ def kernel_sph_boundaries_impulse(
 
     # Each segment takes the opposite of the impulse it gives the particles around it. On GPU, the lanes of a subgroup
     # take a segment together, striding the particles of each cell around it (see kernel_place_sph_boundary_segments).
-    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_kernels else 1)
+    N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_segments else 1)
     n_segments = sph_boundaries.segments_impulse.shape[0]
     for i_t in range(sph_boundaries.segments_impulse.shape[1] * n_segments * N_LANES):
         i_lane = i_t % N_LANES
