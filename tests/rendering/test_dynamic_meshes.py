@@ -19,9 +19,8 @@ from .conftest import RENDERER_TYPE
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_batch_deformable_render(monkeypatch, png_snapshot):
     # Having many particles in the scene creates artifacts that are not deterministic between different hardware. Every
-    # visible feature spans several pixels, since a renderer rasterizes sub-pixel geometry its own way: the liquid holds
-    # a few hundred particles about 5 pixels wide, and the wireframes of the solver boundaries, thinner than a pixel,
-    # are left out (see 'Reproducing Apple Software Renderer Failures Locally' in CLAUDE.md).
+    # visible feature spans several pixels, since each renderer rasterizes sub-pixel geometry its own way: the liquid
+    # holds a few hundred particles 5 pixels wide, and the sub-pixel wireframes of the solver boundaries are left out.
     png_snapshot.extension._std_err_threshold = 2.0
     png_snapshot.extension._blurred_kernel_size = 3
 
