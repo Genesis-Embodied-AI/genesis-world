@@ -1,6 +1,6 @@
 import os
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -45,8 +45,10 @@ from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
+    from genesis.engine.materials.base import Material
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
+    from genesis.options.surfaces import Surface
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
@@ -160,14 +162,14 @@ class Simulator(BatchedMixin, BuildableMixin, RBC):
 
     def add_entity(
         self,
-        morph: Morph | None = None,
-        material=None,
-        surface=None,
-        visualize_contact=False,
+        morph: Morph | Sequence[Morph] | None = None,
+        material: "Material | None" = None,
+        surface: "Surface | None" = None,
+        visualize_contact: bool = False,
         name: str | None = None,
         options: "gs.entities.BaseEntity | None" = None,
         desc: "EntityDescription | None" = None,
-    ):
+    ) -> "Entity":
         if desc is not None:
             material = desc.material
             options = desc.options

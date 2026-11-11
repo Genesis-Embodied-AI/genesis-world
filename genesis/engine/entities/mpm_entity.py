@@ -1,13 +1,20 @@
 import functools
+from typing import TYPE_CHECKING
 
 import torch
 
 import quadrants as qd
 
 import genesis as gs
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.mpm_solver import MPMSolver
 
 
 def assert_muscle(method):
@@ -51,19 +58,19 @@ class MPMEntity(ParticleEntity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        vvert_start,
-        vface_start,
-        options,
+        scene: "Scene",
+        solver: "MPMSolver",
+        material: "gs.materials.MPM.Base",
+        morph: Morph,
+        surface: Surface,
+        particle_size: float,
+        idx: int,
+        particle_start: int,
+        vvert_start: int,
+        vface_start: int,
+        options: "gs.entities.MPM",
         name: str | None = None,
-    ):
+    ) -> None:
         need_skinning = not isinstance(
             material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
         )

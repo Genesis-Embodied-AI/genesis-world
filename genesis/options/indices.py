@@ -1,7 +1,7 @@
 """Selections of the links, geoms and vertices of an entity, keying the options set on them."""
 
 from fnmatch import fnmatchcase
-from typing import Annotated
+from typing import Annotated, Any
 
 import numpy as np
 
@@ -32,7 +32,9 @@ class _Selection(Options):
     """
 
     @model_serializer(mode="wrap")
-    def _dump_hashable(self, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
+    def _dump_hashable(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> tuple[tuple[str, Any], ...] | dict[str, Any]:
         dumped = handler(self)
         return tuple(dumped.items()) if info.mode == "python" else dumped
 

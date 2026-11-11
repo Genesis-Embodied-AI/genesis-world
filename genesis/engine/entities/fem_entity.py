@@ -1,5 +1,6 @@
 from functools import wraps
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -11,10 +12,16 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.rigid_entity import RigidLink
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, unique_rows
 
 from .base_entity import Entity
+
+if TYPE_CHECKING:
+    from genesis.engine.scene import Scene
+    from genesis.engine.solvers.fem_solver import FEMSolver
 
 
 class FEMVisGeom(RBC):
@@ -149,20 +156,20 @@ class FEMEntity(Entity):
 
     def __init__(
         self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        idx,
-        options,
-        v_start=0,
-        el_start=0,
-        s_start=0,
-        vvert_start=0,
-        vface_start=0,
+        scene: "Scene",
+        solver: "FEMSolver",
+        material: "gs.materials.FEM.Base",
+        morph: Morph,
+        surface: Surface,
+        idx: int,
+        options: "gs.entities.FEM",
+        v_start: int = 0,
+        el_start: int = 0,
+        s_start: int = 0,
+        vvert_start: int = 0,
+        vface_start: int = 0,
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
         self._v_start = v_start  # offset for vertex index of elements

@@ -26,6 +26,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import assign_indexed_tensor, broadcast_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
@@ -194,8 +195,8 @@ class KinematicSolver(Solver):
         idx: int,
         material: Kinematic,
         morph: Morph | Sequence[Morph] | None,
-        surface: "gs.surfaces.Surface | None",
-        options: "gs.entities.Kinematic",
+        surface: Surface | None,
+        options: "gs.entities.Kinematic | gs.entities.Rigid",
         visualize_contact: bool = False,
         name: str | None = None,
         desc: KinematicEntityDescription | None = None,

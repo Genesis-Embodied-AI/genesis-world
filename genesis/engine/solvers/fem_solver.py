@@ -37,7 +37,9 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, no_grad
+from genesis.options.morphs import Morph
 from genesis.options.solvers import FEMOptions
+from genesis.options.surfaces import Surface
 from genesis.utils.data import (
     ENVS,
     Config,
@@ -75,6 +77,7 @@ from .base_solver import (
 )
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import EntityDescription
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
@@ -841,13 +844,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self,
         idx: int,
-        material: "gs.materials.FEM.Base",
-        morph: "gs.morphs.Morph",
-        surface: "gs.surfaces.Surface",
+        material: FEM.Base,
+        morph: Morph,
+        surface: Surface,
         options: "gs.entities.FEM",
         visualize_contact: bool = False,
         name: str | None = None,
-        desc: None = None,
+        desc: "EntityDescription | None" = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._sim.scene,
@@ -1182,8 +1185,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     @gs.assert_built
     @mutates(StateChange.MODEL)
     def set_vertex_constraints(
-        self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
-    ):
+        self,
+        verts_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
+        link_idx: int = -1,
+        is_soft_constraint: bool = False,
+        stiffness: float = 0.0,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> None:
         """
         Constrain some vertices to target positions, or to follow a rigid link.
 
@@ -1208,8 +1217,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._set_vertex_constraints(verts_idx, target_poss, link_idx, is_soft_constraint, stiffness, envs_idx)
 
     def _set_vertex_constraints(
-        self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
-    ):
+        self,
+        verts_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+        target_poss: np.typing.ArrayLike | torch.Tensor | None = None,
+        link_idx: int = -1,
+        is_soft_constraint: bool = False,
+        stiffness: float = 0.0,
+        envs_idx: int | Sequence[int] | np.ndarray | torch.Tensor | None = None,
+    ) -> None:
         """Constrain some vertices (see 'set_vertex_constraints'), also before the scene is built."""
         # Imported here to avoid a circular dependency (see 'substep_pre_coupling')
         from genesis.engine.couplers import IPCCoupler

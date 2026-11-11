@@ -1469,7 +1469,14 @@ class KinematicEntityDescription(EntityDescription):
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
         )
 
-    def _resolve_geoms(self, morph, g_infos, is_robot, link_path, resolution: Resolution):
+    def _resolve_geoms(
+        self,
+        morph: Morph,
+        g_infos: list[dict[str, Any]],
+        is_robot: bool,
+        link_path: tuple[str, ...],
+        resolution: Resolution,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Split what a parse states about the geoms of one link, and post-process its collision geometry.
 
         Post-processing convexifies the collision meshes, decomposing the ones a single hull cannot approximate within
