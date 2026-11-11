@@ -351,7 +351,7 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
+        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,

@@ -425,10 +425,9 @@ class KinematicEntityDescription(EntityDescription):
         surface: Surface,
         solver_options: Options,
         enable_mujoco_compatibility: bool,
+        options: gs.entities.BaseEntity,
         visualize_contact: bool = False,
         name: str | None = None,
-        *,
-        options: gs.entities.BaseEntity,
     ) -> Self:
         """Resolve what an entity is created with into the description it is built from.
 

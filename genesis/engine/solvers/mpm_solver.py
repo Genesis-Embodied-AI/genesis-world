@@ -477,7 +477,7 @@ Please decrease the simulation timestep or adjust the material parameters."""
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
+        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
     ) -> "MPMEntity":
         self.add_material(material)
 

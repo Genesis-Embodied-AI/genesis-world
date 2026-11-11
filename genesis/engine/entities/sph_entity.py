@@ -40,9 +40,8 @@ class SPHEntity(ParticleEntity):
         particle_size,
         idx,
         particle_start,
-        name: str | None = None,
-        *,
         options,
+        name: str | None = None,
     ):
         super().__init__(
             scene,

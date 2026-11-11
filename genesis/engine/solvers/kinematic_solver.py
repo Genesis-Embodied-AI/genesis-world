@@ -177,7 +177,7 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, *, options, desc=None
+        self, idx, material, morph, surface, options, visualize_contact=False, name=None, desc=None
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
@@ -194,9 +194,9 @@ class KinematicSolver(Solver):
                 surface,
                 self._options,
                 self._enable_mujoco_compatibility,
+                options,
                 visualize_contact,
                 name,
-                options=options,
             )
         else:
             for _, entity_cls in self._entity_classes:

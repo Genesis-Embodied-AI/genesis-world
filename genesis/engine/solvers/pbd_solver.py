@@ -358,7 +358,7 @@ class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
+        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(

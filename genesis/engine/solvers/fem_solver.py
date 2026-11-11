@@ -831,7 +831,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_elements > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
+        self, idx, material, morph, surface, options, visualize_contact=False, name: str | None = None, desc=None
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
