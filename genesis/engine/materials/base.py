@@ -1,5 +1,4 @@
-import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import StrictBool
 
@@ -19,14 +18,3 @@ class Material[EntityT: "Entity"](Options):
     """
 
     use_visual_raycasting: StrictBool = False
-
-    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "Material":
-        # A material binds its kernels to itself as it is built, so a copy is built anew from the fields given
-        # explicitly rather than holding the kernels of the original. The fields the solver sets are left out.
-        return type(self)(
-            **{
-                name: copy.deepcopy(value, memo)
-                for name, value in self
-                if name in self.model_fields_set and not type(self).model_fields[name].exclude
-            }
-        )
