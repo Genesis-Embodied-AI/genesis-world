@@ -1,0 +1,21 @@
+examples/rigid/latch_behavior.py
+  s_abba95c078c493::t_adbb63101b1bba 199-216
+  s_abba95c078c493::t_0271540957b38d 138-143
+  s_abba95c078c493::t_90b192a9013daf 123,125-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "140c7e1e1fb0af295b8578c30ef39821e70b3841",
+  "prompts": {},
+  "sessions": {
+    "s_abba95c078c493": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dc341394-3556-45b0-9d8b-a7ae46a7da39",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
