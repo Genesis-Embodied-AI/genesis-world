@@ -256,16 +256,6 @@ class Rigid(BaseEntity["RigidEntity"]):
             )
         return self
 
-    @property
-    def has_link_density(self) -> bool:
-        """Whether the link and geom options give a density to some link or geom."""
-        links_options = self.links.values()
-        geoms_options = [*self.geoms.values(), *(geom for link in links_options for geom in link.geoms.values())]
-        return any(
-            options.material is not None and options.material.rho is not None
-            for options in (*links_options, *geoms_options)
-        )
-
     def get_geoms_material(self, link_path: tuple[str, ...], geoms_name: list[str]) -> list[materials.Rigid | None]:
         """Return the material the link and geom options give each collision geom of a link, or None where none.
 

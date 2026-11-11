@@ -569,7 +569,15 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     self._ipc_constitution_tabular.insert(self._ipc_abd)
 
                 # An affine body holds the density of its entity alone, over every link merged into it
-                if entity._options.has_link_density:
+                links_options = entity._options.links.values()
+                geoms_options = [
+                    *entity._options.geoms.values(),
+                    *(geom_options for link_options in links_options for geom_options in link_options.geoms.values()),
+                ]
+                if any(
+                    options.material is not None and options.material.rho is not None
+                    for options in (*links_options, *geoms_options)
+                ):
                     gs.raise_exception(
                         f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
                         "the link and geom options cannot give a density."
