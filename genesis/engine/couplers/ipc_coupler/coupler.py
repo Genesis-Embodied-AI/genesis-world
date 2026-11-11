@@ -16,6 +16,8 @@ from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT
 from genesis.engine.entities.rigid_entity.rigid_entity import compute_forward_kinematics
 from genesis.engine.materials.FEM.cloth import Cloth
 from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin
+from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
+from genesis.engine.solvers.rigid.data import LinksState
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ENVS, Data, DataKind, field
@@ -92,6 +94,24 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     assert is_constrained_attr and aim_transform_attr
     uipc.view(is_constrained_attr)[0] = 1
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
+
+
+@qd.kernel
+def kernel_add_links_coupling_wrench(
+    links_idx: qd.types.ndarray(), forces: qd.types.ndarray(), torques: qd.types.ndarray(), links_state: LinksState
+):
+    """Apply the coupling force at the origin of each link and the coupling torque, over the next substep."""
+    for i_l_, i_b in qd.ndrange(links_idx.shape[0], forces.shape[0]):
+        i_l = links_idx[i_l_]
+        func_add_external_wrench(
+            i_l,
+            i_b,
+            links_state.pos[i_l, i_b],
+            force=qd.Vector([forces[i_b, i_l_, 0], forces[i_b, i_l_, 1], forces[i_b, i_l_, 2]]),
+            torque=qd.Vector([torques[i_b, i_l_, 0], torques[i_b, i_l_, 1], torques[i_b, i_l_, 2]]),
+            links_state=links_state,
+            is_exact=False,
+        )
 
 
 class IPCCouplerState(Data, kind=DataKind.STATE):
@@ -1178,8 +1198,9 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 "the simulation timestep."
             )
 
-        self.rigid_solver.apply_links_external_wrench(
-            self._coupling_data.out_forces if self.sim.n_envs > 0 else self._coupling_data.out_forces[0],
-            self._coupling_data.out_torques if self.sim.n_envs > 0 else self._coupling_data.out_torques[0],
-            links_idx=self._coupling_data.links_idx,
+        kernel_add_links_coupling_wrench(
+            self._coupling_data.links_idx,
+            self._coupling_data.out_forces,
+            self._coupling_data.out_torques,
+            self.rigid_solver.dyn_state.links,
         )

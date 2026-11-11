@@ -103,6 +103,7 @@ def kernel_update_hybrid_soft_part(
                 i_b,
                 x_pos,
                 force=-mass_real * (vel_d / rigid_dt),
+                torque=qd.Vector.zero(gs.qd_float, 3),
                 links_state=links_state,
                 is_exact=mpm_config.is_deterministic and not is_backward,
             )

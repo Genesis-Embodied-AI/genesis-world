@@ -25,7 +25,7 @@ from genesis.engine.solvers.mpm_solver import (
 from genesis.engine.solvers.particle_solver import func_add_particles_momentum, func_get_particles_mean_vel
 from genesis.engine.solvers.pbd_solver import PBDInfo, PBDState
 from genesis.engine.solvers.rigid.abd.forward_dynamics import func_vel_at_point
-from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench, func_apply_external_wrench
+from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GeomsInfo, GeomsState, LinksInfo, LinksState, RigidData, RigidInfo
 from genesis.engine.solvers.sph_solver import (
     SPHInfo,
@@ -971,7 +971,8 @@ def func_point_vel_after_collisions_with_rigid_geoms(
                         i_b,
                         pos_world,
                         force,
-                        links_state,
+                        torque=qd.Vector.zero(gs.qd_float, 3),
+                        links_state=links_state,
                         is_exact=mpm_config.is_deterministic and not is_backward,
                     )
     return vel
@@ -1218,12 +1219,14 @@ def kernel_fem_surface_force(
                                 is_colliding_any = True
                             vel_fem_sv = vel_new
                         if is_colliding_any:
-                            func_apply_external_wrench(
+                            func_add_external_wrench(
                                 geoms_info.link_idx[i_g],
                                 i_b,
                                 pos,
                                 force=-delta_mv / rigid_info.substep_dt[None],
+                                torque=qd.Vector.zero(gs.qd_float, 3),
                                 links_state=links_state,
+                                is_exact=False,
                             )
 
         if qd.static(legacy_coupler_config.has_fem_mpm):
@@ -1349,7 +1352,15 @@ def func_pbd_collide_with_rigid_geom(
 
         delta_mv = mass * (new_vel - vel)
         force = -delta_mv / rigid_info.substep_dt[None]
-        func_apply_external_wrench(geoms_info.link_idx[i_g], i_b, pos_world, force, links_state)
+        func_add_external_wrench(
+            geoms_info.link_idx[i_g],
+            i_b,
+            pos_world,
+            force,
+            torque=qd.Vector.zero(gs.qd_float, 3),
+            links_state=links_state,
+            is_exact=False,
+        )
 
     return new_pos, new_vel
 
@@ -2003,6 +2014,7 @@ def kernel_sph_boundaries_impulse(
                     i_b,
                     sph_boundaries.segments.centroid[i_sg, i_b],
                     force,
-                    links_state,
-                    legacy_coupler_config.is_external_wrench_exact,
+                    torque=qd.Vector.zero(gs.qd_float, 3),
+                    links_state=links_state,
+                    is_exact=legacy_coupler_config.is_external_wrench_exact,
                 )
