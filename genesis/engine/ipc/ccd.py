@@ -138,18 +138,25 @@ def func_additive_ccd(
             if distance2 <= thickness2:
                 toi = 0.0
                 break
-            mean = qd.Vector.zero(gs.qd_float, 3)
-            for i_v in qd.static(range(n_a)):
-                mean += displacements_a[i_v, :]
-            for i_v in qd.static(range(n_b)):
-                mean += displacements_b[i_v, :]
-            mean = mean / (n_a + n_b)
+            # The displacements are summed in pairs in a fixed order per stencil, which sets the rounding of their mean
+            total = displacements_a[0, :] + displacements_b[0, :]
+            if qd.static(n_a == 1 and n_b == 3):
+                total = (displacements_b[0, :] + displacements_b[1, :]) + (
+                    displacements_b[2, :] + displacements_a[0, :]
+                )
+            elif qd.static(n_a == 2 and n_b == 2):
+                total = (displacements_a[0, :] + displacements_a[1, :]) + (
+                    displacements_b[0, :] + displacements_b[1, :]
+                )
+            elif qd.static(n_a == 1 and n_b == 2):
+                total = (displacements_a[0, :] + displacements_b[0, :]) + displacements_b[1, :]
+            shift = -(1.0 / (n_a + n_b)) * total
             for i_v in qd.static(range(n_a)):
                 for k in qd.static(range(3)):
-                    relative_a[i_v, k] = displacements_a[i_v, k] - mean[k]
+                    relative_a[i_v, k] = displacements_a[i_v, k] + shift[k]
             for i_v in qd.static(range(n_b)):
                 for k in qd.static(range(3)):
-                    relative_b[i_v, k] = displacements_b[i_v, k] - mean[k]
+                    relative_b[i_v, k] = displacements_b[i_v, k] + shift[k]
             max_displacement = _func_max_row_norm(relative_a) + _func_max_row_norm(relative_b)
             if max_displacement <= 0.0:
                 toi = 1.0

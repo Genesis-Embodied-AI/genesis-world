@@ -214,15 +214,21 @@ def func_mollified_barrier_gradient_hessian(
         )
 
         # Projection of the symmetric 2x2 block onto the positive semi-definite cone: a negative eigenvalue is clamped to
-        # zero, which leaves the larger eigenvalue times the outer product of its unit eigenvector. The eigenvector is
-        # the column of the block minus the smaller eigenvalue that involves no cancellation: forming that whole
-        # difference instead would leave the smaller diagonal entry with an absolute error of the order of the rounding
-        # of the larger eigenvalue.
+        # zero, which leaves the larger eigenvalue times the outer product of its unit eigenvector. Both are formed
+        # without cancellation, the diagonal entries spanning many orders of magnitude: the eigenvalue of the sign
+        # opposite to the half trace comes from the determinant, and the eigenvector is the column of the block minus
+        # the smaller eigenvalue whose entries add up instead of cancelling.
         half_trace = 0.5 * (eigen_cross + eigen_distance)
         half_gap = 0.5 * (eigen_cross - eigen_distance)
         radius = qd.sqrt(half_gap * half_gap + eigen_coupling * eigen_coupling)
+        det = eigen_cross * eigen_distance - eigen_coupling * eigen_coupling
+        eigen_min = half_trace - radius
         eigen_max = half_trace + radius
-        if half_trace - radius < 0.0:
+        if half_trace < 0.0:
+            eigen_max = det / eigen_min
+        elif eigen_max > 0.0:
+            eigen_min = det / eigen_max
+        if eigen_min < 0.0:
             axis = qd.Vector([half_gap + radius, eigen_coupling])
             if half_gap < 0.0:
                 axis = qd.Vector([eigen_coupling, radius - half_gap])
