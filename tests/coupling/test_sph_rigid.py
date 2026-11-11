@@ -11,15 +11,13 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.parametrize(
-    "n_envs, pressure_solver",
+    "n_envs",
     [
-        pytest.param(0, "WCSPH", marks=pytest.mark.required),
-        (0, "DFSPH"),
-        pytest.param(2, "WCSPH", marks=pytest.mark.slow),  # ~150s
-        pytest.param(2, "DFSPH", marks=pytest.mark.slow),  # ~300s
+        pytest.param(0, marks=pytest.mark.required),
+        pytest.param(2, marks=pytest.mark.slow),  # ~300s
     ],
 )
-def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
+def test_flotation_follows_density_ratio(n_envs, show_viewer):
     PARTICLE_SIZE = 0.02
     BALL_RADIUS = 0.06
     RAFT_SIZE = (0.1, 0.1, 0.04)
@@ -35,7 +33,6 @@ def test_flotation_follows_density_ratio(n_envs, pressure_solver, show_viewer):
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
-            pressure_solver=pressure_solver,
             lower_bound=(-0.25, -0.25, -0.1),
             upper_bound=(0.25, 0.25, 1.0),
         ),

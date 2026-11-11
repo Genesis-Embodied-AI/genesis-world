@@ -735,7 +735,8 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
 
 class SPHOptions(GravityMixin, TimeBasedMixin):
     """
-    Options configuring the SPHSolver.
+    Options configuring the SPHSolver, which keeps the liquid incompressible with divergence-free smoothed particle
+    hydrodynamics (DFSPH).
 
     Note
     ----
@@ -745,8 +746,6 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     ----------
     particle_size : float, optional
         Particle diameter in meters. Defaults to 0.02.
-    pressure_solver : str, optional
-        Pressure solver type. Current supported pressure solvers are 'WCSPH' and 'DFSPH'. Defaults to 'WCSPH'.
     lower_bound : tuple, shape (3,), optional
         Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
     upper_bound : tuple, shape (3,), optional
@@ -769,7 +768,6 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     """
 
     particle_size: PositiveFloat = 0.02
-    pressure_solver: Literal["WCSPH", "DFSPH"] = "WCSPH"
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
