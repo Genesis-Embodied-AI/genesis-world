@@ -1,0 +1,19 @@
+.github/workflows/generic.yml
+  s_8dcd099535a081::t_e04ceb6f7d5070 144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "433afdaf3f6e76843cfe83646b8bfa7ea3d16c2a",
+  "prompts": {},
+  "sessions": {
+    "s_8dcd099535a081": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da3c0e53-d05e-4a1e-a959-baad879e57e4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
