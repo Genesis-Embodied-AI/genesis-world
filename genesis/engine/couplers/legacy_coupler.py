@@ -711,56 +711,6 @@ def func_project_on_bounds(
 
 
 @qd.func
-def func_active_frictions(
-    i_b: int,
-    pos: qd.types.vector(3),
-    vel: qd.types.vector(3),
-    active_geoms: qd.types.vector(3, dtype=gs.qd_int),
-    active_normals: qd.types.matrix(3, 3),
-    active_influences: qd.types.vector(3),
-    active_lambdas: qd.types.vector(3),
-    links_state: LinksState,
-    geoms_info: GeomsInfo,
-    rigid_info: RigidInfo,
-):
-    """
-    Return the velocity each active bound of an SPH particle takes back by the friction of its geom, as rows.
-
-    The friction of a geom takes back the tangential velocity relative to it by its coefficient times the normal
-    velocity change the geom caused before its restitution and its influence scaled it. The frictions of all the active
-    bounds are scaled down together so that none reverses the tangential velocity relative to its geom.
-    """
-    frictions = qd.Matrix.zero(gs.qd_float, 3, 3)
-    rvels_tan = qd.Matrix.zero(gs.qd_float, 3, 3)
-    friction_sum = qd.Vector.zero(gs.qd_float, 3)
-    for i_s in qd.static(range(3)):
-        i_g = active_geoms[i_s]
-        if i_g >= 0 and active_lambdas[i_s] > 0.0:
-            normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
-            rvel = vel - func_vel_at_point(geoms_info.link_idx[i_g], i_b, pos, links_state)
-            rvel_tan = rvel - rvel.dot(normal) * normal
-            rvel_tan_norm = rvel_tan.norm(rigid_info.EPS[None])
-            influence = active_influences[i_s]
-            rvel_normal_change = active_lambdas[i_s] / (influence * (1.0 + geoms_info.coup_restitution[i_g]))
-            friction = influence * qd.min(rvel_tan_norm, geoms_info.coup_friction[i_g] * rvel_normal_change)
-            for i_d in qd.static(range(3)):
-                frictions[i_s, i_d] = friction / rvel_tan_norm * rvel_tan[i_d]
-                rvels_tan[i_s, i_d] = rvel_tan[i_d]
-            friction_sum = friction_sum + friction / rvel_tan_norm * rvel_tan
-    # The largest share of the summed frictions that leaves the tangential velocity relative to each geom unreversed
-    scale = gs.qd_float(1.0)
-    for i_s in qd.static(range(3)):
-        if active_geoms[i_s] >= 0 and active_lambdas[i_s] > 0.0:
-            normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
-            rvel_tan = qd.Vector([rvels_tan[i_s, 0], rvels_tan[i_s, 1], rvels_tan[i_s, 2]])
-            friction_tan = friction_sum - friction_sum.dot(normal) * normal
-            friction_along = friction_tan.dot(rvel_tan)
-            if friction_along > rvel_tan.norm_sqr():
-                scale = qd.min(scale, rvel_tan.norm_sqr() / friction_along)
-    return frictions * scale
-
-
-@qd.func
 def func_sph_particle_collide_with_rigid_geoms(
     i_p: int,
     i_b: int,
@@ -831,18 +781,41 @@ def func_sph_particle_collide_with_rigid_geoms(
         if not is_done:
             is_last_pass = (is_projected and not is_pressure_pass) or i_pass == N_PASSES_MAX - 1
             if is_last_pass:
-                active_frictions = func_active_frictions(
-                    i_b,
-                    pos,
-                    vel,
-                    active_geoms,
-                    active_normals,
-                    active_influences,
-                    active_lambdas,
-                    links_state,
-                    geoms_info,
-                    rigid_info,
-                )
+                # The friction of each active bound takes back the tangential velocity relative to its geom by its
+                # coefficient times the normal velocity change the geom caused before its restitution and its influence
+                # scaled it. The frictions of all the active bounds are scaled down together so that none reverses the
+                # tangential velocity relative to its geom.
+                frictions = qd.Matrix.zero(gs.qd_float, 3, 3)
+                rvels_tan = qd.Matrix.zero(gs.qd_float, 3, 3)
+                friction_sum = qd.Vector.zero(gs.qd_float, 3)
+                for i_s in qd.static(range(3)):
+                    i_g = active_geoms[i_s]
+                    if i_g >= 0 and active_lambdas[i_s] > 0.0:
+                        normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
+                        rvel = vel - func_vel_at_point(geoms_info.link_idx[i_g], i_b, pos, links_state)
+                        rvel_tan = rvel - rvel.dot(normal) * normal
+                        rvel_tan_norm = rvel_tan.norm(rigid_info.EPS[None])
+                        influence = active_influences[i_s]
+                        rvel_normal_change = active_lambdas[i_s] / (
+                            influence * (1.0 + geoms_info.coup_restitution[i_g])
+                        )
+                        friction = influence * qd.min(rvel_tan_norm, geoms_info.coup_friction[i_g] * rvel_normal_change)
+                        for i_d in qd.static(range(3)):
+                            frictions[i_s, i_d] = friction / rvel_tan_norm * rvel_tan[i_d]
+                            rvels_tan[i_s, i_d] = rvel_tan[i_d]
+                        friction_sum = friction_sum + friction / rvel_tan_norm * rvel_tan
+                # The largest share of the summed frictions that leaves the tangential velocity relative to each geom
+                # unreversed
+                scale = gs.qd_float(1.0)
+                for i_s in qd.static(range(3)):
+                    if active_geoms[i_s] >= 0 and active_lambdas[i_s] > 0.0:
+                        normal = qd.Vector([active_normals[i_s, 0], active_normals[i_s, 1], active_normals[i_s, 2]])
+                        rvel_tan = qd.Vector([rvels_tan[i_s, 0], rvels_tan[i_s, 1], rvels_tan[i_s, 2]])
+                        friction_tan = friction_sum - friction_sum.dot(normal) * normal
+                        friction_along = friction_tan.dot(rvel_tan)
+                        if friction_along > rvel_tan.norm_sqr():
+                            scale = qd.min(scale, rvel_tan.norm_sqr() / friction_along)
+                active_frictions = frictions * scale
             is_projected = True
             is_kept_used = not is_pressure_pass and is_kept_all
             n_items = qd.select(is_kept_used, n_kept, n_geoms)
