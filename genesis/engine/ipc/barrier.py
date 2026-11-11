@@ -3,13 +3,16 @@
 The barrier of a pair at squared distance D is b(r) = kappa (r - 1)^2 ln(r)^2 with r = (D - xi^2) / (d_hat^2 + 2 d_hat xi),
 xi the contact thickness of the pair and d_hat the activation distance beyond it. It is active for xi^2 < D < (d_hat +
 xi)^2, where 0 < r < 1, and vanishes with its first derivative at the outer bound. The gradient and the Hessian with
-respect to the stencil vertices come from the squared distance D and its gradient, the Hessian being projected onto the
-positive semi-definite cone analytically.
+respect to the stencil vertices come from the squared distance D and its derivatives, the Hessian being projected onto
+the positive semi-definite cone.
 """
 
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
+
+from .distance import func_edge_edge_cross_norm2, func_edge_edge_flagged_distance2_hessian
 
 
 @qd.func
@@ -148,104 +151,61 @@ def func_barrier_gradient_hessian(
 
 @qd.func
 def func_mollified_barrier_gradient_hessian(
+    flag: int,
+    ea0: qd.types.vector(3),
+    ea1: qd.types.vector(3),
+    eb0: qd.types.vector(3),
+    eb1: qd.types.vector(3),
     distance2: float,
-    distance2_gradient,
-    cross_norm2: float,
-    cross_norm2_gradient,
+    distance2_gradient: qd.types.vector(12),
     mollifier_threshold: float,
     d_hat: float,
     thickness: float,
     kappa: float,
-    hessian_clamp_ratio: float,
+    rank_tolerance: float,
+    eigen_tolerance: float,
+    max_sweeps: int,
 ):
-    """Compute the gradient and the positive semi-definite Hessian of the mollified edge-edge barrier.
+    """Compute the gradient and the positive semi-definite Hessian of the mollified edge-edge barrier m(c) b(D).
 
-    The barrier is the one of func_mollified_barrier. 'distance2_gradient' and 'cross_norm2_gradient' are the gradients
-    of the squared distance and of the squared cross norm over the same stencil. The Hessian is of rank two, in the span
-    of the gradients of the unsquared distance and of the unsquared cross norm, where its 2x2 block is projected onto the
-    positive semi-definite cone. Parallel edges, of zero cross norm, give a zero gradient and Hessian. Returns the
-    gradient vector and the Hessian matrix.
+    The barrier is the one of func_mollified_barrier. 'flag' is the distance flag of the edges (see
+    func_edge_edge_distance_flag), 'distance2' and 'distance2_gradient' the squared distance of their closest features
+    and its gradient over (ea0, ea1, eb0, eb1). Both derivatives keep every term of the product rule,
+        G = b grad m + m b' grad D,
+        H = b Hess m + b' (grad m grad D^T + grad D grad m^T) + m (b'' grad D grad D^T + b' Hess D),
+    because toward parallel edges the curvature is dominated by b m' Hess c, the resistance of the barrier to the
+    relative rotation of the edges. The Hessian is projected onto the positive semi-definite cone (see qd_project_psd,
+    which takes 'rank_tolerance', 'eigen_tolerance' and 'max_sweeps'), then symmetrized. Returns the gradient vector and
+    the Hessian matrix.
     """
-    n = qd.static(distance2_gradient.n)
-    gradient = qd.Vector.zero(gs.qd_float, n)
-    hessian = qd.Matrix.zero(gs.qd_float, n, n)
-    if cross_norm2 > 0.0:
-        d_tilde = distance2 - thickness * thickness
-        d_hat_tilde2 = d_hat * d_hat + 2.0 * d_hat * thickness
-        d_hat_tilde = qd.sqrt(d_hat_tilde2)
-        ratio = d_tilde / d_hat_tilde2
-        cross_norm = qd.sqrt(cross_norm2)
-        ratio_sqrt = qd.sqrt(d_tilde) / d_hat_tilde
-        log_ratio = qd.log(ratio)
-        threshold2 = mollifier_threshold * mollifier_threshold
-        log_term = log_ratio + (ratio - 1.0) / ratio
-        ratio_minus_one = ratio - 1.0
-        mollifier = cross_norm2 * (2.0 * mollifier_threshold - cross_norm2) / threshold2
+    PROJECTION_MAX_RANK = qd.static(6)
+    cross_norm2, cross_norm2_gradient, cross_norm2_hessian = func_edge_edge_cross_norm2(ea0, ea1, eb0, eb1)
+    distance2_hessian = func_edge_edge_flagged_distance2_hessian(flag, ea0, ea1, eb0, eb1)
+    energy, first, second = func_barrier(distance2, d_hat, thickness, kappa)
 
-        # Gradients of the unsquared cross norm and of the unsquared distance over the barrier width, the latter rescaled
-        # by D / (D - xi^2) so that the barrier is a function of their deformation-gradient entries
-        cross_norm_gradient = cross_norm2_gradient / (2.0 * cross_norm)
-        distance_gradient = distance2_gradient / (2.0 * d_hat_tilde * qd.sqrt(d_tilde))
+    inverse_threshold = 1.0 / mollifier_threshold
+    mollifier = -(cross_norm2 * cross_norm2) * inverse_threshold * inverse_threshold + (
+        2.0 * cross_norm2 * inverse_threshold
+    )
+    mollifier_first = -2.0 * cross_norm2 * inverse_threshold * inverse_threshold + 2.0 * inverse_threshold
+    mollifier_second = -2.0 * inverse_threshold * inverse_threshold
+    mollifier_gradient = mollifier_first * cross_norm2_gradient
+    mollifier_hessian = (
+        mollifier_second * cross_norm2_gradient.outer_product(cross_norm2_gradient)
+        + mollifier_first * cross_norm2_hessian
+    )
 
-        stress_cross = (
-            (kappa * 4.0) * (mollifier_threshold - cross_norm2) / threshold2 * ratio_minus_one * ratio_minus_one
-        ) * (log_ratio * log_ratio)
-        stress_distance = (kappa * 4.0) * mollifier * ratio_minus_one * log_ratio * log_term
-        gradient = (stress_cross * cross_norm) * cross_norm_gradient + (
-            stress_distance * ratio_sqrt
-        ) * distance_gradient
-
-        eigen_cross = (
-            (kappa * 4.0) * (mollifier_threshold - 3.0 * cross_norm2) / threshold2 * ratio_minus_one * ratio_minus_one
-        ) * (log_ratio * log_ratio)
-        eigen_distance = mollifier * _func_barrier_hessian_eigenvalue(
-            ratio, d_tilde, d_hat_tilde2, kappa, hessian_clamp_ratio
-        )
-        eigen_coupling = (
-            16.0
-            * kappa
-            * (mollifier_threshold - cross_norm2)
-            * ratio_minus_one
-            * log_ratio
-            * log_term
-            * cross_norm
-            * ratio_sqrt
-            / threshold2
-        )
-
-        # Projection of the symmetric 2x2 block onto the positive semi-definite cone: a negative eigenvalue is clamped to
-        # zero, which leaves the larger eigenvalue times the outer product of its unit eigenvector. Both are formed
-        # without cancellation, the diagonal entries spanning many orders of magnitude: the eigenvalue of the sign
-        # opposite to the half trace comes from the determinant, and the eigenvector is the column of the block minus
-        # the smaller eigenvalue whose entries add up instead of cancelling.
-        half_trace = 0.5 * (eigen_cross + eigen_distance)
-        half_gap = 0.5 * (eigen_cross - eigen_distance)
-        radius = qd.sqrt(half_gap * half_gap + eigen_coupling * eigen_coupling)
-        det = eigen_cross * eigen_distance - eigen_coupling * eigen_coupling
-        eigen_min = half_trace - radius
-        eigen_max = half_trace + radius
-        if half_trace < 0.0:
-            eigen_max = det / eigen_min
-        elif eigen_max > 0.0:
-            eigen_min = det / eigen_max
-        if eigen_min < 0.0:
-            axis = qd.Vector([half_gap + radius, eigen_coupling])
-            if half_gap < 0.0:
-                axis = qd.Vector([eigen_coupling, radius - half_gap])
-            scale = gs.qd_float(0.0)
-            if eigen_max > 0.0:
-                scale = eigen_max / axis.norm_sqr()
-            eigen_cross = scale * axis[0] * axis[0]
-            eigen_coupling = scale * axis[0] * axis[1]
-            eigen_distance = scale * axis[1] * axis[1]
-
-        coupling = cross_norm_gradient.outer_product(distance_gradient)
-        hessian = (
-            eigen_cross * cross_norm_gradient.outer_product(cross_norm_gradient)
-            + eigen_coupling * (coupling + coupling.transpose())
-            + eigen_distance * distance_gradient.outer_product(distance_gradient)
-        )
-    return gradient, hessian
+    gradient = energy * mollifier_gradient + (mollifier * first) * distance2_gradient
+    coupling = mollifier_gradient.outer_product(distance2_gradient)
+    hessian = (
+        energy * mollifier_hessian
+        + first * (coupling + coupling.transpose())
+        + mollifier * (second * distance2_gradient.outer_product(distance2_gradient) + first * distance2_hessian)
+    )
+    hessian = gu.qd_project_psd(hessian, PROJECTION_MAX_RANK, rank_tolerance, eigen_tolerance, max_sweeps)
+    # The scatter of the Hessian into the system keeps one triangle of the off-diagonal blocks but the whole diagonal
+    # ones, so that a projection symmetric only up to rounding would add an asymmetric part
+    return gradient, 0.5 * (hessian + hessian.transpose())
 
 
 @qd.func

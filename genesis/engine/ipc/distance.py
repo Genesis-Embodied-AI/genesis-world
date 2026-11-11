@@ -1,4 +1,4 @@
-"""Distances between the primitives of an IPC contact stencil, their closest features and their gradients.
+"""Distances between the primitives of an IPC contact stencil, their closest features and their derivatives.
 
 A stencil lists its vertices in a fixed order: the point then the triangle for point-triangle (PT), the two vertices of
 edge A then the two of edge B for edge-edge (EE), the point then the edge for point-edge (PE). The closest feature of a
@@ -13,6 +13,7 @@ evaluation only when the kernel is compiled without contraction into fused multi
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 
 
 @qd.func
@@ -270,12 +271,121 @@ def func_edge_edge_distance2_gradient(
 
 
 @qd.func
+def _func_cross_norm2_hessian(u: qd.types.vector(3), v: qd.types.vector(3)):
+    """Compute the Hessian of |u x v|^2 = |u|^2 |v|^2 - (u . v)^2 over (u, v)."""
+    identity = qd.Matrix.identity(gs.qd_float, 3)
+    block_uu = 2.0 * (v.norm_sqr() * identity - v.outer_product(v))
+    block_vv = 2.0 * (u.norm_sqr() * identity - u.outer_product(u))
+    block_uv = 4.0 * u.outer_product(v) - 2.0 * v.outer_product(u) - 2.0 * u.dot(v) * identity
+    hessian = qd.Matrix.zero(gs.qd_float, 6, 6)
+    for i in qd.static(range(3)):
+        for j in qd.static(range(3)):
+            hessian[i, j] = block_uu[i, j]
+            hessian[i, 3 + j] = block_uv[i, j]
+            hessian[3 + i, j] = block_uv[j, i]
+            hessian[3 + i, 3 + j] = block_vv[i, j]
+    return hessian
+
+
+@qd.func
+def _func_vertex_hessian(variable_hessian, coefficients: qd.template()):
+    """Map a Hessian over difference vectors of a stencil to its vertices.
+
+    Each variable is a signed sum of vertices, 'coefficients[i_v][i_x]' being the coefficient (-1, 0 or 1) of vertex i_v
+    in variable i_x.
+    """
+    n_v, n_x = qd.static(len(coefficients), len(coefficients[0]))
+    hessian = qd.Matrix.zero(gs.qd_float, 3 * n_v, 3 * n_v)
+    for i_v in qd.static(range(n_v)):
+        for j_v in qd.static(range(n_v)):
+            for i_x in qd.static(range(n_x)):
+                for j_x in qd.static(range(n_x)):
+                    sign = qd.static(coefficients[i_v][i_x] * coefficients[j_v][j_x])
+                    for i in qd.static(range(3)):
+                        for j in qd.static(range(3)):
+                            if qd.static(sign > 0):
+                                hessian[3 * i_v + i, 3 * j_v + j] = (
+                                    hessian[3 * i_v + i, 3 * j_v + j] + variable_hessian[3 * i_x + i, 3 * j_x + j]
+                                )
+                            elif qd.static(sign < 0):
+                                hessian[3 * i_v + i, 3 * j_v + j] = (
+                                    hessian[3 * i_v + i, 3 * j_v + j] - variable_hessian[3 * i_x + i, 3 * j_x + j]
+                                )
+    return hessian
+
+
+@qd.func
+def func_point_edge_distance2_hessian(p: qd.types.vector(3), e0: qd.types.vector(3), e1: qd.types.vector(3)):
+    """Compute the Hessian of the squared distance from a point to the line through an edge, over (p, e0, e1).
+
+    With x = e0 - p, e = e1 - e0, N = |x x e|^2 and L = |e|^2, the squared distance is D = N / L and its Hessian over
+    (x, e) is (Hess N - D Hess L - grad D grad L^T - grad L grad D^T) / L.
+    """
+    offset = e0 - p
+    edge = e1 - e0
+    edge_norm2 = edge.norm_sqr()
+    cross = offset.cross(edge)
+    distance2 = cross.norm_sqr() / edge_norm2
+    grad_offset = 2.0 * edge.cross(cross) / edge_norm2
+    grad_edge = (2.0 * cross.cross(offset) - 2.0 * distance2 * edge) / edge_norm2
+    coupling_edge = grad_edge.outer_product(2.0 * edge)
+    block_edge = 2.0 * distance2 * qd.Matrix.identity(gs.qd_float, 3) + coupling_edge + coupling_edge.transpose()
+    block_offset_edge = grad_offset.outer_product(2.0 * edge)
+    variable_hessian = _func_cross_norm2_hessian(offset, edge) / edge_norm2
+    for i in qd.static(range(3)):
+        for j in qd.static(range(3)):
+            variable_hessian[i, 3 + j] = variable_hessian[i, 3 + j] - block_offset_edge[i, j] / edge_norm2
+            variable_hessian[3 + i, j] = variable_hessian[3 + i, j] - block_offset_edge[j, i] / edge_norm2
+            variable_hessian[3 + i, 3 + j] = variable_hessian[3 + i, 3 + j] - block_edge[i, j] / edge_norm2
+    return _func_vertex_hessian(variable_hessian, ((-1, 0), (1, -1), (0, 1)))
+
+
+@qd.func
+def func_edge_edge_distance2_hessian(
+    ea0: qd.types.vector(3), ea1: qd.types.vector(3), eb0: qd.types.vector(3), eb1: qd.types.vector(3)
+):
+    """Compute the Hessian of the squared distance between the lines through two edges, over (ea0, ea1, eb0, eb1).
+
+    With r = eb0 - ea0, u = ea1 - ea0, v = eb1 - eb0, n = u x v, s = r . n, q = |n|^2 and a = s / q, the squared
+    distance is D = s^2 / q and its Hessian over (r, u, v) is (2 / q) w w^T + 2 a Hess s - a^2 Hess q, with
+    w = grad s - a grad q = (n, v x (r - 2 a n), (r - 2 a n) x u). It stays bounded as the lines meet (s -> 0).
+    """
+    offset = eb0 - ea0
+    u = ea1 - ea0
+    v = eb1 - eb0
+    normal = u.cross(v)
+    normal_norm2 = normal.norm_sqr()
+    ratio = offset.dot(normal) / normal_norm2
+    shifted = offset - 2.0 * ratio * normal
+    blocks = (normal, v.cross(shifted), shifted.cross(u))
+    w = qd.Vector([blocks[k // 3][k % 3] for k in qd.static(range(9))])
+    variable_hessian = (2.0 / normal_norm2) * w.outer_product(w)
+    # s = r . (u x v) is trilinear: its Hessian has the off-diagonal blocks Hess_uv = -[r]x, Hess_ur = [v]x and
+    # Hess_vr = -[u]x, [.]x being the skew-symmetric matrix of a cross product
+    skews = (gu.qd_vec_to_skew(offset), gu.qd_vec_to_skew(v), gu.qd_vec_to_skew(u))
+    cross_hessian = _func_cross_norm2_hessian(u, v)
+    for i in qd.static(range(3)):
+        for j in qd.static(range(3)):
+            variable_hessian[3 + i, 6 + j] = variable_hessian[3 + i, 6 + j] - 2.0 * ratio * skews[0][i, j]
+            variable_hessian[6 + i, 3 + j] = variable_hessian[6 + i, 3 + j] + 2.0 * ratio * skews[0][i, j]
+            variable_hessian[3 + i, j] = variable_hessian[3 + i, j] + 2.0 * ratio * skews[1][i, j]
+            variable_hessian[i, 3 + j] = variable_hessian[i, 3 + j] - 2.0 * ratio * skews[1][i, j]
+            variable_hessian[6 + i, j] = variable_hessian[6 + i, j] - 2.0 * ratio * skews[2][i, j]
+            variable_hessian[i, 6 + j] = variable_hessian[i, 6 + j] + 2.0 * ratio * skews[2][i, j]
+    for i in qd.static(range(6)):
+        for j in qd.static(range(6)):
+            variable_hessian[3 + i, 3 + j] = variable_hessian[3 + i, 3 + j] - ratio * ratio * cross_hessian[i, j]
+    return _func_vertex_hessian(variable_hessian, ((-1, -1, 0), (0, 1, 0), (1, 0, -1), (0, 0, 1)))
+
+
+@qd.func
 def func_edge_edge_cross_norm2(
     ea0: qd.types.vector(3), ea1: qd.types.vector(3), eb0: qd.types.vector(3), eb1: qd.types.vector(3)
 ):
-    """Compute the squared norm of the cross product of two edges, and its gradient over (ea0, ea1, eb0, eb1).
+    """Compute the squared norm of the cross product of two edges, and its gradient and Hessian over (ea0, ea1, eb0, eb1).
 
     It vanishes for parallel edges, which is where the mollifier of the edge-edge barrier ramps the barrier down.
+    Returns the squared cross norm, its gradient vector and its Hessian matrix.
     """
     u = ea1 - ea0
     v = eb1 - eb0
@@ -283,7 +393,9 @@ def func_edge_edge_cross_norm2(
     grad_u = 2.0 * v.cross(cross)
     grad_v = 2.0 * cross.cross(u)
     blocks = (-grad_u, grad_u, -grad_v, grad_v)
-    return cross.norm_sqr(), qd.Vector([blocks[k // 3][k % 3] for k in qd.static(range(12))])
+    gradient = qd.Vector([blocks[k // 3][k % 3] for k in qd.static(range(12))])
+    hessian = _func_vertex_hessian(_func_cross_norm2_hessian(u, v), ((-1, 0), (1, 0), (0, -1), (0, 1)))
+    return cross.norm_sqr(), gradient, hessian
 
 
 @qd.func
@@ -307,6 +419,40 @@ def _func_scatter_blocks(i_v0: int, i_v1: int, i_v2: int, blocks):
                 for k in qd.static(range(3)):
                     gradient[3 * i_v + k] = blocks[3 * i_s + k]
     return gradient
+
+
+@qd.func
+def _func_scatter_hessian_blocks(i_v0: int, i_v1: int, i_v2: int, blocks):
+    """Place the 3x3 blocks of the Hessian of a sub-stencil at their vertex slots in a 4-vertex stencil, zero elsewhere.
+
+    The first 'blocks.n // 3' of the slots are used.
+    """
+    hessian = qd.Matrix.zero(gs.qd_float, 12, 12)
+    slots = qd.Vector([i_v0, i_v1, i_v2], dt=gs.qd_int)
+    for i_s in qd.static(range(blocks.n // 3)):
+        for j_s in qd.static(range(blocks.n // 3)):
+            for i in qd.static(range(3)):
+                for j in qd.static(range(3)):
+                    hessian[3 * slots[i_s] + i, 3 * slots[j_s] + j] = blocks[3 * i_s + i, 3 * j_s + j]
+    return hessian
+
+
+@qd.func
+def _func_edge_edge_feature_slots(flag: int):
+    """Find the stencil slots of the closest features of an edge-edge distance flag of two or three active vertices.
+
+    A PE feature gives the slot of its point, the active vertex of the edge with one inactive vertex, then the slots of
+    the other edge. A PP feature gives the slot of the vertex of edge A, the one of edge B, then a dummy slot.
+    """
+    i_va = 0 if flag & 0x1 else 1
+    i_vb = 2 if flag & 0x4 else 3
+    i_v0, i_v1, i_v2 = i_va, i_vb, 0
+    if qd.math.popcnt(flag) == 3:
+        is_point_on_a = (flag & 0x3) != 0x3
+        i_v0 = i_va if is_point_on_a else i_vb
+        i_v1 = 2 if is_point_on_a else 0
+        i_v2 = i_v1 + 1
+    return i_v0, i_v1, i_v2
 
 
 @qd.func
@@ -359,29 +505,52 @@ def func_edge_edge_flagged_distance2(
     distance2 = gs.qd_float(0.0)
     gradient = qd.Vector.zero(gs.qd_float, 12)
     n_active = qd.math.popcnt(flag)
-    i_va = 0 if flag & 0x1 else 1
-    i_vb = 2 if flag & 0x4 else 3
+    i_v0, i_v1, i_v2 = _func_edge_edge_feature_slots(flag)
+    x0 = _func_select_vertex(i_v0, ea0, ea1, eb0, eb1)
+    x1 = _func_select_vertex(i_v1, ea0, ea1, eb0, eb1)
     if n_active == 4:
         distance2 = func_edge_edge_distance2(ea0, ea1, eb0, eb1)
         gradient = func_edge_edge_distance2_gradient(ea0, ea1, eb0, eb1)
     elif n_active == 3:
-        is_point_on_a = (flag & 0x3) != 0x3
-        i_v_point = i_va if is_point_on_a else i_vb
-        i_v_edge0 = 2 if is_point_on_a else 0
-        i_v_edge1 = i_v_edge0 + 1
-        point = _func_select_vertex(i_v_point, ea0, ea1, eb0, eb1)
-        e0 = _func_select_vertex(i_v_edge0, ea0, ea1, eb0, eb1)
-        e1 = _func_select_vertex(i_v_edge1, ea0, ea1, eb0, eb1)
-        distance2 = func_point_edge_distance2(point, e0, e1)
-        gradient = _func_scatter_blocks(
-            i_v_point, i_v_edge0, i_v_edge1, func_point_edge_distance2_gradient(point, e0, e1)
-        )
+        x2 = _func_select_vertex(i_v2, ea0, ea1, eb0, eb1)
+        distance2 = func_point_edge_distance2(x0, x1, x2)
+        gradient = _func_scatter_blocks(i_v0, i_v1, i_v2, func_point_edge_distance2_gradient(x0, x1, x2))
     else:
-        xa = _func_select_vertex(i_va, ea0, ea1, eb0, eb1)
-        xb = _func_select_vertex(i_vb, ea0, ea1, eb0, eb1)
-        distance2 = (xa - xb).norm_sqr()
-        gradient = _func_scatter_blocks(i_va, i_vb, 0, _func_point_point_gradient(xa, xb))
+        distance2 = (x0 - x1).norm_sqr()
+        gradient = _func_scatter_blocks(i_v0, i_v1, 0, _func_point_point_gradient(x0, x1))
     return distance2, gradient
+
+
+@qd.func
+def func_edge_edge_flagged_distance2_hessian(
+    flag: int, ea0: qd.types.vector(3), ea1: qd.types.vector(3), eb0: qd.types.vector(3), eb1: qd.types.vector(3)
+):
+    """Compute the Hessian of the squared distance of the closest features of an edge-edge stencil.
+
+    The features are given by their distance flag, as for func_edge_edge_flagged_distance2. Returns the Hessian over
+    (ea0, ea1, eb0, eb1), zero at the inactive vertices.
+    """
+    hessian = qd.Matrix.zero(gs.qd_float, 12, 12)
+    n_active = qd.math.popcnt(flag)
+    i_v0, i_v1, i_v2 = _func_edge_edge_feature_slots(flag)
+    if n_active == 4:
+        hessian = func_edge_edge_distance2_hessian(ea0, ea1, eb0, eb1)
+    elif n_active == 3:
+        x0 = _func_select_vertex(i_v0, ea0, ea1, eb0, eb1)
+        x1 = _func_select_vertex(i_v1, ea0, ea1, eb0, eb1)
+        x2 = _func_select_vertex(i_v2, ea0, ea1, eb0, eb1)
+        hessian = _func_scatter_hessian_blocks(i_v0, i_v1, i_v2, func_point_edge_distance2_hessian(x0, x1, x2))
+    else:
+        identity = 2.0 * qd.Matrix.identity(gs.qd_float, 3)
+        blocks = qd.Matrix.zero(gs.qd_float, 6, 6)
+        for i in qd.static(range(3)):
+            for j in qd.static(range(3)):
+                blocks[i, j] = identity[i, j]
+                blocks[i, 3 + j] = -identity[i, j]
+                blocks[3 + i, j] = -identity[i, j]
+                blocks[3 + i, 3 + j] = identity[i, j]
+        hessian = _func_scatter_hessian_blocks(i_v0, i_v1, 0, blocks)
+    return hessian
 
 
 @qd.func
