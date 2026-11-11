@@ -153,13 +153,9 @@ def _field_check(cls: type, name: str) -> TypeAdapter:
 
 
 def _declared_fields(cls: type) -> dict[str, type]:
-    """Return the declared type of each field of a class. Those types drive how a value loads back.
-
-    The fields of options excluded from their dump hold what the options compute or are given at run time (the
-    kernels a material binds, the index a solver assigns), so a file leaves them out.
-    """
+    """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items() if not info.exclude}
+        return {name: info.annotation for name, info in cls.model_fields.items()}
     return typing.get_type_hints(cls)
 
 
@@ -245,10 +241,11 @@ def _layout(cls: type) -> list[str] | dict[str, int | str]:
 def _schema_name(cls: type) -> str:
     """The name a class is recorded under in the schema of a file, unique among the classes of Genesis.
 
-    Classes of different modules share a name, such as the rigid entity options and the rigid material, so the name
-    holds the module of the class as well.
+    The entity options share their names with the materials, such as 'Rigid', so they are recorded as 'entities.Rigid'.
     """
-    return f"{cls.__module__}.{cls.__qualname__}"
+    if cls.__module__ == "genesis.options.entities":
+        return f"entities.{cls.__name__}"
+    return cls.__name__
 
 
 def schema(classes: set[type]) -> dict:

@@ -242,8 +242,9 @@ class FEM(BaseEntity["FEMEntity"]):
 
     Parameters
     ----------
-    material : gs.materials.FEM.Elastic | gs.materials.FEM.Cloth
-        The material of the entity, a ``gs.materials.FEM.Muscle`` making it a muscle.
+    material : gs.materials.FEM.Base
+        The material of the entity, one of ``gs.materials.FEM.Elastic``, ``Cloth`` or ``Muscle``, which makes it a
+        muscle.
     vertices : dict[gs.VertexIndex, gs.options.Vertex], optional
         The options of the vertices each key selects among the vertices of the volume mesh. A Cloth material takes
         none. Default is no vertex options.
@@ -251,7 +252,7 @@ class FEM(BaseEntity["FEMEntity"]):
 
     _solver_options_cls = FEMOptions
 
-    material: materials.FEM.Elastic | materials.FEM.Cloth
+    material: materials.FEM.Base
     vertices: FrozenDictType[VertexIndex, Vertex] = {}
 
     @model_validator(mode="after")
@@ -295,13 +296,13 @@ class SPH(_EmittableParticles["SPHEntity"]):
 
     Parameters
     ----------
-    material : gs.materials.SPH.Liquid, optional
+    material : gs.materials.SPH.Base, optional
         The material of the liquid. Defaults to ``gs.materials.SPH.Liquid()``.
     """
 
     _solver_options_cls = SPHOptions
 
-    material: materials.SPH.Liquid = Field(default_factory=materials.SPH.Liquid)
+    material: materials.SPH.Base = Field(default_factory=materials.SPH.Liquid)
 
 
 class PBD(_EmittableParticles["PBDBaseEntity"]):
