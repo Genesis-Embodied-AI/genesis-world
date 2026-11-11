@@ -93,6 +93,18 @@ class SPHEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     is_solving: qd.Tensor = field(bool, labels=DFSPH)
 
 
+class SPHSolveLoop(Data, kind=DataKind.SCRATCH, shape=()):
+    """
+    The passes of a solve of divergence-free smoothed particle hydrodynamics (DFSPH), which runs on the device as long
+    as an environment iterates on (see kernel_solve_incompressibility).
+
+    The flag is an ndarray on every backend, since graph.do_while takes the same ndarray on every call.
+    """
+
+    n_passes: qd.Tensor = field(int)
+    is_looping: qd.Tensor = field(qd.i32, ndarray=True)
+
+
 class SPHBoundaryParticles(Data, kind=DataKind.SCRATCH, shape=(PARTICLES, ENVS)):
     """The moving boundaries around each SPH particle over the current substep, in the order of the particles."""
 
@@ -128,6 +140,7 @@ class SPHState(Data, kind=DataKind.STATE):
     # The stiffness that the next Jacobi iteration of DFSPH applies, read by the neighbors of each sorted particle
     particles_k_reordered: qd.Tensor = field(float, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH, labels=DFSPH)
     envs_solve: SPHEnvsSolve
+    solve_loop: SPHSolveLoop = field(labels=DFSPH)
     # The moving boundaries around each particle, which a coupler opts in
     boundary: SPHBoundaryParticles = field(opt_in=True)
     hash_grid: SpatialHashGrid
@@ -245,8 +258,8 @@ class SPHSolver(ParticleSolver):
                 **hash_grid_sizes(math.prod(self._hash_grid_res)),
             ),
             values=dict(hash_grid=hash_grid_values),
-            # The units of the bins of the exact sums span no environment
-            env_first={None: False, SPHState.envs_solve.err.bins_unit: None},
+            # The units of the bins of the exact sums and the loop of the solves span no environment
+            env_first={None: False, (SPHState.envs_solve.err.bins_unit, SPHState.solve_loop): None},
             unused=(
                 {
                     DFSPH: not is_dfsph,
@@ -383,27 +396,14 @@ solver. Please consider reducing the timestep, liquid viscosity (mu), or increas
     def _solve_incompressibility(self, solve_density: bool) -> None:
         n_iters_max = self._df_max_den_iters if solve_density else self._df_max_div_iters
 
-        # The convergence is checked before the first iteration of the divergence solve, which a divergence-free
-        # velocity field leaves without iterations. The warm start of the density solve applies the pressure carried
-        # over from the previous substep, which overshoots wherever that pressure corrected a density error at once.
-        # The average density error leaves such particles unnoticed, so the density solve iterates at least once to
-        # take their pressure back. Otherwise, the pressure keeps pushing them apart substep after substep.
-        if solve_density:
-            kernel_solver_iteration(self.sph_state, self.sph_info, self.sph_config, solve_density, warm_start=True)
-        kernel_compute_density_rate(self.sph_state, self.sph_info, self.sph_config, solve_density)
-        n_envs_solving = kernel_update_convergence(
-            self.sph_state, self.sph_info, self.sph_config, solve_density, can_stop=not solve_density
+        kernel_solve_incompressibility(
+            n_iters_max,
+            self.sph_state.solve_loop.is_looping,
+            self.sph_state,
+            self.sph_info,
+            self.sph_config,
+            solve_density,
         )
-        n_iters = 0
-        while n_envs_solving > 0 and n_iters < n_iters_max:
-            kernel_solver_iteration(self.sph_state, self.sph_info, self.sph_config, solve_density, warm_start=False)
-            kernel_compute_density_rate(self.sph_state, self.sph_info, self.sph_config, solve_density)
-            n_envs_solving = kernel_update_convergence(
-                self.sph_state, self.sph_info, self.sph_config, solve_density, can_stop=True
-            )
-            n_iters += 1
-
-        gs.logger.debug(f"DFSPH - {'density' if solve_density else 'divergence'} solve iterations: {n_iters}")
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -1004,7 +1004,7 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
     Compute the factor of the divergence and density solves of the sorted particles.
 
     These are the solves of divergence-free smoothed particle hydrodynamics (DFSPH). Every environment takes part in the
-    divergence solve that follows (see kernel_update_convergence).
+    divergence solve that follows (see func_update_convergence).
     """
     for i_b in range(sph_state.particles_reordered.pos.shape[1]):
         sph_state.envs_solve.is_solving[i_b] = True
@@ -1021,7 +1021,7 @@ def kernel_compute_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, sph_conf
 
             # The walls, at rest, change the density of the particle by its own velocity, which they change with its own
             # stiffness and with the stiffness they take from it among the liquid around it (see
-            # kernel_solver_iteration), weighted by its share of the kernel sum of the liquid.
+            # func_solver_iteration), weighted by its share of the kernel sum of the liquid.
             wall_volume, wall_volume_grad, wall_moment = func_boundary_volume(i_p, i_b, sph_state, sph_info, sph_config)
             i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
             rho_rel = sph_state.particles_reordered.rho[i_p, i_b] / sph_info.particles.rho[i_o]
@@ -1054,8 +1054,8 @@ def func_task_compute_density_rate(
     ret.n_neighbors += 1
 
 
-@qd.kernel(fastcache=True)
-def kernel_compute_density_rate(
+@qd.func
+def func_compute_density_rate(
     sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template()
 ):
     """
@@ -1063,7 +1063,7 @@ def kernel_compute_density_rate(
 
     The divergence solve cancels the positive rate of change of the density, and the density solve the predicted
     relative density at the end of the substep. Each particle also gets the stiffness that the next Jacobi iteration
-    applies to cancel it, and adds its error to that of its environment, summed for kernel_update_convergence.
+    applies to cancel it, and adds its error to that of its environment, summed for func_update_convergence.
     """
     for i_p, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.drho))
@@ -1122,7 +1122,7 @@ def kernel_predict_velocity(sph_state: SPHState, sph_info: SPHInfo):
     """
     Advance the velocity of the sorted particles by their non-pressure acceleration, ahead of the density solve.
 
-    Every environment takes part in the density solve that follows (see kernel_update_convergence). The warm start of
+    Every environment takes part in the density solve that follows (see func_update_convergence). The warm start of
     that solve applies part of the pressure carried over from the previous substep (see warm_start_scale in SPHInfo), to
     the particles compressed at the start of the substep.
     """
@@ -1167,28 +1167,37 @@ def func_task_solver_iteration(
         ret.dv = ret.dv - ret.dv_scale * k_sum * grad_p_j
 
     # The stiffness and the position of the neighbors, weighted for the stiffness of the walls (see
-    # kernel_solver_iteration)
+    # func_solver_iteration)
     kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
     ret.weight_sum = ret.weight_sum + kernel_ij
     ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
     ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
 
 
-@qd.kernel(fastcache=True)
-def kernel_solver_iteration(
-    sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template(), warm_start: bool
+@qd.func
+def func_solver_iteration(
+    sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template()
 ):
     """
     Run one Jacobi iteration of the divergence or the density solve of divergence-free smoothed particle hydrodynamics
     (DFSPH) on the velocity of the sorted particles.
 
     The velocity of every particle changes by the stiffness of its own and of its neighbors. The divergence solve
-    corrects velocities directly, while the density solve accelerates over the substep.
+    corrects velocities directly, while the density solve accelerates over the substep. The first pass of the density
+    solve is its warm start, and the divergence solve checks its convergence before its first iteration, so its first
+    pass leaves the velocities untouched.
     """
+    is_first_pass = sph_state.solve_loop.n_passes[None] == 0
+    warm_start = False
+    is_iterating = True
+    if qd.static(solve_density):
+        warm_start = is_first_pass
+    else:
+        is_iterating = not is_first_pass
     for i_p, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.vel))
     ):
-        if sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
+        if is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]:
             dv_scale = gs.qd_float(1.0)
             if qd.static(solve_density):
                 dv_scale = sph_info.substep_dt[None]
@@ -1238,18 +1247,23 @@ def kernel_solver_iteration(
                     sph_state.particles_reordered.p[i_p, i_b] = sph_state.particles_reordered.p[i_p, i_b] - k_i * rho0
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_convergence(
-    sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template(), can_stop: bool
-) -> int:
+@qd.func
+def func_update_convergence(
+    n_iters_max: int, sph_state: SPHState, sph_info: SPHInfo, sph_config: qd.template(), solve_density: qd.template()
+):
     """
-    Return the number of environments whose divergence-free smoothed particle hydrodynamics (DFSPH) solve iterates on.
+    Stop the solve of divergence-free smoothed particle hydrodynamics (DFSPH) of the environments that converged.
 
     Each environment stops once the average density error of its own particles meets the tolerance, so that its result
-    is the same whatever the other environments simulate alongside it, and only once `can_stop` allows it. The error
-    summed by the density rate kernels is reset once read, for the next call.
+    is the same whatever the other environments simulate alongside it, and the density solve only after its warm start.
+    The error summed by the density rate pass is reset once read, for the next pass. The loop runs on as long as an
+    environment iterates on, for `n_iters_max` iterations at most after its first pass.
     """
-    n_envs_solving = 0
+    n_passes = sph_state.solve_loop.n_passes[None]
+    can_stop = True
+    if qd.static(solve_density):
+        can_stop = n_passes > 0
+    sph_state.solve_loop.is_looping[()] = 0
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
         if sph_state.envs_solve.is_solving[i_b]:
             err_tol = sph_info.divergence_err_tol[None]
@@ -1263,9 +1277,37 @@ def kernel_update_convergence(
                 sph_state.envs_solve.err_sum[i_b] = 0.0
             if can_stop and err <= err_tol * sph_state.envs_solve.n_active[i_b]:
                 sph_state.envs_solve.is_solving[i_b] = False
-            else:
-                qd.atomic_add(n_envs_solving, 1)
-    return n_envs_solving
+            elif n_passes < n_iters_max:
+                sph_state.solve_loop.is_looping[()] = 1
+    sph_state.solve_loop.n_passes[None] = n_passes + 1
+
+
+@qd.kernel(graph=True, fastcache=True)
+def kernel_solve_incompressibility(
+    n_iters_max: int,
+    is_looping: qd.types.ndarray(qd.i32, ndim=0),
+    sph_state: SPHState,
+    sph_info: SPHInfo,
+    sph_config: qd.template(),
+    solve_density: qd.template(),
+):
+    """
+    Run the divergence or the density solve of divergence-free smoothed particle hydrodynamics (DFSPH) on the device.
+
+    The warm start of the density solve applies the pressure carried over from the previous substep, which overshoots
+    wherever that pressure corrected a density error at once. The average density error leaves such particles unnoticed,
+    so the density solve iterates at least once to take their pressure back. Otherwise, the pressure keeps pushing them
+    apart substep after substep. The divergence solve checks its convergence before its first iteration, which a
+    divergence-free velocity field leaves without iterations.
+    """
+    sph_state.solve_loop.n_passes[None] = 0
+    is_looping[()] = 1
+    # FIXME: quadrants#1083 - the statements before a graph do_while run again on every pass when the loop body opens
+    # with bare statements, so the loop body opens with a for loop.
+    while qd.graph.do_while(is_looping):
+        func_solver_iteration(sph_state, sph_info, sph_config, solve_density)
+        func_compute_density_rate(sph_state, sph_info, sph_config, solve_density)
+        func_update_convergence(n_iters_max, sph_state, sph_info, sph_config, solve_density)
 
 
 # ------------------------------------------------------------------------------------
