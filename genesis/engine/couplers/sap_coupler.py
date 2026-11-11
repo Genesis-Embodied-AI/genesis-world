@@ -769,7 +769,8 @@ class SAPConstraintInfo(Data, kind=DataKind.SCRATCH):
 class SAPJointEqualityConstraints(Data, kind=DataKind.CONSTANT, shape=(JOINT_EQUALITIES,)):
     """The joint equality constraints of every environment, the same in all of them."""
 
-    # Environment of each constraint, its equality, and the dofs and the joint positions it binds
+    # Environment of each constraint, its equality, and the dofs and the joint positions it binds, the second ones being
+    # -1 for an equality without second joint.
     batch_idx: qd.Tensor = field(int)
     i_eq: qd.Tensor = field(int)
     i_dof1: qd.Tensor = field(int)
@@ -1158,10 +1159,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                         f"SAPCoupler enforces joint equalities only, but entity '{entity.name}' holds "
                         f"{unsupported_names} ones."
                     )
-
-        for equality in self.rigid_solver.equalities:
-            if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
-                gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
 
         # The floor contacts model a horizontal floor at the current height of the rigid ground plane of each
         # environment, whose orientation is checked at build only, and every other contact leaves that plane out. A
@@ -2302,13 +2299,18 @@ def kernel_build_equality_constraints(
         i_j1 = equalities_info.eq_obj1id[i_e, i_b]
         i_j2 = equalities_info.eq_obj2id[i_e, i_b]
         I_j1 = [i_j1, i_b] if qd.static(rigid_config.batch_joints_info) else i_j1
-        I_j2 = [i_j2, i_b] if qd.static(rigid_config.batch_joints_info) else i_j2
         joint_equalities.constraints.batch_idx[i_c] = i_b
         joint_equalities.constraints.i_eq[i_c] = i_e
         joint_equalities.constraints.i_dof1[i_c] = joints_info.dof_start[I_j1]
-        joint_equalities.constraints.i_dof2[i_c] = joints_info.dof_start[I_j2]
         joint_equalities.constraints.i_qpos1[i_c] = joints_info.q_start[I_j1]
-        joint_equalities.constraints.i_qpos2[i_c] = joints_info.q_start[I_j2]
+        i_dof2 = -1
+        i_qpos2 = -1
+        if i_j2 >= 0:
+            I_j2 = [i_j2, i_b] if qd.static(rigid_config.batch_joints_info) else i_j2
+            i_dof2 = joints_info.dof_start[I_j2]
+            i_qpos2 = joints_info.q_start[I_j2]
+        joint_equalities.constraints.i_dof2[i_c] = i_dof2
+        joint_equalities.constraints.i_qpos2[i_c] = i_qpos2
 
 
 # ------------------------------------------------------------------------------------
@@ -4560,7 +4562,8 @@ class RigidConstraintHandler(RBC):
         self, entities_info: EntitiesInfo, equalities_info: EqualitiesInfo, rigid_info: RigidInfo, sap_info: SAPInfo
     ):
         # The constraint q1 - q1_0 = poly(q2 - q2_0) of the polynomial coefficients 'eq_data', linearized at the current
-        # joint positions as the rigid constraint solver does, so its Jacobian is [1, -poly'(q2 - q2_0)].
+        # joint positions as the rigid constraint solver does, so its Jacobian is [1, -poly'(q2 - q2_0)]. Without second
+        # joint, the constraint is q1 - q1_0 = poly(0).
         dt_inv = 1.0 / sap_info.substep_dt[None]
         for i_c in range(self.n_constraints()):
             i_b = self.joint_equalities.constraints.batch_idx[i_c]
@@ -4568,7 +4571,9 @@ class RigidConstraintHandler(RBC):
             i_qpos1 = self.joint_equalities.constraints.i_qpos1[i_c]
             i_qpos2 = self.joint_equalities.constraints.i_qpos2[i_c]
             pos = rigid_info.qpos[i_qpos1, i_b] - rigid_info.qpos0[i_qpos1, i_b]
-            diff = rigid_info.qpos[i_qpos2, i_b] - rigid_info.qpos0[i_qpos2, i_b]
+            diff = gs.qd_float(0.0)
+            if i_qpos2 >= 0:
+                diff = rigid_info.qpos[i_qpos2, i_b] - rigid_info.qpos0[i_qpos2, i_b]
             g0, deriv = gu.joint_equality_residual(pos, diff, equalities_info.eq_data[i_e, i_b])
             self.joint_equalities.constraints.jac_dof2[i_c] = -deriv
             self.joint_equalities.constraints.constraint_info.v_hat[i_c] = -g0 * dt_inv
@@ -4614,10 +4619,9 @@ class RigidConstraintHandler(RBC):
             # Delassus operator J @ M^-1 @ J^T
             i_dof1 = self.joint_equalities.constraints.i_dof1[i_c]
             i_dof2 = self.joint_equalities.constraints.i_dof2[i_c]
-            W = (
-                self.joint_equalities.M_inv_Jt[i_c, i_dof1]
-                + self.joint_equalities.constraints.jac_dof2[i_c] * self.joint_equalities.M_inv_Jt[i_c, i_dof2]
-            )
+            W = self.joint_equalities.M_inv_Jt[i_c, i_dof1]
+            if i_dof2 >= 0:
+                W = W + self.joint_equalities.constraints.jac_dof2[i_c] * self.joint_equalities.M_inv_Jt[i_c, i_dof2]
             R = qd.max(beta_factor * W, 1.0 / (sap_info.dt2[None] * self.joint_equalities.stiffness[None]))
             self.joint_equalities.constraints.constraint_info.R[i_c] = R
             self.joint_equalities.constraints.constraint_info.R_inv[i_c] = 1.0 / R
@@ -4648,7 +4652,10 @@ class RigidConstraintHandler(RBC):
         i_b = self.joint_equalities.constraints.batch_idx[i_c]
         i_dof1 = self.joint_equalities.constraints.i_dof1[i_c]
         i_dof2 = self.joint_equalities.constraints.i_dof2[i_c]
-        return x[i_dof1, i_b] + self.joint_equalities.constraints.jac_dof2[i_c] * x[i_dof2, i_b]
+        Jx = x[i_dof1, i_b]
+        if i_dof2 >= 0:
+            Jx = Jx + self.joint_equalities.constraints.jac_dof2[i_c] * x[i_dof2, i_b]
+        return Jx
 
     @qd.func
     def compute_solve_op(
