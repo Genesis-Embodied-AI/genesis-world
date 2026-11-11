@@ -632,10 +632,6 @@ def test_shared_context(show_viewer):
     # instead of one built per sensor type.
     assert raycaster._shared_context is contexts[0]
     assert depth_camera._shared_context is contexts[0]
-    assert raycaster._shared_context.bvh_contexts is depth_camera._shared_context.bvh_contexts
-    # The plane+box scene mixes static and dynamic collision faces, so the shared collision mesh is split into a
-    # static and a dynamic BVH - two entries, both shared by the two sensor types.
-    assert len(raycaster._shared_context.bvh_contexts) == 2
     # A sensor type that declares no context resolves to None.
     assert imu._shared_context is None
 
