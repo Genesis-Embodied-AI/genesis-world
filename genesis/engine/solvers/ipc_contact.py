@@ -1244,8 +1244,8 @@ def kernel_contact_init_kappa(ipc_state: IPCState, ipc_info: IPCInfo):
         ipc_state.vertices_kappa.iter_min_gap[i_v, i_b] = ipc_info.min_gap_unrecorded[None]
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_kappa_iteration(envs_mask: qd.Tensor, ipc_state: IPCState, ipc_info: IPCInfo):
+@qd.func(requires_top_level=True)
+def func_contact_kappa_iteration(envs_mask: qd.Tensor, ipc_state: IPCState, ipc_info: IPCInfo):
     """
     Stiffen the vertices of the environments selected whose gap collapsed over the last Newton iteration, at the start
     of the next one, and flag the environments where the stiffness grew, whose energy at the start point changes.
@@ -1597,7 +1597,7 @@ def func_pairs_ccd(
     newton_config: qd.template(),
     is_edge_edge: qd.template(),
 ):
-    """Bound the steps by the time of contact of the candidate pairs of one kind (see 'kernel_contact_ccd'), a pair with
+    """Bound the steps by the time of contact of the candidate pairs of one kind (see 'func_contact_ccd'), a pair with
     a rigid side along the screws of its sides."""
     i_kind = qd.static(1 if is_edge_edge else 0)
     N_A = qd.static(2 if is_edge_edge else 1)
@@ -1678,8 +1678,8 @@ def func_pairs_ccd(
                 func_bound_step(i_b, i_body_a, i_body_b, toc, alpha, ipc_state, newton_config.has_ccd_partition)
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_ccd(
+@qd.func(requires_top_level=True)
+def func_contact_ccd(
     envs_mask: qd.Tensor,
     alpha: qd.Tensor,
     ipc_pairs: IPCPairs,
@@ -1717,8 +1717,8 @@ def kernel_contact_ccd(
     func_pairs_ccd(envs_mask, alpha, ipc_pairs, ipc_state, ipc_info, newton_config, is_edge_edge=True)
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_partition(envs_mask: qd.Tensor, ipc_state: IPCState):
+@qd.func(requires_top_level=True)
+def func_contact_partition(envs_mask: qd.Tensor, ipc_state: IPCState):
     """
     Group the contact bodies of every environment selected by their links, and set the step of every group, the smallest
     time of contact of its bodies, which scales the Newton direction of their participants (see IPCBodies).

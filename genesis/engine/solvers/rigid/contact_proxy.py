@@ -20,7 +20,7 @@ linearized increment of the proxy is eliminated (dg = S B dx + d_p, see 'func_pr
 the proxy moving on its own screw along the line search, its exact mismatch with its link bounded by the FK-defect
 limiter and checked at every trial.
 
-The line search globalizes the solve as CGQ's (see 'kernel_line_search_trial' in newton_solver.py): a merit weighs the
+The line search globalizes the solve as CGQ's (see 'func_line_search_trial' in newton_solver.py): a merit weighs the
 mismatch against the energy once the proxies lie within the solve tolerance, a filter takes the steps toward feasibility
 otherwise, and a line search that runs out of trials with infeasible proxies enters the restoration. Over one iteration,
 the slack s of the constraint of every moving proxy joins the unknowns in the rows of the proxy (dg = S B dx + d_p + N s,
@@ -156,7 +156,7 @@ class IPCProxies(Data, kind=DataKind.SCRATCH, shape=(PROXIES, ENVS)):
     current iterate, about which its link Jacobian measures the motion of the link.
 
     `gradient` and `hessian_particular` are the gradient g of the energy in its rows at the iterate and the product
-    H d_p there, which the slope of the merit takes (see 'kernel_proxies_merit_probe' in newton_solver.py), and
+    H d_p there, which the slope of the merit takes (see 'func_proxies_merit_probe' in newton_solver.py), and
     `hessian` the block H_pp of its rows. The restoration (see the module docstring) prices the slack s of its
     constraint by `dual` . s + s^T K s / 2, K the `metric`, `slack` holding the slack of the Newton direction and
     `slack_search` that of the search direction of the conjugate gradient across its product.
@@ -187,7 +187,7 @@ class IPCProxiesEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     its proxies at the current iterate, `trial_max_residual` at the trial point of its line search, and `fk_alpha` the
     step the FK-defect limiter allows (see 'func_proxies_limit_step').
 
-    The line search accepts a step by the rules of 'kernel_line_search_trial' in newton_solver.py: `merit_rho` and
+    The line search accepts a step by the rules of 'func_line_search_trial' in newton_solver.py: `merit_rho` and
     `merit_slope` are the weight and the slope of the merit E + rho h once `is_merit_active`, `is_merit_probe` asks for
     them and `is_merit_evaluated` records that they were asked for in the iteration. `n_filter` entries of the filter
     (see IPCProxiesFilter) hold, `is_filter_retry` forcing the filter on the next iteration. `is_restoration` prices the

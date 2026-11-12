@@ -3618,7 +3618,7 @@ def func_cloth_init_line_search(
     surface (see 'func_cloth_publish_contact').
 
     The largest update of the position of a vertex adds to the entry of its environment in `max_displacement`. The
-    contacts bound the step along the direction afterwards (see 'kernel_contact_ccd' in
+    contacts bound the step along the direction afterwards (see 'func_contact_ccd' in
     genesis/engine/solvers/ipc_contact.py).
     """
     n_vertices = fem_state.vertices.pos.shape[0]
