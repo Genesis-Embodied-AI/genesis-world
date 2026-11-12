@@ -135,9 +135,9 @@ class SAPCouplerOptions(BaseCouplerOptions):
         Stiffness of the contacts of rigid bodies, as the time a resting body takes to settle on what it rests on, in
         substeps. A smaller value makes the contacts stiffer, so that bodies sink less into each other and rock less
         under a push, at the cost of a less robust solve that may take more iterations. A larger value softens them:
-        the penetration grows with the square of this value. On the vertex floor (`rigid_floor_contact_type="vert"`),
-        the fixed stiffness of each vertex also bounds how stiff the contact of a heavy body gets. Defaults to 0.125,
-        which keeps resting bodies less than a tenth of a millimeter deep at usual substeps.
+        the penetration grows with the square of this value. On the floor, the fixed stiffness of the contact of each
+        vertex also bounds how stiff the contact of a heavy body gets. Defaults to 0.125, which keeps resting bodies
+        less than a tenth of a millimeter deep at usual substeps.
     sap_sigma : float, optional
         Friction regularization parameter for SAP. Defaults to 1e-3.
     enable_lagged_friction : bool, optional
@@ -161,24 +161,20 @@ class SAPCouplerOptions(BaseCouplerOptions):
     linesearch_max_step_size : float, optional
         Maximum step size for exact linesearch. Defaults to 1.5.
     hydroelastic_stiffness : float, optional
-        Stiffness for hydroelastic contact. Defaults to 1e8.
-    point_contact_stiffness : float, optional
-        Stiffness for point contact. Defaults to 1e8.
-    fem_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet" or "vert". The floor is the rigid ground
-        plane of the scene, which must be a single fixed plane facing up. A scene without one has no floor.
-        TET would be the default choice for most cases.
-        VERT would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
-    enable_fem_self_tet_contact : bool, optional
-        Whether a FEM entity collides with itself where distant parts of it meet, such as a long soft body folding
-        onto itself. Distinct FEM entities always collide with each other. Self-contact searches each entity against
-        itself at every step, a cost growing with the resolution of its mesh that can dominate the contact search, so
-        enable it only for entities that can fold or wrap onto themselves. Parts adjacent in the rest shape of an entity
-        never collide. Defaults to False.
-    rigid_floor_contact_type : str, optional
-        Type of contact against the floor, as for `fem_floor_contact_type`. Defaults to "tet". Can be "tet" or "vert".
-        Tet would be the default choice for most cases.
-        Vert would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
+        Stiffness for hydroelastic contact. It also bounds the stiffness of the contact of FEM entities with the floor,
+        which otherwise follows the hydroelastic modulus of their material. The floor is the rigid ground plane of the
+        scene, which must be a single fixed plane facing up, and the surface vertices of FEM entities and the vertices
+        of rigid bodies touch it. A scene without one has no floor. Defaults to 1e8.
+    enable_fem_self_collision : bool, optional
+        Whether a FEM entity collides with itself where distant parts of it meet, such as a long soft body folding onto
+        itself. Distinct FEM entities always collide. Disabling it skips the contact search of a lone FEM entity against
+        itself, a cost growing with the resolution of its mesh. With several FEM entities, their contact search still
+        runs, and only the contacts within each entity are dropped. Disable it when FEM entities never fold onto
+        themselves. Defaults to True.
+    enable_fem_neutral_collision : bool, optional
+        Whether the parts of a FEM entity adjacent in its rest shape also collide with each other, when
+        `enable_fem_self_collision` is on. Enable it for a thin body whose faces get pressed together. It multiplies the
+        collision pairs of fine meshes, which then need a much larger `max_collision_pairs`. Defaults to False.
     max_collision_pairs : int, optional
         Maximum number of collision pairs of each kind of contact in each environment: the pairs of overlapping bounding
         boxes the contact detection tests, and the pairs of elements, or of an element and the floor, that may touch. A
@@ -206,10 +202,8 @@ class SAPCouplerOptions(BaseCouplerOptions):
     linesearch_ftol: PositiveFloat = 1e-6
     linesearch_max_step_size: PositiveFloat = 1.5
     hydroelastic_stiffness: PositiveFloat = 1e8
-    point_contact_stiffness: PositiveFloat = 1e8
-    fem_floor_contact_type: Literal["tet", "vert"] = "tet"
-    enable_fem_self_tet_contact: StrictBool = False
-    rigid_floor_contact_type: Literal["tet", "vert"] = "tet"
+    enable_fem_self_collision: StrictBool = True
+    enable_fem_neutral_collision: StrictBool = False
     max_collision_pairs: NonNegativeInt = 32768
     max_contacts: NonNegativeInt = 4096
 

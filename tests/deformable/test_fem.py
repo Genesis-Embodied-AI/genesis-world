@@ -229,14 +229,14 @@ def test_halt_on_nan(show_viewer):
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize(
-    "coupler_type, material_model, fem_floor_contact_type",
+    "coupler_type, material_model",
     [
-        (gs.options.SAPCouplerOptions, "linear", "tet"),
-        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
-        (gs.options.LegacyCouplerOptions, "linear", None),
+        (gs.options.SAPCouplerOptions, "linear"),
+        (gs.options.SAPCouplerOptions, "linear_corotated"),
+        (gs.options.LegacyCouplerOptions, "linear"),
     ],
 )
-def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_contact_type, show_viewer):
+def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     SPHERE_POS = (0.4, -0.1, 0.1)
     SPHERE_RADIUS = 0.1
     SPHERE_RHO = 500.0
@@ -252,14 +252,16 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
     REST_VEL_MAX = 2e-2
     # A sphere resting on vertex contacts deforms its coarse tessellation unevenly, which rolls it unless it is stiff
     # enough to keep its contact patch on a few vertices.
-    SPHERE_E = 3e5 if fem_floor_contact_type == "vert" else 1e5
+    SPHERE_E = 3e5 if coupler_type == gs.options.SAPCouplerOptions else 1e5
     SPHERE_DRIFT_MAX = 1e-2
     SPHERE_SPIN_MAX = 0.2
 
     # The hanging bar checks the exact physics of the solve, whose tolerance its bounds follow from
     coupler_kwargs = {}
     if coupler_type == gs.options.SAPCouplerOptions:
-        coupler_kwargs = dict(sap_convergence_rtol=SAP_RTOL, fem_floor_contact_type=fem_floor_contact_type)
+        coupler_kwargs = dict(
+            sap_convergence_rtol=SAP_RTOL,
+        )
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -956,10 +958,9 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        # A capacity that holds the contacts of the scene, below the pairs of tets neighbouring each other at rest, with
-        # the self-contact the single entity of two cubes needs
+        # The capacity holds the contacts of the scene but not the pairs of tets of the sphere neighbouring each other
+        # at rest, which the contact search must skip.
         coupler_options=gs.options.SAPCouplerOptions(
-            enable_fem_self_tet_contact=True,
             max_collision_pairs=8192,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -967,7 +968,6 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
             camera_lookat=(0.0, 0.0, 0.15),
         ),
         show_viewer=show_viewer,
-        show_FPS=False,
     )
     scene.add_entity(
         morph=gs.morphs.Plane(),
@@ -1087,16 +1087,26 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
 
 
 @pytest.mark.required("sparse")
-@pytest.mark.parametrize("capacity_option", ["max_collision_pairs", "max_contacts", "n_sap_iterations"])
-def test_sap_coupler_capacity(capacity_option, show_viewer):
+@pytest.mark.parametrize(
+    "capacity_option, capacity, enable_fem_neutral_collision",
+    [
+        ("max_collision_pairs", 1, False),
+        ("max_contacts", 1, False),
+        ("n_sap_iterations", 1, False),
+        ("max_collision_pairs", 8192, True),
+    ],
+)
+def test_sap_coupler_capacity(capacity_option, capacity, enable_fem_neutral_collision, show_viewer):
     SPHERE_RADIUS = 0.1
 
     scene = gs.Scene(
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
+        # With neutral collision, the pairs of tets of the sphere adjacent at rest exceed the capacity holding the scene
         coupler_options=gs.options.SAPCouplerOptions(
-            **{capacity_option: 1},
+            enable_fem_neutral_collision=enable_fem_neutral_collision,
+            **{capacity_option: capacity},
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, 0.3),
@@ -1113,6 +1123,13 @@ def test_sap_coupler_capacity(capacity_option, show_viewer):
             radius=SPHERE_RADIUS,
         ),
         material=gs.materials.FEM.Elastic(),
+    )
+    # A rigid box resting on the sphere, whose contact search tests pairs of its triangles and of the tets of the sphere
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 1.9 * SPHERE_RADIUS + 0.025),
+            size=(0.05, 0.05, 0.05),
+        ),
     )
     scene.build(n_envs=2)
 
@@ -1175,7 +1192,7 @@ def test_sap_coupler_default_capacity(show_viewer):
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
         ),
     )
-    # A FEM cube resting on another one far apart, distinct FEM entities colliding whatever the self-contact option
+    # A FEM cube falling onto another one, away from the rigid boxes
     scene.add_entity(
         morph=gs.morphs.Box(
             pos=(-1.0, 0.0, BOX_SIZE),
