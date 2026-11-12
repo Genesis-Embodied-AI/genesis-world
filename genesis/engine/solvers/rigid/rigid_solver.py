@@ -3244,10 +3244,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """
         if self.is_built:
             return self._is_solved_in_global_newton
-        is_coupled = self.sim.coupler.rigid_couplings[0] or self.sim.fem_solver.is_solved_in_global_newton
         return (
             self.sim.newton_solver.is_active
-            and is_coupled
+            and (self.sim.coupler.rigid_couplings[0] or self.sim.fem_solver.is_solved_in_global_newton)
             and any(geom.needs_coup and not geom.is_fixed for geom in self.geoms)
         )
 
