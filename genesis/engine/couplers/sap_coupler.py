@@ -758,6 +758,10 @@ class FEMSurfaceTets(Data, kind=DataKind.CONSTANT):
     # Bounds of the box of each surface tet over the rest positions of its vertices (see FEMSurfaceTetsQuery)
     rest_aabb_min: qd.Tensor = field((float, 3), shape=(SURFACE_ELEMENTS,))
     rest_aabb_max: qd.Tensor = field((float, 3), shape=(SURFACE_ELEMENTS,))
+    # Whether the pairs of tets of one entity are kept, all of them with 'has_neutral_collision' and otherwise those
+    # whose boxes are apart in the rest configuration (see FEMSurfaceTetsQuery)
+    has_self_collision: qd.Tensor = field(bool, shape=())
+    has_neutral_collision: qd.Tensor = field(bool, shape=())
 
 
 class FEMSurfaceTetNodes(Data, kind=DataKind.SCRATCH, shape=(BVH_NODES, ENVS)):
@@ -843,6 +847,8 @@ class RigidVolume(NamedTuple):
     elems: np.ndarray
 
 
+# FIXME: quadrants#1039 - the fastcache key misses what the qd.func methods of a handler and of its query read through
+# self, so these read the counts and options of the scene from arrays at runtime, keeping class constants alone static.
 # FIXME: quadrants#1040 - a tuple argument hides the ndarrays of its items, so every kernel takes one named parameter
 # per handler and rebuilds this tuple statically, back to a single handlers argument once the issue is fixed.
 class SAPHandlers(NamedTuple):
@@ -917,11 +923,11 @@ class SAPConfig(Config):
 class FEMSurfaceTetsQuery(BoxQuery):
     """The visitor of the box query of the FEM surface tets against their own tree, keeping each unordered pair once.
 
-    It keeps the pairs of tets of distinct entities. Without `has_self_collision`, it drops every pair of tets of one
-    entity. With it, it keeps the pairs of distant parts of one entity folding onto each other, and drops the pairs
-    whose boxes overlap in the rest configuration of the entity, tets sharing a vertex included, as the rigid collider
-    drops the pairs of links colliding in their neutral configuration, unless `has_neutral_collision` keeps them too.
-    It reads the surface tets of the FEM entities (see FEMSurfaceTets).
+    It keeps the pairs of tets of distinct entities. Without self-collision, it drops every pair of tets of one entity.
+    With it, it keeps the pairs of distant parts of one entity folding onto each other, and drops the pairs whose boxes
+    overlap in the rest configuration of the entity, tets sharing a vertex included, as the rigid collider drops the
+    pairs of links colliding in their neutral configuration, unless neutral collision keeps them too. It reads the
+    surface tets of the FEM entities and these options (see FEMSurfaceTets).
 
     It fits the bounds of the surface tets under each node as the tree is built (see FEMSurfaceTetNodes), and skips the
     nodes whose every pair it drops, a leaf node bounding its single tet, so that the walk never reaches the tets of
@@ -933,14 +939,10 @@ class FEMSurfaceTetsQuery(BoxQuery):
         results: BVHQueryResults,
         surface_tets: FEMSurfaceTets,
         nodes: FEMSurfaceTetNodes,
-        has_self_collision: bool,
-        has_neutral_collision: bool,
     ) -> None:
         super().__init__(results)
         self.surface_tets = surface_tets
         self.nodes = nodes
-        self.has_self_collision = has_self_collision
-        self.has_neutral_collision = has_neutral_collision
 
     @qd.func
     def fit_leaf(self, i_t: int, i_n: int, i_a: int):
@@ -982,9 +984,9 @@ class FEMSurfaceTetsQuery(BoxQuery):
             is_hit = func_aabb_intersects_aabb(node_min, node_max, query.aabb_min, query.aabb_max)
         if is_hit and self.nodes.entity_idx[i_n, i_t] == self.surface_tets.entity_idx[i_q]:
             is_dropped = True
-            if qd.static(self.has_neutral_collision):
+            if self.surface_tets.has_neutral_collision[None]:
                 is_dropped = False
-            elif qd.static(self.has_self_collision):
+            elif self.surface_tets.has_self_collision[None]:
                 is_dropped = func_aabb_intersects_aabb(
                     self.nodes.rest_aabb_min_max[i_n, i_t],
                     self.nodes.rest_aabb_max_min[i_n, i_t],
@@ -1873,7 +1875,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_rigid_pressure_gradient_rest(sap_info: SAPInfo):
     """Compute the gradient of the pressure field of every rigid volume element in the frame of its geom."""
     for i_e in range(sap_info.rigid_volume_elems.shape[0]):
@@ -1901,7 +1903,7 @@ def kernel_compute_rigid_pressure_gradient_rest(sap_info: SAPInfo):
                 )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_update_rigid_volume_verts_pressure_gradient(geoms_state: GeomsState, sap_state: SAPState, sap_info: SAPInfo):
     """Pose the vertices and the pressure gradients of the rigid volume meshes with their geoms."""
     for i_v, i_b in qd.ndrange(
@@ -1926,7 +1928,7 @@ def kernel_update_rigid_volume_verts_pressure_gradient(geoms_state: GeomsState, 
         sap_state.rigid_pressure_gradient[i_e, i_b] = R @ sap_info.rigid_pressure_gradient_rest[i_e]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_fem_pressure_gradient(
     fem_state: FEMState, sap_state: SAPState, fem_info: FEMInfo, sap_info: SAPInfo
 ):
@@ -1966,7 +1968,7 @@ def kernel_compute_fem_pressure_gradient(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_fem_surface_tet_aabb(fem_state: FEMState, bvh_leaves: BVHLeaves, fem_info: FEMInfo):
     """Fit the box of every FEM surface tet, the leaves of the trees of the FEM contacts."""
     for i_se, i_b in qd.ndrange(
@@ -1990,7 +1992,7 @@ def kernel_compute_fem_surface_tet_aabb(fem_state: FEMState, bvh_leaves: BVHLeav
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_update_contact(
     fem_state: FEMState,
     geoms_state: GeomsState,
@@ -2089,7 +2091,7 @@ def func_sort_env_keys(i_b: int, key: qd.Tensor, order: qd.Tensor, constraint_or
             order[i_s] = constraint_order.order_scratch[i_s]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_order_constraints(
     sap_state: SAPState,
     fem_info: FEMInfo,
@@ -2325,7 +2327,7 @@ def func_contact_target(i_c: int, i_k: int, fem_info: FEMInfo, handler: qd.templ
     return i_x
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_sum_contact_patches(
     sap_state: SAPState,
     fem_info: FEMInfo,
@@ -2425,7 +2427,7 @@ def kernel_sum_contact_patches(
                                     handler.contact_pairs.contact_info.k_patch[i_c] = k_patch
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_build_equality_constraints(
     equalities_info: EqualitiesInfo,
     joints_info: JointsInfo,
@@ -2464,7 +2466,7 @@ def kernel_build_equality_constraints(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_regularization(
     fem_state: FEMState,
     dofs_state: DofsState,
@@ -2548,7 +2550,7 @@ def kernel_compute_regularization(
                     )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_update_vel(
     fem_state: FEMState,
     dofs_state: DofsState,
@@ -2628,7 +2630,7 @@ def kernel_update_vel(
                     lagged_friction.normal_impulse[i_k, i_b] = handler.normal_impulse(i_c)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_init_sap_solve(
     newton_counter: qd.types.ndarray(qd.i32, ndim=0),
     pcg_counter: qd.types.ndarray(qd.i32, ndim=0),
@@ -3394,7 +3396,7 @@ def func_fem_delassus_vertex(
 # the coupler, then the constraint handlers.
 
 
-@qd.kernel(graph=True)
+@qd.kernel(graph=True, fastcache=True)
 def kernel_sap_solve(
     newton_counter: qd.types.ndarray(qd.i32, ndim=0),
     pcg_counter: qd.types.ndarray(qd.i32, ndim=0),
@@ -5645,8 +5647,7 @@ class FEMSelfContactHandler(BaseContactHandler):
     def __init__(self, simulator: "Simulator", options: SAPCouplerOptions) -> None:
         fem_solver = simulator.fem_solver
         # The key of a pair is its two tets
-        self.element_bits = max(1, fem_solver.n_elements - 1).bit_length()
-        self.key_bits = 2 * self.element_bits
+        self.key_bits = 2 * max(1, fem_solver.n_elements - 1).bit_length()
         # Each pair of surface tets gives one candidate and one contact at most
         n_pairs_max = fem_solver.n_surface_elements * (fem_solver.n_surface_elements - 1) // 2
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
@@ -5667,7 +5668,13 @@ class FEMSelfContactHandler(BaseContactHandler):
         el2v = qd_to_numpy(fem_solver.fem_info.elements.el2v, transpose=True)
         rest_pos = np.concatenate([tensor_to_array(entity.init_positions) for entity in entities])
         surface_tets_rest_pos = rest_pos[el2v[surface_elements]]
-        self.surface_tets = FEMSurfaceTets(sizes=dict(surface_elements=len(surface_elements)))
+        self.surface_tets = FEMSurfaceTets(
+            sizes=dict(surface_elements=len(surface_elements)),
+            values=dict(
+                has_self_collision=options.enable_fem_self_collision,
+                has_neutral_collision=options.enable_fem_self_collision and options.enable_fem_neutral_collision,
+            ),
+        )
         self.surface_tets.entity_idx.from_numpy(elements_entity_idx[surface_elements])
         self.surface_tets.rest_aabb_min.from_numpy(surface_tets_rest_pos.min(axis=1))
         self.surface_tets.rest_aabb_max.from_numpy(surface_tets_rest_pos.max(axis=1))
@@ -5684,8 +5691,6 @@ class FEMSelfContactHandler(BaseContactHandler):
             self.query_results,
             self.surface_tets,
             surface_tet_nodes,
-            has_self_collision=options.enable_fem_self_collision,
-            has_neutral_collision=options.enable_fem_self_collision and options.enable_fem_neutral_collision,
         )
 
     @qd.func
@@ -5866,7 +5871,8 @@ class FEMSelfContactHandler(BaseContactHandler):
                 self.contact_pairs.normal[i_p] = normal
                 self.contact_pairs.tangent0[i_p] = tangent0
                 self.contact_pairs.tangent1[i_p] = tangent1
-                self.contact_pairs.key[i_p] = (qd.u64(i_e0) << qd.u64(self.element_bits)) | qd.u64(i_e1)
+                n_elements = fem_info.elements.V.shape[0]
+                self.contact_pairs.key[i_p] = qd.u64(i_e0) * qd.u64(n_elements) + qd.u64(i_e1)
                 self.contact_pairs.geom_idx0[i_p] = i_e0
                 self.contact_pairs.geom_idx1[i_p] = i_e1
                 self.contact_pairs.barycentric0[i_p] = barycentric0
@@ -6203,8 +6209,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         fem_solver = simulator.fem_solver
         rigid_solver = simulator.rigid_solver
         # The key of a pair is its rigid face and its FEM tet
-        self.element_bits = max(1, fem_solver.n_elements - 1).bit_length()
-        self.key_bits = max(1, rigid_solver.n_faces - 1).bit_length() + self.element_bits
+        self.key_bits = max(1, rigid_solver.n_faces - 1).bit_length() + max(1, fem_solver.n_elements - 1).bit_length()
         # Each pair of a triangle of a geom and a surface tet gives one candidate and one contact at most
         n_pairs_max = rigid_solver.n_faces * fem_solver.n_surface_elements
         n_contacts, n_candidates = get_contact_capacities(options, n_pairs_max, n_pairs_max)
@@ -6384,9 +6389,9 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
                 self.contact_pairs.normal[i_p] = normal
                 self.contact_pairs.tangent0[i_p] = tangent0
                 self.contact_pairs.tangent1[i_p] = tangent1
-                self.contact_pairs.key[i_p] = (
-                    qd.u64(self.contact_candidates.geom_idx1[i_c]) << qd.u64(self.element_bits)
-                ) | qd.u64(i_e)
+                n_elements = fem_info.elements.V.shape[0]
+                i_f = self.contact_candidates.geom_idx1[i_c]
+                self.contact_pairs.key[i_p] = qd.u64(i_f) * qd.u64(n_elements) + qd.u64(i_e)
                 self.contact_pairs.geom_idx0[i_p] = i_e
                 self.contact_pairs.barycentric0[i_p] = barycentric0
                 self.contact_pairs.link_idx[i_p] = geoms_info.link_idx[i_g]
@@ -6516,8 +6521,7 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
     ) -> None:
         rigid_solver = simulator.rigid_solver
         # The key of a pair is its two tets
-        self.element_bits = max(1, n_rigid_volume_elems - 1).bit_length()
-        self.key_bits = 2 * self.element_bits
+        self.key_bits = 2 * max(1, n_rigid_volume_elems - 1).bit_length()
         # Each pair of tets of two geoms that may collide gives one candidate and one contact at most
         geoms_n_tets = np.zeros(rigid_solver.n_geoms, dtype=gs.np_int)
         for volume in rigid_volumes:
@@ -6745,7 +6749,8 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
                 i_g0 = sap_info.rigid_volume_elems_geom_idx[i_e0]
                 i_g1 = sap_info.rigid_volume_elems_geom_idx[i_e1]
                 self.contact_pairs.batch_idx[i_p] = i_b
-                self.contact_pairs.key[i_p] = (qd.u64(i_e0) << qd.u64(self.element_bits)) | qd.u64(i_e1)
+                n_elements = sap_info.rigid_volume_elems.shape[0]
+                self.contact_pairs.key[i_p] = qd.u64(i_e0) * qd.u64(n_elements) + qd.u64(i_e1)
                 self.contact_pairs.normal[i_p] = normal
                 self.contact_pairs.tangent0[i_p] = tangent0
                 self.contact_pairs.tangent1[i_p] = tangent1
