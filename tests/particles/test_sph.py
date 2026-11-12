@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 import genesis as gs
-from genesis.utils.misc import qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -386,11 +386,43 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     particle_weight = qd_to_numpy(sph_solver.sph_info.particles.mass)[0] * GRAVITY
     footprint_area = LIQUID_SIZE[0] * LIQUID_SIZE[1]
     weight_per_area = sph_solver.n_particles * particle_weight / footprint_area
-    p_bottoms, p_middles, p_tops, p_hydrostatics = [], [], [], []
+    # Under gravity tilted away from the vertical, the free surface settles normal to gravity, and the walls carry the
+    # hydrostatic pressure of the depth along gravity. The second environment starts at this equilibrium, each column of
+    # the lattice of the liquid filled up to the free surface over it, the columns gaining what others lose. The walls
+    # along y of a slab thinner than the support radius hold all its particles, which the ratio would then average over.
+    is_tilt_checked = liquid_width > 2 * PARTICLE_SIZE
+    tilt = np.radians(20.0)
+    gravity_tilted = GRAVITY * np.array([np.sin(tilt), 0.0, -np.cos(tilt)])
+    if is_tilt_checked:
+        sph_solver.set_gravity(gravity_tilted, envs_idx=1)
+        particles_pos = tensor_to_array(liquid.get_particles_pos())[1]
+        columns_pos = np.unique(particles_pos[:, :2], axis=0)
+        layers_height = particles_pos[:, 2].min() + np.arange(0.0, 2.0 * LIQUID_SIZE[2], PARTICLE_SIZE)
+        is_filled = layers_height < LIQUID_SIZE[2] + columns_pos[:, :1] * np.tan(tilt)
+        columns_layers_pos = np.concatenate(
+            [
+                np.broadcast_to(columns_pos[:, None], (*is_filled.shape, 2)),
+                np.broadcast_to(layers_height[:, None], (*is_filled.shape, 1)),
+            ],
+            axis=-1,
+        )
+        liquid.set_particles_pos(columns_layers_pos[is_filled][None], envs_idx=[1])
+    rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
+    p_bottoms, p_middles, p_tops, p_hydrostatics, tilted_ratios = [], [], [], [], []
     is_settled = True
     n_steps = 100
     for i_step in range(n_steps):
         scene.step()
+        if is_tilt_checked and i_step >= 50:
+            pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
+            positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]
+            heights = positions @ (-gravity_tilted / GRAVITY)
+            depths = heights.max() + 0.5 * PARTICLE_SIZE - heights
+            is_wall = (positions[:, 2] < PARTICLE_SIZE) | (
+                np.abs(positions[:, :2]) > 0.5 * np.array(LIQUID_SIZE[:2]) - PARTICLE_SIZE
+            ).any(axis=-1)
+            is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
+            tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
         if i_step >= n_steps - 10:
             # The settled column only keeps a residual sloshing, far slower than a gravity wave over its depth
             speeds = liquid.get_particles_vel()[0].norm(dim=-1)
@@ -415,8 +447,8 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     # leaves loosely set, over the window.
     assert_allclose(p_bottoms[window].mean(), p_hydrostatics[window].mean(), rtol=0.1)
 
-    # FIXME: The wall pressure under tilted gravity needs a scene that settles within the test budget, e.g. one started
-    # at its tilted equilibrium.
+    if is_tilt_checked:
+        assert_allclose(np.mean(tilted_ratios), 1.0, atol=1e-2)
 
     # The liquid keeps the volume of the box it was sampled from, up to the compression of the column under its own
     # weight, so its particles rest around the center of the box.
