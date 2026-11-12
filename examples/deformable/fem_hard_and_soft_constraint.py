@@ -40,16 +40,29 @@ def main():
 
     scene.add_entity(gs.morphs.Plane())
 
+    # The vertex options fix the top cap of the blob and one vertex of the rim of the cylinder, at their initial
+    # positions from the first step on. Their selections hold in the frame of the morph, offset by its position alone.
+    blob_pos = SCENE_POS + np.array([-0.3, -0.3, 0])
+    blob_fixed_bounds = np.array([[-0.1, -0.1, 0.085], [0.1, 0.1, 0.1]])
+    cylinder_pos = SCENE_POS + np.array([-0.3, 0.3, 0])
+    cylinder_fixed_pos = np.array([0.05, 0.0, 0.1])
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=SCENE_POS + np.array([-0.3, -0.3, 0]),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.entities.FEM(
+            morph=gs.morphs.Sphere(
+                pos=blob_pos,
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e4,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
+            vertices={
+                gs.VertexIndex.in_box(lower=blob_fixed_bounds[0], upper=blob_fixed_bounds[1]): gs.options.Vertex(
+                    is_fixed=True,
+                ),
+            },
         ),
     )
 
@@ -66,13 +79,12 @@ def main():
         ),
     )
 
-    # A beam clamped by its left end face and pinned by a bottom corner of its right end, which the vertex options hold
-    # at their initial positions from the first step on
     scene.add_entity(
         options=gs.entities.FEM(
-            morph=gs.morphs.Box(
-                pos=SCENE_POS + np.array([0.3, -0.3, 0]),
-                size=(0.4, 0.06, 0.06),
+            morph=gs.morphs.Cylinder(
+                pos=cylinder_pos,
+                height=0.2,
+                radius=0.05,
             ),
             material=gs.materials.FEM.Elastic(
                 E=1.0e5,
@@ -81,10 +93,7 @@ def main():
                 model="linear_corotated",
             ),
             vertices={
-                (
-                    gs.VertexIndex.in_box(lower=(-0.2, -0.03, -0.03), upper=(-0.2, 0.03, 0.03))
-                    | gs.VertexIndex.closest_to(pos=(0.2, 0.03, -0.03), max_distance=0.01)
-                ): gs.options.Vertex(
+                gs.VertexIndex.closest_to(pos=cylinder_fixed_pos, max_distance=0.01): gs.options.Vertex(
                     is_fixed=True,
                 ),
             },
@@ -99,6 +108,7 @@ def main():
         pos=(-2.0, 3.0, 2.0),
         lookat=SCENE_POS + np.array([0.0, 0.0, -0.8]),
         fov=30,
+        debug=True,
     )
 
     scene.build()
@@ -134,13 +144,16 @@ def main():
     debug_circle = None
     total_steps = int(args.seconds / args.dt)
 
+    # The fixed vertices of the blob in a translucent red box, and that of the cylinder as a red sphere
+    scene.draw_debug_box(bounds=blob_pos + blob_fixed_bounds, color=(1, 0, 0, 0.3), wireframe=False)
+    scene.draw_debug_spheres(poss=[cylinder_pos + cylinder_fixed_pos], radius=0.01, color=(1, 0, 0, 1))
+
     try:
         target_positions = blob.init_positions[pinned_idx]
-        scene.draw_debug_spheres(poss=target_positions, radius=0.02, color=(1, 0, 1, 0.8))
         blob.set_vertex_constraints(pinned_idx, target_positions, is_soft_constraint=True, stiffness=1e4)
 
         target_positions = get_next_circle_position()
-        debug_circle = scene.draw_debug_spheres(poss=target_positions, radius=0.02, color=(0, 1, 0, 0.8))
+        debug_circle = scene.draw_debug_spheres(poss=target_positions, radius=0.01, color=(1, 0, 0, 1))
         cube.set_vertex_constraints(pinned_idx, target_positions)
 
         for _ in tqdm(range(total_steps), total=total_steps):
@@ -148,7 +161,7 @@ def main():
                 scene.clear_debug_object(debug_circle)
 
             new_pos = get_next_circle_position()
-            debug_circle = scene.draw_debug_spheres(poss=new_pos, radius=0.02, color=(0, 1, 0, 0.8))
+            debug_circle = scene.draw_debug_spheres(poss=new_pos, radius=0.01, color=(1, 0, 0, 1))
             cube.update_constraint_targets(pinned_idx, new_pos)
 
             scene.step()
