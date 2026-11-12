@@ -393,6 +393,10 @@ class Resolution:
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
     # The names of every collision geom as its asset states them, which the geom options of the entity select on
     geoms_name: list[str] = field(default_factory=list)
+    # The number of collision geoms of the morph being resolved, which a 'gs.GeomIndex.at' selection counts, None for a
+    # single-link morph, and the ordinal of the first collision geom of the next link it resolves
+    n_geoms: int | None = None
+    geoms_start: int = 0
     # The paths of the links whose link or geom options give a density to one of their collision geoms
     links_path_with_density: set[tuple[str, ...]] = field(default_factory=set)
 
@@ -761,6 +765,7 @@ class KinematicEntityDescription(EntityDescription):
         )
 
     def _load_primitive(self, morph, resolution: Resolution, load_geom_only_for_heterogeneous=False):
+        resolution.n_geoms, resolution.geoms_start = None, 0
         if morph.fixed:
             joint_type = gs.JOINT_TYPE.FIXED
             n_qs = 0
@@ -862,6 +867,7 @@ class KinematicEntityDescription(EntityDescription):
         return g_infos
 
     def _load_mesh(self, morph, resolution: Resolution, load_geom_only_for_heterogeneous=False):
+        resolution.n_geoms, resolution.geoms_start = None, 0
         # Load meshes
         meshes = gs.Mesh.from_morph_surface(morph, self.surface)
 
@@ -1254,6 +1260,13 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
+        # A 'gs.GeomIndex.at' selection counts the collision geoms of the whole morph (see '_resolve_geoms')
+        resolution.n_geoms = sum(
+            bool(morph.collision and (g_info["contype"] or g_info["conaffinity"]))
+            for link_g_infos in links_g_infos
+            for g_info in link_g_infos
+        )
+        resolution.geoms_start = 0
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
     def _load_scene(self, morph, resolution: Resolution):
@@ -1507,22 +1520,25 @@ class KinematicEntityDescription(EntityDescription):
         # options never fuse. Their density stays out of the authored ones, which anchor an aligned link where a
         # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options of the entity rank
         # below the link options, which rank below the geom options of the links, and two selections of one rank giving
-        # one field of one geom raise an error. A selection by name may match no geom of this link, 'resolve' checking
-        # that it matches a geom of the entity.
+        # one field of one geom raise an error. A selection may match no geom of this link, as long as it matches a geom
+        # of the entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
+        geoms_start = resolution.geoms_start
+        n_geoms = len(cg_infos) if resolution.n_geoms is None else resolution.n_geoms
+        resolution.geoms_start += len(cg_infos)
         if isinstance(self.options, gs.entities.Rigid) and cg_infos:
             link_name = link_path[-1]
             entity_geoms_fields, link_fields, link_geoms_fields = [{} for _ in cg_infos], {}, [{} for _ in cg_infos]
             fields_options = []
             for geom_index, geom_options in self.options.geoms.items():
-                for i_g in geom_index.resolve(geoms_name):
+                for i_g in geom_index.resolve(geoms_name, geoms_start, n_geoms):
                     fields_options.append((entity_geoms_fields[i_g], geom_options, f"geom {i_g} of link '{link_name}'"))
             for link_index, link_options in self.options.links.items():
                 if link_index.matches(link_path):
                     fields_options.append((link_fields, link_options, f"link '{link_name}'"))
                     for geom_index, geom_options in link_options.geoms.items():
-                        for i_g in geom_index.resolve(geoms_name):
+                        for i_g in geom_index.resolve(geoms_name, 0, len(geoms_name)):
                             target = f"geom {i_g} of link '{link_name}'"
                             fields_options.append((link_geoms_fields[i_g], geom_options, target))
             for fields, options, target in fields_options:
