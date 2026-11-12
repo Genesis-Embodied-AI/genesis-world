@@ -341,32 +341,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.register_errors(
             self._errno,
             {
-                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: lambda: (
                     "Exceeding max number of broad phase candidate contact pairs "
                     f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of "
                     f"{type(self).__name__}'s option 'multiplier_collision_broad_phase'."
                 ),
-                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                RigidErrorCode.OVERFLOW_COLLISION_PAIRS: lambda: (
                     f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
                     f"Please increase the value of {type(self).__name__}'s option 'max_collision_pairs'."
                 ),
-                RigidErrorCode.OVERFLOW_CONTACTS: (
+                RigidErrorCode.OVERFLOW_CONTACTS: lambda: (
                     f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
                     "supported by the constraint solver. Please increase the value of "
                     f"{type(self).__name__}'s option 'max_contacts'."
                 ),
-                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: lambda: (
                     "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
                     "filter this pair out via 'contype'/'conaffinity'."
                 ),
-                RigidErrorCode.INVALID_CONTACT_NAN: (
+                RigidErrorCode.INVALID_CONTACT_NAN: lambda: (
                     "Collision detection reported a contact whose position, normal or penetration is not finite. This "
                     "is a solver-internal error, please report it."
                 ),
-                RigidErrorCode.INVALID_FORCE_NAN: (
+                RigidErrorCode.INVALID_FORCE_NAN: lambda: (
                     "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
                 ),
-                RigidErrorCode.INVALID_ACC_NAN: (
+                RigidErrorCode.INVALID_ACC_NAN: lambda: (
                     "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
                     "the controls given to the dofs."
                 ),

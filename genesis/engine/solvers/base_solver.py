@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from enum import IntFlag
 from typing import TYPE_CHECKING, NamedTuple, overload
 
@@ -139,10 +139,10 @@ class ErrnoMixin:
     Mixed into every solver, and into the couplers whose kernels flag errors of their own.
     """
 
-    # The error flags the kernels write, the message raised for each, and the flags accumulated from them and from the
-    # backward pass since the last reset of each env (see 'register_errors').
+    # The error flags the kernels write, the report building the message raised for each, and the flags accumulated
+    # from them and from the backward pass since the last reset of each env (see 'register_errors').
     _errno: "qd.Tensor | None" = None
-    _error_messages: dict[int, str] = {}
+    _error_reports: dict[int, Callable[[], str]] = {}
     _errno_latched: torch.Tensor | None = None
     # The page-locked host copy of '_errno_latched' a non-blocking check reads, and the event recorded once it landed
     # (see 'check_errno').
@@ -158,20 +158,21 @@ class ErrnoMixin:
             self._errno_host = torch.zeros((n_envs,), dtype=gs.tc_int, pin_memory=True)
             self._errno_event = torch.cuda.Event()
 
-    def register_errors(self, errno: qd.Tensor, messages: dict[int, str]) -> None:
+    def register_errors(self, errno: qd.Tensor, reports: dict[int, Callable[[], str]]) -> None:
         """
-        Declare the error flags the kernels of the component write per env, one bit per error, and the message of each.
+        Declare the error flags the kernels of the component write per env, one bit per error, and the report of each.
 
-        `errno` is an array of the component, which the mixin references. 'check_errno' raises the message of the first
-        flagged error, in the order of `messages`. It reads `_errno_latched`, the union of every flag `errno` held since
-        the last reset of each env, which no restore of the state rewinds (see 'update_errno'), so a component clears
-        the flags of some envs through 'clear_errno'. The flags of the backward pass come after those of `messages`, as
-        'StepOperation.backward' sets them.
+        `errno` is an array of the component, which the mixin references. 'check_errno' raises the message returned by
+        the report of the first flagged error, in the order of `reports`. A report runs when its error raises, so that
+        its message can name what the flags alone cannot tell apart, such as the environment past a capacity. The check
+        reads `_errno_latched`, the union of every flag `errno` held since the last reset of each env, which no restore
+        of the state rewinds (see 'update_errno'), so a component clears the flags of some envs through 'clear_errno'.
+        The flags of the backward pass come after those of `reports`, as 'StepOperation.backward' sets them.
         """
         # Each error owns its bit, those of the backward pass included
-        assert not messages.keys() & self._error_messages.keys(), f"{type(self).__name__} reuses a reserved error bit."
+        assert not reports.keys() & self._error_reports.keys(), f"{type(self).__name__} reuses a reserved error bit."
         self._errno = errno
-        self._error_messages = {**messages, **self._error_messages}
+        self._error_reports = {**reports, **self._error_reports}
 
     def update_errno(self) -> None:
         """
@@ -224,7 +225,7 @@ class ErrnoMixin:
         between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
         `context` says where the check runs, ahead of the message.
         """
-        if not self._error_messages:
+        if not self._error_reports:
             return
         if not blocking and self._errno_host is not None:
             self._errno_event.synchronize()
@@ -244,8 +245,9 @@ class ErrnoMixin:
             self._errno_host_context = None
         if not errno:
             return
-        for code, message in self._error_messages.items():
+        for code, report in self._error_reports.items():
             if errno & code:
+                message = report()
                 gs.raise_exception(message if context is None else f"{context}: {message}")
 
 
@@ -681,9 +683,9 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         self._B = self._sim._B
         self.build_errno(self._B)
         if self._requires_grad:
-            self._error_messages = {
-                **self._error_messages,
-                BackwardErrorCode.INVALID_GRAD_NAN: (
+            self._error_reports = {
+                **self._error_reports,
+                BackwardErrorCode.INVALID_GRAD_NAN: lambda: (
                     "The backward pass produced a 'nan' or 'inf' gradient of the state. The rollout is likely too stiff "
                     "to differentiate over this horizon: shorten it, or decrease the simulation timestep."
                 ),

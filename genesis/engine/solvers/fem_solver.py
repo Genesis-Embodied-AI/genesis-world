@@ -730,7 +730,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.register_errors(
             self.data_manager.errno,
             {
-                FEMErrorCode.INVALID_VERTEX_NAN: (
+                FEMErrorCode.INVALID_VERTEX_NAN: lambda: (
                     "NaN detected in FEM states. Try reducing the time step size or adjusting simulation parameters."
                 ),
             },

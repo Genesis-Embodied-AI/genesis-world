@@ -441,7 +441,7 @@ Please reduce 'grid_density', or set tighter boundaries via 'lower_bound' / 'upp
         self.register_errors(
             self.data_manager.errno,
             {
-                MPMErrorCode.INVALID_VELOCITY_NAN: (
+                MPMErrorCode.INVALID_VELOCITY_NAN: lambda: (
                     """Invalid MPM particle velocities causing 'nan' or 'inf'.
 Please decrease the simulation timestep or adjust the material parameters."""
                 ),
