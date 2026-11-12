@@ -1,0 +1,21 @@
+tests/utils/assets.py
+  s_e0e9daf97ed558::t_65c885ae5592f9 25
+pyproject.toml
+  s_e0e9daf97ed558::t_ec506a4b0754d7 106-108
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "895f91b537c0547d560cb3a7f6988254f9a84202",
+  "prompts": {},
+  "sessions": {
+    "s_e0e9daf97ed558": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c7e6868c-2cee-4cbc-8228-9a88ac172a3e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
