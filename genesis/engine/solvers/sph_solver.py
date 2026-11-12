@@ -1138,10 +1138,11 @@ def func_task_solver_iteration(
 
     # The stiffness and the position of the neighbors, weighted for the stiffness of the walls (see
     # func_solver_iteration)
-    kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
-    ret.weight_sum = ret.weight_sum + kernel_ij
-    ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
-    ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
+    if ret.is_near_boundary:
+        kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
+        ret.weight_sum = ret.weight_sum + kernel_ij
+        ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
+        ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
 
 
 @qd.func
@@ -1183,10 +1184,22 @@ def func_solver_iteration(
         if qd.static(solve_density):
             dv_scale = sph_info.substep_dt[None]
         k_i = sph_state.particles_k_reordered[i_p, i_b]
+        # The neighbors weigh the stiffness of the walls, which acts through kernel gradients that are all zero beyond
+        # the support radius of the particle (see func_wall_volume). The distance to the surface of the moving
+        # boundaries takes a margin of one particle size, as their quadrature points lie on that surface.
+        pos = sph_state.particles_reordered.pos[i_p, i_b]
+        support_radius = sph_info.support_radius[None]
+        walls_dist = qd.min((pos - sph_info.boundary.lower[None]).min(), (sph_info.boundary.upper[None] - pos).min())
+        is_near_boundary = walls_dist < support_radius
+        if qd.static(sph_config.has_boundary):
+            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+            if sph_state.boundary.surface_dist[i_o, i_b] < support_radius + sph_info.particle_size[None]:
+                is_near_boundary = True
         ret = qd.Struct(
             dv=qd.Vector.zero(gs.qd_float, 3),
             k_i=k_i,
             dv_scale=dv_scale,
+            is_near_boundary=is_near_boundary,
             weight_sum=gs.qd_float(0.0),
             k_sum_w=gs.qd_float(0.0),
             pos_sum=qd.Vector.zero(gs.qd_float, 3),
@@ -1206,7 +1219,6 @@ def func_solver_iteration(
         )
         if is_solved and i_lane == 0:
             # The particle itself weighs into the stiffness and the position its neighbors give the walls
-            pos = sph_state.particles_reordered.pos[i_p, i_b]
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
             ret.weight_sum = ret.weight_sum + kernel_self
             ret.k_sum_w = ret.k_sum_w + kernel_self * k_i
