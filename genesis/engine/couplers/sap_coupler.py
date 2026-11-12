@@ -154,11 +154,6 @@ CONTACT_AREA_MIN = 1e-10
 CONTACT_STIFFNESS_MIN = 1e-10
 CONTACT_SEPARATION_MAX = 1e-10
 
-# Cosine of the largest angle between the pressure gradient of a tet and the normal of a contact plane of FEM tets,
-# beyond which the pair has no contact. The bound lies past a right angle, so that it drops only the pairs whose normal
-# points against the pressure increase into a side.
-COS_ANGLE_THRESHOLD = math.cos(math.pi * 5.0 / 8.0)
-
 # Stiffness of the contact of each vertex of a rigid body with the floor, in N/m, whatever the mass of the body and its
 # number of vertices. The softer of it and the near-rigid regularization of the contact (see 'sap_beta' in
 # SAPCouplerOptions) sets the compliance of the contact, this stiffness for heavy bodies.
@@ -602,7 +597,6 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     linesearch_cost_rtol: qd.Tensor = field(float, shape=())
     hydroelastic_stiffness: qd.Tensor = field(float, shape=())
     rigid_floor_vert_stiffness: qd.Tensor = field(float, shape=())
-    cos_angle_threshold: qd.Tensor = field(float, shape=())
     # See CONTACT_GRADIENT_RTOL, COARSE_PIVOT_RTOL, CONTACT_AREA_MIN and CAP_RESIDUAL_MAX
     contact_gradient_rtol: qd.Tensor = field(float, shape=())
     coarse_pivot_rtol: qd.Tensor = field(float, shape=())
@@ -1650,7 +1644,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     linesearch_cost_rtol=LINESEARCH_COST_RTOL * precision / np.finfo(np.float64).eps,
                     hydroelastic_stiffness=options.hydroelastic_stiffness,
                     rigid_floor_vert_stiffness=RIGID_FLOOR_VERT_STIFFNESS,
-                    cos_angle_threshold=COS_ANGLE_THRESHOLD,
                     contact_gradient_rtol=CONTACT_GRADIENT_RTOL * precision,
                     coarse_pivot_rtol=COARSE_PIVOT_RTOL * precision,
                     contact_area_min=CONTACT_AREA_MIN,
@@ -6236,6 +6229,38 @@ def accumulate_area_centroid(
 
 
 @qd.func
+def func_equal_pressure_plane(
+    x0: qd.types.vector(3),
+    x1: qd.types.vector(3),
+    g0: qd.types.vector(3),
+    g1: qd.types.vector(3),
+    p0: float,
+    p1: float,
+    rtol: float,
+):
+    """Return whether two tets have a contact plane, its unit normal and its point closest to the origin.
+
+    The pressure field of each tet is linear, p0 + g0 . (x - x0) for the first one, `x0` being one of its vertices, `p0`
+    the pressure there and `g0` its gradient. The contact plane is where both pressures are equal, its normal pointing
+    into the first tet. The tets have a contact only if the pressure of each increases into its own body along the
+    normal by more than `rtol` times the norm of its gradient: a contact stiffness is this increase, harmonically
+    averaged over both tets, so that a smaller one transmits no force.
+    """
+    g0_norm = g0.norm()
+    g1_norm = g1.norm()
+    normal = g0 - g1
+    magnitude = normal.norm()
+    # Gradients equal up to round-off leave the plane undefined
+    is_valid = magnitude > rtol * (g0_norm + g1_norm)
+    x = qd.Vector.zero(gs.qd_float, 3)
+    if is_valid:
+        normal = normal / magnitude
+        x = (p1 - p0 - g1.dot(x1) + g0.dot(x0)) / magnitude * normal
+        is_valid = normal.dot(g0) > rtol * g0_norm and -normal.dot(g1) > rtol * g1_norm
+    return is_valid, normal, x
+
+
+@qd.func
 def func_clip_polygon_by_tet(
     polygon_vertices: qd.template(),
     polygon_n_vertices: qd.template(),
@@ -6381,28 +6406,16 @@ class FEMSelfContactHandler(BaseContactHandler):
                 continue
             i_v0 = fem_info.elements.el2v[i_a][0]
             i_v1 = fem_info.elements.el2v[i_q][0]
-            x0 = fem_state.vertices.pos[i_v0, i_b]
-            x1 = fem_state.vertices.pos[i_v1, i_b]
-            p0 = sap_info.fem_pressure[i_v0]
-            p1 = sap_info.fem_pressure[i_v1]
-            g0 = sap_state.fem_pressure_gradient[i_a, i_b]
-            g1 = sap_state.fem_pressure_gradient[i_q, i_b]
-            g0_norm = g0.norm()
-            g1_norm = g1.norm()
-            if g0_norm == 0.0 or g1_norm == 0.0:
-                continue
-            # Calculate the isosurface, i.e. equal pressure plane defined by x and normal
-            # Solve for p0 + g0.dot(x - x0) = p1 + g1.dot(x - x1)
-            normal = g0 - g1
-            magnitude = normal.norm()
-            if magnitude <= sap_info.contact_gradient_rtol[None] * (g0_norm + g1_norm):
-                continue
-            normal = normal / magnitude
-            b = p1 - p0 - g1.dot(x1) + g0.dot(x0)
-            x = b / magnitude * normal
-            # Check that the normal is pointing along g0 and against g1 (see COS_ANGLE_THRESHOLD)
-            threshold = sap_info.cos_angle_threshold[None]
-            if normal.dot(g0) < threshold * g0_norm or normal.dot(g1) > -threshold * g1_norm:
+            is_valid, normal, x = func_equal_pressure_plane(
+                fem_state.vertices.pos[i_v0, i_b],
+                fem_state.vertices.pos[i_v1, i_b],
+                sap_state.fem_pressure_gradient[i_a, i_b],
+                sap_state.fem_pressure_gradient[i_q, i_b],
+                sap_info.fem_pressure[i_v0],
+                sap_info.fem_pressure[i_v1],
+                sap_info.contact_gradient_rtol[None],
+            )
+            if not is_valid:
                 continue
             intersection_code0 = qd.int32(0)
             distance0 = qd.Vector.zero(gs.qd_float, 4)
@@ -7289,29 +7302,17 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
         for i_r in range(self.query_results.count[0]):
             i_b, i_a, i_q = self.query_results.triplets[i_r]
             i_v0 = sap_info.rigid_volume_elems[i_a][0]
-            i_v1 = sap_info.rigid_volume_elems[i_q][1]
-            x0 = sap_state.rigid_volume_verts[i_v0, i_b]
-            x1 = sap_state.rigid_volume_verts[i_v1, i_b]
-            p0 = sap_info.rigid_pressure_field[i_v0]
-            p1 = sap_info.rigid_pressure_field[i_v1]
-            g0 = sap_state.rigid_pressure_gradient[i_a, i_b]
-            g1 = sap_state.rigid_pressure_gradient[i_q, i_b]
-            g0_norm = g0.norm()
-            g1_norm = g1.norm()
-            if g0_norm == 0.0 or g1_norm == 0.0:
-                continue
-            # Calculate the isosurface, i.e. equal pressure plane defined by x and normal
-            # Solve for p0 + g0.dot(x - x0) = p1 + g1.dot(x - x1)
-            normal = g0 - g1
-            magnitude = normal.norm()
-            g_rtol = sap_info.contact_gradient_rtol[None]
-            if magnitude <= g_rtol * (g0_norm + g1_norm):
-                continue
-            normal = normal / magnitude
-            b = p1 - p0 - g1.dot(x1) + g0.dot(x0)
-            x = b / magnitude * normal
-            # Check that the normal is pointing along g0 and against g1
-            if normal.dot(g0) <= g_rtol * g0_norm or normal.dot(g1) >= -g_rtol * g1_norm:
+            i_v1 = sap_info.rigid_volume_elems[i_q][0]
+            is_valid, normal, x = func_equal_pressure_plane(
+                sap_state.rigid_volume_verts[i_v0, i_b],
+                sap_state.rigid_volume_verts[i_v1, i_b],
+                sap_state.rigid_pressure_gradient[i_a, i_b],
+                sap_state.rigid_pressure_gradient[i_q, i_b],
+                sap_info.rigid_pressure_field[i_v0],
+                sap_info.rigid_pressure_field[i_v1],
+                sap_info.contact_gradient_rtol[None],
+            )
+            if not is_valid:
                 continue
 
             intersection_code0 = qd.int32(0)
