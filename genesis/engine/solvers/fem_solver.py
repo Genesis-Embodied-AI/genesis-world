@@ -3687,15 +3687,31 @@ def func_cloth_publish_rows(newton_rows: NewtonRows, ipc_state: IPCState, fem_st
 
 
 @qd.func(requires_top_level=True)
-def func_cloth_scale_direction(envs_mask: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, ipc_info: IPCInfo):
-    """Scale the Newton direction of the vertices of the cloth of every environment selected by the step of the group of
-    contact bodies of its entity (see IPCBodies in genesis/engine/solvers/ipc_contact.py)."""
+def func_cloth_scale_direction(
+    envs_mask: qd.Tensor,
+    alpha: qd.Tensor,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    has_rigid: qd.template(),
+    is_by_body: qd.template(),
+):
+    """Scale the Newton direction of the vertices of the cloth of every environment selected by the step of their
+    environment in `alpha`, or with `is_by_body` by that of the group of the contact body of their entity (see
+    IPCBodies in genesis/engine/solvers/ipc_contact.py), their sweep in the contact surface along."""
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
         if envs_mask[i_b]:
-            i_body = ipc_info.vertices.body_idx[i_v]
-            fem_state.cloth_vertices.displacement[i_v, i_b] = (
-                ipc_state.bodies.alpha[i_body, i_b] * fem_state.cloth_vertices.displacement[i_v, i_b]
-            )
+            scale = gs.qd_float(0.0)
+            if qd.static(is_by_body):
+                i_body = ipc_info.vertices.body_idx[i_v]
+                scale = alpha[i_body, i_b]
+            else:
+                scale = alpha[i_b]
+            displacement = scale * fem_state.cloth_vertices.displacement[i_v, i_b]
+            fem_state.cloth_vertices.displacement[i_v, i_b] = displacement
+            ipc_state.vertices.displacement[i_v, i_b] = displacement
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot_displacement[i_v, i_b] = displacement
 
 
 @qd.kernel(fastcache=True)

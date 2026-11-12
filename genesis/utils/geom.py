@@ -390,6 +390,30 @@ def qd_quat_to_R(quat, eps):
 
 
 @qd.func
+def qd_R_to_quat(R):
+    """
+    Converts a 3x3 rotation matrix to a unit quaternion, from its largest diagonal combination for accuracy.
+    """
+    t = gs.qd_float(0.0)
+    quat = qd.Vector.zero(gs.qd_float, 4)
+    if R[2, 2] < 0.0:
+        if R[0, 0] > R[1, 1]:
+            t = 1.0 + R[0, 0] - R[1, 1] - R[2, 2]
+            quat = qd.Vector([R[2, 1] - R[1, 2], t, R[1, 0] + R[0, 1], R[0, 2] + R[2, 0]], dt=gs.qd_float)
+        else:
+            t = 1.0 - R[0, 0] + R[1, 1] - R[2, 2]
+            quat = qd.Vector([R[0, 2] - R[2, 0], R[1, 0] + R[0, 1], t, R[2, 1] + R[1, 2]], dt=gs.qd_float)
+    else:
+        if R[0, 0] < -R[1, 1]:
+            t = 1.0 - R[0, 0] - R[1, 1] + R[2, 2]
+            quat = qd.Vector([R[1, 0] - R[0, 1], R[0, 2] + R[2, 0], R[2, 1] + R[1, 2], t], dt=gs.qd_float)
+        else:
+            t = 1.0 + R[0, 0] + R[1, 1] + R[2, 2]
+            quat = qd.Vector([t, R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]], dt=gs.qd_float)
+    return quat / (2.0 * qd.sqrt(t))
+
+
+@qd.func
 def qd_quat_to_xyz(quat, eps):
     """
     Convert a quaternion into intrinsic x-y-z Euler angles.

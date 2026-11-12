@@ -15,6 +15,7 @@ from enum import IntEnum, auto
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
 import quadrants as qd
 
@@ -26,6 +27,7 @@ from genesis.engine.couplers.mpm_rigid_global_newton import (
     func_contact_terms,
     func_mark_constrained_links,
 )
+from genesis.engine.materials import FEM
 from genesis.engine.numerics.bcoo import assemble_bcoo_matrix, func_add_by_key
 from genesis.engine.numerics.newton_rows import (
     NewtonRows,
@@ -39,11 +41,29 @@ from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.contact_proxy import (
     PROXIES,
     PROXY_VERTICES,
+    IPCProxies,
+    IPCProxiesEnvs,
     IPCProxiesInfo,
     IPCProxiesState,
+    IPCProxyDofsInfo,
     IPCProxyVerticesInfo,
+    ProxyKinematics,
     build_contact_proxies,
+    func_proxies_expand,
+    func_proxies_init_line_search,
+    func_proxies_init_substep,
+    func_proxies_limit_step,
+    func_proxies_link_stiffness,
+    func_proxies_mask_rows,
+    func_proxies_prepare,
     func_proxies_publish_contact,
+    func_proxies_publish_sweep,
+    func_proxies_reduce_gradient,
+    func_proxies_restrict,
+    func_proxies_scale_direction,
+    func_proxies_scale_dofs,
+    func_proxies_step_forward,
+    func_proxies_trial_residual,
     kernel_proxies_init_pose,
 )
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
@@ -63,10 +83,10 @@ from genesis.engine.solvers.rigid.global_newton import (
     func_rigid_step_forward,
     func_rigid_update_constraint,
 )
-from genesis.engine.materials import FEM
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.solvers import LegacyCouplerOptions, NewtonOptions
 from genesis.utils.data import ENVS, Config, Data, DataItem, DataKind, field, iter_data
-from genesis.utils.misc import qd_isfinite, qd_to_numpy
+from genesis.utils.misc import indices_to_mask, qd_isfinite, qd_to_numpy
 
 from .base_solver import ErrorCode, Solver
 from .fem_solver import (
@@ -137,6 +157,8 @@ class NewtonErrorCode(ErrorCode):
 
     INVALID_SOLVE_NAN = auto()
     INVALID_CONTACT_THICKNESS = auto()
+    INVALID_PROXY_PATH = auto()
+    PROXY_SOLVE_EXHAUSTED = auto()
 
 
 class NewtonFailure(IntEnum):
@@ -207,6 +229,12 @@ class NewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
     displacement_tol: qd.Tensor = field(float)
     pcg_max_iterations: qd.Tensor = field(int)
     pcg_tol: qd.Tensor = field(float)
+    # The mismatch of a proxy with its link a step keeps within at least, 0.1 d_hat, the one a converged solve reaches
+    # at most, min(velocity_tol * dt, 0.01 d_hat), and the relative round-off of the check of a trial against its path
+    # limit (see rigid/contact_proxy.py)
+    proxy_path_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_solve_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_guard_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
 
 
 class NewtonConfig(Config):
@@ -222,8 +250,10 @@ class NewtonConfig(Config):
     has_mpm: bool
     has_cloth: bool
     has_halfplanes: bool
-    # Whether the contact surface holds rigid vertices, those of the rigid contact proxies (see ipc_contact.py)
+    # Whether the contact surface holds rigid vertices, those of the rigid contact proxies (see ipc_contact.py), and
+    # whether some of them move, their constraints joining the solve (see rigid/contact_proxy.py)
     has_rigid_vertices: bool
+    has_moving_proxies: bool
     # The contact of the cloth (see 'gs.options.IPCOptions'): whether its time of contact bounds the closing rate of a
     # pair rather than the motion of its vertices, whether every group of contact bodies takes a step of its own, whether
     # its stiffness adapts, and whether it grows at the start of every Newton iteration rather than of every substep
@@ -247,6 +277,10 @@ class NewtonData(Data):
     proxies_state: IPCProxiesState = field(labels=PROXIES_LABEL)
     proxies_info: IPCProxiesInfo = field(labels=PROXIES_LABEL)
     proxy_vertices_info: IPCProxyVerticesInfo = field(labels=PROXIES_LABEL)
+    proxies: IPCProxies = field(labels=PROXIES_LABEL)
+    proxies_envs: IPCProxiesEnvs = field(labels=PROXIES_LABEL)
+    proxy_kinematics: ProxyKinematics = field(labels=PROXIES_LABEL)
+    proxy_dofs_info: IPCProxyDofsInfo = field(labels=PROXIES_LABEL)
 
 
 class NewtonSolver(Solver):
@@ -325,6 +359,7 @@ class NewtonSolver(Solver):
         has_cloth = fem_solver.is_solved_in_global_newton
         halfplanes_geom_idx = []
         links_geoms = []
+        entities_moving = []
         if has_cloth and gs.qd_float == qd.f32:
             gs.logger.warning(
                 "The cloth runs in single precision, where its contact with itself and with other cloths is less "
@@ -340,7 +375,7 @@ class NewtonSolver(Solver):
                 gs.raise_exception("The cloth is not supported together with volumetric FEM entities.")
             # The fixed planes bound the cloth as halfplanes, and every link holding other collision geoms of an entity
             # coupling with the cloth owns a rigid contact proxy (see rigid/contact_proxy.py)
-            entities_moving = []
+            links_parent_idx = {link.idx: link.parent_idx for entity in rigid_solver.entities for link in entity.links}
             for entity in rigid_solver.entities:
                 for link in entity.links:
                     geoms = []
@@ -355,14 +390,14 @@ class NewtonSolver(Solver):
                         elif entity.material.needs_coup:
                             geoms.append(geom)
                     if geoms:
-                        if not link.is_fixed:
-                            gs.raise_exception(
-                                "The cloth supports fixed rigid links alone for now, got the moving link "
-                                f"'{link.name}' of entity '{entity.name}'."
-                            )
                         if not link.is_fixed and entity not in entities_moving:
                             entities_moving.append(entity)
-                        links_geoms.append((link, entities_moving.index(entity) if not link.is_fixed else -1, geoms))
+                        # The links from the link to the root of its tree, which its constraint reads
+                        depth, i_l = 0, link.idx
+                        while i_l >= 0:
+                            depth, i_l = depth + 1, links_parent_idx[i_l]
+                        i_body = -1 if link.is_fixed else entities_moving.index(entity)
+                        links_geoms.append((link, i_body, depth, geoms))
         rigid_options = self._scene.options.rigid
         has_rigid_dofs = rigid_solver.is_solved_in_global_newton
         if has_rigid_dofs:
@@ -380,9 +415,17 @@ class NewtonSolver(Solver):
             ):
                 if not is_supported:
                     gs.raise_exception(
-                        f"Coupling the rigid solver with the implicit MPM solver requires RigidOptions({requirement}), "
-                        "or else LegacyCouplerOptions(rigid_mpm=False)."
+                        "Solving the rigid solver within the Newton solve, its moving geoms coupling with the implicit "
+                        f"MPM solver or with the cloth, requires RigidOptions({requirement})."
                     )
+        if entities_moving and rigid_options.integrator == gs.integrator.implicitfast:
+            # The implicit damping applied after the solve changes the configuration the dofs reach from their solved
+            # acceleration, which the constraint of the proxies follows (see rigid/contact_proxy.py)
+            gs.raise_exception(
+                "The contact of the cloth with moving rigid links does not support RigidOptions("
+                "integrator=gs.integrator.implicitfast): use gs.integrator.approximate_implicitfast or "
+                "gs.integrator.Euler."
+            )
         has_halfplanes = len(halfplanes_geom_idx) > 0
         ipc_options = self._scene.options.ipc
         # The contact surface, every participant publishing its primitives into its own range, the cloth first
@@ -409,6 +452,7 @@ class NewtonSolver(Solver):
             has_cloth=has_cloth,
             has_halfplanes=has_halfplanes,
             has_rigid_vertices=proxies is not None,
+            has_moving_proxies=len(entities_moving) > 0,
             is_ccd_directional=ipc_options.ccd_bound == "directional",
             has_ccd_partition=has_cloth and ipc_options.ccd_partition,
             has_adaptive_kappa=has_cloth and ipc_options.adaptive_kappa_mode == "per-vertex",
@@ -419,6 +463,8 @@ class NewtonSolver(Solver):
                 "envs": self._B,
                 "dofs": max(rigid_solver.n_dofs, 1),
                 "links": max(rigid_solver.n_links, 1),
+                "qs": max(rigid_solver.n_qs, 1),
+                "joints": max(rigid_solver.n_joints, 1),
                 "halfplanes": len(halfplanes_geom_idx),
                 HALFPLANE_VERTICES: fem_solver.n_vertices,
                 CONTACT_VERTICES: len(surface.vertices_body_idx) if has_cloth else 0,
@@ -436,6 +482,11 @@ class NewtonSolver(Solver):
                     displacement_tol=self._options.velocity_tol * self._sim.substep_dt,
                     pcg_max_iterations=self._options.pcg_max_iterations,
                     pcg_tol=self._options.pcg_tol,
+                    proxy_path_tolerance=0.1 * ipc_options.d_hat,
+                    proxy_solve_tolerance=min(
+                        self._options.velocity_tol * self._sim.substep_dt, 0.01 * ipc_options.d_hat
+                    ),
+                    proxy_guard_tolerance=1e-10,
                 ),
                 ipc_info=dict(
                     substep_dt=self._sim.substep_dt,
@@ -489,6 +540,14 @@ class NewtonSolver(Solver):
                     "contact is undefined. Start the cloth farther than its contact thickness from the planes and from "
                     "itself, or lower gs.materials.FEM.Cloth(contact_thickness)."
                 ),
+                NewtonErrorCode.INVALID_PROXY_PATH: (
+                    "A rigid link drifted from the pose its contact with the cloth sees beyond the bound of the step "
+                    "that the Newton solve certified. Please report this issue."
+                ),
+                NewtonErrorCode.PROXY_SOLVE_EXHAUSTED: (
+                    "The Newton solve of the cloth in contact with rigid links stopped before converging, the substep "
+                    "being left uncommitted: raise NewtonOptions(max_iterations) or loosen NewtonOptions(velocity_tol)."
+                ),
             },
         )
         self.newton_envs = self.data_manager.newton_envs
@@ -521,12 +580,24 @@ class NewtonSolver(Solver):
                     self.data_manager.proxies_info,
                     self.data_manager.proxy_vertices_info,
                 )
+                # A dof belongs to the contact body of its entity, its update measuring its convergence unless its link
+                # owns a moving proxy (see IPCProxyDofsInfo in rigid/contact_proxy.py)
+                dofs_body_idx = np.full(max(rigid_solver.n_dofs, 1), -1, dtype=gs.np_int)
+                for i_body, entity in enumerate(entities_moving):
+                    dofs_body_idx[entity.dof_start : entity.dof_end] = len(fem_solver.entities) + i_body
+                dofs_is_measured = np.ones(max(rigid_solver.n_dofs, 1), dtype=bool)
+                for link, *_ in links_geoms:
+                    dofs_is_measured[link.dof_start : link.dof_end] = False
+                proxy_dofs_info = self.data_manager.proxy_dofs_info
                 surface_values += [
                     (proxies_info.link_idx, proxies.links_idx),
                     (proxies_info.is_fixed, proxies.is_fixed),
-                    (proxies_info.surface_radius, proxies.surface_radius),
+                    (proxies_info.chain_depth, proxies.chain_depth),
+                    (proxies_info.body_idx, proxies.body_idx),
                     (proxy_vertices_info.proxy_idx, proxies.vertices_proxy_idx),
                     (proxy_vertices_info.local_pos, proxies.vertices_local_pos),
+                    (proxy_dofs_info.body_idx, dofs_body_idx),
+                    (proxy_dofs_info.is_measured, dofs_is_measured),
                 ]
             # The arrays take the dtypes of Genesis, the meshes giving their own
             for array, values in surface_values:
@@ -552,9 +623,16 @@ class NewtonSolver(Solver):
                 yield from iter_data(self.data_manager, "ipc_info")
                 yield from iter_data(self.data_manager, "ipc_state")
             if self.newton_config.has_rigid_vertices:
-                yield from iter_data(self.data_manager, "proxies_info")
-                yield from iter_data(self.data_manager, "proxy_vertices_info")
-                yield from iter_data(self.data_manager, "proxies_state")
+                for name in (
+                    "proxies_info",
+                    "proxy_vertices_info",
+                    "proxy_dofs_info",
+                    "proxies_state",
+                    "proxies",
+                    "proxies_envs",
+                    "proxy_kinematics",
+                ):
+                    yield from iter_data(self.data_manager, name)
             yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         if self.newton_rows is not None:
             yield from iter_data(self, "newton_rows")
@@ -597,12 +675,50 @@ class NewtonSolver(Solver):
             n_cloth_triplets = n_cloth_rows + self._B * (
                 TRIANGLE_PAIRS * fem_info.cloth_triangles.verts_idx.shape[0] + HINGE_PAIRS * n_hinges
             )
-        args_info = (mpm_info, fem_info, self.ipc_info, dyn_info, rigid_info)
-        args_config = (mpm_solver.mpm_config, fem_solver.fem_config, rigid_solver.rigid_config, self.newton_config)
-        proxies_state = self.data_manager.proxies_state
+        proxies_state, proxies = self.data_manager.proxies_state, self.data_manager.proxies
+        proxies_envs, proxy_kinematics = self.data_manager.proxies_envs, self.data_manager.proxy_kinematics
         proxies_info, proxy_vertices_info = self.data_manager.proxies_info, self.data_manager.proxy_vertices_info
+        proxy_dofs_info = self.data_manager.proxy_dofs_info
+        args_info = (
+            mpm_info,
+            fem_info,
+            self.ipc_info,
+            proxies_info,
+            proxy_vertices_info,
+            proxy_dofs_info,
+            dyn_info,
+            rigid_info,
+        )
+        args_config = (mpm_solver.mpm_config, fem_solver.fem_config, rigid_solver.rigid_config, self.newton_config)
+        # The rows of the proxies (see NewtonSegment), two per proxy, those of a fixed link unused
+        n_proxy_rows = 0
+        if self.newton_config.has_moving_proxies:
+            n_proxy_rows = 2 * self._B * proxies_info.link_idx.shape[0]
         if self.newton_config.has_rigid_vertices and self.ipc_contact is None:
-            kernel_proxies_init_pose(proxies_state, dyn_state, proxies_info)
+            kernel_proxies_init_pose(
+                torch.ones(self._B, dtype=gs.tc_int, device=gs.device),
+                proxies_state,
+                dyn_state,
+                proxies_info,
+                dyn_info,
+                rigid_solver.rigid_config,
+            )
+
+            def reinit_proxies(change: StateChange, envs_idx) -> None:
+                # A write of the configuration of the rigid solver moves its links, which the proxies of the written
+                # environments follow (see rigid/contact_proxy.py)
+                envs_mask = torch.zeros(self._B, dtype=gs.tc_int, device=gs.device)
+                envs_mask[indices_to_mask(envs_idx)] = 1
+                kernel_proxies_init_pose(
+                    envs_mask,
+                    proxies_state,
+                    rigid_solver.dyn_state,
+                    proxies_info,
+                    rigid_solver.dyn_info,
+                    rigid_solver.rigid_config,
+                )
+
+            rigid_solver.subscribe(Subscriber(frozenset((StateChange.GEOMETRY,)), callback=reinit_proxies))
         if self.newton_config.has_cloth:
             kernel_publish_contact(
                 fem_solver.n_vertices,
@@ -612,6 +728,8 @@ class NewtonSolver(Solver):
                 dyn_state,
                 proxies_info,
                 proxy_vertices_info,
+                dyn_info,
+                rigid_solver.rigid_config,
                 self.newton_config,
             )
         if self.newton_config.has_cloth and self.ipc_contact is None:
@@ -649,6 +767,10 @@ class NewtonSolver(Solver):
             ipc_pairs,
             friction_pairs,
             self.ipc_state,
+            proxies_state,
+            proxies,
+            proxies_envs,
+            proxy_kinematics,
             self.rigid_dofs,
             self.rigid_links,
             dyn_state,
@@ -666,14 +788,36 @@ class NewtonSolver(Solver):
                 if self.newton_config.has_halfplanes:
                     n_contact_triplets += n_cloth_rows
             self.newton_rows = grow_newton_rows(
-                n_mpm_rows + n_cloth_rows,
+                n_mpm_rows + n_cloth_rows + n_proxy_rows,
                 n_mpm_triplets + n_cloth_triplets + n_contact_triplets,
                 self.newton_rows,
                 self._newton_rows_replaced,
             )
             kernel_set_segments(
-                n_mpm_rows, n_mpm_triplets, n_cloth_rows, n_cloth_triplets + n_contact_triplets, self.newton_rows
+                n_mpm_rows,
+                n_mpm_triplets,
+                n_cloth_rows,
+                n_cloth_triplets + n_contact_triplets,
+                n_proxy_rows,
+                self.newton_rows,
             )
+            if self.newton_config.has_moving_proxies:
+                kernel_proxies_prepare(
+                    fem_solver.n_vertices,
+                    self.rigid_dofs.x,
+                    self.newton_rows,
+                    self.ipc_state,
+                    proxies_envs,
+                    proxies,
+                    proxies_state,
+                    proxy_kinematics,
+                    dyn_state,
+                    proxies_info,
+                    proxy_vertices_info,
+                    dyn_info,
+                    rigid_info,
+                    rigid_solver.rigid_config,
+                )
             if mpm_solver.mpm_config.has_rigid_contact:
                 kernel_assemble_mpm_rigid_coupling(
                     mpm_state,
@@ -703,6 +847,10 @@ class NewtonSolver(Solver):
                 self.newton_config,
             )
             assemble_bcoo_matrix(self.newton_rows.matrix, block_scalars=9)
+            if self.newton_config.has_moving_proxies:
+                kernel_proxies_link_stiffness(
+                    self.newton_rows, self.rigid_links.stiffness, proxies, dyn_state, proxies_info
+                )
             if self.newton_config.has_rigid_dofs:
                 kernel_assemble_rigid(
                     self.newton_envs,
@@ -710,6 +858,18 @@ class NewtonSolver(Solver):
                     *args_info,
                     *args_config,
                     self._rigid_contact_stiffness,
+                )
+            if self.newton_config.has_moving_proxies:
+                kernel_proxies_reduce_gradient(
+                    self.newton_envs.is_active,
+                    self.newton_envs.p_dot_ap,
+                    self.rigid_dofs.gradient,
+                    self.newton_rows,
+                    proxies,
+                    proxy_kinematics,
+                    proxies_info,
+                    dyn_info,
+                    rigid_solver.rigid_config,
                 )
             kernel_pcg_start(
                 self.newton_rows,
@@ -748,14 +908,26 @@ class NewtonSolver(Solver):
                 )
                 if self.newton_config.has_ccd_partition:
                     kernel_contact_partition(self.newton_envs.is_active, self.ipc_state)
-                    kernel_scale_directions(self.newton_envs.is_active, fem_state, self.ipc_state, self.ipc_info)
+                    kernel_scale_directions(
+                        self.newton_envs.is_active,
+                        fem_state,
+                        self.ipc_state,
+                        proxies,
+                        self.rigid_dofs,
+                        self.ipc_info,
+                        proxies_info,
+                        proxy_dofs_info,
+                        self.newton_config,
+                    )
             while True:
                 kernel_line_search_trial(
-                    self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config
+                    self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config, errno
                 )
                 if not qd_to_numpy(self.newton_loops.is_line_search_running):
                     break
-            kernel_end_iteration(self.newton_envs, self.newton_loops, self.newton_info)
+            kernel_end_iteration(
+                self.newton_envs, self.newton_loops, proxies_envs, self.newton_info, self.newton_config, errno
+            )
             if not qd_to_numpy(self.newton_loops.is_newton_running):
                 break
         kernel_flag_failures(self.newton_envs, self.newton_loops, errno)
@@ -786,6 +958,10 @@ def func_add_energies(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -793,6 +969,9 @@ def func_add_energies(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -810,7 +989,7 @@ def func_add_energies(
     dofs of the rigid solver join the unknowns, the cost of the rigid solver at their iterate, scaled by dt^4 to the
     units of the incremental potential.
     """
-    if qd.static(newton_config.has_rigid_dofs):
+    if qd.static(newton_config.has_rigid_dofs and newton_config.has_mpm):
         func_link_spatial_disp(rigid_dofs.x, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
     if qd.static(newton_config.has_mpm):
         n_valid = mpm_state.sorted_particles.n_valid[None]
@@ -852,12 +1031,88 @@ def func_add_energies(
 
 @qd.kernel(fastcache=True)
 def kernel_set_segments(
-    n_mpm_rows: int, n_mpm_triplets: int, n_cloth_rows: int, n_cloth_triplets: int, newton_rows: NewtonRows
+    n_mpm_rows: int,
+    n_mpm_triplets: int,
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_proxy_rows: int,
+    newton_rows: NewtonRows,
 ):
-    """Lay out the rows of the iteration from the rows and the triplets of every segment (see NewtonSegment)."""
+    """Lay out the rows of the iteration from the rows and the triplets of every segment (see NewtonSegment), the rows
+    of the proxies writing no triplet of their own."""
     for _ in range(1):
         func_set_segment(NewtonSegment.MPM_NODES, n_mpm_rows, n_mpm_triplets, newton_rows)
         func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets, newton_rows)
+        func_set_segment(NewtonSegment.PROXIES, n_proxy_rows, 0, newton_rows)
+
+
+@qd.kernel(fastcache=True)
+def kernel_proxies_prepare(
+    proxy_vertex_start: int,
+    x: qd.Tensor,
+    newton_rows: NewtonRows,
+    ipc_state: IPCState,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    proxy_kinematics: ProxyKinematics,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Prepare the proxies for the Newton iteration at the iterate `x` of the dofs (see 'func_proxies_prepare' in
+    rigid/contact_proxy.py)."""
+    func_proxies_prepare(
+        proxy_vertex_start,
+        x,
+        newton_rows,
+        ipc_state,
+        proxies_envs,
+        proxies,
+        proxies_state,
+        proxy_kinematics,
+        dyn_state,
+        proxies_info,
+        proxy_vertices_info,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+    )
+
+
+@qd.kernel(fastcache=True)
+def kernel_proxies_link_stiffness(
+    newton_rows: NewtonRows,
+    link_stiffness: qd.Tensor,
+    proxies: IPCProxies,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+):
+    """Set the spatial stiffness of the link of every moving proxy, which preconditions its dofs (see
+    'func_proxies_link_stiffness' in rigid/contact_proxy.py)."""
+    func_proxies_link_stiffness(newton_rows, link_stiffness, proxies, dyn_state, proxies_info)
+
+
+@qd.kernel(fastcache=True)
+def kernel_proxies_reduce_gradient(
+    envs_mask: qd.Tensor,
+    p_dot_ap: qd.Tensor,
+    dofs_gradient: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies: IPCProxies,
+    proxy_kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Reduce the gradient of the environments selected to the unknowns of the Newton solve, P^T (g + H d_p) (see
+    'func_proxies_reduce_gradient' in rigid/contact_proxy.py)."""
+    func_proxies_reduce_gradient(
+        envs_mask, p_dot_ap, dofs_gradient, newton_rows, proxies, proxy_kinematics, proxies_info, dyn_info, rigid_config
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -869,6 +1124,8 @@ def kernel_publish_contact(
     dyn_state: DynState,
     proxies_info: IPCProxiesInfo,
     proxy_vertices_info: IPCProxyVerticesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
     newton_config: qd.template(),
 ):
     """Publish the participants of the contact into the contact surface at the start point of the substep: the cloth
@@ -877,15 +1134,44 @@ def kernel_publish_contact(
     func_cloth_publish_contact(ipc_state, fem_state, newton_config.has_rigid_vertices)
     if qd.static(newton_config.has_rigid_vertices):
         func_proxies_publish_contact(
-            proxy_vertex_start, ipc_state, proxies_state, dyn_state, proxies_info, proxy_vertices_info
+            proxy_vertex_start,
+            ipc_state,
+            proxies_state,
+            dyn_state,
+            proxies_info,
+            proxy_vertices_info,
+            dyn_info,
+            rigid_config,
         )
 
 
 @qd.kernel(fastcache=True)
-def kernel_scale_directions(envs_mask: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, ipc_info: IPCInfo):
+def kernel_scale_directions(
+    envs_mask: qd.Tensor,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    proxies: IPCProxies,
+    rigid_dofs: NewtonRigidDofs,
+    ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
+    newton_config: qd.template(),
+):
     """Scale the Newton direction of the participants of the contact of every environment selected by the steps of their
-    groups of contact bodies (see 'kernel_contact_partition' in ipc_contact.py)."""
-    func_cloth_scale_direction(envs_mask, fem_state, ipc_state, ipc_info)
+    groups of contact bodies (see 'kernel_contact_partition' in ipc_contact.py): the cloth, and the dofs and the proxies
+    of the rigid entities with moving proxies."""
+    func_cloth_scale_direction(
+        envs_mask=envs_mask,
+        alpha=ipc_state.bodies.alpha,
+        fem_state=fem_state,
+        ipc_state=ipc_state,
+        ipc_info=ipc_info,
+        has_rigid=newton_config.has_rigid_vertices,
+        is_by_body=True,
+    )
+    if qd.static(newton_config.has_moving_proxies):
+        func_proxies_scale_dofs(envs_mask, ipc_state.bodies.alpha, rigid_dofs.dx, proxy_dofs_info, is_by_body=True)
+        func_proxies_scale_direction(envs_mask, ipc_state.bodies.alpha, proxies, proxies_info, is_by_body=True)
 
 
 @qd.kernel(fastcache=True)
@@ -898,6 +1184,10 @@ def kernel_init_substep(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -905,6 +1195,9 @@ def kernel_init_substep(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -918,8 +1211,9 @@ def kernel_init_substep(
     solve failed earlier in the step, and evaluate its energy there.
 
     The dofs of the rigid solver start as its constraint solve starts (see 'func_rigid_init_substep' in
-    rigid/global_newton.py), and the links that the particles touch are constrained over the substep (see
-    'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py). The contact of the cloth takes the pose of
+    rigid/global_newton.py), but those of the entities with moving proxies, which start at rest (see
+    'func_proxies_init_substep' in rigid/contact_proxy.py), and the links that the particles touch are constrained over
+    the substep (see 'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py). The contact of the cloth takes the pose of
     the planes, its friction and its adaptive stiffness from the start of the substep (see
     'func_contact_init_substep' in ipc_contact.py).
     """
@@ -948,7 +1242,10 @@ def kernel_init_substep(
         func_rigid_init_substep(
             rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows
         )
-        func_mark_constrained_links(mpm_state, dyn_state, dyn_info)
+        if qd.static(newton_config.has_mpm):
+            func_mark_constrained_links(mpm_state, dyn_state, dyn_info)
+        if qd.static(newton_config.has_moving_proxies):
+            func_proxies_init_substep(rigid_dofs.x, dyn_state, proxy_dofs_info, proxies_info, rigid_info)
     func_add_energies(
         newton_envs.energy_start,
         newton_envs.is_active,
@@ -959,6 +1256,10 @@ def kernel_init_substep(
         ipc_pairs,
         friction_pairs,
         ipc_state,
+        proxies_state,
+        proxies,
+        proxies_envs,
+        proxy_kinematics,
         rigid_dofs,
         rigid_links,
         dyn_state,
@@ -966,6 +1267,9 @@ def kernel_init_substep(
         mpm_info,
         fem_info,
         ipc_info,
+        proxies_info,
+        proxy_vertices_info,
+        proxy_dofs_info,
         dyn_info,
         rigid_info,
         mpm_config,
@@ -984,6 +1288,10 @@ def kernel_refresh_energy_start(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -991,6 +1299,9 @@ def kernel_refresh_energy_start(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1014,6 +1325,10 @@ def kernel_refresh_energy_start(
         ipc_pairs,
         friction_pairs,
         ipc_state,
+        proxies_state,
+        proxies,
+        proxies_envs,
+        proxy_kinematics,
         rigid_dofs,
         rigid_links,
         dyn_state,
@@ -1021,6 +1336,9 @@ def kernel_refresh_energy_start(
         mpm_info,
         fem_info,
         ipc_info,
+        proxies_info,
+        proxy_vertices_info,
+        proxy_dofs_info,
         dyn_info,
         rigid_info,
         mpm_config,
@@ -1104,6 +1422,10 @@ def kernel_assemble_rigid(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1111,6 +1433,9 @@ def kernel_assemble_rigid(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1134,8 +1459,9 @@ def kernel_assemble_rigid(
         newton_envs.rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, has_rigid_rows
     )
     func_rigid_assemble_gradient(rigid_dofs, dyn_state, constraint_state, rigid_info, has_rigid_rows)
-    func_add_contact_link_terms(mpm_state, rigid_links, dyn_state, dyn_info)
-    func_link_force_to_dofs(rigid_dofs.gradient, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
+    if qd.static(newton_config.has_mpm):
+        func_add_contact_link_terms(mpm_state, rigid_links, dyn_state, dyn_info)
+        func_link_force_to_dofs(rigid_dofs.gradient, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
     func_rigid_factor(constraint_state, rigid_info, rigid_config, rigid_contact_stiffness, has_rigid_rows)
 
 
@@ -1155,6 +1481,10 @@ def kernel_pcg_start(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1163,6 +1493,9 @@ def kernel_pcg_start(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1179,6 +1512,8 @@ def kernel_pcg_start(
     dofs makes.
     """
     func_rows_precond_invert(newton_rows)
+    if qd.static(newton_config.has_moving_proxies):
+        func_proxies_mask_rows(newton_rows)
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.is_pcg_active[i_b] = newton_envs.is_active[i_b]
         newton_envs.rz[i_b] = 0.0
@@ -1243,11 +1578,14 @@ def func_pcg_iteration(
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
+    proxies: IPCProxies,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
     mpm_info: MPMInfo,
+    proxies_info: IPCProxiesInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
@@ -1260,26 +1598,51 @@ def func_pcg_iteration(
     numerics/newton_rows.py), in the energy form p . Ap of every environment without the dofs. When the dofs of the
     rigid solver join the unknowns, it adds their block (see 'func_rigid_matvec' in rigid/global_newton.py) and the
     coupling of the contacts of the particles with the links (see 'func_contact_matvec' in
-    couplers/mpm_rigid_global_newton.py).
+    couplers/mpm_rigid_global_newton.py). With moving proxies, the product is the reduced one P^T H P p: the direction
+    of the dofs expands to the rows of the proxies before the product of the rows, which restricts back to the dofs
+    after it (see 'func_proxies_expand' in rigid/contact_proxy.py).
     """
+    if qd.static(newton_config.has_moving_proxies):
+        func_proxies_expand(
+            newton_envs.is_pcg_active,
+            rigid_dofs.p,
+            newton_rows,
+            proxies,
+            proxy_kinematics,
+            proxies_info,
+            dyn_info,
+            rigid_config,
+        )
     func_rows_matvec(
         newton_rows, newton_envs.is_pcg_active, newton_envs.p_dot_ap, qd.static(not newton_config.has_rigid_dofs)
     )
     n_rows = newton_rows.segments_start[newton_rows.segments_start.shape[0] - 1]
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_matvec(rigid_dofs, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows)
-        func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
-        func_contact_matvec(
-            newton_rows,
-            newton_envs.is_pcg_active,
-            mpm_state,
-            sparse_grid,
-            rigid_links,
-            dyn_state,
-            mpm_info,
-            dyn_info,
-        )
-        func_link_force_to_dofs(rigid_dofs.Ap, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
+        if qd.static(newton_config.has_mpm):
+            func_link_spatial_disp(rigid_dofs.p, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
+            func_contact_matvec(
+                newton_rows,
+                newton_envs.is_pcg_active,
+                mpm_state,
+                sparse_grid,
+                rigid_links,
+                dyn_state,
+                mpm_info,
+                dyn_info,
+            )
+            func_link_force_to_dofs(rigid_dofs.Ap, rigid_links, dyn_state.dofs, dyn_info.links, rigid_config)
+        if qd.static(newton_config.has_moving_proxies):
+            func_proxies_restrict(
+                newton_envs.is_pcg_active,
+                rigid_dofs.Ap,
+                newton_rows,
+                proxies,
+                proxy_kinematics,
+                proxies_info,
+                dyn_info,
+                rigid_config,
+            )
         # p . Ap over the rows and over the dofs, once Ap holds the whole product
         qd.loop_config(block_dim=256)
         for i_r in range((n_rows + 31) // 32 * 32):
@@ -1382,6 +1745,10 @@ def kernel_pcg_loop(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1389,6 +1756,9 @@ def kernel_pcg_loop(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1407,11 +1777,14 @@ def kernel_pcg_loop(
             newton_loops,
             mpm_state,
             sparse_grid,
+            proxies,
+            proxy_kinematics,
             rigid_dofs,
             rigid_links,
             dyn_state,
             constraint_state,
             mpm_info,
+            proxies_info,
             dyn_info,
             rigid_info,
             rigid_config,
@@ -1435,6 +1808,10 @@ def kernel_start_line_search(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1443,6 +1820,9 @@ def kernel_start_line_search(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1483,7 +1863,25 @@ def kernel_start_line_search(
             newton_config.has_rigid_vertices,
         )
     if qd.static(newton_config.has_rigid_dofs):
-        func_rigid_init_line_search(rigid_dofs, newton_envs.is_active, newton_envs.max_displacement)
+        func_rigid_init_line_search(
+            newton_envs.is_active,
+            newton_envs.max_displacement,
+            proxy_dofs_info.is_measured,
+            rigid_dofs,
+            newton_config.has_moving_proxies,
+        )
+    if qd.static(newton_config.has_moving_proxies):
+        func_proxies_init_line_search(
+            newton_envs.is_active,
+            newton_envs.max_displacement,
+            rigid_dofs.dx,
+            proxies,
+            proxies_state,
+            proxy_kinematics,
+            proxies_info,
+            dyn_info,
+            rigid_config,
+        )
     for _ in range(1):
         newton_loops.is_line_search_running[None] = 0
     for i_b in range(newton_envs.is_active.shape[0]):
@@ -1495,6 +1893,45 @@ def kernel_start_line_search(
                 newton_envs.failure[i_b] = NewtonFailure.NON_FINITE
             qd.atomic_max(newton_loops.is_line_search_running[None], 1)
         newton_envs.is_line_search_active[i_b] = is_active
+    if qd.static(newton_config.has_moving_proxies):
+        # The FK-defect limiter shrinks the whole direction of an environment, its convergence measured before, then
+        # the vertices of the proxies publish their sweep (see rigid/contact_proxy.py)
+        func_proxies_limit_step(
+            newton_envs.is_active,
+            rigid_dofs.dx,
+            proxies_envs,
+            proxies,
+            proxies_state,
+            proxy_kinematics,
+            proxies_info,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            newton_info.proxy_path_tolerance[None],
+        )
+        func_cloth_scale_direction(
+            newton_envs.is_active,
+            proxies_envs.fk_alpha,
+            fem_state,
+            ipc_state,
+            ipc_info,
+            newton_config.has_rigid_vertices,
+            is_by_body=False,
+        )
+        func_proxies_scale_dofs(
+            newton_envs.is_active, proxies_envs.fk_alpha, rigid_dofs.dx, proxy_dofs_info, is_by_body=False
+        )
+        func_proxies_scale_direction(
+            newton_envs.is_active, proxies_envs.fk_alpha, proxies, proxies_info, is_by_body=False
+        )
+        func_proxies_publish_sweep(
+            fem_state.vertices.pos.shape[0],
+            newton_envs.is_active,
+            ipc_state,
+            proxies,
+            proxies_info,
+            proxy_vertices_info,
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -1507,6 +1944,10 @@ def kernel_line_search_trial(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1515,18 +1956,25 @@ def kernel_line_search_trial(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
     fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
+    errno: qd.Tensor,
 ):
     """
-    Move the nodes, the vertices of the cloth and the dofs of every environment still searching to the trial point of
-    its step, and accept the step once the energy there is at most the energy at the start point, or shrink it.
+    Move the nodes, the vertices of the cloth, the dofs and the proxies of every environment still searching to the
+    trial point of its step, and accept the step once the energy there is at most the energy at the start point, or
+    shrink it.
 
-    A converged or failed environment takes its step at once, and an environment out of trials keeps its last one.
+    A converged or failed environment takes its step at once, and an environment out of trials keeps its last one. The
+    exact mismatch of the proxies with their links at the trial point stays within the certificate of the FK-defect
+    limiter (see 'func_proxies_trial_residual' in rigid/contact_proxy.py).
     """
     if qd.static(newton_config.has_mpm):
         func_mpm_step_forward(sparse_grid, newton_envs.is_line_search_active, newton_envs.alpha)
@@ -1536,6 +1984,33 @@ def kernel_line_search_trial(
         )
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_step_forward(rigid_dofs, newton_envs.is_line_search_active, newton_envs.alpha)
+    if qd.static(newton_config.has_moving_proxies):
+        func_proxies_step_forward(
+            fem_state.vertices.pos.shape[0],
+            newton_envs.is_line_search_active,
+            newton_envs.alpha,
+            ipc_state,
+            proxies,
+            proxies_state,
+            proxies_info,
+            proxy_vertices_info,
+        )
+        func_proxies_trial_residual(
+            newton_envs.is_line_search_active,
+            rigid_dofs.x,
+            proxies_envs,
+            proxies,
+            proxies_state,
+            proxy_kinematics,
+            dyn_state,
+            proxies_info,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            newton_info.proxy_guard_tolerance[None],
+            int(NewtonErrorCode.INVALID_PROXY_PATH),
+            errno,
+        )
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.energy_trial[i_b] = 0.0
     func_add_energies(
@@ -1548,6 +2023,10 @@ def kernel_line_search_trial(
         ipc_pairs,
         friction_pairs,
         ipc_state,
+        proxies_state,
+        proxies,
+        proxies_envs,
+        proxy_kinematics,
         rigid_dofs,
         rigid_links,
         dyn_state,
@@ -1555,6 +2034,9 @@ def kernel_line_search_trial(
         mpm_info,
         fem_info,
         ipc_info,
+        proxies_info,
+        proxy_vertices_info,
+        proxy_dofs_info,
         dyn_info,
         rigid_info,
         mpm_config,
@@ -1581,19 +2063,41 @@ def kernel_line_search_trial(
 
 
 @qd.kernel(fastcache=True)
-def kernel_end_iteration(newton_envs: NewtonEnvs, newton_loops: NewtonLoops, newton_info: NewtonInfo):
-    """Stop every environment that converged or failed, or reached the iteration cap, which it latches as a failure."""
+def kernel_end_iteration(
+    newton_envs: NewtonEnvs,
+    newton_loops: NewtonLoops,
+    proxies_envs: IPCProxiesEnvs,
+    newton_info: NewtonInfo,
+    newton_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """
+    Stop every environment that converged or failed, or reached the iteration cap, which it latches as a failure.
+
+    With moving proxies, an environment converges once its step also kept the whole direction and its proxies end within
+    the solve tolerance of their links, and a solve reaching the iteration cap unconverged sets the flag
+    PROXY_SOLVE_EXHAUSTED in its errno, the substep being left uncommitted.
+    """
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
     for i_b in range(newton_envs.is_active.shape[0]):
         if newton_envs.is_active[i_b]:
             newton_envs.n_iterations[i_b] = newton_envs.n_iterations[i_b] + 1
-            if newton_envs.is_converged[i_b] or newton_envs.failure[i_b] != NewtonFailure.NONE:
+            is_converged = newton_envs.is_converged[i_b]
+            if qd.static(newton_config.has_moving_proxies):
+                is_converged = (
+                    is_converged
+                    and proxies_envs.fk_alpha[i_b] >= 1.0
+                    and proxies_envs.trial_max_residual[i_b] <= newton_info.proxy_solve_tolerance[None]
+                )
+            if is_converged or newton_envs.failure[i_b] != NewtonFailure.NONE:
                 newton_envs.is_active[i_b] = False
             elif newton_envs.n_iterations[i_b] >= newton_info.max_iterations[None]:
                 newton_envs.is_active[i_b] = False
                 newton_envs.failure[i_b] = NewtonFailure.ITERATIONS
                 qd.atomic_max(newton_loops.has_failed_iterations[None], 1)
+                if qd.static(newton_config.has_moving_proxies):
+                    qd.atomic_or(errno[i_b], NewtonErrorCode.PROXY_SOLVE_EXHAUSTED)
             else:
                 qd.atomic_max(newton_loops.is_newton_running[None], 1)
 
@@ -1607,6 +2111,10 @@ def kernel_finish_rigid(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
+    proxies_state: IPCProxiesState,
+    proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
+    proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
@@ -1614,6 +2122,9 @@ def kernel_finish_rigid(
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpm_config: qd.template(),
@@ -1625,11 +2136,23 @@ def kernel_finish_rigid(
     """
     Hand the accelerations of the dofs solved to the rigid solver (see 'func_rigid_finish' in rigid/global_newton.py).
 
-    An environment whose Newton solve failed keeps the state of the rigid solver until the error raises (see
-    'RigidInfo.is_env_frozen').
+    An environment whose Newton solve failed keeps the state of the rigid solver and the poses of its proxies until the
+    error raises (see 'RigidInfo.is_env_frozen').
     """
     for i_b in range(rigid_info.is_env_frozen.shape[0]):
-        rigid_info.is_env_frozen[i_b] = (errno[i_b] & NewtonErrorCode.INVALID_SOLVE_NAN) != 0
+        rigid_info.is_env_frozen[i_b] = (
+            errno[i_b]
+            & (
+                NewtonErrorCode.INVALID_SOLVE_NAN
+                | NewtonErrorCode.INVALID_PROXY_PATH
+                | NewtonErrorCode.PROXY_SOLVE_EXHAUSTED
+            )
+        ) != 0
+    if qd.static(newton_config.has_moving_proxies):
+        for i_p, i_b in qd.ndrange(*proxies_state.pos.shape):
+            if rigid_info.is_env_frozen[i_b]:
+                proxies_state.pos[i_p, i_b] = proxies_state.pos_start[i_p, i_b]
+                proxies_state.quat[i_p, i_b] = proxies_state.quat_start[i_p, i_b]
     func_rigid_finish(
         newton_envs.rigid_cost,
         rigid_dofs,

@@ -3,9 +3,22 @@ The rigid contact proxies of the links in the contact of the Newton solver (see 
 and genesis/engine/ipc/se3.py).
 
 Every link holding collision geoms of an entity that couples with the other solvers ('RigidMaterial(needs_coup)') owns a
-proxy: a massless copy of the pose of the frame of the link, the only pose the contact sees. The vertices of the proxy
-are those of the collision geoms of the link in that frame, published into the contact surface after the cloth. The
-proxy of a fixed link takes the pose of its link at the start of every substep.
+proxy: a massless copy of the pose of the inertial frame of the link (its center of mass and its principal axes of
+inertia), the only pose the contact sees. The screw a proxy moves along in the line search turns about the origin of
+its frame, the center of mass, as the free motion of a rigid body. The vertices of the proxy are those of the collision
+geoms of the link, held in the frame of the link and placed through its inertial frame at every substep, which follows
+the inertial parameters the setters write, and published into the contact surface after the cloth. The proxy of a fixed
+link takes the pose of its link at the start of every substep.
+
+The proxy of a moving link is an independent state of the Newton solve, held equal to the pose of its link by the
+constraint of genesis/engine/ipc/se3.py. The unknowns of the rigid solver are x = dt^2 qacc, from which it reaches the
+configuration q1(x) = q0 (+) (dt v0 + x) at the end of the substep, (+) adding a revolute or prismatic coordinate and a
+free translation, and turning a free or spherical rotation as R0 Exp(phi), phi its rotation vector in the frame of the
+link (see 'func_integrate' in abd/forward_dynamics.py). The link Jacobian B of the constraint is the derivative of the
+forward kinematics of q1(x), its rotation columns carrying the right Jacobian Jr(phi) of the retraction. Only the
+linearized increment of the proxy is eliminated (dg = S B dx + d_p, see 'func_proxy_maps' in genesis/engine/ipc/se3.py),
+the proxy moving on its own screw along the line search, its exact mismatch with its link bounded by the FK-defect
+limiter and checked at every trial.
 """
 
 from typing import NamedTuple
@@ -16,8 +29,17 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.ipc.se3 import (
+    func_fk_defect_prefix_cap,
+    func_proxy_constraint,
+    func_proxy_maps,
+    func_so3_left_jacobian,
+)
+from genesis.engine.numerics.bcoo import func_read_entry
+from genesis.engine.numerics.newton_rows import NewtonRows, NewtonSegment, func_rows_matvec
 from genesis.engine.solvers.ipc_contact import IPCState, IPCSurfacePrimitives, surface_area_weights
-from genesis.engine.solvers.rigid.data import DynState
+from genesis.engine.solvers.rigid.abd.inverse_kinematics import func_forward_kinematics_scratch
+from genesis.engine.solvers.rigid.data import DOFS, JOINTS, LINKS, QS, DynInfo, DynState, RigidInfo
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
 # The proxies, one per link holding collision geoms, and their vertices
@@ -29,14 +51,15 @@ class ContactProxies(NamedTuple):
     """
     The rigid contact proxies of a scene at build (see the module docstring), one row per proxy or per vertex.
 
-    A proxy carries its link, whether its link is fixed, and its surface radius, the largest distance of its vertices
-    from the origin of its link. A vertex carries its proxy and its position in the frame of the link. `surface` holds
-    the contact primitives of the proxies, their vertices in the order of the vertices of the proxies.
+    A proxy carries its link, whether its link is fixed, the number of links from its link to the root of its tree and
+    its contact body (-1 for a fixed link). A vertex carries its proxy and its position in the frame of the link.
+    `surface` holds the contact primitives of the proxies, their vertices in the order of the vertices of the proxies.
     """
 
     links_idx: np.ndarray
     is_fixed: np.ndarray
-    surface_radius: np.ndarray
+    chain_depth: np.ndarray
+    body_idx: np.ndarray
     vertices_proxy_idx: np.ndarray
     vertices_local_pos: np.ndarray
     surface: IPCSurfacePrimitives
@@ -47,7 +70,8 @@ class IPCProxiesInfo(Data, kind=DataKind.CONSTANT, shape=(PROXIES,)):
 
     link_idx: qd.Tensor = field(int)
     is_fixed: qd.Tensor = field(bool)
-    surface_radius: qd.Tensor = field(float)
+    chain_depth: qd.Tensor = field(int)
+    body_idx: qd.Tensor = field(int)
 
 
 class IPCProxyVerticesInfo(Data, kind=DataKind.CONSTANT, shape=(PROXY_VERTICES,)):
@@ -57,13 +81,114 @@ class IPCProxyVerticesInfo(Data, kind=DataKind.CONSTANT, shape=(PROXY_VERTICES,)
     local_pos: qd.Tensor = field((float, 3))
 
 
+class IPCProxyDofsInfo(Data, kind=DataKind.CONSTANT, shape=(DOFS,)):
+    """
+    The dofs of the rigid solver as the proxies see them.
+
+    `body_idx` is the contact body of the entity of a dof (see IPCBodies in genesis/engine/solvers/ipc_contact.py), -1
+    for an entity without moving proxies, and `is_measured` whether the update of the dof measures its convergence, its
+    link owning no proxy, whose surface displacement measures it otherwise.
+    """
+
+    body_idx: qd.Tensor = field(int)
+    is_measured: qd.Tensor = field(bool)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_scale_dofs(
+    envs_mask: qd.Tensor,
+    alpha: qd.Tensor,
+    dofs_dx: qd.Tensor,
+    proxy_dofs_info: IPCProxyDofsInfo,
+    is_by_body: qd.template(),
+):
+    """Scale the Newton direction of the dofs of the environments selected by the step of their environment in `alpha`,
+    or with `is_by_body` the dofs of the entities with moving proxies by the step of the group of the contact body of
+    their entity (see IPCBodies)."""
+    for i_d, i_b in qd.ndrange(*dofs_dx.shape):
+        if envs_mask[i_b]:
+            scale = gs.qd_float(1.0)
+            if qd.static(is_by_body):
+                i_body = proxy_dofs_info.body_idx[i_d]
+                if i_body >= 0:
+                    scale = alpha[i_body, i_b]
+            else:
+                scale = alpha[i_b]
+            dofs_dx[i_d, i_b] = scale * dofs_dx[i_d, i_b]
+
+
 class IPCProxiesState(Data, kind=DataKind.STATE, shape=(PROXIES, ENVS)):
-    """The pose of every proxy, accepted by the last substep, and its pose at the start of the current one."""
+    """
+    The pose of every proxy, at the current iterate of the Newton solve and accepted by it at the end of a substep, and
+    its pose at the start of the current substep.
+
+    `inertial_pos` and `inertial_quat` are the inertial frame of its link in the frame of the link, and
+    `surface_radius` the largest distance of its vertices from the center of mass, both set at the start of every
+    substep (see 'func_proxies_publish_contact').
+    """
 
     pos: qd.Tensor = field((float, 3))
     quat: qd.Tensor = field((float, 4))
     pos_start: qd.Tensor = field((float, 3))
     quat_start: qd.Tensor = field((float, 4))
+    inertial_pos: qd.Tensor = field((float, 3), kind=DataKind.DERIVED)
+    inertial_quat: qd.Tensor = field((float, 4), kind=DataKind.DERIVED)
+    surface_radius: qd.Tensor = field(float, kind=DataKind.DERIVED)
+
+
+class IPCProxies(Data, kind=DataKind.SCRATCH, shape=(PROXIES, ENVS)):
+    """
+    The constraint of every moving proxy at the current Newton iterate and its Newton direction.
+
+    `constraint`, the rotation blocks `tangent_rotation` and `normal_rotation` of its maps and `particular` follow
+    'func_proxy_maps' in genesis/engine/ipc/se3.py. `pos_iter` and `quat_iter` are the pose at the start of the line
+    search, `direction_pos` and `direction_rot` the world twist the step moves it by, `path_limit` the mismatch with its
+    link the step keeps within (see 'func_proxies_limit_step'), and `target_pos` the center of mass of its link at the
+    current iterate, about which its link Jacobian measures the motion of the link.
+    """
+
+    constraint: qd.Tensor = field((float, 6))
+    tangent_rotation: qd.Tensor = field((float, (3, 3)))
+    normal_rotation: qd.Tensor = field((float, (3, 3)))
+    particular: qd.Tensor = field((float, 6))
+    pos_iter: qd.Tensor = field((float, 3))
+    quat_iter: qd.Tensor = field((float, 4))
+    direction_pos: qd.Tensor = field((float, 3))
+    direction_rot: qd.Tensor = field((float, 3))
+    path_limit: qd.Tensor = field(float)
+    target_pos: qd.Tensor = field((float, 3))
+
+
+class IPCProxiesEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    """
+    The scalars of the proxies of every environment: `max_residual` is the largest surface mismatch |c_t| + r |c_w| of
+    its proxies at the current iterate, `trial_max_residual` at the trial point of its line search, and `fk_alpha` the
+    step the FK-defect limiter allows (see 'func_proxies_limit_step').
+    """
+
+    max_residual: qd.Tensor = field(float)
+    trial_max_residual: qd.Tensor = field(float)
+    fk_alpha: qd.Tensor = field(float)
+
+
+class ProxyKinematics(Data, kind=DataKind.SCRATCH):
+    """
+    The forward kinematics of the configuration q1(x) the rigid solver reaches from an iterate of the Newton solve (see
+    the module docstring), apart from the state of the rigid solver.
+
+    `qpos` is the configuration, `links_pos`, `links_quat`, `joints_xanchor` and `joints_xaxis` its frames (see
+    'func_forward_kinematics_scratch' in abd/inverse_kinematics.py), and `dofs_motion_vel` and `dofs_motion_ang` the
+    derivative of the motion of the links along every dof there, the velocity of the point at the world origin and the
+    angular velocity.
+    """
+
+    qpos: qd.Tensor = field(float, shape=(QS, ENVS))
+    links_pos: qd.Tensor = field((float, 3), shape=(LINKS, ENVS))
+    links_quat: qd.Tensor = field((float, 4), shape=(LINKS, ENVS))
+    joints_xanchor: qd.Tensor = field((float, 3), shape=(JOINTS, ENVS))
+    joints_xaxis: qd.Tensor = field((float, 3), shape=(JOINTS, ENVS))
+    dofs_motion_vel: qd.Tensor = field((float, 3), shape=(DOFS, ENVS))
+    dofs_motion_ang: qd.Tensor = field((float, 3), shape=(DOFS, ENVS))
 
 
 def build_contact_proxies(links_geoms: list, n_bodies_start: int, d_hat: float) -> ContactProxies:
@@ -71,16 +196,17 @@ def build_contact_proxies(links_geoms: list, n_bodies_start: int, d_hat: float) 
     Build the rigid contact proxies of the links holding collision geoms (see ContactProxies).
 
     `links_geoms` lists, per link owning a proxy, the link, the rank of the contact body of its entity among the rigid
-    entities with moving proxies, and its collision geoms. A proxy stands for the merged meshes of its geoms in the
-    frame of its link. A vertex of a fixed link belongs to no contact body (-1), the vertices of the other links to body
-    `n_bodies_start` plus the rank of their entity. The contact vertices of a proxy are rigid, of no thickness and of no
-    resistance (the cloth sets the resistance of their pairs), with the friction coefficient of their geom for coupling.
+    entities with moving proxies (-1 for a fixed link), the depth of the link in its tree and its collision geoms. A
+    proxy stands for the merged meshes of its geoms in the frame of its link. The vertices of a moving link belong to body
+    `n_bodies_start` plus the rank of their entity, those of a fixed link to none. The contact vertices of a proxy are
+    rigid, of no thickness and of no resistance (the cloth sets the resistance of their pairs), with the friction
+    coefficient of their geom for coupling.
     """
-    links_idx, is_fixed, surface_radius = [], [], []
+    links_idx, is_fixed, chain_depth, body_idx = [], [], [], []
     vertices_proxy_idx, vertices_local_pos, vertices_body_idx, vertices_friction_mu = [], [], [], []
     tris_all = []
     n_verts = 0
-    for i_proxy, (link, i_body, geoms) in enumerate(links_geoms):
+    for i_proxy, (link, i_body, depth, geoms) in enumerate(links_geoms):
         proxy_verts = []
         for geom in geoms:
             verts = gu.transform_by_trans_quat(geom.init_verts, geom.init_pos, geom.init_quat)
@@ -89,12 +215,14 @@ def build_contact_proxies(links_geoms: list, n_bodies_start: int, d_hat: float) 
             vertices_friction_mu.append(np.full(len(verts), geom.coup_friction, dtype=gs.np_float))
             n_verts += len(verts)
         proxy_verts = np.concatenate(proxy_verts)
+        i_body_proxy = -1 if link.is_fixed else n_bodies_start + i_body
         links_idx.append(link.idx)
         is_fixed.append(link.is_fixed)
-        surface_radius.append(np.linalg.norm(proxy_verts, axis=-1).max())
+        chain_depth.append(depth)
+        body_idx.append(i_body_proxy)
         vertices_proxy_idx.append(np.full(len(proxy_verts), i_proxy, dtype=gs.np_int))
         vertices_local_pos.append(proxy_verts)
-        vertices_body_idx.append(np.full(len(proxy_verts), -1 if link.is_fixed else n_bodies_start + i_body))
+        vertices_body_idx.append(np.full(len(proxy_verts), i_body_proxy, dtype=gs.np_int))
     pos = np.concatenate(vertices_local_pos)
     tris = np.concatenate(tris_all)
     areas, edges_verts_idx, edges_area_weight, edges_rest_length2, vertices_area_weight = surface_area_weights(
@@ -106,7 +234,7 @@ def build_contact_proxies(links_geoms: list, n_bodies_start: int, d_hat: float) 
         vertices_area_weight=vertices_area_weight,
         vertices_resistance=np.zeros(n_verts, dtype=gs.np_float),
         vertices_friction_mu=np.concatenate(vertices_friction_mu),
-        vertices_body_idx=np.concatenate(vertices_body_idx).astype(gs.np_int),
+        vertices_body_idx=np.concatenate(vertices_body_idx),
         vertices_is_rigid=np.ones(n_verts, dtype=bool),
         edges_verts_idx=edges_verts_idx,
         edges_area_weight=edges_area_weight,
@@ -117,11 +245,59 @@ def build_contact_proxies(links_geoms: list, n_bodies_start: int, d_hat: float) 
     return ContactProxies(
         links_idx=np.array(links_idx, dtype=gs.np_int),
         is_fixed=np.array(is_fixed, dtype=bool),
-        surface_radius=np.array(surface_radius, dtype=gs.np_float),
+        chain_depth=np.array(chain_depth, dtype=gs.np_int),
+        body_idx=np.array(body_idx, dtype=gs.np_int),
         vertices_proxy_idx=np.concatenate(vertices_proxy_idx),
-        vertices_local_pos=pos.astype(gs.np_float),
+        vertices_local_pos=pos,
         surface=surface,
     )
+
+
+# ------------------------------------------------------------------------------------
+# --------------------------------- publication --------------------------------------
+# ------------------------------------------------------------------------------------
+
+
+@qd.func
+def func_proxy_row(i_p: int, i_b: int, n_proxies: int, newton_rows: NewtonRows) -> int:
+    """Return the translation row of a proxy in the segment of the proxies, its rotation row following (see NewtonSegment
+    in numerics/newton_rows.py), the proxies of an environment following one another, those of a fixed link unused."""
+    return newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))] + 2 * (i_b * n_proxies + i_p)
+
+
+@qd.func
+def func_proxy_vertex_pos(
+    i_pv: int,
+    i_b: int,
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    proxies_state: IPCProxiesState,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+):
+    """Return the world position of a vertex of a proxy at the pose (`pos`, `quat`) of its proxy, through the inertial
+    frame of its link (see IPCProxiesState)."""
+    i_p = proxy_vertices_info.proxy_idx[i_pv]
+    local_pos = gu.qd_inv_transform_by_trans_quat(
+        proxy_vertices_info.local_pos[i_pv], proxies_state.inertial_pos[i_p, i_b], proxies_state.inertial_quat[i_p, i_b]
+    )
+    return pos + gu.qd_transform_by_quat(local_pos, quat)
+
+
+@qd.func
+def func_proxy_inertial_frame(
+    i_p: int, i_b: int, proxies_info: IPCProxiesInfo, dyn_info: DynInfo, rigid_config: qd.template()
+):
+    """Return the inertial frame of the link of a proxy in the frame of the link, its center of mass and the rotation of
+    its principal axes of inertia."""
+    i_l = proxies_info.link_idx[i_p]
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    _, axes = qd.sym_eig(dyn_info.links.inertial_i[I_l], gs.qd_float)
+    # The eigenvectors make a basis of either hand, which a rotation takes right-handed
+    if axes.determinant() < 0.0:
+        for k in qd.static(range(3)):
+            axes[k, 2] = -axes[k, 2]
+    quat = gu.qd_transform_quat_by_quat(gu.qd_R_to_quat(axes), dyn_info.links.inertial_quat[I_l])
+    return dyn_info.links.inertial_pos[I_l], quat
 
 
 @qd.func(requires_top_level=True)
@@ -132,22 +308,30 @@ def func_proxies_publish_contact(
     dyn_state: DynState,
     proxies_info: IPCProxiesInfo,
     proxy_vertices_info: IPCProxyVerticesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
 ):
     """
     Publish the vertices of the proxies at the start of the substep into their range of the contact surface, from the
     contact vertex `vertex_start` on (see IPCVertices in genesis/engine/solvers/ipc_contact.py).
 
-    The proxy of a fixed link takes the pose of its link, and the others start at their accepted pose. A vertex stands
-    at the pose of its proxy at the start, its lagged position too, its proxy being its pivot, without rotation. The
-    vertices of a fixed link take no contact terms.
+    The inertial frame of every proxy and its surface radius follow the inertial parameters of its link. The proxy of a
+    fixed link takes the pose of the inertial frame of its link, and the others start at their accepted pose. A vertex
+    stands at the pose of its proxy at the start, its lagged position too, its proxy being its pivot, without rotation.
+    The vertices of a fixed link take no contact terms.
     """
     for i_p, i_b in qd.ndrange(*proxies_state.pos.shape):
+        inertial_pos, inertial_quat = func_proxy_inertial_frame(i_p, i_b, proxies_info, dyn_info, rigid_config)
+        proxies_state.inertial_pos[i_p, i_b] = inertial_pos
+        proxies_state.inertial_quat[i_p, i_b] = inertial_quat
+        proxies_state.surface_radius[i_p, i_b] = 0.0
         pos = proxies_state.pos[i_p, i_b]
         quat = proxies_state.quat[i_p, i_b]
         if proxies_info.is_fixed[i_p]:
             i_l = proxies_info.link_idx[i_p]
-            pos = dyn_state.links.pos[i_l, i_b]
-            quat = dyn_state.links.quat[i_l, i_b]
+            pos, quat = gu.qd_transform_pos_quat_by_trans_quat(
+                inertial_pos, inertial_quat, dyn_state.links.pos[i_l, i_b], dyn_state.links.quat[i_l, i_b]
+            )
             proxies_state.pos[i_p, i_b] = pos
             proxies_state.quat[i_p, i_b] = quat
         proxies_state.pos_start[i_p, i_b] = pos
@@ -155,7 +339,10 @@ def func_proxies_publish_contact(
     for i_pv, i_b in qd.ndrange(proxy_vertices_info.proxy_idx.shape[0], proxies_state.pos.shape[1]):
         i_p = proxy_vertices_info.proxy_idx[i_pv]
         pos = proxies_state.pos_start[i_p, i_b]
-        x = pos + gu.qd_transform_by_quat(proxy_vertices_info.local_pos[i_pv], proxies_state.quat_start[i_p, i_b])
+        x = func_proxy_vertex_pos(
+            i_pv, i_b, pos, proxies_state.quat_start[i_p, i_b], proxies_state, proxy_vertices_info
+        )
+        qd.atomic_max(proxies_state.surface_radius[i_p, i_b], (x - pos).norm())
         i_v = vertex_start + i_pv
         ipc_state.vertices.pos[i_v, i_b] = x
         ipc_state.vertices.pos_lagged[i_v, i_b] = x
@@ -168,9 +355,760 @@ def func_proxies_publish_contact(
 
 
 @qd.kernel(fastcache=True)
-def kernel_proxies_init_pose(proxies_state: IPCProxiesState, dyn_state: DynState, proxies_info: IPCProxiesInfo):
-    """Set the pose of every proxy to the pose of its link, its constraint vanishing (see genesis/engine/ipc/se3.py)."""
+def kernel_proxies_init_pose(
+    envs_mask: qd.Tensor,
+    proxies_state: IPCProxiesState,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Set the pose of every proxy of the environments selected to the pose of the inertial frame of its link, its
+    constraint vanishing (see genesis/engine/ipc/se3.py)."""
     for i_p, i_b in qd.ndrange(*proxies_state.pos.shape):
+        if envs_mask[i_b]:
+            i_l = proxies_info.link_idx[i_p]
+            inertial_pos, inertial_quat = func_proxy_inertial_frame(i_p, i_b, proxies_info, dyn_info, rigid_config)
+            proxies_state.pos[i_p, i_b], proxies_state.quat[i_p, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
+                inertial_pos, inertial_quat, dyn_state.links.pos[i_l, i_b], dyn_state.links.quat[i_l, i_b]
+            )
+
+
+# ------------------------------------------------------------------------------------
+# ---------------------------------- kinematics --------------------------------------
+# ------------------------------------------------------------------------------------
+
+
+@qd.func
+def func_rotation_increment(i_d: int, i_b: int, x: qd.Tensor, dyn_state: DynState, rigid_info: RigidInfo):
+    """Return the rotation vector phi = dt w0 + x of the free or spherical rotation whose first dof is i_d, in the frame
+    of its link (see the module docstring)."""
+    dt = rigid_info.substep_dt[None]
+    return qd.Vector(
+        [dt * dyn_state.dofs.vel[i_d + k, i_b] + x[i_d + k, i_b] for k in qd.static(range(3))], dt=gs.qd_float
+    )
+
+
+@qd.func(requires_top_level=True)
+def func_proxy_kinematics(
+    x: qd.Tensor,
+    kinematics: ProxyKinematics,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    has_motions: qd.template(),
+):
+    """
+    Compute the configuration q1(x) the rigid solver reaches from the unknowns `x` of the Newton solve and its forward
+    kinematics (see ProxyKinematics), with `has_motions` the motion of the links along every dof there.
+
+    The configuration follows the integration of 'func_integrate' in abd/forward_dynamics.py, the links of a proxy being
+    constrained, which keeps them off its midpoint rule (see 'func_proxies_mark_constrained').
+    """
+    dt = rigid_info.substep_dt[None]
+    n_envs = kinematics.qpos.shape[1]
+    for i_l, i_b in qd.ndrange(kinematics.links_pos.shape[0], n_envs):
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        q_start = dyn_info.links.q_start[I_l]
+        q_end = dyn_info.links.q_end[I_l]
+        dof_start = dyn_info.links.dof_start[I_l]
+        if dyn_info.links.n_dofs[I_l] > 0:
+            i_j = dyn_info.links.joint_start[I_l]
+            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+            joint_type = dyn_info.joints.type[I_j]
+            if joint_type == gs.JOINT_TYPE.FREE:
+                for k in qd.static(range(3)):
+                    kinematics.qpos[q_start + k, i_b] = (
+                        rigid_info.qpos[q_start + k, i_b]
+                        + dt * dyn_state.dofs.vel[dof_start + k, i_b]
+                        + x[dof_start + k, i_b]
+                    )
+            if joint_type == gs.JOINT_TYPE.SPHERICAL or joint_type == gs.JOINT_TYPE.FREE:
+                rot_offset = 3 if joint_type == gs.JOINT_TYPE.FREE else 0
+                rot0 = qd.Vector(
+                    [rigid_info.qpos[q_start + rot_offset + k, i_b] for k in qd.static(range(4))], dt=gs.qd_float
+                )
+                phi = func_rotation_increment(dof_start + rot_offset, i_b, x, dyn_state, rigid_info)
+                rot = gu.qd_transform_quat_by_quat(gu.qd_rotvec_to_quat(phi), rot0)
+                for k in qd.static(range(4)):
+                    kinematics.qpos[q_start + rot_offset + k, i_b] = rot[k]
+            else:
+                for j_ in range(q_end - q_start):
+                    kinematics.qpos[q_start + j_, i_b] = (
+                        rigid_info.qpos[q_start + j_, i_b]
+                        + dt * dyn_state.dofs.vel[dof_start + j_, i_b]
+                        + x[dof_start + j_, i_b]
+                    )
+        else:
+            for j_ in range(q_end - q_start):
+                kinematics.qpos[q_start + j_, i_b] = rigid_info.qpos[q_start + j_, i_b]
+    for i_e, i_b in qd.ndrange(dyn_info.entities.link_start.shape[0], n_envs):
+        func_forward_kinematics_scratch(
+            i_b,
+            i_b,
+            i_b,
+            i_e,
+            0,
+            0,
+            0,
+            kinematics.qpos,
+            kinematics.links_pos,
+            kinematics.links_quat,
+            kinematics.joints_xanchor,
+            kinematics.joints_xaxis,
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+        )
+    if qd.static(has_motions):
+        EPS = rigid_info.EPS[None]
+        for i_l, i_b in qd.ndrange(kinematics.links_pos.shape[0], n_envs):
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
+                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                joint_type = dyn_info.joints.type[I_j]
+                i_d = dyn_info.joints.dof_start[I_j]
+                anchor = kinematics.joints_xanchor[i_j, i_b]
+                axis = kinematics.joints_xaxis[i_j, i_b]
+                if joint_type == gs.JOINT_TYPE.REVOLUTE:
+                    kinematics.dofs_motion_ang[i_d, i_b] = axis
+                    kinematics.dofs_motion_vel[i_d, i_b] = anchor.cross(axis)
+                elif joint_type == gs.JOINT_TYPE.PRISMATIC:
+                    kinematics.dofs_motion_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                    kinematics.dofs_motion_vel[i_d, i_b] = axis
+                elif joint_type == gs.JOINT_TYPE.FREE or joint_type == gs.JOINT_TYPE.SPHERICAL:
+                    rot_offset = 0
+                    if joint_type == gs.JOINT_TYPE.FREE:
+                        rot_offset = 3
+                        for k in qd.static(range(3)):
+                            kinematics.dofs_motion_ang[i_d + k, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                            kinematics.dofs_motion_vel[i_d + k, i_b] = qd.Vector(
+                                [1.0 if j == k else 0.0 for j in qd.static(range(3))], dt=gs.qd_float
+                            )
+                    # The rotation turns as R0 Exp(phi) in the frame of the link, whose derivative in the world is
+                    # R1 Jr(phi), Jr(phi) = Jl(-phi)
+                    phi = func_rotation_increment(i_d + rot_offset, i_b, x, dyn_state, rigid_info)
+                    rotation = gu.qd_quat_to_R(kinematics.links_quat[i_l, i_b], EPS) @ func_so3_left_jacobian(-phi)
+                    for k in qd.static(range(3)):
+                        ang = qd.Vector([rotation[0, k], rotation[1, k], rotation[2, k]], dt=gs.qd_float)
+                        kinematics.dofs_motion_ang[i_d + rot_offset + k, i_b] = ang
+                        kinematics.dofs_motion_vel[i_d + rot_offset + k, i_b] = anchor.cross(ang)
+
+
+@qd.func
+def func_link_twist(
+    i_l: int,
+    i_b: int,
+    depth: int,
+    point: qd.types.vector(3),
+    src: qd.Tensor,
+    kinematics: ProxyKinematics,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Return the world twist of a link along a vector `src` over the dofs, the displacement of its point `point` and
+    its rotation, summed over the dofs of the `depth` links of its chain (see ProxyKinematics)."""
+    motion_vel = qd.Vector.zero(gs.qd_float, 3)
+    motion_ang = qd.Vector.zero(gs.qd_float, 3)
+    j_l = i_l
+    for _ in range(depth):
+        J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
+        for i_d in range(dyn_info.links.dof_start[J_l], dyn_info.links.dof_end[J_l]):
+            motion_vel = motion_vel + kinematics.dofs_motion_vel[i_d, i_b] * src[i_d, i_b]
+            motion_ang = motion_ang + kinematics.dofs_motion_ang[i_d, i_b] * src[i_d, i_b]
+        j_l = dyn_info.links.parent_idx[J_l]
+    return motion_vel + motion_ang.cross(point), motion_ang
+
+
+@qd.func
+def func_link_wrench_to_dofs(
+    i_l: int,
+    i_b: int,
+    depth: int,
+    point: qd.types.vector(3),
+    force: qd.types.vector(3),
+    torque: qd.types.vector(3),
+    out: qd.Tensor,
+    kinematics: ProxyKinematics,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Add to a vector `out` over the dofs the generalized force of a wrench on a link, its force at its point `point`
+    and its torque, the transpose of 'func_link_twist'."""
+    torque_origin = torque + point.cross(force)
+    j_l = i_l
+    for _ in range(depth):
+        J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
+        for i_d in range(dyn_info.links.dof_start[J_l], dyn_info.links.dof_end[J_l]):
+            qd.atomic_add(
+                out[i_d, i_b],
+                kinematics.dofs_motion_vel[i_d, i_b].dot(force)
+                + kinematics.dofs_motion_ang[i_d, i_b].dot(torque_origin),
+            )
+        j_l = dyn_info.links.parent_idx[J_l]
+
+
+@qd.func
+def func_proxy_expand(
+    i_p: int,
+    i_b: int,
+    src: qd.Tensor,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Return the twist S B src of a moving proxy along a vector `src` over the dofs, translation and rotation (see the
+    module docstring), the twin of 'func_proxy_restrict'."""
+    twist_pos, twist_rot = func_link_twist(
+        proxies_info.link_idx[i_p],
+        i_b,
+        proxies_info.chain_depth[i_p],
+        proxies.target_pos[i_p, i_b],
+        src,
+        kinematics,
+        dyn_info,
+        rigid_config,
+    )
+    return twist_pos, proxies.tangent_rotation[i_p, i_b] @ twist_rot
+
+
+@qd.func
+def func_proxy_restrict(
+    i_p: int,
+    i_b: int,
+    force: qd.types.vector(3),
+    torque: qd.types.vector(3),
+    out: qd.Tensor,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Add to a vector `out` over the dofs the restriction B^T S^T of a wrench on a moving proxy, its force and its torque,
+    the twin of 'func_proxy_expand'."""
+    func_link_wrench_to_dofs(
+        proxies_info.link_idx[i_p],
+        i_b,
+        proxies_info.chain_depth[i_p],
+        proxies.target_pos[i_p, i_b],
+        force,
+        proxies.tangent_rotation[i_p, i_b].transpose() @ torque,
+        out,
+        kinematics,
+        dyn_info,
+        rigid_config,
+    )
+
+
+# ------------------------------------------------------------------------------------
+# ----------------------------------- Newton solve -----------------------------------
+# ------------------------------------------------------------------------------------
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_init_substep(
+    x: qd.Tensor,
+    dyn_state: DynState,
+    proxy_dofs_info: IPCProxyDofsInfo,
+    proxies_info: IPCProxiesInfo,
+    rigid_info: RigidInfo,
+):
+    """
+    Start the dofs of the entities with moving proxies at rest, x = -dt v0, where the configuration they reach is the one
+    at the start of the substep (see the module docstring), and constrain the links of the proxies.
+
+    The proxies start at the poses their links held when the last substep committed them, so that their constraint
+    starts within its solve tolerance, where the FK-defect limiter certifies a full step. The constraint of the links
+    keeps them off the midpoint rule of the free bodies, whose position follows another map of x.
+    """
+    dt = rigid_info.substep_dt[None]
+    for i_d, i_b in qd.ndrange(*x.shape):
+        if proxy_dofs_info.body_idx[i_d] >= 0:
+            x[i_d, i_b] = -dt * dyn_state.dofs.vel[i_d, i_b]
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], x.shape[1]):
+        if not proxies_info.is_fixed[i_p]:
+            i_l = proxies_info.link_idx[i_p]
+            dyn_state.links.is_constrained[i_l, i_b] = True
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_prepare(
+    vertex_start: int,
+    x: qd.Tensor,
+    newton_rows: NewtonRows,
+    ipc_state: IPCState,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    kinematics: ProxyKinematics,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Prepare the proxies for the Newton iteration at the iterate `x` of the dofs: the forward kinematics of q1(x) with the
+    motions of its dofs, the constraint of every moving proxy and its maps (see 'func_proxy_maps' in
+    genesis/engine/ipc/se3.py), the largest surface mismatch of every environment, and the rows of the proxies, whose
+    gradients the contact adds to, published for their vertices from the contact vertex `vertex_start` on.
+    """
+    func_proxy_kinematics(x, kinematics, dyn_state, dyn_info, rigid_info, rigid_config, True)
+    n_proxies = proxies_info.link_idx.shape[0]
+    n_envs = proxies_state.pos.shape[1]
+    for i_b in range(n_envs):
+        proxies_envs.max_residual[i_b] = 0.0
+    for i_p, i_b in qd.ndrange(n_proxies, n_envs):
+        i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+        for k in qd.static(range(2)):
+            newton_rows.rows_env[i_r + k] = i_b
+            newton_rows.gradient[i_r + k] = qd.Vector.zero(gs.qd_float, 3)
+        if not proxies_info.is_fixed[i_p]:
+            i_l = proxies_info.link_idx[i_p]
+            target_pos, target_quat = gu.qd_transform_pos_quat_by_trans_quat(
+                proxies_state.inertial_pos[i_p, i_b],
+                proxies_state.inertial_quat[i_p, i_b],
+                kinematics.links_pos[i_l, i_b],
+                kinematics.links_quat[i_l, i_b],
+            )
+            constraint = func_proxy_constraint(
+                proxies_state.pos[i_p, i_b], proxies_state.quat[i_p, i_b], target_pos, target_quat
+            )
+            tangent_rotation, normal_rotation, particular = func_proxy_maps(constraint)
+            proxies.target_pos[i_p, i_b] = target_pos
+            proxies.constraint[i_p, i_b] = constraint
+            proxies.tangent_rotation[i_p, i_b] = tangent_rotation
+            proxies.normal_rotation[i_p, i_b] = normal_rotation
+            proxies.particular[i_p, i_b] = particular
+            residual = func_surface_residual(constraint, proxies_state.surface_radius[i_p, i_b])
+            qd.atomic_max(proxies_envs.max_residual[i_b], residual)
+    for i_pv, i_b in qd.ndrange(proxy_vertices_info.proxy_idx.shape[0], n_envs):
+        i_p = proxy_vertices_info.proxy_idx[i_pv]
+        ipc_state.vertices.row[vertex_start + i_pv, i_b] = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+
+
+@qd.func
+def func_surface_residual(constraint: qd.types.vector(6), radius: float) -> float:
+    """Return the surface mismatch |c_t| + r |c_w| of a proxy with its link, r its surface radius."""
+    return (
+        qd.Vector([constraint[0], constraint[1], constraint[2]]).norm()
+        + radius * qd.Vector([constraint[3], constraint[4], constraint[5]]).norm()
+    )
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_link_stiffness(
+    newton_rows: NewtonRows,
+    link_stiffness: qd.Tensor,
+    proxies: IPCProxies,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+):
+    """
+    Set the spatial stiffness of the link of every moving proxy, which the factor of the rigid solver adds to its Hessian
+    (see RigidContactStiffness in rigid/global_newton.py): T^T S^T H_pp S T, H_pp the 6 x 6 block of the proxy in the
+    rows, S its tangent map and T the map of the spatial displacement of the link about the center of mass of its root,
+    as the motion subspace of the dofs, to its twist at the center of mass of the link.
+    """
+    n_proxies = proxies_info.link_idx.shape[0]
+    n_envs = proxies.constraint.shape[1]
+    for i_p, i_b in qd.ndrange(n_proxies, n_envs):
         i_l = proxies_info.link_idx[i_p]
-        proxies_state.pos[i_p, i_b] = dyn_state.links.pos[i_l, i_b]
-        proxies_state.quat[i_p, i_b] = dyn_state.links.quat[i_l, i_b]
+        link_stiffness[i_l, i_b] = qd.Matrix.zero(gs.qd_float, 6, 6)
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
+    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
+    for i_entry in range(newton_rows.matrix.n_entries[None]):
+        i_r, j_r, block = func_read_entry(newton_rows.matrix, i_entry, block_rows=3, block_cols=3)
+        # The blocks of a proxy with itself, its translation row even in the segment, the upper triangle alone
+        if i_r >= row_start and i_r < row_end and (j_r - row_start) // 2 == (i_r - row_start) // 2:
+            i_pb = (i_r - row_start) // 2
+            i_p = i_pb % n_proxies
+            i_b = i_pb // n_proxies
+            if not proxies_info.is_fixed[i_p]:
+                i_l = proxies_info.link_idx[i_p]
+                a = (i_r - row_start) % 2
+                c = (j_r - row_start) % 2
+                # Every entry writes its own block, the transposed one of an off-diagonal entry too
+                for k, j in qd.static(qd.ndrange(3, 3)):
+                    link_stiffness[i_l, i_b][3 * a + k, 3 * c + j] = block[k, j]
+                    if a != c:
+                        link_stiffness[i_l, i_b][3 * c + j, 3 * a + k] = block[k, j]
+    for i_p, i_b in qd.ndrange(n_proxies, n_envs):
+        if not proxies_info.is_fixed[i_p]:
+            i_l = proxies_info.link_idx[i_p]
+            lever_skew = gu.qd_vec_to_skew(dyn_state.links.i_pos[i_l, i_b])
+            tangent_rotation = proxies.tangent_rotation[i_p, i_b]
+            lift = qd.Matrix.identity(gs.qd_float, 6)
+            for k, j in qd.static(qd.ndrange(3, 3)):
+                lift[k, 3 + j] = -lever_skew[k, j]
+                lift[3 + k, 3 + j] = tangent_rotation[k, j]
+            link_stiffness[i_l, i_b] = lift.transpose() @ link_stiffness[i_l, i_b] @ lift
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_reduce_gradient(
+    envs_mask: qd.Tensor,
+    p_dot_ap: qd.Tensor,
+    dofs_gradient: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Reduce the gradient of the rows and of the dofs of every environment selected to the unknowns of the Newton solve,
+    P^T (g + H d_p), d_p the particular step of the proxies, the rows of the proxies then holding no unknown.
+
+    The product H d_p of the rows goes through the search direction and its product (see 'func_rows_matvec' in
+    numerics/newton_rows.py), which the conjugate gradient starts afresh afterwards, and `p_dot_ap` takes the energy form
+    of the product along. The wrench of a proxy, its gradient plus its part of H d_p, restricts to `dofs_gradient`.
+    """
+    n_proxies = proxies_info.link_idx.shape[0]
+    n_envs = proxies.constraint.shape[1]
+    n_rows = newton_rows.segments_start[newton_rows.segments_start.shape[0] - 1]
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
+    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
+    for i_r in range(n_rows):
+        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
+    for i_p, i_b in qd.ndrange(n_proxies, n_envs):
+        if not proxies_info.is_fixed[i_p]:
+            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+            particular = proxies.particular[i_p, i_b]
+            newton_rows.p[i_r] = qd.Vector([particular[0], particular[1], particular[2]])
+            newton_rows.p[i_r + 1] = qd.Vector([particular[3], particular[4], particular[5]])
+    func_rows_matvec(newton_rows, envs_mask, p_dot_ap, False)
+    for i_r in range(n_rows):
+        if i_r < row_start or i_r >= row_end:
+            i_b = newton_rows.rows_env[i_r]
+            if envs_mask[i_b]:
+                newton_rows.gradient[i_r] = newton_rows.gradient[i_r] + newton_rows.Ap[i_r]
+    for i_p, i_b in qd.ndrange(n_proxies, n_envs):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+            func_proxy_restrict(
+                i_p,
+                i_b,
+                newton_rows.gradient[i_r] + newton_rows.Ap[i_r],
+                newton_rows.gradient[i_r + 1] + newton_rows.Ap[i_r + 1],
+                dofs_gradient,
+                proxies,
+                kinematics,
+                proxies_info,
+                dyn_info,
+                rigid_config,
+            )
+    for i_r in range(row_start, row_end):
+        newton_rows.gradient[i_r] = qd.Vector.zero(gs.qd_float, 3)
+    for i_r in range(n_rows):
+        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_mask_rows(newton_rows: NewtonRows):
+    """Zero the preconditioner of the rows of the proxies, which hold no unknown of the conjugate gradient, so that their
+    residual and their search direction stay zero."""
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
+    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
+    for i_r in range(row_start, row_end):
+        newton_rows.jacobi[i_r] = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_expand(
+    envs_mask: qd.Tensor,
+    dofs_p: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Write in the rows of every moving proxy of the environments selected the twist S B p of the search direction
+    `dofs_p` of the dofs, which the product of the rows carries to the other rows (see 'func_proxies_restrict')."""
+    n_proxies = proxies_info.link_idx.shape[0]
+    for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+            twist_pos, twist_rot = func_proxy_expand(
+                i_p, i_b, dofs_p, proxies, kinematics, proxies_info, dyn_info, rigid_config
+            )
+            newton_rows.p[i_r] = twist_pos
+            newton_rows.p[i_r + 1] = twist_rot
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_restrict(
+    envs_mask: qd.Tensor,
+    dofs_ap: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """Restrict the product of the rows of every moving proxy of the environments selected to `dofs_ap`, B^T S^T (H P p),
+    and clear the rows of the proxies, which hold no unknown (see 'func_proxies_expand')."""
+    n_proxies = proxies_info.link_idx.shape[0]
+    for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+            func_proxy_restrict(
+                i_p,
+                i_b,
+                newton_rows.Ap[i_r],
+                newton_rows.Ap[i_r + 1],
+                dofs_ap,
+                proxies,
+                kinematics,
+                proxies_info,
+                dyn_info,
+                rigid_config,
+            )
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
+    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
+    for i_r in range(row_start, row_end):
+        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
+        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_init_line_search(
+    envs_mask: qd.Tensor,
+    max_displacement: qd.Tensor,
+    dofs_dx: qd.Tensor,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Set the Newton direction of every moving proxy of the environments selected, S B dx + d_p from the direction `dofs_dx`
+    of the dofs (see the module docstring), from its pose at the start of the line search.
+
+    The surface displacement |dt| + r |dw| of a proxy adds to the entry of its environment in `max_displacement`, the
+    world displacement that measures the convergence of the rigid links.
+    """
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            twist_pos, twist_rot = func_proxy_expand(
+                i_p, i_b, dofs_dx, proxies, kinematics, proxies_info, dyn_info, rigid_config
+            )
+            particular = proxies.particular[i_p, i_b]
+            direction_pos = twist_pos + qd.Vector([particular[0], particular[1], particular[2]])
+            direction_rot = twist_rot + qd.Vector([particular[3], particular[4], particular[5]])
+            proxies.direction_pos[i_p, i_b] = direction_pos
+            proxies.direction_rot[i_p, i_b] = direction_rot
+            proxies.pos_iter[i_p, i_b] = proxies_state.pos[i_p, i_b]
+            proxies.quat_iter[i_p, i_b] = proxies_state.quat[i_p, i_b]
+            qd.atomic_max(
+                max_displacement[i_b],
+                direction_pos.norm() + proxies_state.surface_radius[i_p, i_b] * direction_rot.norm(),
+            )
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_limit_step(
+    envs_mask: qd.Tensor,
+    dofs_dx: qd.Tensor,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    path_tolerance: float,
+):
+    """
+    Bound the step of every environment selected by the FK-defect limiter: the largest step along which the surface
+    mismatch of every moving proxy with its link stays within its path limit, max(`path_tolerance`, h0), h0 its mismatch
+    at the start (see 'func_fk_defect_prefix_cap' in genesis/engine/ipc/se3.py).
+
+    The mismatch grows at most as the curvature |dw|^2 r of the screw of the proxy plus that of its link along the
+    retraction of the dofs. The latter bounds every chain of dofs by 2 omega s, omega the summed rotation rates and s the
+    summed speeds of the point at the surface radius from the joints, as the articulated trajectories of CGQ, a joint of
+    which reaches the point through the norms of the frames of the links, from the origin of the link of the proxy past
+    its center of mass. A free or spherical rotation, whose axis turns along the retraction R0 Exp(phi + alpha dphi),
+    adds |dphi|^2 / 2 times its reach, which bounds the derivative of its angular velocity Jr(phi) dphi along the step.
+    """
+    for i_b in range(proxies_envs.fk_alpha.shape[0]):
+        proxies_envs.fk_alpha[i_b] = 1.0
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            radius = proxies_state.surface_radius[i_p, i_b]
+            h0 = func_surface_residual(proxies.constraint[i_p, i_b], radius)
+            limit = qd.max(path_tolerance, h0)
+            proxies.path_limit[i_p, i_b] = limit
+            reach = radius + proxies_state.inertial_pos[i_p, i_b].norm()
+            speed = gs.qd_float(0.0)
+            omega = gs.qd_float(0.0)
+            extra = gs.qd_float(0.0)
+            j_l = proxies_info.link_idx[i_p]
+            for _ in range(proxies_info.chain_depth[i_p]):
+                J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
+                travel = gs.qd_float(0.0)
+                for i_j in range(dyn_info.links.joint_start[J_l], dyn_info.links.joint_end[J_l]):
+                    I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                    joint_type = dyn_info.joints.type[I_j]
+                    i_d = dyn_info.joints.dof_start[I_j]
+                    reach_joint = reach + dyn_info.joints.pos[I_j].norm()
+                    if joint_type == gs.JOINT_TYPE.REVOLUTE:
+                        speed = speed + qd.abs(dofs_dx[i_d, i_b]) * reach_joint
+                        omega = omega + qd.abs(dofs_dx[i_d, i_b])
+                    elif joint_type == gs.JOINT_TYPE.PRISMATIC:
+                        q_start = dyn_info.joints.q_start[I_j]
+                        q_rel = kinematics.qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
+                        travel = travel + qd.max(qd.abs(q_rel), qd.abs(q_rel + dofs_dx[i_d, i_b]))
+                        speed = speed + qd.abs(dofs_dx[i_d, i_b])
+                    elif joint_type == gs.JOINT_TYPE.FREE or joint_type == gs.JOINT_TYPE.SPHERICAL:
+                        rot_offset = 3 if joint_type == gs.JOINT_TYPE.FREE else 0
+                        rate = qd.Vector([dofs_dx[i_d + rot_offset + k, i_b] for k in qd.static(range(3))]).norm()
+                        speed = speed + rate * reach_joint
+                        omega = omega + rate
+                        extra = extra + 0.5 * rate * rate * reach_joint
+                    reach = reach_joint
+                reach = reach + travel + dyn_info.links.pos[J_l].norm()
+                j_l = dyn_info.links.parent_idx[J_l]
+            rate_proxy = proxies.direction_rot[i_p, i_b].norm()
+            curvature = rate_proxy * rate_proxy * radius + 2.0 * omega * speed + extra
+            alpha = func_fk_defect_prefix_cap(h0, 0.0, curvature, limit)
+            qd.atomic_min(proxies_envs.fk_alpha[i_b], alpha)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_scale_direction(
+    envs_mask: qd.Tensor, alpha: qd.Tensor, proxies: IPCProxies, proxies_info: IPCProxiesInfo, is_by_body: qd.template()
+):
+    """Scale the Newton direction of every moving proxy of the environments selected by the step of its environment in
+    `alpha`, or with `is_by_body` by that of the group of its contact body (see IPCBodies)."""
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            scale = gs.qd_float(0.0)
+            if qd.static(is_by_body):
+                i_body = proxies_info.body_idx[i_p]
+                scale = alpha[i_body, i_b]
+            else:
+                scale = alpha[i_b]
+            proxies.direction_pos[i_p, i_b] = scale * proxies.direction_pos[i_p, i_b]
+            proxies.direction_rot[i_p, i_b] = scale * proxies.direction_rot[i_p, i_b]
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_publish_sweep(
+    vertex_start: int,
+    envs_mask: qd.Tensor,
+    ipc_state: IPCState,
+    proxies: IPCProxies,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+):
+    """Publish the sweep of the vertices of every moving proxy of the environments selected along its Newton direction,
+    the screw of its pose (see IPCVertices in genesis/engine/solvers/ipc_contact.py)."""
+    for i_pv, i_b in qd.ndrange(proxy_vertices_info.proxy_idx.shape[0], proxies.constraint.shape[1]):
+        i_p = proxy_vertices_info.proxy_idx[i_pv]
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_v = vertex_start + i_pv
+            pivot = proxies.pos_iter[i_p, i_b]
+            direction_pos = proxies.direction_pos[i_p, i_b]
+            direction_rot = proxies.direction_rot[i_p, i_b]
+            lever = ipc_state.vertices.pos[i_v, i_b] - pivot
+            ipc_state.vertices.pivot[i_v, i_b] = pivot
+            ipc_state.vertices.pivot_displacement[i_v, i_b] = direction_pos
+            ipc_state.vertices.rotation[i_v, i_b] = direction_rot
+            ipc_state.vertices.displacement[i_v, i_b] = (
+                direction_pos + gu.qd_transform_by_quat(lever, gu.qd_rotvec_to_quat(direction_rot)) - lever
+            )
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_step_forward(
+    vertex_start: int,
+    envs_mask: qd.Tensor,
+    alpha: qd.Tensor,
+    ipc_state: IPCState,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+):
+    """Move every moving proxy of the environments selected along its screw to the trial point of the step `alpha` of
+    its environment, (t + alpha dt, Exp(alpha dw) R), and publish the positions of its vertices."""
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            step = alpha[i_b]
+            proxies_state.pos[i_p, i_b] = proxies.pos_iter[i_p, i_b] + step * proxies.direction_pos[i_p, i_b]
+            proxies_state.quat[i_p, i_b] = gu.qd_transform_quat_by_quat(
+                proxies.quat_iter[i_p, i_b], gu.qd_rotvec_to_quat(step * proxies.direction_rot[i_p, i_b])
+            )
+    for i_pv, i_b in qd.ndrange(proxy_vertices_info.proxy_idx.shape[0], proxies.constraint.shape[1]):
+        i_p = proxy_vertices_info.proxy_idx[i_pv]
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_v = vertex_start + i_pv
+            pos = proxies_state.pos[i_p, i_b]
+            ipc_state.vertices.pos[i_v, i_b] = func_proxy_vertex_pos(
+                i_pv, i_b, pos, proxies_state.quat[i_p, i_b], proxies_state, proxy_vertices_info
+            )
+            ipc_state.vertices.pivot[i_v, i_b] = pos
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_trial_residual(
+    envs_mask: qd.Tensor,
+    x: qd.Tensor,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    proxies_state: IPCProxiesState,
+    kinematics: ProxyKinematics,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    guard_tolerance: float,
+    guard_errno: int,
+    errno: qd.Tensor,
+):
+    """
+    Evaluate the exact surface mismatch of every moving proxy of the environments selected with its link at the trial
+    point, the dofs at `x`, its largest one in every environment.
+
+    A mismatch beyond the path limit of its proxy, past the relative round-off `guard_tolerance`, breaks the certificate
+    of the FK-defect limiter (see 'func_proxies_limit_step'): it sets the flag `guard_errno` in the errno of its
+    environment, never a shorter step.
+    """
+    func_proxy_kinematics(x, kinematics, dyn_state, dyn_info, rigid_info, rigid_config, False)
+    for i_b in range(proxies_envs.trial_max_residual.shape[0]):
+        if envs_mask[i_b]:
+            proxies_envs.trial_max_residual[i_b] = 0.0
+    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_l = proxies_info.link_idx[i_p]
+            target_pos, target_quat = gu.qd_transform_pos_quat_by_trans_quat(
+                proxies_state.inertial_pos[i_p, i_b],
+                proxies_state.inertial_quat[i_p, i_b],
+                kinematics.links_pos[i_l, i_b],
+                kinematics.links_quat[i_l, i_b],
+            )
+            constraint = func_proxy_constraint(
+                proxies_state.pos[i_p, i_b], proxies_state.quat[i_p, i_b], target_pos, target_quat
+            )
+            residual = func_surface_residual(constraint, proxies_state.surface_radius[i_p, i_b])
+            qd.atomic_max(proxies_envs.trial_max_residual[i_b], residual)
+            path_limit = proxies.path_limit[i_p, i_b]
+            if residual > path_limit + guard_tolerance * (1.0 + path_limit):
+                qd.atomic_or(errno[i_b], guard_errno)

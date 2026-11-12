@@ -18,11 +18,14 @@ class NewtonSegment(IntEnum):
     The participants of a Newton solve that own rows, in the order of their rows.
 
     The nodes of the sparse grid of the implicit MPM solver come first, so that the row of a node keeps its index. The
-    vertices of the cloth follow, environment by environment.
+    vertices of the cloth follow, environment by environment, then the translation and rotation rows of the rigid
+    contact proxies, which take the terms of their contacts but hold no unknown of the reduced solve (see
+    genesis/engine/solvers/rigid/contact_proxy.py).
     """
 
     MPM_NODES = 0
     CLOTH_VERTICES = 1
+    PROXIES = 2
 
 
 N_SEGMENTS = len(NewtonSegment)

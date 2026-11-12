@@ -3233,19 +3233,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     @property
     def is_solved_in_global_newton(self) -> bool:
         """
-        Whether the substeps of the rigid solver are solved within the global Newton solve of the implicit MPM solver,
-        the accelerations of its dofs joining the unknowns of the particles (see NewtonSolver).
+        Whether the substeps of the rigid solver are solved within the global Newton solve of the implicit MPM solver or
+        of the cloth, the accelerations of its dofs joining the unknowns of the particles or of the vertices of the cloth
+        (see NewtonSolver).
 
-        They are once a rigid geom that couples with the particles moves (see 'LegacyCouplerOptions.rigid_mpm' and
-        'needs_coup' of gs.materials.Rigid), the geoms fixed in the world acting on the particles alone. A substep then
-        stops once its constraint rows are assembled, and finishes from the accelerations that the Newton solve hands it
-        (see 'substep_post_coupling').
+        They are once a rigid geom that couples with the particles or with the cloth moves (see
+        'LegacyCouplerOptions.rigid_mpm' and 'needs_coup' of gs.materials.Rigid), the geoms fixed in the world acting on
+        them alone. A substep then stops once its constraint rows are assembled, and finishes from the accelerations that
+        the Newton solve hands it (see 'substep_post_coupling').
         """
         if self.is_built:
             return self._is_solved_in_global_newton
+        is_coupled = self.sim.coupler.rigid_couplings[0] or self.sim.fem_solver.is_solved_in_global_newton
         return (
             self.sim.newton_solver.is_active
-            and self.sim.coupler.rigid_couplings[0]
+            and is_coupled
             and any(geom.needs_coup and not geom.is_fixed for geom in self.geoms)
         )
 

@@ -409,19 +409,31 @@ def func_rigid_matvec(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_init_line_search(rigid_dofs: NewtonRigidDofs, envs_mask: qd.Tensor, max_displacement: qd.Tensor):
+def func_rigid_init_line_search(
+    envs_mask: qd.Tensor,
+    max_displacement: qd.Tensor,
+    is_measured: qd.Tensor,
+    rigid_dofs: NewtonRigidDofs,
+    has_measure: qd.template(),
+):
     """
     Set the Newton direction of the dofs of every environment selected, minus the solution of the linear solve, from
     their start point.
 
-    The largest update of a dof adds to the entry of its environment in `max_displacement`.
+    The largest update of a dof adds to the entry of its environment in `max_displacement`, with `has_measure` that of
+    the dofs `is_measured` selects alone, the others being measured otherwise (see 'IPCProxyDofsInfo' in
+    rigid/contact_proxy.py).
     """
     for i_d, i_b in qd.ndrange(rigid_dofs.x.shape[0], rigid_dofs.x.shape[1]):
         if envs_mask[i_b]:
             dx = -rigid_dofs.solution[i_d, i_b]
             rigid_dofs.dx[i_d, i_b] = dx
             rigid_dofs.x_start[i_d, i_b] = rigid_dofs.x[i_d, i_b]
-            qd.atomic_max(max_displacement[i_b], qd.abs(dx))
+            is_kept = True
+            if qd.static(has_measure):
+                is_kept = is_measured[i_d]
+            if is_kept:
+                qd.atomic_max(max_displacement[i_b], qd.abs(dx))
 
 
 @qd.func(requires_top_level=True)
