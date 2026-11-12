@@ -1481,6 +1481,59 @@ def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
 
 
 @pytest.mark.required
+def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    D_HAT = 1e-2
+    BOX_SIZE = 0.1
+
+    scene = gs.Scene(
+        ipc_options=gs.options.IPCOptions(
+            d_hat=D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, -0.5, 0.3),
+            camera_lookat=(0.0, 0.0, 0.03),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    # A free box dropped onto a cloth lying on the ground, several vertices of the cloth under its bottom face
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            scale=0.4,
+            pos=(0.0, 0.0, 0.01),
+        ),
+        material=gs.materials.FEM.Cloth(
+            contact_thickness=CONTACT_THICKNESS,
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(0.0, 0.0, 0.08),
+        ),
+    )
+    scene.build(n_envs=2)
+
+    box_vz = []
+    for _ in range(50):
+        scene.step()
+        box_vz.append(box.get_vel()[..., 2])
+    # The box comes to rest on the cloth, in its contact band, the contact keeping the cloth off the ground
+    assert (torch.stack(box_vz[-20:]).abs() < 5e-6).all()
+    verts = cloth.get_verts_pos()
+    is_under_box = (verts[..., :2].abs() < 0.5 * BOX_SIZE).all(dim=-1)
+    gaps_min = (
+        box.get_pos()[..., 2] - 0.5 * BOX_SIZE - torch.where(is_under_box, verts[..., 2], -1.0).max(dim=-1).values
+    )
+    assert ((CONTACT_THICKNESS < gaps_min) & (gaps_min < CONTACT_THICKNESS + D_HAT)).all()
+    assert (verts[..., 2] > CONTACT_THICKNESS).all()
+
+
+@pytest.mark.required
 def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     scene = gs.Scene(mpm_options=gs.options.MPMOptions(use_implicit_solver=True))
     scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
