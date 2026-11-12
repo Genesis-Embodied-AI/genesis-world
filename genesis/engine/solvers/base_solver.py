@@ -407,10 +407,13 @@ class CheckpointMixin:
             # in this process, which spares checking them against the scene
             items_mask = {}
             if envs_idx is not None:
-                envs_mask = indices_to_mask(envs_idx)
+                # The saved arrays are written back whole through a mask of the selected environments, which spares
+                # reading their count back from the device (see 'assign_indexed_tensor').
+                envs_mask = torch.zeros((self.sim._B,), dtype=torch.bool, device=gs.device)
+                assign_indexed_tensor(envs_mask, indices_to_mask(envs_idx), value=True)
                 for item in self._boundary_items.items:
                     if isinstance(item, ArrayItem):
-                        items_mask[item.name] = (*[slice(None)] * (len(item.array.shape) - 1), *envs_mask)
+                        items_mask[item.name] = (*[slice(None)] * (len(item.array.shape) - 1), envs_mask)
             if self._boundary_items.views:
                 # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
                 if gs.backend == gs.metal:
@@ -420,10 +423,10 @@ class CheckpointMixin:
                     torch._foreach_copy_(self._boundary_items.views, values)
                 else:
                     for item, view, value in zip(self._boundary_items.items_viewed, self._boundary_items.views, values):
-                        # Torch writes no unsigned 64-bit integer by index, so such an array is written as its signed bits
+                        # Torch masks no unsigned 64-bit integer, so such an array is written as its signed bits
                         if view.dtype == torch.uint64:
                             view, value = view.view(torch.int64), value.view(torch.int64)
-                        assign_indexed_tensor(view, items_mask[item.name], value[items_mask[item.name]])
+                        assign_indexed_tensor(view, items_mask[item.name], value)
             items = self._boundary_items.items_copied
             arrays = {item.name: checkpoint.arrays[item.name] for item in items}
             if envs_idx is not None:
@@ -431,7 +434,7 @@ class CheckpointMixin:
                 for item in items:
                     if isinstance(item, ArrayItem):
                         array = data_to_array(item.array, to_torch=True, copy=True)
-                        assign_indexed_tensor(array, items_mask[item.name], arrays[item.name][items_mask[item.name]])
+                        assign_indexed_tensor(array, items_mask[item.name], arrays[item.name])
                         arrays[item.name] = array
         else:
             items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
@@ -519,9 +522,7 @@ class GravityMixin:
         if gs.use_zerocopy:
             envs_mask = indices_to_mask(envs_idx)
             gravity_t = qd_to_torch(self._gravity, transpose=True, copy=False)
-            assign_indexed_tensor(
-                gravity_t, envs_mask, broadcast_tensor(gravity, gs.tc_float, gravity_t[envs_mask].shape)
-            )
+            assign_indexed_tensor(gravity_t, envs_mask, gravity)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
             return
@@ -806,7 +807,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
                 mask = (0, *indices_to_mask(idx))
             else:
                 mask = indices_to_mask(envs_idx, idx, pair_rows=True)
-            assign_indexed_tensor(view, mask, broadcast_tensor(values, view.dtype, view[mask].shape))
+            assign_indexed_tensor(view, mask, values)
             return
         values, idx, envs_idx = self._sanitize_io_variables(
             values,
