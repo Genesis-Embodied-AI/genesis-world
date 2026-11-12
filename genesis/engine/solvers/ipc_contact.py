@@ -894,6 +894,9 @@ def func_add_pair_terms(
     # See PAIR_TRIPLETS and RIGID_POINT_PAIR_TRIPLETS at module level
     PAIR_TRIPLETS = qd.static(10)
     RIGID_POINT_PAIR_TRIPLETS = qd.static(15)
+    # The triplets of a pair whose second primitive is rigid: 3 + 4 + 3 for an edge-edge pair, 1 + 2 + 3 for a point
+    # against a rigid triangle (see 'func_add_rigid_side_terms')
+    RIGID_SIDE_TRIPLETS = qd.static(10 if is_edge_edge else 6)
     if qd.static(not has_rigid):
         func_add_point_terms(i_b, triplet_start, verts_idx, gradient, hessian, newton_rows, ipc_state)
     else:
@@ -911,7 +914,7 @@ def func_add_pair_terms(
             func_add_rigid_side_terms(
                 i_b, triplet_start, verts_idx, gradient, hessian, newton_rows, ipc_state, rigid_start=N_A, rigid_end=4
             )
-            n_written = qd.static(10 if is_edge_edge else 6)
+            n_written = RIGID_SIDE_TRIPLETS
         elif is_rigid_point:
             func_add_rigid_side_terms(
                 i_b, triplet_start, verts_idx, gradient, hessian, newton_rows, ipc_state, rigid_start=0, rigid_end=1
