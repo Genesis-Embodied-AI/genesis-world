@@ -382,7 +382,8 @@ class SAPEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     is_linesearch_active: qd.Tensor = field(bool)
     # Residual at the last convergence check, relative to the momentum and the impulses
     relative_residual: qd.Tensor = field(float)
-    # The scalars of the preconditioned conjugate gradient (PCG) solve
+    # The scalars of the preconditioned conjugate gradient (PCG) solve, those of the FEM vertices when it solves the
+    # rigid dofs apart (see is_pcg_coupled)
     rTz: qd.Tensor = field(float)
     rTz_fem_threshold: qd.Tensor = field(float)
     rTz_rigid_threshold: qd.Tensor = field(float)
@@ -409,6 +410,13 @@ class SAPEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     df: qd.Tensor = field(float)
     minus_dalpha: qd.Tensor = field(float)
     minus_dalpha_prev: qd.Tensor = field(float)
+    # Whether a constraint couples the FEM vertices with the rigid dofs, the conjugate gradient solving them together.
+    # Otherwise it solves each part apart, with the scalars of the rigid dofs below (see func_init_pcg_solve).
+    is_pcg_coupled: qd.Tensor = field(bool)
+    is_pcg_fem_active: qd.Tensor = field(bool)
+    is_pcg_rigid_active: qd.Tensor = field(bool)
+    rTz_rigid: qd.Tensor = field(float)
+    beta_rigid: qd.Tensor = field(float)
 
 
 class SAPFEMCoarse(Data, kind=DataKind.SCRATCH, shape=(FEM_ENTITIES, ENVS)):
@@ -3692,19 +3700,33 @@ def func_compute_vertices_dofs(
         i_b = i_t // (N_LANES * n_chunks)
         alpha = gs.qd_float(0.0)
         if qd.static(op == VertexDofOp.PCG_UPDATE):
-            pTAp = func_chunks_total(
-                i_b,
-                0,
-                sap_state.vertices_dofs_partials.shape[0],
-                qd.static(VertexDofSum.PTAP),
-                i_lane,
-                sap_state,
-                n_lanes=N_LANES,
-                n_sums=1,
-            )[0]
+            # p^T A p of the FEM vertices then of the rigid dofs
+            pTAp_fem = gs.qd_float(0.0)
+            pTAp_rigid = gs.qd_float(0.0)
+            for i_part in range(2):
+                i_k_start, i_k_end = 0, n_vertex_chunks
+                if i_part == 1:
+                    i_k_start, i_k_end = n_vertex_chunks, n_chunks
+                pTAp_part = func_chunks_total(
+                    i_b, i_k_start, i_k_end, qd.static(VertexDofSum.PTAP), i_lane, sap_state, n_lanes=N_LANES, n_sums=1
+                )[0]
+                if i_part == 0:
+                    pTAp_fem = pTAp_part
+                else:
+                    pTAp_rigid = pTAp_part
+            rTz = sap_state.envs.rTz[i_b]
+            pTAp = pTAp_fem
+            is_part_active = sap_state.envs.is_pcg_fem_active[i_b]
+            if sap_state.envs.is_pcg_coupled[i_b]:
+                rTz = rTz + sap_state.envs.rTz_rigid[i_b]
+                pTAp = pTAp_fem + pTAp_rigid
+            elif i_k >= n_vertex_chunks:
+                rTz = sap_state.envs.rTz_rigid[i_b]
+                pTAp = pTAp_rigid
+                is_part_active = sap_state.envs.is_pcg_rigid_active[i_b]
             # A direction along which the cost has no curvature, p^T A p underflowing, takes no step
-            if envs_is_active[i_b] and pTAp > 0.0:
-                alpha = sap_state.envs.rTz[i_b] / pTAp
+            if envs_is_active[i_b] and is_part_active and pTAp > 0.0:
+                alpha = rTz / pTAp
         sums = qd.Vector.zero(gs.qd_float, N_SUMS)
         if envs_is_active[i_b]:
             for i_i_ in range(CHUNK_DIM // N_LANES):
@@ -4155,7 +4177,7 @@ def func_compute_rigid_dof(
             )
         sums[VertexDofSum.RTZ] = sap_state.rigid_dofs.r[i_d, i_b] * sap_state.rigid_dofs.z[i_d, i_b]
     if qd.static(op == VertexDofOp.PCG_SEARCH_DIRECTION):
-        beta = sap_state.envs.beta[i_b]
+        beta = sap_state.envs.beta_rigid[i_b]
         Mz = gs.qd_float(0.0)
         for j_d in range(rigid_info.dofs_mass_block_start[i_d], rigid_info.dofs_mass_block_end[i_d]):
             Mz = Mz + rigid_info.mass_mat[i_d, j_d, i_b] * sap_state.rigid_dofs.z[j_d, i_b]
@@ -4209,13 +4231,21 @@ def func_init_pcg_solve(
     residual impulses are small while their velocity errors are large, and the Newton iterations stall above their
     convergence threshold. The FEM vertices and the rigid dofs reduce their own residual each, since the exact
     preconditioner of the rigid dofs solves their share of r^T z within an iteration, which would stop a solve on the
-    sum early.
+    sum early. Without constraint coupling them, they are two independent systems, which run a conjugate gradient each:
+    the step size of a joint solve tracks the larger share alone, so that the residual of a share orders of magnitude
+    smaller swings by orders of magnitude around its own threshold, running the solve to its iteration cap.
     """
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     for i_b in range(sap_state.envs.is_active.shape[0]):
         sap_state.envs.is_pcg_active[i_b] = sap_state.envs.is_active[i_b]
         # The first search direction is the preconditioned residual, which the first iteration sets from p = 0
         sap_state.envs.beta[i_b] = 0.0
+        sap_state.envs.beta_rigid[i_b] = 0.0
+        is_coupled = False
+        for handler in qd.static(constraint_handlers):
+            if qd.static(handler.n_fem_corners > 0 and handler.n_rigid_sides > 0):
+                is_coupled = is_coupled or handler.envs_n_constraints(i_b) > 0
+        sap_state.envs.is_pcg_coupled[i_b] = is_coupled
     func_compute_vertices_dofs(
         sap_state.envs.is_pcg_active,
         fem_state,
@@ -4239,10 +4269,18 @@ def func_init_pcg_solve(
         is_active = sap_state.envs.is_pcg_active[i_b]
         rTz_fem, rTz_rigid = func_pcg_residuals(i_b, i_lane, is_active, sap_state, sap_info, sap_config)
         if is_active and i_lane == 0:
-            sap_state.envs.rTz[i_b] = rTz_fem + rTz_rigid
+            sap_state.envs.rTz[i_b] = rTz_fem
+            sap_state.envs.rTz_rigid[i_b] = rTz_rigid
             sap_state.envs.rTz_fem_threshold[i_b] = sap_info.pcg_threshold[None] * rTz_fem
             sap_state.envs.rTz_rigid_threshold[i_b] = sap_info.pcg_threshold[None] * rTz_rigid
-            sap_state.envs.is_pcg_active[i_b] = sap_state.envs.rTz[i_b] > 0.0
+            is_fem_active = rTz_fem > 0.0
+            is_rigid_active = rTz_rigid > 0.0
+            if sap_state.envs.is_pcg_coupled[i_b]:
+                is_fem_active = rTz_fem + rTz_rigid > 0.0
+                is_rigid_active = is_fem_active
+            sap_state.envs.is_pcg_fem_active[i_b] = is_fem_active
+            sap_state.envs.is_pcg_rigid_active[i_b] = is_rigid_active
+            sap_state.envs.is_pcg_active[i_b] = is_fem_active or is_rigid_active
 
 
 @qd.func
@@ -4420,14 +4458,38 @@ def func_one_pcg_iter(
         is_active = sap_state.envs.is_pcg_active[i_b]
         rTz_fem, rTz_rigid = func_pcg_residuals(i_b, i_lane, is_active, sap_state, sap_info, sap_config)
         if is_active and i_lane == 0:
-            is_active = (
-                rTz_fem > sap_state.envs.rTz_fem_threshold[i_b] or rTz_rigid > sap_state.envs.rTz_rigid_threshold[i_b]
+            rTz_fem_prev = sap_state.envs.rTz[i_b]
+            rTz_rigid_prev = sap_state.envs.rTz_rigid[i_b]
+            is_fem_active = sap_state.envs.is_pcg_fem_active[i_b] and rTz_fem > sap_state.envs.rTz_fem_threshold[i_b]
+            is_rigid_active = (
+                sap_state.envs.is_pcg_rigid_active[i_b] and rTz_rigid > sap_state.envs.rTz_rigid_threshold[i_b]
             )
+            beta_fem = gs.qd_float(0.0)
+            beta_rigid = gs.qd_float(0.0)
+            if sap_state.envs.is_pcg_coupled[i_b]:
+                is_fem_active = (
+                    rTz_fem > sap_state.envs.rTz_fem_threshold[i_b]
+                    or rTz_rigid > sap_state.envs.rTz_rigid_threshold[i_b]
+                )
+                is_rigid_active = is_fem_active
+                beta_fem = (rTz_fem + rTz_rigid) / (rTz_fem_prev + rTz_rigid_prev)
+                beta_rigid = beta_fem
+            else:
+                # A part still iterating had r^T z above its threshold, which is non-negative
+                if is_fem_active:
+                    beta_fem = rTz_fem / rTz_fem_prev
+                if is_rigid_active:
+                    beta_rigid = rTz_rigid / rTz_rigid_prev
+            is_active = is_fem_active or is_rigid_active
+            sap_state.envs.is_pcg_fem_active[i_b] = is_fem_active
+            sap_state.envs.is_pcg_rigid_active[i_b] = is_rigid_active
             sap_state.envs.is_pcg_active[i_b] = is_active
             if is_active:
                 pcg_counter[()] = sap_state.loops.n_pcg_next[()]
-                sap_state.envs.beta[i_b] = (rTz_fem + rTz_rigid) / sap_state.envs.rTz[i_b]
-                sap_state.envs.rTz[i_b] = rTz_fem + rTz_rigid
+                sap_state.envs.beta[i_b] = beta_fem
+                sap_state.envs.beta_rigid[i_b] = beta_rigid
+                sap_state.envs.rTz[i_b] = rTz_fem
+                sap_state.envs.rTz_rigid[i_b] = rTz_rigid
 
 
 @qd.func
