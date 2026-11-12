@@ -425,7 +425,10 @@ class KinematicEntityDescription(EntityDescription):
     attachment: KinematicAttachmentDescription | None = None
 
     def __post_init__(self):
-        if self.options is None:
+        # A file holds the material twice, in the description and in its options, which load as one material
+        if self.options is not None:
+            self.material = self.options.material
+        else:
             options_cls = get_entity_options_cls(self.material)
             if options_cls is None:
                 gs.raise_exception(f"No entity options admit material {type(self.material).__name__}.")
@@ -1434,8 +1437,8 @@ class KinematicEntityDescription(EntityDescription):
                 root.is_aligned = False
                 gs.logger.warning(
                     f"The link or geom options give a density in the body of link '{root.name}', which may move its "
-                    "center of mass off its frame. The body is simulated unaligned, its frame staying where 'align' puts "
-                    "it from the densities of the asset."
+                    "center of mass off its frame. The body is simulated unaligned, its frame staying where 'align' "
+                    "puts it from the densities of the asset."
                 )
 
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent

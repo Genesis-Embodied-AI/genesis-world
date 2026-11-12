@@ -1,7 +1,7 @@
 """Selections of the links, geoms and vertices of an entity, keying the options set on them."""
 
 from fnmatch import fnmatchcase
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import numpy as np
 
@@ -14,7 +14,6 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
-from typing_extensions import Self
 
 import genesis as gs
 from genesis.typing import IArrayType, PositiveFloat, StrArrayType, StrictInt, Vec3FType
@@ -27,8 +26,8 @@ BArrayType = Annotated[tuple[StrictBool, ...], Field(min_length=1, strict=False)
 class _Selection(Options):
     """A selection keying the options set on part of an entity.
 
-    A selection dumps to a tuple of (field, value) pairs in Python mode, so that the dump of the options it keys holds it
-    as a key, since a dict is unhashable and any mapping is dumped as one.
+    A selection dumps to a tuple of (field, value) pairs in Python mode, so that the dump of the options it keys holds
+    it as a key, since a dict is unhashable and any mapping is dumped as one.
     """
 
     @model_serializer(mode="wrap")
@@ -165,7 +164,7 @@ class _NamedOrdinalIndex(_OrdinalIndex):
 
     @classmethod
     def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
-        """Select the geoms a numpy index picks among the collision geoms: an ordinal, ordinals, a boolean mask or a slice.
+        """Select the collision geoms a numpy index picks: an ordinal, ordinals, a boolean mask or a slice.
 
         Keying the 'geoms' of entity options, the index counts the collision geoms of the whole entity, link after link
         in the order of the asset. Keying the 'geoms' of link options, it counts the collision geoms of each selected

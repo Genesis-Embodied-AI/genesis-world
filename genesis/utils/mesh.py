@@ -615,7 +615,6 @@ def postprocess_collision_geoms(
         friction = g_info.get("friction")
         density = g_info.get("density")
         sol_params = g_info.get("sol_params")
-        geom_options = g_info.get("geom_options")
         key_parts += [
             np.ascontiguousarray(mesh.verts),
             np.ascontiguousarray(mesh.faces),
@@ -625,7 +624,7 @@ def postprocess_collision_geoms(
             float("nan") if friction is None else float(friction),
             float("nan") if density is None else float(density),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
-            {} if geom_options is None else geom_options.model_dump(exclude_unset=True),
+            g_info.get("geom_options"),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
             np.ascontiguousarray(g_info.get("quat", gu.identity_quat()), dtype=np.float64),
         ]

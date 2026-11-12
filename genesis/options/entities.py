@@ -126,8 +126,9 @@ class _GeomFields(_FrozenOptions):
 class Geom(_GeomFields):
     """Options of the collision geoms of a rigid entity that a ``gs.GeomIndex`` selects.
 
-    The fields given explicitly override those of the entity material for the selected geoms, and those of the link
-    options as well when the link options hold them. The fields left unset keep theirs.
+    The fields given explicitly override those of the entity material for the selected geoms. Given in the 'geoms' of
+    link options, they override the link options as well, while in the 'geoms' of entity options the link options
+    override them. The fields left unset keep theirs.
 
     Parameters
     ----------
@@ -135,7 +136,8 @@ class Geom(_GeomFields):
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. The frame of an aligned body stays where the
         densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects it, since it
-        simulates an entity at the density of its material. If None, the geoms take the density of their link. Default is None.
+        simulates an entity at the density of its material. If None, the geoms take the density of their link.
+        Default is None.
     friction : float | None, optional
         The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
         the geoms take that of their link. Default is None.
