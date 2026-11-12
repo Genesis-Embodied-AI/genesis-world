@@ -587,11 +587,14 @@ class Mesh(URDFType):
     _TAG = "mesh"
 
     def __init__(self, filename, scale=None, meshes=None):
-        if meshes is None:
-            meshes = load_meshes(filename)
         self.filename = filename
         self.scale = scale
-        self.meshes = meshes
+        # Meshes left unspecified are loaded on first access, since parsing the URDF tree alone does not need them
+        self._meshes = None
+        self._mesh_path = filename
+        self._is_collision = False
+        if meshes is not None:
+            self.meshes = meshes
 
     @property
     def filename(self):
@@ -618,6 +621,14 @@ class Mesh(URDFType):
         """list of :class:`~trimesh.base.Trimesh` : The triangular meshes
         that represent this object.
         """
+        if self._meshes is None:
+            meshes = load_meshes(self._mesh_path)
+            # Combine collision geometry meshes but keep visual ones separate to preserve colors and textures
+            if self._is_collision:
+                for m in meshes:
+                    m.visual = trimesh.visual.ColorVisuals(mesh=m)
+                meshes = [meshes[0] + meshes[1:]]
+            self.meshes = meshes
         return self._meshes
 
     @meshes.setter
@@ -640,24 +651,14 @@ class Mesh(URDFType):
     @classmethod
     def _from_xml(cls, node, root, path):
         kwargs = cls._parse(node, root, path)
-
-        # Load the mesh, combining collision geometry meshes but keeping
-        # visual ones separate to preserve colors and textures
-        fn = get_filename(path, kwargs["filename"])
         parent = next((p for p in root.iter() if node in p))
         grandparent = next((p for p in root.iter() if parent in p))
         assert grandparent.tag in (Visual._TAG, Collision._TAG)
-        combine = grandparent.tag == Collision._TAG
 
-        meshes = load_meshes(fn)
-        if combine:
-            # Delete visuals for simplicity
-            for m in meshes:
-                m.visual = trimesh.visual.ColorVisuals(mesh=m)
-            meshes = [meshes[0] + meshes[1:]]
-        kwargs["meshes"] = meshes
-
-        return Mesh(**kwargs)
+        mesh = Mesh(**kwargs)
+        mesh._mesh_path = get_filename(path, kwargs["filename"])
+        mesh._is_collision = grandparent.tag == Collision._TAG
+        return mesh
 
     def _to_xml(self, parent):
         return self._unparse()
