@@ -13,7 +13,7 @@ def func_point_in_triangle(
 ) -> bool:
     """Test whether a point of the plane of a triangle lies inside it, its barycentric coordinates within a tolerance.
 
-    A triangle whose squared area is below 1e-30 contains no point.
+    A triangle whose corner at t0 has a sine below 'tolerance' contains no point.
     """
     u = t1 - t0
     v = t2 - t0
@@ -23,9 +23,10 @@ def func_point_in_triangle(
     vv = v.dot(v)
     wu = w.dot(u)
     wv = w.dot(v)
+    # -|u x v|^2, compared with uu vv so that the test holds at any scale
     denom = uv * uv - uu * vv
     is_inside = False
-    if qd.abs(denom) >= 1e-30:
+    if qd.abs(denom) >= tolerance * tolerance * uu * vv:
         s = (uv * wv - vv * wu) / denom
         t = (uv * wu - uu * wv) / denom
         is_inside = s >= -tolerance and t >= -tolerance and s + t <= 1.0 + tolerance
@@ -46,7 +47,8 @@ def func_edge_triangle_intersect(
     'tolerance' is relative to the longest of the edge and the sides of the triangle, so that the test holds at any
     scale: it bounds the squared area of a degenerate triangle, which intersects nothing, the distance to the plane
     under which the edge counts as coplanar, and the barycentric coordinates of the inside tests. A coplanar edge
-    intersects the triangle when one of its vertices lies inside it or it crosses one of its sides. Otherwise the point
+    intersects the triangle when one of its vertices lies inside it or it crosses one of its sides in the plane of the
+    triangle, a side whose angle with the edge has a sine below 'tolerance' being parallel to it. Otherwise the point
     where the edge crosses the plane must lie inside the triangle.
     """
     u = t1 - t0
@@ -69,12 +71,17 @@ def func_edge_triangle_intersect(
                 corners = (t0, t1, t2)
                 for k in qd.static(range(3)):
                     side = corners[(k + 1) % 3] - corners[k]
-                    cross_dirs = edge.cross(side)
-                    denom = cross_dirs.dot(cross_dirs)
-                    if not is_hit and denom >= 1e-30:
+                    # Cross products projected on the normal, so that the tilt of the edge out of the plane that the
+                    # coplanar band admits does not enter: in 3D it dominates the cross product of an edge parallel to
+                    # a side in the plane, whose crossing coordinates then are rounding noise
+                    denom = edge.cross(side).dot(normal)
+                    if (
+                        not is_hit
+                        and denom * denom >= tolerance * tolerance * edge.dot(edge) * side.dot(side) * normal_norm2
+                    ):
                         offset = corners[k] - e0
-                        coord_edge = offset.cross(side).dot(cross_dirs) / denom
-                        coord_side = offset.cross(edge).dot(cross_dirs) / denom
+                        coord_edge = offset.cross(side).dot(normal) / denom
+                        coord_side = offset.cross(edge).dot(normal) / denom
                         is_hit = (
                             coord_edge >= -tolerance
                             and coord_edge <= 1.0 + tolerance
