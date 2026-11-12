@@ -468,6 +468,18 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         scene.step()
     scene.step()
 
+    # Steps emitting 0.4 particle size of liquid release a droplet every third step. A reset restarts this count,
+    # discarding the partial droplet accumulated by the steps before it.
+    speed = 0.4 * emitter.entity.particle_size / scene.dt
+    for _ in range(2):
+        emitter.emit(droplet_shape="circle", droplet_size=0.25, speed=speed)
+    scene.reset()
+    for _ in range(2):
+        emitter.emit(droplet_shape="circle", droplet_size=0.25, speed=speed)
+        assert emitter.next_particle == 0
+    emitter.emit(droplet_shape="circle", droplet_size=0.25, speed=speed)
+    assert emitter.next_particle > 0
+
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
