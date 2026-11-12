@@ -2083,8 +2083,8 @@ def kernel_line_search_trial(
 
     A converged or failed environment takes its step at once, and an environment out of trials keeps its last one. The
     exact mismatch of the proxies with their links at the trial point stays within the certificate of the FK-defect
-    limiter (see 'func_proxies_trial_residual' in rigid/contact_proxy.py). With the cloth, as CGQ's Newton loop, the step
-    of a converged iteration is no trial of a line search: it counts none, and no rule tests it.
+    limiter (see 'func_proxies_trial_residual' in rigid/contact_proxy.py). As in CGQ's Newton loop, the step of a
+    converged iteration is no trial of a line search: it counts none, and no rule tests it.
 
     With moving proxies, the rules of CGQ accept a step, h the largest surface mismatch of the proxies of the environment
     and E its energy, the price of the slack over the restoration included (see rigid/contact_proxy.py): E at most E0 up
@@ -2169,11 +2169,7 @@ def kernel_line_search_trial(
         for i_b in range(newton_envs.is_active.shape[0]):
             if newton_envs.is_line_search_active[i_b]:
                 is_accepted = newton_envs.is_converged[i_b] or newton_envs.failure[i_b] != NewtonFailure.NONE
-                # The contact of the cloth takes a converged step without a search, as CGQ (see the docstring)
-                is_trial = not is_accepted
-                if qd.static(not newton_config.has_cloth):
-                    is_trial = True
-                if is_trial:
+                if not is_accepted:
                     newton_envs.n_line_search_iterations[i_b] = newton_envs.n_line_search_iterations[i_b] + 1
                 if newton_envs.energy_trial[i_b] <= newton_envs.energy_start[i_b]:
                     is_accepted = True
@@ -2395,11 +2391,12 @@ def kernel_end_iteration(
     """
     Stop every environment that converged or failed, or reached the iteration cap, which it latches as a failure.
 
-    With the cloth, an environment converges from its second iteration on, as in CGQ's Newton loop. With moving proxies, an environment converges once its proxies also end within the solve tolerance of their links,
-    and a solve reaching the iteration cap unconverged sets the flag PROXY_SOLVE_EXHAUSTED in its errno, the substep
-    being left uncommitted, as does a trial breaking the certificate of the FK-defect limiter at once. The restoration
-    lasts one iteration past the one that enters it, after which the hard iterations go on until they converge, the
-    duals taking the slack left at its end (see IPCProxiesEnvs).
+    An environment converges from its second iteration on, as in CGQ's Newton loop. With moving proxies, an environment
+    converges once its proxies also end within the solve tolerance of their links, and a solve reaching the iteration cap
+    unconverged sets the flag PROXY_SOLVE_EXHAUSTED in its errno, the substep being left uncommitted, as does a trial
+    breaking the certificate of the FK-defect limiter at once. The restoration lasts one iteration past the one that
+    enters it, after which the hard iterations go on until they converge, the duals taking the slack left at its end (see
+    IPCProxiesEnvs).
     """
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
@@ -2424,9 +2421,7 @@ def kernel_end_iteration(
                 else:
                     is_converged = is_converged and is_feasible
                 is_failed = is_failed or (errno[i_b] & NewtonErrorCode.INVALID_PROXY_PATH) != 0
-            # With the cloth, as CGQ's Newton loop, a converged first iteration goes on to a second one
-            if qd.static(newton_config.has_cloth):
-                is_converged = is_converged and newton_envs.n_iterations[i_b] > 1
+            is_converged = is_converged and newton_envs.n_iterations[i_b] > 1
             if is_converged or is_failed:
                 newton_envs.is_active[i_b] = False
             elif newton_envs.n_iterations[i_b] >= newton_info.max_iterations[None]:
