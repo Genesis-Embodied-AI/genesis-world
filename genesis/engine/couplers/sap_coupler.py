@@ -1112,7 +1112,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 if unsupported_types:
                     unsupported_names = ", ".join([equality_type.name.lower() for equality_type in unsupported_types])
                     gs.raise_exception(
-                        f"SAPCoupler enforces joint equalities only, but entity '{entity.name}' holds "
+                        f"{type(self).__name__} enforces joint equalities only, but entity '{entity.name}' holds "
                         f"{unsupported_names} ones."
                     )
 
@@ -1136,8 +1136,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 gs.raise_exception(
                     textwrap.dedent(
                         f"""\
-                        SAPCoupler supports a single fixed plane facing up in every environment as ground, got
-                        {[(type(geom.entity.morph).__name__, geom.type) for geom in ground_geoms]}."""
+                        {type(self).__name__} supports a single fixed plane facing up in every environment as
+                        ground, got {[(type(geom.entity.morph).__name__, geom.type) for geom in ground_geoms]}."""
                     )
                 )
             ground_geom_idx = ground_geom.idx
@@ -1154,9 +1154,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             if self.fem_solver._use_implicit_solver is False:
                 gs.raise_exception(
                     textwrap.dedent(
-                        """\
-                        SAPCoupler requires FEM to use implicit solver. Please set `use_implicit_solver=True` in FEM
-                        options."""
+                        f"""\
+                        {type(self).__name__} requires FEM to use implicit solver. Please set
+                        `use_implicit_solver=True` in FEM options."""
                     )
                 )
             has_tet_tables = self._has_fem_tet_contact
@@ -1311,8 +1311,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             n_chain_dofs_max = max(n_chain_dofs_max, n_chain_dofs)
         if n_chain_dofs_max > CHAIN_DOFS_SIZES[-1]:
             gs.raise_exception(
-                f"SAPCoupler supports kinematic chains of {CHAIN_DOFS_SIZES[-1]} dofs at most, a link of the scene and "
-                f"its ancestors holding {n_chain_dofs_max}."
+                f"{type(self).__name__} supports kinematic chains of {CHAIN_DOFS_SIZES[-1]} dofs at most, a link of "
+                f"the scene and its ancestors holding {n_chain_dofs_max}."
             )
         n_max_chain_dofs = CHAIN_DOFS_SIZES[-1]
         if not gs.use_ndarray:
@@ -1511,16 +1511,18 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             {
                 SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of SAP collision pairs of a kind of contact in an environment "
-                    f"({envs_max_candidates}). Please increase the value of SAPCoupler's option 'max_collision_pairs'."
+                    f"({envs_max_candidates}). Please increase the value of {type(self).__name__}'s option "
+                    "'max_collision_pairs'."
                 ),
                 SAPErrorCode.OVERFLOW_CONTACTS: (
                     "Exceeding max number of SAP contacts of a kind of contact in an environment "
-                    f"({envs_max_contacts}). Please increase the value of SAPCoupler's option 'max_contacts'."
+                    f"({envs_max_contacts}). Please increase the value of {type(self).__name__}'s option "
+                    "'max_contacts'."
                 ),
                 SAPErrorCode.INVALID_SOLVE: (
                     "SAP solve stopped at its Newton iteration cap with a residual |gradient| / max(|momentum|, "
                     f"|impulse|) of {CAP_RESIDUAL_MAX} or more, which leaves its velocities meaningless. Please "
-                    "increase the value of SAPCoupler's option 'n_sap_iterations'."
+                    f"increase the value of {type(self).__name__}'s option 'n_sap_iterations'."
                 ),
             },
         )
