@@ -179,7 +179,6 @@ def qd_symmetric_eigen(A, tolerance: float, max_sweeps: int):
     B = A
     Q = qd.Matrix.identity(gs.qd_float, n)
     frobenius2 = (A * A).sum()
-    is_converged = False
     for _ in range(max_sweeps):
         # Summed over the off-diagonal entries alone, since the total minus the diagonal would cancel to rounding noise
         off2 = gs.qd_float(0.0)
@@ -188,33 +187,32 @@ def qd_symmetric_eigen(A, tolerance: float, max_sweeps: int):
                 if qd.static(i != j):
                     off2 = off2 + B[i, j] * B[i, j]
         if off2 < tolerance * tolerance * frobenius2:
-            is_converged = True
-        if not is_converged:
-            for p in range(n - 1):
-                for q in range(p + 1, n):
-                    b_pq = B[p, q]
-                    if qd.abs(b_pq) >= 1e-300:
-                        tau = (B[q, q] - B[p, p]) / (2.0 * b_pq)
-                        t = 1.0 / (qd.abs(tau) + qd.sqrt(1.0 + tau * tau))
-                        if tau < 0.0:
-                            t = -t
-                        c = 1.0 / qd.sqrt(1.0 + t * t)
-                        s = t * c
-                        for k in range(n):
-                            b_kp = B[k, p]
-                            b_kq = B[k, q]
-                            B[k, p] = c * b_kp - s * b_kq
-                            B[k, q] = s * b_kp + c * b_kq
-                        for k in range(n):
-                            b_pk = B[p, k]
-                            b_qk = B[q, k]
-                            B[p, k] = c * b_pk - s * b_qk
-                            B[q, k] = s * b_pk + c * b_qk
-                        for k in range(n):
-                            q_kp = Q[k, p]
-                            q_kq = Q[k, q]
-                            Q[k, p] = c * q_kp - s * q_kq
-                            Q[k, q] = s * q_kp + c * q_kq
+            break
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                b_pq = B[p, q]
+                if qd.abs(b_pq) >= 1e-300:
+                    tau = (B[q, q] - B[p, p]) / (2.0 * b_pq)
+                    t = 1.0 / (qd.abs(tau) + qd.sqrt(1.0 + tau * tau))
+                    if tau < 0.0:
+                        t = -t
+                    c = 1.0 / qd.sqrt(1.0 + t * t)
+                    s = t * c
+                    for k in range(n):
+                        b_kp = B[k, p]
+                        b_kq = B[k, q]
+                        B[k, p] = c * b_kp - s * b_kq
+                        B[k, q] = s * b_kp + c * b_kq
+                    for k in range(n):
+                        b_pk = B[p, k]
+                        b_qk = B[q, k]
+                        B[p, k] = c * b_pk - s * b_qk
+                        B[q, k] = s * b_pk + c * b_qk
+                    for k in range(n):
+                        q_kp = Q[k, p]
+                        q_kq = Q[k, q]
+                        Q[k, p] = c * q_kp - s * q_kq
+                        Q[k, q] = s * q_kp + c * q_kq
     return qd.Vector([B[i, i] for i in qd.static(range(n))]), Q
 
 
@@ -223,14 +221,14 @@ def qd_project_psd(A, max_rank: qd.template(), rank_tolerance: float, tolerance:
     """Project a symmetric matrix onto the positive semi-definite (PSD) cone by clamping its negative eigenvalues to zero.
 
     A matrix of rank at most 'max_rank' is first written as V T V^T, V an orthonormal basis of its range built from its
-    columns by Gram-Schmidt, so that only the small matrix T gets decomposed. Columns whose part outside the basis is
-    below 'rank_tolerance' times the Frobenius norm of the matrix add no direction. A matrix of higher rank is
-    decomposed whole, and returned untouched if already PSD. 'tolerance' and 'max_sweeps' are those of
-    qd_symmetric_eigen. Returns the projected matrix, exactly symmetric.
+    columns by Gram-Schmidt, so that only the small matrix T gets decomposed, and the projection is rebuilt from the
+    positive eigenpairs of T alone. Columns whose part outside the basis is below 'rank_tolerance' times the Frobenius
+    norm of the matrix add no direction. A matrix of higher rank is decomposed whole, and returned untouched if already
+    PSD. 'tolerance' and 'max_sweeps' are those of qd_symmetric_eigen. Returns the projected matrix, exactly symmetric.
     """
     n = qd.static(A.n)
     frobenius = qd.sqrt((A * A).sum())
-    basis = qd.Matrix.zero(gs.qd_float, n, n)
+    basis = qd.Matrix.zero(gs.qd_float, n, max_rank)
     rank = 0
     is_low_rank = True
     for j in range(n):
@@ -250,27 +248,28 @@ def qd_project_psd(A, max_rank: qd.template(), rank_tolerance: float, tolerance:
             else:
                 is_low_rank = False
 
-    # The matrix to decompose, padded with zeros beyond the rank, and the basis its eigenvectors are expressed in
-    reduced = qd.Matrix.zero(gs.qd_float, n, n)
+    projected = qd.Matrix.zero(gs.qd_float, n, n)
     if is_low_rank:
+        # Padded with zeros beyond the rank, which the rotations of the decomposition skip
+        reduced = qd.Matrix.zero(gs.qd_float, max_rank, max_rank)
         for j in range(rank):
-            axis_j = qd.Vector([basis[k, j] for k in qd.static(range(n))])
-            image = A @ axis_j
+            image = A @ qd.Vector([basis[k, j] for k in qd.static(range(n))])
             for i in range(rank):
                 reduced[i, j] = qd.Vector([basis[k, i] for k in qd.static(range(n))]).dot(image)
-    else:
-        reduced = A
-        basis = qd.Matrix.identity(gs.qd_float, n)
-    eigenvalues, eigenvectors = qd_symmetric_eigen(reduced, tolerance, max_sweeps)
-
-    projected = qd.Matrix.zero(gs.qd_float, n, n)
-    if not is_low_rank and eigenvalues.min() >= 0.0:
-        projected = A
-    else:
-        for e in range(n):
+        eigenvalues, eigenvectors = qd_symmetric_eigen(reduced, tolerance, max_sweeps)
+        for e in range(rank):
             if eigenvalues[e] > 0.0:
-                axis = basis @ qd.Vector([eigenvectors[k, e] for k in qd.static(range(n))])
+                axis = basis @ qd.Vector([eigenvectors[k, e] for k in qd.static(range(max_rank))])
                 projected = projected + eigenvalues[e] * axis.outer_product(axis)
+    else:
+        eigenvalues, eigenvectors = qd_symmetric_eigen(A, tolerance, max_sweeps)
+        if eigenvalues.min() >= 0.0:
+            projected = A
+        else:
+            for e in range(n):
+                if eigenvalues[e] > 0.0:
+                    axis = qd.Vector([eigenvectors[k, e] for k in qd.static(range(n))])
+                    projected = projected + eigenvalues[e] * axis.outer_product(axis)
     return projected
 
 
