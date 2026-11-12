@@ -1342,6 +1342,90 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
 
 
 @pytest.mark.required
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
+def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
+    DT = 0.01
+    VELOCITY_TOL = 5e-2
+    CONTACT_THICKNESS = 1e-3
+    D_HAT = 1e-2
+    N_GRID = 8
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=VELOCITY_TOL,
+        ),
+        ipc_options=gs.options.IPCOptions(
+            d_hat=D_HAT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 0.8),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            pos=(0.0, 0.0, 0.005),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending_E=1e6,
+            contact_thickness=CONTACT_THICKNESS,
+        ),
+    )
+    scene.build(n_envs=2)
+    # The four vertices of the corner at x = y = 0.5, the vertex 0 lying at the opposite corner
+    grip_idx = [(N_GRID - k) * (N_GRID + 1) + N_GRID - l for k in (0, 1) for l in (0, 1)]
+    grip_pos = cloth.get_verts_pos()[0, grip_idx]
+    # The first environment grabs the corner where it lies and drags it up and inward, the second one pulls it 0.1 m
+    # under the ground with soft constraints
+    cloth.set_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
+    cloth.set_vertex_constraints(
+        verts_idx_local=grip_idx,
+        target_poss=grip_pos - torch.tensor([0.0, 0.0, 0.1], dtype=gs.tc_float, device=gs.device),
+        is_soft_constraint=True,
+        stiffness=1e3,
+        envs_idx=[1],
+    )
+
+    for i_step in range(1, 41):
+        targets_pos = grip_pos + torch.tensor([-0.3, 0.0, 0.2], dtype=gs.tc_float, device=gs.device) * i_step / 40
+        cloth.update_constraint_targets(verts_idx_local=grip_idx, target_poss=targets_pos, envs_idx=[0])
+        scene.step()
+        verts_pos = cloth.get_verts_pos()
+        # The grabbed corner follows its target up to the convergence tolerance of the solve, and the contact keeps
+        # every vertex out of the ground, the soft pull included
+        assert ((verts_pos[0, grip_idx] - targets_pos).norm(dim=-1) < VELOCITY_TOL * DT).all()
+        assert (verts_pos[..., 2] > CONTACT_THICKNESS).all()
+    # The soft pull presses its corner deeper into the contact band than the free corner opposite it rests
+    assert (verts_pos[1, grip_idx, 2] < verts_pos[1, 0, 2]).all()
+
+    # Released, the corner falls back onto the ground
+    cloth.remove_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
+    for _ in range(40):
+        scene.step()
+        assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+    assert (cloth.get_verts_pos()[0, grip_idx, 2] < CONTACT_THICKNESS + D_HAT).all()
+
+    # The drag never folds the cloth across itself
+    path = str(tmp_path / "cloth.obj")
+    faces = igl.read_triangle_mesh(cloth_grid_obj_path)[1]
+    igl.write_triangle_mesh(path, tensor_to_array(cloth.get_verts_pos()[0], dtype=gs.np_float), faces)
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
+
+
+@pytest.mark.required
 def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
     D_HAT = 4e-3
@@ -1753,3 +1837,12 @@ def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     )
     with pytest.raises(gs.GenesisException, match="The cloth starts crossed"):
         scene.build()
+
+    scene = gs.Scene()
+    cloth = scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    box = scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    scene.build()
+    with pytest.raises(gs.GenesisException, match="moves within the same solve as the cloth"):
+        cloth.set_vertex_constraints(verts_idx_local=[0], link=box.base_link)
+    with pytest.raises(gs.GenesisException, match="must be non-negative"):
+        cloth.set_vertex_constraints(verts_idx_local=[0], is_soft_constraint=True, stiffness=-1.0)
