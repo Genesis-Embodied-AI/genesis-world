@@ -317,15 +317,22 @@ def test_scene_rebuild():
     # manual InteractiveScene. A Rebuild click only queues the request; scene.step() applies it on its thread.
     scene = _build_default_scene(enable_gui=True, run_in_thread=(sys.platform == "linux"))
     # A UV-mapped mesh with an image texture, so the capture comparison below catches the renderer swap invalidating
-    # GL textures shared across the rebuild.
+    # GL textures shared across the rebuild. Its geom options must survive a rebuild that edits its morph.
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck/duck.obj",
-            scale=0.001,
-            pos=(0.8, -0.8, 0.2),
-            fixed=True,
+        options=gs.entities.Rigid(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck/duck.obj",
+                scale=0.001,
+                pos=(0.8, -0.8, 0.2),
+                fixed=True,
+            ),
+            name="duck",
+            geoms={
+                gs.GeomIndex.at(slice(None)): gs.options.Geom(
+                    friction=0.9,
+                ),
+            },
         ),
-        name="duck",
     )
     scene.build()
 
@@ -380,6 +387,8 @@ def test_scene_rebuild():
     scene.step()
     duck_aabb_scaled = scene.get_entity("duck").get_AABB()
     assert_allclose(duck_aabb_scaled[1] - duck_aabb_scaled[0], 2.0 * (duck_aabb[1] - duck_aabb[0]), tol=1e-3)
+    for geom in scene.get_entity("duck").geoms:
+        assert_allclose(geom.get_friction(), 0.9, tol=gs.EPS)
     # A checkpoint restore compares against the cached digest, so the cache must follow the edit
     assert scene._desc_digest != digest_before
 
