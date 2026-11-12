@@ -1532,6 +1532,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ),
             env_first={
                 (
+                    SAPData.sap_state.fem_vertices,
                     SAPData.sap_state.vertices_dofs_partials,
                     SAPData.sap_state.elements_partials,
                     SAPData.sap_state.fem_corner_forces,
