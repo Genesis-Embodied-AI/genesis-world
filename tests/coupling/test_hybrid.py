@@ -490,6 +490,30 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         with pytest.raises(gs.GenesisException, match="single fixed plane facing up"):
             scene.build()
 
+    # A scene of fixed bodies alone, without any degree of freedom, has nothing to solve and steps
+    scene = gs.Scene(
+        coupler_options=gs.options.SAPCouplerOptions(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, 1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    fixed_box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.5),
+            fixed=True,
+        ),
+    )
+    scene.build()
+    for _ in range(2):
+        scene.step()
+    assert_allclose(fixed_box.get_pos(), (0.0, 0.0, 0.5), tol=gs.EPS)
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
