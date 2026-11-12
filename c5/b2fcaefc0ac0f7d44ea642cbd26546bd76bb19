@@ -1,0 +1,61 @@
+genesis/utils/usd/usd_geometry.py
+  s_4e532cc51f4368::t_bf16bf5e696e6c 351,354
+  s_4e532cc51f4368::t_4eeb9f642e5a17 383-384
+examples/deformable/differentiable_push.py
+  s_4e532cc51f4368::t_6d80248ce6aa5a 118,140,143,146
+genesis/engine/entities/hybrid_entity.py
+  s_4e532cc51f4368::t_34cd99e3723ae8 497,505
+  s_4e532cc51f4368::t_9d6f739116f16b 8
+genesis/engine/entities/emitter.py
+  s_4e532cc51f4368::t_5682c13addf38e 132
+  s_4e532cc51f4368::t_66a1478a46ac60 123,125,127,129,198,200-201,203
+genesis/utils/mesh.py
+  s_4e532cc51f4368::t_78bfa6ff8603a4 31
+  s_4e532cc51f4368::t_4ba36a153397e9 898-915,917,922
+tests/parsers/test_mesh.py
+  s_4e532cc51f4368::t_4ce177c255c280 17
+  s_4e532cc51f4368::t_4ba36a153397e9 1007
+genesis/utils/particle.py
+  s_4e532cc51f4368::t_5682c13addf38e 307
+  s_4e532cc51f4368::t_66a1478a46ac60 266,276,285-287,289-293,296-301,303,308-312,314-315
+  s_4e532cc51f4368::t_26b542c8355337 294
+  s_4e532cc51f4368::t_de41860c6dd314 268
+genesis/utils/urdf.py
+  s_4e532cc51f4368::t_57dbd22ceb241c 624-630,632
+genesis/options/options.py
+  s_4e532cc51f4368::t_798d472a7906b9 6,136
+genesis/engine/entities/particle_entity.py
+  s_4e532cc51f4368::t_4ba36a153397e9 254
+  s_4e532cc51f4368::t_66a1478a46ac60 228
+tests/rigid/test_api.py
+  s_4e532cc51f4368::t_180c62f7f1b77e 1450-1452
+genesis/repr_base.py
+  s_4e532cc51f4368::t_bf16bf5e696e6c 114
+  s_4e532cc51f4368::t_26b542c8355337 117-118
+  s_4e532cc51f4368::t_798d472a7906b9 3-5,72,111-113,115-116,119-129
+genesis/utils/hybrid.py
+  s_4e532cc51f4368::t_34cd99e3723ae8 20,25-29,94,96-97,99-103
+genesis/engine/entities/rigid_entity/description.py
+  s_4e532cc51f4368::t_1c45c5101d3f9d 57-60
+  s_4e532cc51f4368::t_454843814e715b 1677
+  s_4e532cc51f4368::t_6f97f2b54b4e74 61
+  s_4e532cc51f4368::t_bf16bf5e696e6c 1672-1674
+genesis/engine/mesh.py
+  s_4e532cc51f4368::t_4ce177c255c280 640
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c5b2fcaefc0ac0f7d44ea642cbd26546bd76bb19",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
