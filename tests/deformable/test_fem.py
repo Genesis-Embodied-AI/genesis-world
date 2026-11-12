@@ -1088,23 +1088,28 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize(
-    "capacity_option, capacity, enable_fem_neutral_collision",
+    "capacity_option, capacity, enable_fem_self_collision, enable_fem_neutral_collision",
     [
-        ("max_collision_pairs", 1, False),
-        ("max_contacts", 1, False),
-        ("n_sap_iterations", 1, False),
-        ("max_collision_pairs", 8192, True),
+        ("max_collision_pairs", 1, True, False),
+        ("max_contacts", 1, True, False),
+        ("n_sap_iterations", 1, True, False),
+        ("max_collision_pairs", 8192, True, True),
+        ("max_collision_pairs", 700, False, False),
     ],
 )
-def test_sap_coupler_capacity(capacity_option, capacity, enable_fem_neutral_collision, show_viewer):
+def test_sap_coupler_capacity(
+    capacity_option, capacity, enable_fem_self_collision, enable_fem_neutral_collision, show_viewer
+):
     SPHERE_RADIUS = 0.1
 
     scene = gs.Scene(
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        # With neutral collision, the pairs of tets of the sphere adjacent at rest exceed the capacity holding the scene
+        # With neutral collision, the pairs of tets of the sphere adjacent at rest exceed the capacity holding the scene.
+        # Without self-collision, the capacity bounds the query of the box against the sphere alone.
         coupler_options=gs.options.SAPCouplerOptions(
+            enable_fem_self_collision=enable_fem_self_collision,
             enable_fem_neutral_collision=enable_fem_neutral_collision,
             **{capacity_option: capacity},
         ),
@@ -1124,20 +1129,31 @@ def test_sap_coupler_capacity(capacity_option, capacity, enable_fem_neutral_coll
         ),
         material=gs.materials.FEM.Elastic(),
     )
-    # A rigid box resting on the sphere, whose contact search tests pairs of its triangles and of the tets of the sphere
-    scene.add_entity(
+    # A tilted box landing on the sphere, the boxes of its large faces spanning many tets that do not cross them
+    box = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 1.9 * SPHERE_RADIUS + 0.025),
-            size=(0.05, 0.05, 0.05),
+            pos=(0.0, 0.0, 1.8 * SPHERE_RADIUS + 0.12),
+            size=(0.3, 0.3, 0.1),
+            euler=(45.0, 35.0, 0.0),
         ),
     )
     scene.build(n_envs=2)
 
-    # The error a step flags raises at the second step after it on CUDA, where the check does not wait for the device.
-    # The solve stopped at its cap starts the third step from the velocities of the second, far from its solution.
-    with pytest.raises(gs.GenesisException, match=capacity_option):
-        for _ in range(5):
+    if capacity == 1 or enable_fem_neutral_collision:
+        # The error a step flags raises at the second step after it on CUDA, where the check does not wait for the
+        # device. The solve stopped at its cap starts the third step from the velocities of the second, far from its
+        # solution. The overflow of a kind of contact names its handler.
+        error_pattern = (
+            capacity_option if capacity_option == "n_sap_iterations" else rf"ContactHandler needs .*{capacity_option}"
+        )
+        with pytest.raises(gs.GenesisException, match=error_pattern):
+            for _ in range(5):
+                scene.step()
+    else:
+        # A capacity holding the candidate pairs of the scene holds, however many tets the boxes of its faces span
+        for _ in range(20):
             scene.step()
+        assert (tensor_to_array(box.get_pos())[..., 2] > 2 * SPHERE_RADIUS).all()
 
 
 @pytest.mark.required

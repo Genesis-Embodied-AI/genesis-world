@@ -1,3 +1,4 @@
+import functools
 import math
 import textwrap
 from collections.abc import Iterator
@@ -89,6 +90,8 @@ class SAPErrorCode(ErrorCode):
     OVERFLOW_CANDIDATE_CONTACTS = auto()
     OVERFLOW_CONTACTS = auto()
     INVALID_SOLVE = auto()
+    # The box overlaps a query keeps, before its candidate test, past their share in an environment
+    OVERFLOW_QUERY_RESULTS = auto()
 
 
 MARCHING_TETS_EDGE_TABLE = (
@@ -944,6 +947,56 @@ class RigidTetsQuery(BoxQuery):
         return self.Query(verts=verts, aabb_min=aabb_min, aabb_max=aabb_max)
 
 
+@qd.data_oriented
+class RigidFacesQuery(BoxQuery):
+    """The visitor of the box query of a FEM surface tet against the triangles of the meshes of the rigid geoms, keeping
+    the pairs whose tet crosses the plane of the triangle.
+
+    The test is the one the candidates of the pairs repeat (see RigidFEMContactHandler), so that the box overlaps
+    of a large triangle with the tets far from its plane fill no results. It reads the FEM vertices and the vertices of
+    the rigid meshes.
+    """
+
+    def __init__(
+        self,
+        results: BVHQueryResults,
+        fem_state: FEMState,
+        free_verts_state: VertsState,
+        fixed_verts_state: VertsState,
+        fem_info: FEMInfo,
+        verts_info: VertsInfo,
+        faces_info: FacesInfo,
+    ) -> None:
+        super().__init__(results)
+        self.fem_state = fem_state
+        self.free_verts_state = free_verts_state
+        self.fixed_verts_state = fixed_verts_state
+        self.fem_info = fem_info
+        self.verts_info = verts_info
+        self.faces_info = faces_info
+
+    @qd.func
+    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
+        tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for i in qd.static(range(3)):
+            i_v = self.faces_info.verts_idx[i_a][i]
+            i_fv = self.verts_info.verts_state_idx[i_v]
+            if self.verts_info.is_fixed[i_v]:
+                tri_vertices[:, i] = self.fixed_verts_state.pos[i_fv]
+            else:
+                tri_vertices[:, i] = self.free_verts_state.pos[i_fv, i_t]
+        pos_v0 = tri_vertices[:, 0]
+        # The side of each vertex of the tet, which the length of the normal leaves unchanged
+        normal = (tri_vertices[:, 1] - pos_v0).cross(tri_vertices[:, 2] - pos_v0)
+        i_e = self.fem_info.surface_elements[i_q]
+        intersection_code = qd.int32(0)
+        for i in qd.static(range(4)):
+            i_v = self.fem_info.elements.el2v[i_e][i]
+            if (self.fem_state.vertices.pos[i_v, i_t] - pos_v0).dot(normal) > 0.0:
+                intersection_code |= 1 << i
+        return intersection_code != 0 and intersection_code != 15
+
+
 def get_contact_capacities(options: SAPCouplerOptions, n_contacts_max: int, n_candidates_max: int) -> tuple[int, int]:
     """
     Return the contacts and the candidate contacts a contact handler holds in each environment.
@@ -1004,7 +1057,7 @@ def func_flag_query_overflow(query_results: BVHQueryResults, errno: qd.Tensor):
     n_tree_results_max = query_results.triplets.shape[0] // query_results.trees_count.shape[0]
     for i_b in range(query_results.trees_count.shape[0]):
         if query_results.trees_count[i_b] > n_tree_results_max:
-            errno[i_b] = errno[i_b] | SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS
+            errno[i_b] = errno[i_b] | SAPErrorCode.OVERFLOW_QUERY_RESULTS
 
 
 @qd.func
@@ -1496,30 +1549,53 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         # The errors of each env, raised at the beginning of the next step (see 'ErrnoMixin.register_errors')
         self.build_errno(self._B)
-        envs_max_contacts = ", ".join(
-            [f"{type(contact).__name__}: {contact.max_contact_pairs // self._B}" for contact in self.handlers.contacts]
-        )
-        envs_max_candidates = ", ".join(
-            [
-                f"{type(contact).__name__}: {contact.max_contact_candidates // self._B}"
-                for contact in self.handlers.contacts
-                if contact.has_candidates
-            ]
-        )
+
+        def report_overflow(code: SAPErrorCode) -> str:
+            # One error flag serves every handler of a kind of contact, so the message reads the counts of the last
+            # detection to name the handler and the environment past their capacity.
+            option = "max_contacts" if code == SAPErrorCode.OVERFLOW_CONTACTS else "max_collision_pairs"
+            for contact in self.handlers.contacts:
+                if code == SAPErrorCode.OVERFLOW_QUERY_RESULTS:
+                    if not contact.has_query:
+                        continue
+                    envs_n = contact.query_results.trees_count
+                    n_max = contact.query_results.triplets.shape[0] // self._B
+                    what = "box overlaps in its query before testing them as collision pairs"
+                elif code == SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS:
+                    if not contact.has_candidates:
+                        continue
+                    envs_n, n_max = (
+                        contact.contact_candidates.envs_n_candidates,
+                        contact.max_contact_candidates // self._B,
+                    )
+                    what = "collision pairs"
+                else:
+                    envs_n, n_max = contact.contact_pairs.envs_n_pairs, contact.max_contact_pairs // self._B
+                    what = "contacts"
+                envs_n = qd_to_numpy(envs_n)
+                (envs_idx,) = np.nonzero(envs_n > n_max)
+                if envs_idx.size > 0:
+                    return (
+                        f"SAP {type(contact).__name__} needs {envs_n[envs_idx[0]]} {what} in environment "
+                        f"{envs_idx[0]}, beyond its capacity of {n_max}. Please increase the value of "
+                        f"{type(self).__name__}'s option '{option}'."
+                    )
+            return (
+                "Exceeding a capacity of the SAP contacts in an environment. Please increase the value of "
+                f"{type(self).__name__}'s option '{option}'."
+            )
+
         self.register_errors(
             self.sap_data.errno,
             {
-                SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
-                    "Exceeding max number of SAP collision pairs of a kind of contact in an environment "
-                    f"({envs_max_candidates}). Please increase the value of {type(self).__name__}'s option "
-                    "'max_collision_pairs'."
+                SAPErrorCode.OVERFLOW_QUERY_RESULTS: functools.partial(
+                    report_overflow, SAPErrorCode.OVERFLOW_QUERY_RESULTS
                 ),
-                SAPErrorCode.OVERFLOW_CONTACTS: (
-                    "Exceeding max number of SAP contacts of a kind of contact in an environment "
-                    f"({envs_max_contacts}). Please increase the value of {type(self).__name__}'s option "
-                    "'max_contacts'."
+                SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS: functools.partial(
+                    report_overflow, SAPErrorCode.OVERFLOW_CANDIDATE_CONTACTS
                 ),
-                SAPErrorCode.INVALID_SOLVE: (
+                SAPErrorCode.OVERFLOW_CONTACTS: functools.partial(report_overflow, SAPErrorCode.OVERFLOW_CONTACTS),
+                SAPErrorCode.INVALID_SOLVE: lambda: (
                     "SAP solve stopped at its Newton iteration cap with a residual |gradient| / max(|momentum|, "
                     f"|impulse|) of {CAP_RESIDUAL_MAX} or more, which leaves its velocities meaningless. Please "
                     f"increase the value of {type(self).__name__}'s option 'n_sap_iterations'."
@@ -5843,8 +5919,19 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         self.query_results = BVHQueryResults(
             sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
         )
+        # The tets crossing the plane of a triangle alone take a result, as the candidates of the pairs require
         self.query = InstancesQuery(
-            BoxQuery(self.query_results), get_solver_meshes(rigid_solver, is_visual=False), rigid_solver.dyn_state.geoms
+            RigidFacesQuery(
+                self.query_results,
+                fem_solver.fem_state,
+                rigid_solver.dyn_state.free_verts,
+                rigid_solver.dyn_state.fixed_verts,
+                fem_solver.fem_info,
+                rigid_solver.dyn_info.verts,
+                rigid_solver.dyn_info.faces,
+            ),
+            get_solver_meshes(rigid_solver, is_visual=False),
+            rigid_solver.dyn_state.geoms,
         )
 
     @qd.func
