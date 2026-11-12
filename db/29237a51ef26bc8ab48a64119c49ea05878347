@@ -1,0 +1,188 @@
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_b3648fcdba9030 158,288,401,495,504,507-508,509-516,564,573,576-577,578-585
+  s_c62ec9da443b15::t_5ea8b9aa431178 145,274,387,504,573
+  s_c62ec9da443b15::t_cea66ad1d85f18 155-156
+  s_c62ec9da443b15::t_a802214e6adb2e 134-135,136-144,146
+  s_c62ec9da443b15::t_60ce880f973d61 1-2,14-19
+  s_c62ec9da443b15::t_a6bad34ff02224 262-263,264-273,275,375-376,377-386,388,496-497,498-503,505,565-566,567-572,574
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_b3648fcdba9030 387,403,415,427
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 365-366,367-369,370-371
+  s_c62ec9da443b15::t_528eaf008aaa57 14,16,18,36
+genesis/engine/entities/sph_entity.py
+  s_c62ec9da443b15::t_b3648fcdba9030 40,49,52-53,54-61
+  s_c62ec9da443b15::t_5ea8b9aa431178 49
+  s_c62ec9da443b15::t_60ce880f973d61 1-2,6-7,11-13
+  s_c62ec9da443b15::t_a802214e6adb2e 41-42,43-48,50
+  s_c62ec9da443b15::t_3caa8fdea294ee 14
+genesis/engine/entities/rigid_entity/rigid_link.py
+  s_c62ec9da443b15::t_b3648fcdba9030 330-334
+genesis/engine/solvers/sph_solver.py
+  s_c62ec9da443b15::t_b3648fcdba9030 371
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 354-355,356-358,359-360
+  s_c62ec9da443b15::t_528eaf008aaa57 14,16,42
+genesis/options/entities.py
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 13,15,69,94,97,111,218,239,243-244,260,312-314,335,353,368-369,374,392-393,396
+  s_c62ec9da443b15::t_b3648fcdba9030 1-2,4,6,8-11,16-35,38,41,47-50,52-53,65-68,73-85,86-88,89-93,95-96,98-100,112-118,127-128,132-133,136,148-149,150,164,167,171-173,174,183-184,185,198-199,206-208,210-212,214-217,219-221,222,226-231,232-233,234,236-238,240-242,256-258,259,261,271,275-287,288-297,301-307,309-311,315-316,317-334,336-351,354-357,359-367,370-373,375-391,394-395
+  s_c62ec9da443b15::t_a5a60068a7a947 101,107-108,110
+  s_c62ec9da443b15::t_65fc2bb97408c0 7,12,36-37,39-40,42-46,102-103,131,134-135,139-147,273-274,397-408
+  s_c62ec9da443b15::t_b5b642d6c0c926 104-106,109
+  s_c62ec9da443b15::t_ddb71d6162bcaf 119-126,165,168
+  s_c62ec9da443b15::t_b16ed5f919dfb9 298-300,308,352,358
+  s_c62ec9da443b15::t_d4026034b4a4cf 51,70-72
+genesis/engine/entities/base_entity.py
+  s_c62ec9da443b15::t_b3648fcdba9030 2,46,61,121-122,124,127
+  s_c62ec9da443b15::t_5ea8b9aa431178 47
+  s_c62ec9da443b15::t_4ac9add444865e 30-31
+  s_c62ec9da443b15::t_60ce880f973d61 11,17
+  s_c62ec9da443b15::t_a802214e6adb2e 41-44,45,48
+  s_c62ec9da443b15::t_d4026034b4a4cf 25-27
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_b3648fcdba9030 29,386-387,438,440,447,464,469,486,488-489,491-495,501,502-511,637-640,642,716-718,1308,1442,1445,1451,1470-1472,1512-1513,1536-1537,1620,1717-1719,1722-1725,1850-1854,1864-1866,1872,1874,1876-1880,1882-1885,1887-1892,1908-1910,1912-1913
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 87,92-94,104,1911
+  s_c62ec9da443b15::t_5ea8b9aa431178 440
+  s_c62ec9da443b15::t_c96de259e1bd7d 392-393,1444,1567
+  s_c62ec9da443b15::t_0d47374e02ab26 1443
+  s_c62ec9da443b15::t_f0eaf271845d76 226
+  s_c62ec9da443b15::t_59c062ef6569e9 1530-1531
+  s_c62ec9da443b15::t_42752cc59d27ee 1541-1542,1544,1548-1550,1555,1559-1561,1566,1720-1721,1870,1873,1875,1881,1903
+  s_c62ec9da443b15::t_206b84f05f2561 28,422-424,427-432,487
+  s_c62ec9da443b15::t_a418e96f8f97dc 1499-1506
+genesis/engine/solvers/mpm_solver.py
+  s_c62ec9da443b15::t_b3648fcdba9030 503
+  s_c62ec9da443b15::t_528eaf008aaa57 22,24,47
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 482-483,484-486,487-488
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_b3648fcdba9030 626-627,629
+  s_c62ec9da443b15::t_42752cc59d27ee 450,460
+  s_c62ec9da443b15::t_de7f6df110228c 628
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_b3648fcdba9030 1-4,6-32,34-37,39,41-52,65-98,107,109,113-114,116-119,120-132,135-160,162-164,176-177,179,182-183,185-188,191-192,204-218,220-221,223-224,226-256,267-269,275-297,305-311,317-323,326-330,335-336,349-354,364-365,370-397,406,408-409,411-413,416-417
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 53-54,360-361,363
+  s_c62ec9da443b15::t_d41c0022bf3a59 40,180,404,407,414-415
+  s_c62ec9da443b15::t_fffc55338f4e6b 5,401-403,405
+  s_c62ec9da443b15::t_b805042fbb4a01 58-64,99-102,104-106
+  s_c62ec9da443b15::t_b1a64708f472cd 57
+  s_c62ec9da443b15::t_9b4a250cb94087 103,108,110-112,115,134,161,165,178,181,184,194,219,222,225,324-325
+  s_c62ec9da443b15::t_b1b500b59dcace 332
+  s_c62ec9da443b15::t_af421161d6231e 298-299,304,312-316
+genesis/engine/simulator.py
+  s_c62ec9da443b15::t_b3648fcdba9030 157,161-164,167-172
+  s_c62ec9da443b15::t_a418e96f8f97dc 154,155,159
+  s_c62ec9da443b15::t_60ce880f973d61 2,40
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_b3648fcdba9030 72-84,90-94
+  s_c62ec9da443b15::t_59c062ef6569e9 89
+genesis/__init__.py
+  s_c62ec9da443b15::t_b3648fcdba9030 515
+genesis/options/indices.py
+  s_c62ec9da443b15::t_b3648fcdba9030 1-3,5-34,38-58,61-112,115-122,123-130,133-135,137-150,151-152,154-160,163-165,177-181,182-185,187-188,192-193,197-200,202-210,250-283,284-315
+  s_c62ec9da443b15::t_a418e96f8f97dc 4,35-37
+genesis/engine/entities/fem_entity.py
+  s_c62ec9da443b15::t_b3648fcdba9030 374
+  s_c62ec9da443b15::t_c94bf0f583eaa0 361-373
+  s_c62ec9da443b15::t_60ce880f973d61 3,15-16,22-24
+  s_c62ec9da443b15::t_a802214e6adb2e 157-158,159-167,169
+  s_c62ec9da443b15::t_8ea460c7bd9e79 25
+genesis/engine/scene.py
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 361-362,410,411,413-414
+  s_c62ec9da443b15::t_b3648fcdba9030 44,306-308,313,321-332,335,340,345,348,351-352,354-356,359-360,378,380,387-389,394,396-402,406-407,412,415-424,439-441,453-467,471,473-474,476-477,479-482,484-487,502-503,505-515,519,526,528,532-533,540-549,551,553-554,559,563-567,828-829,831-832,843-845,847-852,864-866,869,871-875,878-879,881-882,884,893-894
+  s_c62ec9da443b15::t_1375c4311c4902 426,427
+  s_c62ec9da443b15::t_1dbee578c1588d 433
+  s_c62ec9da443b15::t_36862164eedb23 373-375,521-523,839
+  s_c62ec9da443b15::t_ec8e6fbdaa43af 840-842
+  s_c62ec9da443b15::t_26c4cbebf9e78d 483,489-497
+  s_c62ec9da443b15::t_c36217930d9307 498
+  s_c62ec9da443b15::t_c94bf0f583eaa0 408-409,867-868,870
+  s_c62ec9da443b15::t_9bbaf72b04b793 357-358
+  s_c62ec9da443b15::t_7bc07d761e0406 425
+genesis/engine/solvers/kinematic_solver.py
+  s_c62ec9da443b15::t_b3648fcdba9030 202-205,207
+  s_c62ec9da443b15::t_890ff98b571a0e 206
+  s_f2c643cefc552f::t_3b3cdc9cc55fb0 195
+  s_c62ec9da443b15::t_528eaf008aaa57 26
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 184-185,186-188,189
+  s_c62ec9da443b15::t_138e46a4ddc8a3 11,190
+genesis/options/__init__.py
+  s_c62ec9da443b15::t_b3648fcdba9030 9,25,27,29,38
+tests/parsers/test_usd.py
+  s_c62ec9da443b15::t_b3648fcdba9030 568-575,577-578,586-590,598-601
+  s_c62ec9da443b15::t_59c062ef6569e9 579
+genesis/engine/solvers/fem_solver.py
+  s_c62ec9da443b15::t_b3648fcdba9030 869,871,873-874,1244-1246,1255
+  s_c62ec9da443b15::t_fffc55338f4e6b 800-802,805
+  s_c62ec9da443b15::t_528eaf008aaa57 40,42,80
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 849-850,851-853,854-855
+  s_c62ec9da443b15::t_b6dea2244bcec2 1215,1217-1220,1222,1247,1249-1252,1254
+  s_c62ec9da443b15::t_b0b223649542ff 803-804,872
+  s_c62ec9da443b15::t_bb2f574b76fec4 43
+  s_c62ec9da443b15::t_79f8c2b77f2200 1216,1221,1248,1253
+.github/contributing/ARCHITECTURE.md
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 85,98
+  s_c62ec9da443b15::t_b3648fcdba9030 64,96-97,99-100,120-121,123-127,132-135
+  s_c62ec9da443b15::t_67270fccb2a3df 101-119,128-131
+tests/deformable/test_fem.py
+  s_c62ec9da443b15::t_b3648fcdba9030 10,806-822,824-875,876-894,896-899
+  s_c62ec9da443b15::t_3bb694755d6b10 895
+  s_c62ec9da443b15::t_59c062ef6569e9 823
+genesis/engine/entities/mpm_entity.py
+  s_c62ec9da443b15::t_b3648fcdba9030 86
+  s_c62ec9da443b15::t_5ea8b9aa431178 69
+  s_c62ec9da443b15::t_cea66ad1d85f18 82-83
+  s_c62ec9da443b15::t_60ce880f973d61 2,9-10,15-17
+  s_c62ec9da443b15::t_a802214e6adb2e 59-60,61-68,70
+  s_c62ec9da443b15::t_6c452212cd6c53 18
+genesis/utils/serialization.py
+  s_c62ec9da443b15::t_b3648fcdba9030 241-243,245,249-250,259,280,286,399-402,514-517
+  s_c62ec9da443b15::t_e7b8fecbf4cb6f 397
+  s_c62ec9da443b15::t_c7b8f58b66ce23 156,158,244,246-248
+genesis/engine/materials/MPM/snow.py
+  s_c62ec9da443b15::t_f0eaf271845d76 44
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c62ec9da443b15::t_07ff4b26e3f17f 287,289-290,292-295,306
+  s_c62ec9da443b15::t_c94bf0f583eaa0 291
+genesis/engine/materials/rigid.py
+  s_c62ec9da443b15::t_3af0803bae730c 114,117
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_9d2bccfde95c6c 522,532,543
+  s_c62ec9da443b15::t_c0fc66fbc023e9 550-562,564-565
+  s_c62ec9da443b15::t_12677efdf2cf48 563
+genesis/engine/materials/base.py
+  s_c62ec9da443b15::t_8626a55c565c6c 1
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_a802214e6adb2e 96-97,98-106,108
+  s_c62ec9da443b15::t_60ce880f973d61 4,17-18,23-25
+  s_c62ec9da443b15::t_b44a53a96de2f0 26
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_a418e96f8f97dc 67-70,71-75
+  s_c62ec9da443b15::t_60ce880f973d61 3,14-15,29-30
+  s_c62ec9da443b15::t_eb563648ca4eed 31
+genesis/options/solvers.py
+  s_c62ec9da443b15::t_b0b223649542ff 932-933
+genesis/typing.py
+  s_c62ec9da443b15::t_79f8c2b77f2200 235-238
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "db29237a51ef26bc8ab48a64119c49ea05878347",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_f2c643cefc552f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a8f3f200055dc0d52",
+        "model": "unknown"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
