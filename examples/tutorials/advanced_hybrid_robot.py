@@ -22,7 +22,6 @@ scene = gs.Scene(
     ),
     mpm_options=gs.options.MPMOptions(
         gravity=(0, 0, 0),  # mimic gravity compensation
-        enable_CPIC=True,
         lower_bound=(0.0, 0.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
     ),

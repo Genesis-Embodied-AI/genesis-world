@@ -28,7 +28,6 @@ def test_rigid_mpm_muscle(show_viewer):
         ),
         mpm_options=gs.options.MPMOptions(
             gravity=(0.0, 0.0, 0.0),  # mimic gravity compensation
-            enable_CPIC=True,
             lower_bound=(0.0, 0.0, -0.2),
             upper_bound=(1.0, 1.0, 1.0),
         ),
@@ -102,7 +101,7 @@ def test_rigid_mpm_muscle(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("substeps", [1, 10])
-def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
+def test_rigid_mpm_legacy_coupling(substeps, asset_tmp_path, tol, show_viewer):
     # This test is aimining at two things:
     # 1) When substep = 1, the rigid object should be affected by the MPM particles
     # 2) Regardless of substeps, as far as the substep dt is the same, they should give consistent results
@@ -115,7 +114,6 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
             substeps=substeps,
         ),
         mpm_options=gs.options.MPMOptions(
-            enable_CPIC=True,
             lower_bound=(-0.5, -1.0, 0.0),
             upper_bound=(0.5, 1.0, 1),
         ),
@@ -157,8 +155,40 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
             vis_mode="particle",
         ),
     )
+    # A cup whose wall is thinner than a cell of the grid, split into convex pieces meeting at seams, and liquid thrown
+    # against its wall
+    cup_path = str(asset_tmp_path / "rigid_mpm_thin_cup.obj")
+    trimesh.creation.revolve(
+        [
+            [0.0, 0.0],
+            [0.15, 0.0],
+            [0.15, 0.15],
+            [0.147, 0.15],
+            [0.147, 0.01],
+            [0.0, 0.01],
+            [0.0, 0.0],
+        ],
+        sections=48,
+    ).export(cup_path)
+    scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cup_path,
+            pos=(0.0, 0.5, 0.05),
+            fixed=True,
+        ),
+    )
+    obj_liquid = scene.add_entity(
+        material=gs.materials.MPM.Liquid(
+            sampler="regular",
+        ),
+        morph=gs.morphs.Box(
+            pos=(0.04, 0.5, 0.12),
+            size=(0.15, 0.1, 0.1),
+        ),
+    )
 
     scene.build(n_envs=2)
+    obj_liquid.set_velocity((3.0, 0.0, 0.0))
 
     horizon = horizon_substeps // substeps
     for i in range(horizon):
@@ -167,6 +197,12 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     # Check that the sand moved the box along the negative Y direction
     pos = tensor_to_array(obj_rigid.get_pos())
     assert (pos[..., 1] + 0.25 < 0.0).all()
+
+    # The liquid stays inside the cup, apart from what splashes over its rim
+    liquid_pos = obj_liquid.get_particles_pos()
+    liquid_dist = (liquid_pos[..., :2] - liquid_pos.new_tensor((0.0, 0.5))).norm(dim=-1)
+    assert ((liquid_dist < 0.15) | (liquid_pos[..., 2] > 0.2)).all()
+    assert (liquid_pos[..., 2] > 0.06).all()
 
     # Resetting one environment leaves the other one as it was
     sand_pos = tensor_to_array(obj_sand.get_particles_pos())

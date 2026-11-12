@@ -642,13 +642,17 @@ def postprocess_collision_geoms(
             watertighten,
         )
         # The normals the geoms built from the cache share are computed on it, the vertex normals from the face
-        # normals, so both count in what it holds
+        # normals, so both count in what it holds, as do the meshes the pieces of a decomposition were cut from
         n_bytes = sum(
             g_info["mesh"].verts.nbytes
             + g_info["mesh"].faces.nbytes
             + g_info["mesh"].trimesh.face_normals.nbytes
             + g_info["mesh"].trimesh.vertex_normals.nbytes
             for g_info in cached
+        )
+        sources_g_info = {id(g_info["source_verts"]): g_info for g_info in cached if "source_verts" in g_info}
+        n_bytes += sum(
+            [g_info["source_verts"].nbytes + g_info["source_faces"].nbytes for g_info in sources_g_info.values()]
         )
         _COLLISION_GEOMS_CACHE.put(key, cached, n_bytes)
 
@@ -909,7 +913,14 @@ def _postprocess_collision_geoms_impl(
                     )
                     for tmesh in tmeshes
                 ]
-                _g_infos += [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
+                # Each piece keeps the mesh it was decomposed from, which the couplings of other solvers see instead of
+                # the union of the pieces (see 'RigidGeomDescription'). Its arrays are copied, since those of the mesh
+                # may be shared with a visual geom, whose aliasing an exported description would not restore.
+                source_verts, source_faces = np.array(mesh.verts), np.array(mesh.faces)
+                _g_infos += [
+                    {**g_info, **dict(mesh=piece, source_verts=source_verts, source_faces=source_faces)}
+                    for piece in meshes
+                ]
             else:
                 _g_infos.append(g_info)
         g_infos = _g_infos
