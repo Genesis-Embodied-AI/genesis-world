@@ -477,7 +477,8 @@ class SAPConstraintOrder(Data, kind=DataKind.SCRATCH):
 class SAPSolveLoops(Data, kind=DataKind.SCRATCH, shape=()):
     """The iterations left to each loop of the SAP solve, which runs on the device (see kernel_sap_solve)."""
 
-    # Iterations left past the current one, which the counter takes back once an environment iterates on
+    # Iterations left past the current one, which the counter takes back once an environment iterates on. The first
+    # thread of the first loop of each pass takes them from the counter (see kernel_sap_solve).
     n_newton_next: qd.Tensor = field(int)
     n_pcg_next: qd.Tensor = field(int)
     n_linesearch_next: qd.Tensor = field(int)
@@ -1837,24 +1838,27 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sap_config,
             *self.handlers,
         )
-        kernel_sap_solve(
-            loops.newton_counter,
-            loops.pcg_counter,
-            loops.linesearch_counter,
-            fem_state,
-            dofs_state,
-            links_state,
-            self.sap_state,
-            fem_info,
-            vertex_constraints,
-            links_info,
-            rigid_info,
-            self.sap_info,
-            fem_config,
-            rigid_config,
-            self.sap_config,
-            *self.handlers,
-        )
+        # Without FEM vertex nor rigid dof there is nothing to solve, and no loop of the solve would take its counter
+        # (see SAPSolveLoops)
+        if self.sap_config.has_fem or self.sap_config.has_rigid:
+            kernel_sap_solve(
+                loops.newton_counter,
+                loops.pcg_counter,
+                loops.linesearch_counter,
+                fem_state,
+                dofs_state,
+                links_state,
+                self.sap_state,
+                fem_info,
+                vertex_constraints,
+                links_info,
+                rigid_info,
+                self.sap_info,
+                fem_config,
+                rigid_config,
+                self.sap_config,
+                *self.handlers,
+            )
         kernel_update_vel(
             fem_state,
             dofs_state,
@@ -3445,12 +3449,9 @@ def kernel_sap_solve(
         )
     )
     constraint_handlers = qd.static(handlers.constraints)
-    # FIXME: quadrants#1083 - the statements before a nested graph do_while run again on every pass when the loop body
-    # opens with bare statements, so each loop body opens with a for loop, at the cost of one launch per iteration.
+    # FIXME: quadrants#1083 - statements before a nested graph do_while rerun on every pass when its body opens with bare
+    # statements, so the first thread of the first loop of each body takes its counter (see SAPSolveLoops).
     while qd.graph.do_while(newton_counter):
-        for _ in range(1):
-            sap_state.loops.n_newton_next[()] = newton_counter[()] - 1
-            newton_counter[()] = 0
         # The gradient of the cost, then the convergence check
         func_init_unconstrained_gradient(
             fem_state,
@@ -3542,12 +3543,7 @@ def kernel_sap_solve(
             constraint_handlers,
             equality_handler,
         )
-        for _ in range(1):
-            pcg_counter[()] = sap_info.n_pcg_iterations[None]
         while qd.graph.do_while(pcg_counter):
-            for _ in range(1):
-                sap_state.loops.n_pcg_next[()] = pcg_counter[()] - 1
-                pcg_counter[()] = 0
             func_one_pcg_iter(
                 pcg_counter,
                 fem_state,
@@ -3583,12 +3579,7 @@ def kernel_sap_solve(
             constraint_handlers,
             equality_handler,
         )
-        for _ in range(1):
-            linesearch_counter[()] = sap_info.n_linesearch_iterations[None] + 1
         while qd.graph.do_while(linesearch_counter):
-            for _ in range(1):
-                sap_state.loops.n_linesearch_next[()] = linesearch_counter[()] - 1
-                linesearch_counter[()] = 0
             func_one_exact_linesearch_iter(
                 linesearch_counter,
                 fem_state,
@@ -3631,6 +3622,9 @@ def func_init_unconstrained_gradient(
     """
     if qd.static(sap_config.has_fem):
         for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(sap_state.fem_vertices.v))):
+            if i_v == 0 and i_b == 0:
+                sap_state.loops.n_newton_next[()] = sap_state.loops.newton_counter[()] - 1
+                sap_state.loops.newton_counter[()] = 0
             # The FEM solver solves for positions and SAP for velocities, so the Hessian scales by dt^2
             sap_state.fem_vertices.diag3x3[i_v, i_b] = fem_state.vertices_solve.diag3x3[i_v, i_b] * fem_info.dt2[None]
             sap_state.fem_vertices.v_diff[i_v, i_b] = (
@@ -3653,6 +3647,10 @@ def func_init_unconstrained_gradient(
             sap_state.envs.is_active.shape[0],
             axes=qd.static(eoa(sap_state.rigid_dofs.v)),
         ):
+            if qd.static(not sap_config.has_fem):
+                if i_d == 0 and i_b == 0:
+                    sap_state.loops.n_newton_next[()] = sap_state.loops.newton_counter[()] - 1
+                    sap_state.loops.newton_counter[()] = 0
             sap_state.rigid_dofs.v_diff[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b] - dofs_state.vel[i_d, i_b]
         func_compute_rigid_mass_mat_vec_product(
             sap_state.rigid_dofs.v_diff, sap_state.rigid_dofs.gradient, sap_state.envs.is_active, rigid_info
@@ -3697,6 +3695,14 @@ def func_compute_vertices_dofs(
         i_lane = i_t % N_LANES
         i_k = i_t // N_LANES % n_chunks
         i_b = i_t // (N_LANES * n_chunks)
+        if qd.static(op == VertexDofOp.PCG_SEARCH_DIRECTION):
+            if i_t == 0:
+                sap_state.loops.n_pcg_next[()] = sap_state.loops.pcg_counter[()] - 1
+                sap_state.loops.pcg_counter[()] = 0
+        if qd.static(op == VertexDofOp.LINESEARCH_VELOCITY):
+            if i_t == 0:
+                sap_state.loops.n_linesearch_next[()] = sap_state.loops.linesearch_counter[()] - 1
+                sap_state.loops.linesearch_counter[()] = 0
         alpha = gs.qd_float(0.0)
         if qd.static(op == VertexDofOp.PCG_UPDATE):
             # p^T A p of the FEM vertices then of the rigid dofs
@@ -3770,6 +3776,68 @@ def func_compute_vertices_dofs(
 
 
 @qd.func
+def func_compute_constraint_chunk(
+    i_t: int,
+    envs_is_active: qd.Tensor,
+    dofs_state: DofsState,
+    links_state: LinksState,
+    sap_state: SAPState,
+    fem_info: FEMInfo,
+    links_info: LinksInfo,
+    sap_info: SAPInfo,
+    sap_config: qd.template(),
+    constraint_handlers: qd.template(),
+    op: qd.template(),
+):
+    """
+    Run an operation of the solve on a chunk of the sorted constraints, and sum its values into the partials of the chunk.
+
+    The thread i_t takes a lane of a chunk (see CHUNK_SIZE), the lanes of each summing theirs along a fixed tree. See
+    func_compute_constraints.
+    """
+    # The sums of a chunk of constraints (see N_CONSTRAINT_SUMS)
+    N_SUMS = qd.static(3)
+    # The items of a chunk (see CHUNK_SIZE)
+    CHUNK_DIM = qd.static(32)
+    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    i_lane = i_t % N_LANES
+    i_u = i_t // N_LANES
+    i_b = sap_state.constraint_order.units_env[i_u]
+    is_active = i_u < sap_state.constraint_order.n_units[None] and envs_is_active[i_b]
+    sums = qd.Vector.zero(gs.qd_float, N_SUMS)
+    if is_active:
+        i_s_end = sap_state.constraint_order.envs_constraint_start[i_b + 1]
+        for i_i_ in range(CHUNK_DIM // N_LANES):
+            i_s = sap_state.constraint_order.units_start[i_u] + i_i_ * N_LANES + i_lane
+            if i_s < i_s_end:
+                i_q = sap_state.constraint_order.order[i_s]
+                for i_h, handler in qd.static(enumerate(constraint_handlers)):
+                    if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                        i_c = i_q - sap_info.handlers_slot_start[i_h]
+                        dell, d2ell, energy = handler.compute_solve_op(
+                            i_c,
+                            dofs_state,
+                            links_state,
+                            sap_state,
+                            fem_info,
+                            links_info,
+                            sap_info,
+                            sap_config,
+                            op=op,
+                        )
+                        if qd.static(op == ConstraintOp.LINE_DERIVATIVES):
+                            sums[ConstraintSum.DELL] = sums[ConstraintSum.DELL] + dell
+                            sums[ConstraintSum.D2ELL] = sums[ConstraintSum.D2ELL] + d2ell
+                        if qd.static(op == ConstraintOp.ENERGY):
+                            sums[ConstraintSum.ENERGY] = sums[ConstraintSum.ENERGY] + energy
+    for i_q in qd.static(ConstraintSum.of_op(op)):
+        if qd.static(N_LANES > 1):
+            sums[i_q] = su.qd_block_sum(sums[i_q])
+        if i_lane == 0 and is_active:
+            sap_state.constraints_partials[i_u, i_q] = sums[i_q]
+
+
+@qd.func
 def func_compute_constraints(
     envs_is_active: qd.Tensor,
     fem_state: FEMState,
@@ -3794,72 +3862,66 @@ def func_compute_constraints(
     `envs_is_active` holds the flags of the environments it runs on, and `op` is the operation, see ConstraintOp. The
     constraints of each environment run in their sorted order (see kernel_order_constraints) by chunks, each summing the
     values of its constraints into its partials in a fixed order, and each handler running its own branch, so that the
-    operation takes one launch whatever the number of handlers. The matrix-vector product first computes the elastic
-    corner forces along the search direction (see func_compute_fem_corner_force). On GPU, the capacity of the chunks
-    bounds the loop, since a bound read on the device launches a full grid at every call, while on CPU the threads take
-    the chunks in use alone.
+    operation takes one launch whatever the number of handlers. The matrix-vector product also computes the elastic
+    corner forces along the search direction in the same launch (see func_compute_fem_corner_force), their threads
+    rounded up to whole subgroup tiles so that the lanes of each chunk of constraints stay converged. On GPU, the
+    capacity of the chunks bounds the loop, since a bound read on the device launches a full grid at every call, while on
+    CPU the threads take the chunks in use alone.
     """
-    # The sums of a chunk of constraints (see N_CONSTRAINT_SUMS)
-    N_SUMS = qd.static(3)
-    # The items of a chunk (see CHUNK_SIZE)
-    CHUNK_DIM = qd.static(32)
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
-    # The corner forces take a loop of their own: a loop bound reassigned under a static condition is read on the device,
-    # which launches a full grid, where a bound assigned once is a compile-time constant on fields.
-    if qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT and sap_config.has_fem):
-        for i_t in range(envs_is_active.shape[0] * fem_info.elements.V.shape[0]):
-            i_b = i_t // fem_info.elements.V.shape[0]
-            if envs_is_active[i_b]:
-                func_compute_fem_corner_force(
-                    i_t % fem_info.elements.V.shape[0],
-                    i_b,
-                    sap_state.fem_vertices.p,
-                    fem_state,
-                    sap_state,
-                    fem_info,
-                    vertex_constraints,
-                    sap_info,
-                    fem_config,
-                )
     n_units = sap_state.constraint_order.units_env.shape[0]
     if qd.static(gs.backend == gs.cpu):
         n_units = sap_state.constraint_order.n_units[None]
-    for i_t in range(n_units * N_LANES):
-        i_lane = i_t % N_LANES
-        i_u = i_t // N_LANES
-        i_b = sap_state.constraint_order.units_env[i_u]
-        is_active = i_u < sap_state.constraint_order.n_units[None] and envs_is_active[i_b]
-        sums = qd.Vector.zero(gs.qd_float, N_SUMS)
-        if is_active:
-            i_s_end = sap_state.constraint_order.envs_constraint_start[i_b + 1]
-            for i_i_ in range(CHUNK_DIM // N_LANES):
-                i_s = sap_state.constraint_order.units_start[i_u] + i_i_ * N_LANES + i_lane
-                if i_s < i_s_end:
-                    i_q = sap_state.constraint_order.order[i_s]
-                    for i_h, handler in qd.static(enumerate(constraint_handlers)):
-                        if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
-                            i_c = i_q - sap_info.handlers_slot_start[i_h]
-                            dell, d2ell, energy = handler.compute_solve_op(
-                                i_c,
-                                dofs_state,
-                                links_state,
-                                sap_state,
-                                fem_info,
-                                links_info,
-                                sap_info,
-                                sap_config,
-                                op=op,
-                            )
-                            if qd.static(op == ConstraintOp.LINE_DERIVATIVES):
-                                sums[ConstraintSum.DELL] = sums[ConstraintSum.DELL] + dell
-                                sums[ConstraintSum.D2ELL] = sums[ConstraintSum.D2ELL] + d2ell
-                            if qd.static(op == ConstraintOp.ENERGY):
-                                sums[ConstraintSum.ENERGY] = sums[ConstraintSum.ENERGY] + energy
-        for i_q in qd.static(ConstraintSum.of_op(op)):
-            if qd.static(N_LANES > 1):
-                sums[i_q] = su.qd_block_sum(sums[i_q])
-            if i_lane == 0 and is_active:
-                sap_state.constraints_partials[i_u, i_q] = sums[i_q]
+    # A loop bound reassigned under a static condition is read on the device, which launches a full grid, where a bound
+    # assigned once is a compile-time constant on fields, so that each static branch takes a loop of its own.
+    if qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT and sap_config.has_fem):
+        n_elements = fem_info.elements.V.shape[0]
+        n_corner_threads = (envs_is_active.shape[0] * n_elements + N_LANES - 1) // N_LANES * N_LANES
+        for i_t in range(n_corner_threads + n_units * N_LANES):
+            if i_t < n_corner_threads:
+                i_b = i_t // n_elements
+                if i_b < envs_is_active.shape[0]:
+                    if envs_is_active[i_b]:
+                        func_compute_fem_corner_force(
+                            i_t % n_elements,
+                            i_b,
+                            sap_state.fem_vertices.p,
+                            fem_state,
+                            sap_state,
+                            fem_info,
+                            vertex_constraints,
+                            sap_info,
+                            fem_config,
+                        )
+            else:
+                func_compute_constraint_chunk(
+                    i_t - n_corner_threads,
+                    envs_is_active,
+                    dofs_state,
+                    links_state,
+                    sap_state,
+                    fem_info,
+                    links_info,
+                    sap_info,
+                    sap_config,
+                    constraint_handlers,
+                    op=op,
+                )
+    else:
+        for i_t in range(n_units * N_LANES):
+            func_compute_constraint_chunk(
+                i_t,
+                envs_is_active,
+                dofs_state,
+                links_state,
+                sap_state,
+                fem_info,
+                links_info,
+                sap_info,
+                sap_config,
+                constraint_handlers,
+                op=op,
+            )
 
 
 @qd.func
@@ -3893,12 +3955,33 @@ def func_gather_constraints(
     N_LINK_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     N_VERTEX_LANES = qd.static(2**LOG2_GATHER_LANES if sap_config.enable_cooperative_kernels else 1)
     n_envs = envs_is_active.shape[0]
-    if qd.static(HAS_LINKS):
+    # The links then the vertices take one launch, the threads of the links filling whole subgroup tiles. Each static
+    # branch takes a loop of its own (see func_compute_constraints).
+    if qd.static(HAS_LINKS and sap_config.has_fem):
+        n_link_threads = sap_state.constraint_order.links_wrench_force.shape[0] * n_envs * N_LINK_LANES
+        for i_t in range(n_link_threads + n_envs * sap_state.fem_vertices.v.shape[0] * N_VERTEX_LANES):
+            if i_t < n_link_threads:
+                func_compute_link_wrench(
+                    i_t, envs_is_active, links_state, sap_state, sap_info, sap_config, constraint_handlers, op=op
+                )
+            else:
+                func_gather_fem_vertex(
+                    i_t - n_link_threads,
+                    envs_is_active,
+                    sap_state,
+                    fem_info,
+                    vertex_constraints,
+                    sap_info,
+                    sap_config,
+                    constraint_handlers,
+                    op=op,
+                )
+    elif qd.static(HAS_LINKS):
         for i_t in range(sap_state.constraint_order.links_wrench_force.shape[0] * n_envs * N_LINK_LANES):
             func_compute_link_wrench(
                 i_t, envs_is_active, links_state, sap_state, sap_info, sap_config, constraint_handlers, op=op
             )
-    if qd.static(sap_config.has_fem):
+    elif qd.static(sap_config.has_fem):
         for i_t in range(n_envs * sap_state.fem_vertices.v.shape[0] * N_VERTEX_LANES):
             func_gather_fem_vertex(
                 i_t,
@@ -4236,6 +4319,8 @@ def func_init_pcg_solve(
     """
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     for i_b in range(sap_state.envs.is_active.shape[0]):
+        if i_b == 0:
+            sap_state.loops.pcg_counter[()] = sap_info.n_pcg_iterations[None]
         sap_state.envs.is_pcg_active[i_b] = sap_state.envs.is_active[i_b]
         # The first search direction is the preconditioned residual, which the first iteration sets from p = 0
         sap_state.envs.beta[i_b] = 0.0
@@ -4518,6 +4603,8 @@ def func_init_exact_linesearch(
     CHUNK_DIM = qd.static(32)
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     for i_b in range(sap_state.envs.is_active.shape[0]):
+        if i_b == 0:
+            sap_state.loops.linesearch_counter[()] = sap_info.n_linesearch_iterations[None] + 1
         sap_state.envs.is_linesearch_active[i_b] = sap_state.envs.is_active[i_b]
         if sap_state.envs.is_linesearch_active[i_b]:
             sap_state.envs.step_size[i_b] = sap_info.linesearch_max_step_size[None]
