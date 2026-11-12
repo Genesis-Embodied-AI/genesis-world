@@ -1047,7 +1047,7 @@ def func_contact_patch_end_coop(
                     is_end = is_end or qd.abs(collider_state.contact_data.normal[i_pc, i_b].dot(normal_start)) < cos_tol
                 if is_end:
                     i_cb_end_l = i_cb
-            i_cb_end = su.qd_block_min(i_cb_end_l)
+            i_cb_end = su.qd_block_min(i_cb_end_l, log2_size=5)
     return i_cb_end
 
 
@@ -1588,6 +1588,7 @@ def func_clamp_prune_contacts_coop(
     # of a round: each warp computes the statistics of its patches with its own lanes, and each lane of the block
     # builds the support polygon of one patch.
     _K = qd.static(32)
+    LOG2_K = qd.static(_K.bit_length() - 1)
     _W = qd.static(4)
     # Contacts whose sort keys the block holds in shared memory, two per thread (see phase 1)
     _N_STAGED = qd.static(2 * _K * _W)
@@ -1802,8 +1803,8 @@ def func_clamp_prune_contacts_coop(
                             mean_normal = qd.Vector.zero(gs.qd_float, 3)
                             centroid = qd.Vector.zero(gs.qd_float, 3)
                             for i_3 in qd.static(range(3)):
-                                mean_normal[i_3] = su.qd_block_sum(mean_normal_l[i_3])
-                                centroid[i_3] = su.qd_block_sum(centroid_l[i_3])
+                                mean_normal[i_3] = su.qd_block_sum(mean_normal_l[i_3], LOG2_K)
+                                centroid[i_3] = su.qd_block_sum(centroid_l[i_3], LOG2_K)
 
                             # Every lane holds the sums lane 0 does (see qd_block_sum in utils/simt.py), so the
                             # post-reduce math runs on all 32 lanes and agrees bit for bit across them.
@@ -1833,8 +1834,8 @@ def func_clamp_prune_contacts_coop(
                                         max_radius_sq_l = radius_sq
                                     i_cb_ += _K
 
-                                max_depth = su.qd_block_max(max_depth_l)
-                                max_in_plane_r2 = su.qd_block_max(max_radius_sq_l)
+                                max_depth = su.qd_block_max(max_depth_l, LOG2_K)
+                                max_in_plane_r2 = su.qd_block_max(max_radius_sq_l, LOG2_K)
 
                                 if max_depth > tol * qd.sqrt(max_in_plane_r2):
                                     is_coplanar = False
@@ -1964,7 +1965,7 @@ def func_clamp_prune_contacts_coop(
                         i_pc = collider_state.contact_sort_idx[i_c, i_b]
                         if collider_state.contact_keep[i_pc, i_b] != 0:
                             is_kept = 1
-                    i_rank_incl, n_kept = su.qd_block_scan(is_kept)
+                    i_rank_incl, n_kept = su.qd_block_scan(is_kept, LOG2_K)
                     if is_kept != 0:
                         collider_state.contact_sort_idx[i_cw + i_rank_incl - 1, i_b] = i_pc
                     i_cw += n_kept

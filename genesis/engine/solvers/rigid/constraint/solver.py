@@ -45,6 +45,8 @@ def cholesky_tile_size_for(n_dofs):
     It is 16 where one tile of 16 lanes holds the system, or where tiles of 32 lanes would leave most lanes idle (33 to
     48 dofs), and 32 otherwise.
     """
+    # FIXME: quadrants#1093 - a register tile spans the leading lanes of its subgroup, so its block holds one tile and a
+    # 64-lane AMDGPU wavefront leaves the lanes past the tile idle.
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
 
 
@@ -198,7 +200,7 @@ class ConstraintSolver:
                 rows_per_contact=rows_per_contact,
                 nt_vec_slots=nt_vec_n_slots,
                 jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
-                noslip_lanes=32 if config.enable_cooperative_noslip else 1,
+                noslip_lanes=qd.simt.subgroup.group_size() if config.enable_cooperative_noslip else 1,
                 tile_classes=n_tile_classes,
             ),
             env_first={
@@ -967,7 +969,7 @@ def _add_collision_constraints_per_friction(
     """
     _B = dyn_state.dofs.ctrl_mode.shape[1]
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
-    BLOCK_DIM = qd.static(32)
+    BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
 
     qd.loop_config(name="add_collision_constraints", block_dim=BLOCK_DIM)
     for i_flat in range(_B * BLOCK_DIM):
@@ -1615,7 +1617,7 @@ def _sort_contacts_and_build_islands(
         for i_class in range(N_CLASSES):
             constraint_state.island.factor_worklist_size[i_class] = 0
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-        _K = qd.static(32)
+        _K = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="sort_contacts_and_build_islands", block_dim=_K)
         for i_flat in range(_B * _K):
             tid = i_flat % _K
@@ -1929,7 +1931,9 @@ def func_add_dynamic_constraint_rows_batch(
     Returns the row following the last limit row.
     """
     BLOCK_DIM = qd.static(
-        32 if rigid_config.enable_cooperative_constraint_kernels and rigid_config.enable_joint_limit else 1
+        qd.simt.subgroup.group_size()
+        if rigid_config.enable_cooperative_constraint_kernels and rigid_config.enable_joint_limit
+        else 1
     )
     EPS = rigid_info.EPS[None]
     i_e_start = rigid_info.n_equalities[None]
@@ -2054,10 +2058,10 @@ def add_limit_constraints(
     _B = constraint_state.jac.shape[2]
     n_links = dyn_info.links.root_idx.shape[0]
 
-    # On the cooperative path, one block per env takes 32 joints at a time, and a prefix sum over the lanes numbers the
-    # rows of the joints at their limit in joint order, the order of the serial walk over links below.
+    # On the cooperative path, one block per env takes a subgroup of joints at a time, and a prefix sum over the lanes
+    # numbers the rows of the joints at their limit in joint order, the order of the serial walk over links below.
     if qd.static(rigid_config.enable_cooperative_constraint_kernels and rigid_config.enable_joint_limit):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         n_joints = dyn_info.joints.type.shape[0]
         qd.loop_config(name="add_limit_constraints", block_dim=BLOCK_DIM)
         for i_flat in range(_B * BLOCK_DIM):
@@ -2453,7 +2457,7 @@ def func_add_cone_hessian_block_coop(
     dof support, the lower triangle written and the upper one skipped, one entry of nt_H per pair. Two cones on the
     same links share entries, so the lanes sync between cones. The lanes leave in sync.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_rows = qd.static(rigid_config.rows_per_contact)
     ne = constraint_state.n_constraints_equality[i_b]
     nef = ne + constraint_state.n_constraints_frictionloss[i_b]
@@ -2506,15 +2510,16 @@ def func_wrap_cone_hessian(
     cone ride the incrementally maintained nt_H: the current cone block is present while the factor reads nt_H, then
     removed so the next patch lands on a cone-free Hessian.
     """
+    # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+    BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
     if qd.static(rigid_config.enable_elliptic_friction):
         _B = constraint_state.jac.shape[2]
         if qd.static(rigid_config.enable_cooperative_constraint_kernels):
             # The cones of an env by the lanes of its block, see func_add_cone_hessian_block_coop.
-            _K = qd.static(32)
-            qd.loop_config(name="wrap_cone_hessian", block_dim=_K)
-            for i_flat in range(_B * _K):
-                tid = i_flat % _K
-                i_b = i_flat // _K
+            qd.loop_config(name="wrap_cone_hessian", block_dim=BLOCK_DIM)
+            for i_flat in range(_B * BLOCK_DIM):
+                tid = i_flat % BLOCK_DIM
+                i_b = i_flat // BLOCK_DIM
                 if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                     func_add_cone_hessian_block_coop(
                         i_b,
@@ -2526,7 +2531,7 @@ def func_wrap_cone_hessian(
                     )
         else:
             qd.loop_config(
-                name="wrap_cone_hessian", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32
+                name="wrap_cone_hessian", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=BLOCK_DIM
             )
             for i_b in range(_B):
                 if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
@@ -3243,7 +3248,7 @@ def func_island_hessian_assemble_block(
             if qd.static(not rigid_config.is_single_island):
                 i_c = constraint_state.island.constraint_id[i_c, i_b]
             is_active = constraint_state.active[i_c, i_b]
-        rank, n_active = su.qd_block_scan(is_active)
+        rank, n_active = su.qd_block_scan(is_active, qd.static(row_tile.bit_length() - 1))
         if is_active:
             sh_rows[rank - 1] = i_c
             sh_weights[rank - 1] = qd.sqrt(constraint_state.efc_D[i_c, i_b])
@@ -3391,7 +3396,7 @@ def func_island_hessian_patch_block(
     over the rows of the tile and adds the sum once. The deltas ride the scale the block was assembled with under Jacobi
     equilibration, see nt_jacobi in constraint/data.py.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     N_SUBGROUPS = qd.static(block_dim // _K)
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
@@ -3480,6 +3485,7 @@ def func_island_hessian_assemble_all(
     N_CLASSES = qd.static(len(island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)))
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
+    SUBGROUP_DIM = qd.static(qd.simt.subgroup.group_size())
     ROW_TILE = qd.static(32)
     # A single-island scene launches one block per env, for its island 0 (see func_island_tiled_factor_solve_all). The
     # tensor is picked at compile time, a kernel-scope variable assigned twice costing a serial launch.
@@ -3492,7 +3498,7 @@ def func_island_hessian_assemble_all(
     for i_flat in range(n_slots * BLOCK_DIM):
         i_work = i_flat // BLOCK_DIM
         tid = i_flat % BLOCK_DIM
-        sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // 32,), gs.qd_int)
+        sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // SUBGROUP_DIM,), gs.qd_int)
         sh_rows = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_int)
         sh_weights = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_float)
         # An island above the last cap stages its rows a chunk pair at a time (see func_island_hessian_assemble_block)
@@ -3730,6 +3736,8 @@ def func_hessian_and_cholesky_factor_direct(
     compute_envelope computes each island's structural skyline envelope before factoring; it is structural, so callers
     set it once per step (func_solve_init) and leave it False for the per-iteration re-factorizations.
     """
+    # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+    BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
     _B = constraint_state.jac.shape[2]
 
     # The block-diagonal Hessian factors per island; spread the islands across the (env, island) grid so they run
@@ -3739,7 +3747,7 @@ def func_hessian_and_cholesky_factor_direct(
     qd.loop_config(
         name="hess_cholesky_factor_direct_island",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
-        block_dim=32,
+        block_dim=BLOCK_DIM,
     )
     for i_b, i_island in qd.ndrange(_B, max_islands):
         if i_island < constraint_state.island.n_islands[i_b]:
@@ -5292,7 +5300,7 @@ def _func_update_efc_force(constraint_state: ConstraintState, rigid_config: qd.t
     # On the cooperative path, one block per env strides its rows (see _func_update_constraint_forces in
     # solver_breakdown.py).
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="update_constraint_forces", block_dim=BLOCK_DIM)
         for i_flat in range(_B * BLOCK_DIM):
             tid = i_flat % BLOCK_DIM
@@ -5343,7 +5351,7 @@ def _func_update_cost_coop(
     the end.
     """
     _B = constraint_state.grad.shape[1]
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
 
     qd.loop_config(name="update_constraint_cost", block_dim=_K)
     for i_flat in range(_B * _K):
@@ -5495,9 +5503,11 @@ def func_update_gradient(
 ):
     """Compute the gradient of every env and its solve (Mgrad = H^-1 grad for Newton, M^-1 grad for CG), one
     thread per env."""
+    # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+    BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
     _B = constraint_state.jac.shape[2]
 
-    qd.loop_config(name="update_gradient", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
+    qd.loop_config(name="update_gradient", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=BLOCK_DIM)
     for i_b in range(_B):
         func_update_gradient_batch(i_b, dyn_state, constraint_state, rigid_info, rigid_config)
 
@@ -5538,7 +5548,7 @@ def _initialize_Jaref_parallel(qacc: qd.template(), constraint_state: Constraint
     # the cooperative path, one block per env strides its rows (see _func_update_constraint_forces in
     # solver_breakdown.py).
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-        BLOCK_DIM = qd.static(32)
+        BLOCK_DIM = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="init_jaref_parallel", block_dim=BLOCK_DIM)
         for i_flat in range(_B * BLOCK_DIM):
             tid = i_flat % BLOCK_DIM
@@ -5670,7 +5680,7 @@ def func_solve_init(
     # this per-env loop, ahead of every per-island consumer below: by the lanes of the env's block where the
     # cooperative kernels run, serially otherwise.
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-        _K = qd.static(32)
+        _K = qd.static(qd.simt.subgroup.group_size())
         qd.loop_config(name="init_improved", block_dim=_K)
         for i_flat in range(_B * _K):
             tid = i_flat % _K
@@ -5731,7 +5741,7 @@ def func_solve_init(
         # func_solve_seed_batch). The differentiable path keeps its full iteration trace.
         # TODO: Remove the MuJoCo compatibility gate once on MuJoCo 3.11, which carries this criterion natively.
         if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-            _K = qd.static(32)
+            _K = qd.static(qd.simt.subgroup.group_size())
             qd.loop_config(name="certify_converged", block_dim=_K)
             for i_flat in range(_B * _K):
                 tid = i_flat % _K
@@ -5769,7 +5779,9 @@ def func_solve_init(
 
     if qd.static(rigid_config.has_per_env_solve_seed):
         # A fully-asleep env has no awake DOF to move, so its solve is a no-op that neither arm iterates.
-        qd.loop_config(name="solve_seed", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
+        # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+        BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
+        qd.loop_config(name="solve_seed", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=BLOCK_DIM)
         for i_b in range(_B):
             has_awake_work = constraint_state.n_constraints[i_b] > 0
             if qd.static(rigid_config.use_hibernation):
@@ -5901,12 +5913,14 @@ def func_solve_body(
 def _kernel_solve_monolith(
     dyn_state: DynState, constraint_state: ConstraintState, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
+    # One subgroup of threads per block on GPU, blocks of 32 iterations on CPU, which has no subgroup
+    BLOCK_DIM = qd.static(max(qd.simt.subgroup.group_size(), 32))
     _B = constraint_state.grad.shape[1]
 
-    # The monolith arm solves each env whole (32 envs packed per warp); islands change only the per-env factor's block
-    # structure, handled inside func_solve_iter, not the iteration scheme. Per-island parallelism is the decomposed
-    # arm's job, so there is no separate island body here - ON and OFF run the identical packed-env solve.
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
+    # The monolith arm solves each env whole (a subgroup of envs packed per block); islands change only the per-env
+    # factor's block structure, handled inside func_solve_iter, not the iteration scheme. Per-island parallelism is the
+    # decomposed arm's job, so there is no separate island body here - ON and OFF run the identical packed-env solve.
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=BLOCK_DIM)
     for i_b in range(_B):
         # A fully-asleep env has no awake DOF to move, so its Newton solve is a no-op. Skip the whole iteration loop
         # so step time tracks the awake set, not the total body count.
@@ -5924,8 +5938,8 @@ def _kernel_solve_monolith(
 
 
 @func_solve_body.register(
-    # Runs whenever the decomposed arm is not specifically preferred. Solves each env whole with 32 envs packed per
-    # warp; islands only reshape the per-env factor into block-diagonal blocks, they do not change the solve scheme.
+    # Runs unless the decomposed arm is specifically preferred. Solves each env whole with a subgroup of envs packed per
+    # block; islands only reshape the per-env factor into block-diagonal blocks, leaving the solve scheme unchanged.
     is_compatible=lambda *args, **kwargs: _get_config(*args, **kwargs).prefer_decomposed_solver != 1
 )
 def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):

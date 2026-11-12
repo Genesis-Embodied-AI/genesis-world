@@ -1882,7 +1882,7 @@ def func_block_sum(i_t: int, values, n_threads: qd.template()):
     single thread.
     """
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
-    TILE_DIM = qd.static(32)
+    TILE_DIM = qd.static(qd.simt.subgroup.group_size())
 
     totals = values
     if qd.static(n_threads > 1):
@@ -1925,7 +1925,7 @@ def func_build_coarse(
     of an entity (see 'func_coarse_eliminate').
     """
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
-    TILE_DIM = qd.static(32)
+    TILE_DIM = qd.static(qd.simt.subgroup.group_size())
 
     is_serial = qd.static(not fem_config.enable_cooperative_kernels)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)
@@ -2052,7 +2052,7 @@ def func_coarse_eliminate(
     elimination drops it, zeroing its rows and columns of the inverse.
     """
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
-    TILE_DIM = qd.static(32)
+    TILE_DIM = qd.static(qd.simt.subgroup.group_size())
 
     is_serial = qd.static(not fem_config.enable_cooperative_kernels)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)
@@ -2111,7 +2111,7 @@ def func_precondition_env(
     barrier.
     """
     # Threads of the GPU subgroup tile whose sum 'qd_block_sum' computes
-    TILE_DIM = qd.static(32)
+    TILE_DIM = qd.static(qd.simt.subgroup.group_size())
 
     is_serial = qd.static(n_threads == 1)
     n_lanes = qd.static(1 if is_serial else TILE_DIM)

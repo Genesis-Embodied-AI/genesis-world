@@ -911,6 +911,8 @@ class SAPConfig(Config):
     constraints_sort_log256: int
     # Key bits the device radix sort orders in a patch key (see kernel_sum_contact_patches)
     patches_sort_end_bit: int
+    # Whether the device radix sort orders the constraints, where each environment otherwise sorts its own
+    is_device_sort: bool
 
 
 @qd.data_oriented
@@ -1431,7 +1433,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         if gs.use_ndarray:
             constraints_sort_end_bit = patches_sort_end_bit = 64
             constraints_sort_log256 = max(constraints_sort_log256, 4)
-        is_device_sort = gs.backend != gs.cpu
+        # FIXME: quadrants#1096 - the device radix sort returns unsorted keys on RDNA GPUs. Each environment sorts its
+        # own constraints there, one thread per environment.
+        is_device_sort = gs.backend != gs.cpu and not su.has_mirrored_shuffles()
         # The chunks of the sorted constraints of each environment
         n_units = self._B * math.ceil(n_slots // self._B / CHUNK_SIZE) if n_slots >= self._B else 1
         # The contacts of each FEM vertex and rigid link, each environment owning the capacity of its contacts
@@ -1651,6 +1655,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             constraints_sort_end_bit=constraints_sort_end_bit,
             constraints_sort_log256=constraints_sort_log256,
             patches_sort_end_bit=patches_sort_end_bit,
+            is_device_sort=is_device_sort,
         )
 
         # The errors of each env, raised at the beginning of the next step (see 'ErrnoMixin.register_errors')
@@ -2133,7 +2138,9 @@ def kernel_order_constraints(
     # The items of a chunk of the sorted constraints (see CHUNK_SIZE)
     CHUNK_DIM = qd.static(32)
     N_HANDLERS = qd.static(len(constraint_handlers))
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The lanes of a tile of the subgroup that fill the lists of an environment together, whatever its width
+    LOG2_N_LANES = qd.static(5)
+    N_LANES = qd.static(2**LOG2_N_LANES if sap_config.enable_cooperative_kernels else 1)
     # The lists of the contacts of the FEM vertices then of the rigid links
     INCIDENCES = qd.static(
         (
@@ -2176,7 +2183,7 @@ def kernel_order_constraints(
                 sap_state.constraint_order.units_start[i_u] = i_s + i_k * CHUNK_DIM
                 i_u = i_u + 1
             i_s = i_s + n_env_constraints
-            if qd.static(gs.backend == gs.cpu):
+            if qd.static(not sap_config.is_device_sort):
                 sap_state.constraint_order.envs_cursor[i_b] = sap_state.constraint_order.envs_constraint_start[i_b]
         sap_state.constraint_order.envs_constraint_start[n_envs] = i_s
         sap_state.constraint_order.envs_unit_start[n_envs] = i_u
@@ -2192,8 +2199,8 @@ def kernel_order_constraints(
                 if i_x < incidence.starts.shape[0]:
                     incidence.starts[i_x, i_b] = 0
 
-    # The key of every constraint, laid out by environment on CPU, then sorted. The device radix sort runs on GPU alone,
-    # while on CPU each environment sorts its own constraints by a radix sort of 8 bits per pass.
+    # The key of every constraint, then the sort: the device radix sort of every key, or else a radix sort of 8 bits per
+    # pass of the keys of each environment, laid out by environment (see is_device_sort).
     sap_state.constraint_order.n_sorted[None] = sap_state.constraint_order.handlers_n_constraints[N_HANDLERS]
     for i_q in range(sap_state.constraint_order.handlers_n_constraints[N_HANDLERS]):
         for i_h, handler in qd.static(enumerate(constraint_handlers)):
@@ -2204,7 +2211,7 @@ def kernel_order_constraints(
                 i_c = i_q - sap_state.constraint_order.handlers_n_constraints[i_h]
                 i_b = handler.constraint_env(i_c)
                 i_s = i_q
-                if qd.static(gs.backend == gs.cpu):
+                if qd.static(not sap_config.is_device_sort):
                     i_s = qd.atomic_add(sap_state.constraint_order.envs_cursor[i_b], 1)
                 sap_state.constraint_order.key[i_s] = (
                     (qd.u64(i_b) << env_shift) | (qd.u64(i_h) << key_shift) | handler.constraint_key(i_c)
@@ -2215,7 +2222,7 @@ def kernel_order_constraints(
                         i_x = func_contact_target(i_c, i_k, fem_info, handler, is_fem=incidence.is_fem)
                         if i_x >= 0:
                             qd.atomic_add(incidence.starts[i_x + 1, i_b], 1)
-    if qd.static(gs.backend == gs.cpu):
+    if qd.static(not sap_config.is_device_sort):
         for i_b in range(n_envs):
             func_sort_env_keys(
                 i_b,
@@ -2258,7 +2265,7 @@ def kernel_order_constraints(
                 n_entries_prefix = n_entries
                 n_entries_total = n_entries
                 if qd.static(N_LANES > 1):
-                    n_entries_prefix, n_entries_total = su.qd_block_scan(n_entries)
+                    n_entries_prefix, n_entries_total = su.qd_block_scan(n_entries, LOG2_N_LANES)
                 if i_x < n_targets:
                     incidence.starts[i_x + 1, i_b] = i_n + n_entries_prefix - n_entries
                 i_n = i_n + n_entries_total
@@ -2293,7 +2300,7 @@ def kernel_order_constraints(
                     i_lane_first = N_LANES
                     n_tile_entries = 0
                     for i_lane_other in range(N_LANES):
-                        if su.qd_block_shuffle(i_x, i_lane_other) == i_x:
+                        if su.qd_block_shuffle(i_x, i_lane_other, LOG2_N_LANES) == i_x:
                             i_lane_first = qd.min(i_lane_first, i_lane_other)
                             n_tile_entries = n_tile_entries + 1
                             if i_lane_other < i_lane:
@@ -2302,7 +2309,7 @@ def kernel_order_constraints(
                 if i_x >= 0 and i_lane == i_lane_first:
                     i_n = qd.atomic_add(incidence.starts[i_x + 1, i_b], n_tile_entries)
                 if qd.static(N_LANES > 1):
-                    i_n = su.qd_block_shuffle(i_n, i_lane_first)
+                    i_n = su.qd_block_shuffle(i_n, i_lane_first, LOG2_N_LANES)
                 if i_x >= 0:
                     incidence.entries[i_n + i_rank] = i_q * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
 
@@ -2378,7 +2385,7 @@ def kernel_sum_contact_patches(
                     patch_key = patch_key | (qd.u64(i_body0) << body_shift) | qd.u64(i_body1)
         sap_state.constraint_order.patch_key[i_s] = patch_key
         sap_state.constraint_order.patch_order[i_s] = i_s
-    if qd.static(gs.backend == gs.cpu):
+    if qd.static(not sap_config.is_device_sort):
         for i_b in range(n_envs):
             func_sort_env_keys(
                 i_b,
@@ -2649,7 +2656,9 @@ def kernel_init_sap_solve(
     velocities are far from it. The rigid entities without contact start from their free velocities, which solve their
     share of the cost exactly, and the FEM entities without contact from their inertia guess.
     """
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The lanes of a chunk (see CHUNK_SIZE), a tile of the subgroup whatever its width
+    LOG2_N_LANES = qd.static(5)
+    N_LANES = qd.static(2**LOG2_N_LANES if sap_config.enable_cooperative_kernels else 1)
     newton_counter[()] = sap_info.n_newton_iterations[None]
     if qd.static(sap_config.has_fem):
         # The velocities of the FEM vertices of each entity, which are also the reference of its cost. A free vertex of
@@ -2771,11 +2780,11 @@ def kernel_init_sap_solve(
                         )
             if qd.static(N_LANES > 1):
                 # The lanes sum scalars alone
-                mass = su.qd_block_sum(mass)
+                mass = su.qd_block_sum(mass, LOG2_N_LANES)
                 for k in qd.static(range(3)):
-                    mass_first[k] = su.qd_block_sum(mass_first[k])
+                    mass_first[k] = su.qd_block_sum(mass_first[k], LOG2_N_LANES)
                     for l in qd.static(range(3)):
-                        mass_second[k, l] = su.qd_block_sum(mass_second[k, l])
+                        mass_second[k, l] = su.qd_block_sum(mass_second[k, l], LOG2_N_LANES)
             if i_lane == 0:
                 sap_state.fem_coarse.x_ref[i_e, i_b] = x_ref
                 sap_state.fem_coarse.mass[i_e, i_b] = mass
@@ -2838,6 +2847,7 @@ def func_chunks_total(
     arguments but its own lane i_lane, and gets the same bits: the lanes stride the chunks, then sum their shares along
     a fixed tree. A single thread sums them in a row.
     """
+    LOG2_N_LANES = qd.static(n_lanes.bit_length() - 1)
     total = qd.Vector.zero(gs.qd_float, n_sums)
     for i_k_ in range((i_k_end - i_k_start + n_lanes - 1) // n_lanes):
         i_k = i_k_start + i_k_ * n_lanes + i_lane
@@ -2846,7 +2856,7 @@ def func_chunks_total(
                 total[j] = total[j] + sap_state.vertices_dofs_partials[i_k, i_q + j, i_b]
     if qd.static(n_lanes > 1):
         for j in qd.static(range(n_sums)):
-            total[j] = su.qd_block_sum(total[j])
+            total[j] = su.qd_block_sum(total[j], LOG2_N_LANES)
     return total
 
 
@@ -2972,7 +2982,9 @@ def func_compute_link_wrench(
     """
     # The sides an entry packs (see kernel_order_constraints)
     N_SIDES_MAX = qd.static(2)
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The lanes of a share, a tile of the subgroup whatever its width
+    LOG2_N_LANES = qd.static(5)
+    N_LANES = qd.static(2**LOG2_N_LANES if sap_config.enable_cooperative_kernels else 1)
     N_SHARES = qd.static(2 if sap_config.enable_cooperative_kernels else 1)
     n_links = sap_state.constraint_order.links_wrench_force.shape[0] // N_SHARES
     i_lane = i_t % N_LANES
@@ -3001,10 +3013,10 @@ def func_compute_link_wrench(
                                 hessian = hessian + handler.side_hessian(i_c, links_state.root_COM[i_l, i_b])
     if qd.static(N_LANES > 1):
         for k in qd.static(range(6)):
-            wrench[k] = su.qd_block_sum(wrench[k])
+            wrench[k] = su.qd_block_sum(wrench[k], LOG2_N_LANES)
         if qd.static(op == VertexDofOp.GRADIENT):
             for k, l in qd.static(qd.ndrange(6, 6)):
-                hessian[k, l] = su.qd_block_sum(hessian[k, l])
+                hessian[k, l] = su.qd_block_sum(hessian[k, l], LOG2_N_LANES)
     if qd.static(op == VertexDofOp.GRADIENT):
         if i_lane == 0 and envs_is_active[i_b]:
             sap_state.constraint_order.links_wrench_hessian[i_l * N_SHARES + i_w, i_b] = hessian
@@ -3061,7 +3073,9 @@ def func_update_envs_active(
     The lanes of a chunk (see CHUNK_SIZE) take an environment, adding up its norms and the Hessians of its contacts
     restricted to the rigid motions of each FEM entity, which they stride in their sorted order.
     """
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The lanes of a chunk, a tile of the subgroup whatever its width
+    LOG2_N_LANES = qd.static(5)
+    N_LANES = qd.static(2**LOG2_N_LANES if sap_config.enable_cooperative_kernels else 1)
     for i_t in range(sap_state.envs.is_active.shape[0] * N_LANES):
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES
@@ -3069,7 +3083,7 @@ def func_update_envs_active(
         if qd.static(N_LANES > 1):
             # The first lane overwrites the flag below, which nothing orders after the reads of the other lanes, so they
             # take the flag it read: lanes disagreeing on it would sum the coarse Hessians in divergent flow.
-            is_active = su.qd_block_shuffle(qd.cast(is_active, qd.i32), 0) != 0
+            is_active = su.qd_block_shuffle(qd.cast(is_active, qd.i32), 0, LOG2_N_LANES) != 0
         norms = func_chunks_total(
             i_b,
             0,
@@ -3122,7 +3136,7 @@ def func_update_envs_active(
                                                 A = A + H
                     if qd.static(N_LANES > 1):
                         for k, l in qd.static(qd.ndrange(6, 6)):
-                            A[k, l] = su.qd_block_sum(A[k, l])
+                            A[k, l] = su.qd_block_sum(A[k, l], LOG2_N_LANES)
                     if i_lane == 0:
                         # The inertia of the rigid motions, from the moments of the vertices about x_ref
                         mass = sap_state.fem_coarse.mass[i_e, i_b]
@@ -3680,9 +3694,10 @@ def func_compute_vertices_dofs(
     """
     # The sums of a chunk of vertices or dofs (see N_VERTEX_DOF_SUMS)
     N_SUMS = qd.static(8)
-    # The items of a chunk (see CHUNK_SIZE)
-    CHUNK_DIM = qd.static(32)
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The items of a chunk (see CHUNK_SIZE), one per lane of a tile of the subgroup whatever its width
+    LOG2_CHUNK_DIM = qd.static(5)
+    CHUNK_DIM = qd.static(2**LOG2_CHUNK_DIM)
+    N_LANES = qd.static(CHUNK_DIM if sap_config.enable_cooperative_kernels else 1)
     SUMS_IDX = qd.static(VertexDofSum.of_op(op))
     for i_t in range(sap_state.vertices_dofs_partials.shape[2] * sap_state.vertices_dofs_partials.shape[0] * N_LANES):
         n_vertex_chunks = sap_info.n_vertex_chunks[None]
@@ -3743,7 +3758,7 @@ def func_compute_vertices_dofs(
                             )
         for i_q in qd.static(SUMS_IDX):
             if qd.static(N_LANES > 1):
-                sums[i_q] = su.qd_block_sum(sums[i_q])
+                sums[i_q] = su.qd_block_sum(sums[i_q], LOG2_CHUNK_DIM)
             if i_lane == 0 and envs_is_active[i_b]:
                 sap_state.vertices_dofs_partials[i_k, i_q, i_b] = sums[i_q]
 
@@ -3780,9 +3795,10 @@ def func_compute_constraints(
     """
     # The sums of a chunk of constraints (see N_CONSTRAINT_SUMS)
     N_SUMS = qd.static(3)
-    # The items of a chunk (see CHUNK_SIZE)
-    CHUNK_DIM = qd.static(32)
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The items of a chunk (see CHUNK_SIZE), one per lane of a tile of the subgroup whatever its width
+    LOG2_CHUNK_DIM = qd.static(5)
+    CHUNK_DIM = qd.static(2**LOG2_CHUNK_DIM)
+    N_LANES = qd.static(CHUNK_DIM if sap_config.enable_cooperative_kernels else 1)
     # The corner forces take a loop of their own: a loop bound reassigned under a static condition is read on the device,
     # which launches a full grid, where a bound assigned once is a compile-time constant on fields.
     if qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT and sap_config.has_fem):
@@ -3836,7 +3852,7 @@ def func_compute_constraints(
                                 sums[ConstraintSum.ENERGY] = sums[ConstraintSum.ENERGY] + energy
         for i_q in qd.static(ConstraintSum.of_op(op)):
             if qd.static(N_LANES > 1):
-                sums[i_q] = su.qd_block_sum(sums[i_q])
+                sums[i_q] = su.qd_block_sum(sums[i_q], LOG2_CHUNK_DIM)
             if i_lane == 0 and is_active:
                 sap_state.constraints_partials[i_u, i_q] = sums[i_q]
 
@@ -4453,9 +4469,10 @@ def func_init_exact_linesearch(
     The slope, the cost and the second derivative of the free motion part of the cost along the step are computed at
     its start, for the first pass of the line search (see func_one_exact_linesearch_iter).
     """
-    # The items of a chunk (see CHUNK_SIZE)
-    CHUNK_DIM = qd.static(32)
-    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The items of a chunk (see CHUNK_SIZE), one per lane of a tile of the subgroup whatever its width
+    LOG2_CHUNK_DIM = qd.static(5)
+    CHUNK_DIM = qd.static(2**LOG2_CHUNK_DIM)
+    N_LANES = qd.static(CHUNK_DIM if sap_config.enable_cooperative_kernels else 1)
     for i_b in range(sap_state.envs.is_active.shape[0]):
         sap_state.envs.is_linesearch_active[i_b] = sap_state.envs.is_active[i_b]
         if sap_state.envs.is_linesearch_active[i_b]:
@@ -4529,7 +4546,7 @@ def func_init_exact_linesearch(
                         V_dt2 = fem_info.elements.V[i_e] * fem_info.dt2[None]
                         energy = energy + 0.5 * (dF * dP).sum() * fem_info.damping_beta_factor[None] * V_dt2
             if qd.static(N_LANES > 1):
-                energy = su.qd_block_sum(energy)
+                energy = su.qd_block_sum(energy, LOG2_CHUNK_DIM)
             if i_lane == 0 and sap_state.envs.is_linesearch_active[i_b]:
                 sap_state.elements_partials[i_k, i_b] = energy
     func_compute_constraints(

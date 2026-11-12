@@ -1151,7 +1151,7 @@ def func_exit_islands_serial(
 @qd.func
 def func_mv_jv_coop(i_b: int, tid: int, constraint_state: ConstraintState, rigid_info: RigidInfo):
     """Form mv = M @ search over the dofs and jv = J @ search over the rows of one env, by the _K lanes of its block."""
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_dofs = constraint_state.search.shape[0]
     n_con = constraint_state.n_constraints[i_b]
     i_d1 = tid
@@ -1200,7 +1200,7 @@ def func_linesearch_islands_coop(
 
     Returns whether any island moved.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_islands = constraint_state.island.n_islands[i_b]
     ne = constraint_state.n_constraints_equality[i_b]
     nef = ne + constraint_state.n_constraints_frictionloss[i_b]
@@ -1561,7 +1561,7 @@ def func_exit_islands_coop(
 
     Returns whether any island iterates on.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_islands = constraint_state.island.n_islands[i_b]
     improved_any = False
     for i_group in range((n_islands + _K - 1) // _K):

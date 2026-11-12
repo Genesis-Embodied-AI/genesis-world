@@ -178,7 +178,7 @@ def func_group_constraints_by_island_coop(
     its island through sh_chunk (one slot per lane) and placed at its island's cursor, so the lists stay in constraint
     index order.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_islands = constraint_state.island.n_islands[i_b]
     n_con = constraint_state.n_constraints[i_b]
     if n_islands == 1:
@@ -438,7 +438,7 @@ def func_build_single_island_coop(
 ):
     """Write the partition of one env of a single-island scene with the _K lanes of its block, see
     func_build_single_island."""
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_dofs = constraint_state.island.dof_id.shape[0]
     if tid == 0:
         constraint_state.island.n_islands[i_b] = 1
@@ -493,7 +493,7 @@ def func_build_islands_coop(
     by a subgroup scan, the counts summed by atomics, the starts scanned, and each tree writes its own links and dofs
     after those of the earlier trees of its island, so an item's position depends only on the earlier items.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n_trees = rigid_info.trees_root_idx.shape[0]
     n_links = rigid_info.links_tree_idx.shape[0]
     n_dofs = constraint_state.island.dof_id.shape[0]
@@ -905,7 +905,7 @@ def func_sort_contacts_coop(
     The input order moves to contact_id and the position keys to contact_sort_key first, so the ranks scatter straight
     into contact_sort_idx.
     """
-    _K = qd.static(32)
+    _K = qd.static(qd.simt.subgroup.group_size())
     n = collider_state.n_contacts[i_b]
     n_first = collider_state.n_contacts_hibernated[i_b]
     i_c = n_first + tid
