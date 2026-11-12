@@ -347,7 +347,7 @@ def func_get_jacobian(
         i_l = dyn_info.links.parent_idx[I_l]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_get_jacobian(
     tgt_link_idx: int,
     dof_start: int,
@@ -832,7 +832,7 @@ def kernel_set_ik_targets(
         targets.rot_mask[k] = rot_mask[k]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_forward_kinematics_query(
     entity_idx: int,
     qs_idx: qd.types.ndarray(),

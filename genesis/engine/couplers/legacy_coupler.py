@@ -239,6 +239,7 @@ class LegacyCouplerInfo(Data, kind=DataKind.CONSTANT):
     softness_min: qd.Tensor = field(float, shape=())
     mpm_sph_stencil_size: qd.Tensor = field(int, shape=())
     mpm_pbd_stencil_size: qd.Tensor = field(int, shape=())
+    EPS: qd.Tensor = field(float, shape=())
 
 
 class LegacyCouplerConfig(Config):
@@ -470,6 +471,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 softness_min=1e-10,
                 mpm_sph_stencil_size=mpm_sph_stencil_size,
                 mpm_pbd_stencil_size=mpm_pbd_stencil_size,
+                EPS=gs.EPS,
             )
         )
 
@@ -964,7 +966,10 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
         ):
             if self.legacy_coupler_config.has_fixed_rigid_sph:
                 kernel_select_sph_fixed_geoms(
-                    self.rigid_solver.dyn_state.geoms, self.sph_boundaries, self.sph_solver.sph_info
+                    self.rigid_solver.dyn_state.geoms,
+                    self.sph_boundaries,
+                    self.sph_solver.sph_info,
+                    self.legacy_coupler_info,
                 )
             kernel_place_sph_boundary_segments(
                 self.fem_solver.fem_state,
@@ -975,6 +980,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 self.fem_solver.fem_info,
                 self.sph_solver.sph_info,
                 self.rigid_solver.dyn_info.geoms,
+                self.legacy_coupler_info,
                 self.legacy_coupler_config,
             )
 
@@ -1096,7 +1102,7 @@ class LegacyCoupler(ErrnoMixin, CheckpointMixin, RBC):
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_reset_mpm_rigid_normal(envs_idx: qd.types.ndarray(), mpm_state: MPMState):
     for i_p, i_b_ in qd.ndrange(
         mpm_state.particles_cpic.rigid_normal.shape[0],
@@ -1342,7 +1348,7 @@ def kernel_mpm_grid_op(
             mpm_state.grid.vel_out[i_x, i_y, i_z, i_b] = vel_mpm
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_mpm_surface_to_particle(
     mpm_state: MPMState,
     geoms_state: GeomsState,
@@ -1373,7 +1379,7 @@ def kernel_mpm_surface_to_particle(
                         mpm_state.particles_cpic.rigid_normal[i_p, i_g, i_b] = sdf_normal
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_fem_surface_force(
     fem_state: FEMState,
     mpm_state: MPMState,
@@ -1586,7 +1592,7 @@ def func_pbd_collide_with_rigid_geom(
     return new_pos, new_vel
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_pbd_rigid_collide(
     pbd_state: PBDState,
     geoms_state: GeomsState,
@@ -1626,7 +1632,7 @@ def kernel_pbd_rigid_collide(
                     pbd_state.particles_reordered.vel[i_p, i_b] = vel
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_attach_pbd_to_rigid_link(
     particles_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -1649,7 +1655,7 @@ def kernel_attach_pbd_to_rigid_link(
         legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = local_pos
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_detach_pbd_from_rigid_link(
     particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), legacy_coupler_state: LegacyCouplerState
 ):
@@ -1663,7 +1669,7 @@ def kernel_detach_pbd_from_rigid_link(
         legacy_coupler_state.pbd_attach_local_pos[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_pbd_rigid_solve_animate_particles_by_link(
     pbd_state: PBDState,
     links_state: LinksState,
@@ -1706,6 +1712,7 @@ def func_boundary_source_cells(
     sph_boundaries: SPHBoundaries,
     support_radius: float,
     legacy_coupler_config: qd.template(),
+    eps: float,
 ):
     """
     Return the frame of a source of boundary segments, a point in it, and the first cell and number of cells along each
@@ -1734,7 +1741,7 @@ def func_boundary_source_cells(
             if sph_boundaries.geoms_is_active[i_g, i_b]:
                 geom_quat = geoms_state.quat[i_g, i_b]
                 pos_src = qd_inv_transform_by_trans_quat(pos, geoms_state.pos[i_g, i_b], geom_quat)
-                rot = qd_quat_to_R(geom_quat, gs.EPS)
+                rot = qd_quat_to_R(geom_quat, eps)
                 reach = support_radius + sph_boundaries.fixed_geoms_extent_max[i_fg]
                 cell_size = sph_boundaries.fixed_cell_size[None]
                 grid_lower = sph_boundaries.fixed_geoms_grid_lower[i_fg]
@@ -1937,6 +1944,7 @@ def func_boundary_source_segment(
     sph_boundaries: SPHBoundaries,
     legacy_coupler_config: qd.template(),
     support_radius: float,
+    eps: float,
 ):
     """
     Return whether a segment of a window may lie within the support radius of a point, with its shape and velocity.
@@ -2021,7 +2029,7 @@ def func_boundary_source_segment(
                 corner_2 = qd.Vector([corners[2, 0], corners[2, 1], corners[2, 2]])
                 area_normal = 0.5 * (corner_1 - corner_0).cross(corner_2 - corner_0)
                 area = area_normal.norm()
-                normal = area_normal / qd.max(area, gs.EPS)
+                normal = area_normal / qd.max(area, eps)
                 extent = qd.sqrt(
                     qd.max(
                         (corner_0 - centroid).norm_sqr(),
@@ -2032,8 +2040,10 @@ def func_boundary_source_segment(
     return is_near, corners, normal, area, extent, vel, i_bd
 
 
-@qd.kernel
-def kernel_select_sph_fixed_geoms(geoms_state: GeomsState, sph_boundaries: SPHBoundaries, sph_info: SPHInfo):
+@qd.kernel(fastcache=True)
+def kernel_select_sph_fixed_geoms(
+    geoms_state: GeomsState, sph_boundaries: SPHBoundaries, sph_info: SPHInfo, legacy_coupler_info: LegacyCouplerInfo
+):
     """
     List the fixed rigid geoms whose box, widened by the support radius and the largest extent of their segments,
     overlaps the domain of the SPH liquid in each environment, in ascending order.
@@ -2054,7 +2064,7 @@ def kernel_select_sph_fixed_geoms(geoms_state: GeomsState, sph_boundaries: SPHBo
                     sph_boundaries.fixed_geoms_grid_lower[i_fg]
                     + 0.5 * sph_boundaries.fixed_geoms_grid_res[i_fg] * cell_size
                 )
-                rot = qd_quat_to_R(geoms_state.quat[i_g, i_b], gs.EPS)
+                rot = qd_quat_to_R(geoms_state.quat[i_g, i_b], legacy_coupler_info.EPS[None])
                 center = rot @ center_local + geoms_state.pos[i_g, i_b]
                 half_size_world = qd.abs(rot) @ half_size
                 if (center + half_size_world - lower).min() > 0.0 and (upper - center + half_size_world).min() > 0.0:
@@ -2063,7 +2073,7 @@ def kernel_select_sph_fixed_geoms(geoms_state: GeomsState, sph_boundaries: SPHBo
         sph_boundaries.fixed_envs_n_geoms[i_b] = n_geoms
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_place_sph_boundary_segments(
     fem_state: FEMState,
     sph_state: SPHState,
@@ -2073,6 +2083,7 @@ def kernel_place_sph_boundary_segments(
     fem_info: FEMInfo,
     sph_info: SPHInfo,
     geoms_info: GeomsInfo,
+    legacy_coupler_info: LegacyCouplerInfo,
     legacy_coupler_config: qd.template(),
 ):
     """
@@ -2140,7 +2151,7 @@ def kernel_place_sph_boundary_segments(
                 i_l = geoms_info.link_idx[i_g]
                 vel = func_vel_at_point(i_l, i_b, centroid, links_state)
         sph_boundaries.segments.corners[i_sg, i_b] = corners
-        sph_boundaries.segments.normal[i_sg, i_b] = area_normal / qd.max(area, gs.EPS)
+        sph_boundaries.segments.normal[i_sg, i_b] = area_normal / qd.max(area, legacy_coupler_info.EPS[None])
         sph_boundaries.segments.centroid[i_sg, i_b] = centroid
         sph_boundaries.segments.vel[i_sg, i_b] = vel
         sph_boundaries.segments.area[i_sg, i_b] = area
@@ -2162,6 +2173,7 @@ def kernel_place_sph_boundary_segments(
     # particle together, striding the segments of each cell around it, then sum their shares along a fixed tree.
     N_LANES = qd.static(32 if legacy_coupler_config.enable_cooperative_particles else 1)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    eps = legacy_coupler_info.EPS[None]
     n_particles, n_envs = sph_state.particles.pos.shape
     # The environments run fastest, as the arrays keep them innermost
     for i_t in range(n_envs * n_particles * N_LANES):
@@ -2185,7 +2197,7 @@ def kernel_place_sph_boundary_segments(
                 n_sources = 1 + sph_boundaries.fixed_envs_n_geoms[i_b]
             for i_src in range(n_sources):
                 pos_src, rot, cell_base, n_cells = func_boundary_source_cells(
-                    i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config
+                    i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config, eps
                 )
                 src_volume = gs.qd_float(0.0)
                 src_volume_grad = qd.Vector.zero(gs.qd_float, 3)
@@ -2244,6 +2256,7 @@ def kernel_place_sph_boundary_segments(
                                         sph_boundaries,
                                         legacy_coupler_config,
                                         support_radius,
+                                        eps,
                                     )
                                     if is_near and i_part < n_parts:
                                         seg_volume, seg_volume_grad, seg_moment = func_segment_volume(
@@ -2261,7 +2274,7 @@ def kernel_place_sph_boundary_segments(
                                         src_volume_grad = src_volume_grad + seg_volume_grad
                                         src_moment = src_moment + seg_moment
                                         vel_flux = vel_flux + vel.dot(seg_volume_grad)
-                                        surface_dist = qd.min(surface_dist, func_segment_dist(pos_src, corners))
+                                        surface_dist = qd.min(surface_dist, func_segment_dist(pos_src, corners, eps))
                                         if seg_volume_grad.norm_sqr() > 0.0:
                                             boundary_lo = qd.min(boundary_lo, i_bd)
                                             boundary_hi = qd.max(boundary_hi, i_bd)
@@ -2423,7 +2436,7 @@ def func_project_on_bounds(
     return vel, set_best, lambdas_best
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_sph_boundaries_impulse(
     sph_state: SPHState,
     geoms_state: GeomsState,
@@ -2456,6 +2469,7 @@ def kernel_sph_boundaries_impulse(
     # from moving further in.
     N_BOUNDARIES = qd.static(4)
     support_radius, kernel_norm = sph_info.support_radius[None], sph_info.kernel_norm[None]
+    eps = legacy_coupler_info.EPS[None]
     for i_r, i_b in qd.ndrange(
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.vel))
     ):
@@ -2490,7 +2504,7 @@ def kernel_sph_boundaries_impulse(
                         n_sources = 1 + sph_boundaries.fixed_envs_n_geoms[i_b]
                     for i_src in range(n_sources):
                         pos_src, rot, cell_base, n_cells = func_boundary_source_cells(
-                            i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config
+                            i_src, i_b, pos, geoms_state, sph_boundaries, support_radius, legacy_coupler_config, eps
                         )
                         for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
                             item_start, n_items = func_boundary_source_cell(
@@ -2530,6 +2544,7 @@ def kernel_sph_boundaries_impulse(
                                                 sph_boundaries,
                                                 legacy_coupler_config,
                                                 support_radius,
+                                                eps,
                                             )
                                         )
                                         if is_near:
@@ -2556,7 +2571,7 @@ def kernel_sph_boundaries_impulse(
                                                     )
                                                 vel_fluxes[i_k] = vel_fluxes[i_k] + vel.dot(seg_volume_grad)
                                                 surface_dists[i_k] = qd.min(
-                                                    surface_dists[i_k], func_segment_dist(pos_src, corners)
+                                                    surface_dists[i_k], func_segment_dist(pos_src, corners, eps)
                                                 )
                     # The divergence theorem counts the kernel at the particle itself out of the volume of a solid
                     # that encloses it, which turns it negative

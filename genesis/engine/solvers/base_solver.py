@@ -886,7 +886,7 @@ class Solver(ErrnoMixin, CheckpointMixin, RBC):
         return repr_str
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
     # The qd.Tensor annotation accepts both forms the buffer is allocated in: a field, for a solver whose kernels
     # reach gravity through the solver itself, and an ndarray for every other one (see _build_gravity).
@@ -982,7 +982,7 @@ def kernel_get_info(items_idx: qd.types.ndarray(), values: qd.types.ndarray(), i
 
 
 @no_grad
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_set_time(
     i_substep: int, steps: qd.types.ndarray(), sim_state: SimulatorState, substeps: int, substep_dt: float
 ):

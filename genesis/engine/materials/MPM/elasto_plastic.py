@@ -42,14 +42,14 @@ class ElastoPlastic(Base):
         self.update_F_S_Jp = self._update_F_S_Jp_elasto_plastic
 
     @qd.func
-    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_elasto_plastic(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         if qd.static(self.use_von_mises):
             S_new = qd.max(S, 0.05)  # to prevent NaN
             epsilon = qd.Vector([qd.log(S_new[0, 0]), qd.log(S_new[1, 1]), qd.log(S_new[2, 2])])
             epsilon_hat = epsilon - (epsilon.sum() / 3)
-            epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
+            epsilon_hat_norm = epsilon_hat.norm(eps)
             delta_gamma = epsilon_hat_norm - self.von_mises_yield_stress / (2 * self.mu)
 
             if delta_gamma > 0:  # Yields

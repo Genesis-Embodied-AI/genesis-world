@@ -202,7 +202,7 @@ def _qd_polygon_area_from_points_3d(i_b: int, n: int, scratch: qd.types.ndarray(
     return area
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_compute_contact_areas(
     contact_area: qd.types.ndarray(),
     scratch: qd.types.ndarray(),
@@ -283,7 +283,7 @@ def _qd_k_eff(k_a: float, k_b: float, eps: float) -> float:
     return gs.qd_float(2.0) * k_a * k_b / (k_a + k_b + eps)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_contact_heat(
     links_idx: qd.types.ndarray(),
     sensor_cache_start: qd.types.ndarray(),

@@ -115,7 +115,7 @@ class SDF:
             )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def sdf_kernel_init_geom_fields(
     geoms_sdf_cell_start: qd.types.ndarray(),
     geoms_sdf_coarse_cell_start: qd.types.ndarray(),

@@ -53,7 +53,7 @@ class Snow(ElastoPlastic):
         self.update_stress = self._update_stress_snow
 
     @qd.func
-    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_snow(self, J, F_tmp, U, S, V, Jp, eps):
         S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
         Jp_new = Jp
         for d in qd.static(range(3)):

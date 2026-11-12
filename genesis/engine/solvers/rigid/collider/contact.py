@@ -1980,7 +1980,7 @@ def func_clamp_prune_contacts_coop(
                 errno[i_b] = errno[i_b] | RigidErrorCode.OVERFLOW_CONTACTS
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def func_set_upstream_grad(
     dL_dposition: qd.types.ndarray(),
     dL_dnormal: qd.types.ndarray(),

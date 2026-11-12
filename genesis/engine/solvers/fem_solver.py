@@ -2985,7 +2985,7 @@ def kernel_solve_stage(
         func_skip_linesearch(fem_state, fem_info)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_compute_implicit_force(
     fem_state: FEMState,
     fem_info: FEMInfo,
