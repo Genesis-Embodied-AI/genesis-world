@@ -880,6 +880,44 @@ def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
 
 
 @pytest.mark.required("sparse")
+@pytest.mark.parametrize("model_name", ["long_chain"])
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_sap_long_kinematic_chain(xml_path, show_viewer):
+    CHAIN_HALF_HEIGHT = 0.015
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1 / 60,
+            substeps=2,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.7, -1.0, 0.6),
+            camera_lookat=(0.7, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    chain = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=xml_path,
+            pos=(0.0, 0.0, CHAIN_HALF_HEIGHT),
+        ),
+    )
+    scene.build(n_envs=2)
+
+    for _ in range(40):
+        scene.step()
+
+    # The chain of 100 dofs lying flat on the ground rests still, every link slightly sunk into it
+    assert_allclose(chain.get_dofs_velocity(), 0.0, atol=1e-4)
+    chain_depths = CHAIN_HALF_HEIGHT - chain.get_links_pos()[..., 2]
+    assert ((chain_depths > 0.0) & (chain_depths < 1e-3)).all()
+
+
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("enable_lagged_friction", [False, True])
 def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
     PLANE_HEIGHT = 0.1

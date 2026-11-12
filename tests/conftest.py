@@ -123,6 +123,23 @@ def box_on_masked_stick():
     return mjcf
 
 
+@pytest.fixture(scope="session")
+def long_chain():
+    # A free box followed by 31 boxes on ball joints and a last one on a vertical hinge, 100 dofs in a row
+    mjcf = ET.Element("mujoco", model="long_chain")
+    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="link0")
+    ET.SubElement(body, "freejoint")
+    ET.SubElement(body, "geom", type="box", size="0.02 0.015 0.015")
+    for i in range(1, 33):
+        body = ET.SubElement(body, "body", name=f"link{i}", pos="0.045 0 0")
+        if i < 32:
+            ET.SubElement(body, "joint", name=f"ball{i}", type="ball")
+        else:
+            ET.SubElement(body, "joint", name="hinge", type="hinge", axis="0 0 1")
+        ET.SubElement(body, "geom", type="box", size="0.02 0.015 0.015")
+    return mjcf
+
+
 # Canonical skip reason registry.
 # When a test is skipped during setup with one of these reasons, the skip trace location is
 # normalized to point to the definition line below instead of scattered test function locations.
