@@ -839,18 +839,15 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self,
         idx: int,
-        material: FEM.Base,
         morph: Morph,
         surface: Surface,
         options: "gs.entities.FEM",
-        visualize_contact: bool = False,
         name: str | None = None,
         desc: "EntityDescription | None" = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
             solver=self,
-            material=material,
             morph=morph,
             surface=surface,
             idx=idx,

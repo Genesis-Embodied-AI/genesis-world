@@ -35,7 +35,6 @@ from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
-    from genesis.engine.materials.base import Material
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
     from genesis.options.surfaces import Surface
@@ -153,20 +152,17 @@ class Simulator(RBC):
     def _add_entity(
         self,
         morph: Morph | Sequence[Morph] | None = None,
-        material: "Material | None" = None,
         surface: "Surface | None" = None,
-        visualize_contact: bool = False,
         name: str | None = None,
         options: "gs.entities.BaseEntity | None" = None,
         desc: "EntityDescription | None" = None,
     ) -> "Entity":
         if desc is not None:
-            material = desc.material
             options = desc.options
         if isinstance(options, gs.entities.Hybrid):
             # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
             # adds its parts to the scene itself.
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, options, name)
+            entity = HybridEntity(self.n_entities, self.scene, morph, surface, options, name)
         else:
             # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
@@ -174,9 +170,7 @@ class Simulator(RBC):
                     break
             else:
                 gs.raise_exception(f"No solver simulates entities of options {type(options).__name__}.")
-            entity = solver.add_entity(
-                self.n_entities, material, morph, surface, options, visualize_contact, name, desc
-            )
+            entity = solver.add_entity(self.n_entities, morph, surface, options, name, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)

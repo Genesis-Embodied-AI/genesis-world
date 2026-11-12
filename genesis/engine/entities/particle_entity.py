@@ -73,8 +73,6 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
-        The material definition, including sampling strategy and physical properties.
     morph : Morph
         Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
     surface : Surface
@@ -97,7 +95,6 @@ class ParticleEntity(Entity):
         self,
         scene: "Scene",
         solver: "ParticleSolver",
-        material: "gs.materials.MPM.Base | gs.materials.SPH.Base | gs.materials.PBD.Base",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -109,7 +106,7 @@ class ParticleEntity(Entity):
         need_skinning: bool = True,
         name: str | None = None,
     ) -> None:
-        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
+        super().__init__(idx, scene, morph, solver, surface, name=name, options=options)
 
         self._particle_size = particle_size
         self._particle_start = particle_start
@@ -152,7 +149,7 @@ class ParticleEntity(Entity):
         GenesisException
             If the specified sampler is not supported or incorrectly formatted.
         """
-        self.sampler = self._material.sampler
+        self.sampler = self.material.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:
@@ -619,11 +616,6 @@ class ParticleEntity(Entity):
     def init_particles(self):
         """Initial sampled particle positions."""
         return self._particles
-
-    @property
-    def material(self):
-        """Material of this entity."""
-        return self._material
 
     @property
     def surface(self):

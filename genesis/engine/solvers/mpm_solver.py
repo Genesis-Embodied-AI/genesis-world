@@ -482,20 +482,17 @@ Please decrease the simulation timestep or adjust the material parameters."""
     def add_entity(
         self,
         idx: int,
-        material: MPM.Base,
         morph: Morph,
         surface: Surface,
         options: "gs.entities.MPM",
-        visualize_contact: bool = False,
         name: str | None = None,
         desc: "EntityDescription | None" = None,
     ) -> "MPMEntity":
-        self.add_material(material)
+        self.add_material(options.material)
 
         entity = MPMEntity(
             scene=self._scene,
             solver=self,
-            material=material,
             morph=morph,
             surface=surface,
             particle_size=self._particle_size,

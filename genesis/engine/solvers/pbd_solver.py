@@ -364,19 +364,16 @@ class PBDSolver(ParticleSolver):
     def add_entity(
         self,
         idx: int,
-        material: PBD.Base,
         morph: Morph,
         surface: Surface,
         options: "gs.entities.PBD",
-        visualize_contact: bool = False,
         name: str | None = None,
         desc: "EntityDescription | None" = None,
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(material, gs.materials.PBD.Cloth):
+        if isinstance(options.material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
                 scene=self.scene,
                 solver=self,
-                material=material,
                 morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
@@ -389,11 +386,10 @@ class PBDSolver(ParticleSolver):
                 name=name,
                 options=options,
             )
-        elif isinstance(material, gs.materials.PBD.Elastic):
+        elif isinstance(options.material, gs.materials.PBD.Elastic):
             entity = PBD3DEntity(
                 scene=self.scene,
                 solver=self,
-                material=material,
                 morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
@@ -406,11 +402,10 @@ class PBDSolver(ParticleSolver):
                 name=name,
                 options=options,
             )
-        elif isinstance(material, gs.materials.PBD.Liquid):
+        elif isinstance(options.material, gs.materials.PBD.Liquid):
             entity = PBDParticleEntity(
                 scene=self.scene,
                 solver=self,
-                material=material,
                 morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
@@ -419,11 +414,10 @@ class PBDSolver(ParticleSolver):
                 name=name,
                 options=options,
             )
-        elif isinstance(material, gs.materials.PBD.Particle):
+        elif isinstance(options.material, gs.materials.PBD.Particle):
             entity = PBDFreeParticleEntity(
                 scene=self.scene,
                 solver=self,
-                material=material,
                 morph=morph,
                 surface=surface,
                 particle_size=self._particle_size,
