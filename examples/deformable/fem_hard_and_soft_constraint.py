@@ -66,8 +66,8 @@ def main():
         ),
     )
 
-    # A beam clamped by its left end face and pinned by the vertex closest to the bottom of its right end, which the
-    # vertex options hold at their initial positions from the first step on
+    # A beam clamped by its left end face and pinned by a bottom corner of its right end, which the vertex options hold
+    # at their initial positions from the first step on
     scene.add_entity(
         options=gs.entities.FEM(
             morph=gs.morphs.Box(
@@ -83,7 +83,7 @@ def main():
             vertices={
                 (
                     gs.VertexIndex.in_box(lower=(-0.2, -0.03, -0.03), upper=(-0.2, 0.03, 0.03))
-                    | gs.VertexIndex.closest_to(pos=(0.2, 0.0, -0.03), max_distance=0.01)
+                    | gs.VertexIndex.closest_to(pos=(0.2, 0.03, -0.03), max_distance=0.01)
                 ): gs.options.Vertex(
                     is_fixed=True,
                 ),
