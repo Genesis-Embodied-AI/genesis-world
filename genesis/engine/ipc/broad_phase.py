@@ -32,6 +32,7 @@ import genesis as gs
 from genesis.engine.numerics.exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 from genesis.utils.misc import qd_to_numpy
+from genesis.utils.simt import qd_segmented_min, qd_segmented_sum, qd_slot_neighbors
 
 from .dop_bvh import (
     DOPBVHHits,
@@ -45,6 +46,7 @@ from .dop_bvh import (
     func_dop_merge,
     func_dop_overlap,
     func_query_dop_bvh,
+    get_dop_bvh_config,
     get_dop_bvh_data,
 )
 
@@ -112,13 +114,14 @@ class EFSubPairs(Data, kind=DataKind.SCRATCH):
     edge, edge), the first edge of lower index, and their counts, which grow past the capacities on overflow.
 
     `summary` gathers the counts a caller reads back at once after the pairs are filtered: the hits of the groups and of
-    the edge queries, the PT and EE sub-pairs, and the PT and EE counts of the filtered pairs.
+    the edge queries, the PT and EE sub-pairs, the PT and EE counts of the filtered pairs, and the queries that stopped
+    short (see DOPBVHHits).
     """
 
     pt: qd.Tensor = field((int, 3), shape=(EF_SUB_PT,), ndarray=True)
     ee: qd.Tensor = field((int, 3), shape=(EF_SUB_EE,), ndarray=True)
     counts: qd.Tensor = field(int, shape=(2,), ndarray=True)
-    summary: qd.Tensor = field(int, shape=(6,), ndarray=True)
+    summary: qd.Tensor = field(int, shape=(7,), ndarray=True)
 
 
 class EFQueryList(Data, kind=DataKind.SCRATCH):
@@ -287,23 +290,51 @@ def kernel_ef_bounds_build(
         groups.n_vertices[i_g, i_b] = 0
         groups.n_triangles[i_g, i_b] = 0
 
-    # The vertices, and the boxes of their groups
-    for i_v, i_b in qd.ndrange(positions.shape[0], n_envs):
+    # The vertices, and the boxes of their groups. Few groups hold many vertices, so where the lanes vote, the 32 lanes
+    # of a chunk of consecutive vertices of one environment fold each run of lanes sharing a group, and the tail lane of
+    # the run alone updates the group, the contention of the atomics costing most of the bounds otherwise.
+    CHUNK = qd.static(32 if tree_config.is_block_query else 1)
+    n_vertices = positions.shape[0]
+    n_flat = n_vertices * n_envs
+    # Blocks of whole chunks, so that the lane of a vertex in its chunk is i_flat % CHUNK
+    qd.loop_config(block_dim=128)
+    for i_flat in range((n_flat + CHUNK - 1) // CHUNK * CHUNK):
+        is_valid = i_flat < n_flat
+        i_b = qd.min(i_flat, n_flat - 1) // n_vertices
+        i_v = qd.min(i_flat, n_flat - 1) % n_vertices
         start = positions[i_v, i_b]
         end = func_vertex_sweep_end(i_v, i_b, positions, displacements, is_swept)
         lower, upper = func_dop_empty()
         lower, upper = func_dop_add_point(lower, upper, start)
         lower, upper = func_dop_add_point(lower, upper, end)
-        bounds.vertices_lower[i_v, i_b] = lower
-        bounds.vertices_upper[i_v, i_b] = upper
         gap = vertices_d_hat[i_v] + vertices_thickness[i_v]
         gap = gap + func_vertex_bulge(i_v, i_b, positions, pivots, rotations, is_screw)
-        bounds.vertices_gap[i_v, i_b] = gap
+        if is_valid:
+            bounds.vertices_lower[i_v, i_b] = lower
+            bounds.vertices_upper[i_v, i_b] = upper
+            bounds.vertices_gap[i_v, i_b] = gap
         i_g = topology.vertices_group[i_v]
-        qd.atomic_min(groups.lower[i_g, i_b], qd.min(start, end))
-        qd.atomic_max(groups.upper[i_g, i_b], qd.max(start, end))
-        qd.atomic_max(groups.gap[i_g, i_b], gap)
-        qd.atomic_add(groups.n_vertices[i_g, i_b], 1)
+        box_lower = qd.min(start, end)
+        box_upper = qd.max(start, end)
+        n_run = 1
+        is_tail = is_valid
+        if qd.static(tree_config.is_block_query):
+            tid = i_flat % CHUNK
+            i_slot = qd.select(is_valid, i_b * n_groups + i_g, -1)
+            i_slot_prev, i_slot_next = qd_slot_neighbors(tid, i_slot)
+            for k in qd.static(range(3)):
+                run_lower, is_tail = qd_segmented_min(tid, i_slot, i_slot_prev, i_slot_next, box_lower[k])
+                run_upper_neg, _ = qd_segmented_min(tid, i_slot, i_slot_prev, i_slot_next, -box_upper[k])
+                box_lower[k] = run_lower
+                box_upper[k] = -run_upper_neg
+            run_gap_neg, _ = qd_segmented_min(tid, i_slot, i_slot_prev, i_slot_next, -gap)
+            gap = -run_gap_neg
+            n_run, _ = qd_segmented_sum(tid, i_slot, i_slot_prev, i_slot_next, 1)
+        if is_tail:
+            qd.atomic_min(groups.lower[i_g, i_b], box_lower)
+            qd.atomic_max(groups.upper[i_g, i_b], box_upper)
+            qd.atomic_max(groups.gap[i_g, i_b], gap)
+            qd.atomic_add(groups.n_vertices[i_g, i_b], n_run)
 
     # The edges and their queries, grown by the largest gap of the vertices they own
     for i_e, i_b in qd.ndrange(edges_verts_idx.shape[0], n_envs):
@@ -610,6 +641,12 @@ class EFBroadPhase:
         )
         self.tree, self.tree_config = get_dop_bvh_data(n_envs, n_triangles)
         self.groups_tree, self.groups_tree_config = get_dop_bvh_data(n_envs, n_groups)
+        # The queries on one thread each, for the rerun of a search whose queries on the lanes of a block stopped short
+        self._query_configs_thread = (
+            get_dop_bvh_config(n_envs, n_triangles, is_block_query=False),
+            get_dop_bvh_config(n_envs, n_groups, is_block_query=False),
+        )
+        self._is_thread_query = False
         self.queries = DOPBVHQueries(sizes=dict(dop_queries=n_edges, dop_trees=n_envs))
         self.groups_queries = DOPBVHQueries(sizes=dict(dop_queries=n_groups, dop_trees=n_envs))
         # Every group meets itself
@@ -634,8 +671,12 @@ class EFBroadPhase:
 
         `positions` and `displacements` are the positions of the vertices of every environment and their sweep, which
         ends at the positions without `is_swept`. With `is_screw` the vertices sweep along screws of origins `pivots` and
-        rotation vectors `rotations`.
+        rotation vectors `rotations`. The queries run on one thread each after a run whose queries stopped short (see
+        `grow`).
         """
+        tree_config, groups_tree_config = self.tree_config, self.groups_tree_config
+        if self._is_thread_query:
+            tree_config, groups_tree_config = self._query_configs_thread
         kernel_ef_bounds_build(
             positions,
             displacements,
@@ -672,18 +713,20 @@ class EFBroadPhase:
             self.groups_hits,
             self.sub_pairs,
             self.topology,
-            self.tree_config,
-            self.groups_tree_config,
+            tree_config,
+            groups_tree_config,
             is_expanded,
         )
 
-    def grow(self, n_groups_hits: int, n_hits: int, n_sub_pt: int, n_sub_ee: int) -> bool:
+    def grow(self, n_groups_hits: int, n_hits: int, n_sub_pt: int, n_sub_ee: int, n_truncated: int) -> bool:
         """
-        Grow the lists whose counts overflowed them, and return whether one did.
+        Grow the lists whose counts overflowed them, and return whether one did or a query stopped short.
 
         The counts are those of `sub_pairs.summary`, the hits of the groups and of the edge queries, then the PT and EE
-        sub-pairs. A list grows to the larger of its count and `EF_GROW_FACTOR` times its capacity.
+        sub-pairs, then the queries that stopped short (see DOPBVHHits). A list grows to the larger of its count and
+        `EF_GROW_FACTOR` times its capacity. After queries stopped short, the next run queries on one thread each.
         """
+        self._is_thread_query = n_truncated > 0
         counts = (n_groups_hits, n_hits, n_sub_pt, n_sub_ee)
         capacities = (
             self.groups_hits.hits.shape[0],
@@ -704,4 +747,4 @@ class EFBroadPhase:
         if capacities_grown[2:] != capacities[2:]:
             self._retire(self.sub_pairs)
             self.sub_pairs = EFSubPairs(sizes={EF_SUB_PT: capacities_grown[2], EF_SUB_EE: capacities_grown[3]})
-        return capacities_grown != capacities
+        return capacities_grown != capacities or self._is_thread_query

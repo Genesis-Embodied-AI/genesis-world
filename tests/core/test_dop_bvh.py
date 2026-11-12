@@ -5,13 +5,13 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.ipc.dop_bvh import (
-    DOPBVHConfig,
     DOPBVHHits,
     DOPBVHLeaves,
     DOPBVHQueries,
     func_dop_add_point,
     func_dop_empty,
     func_dop_expand,
+    get_dop_bvh_config,
     get_dop_bvh_data,
     kernel_build_dop_bvh,
     kernel_query_dop_bvh,
@@ -92,13 +92,11 @@ def test_build_tree(dop_bvh):
 @pytest.mark.parametrize("n_leaves, n_trees", [(1, 1), (5, 2), (300, 2)])
 @pytest.mark.parametrize("is_block_query", [False, True])
 def test_query(dop_bvh, is_block_query):
-    state, config, _, _ = dop_bvh
+    state, _, _, _ = dop_bvh
     if is_block_query and gs.backend not in (gs.cuda, gs.amdgpu):
         pytest.skip("The block schedule of a query runs on the backends whose lanes vote.")
-    config = DOPBVHConfig(
-        **{key: vars(config)[key] for key in DOPBVHConfig.__annotations__} | {"is_block_query": is_block_query}
-    )
     n_leaves, n_trees = state.leaves.lower.shape[:2]
+    config = get_dop_bvh_config(n_trees, n_leaves, is_block_query=is_block_query)
     leaves_lower = qd_to_numpy(state.leaves.lower, transpose=True)
     leaves_upper = qd_to_numpy(state.leaves.upper, transpose=True)
     leaves_tag = qd_to_numpy(state.leaves.tag, transpose=True)

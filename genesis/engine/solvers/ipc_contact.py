@@ -1332,6 +1332,7 @@ def kernel_contact_filter(
         sub_pairs.summary[3] = sub_pairs.counts[1]
         sub_pairs.summary[4] = ipc_pairs.counts[0]
         sub_pairs.summary[5] = ipc_pairs.counts[1]
+        sub_pairs.summary[6] = groups_hits.n_truncated[()] + hits.n_truncated[()]
 
 
 @qd.func(requires_top_level=True)
@@ -1688,10 +1689,10 @@ class IPCContact:
                 newton_config,
                 is_swept,
             )
-            n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee = (
+            n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee, n_truncated = (
                 int(count) for count in qd_to_numpy(self._broad_phase.sub_pairs.summary)
             )
-            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee)
+            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_truncated)
             capacity = self.pairs.pt.shape[0]
             if max(n_pt, n_ee) > capacity:
                 is_complete = False
@@ -1719,7 +1720,12 @@ class IPCContact:
             n_groups_hits, n_hits = (
                 int(qd_to_numpy(hits.count)) for hits in (self._broad_phase.groups_hits, self._broad_phase.hits)
             )
-            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt=0, n_sub_ee=0)
+            n_truncated = sum(
+                int(qd_to_numpy(hits.n_truncated)) for hits in (self._broad_phase.groups_hits, self._broad_phase.hits)
+            )
+            is_complete = not self._broad_phase.grow(
+                n_groups_hits, n_hits, n_sub_pt=0, n_sub_ee=0, n_truncated=n_truncated
+            )
             n_intersections = int(qd_to_numpy(intersections.count))
             capacity = intersections.hits.shape[0]
             if n_intersections > capacity:

@@ -14,7 +14,8 @@ growing past the capacity of the list on overflow, the hits beyond it dropped. A
 -1 when they differ, and a query skips the subtrees whose leaves all carry its own tag.
 
 A query runs on one thread, walking the tree depth first, or on the 32 lanes of a block, which pop up to 32 nodes of a
-frontier shared by the block at a time; both schedules append the same hits, in different orders.
+frontier shared by the block at a time. Both schedules append the same hits, in different orders, unless the frontier
+of a block fills its shared memory, which the hit list counts (see DOPBVHHits).
 
 Arrays of a batch take the batch as their last index.
 """
@@ -171,14 +172,17 @@ class DOPBVHQueries(Data, kind=DataKind.SCRATCH, shape=(DOP_QUERIES, DOP_TREES))
 
 class DOPBVHHits(Data, kind=DataKind.SCRATCH):
     """
-    The hits (tree, query, leaf) a query of a set of trees appends, and their count.
+    The hits (tree, query, leaf) a query of a set of trees appends, their count, and the count of truncated queries.
 
     The count grows past the capacity on overflow, the hits beyond it dropped, so that a caller reading it knows the
-    capacity a complete query needs.
+    capacity a complete query needs. A query on the lanes of a block stops short when its frontier fills the shared
+    memory of its block (see func_dop_bvh_query_block): it counts in `n_truncated`, and the caller reruns the queries
+    on one thread each, which is complete.
     """
 
     hits: qd.Tensor = field((int, 3), shape=(DOP_HITS,))
     count: qd.Tensor = field(int, shape=())
+    n_truncated: qd.Tensor = field(int, shape=())
 
 
 class DOPBVHData(NamedTuple):
@@ -188,8 +192,18 @@ class DOPBVHData(NamedTuple):
     config: DOPBVHConfig
 
 
-def get_dop_bvh_config(n_trees: int, n_leaves: int) -> DOPBVHConfig:
-    """Return the static config of a set of n_trees 14-DOP trees over n_leaves leaves each."""
+def get_dop_bvh_config(n_trees: int, n_leaves: int, is_block_query: bool | None = None) -> DOPBVHConfig:
+    """
+    Return the static config of a set of n_trees 14-DOP trees over n_leaves leaves each.
+
+    `is_block_query` selects the schedule of a query, on the 32 lanes of a block or on one thread. By default the
+    queries run on the lanes of a block where the lanes vote (CUDA, AMDGPU). The thread schedule is the one that never
+    stops short (see DOPBVHHits).
+    """
+    if is_block_query is None:
+        is_block_query = gs.backend in (gs.cuda, gs.amdgpu)
+    elif is_block_query and gs.backend not in (gs.cuda, gs.amdgpu):
+        gs.raise_exception("The block schedule of a 14-DOP query runs on the backends whose lanes vote (CUDA, AMDGPU).")
     n_keys = n_trees * n_leaves
     leaf_bits = max(1, (n_leaves - 1).bit_length())
     key_bits = (n_trees - 1).bit_length() + MORTON_BITS + leaf_bits
@@ -223,7 +237,7 @@ def get_dop_bvh_config(n_trees: int, n_leaves: int) -> DOPBVHConfig:
         sort_kind=sort_kind,
         fit_kind=fit_kind,
         sort_max_chunks=min(SORT_MAX_CHUNKS, qd.cfg.cpu_max_num_threads),
-        is_block_query=gs.backend in (gs.cuda, gs.amdgpu),
+        is_block_query=is_block_query,
     )
 
 
@@ -776,7 +790,7 @@ def func_dop_bvh_query_block(
     Every lane of the block calls it with the same query, row i_warp of the shared array `sh_stack` being the frontier
     of the block. Each round pops up to 32 nodes, one per lane, tests their two children, pushes the internal ones the
     query meets (their slots taken by a ballot of the lanes) and appends the leaves it meets, one atomic per block and
-    round.
+    round. A query whose frontier fills `sh_stack` stops short and counts in `hits.n_truncated`.
     """
     WARP_SIZE = qd.static(32)
     n_leaves = tree.leaves_idx.shape[0]
@@ -798,9 +812,10 @@ def func_dop_bvh_query_block(
         n_top = 1
     qd.simt.subgroup.sync()
     for _ in range(2 * n_leaves):
-        if n_top == 0:
-            break
+        # A round pops at most as many nodes as the frontier has free slots, since each one may push two children
         n_pop = qd.min(qd.min(n_top, WARP_SIZE), stack_size - n_top)
+        if n_pop == 0:
+            break
         is_active = lane < n_pop
         i_n = 0
         if is_active:
@@ -831,6 +846,9 @@ def func_dop_bvh_query_block(
                     i_a = tree.leaves_idx[i_child - (n_leaves - 1), i_t]
                     hits.hits[i_h] = qd.Vector([i_t, i_q, i_a], dt=gs.qd_int)
             qd.simt.subgroup.sync()
+    # A full frontier leaves nodes unvisited
+    if n_top > 0 and lane == 0:
+        qd.atomic_add(hits.n_truncated[()], 1)
 
 
 @qd.func(requires_top_level=True)
@@ -844,6 +862,7 @@ def func_query_dop_bvh(queries: DOPBVHQueries, tree: DOPBVHTree, hits: DOPBVHHit
     n_queries = queries.lower.shape[0]
     for _ in range(1):
         hits.count[()] = 0
+        hits.n_truncated[()] = 0
     if qd.static(config.is_block_query):
         qd.loop_config(block_dim=BLOCK_DIM)
         for i_flat in range(queries.n_active[()] * WARP_SIZE):
