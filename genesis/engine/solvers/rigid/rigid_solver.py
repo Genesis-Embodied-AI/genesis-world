@@ -1747,32 +1747,20 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
                 target = data[:, link.q_start : link.q_start + 3]
-            if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-                if pos.ndim == 2 and len(pos) not in (1, len(target)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal
-                    # mis-scatters a stride-0 broadcast mask, so it must be materialized to a dense mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(target).contiguous()
-                    target.masked_scatter_(envs_mask, pos.view_as(pos))
-                else:
-                    pos = broadcast_tensor(pos, gs.tc_float, target.shape)
-                    torch.where(envs_idx[:, None], pos, target, out=target)
-            else:
-                # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
-                if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
-                    pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
-                    same_pos = pos.ndim < 2 or len(pos) == 1 or (torch.diff(pos, dim=0).abs() < gs.EPS).all()
-                    set_all_envs = envs_idx is None or torch.equal(
-                        torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+            # Fixed links with at least one geom and non-batched vertices cannot take env-specific positions
+            if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
+                pos = torch.as_tensor(pos, dtype=gs.tc_float, device=gs.device)
+                same_pos = pos.ndim < 2 or len(pos) == 1 or (torch.diff(pos, dim=0).abs() < gs.EPS).all()
+                set_all_envs = envs_idx is None or torch.equal(
+                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                )
+                if not (set_all_envs and same_pos):
+                    gs.raise_exception(
+                        "Specifying env-specific pos for fixed links with at least one geometry requires "
+                        "setting morph option 'batch_fixed_verts=True'."
                     )
-                    if not (set_all_envs and same_pos):
-                        gs.raise_exception(
-                            "Specifying env-specific pos for fixed links with at least one geometry requires "
-                            "setting morph option 'batch_fixed_verts=True'."
-                        )
-                mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-                assign_indexed_tensor(target, mask, pos)
+            mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            assign_indexed_tensor(target, mask, pos)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -1885,31 +1873,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
                 target = data[:, link.q_start + 3 : link.q_start + 7]
-            if isinstance(envs_idx, torch.Tensor) and envs_idx.dtype == torch.bool:
-                if quat.ndim == 2 and len(quat) not in (1, len(target)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal
-                    # mis-scatters a stride-0 broadcast mask, so it must be materialized to a dense mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(target).contiguous()
-                    target.masked_scatter_(envs_mask, quat.view_as(quat))
-                else:
-                    quat = broadcast_tensor(quat, gs.tc_float, target.shape)
-                    torch.where(envs_idx[:, None], quat, target, out=target)
-            else:
-                # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
-                if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
-                    quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
-                    same_quat = quat.ndim < 2 or len(quat) == 1 or (torch.diff(quat, dim=0).abs() < gs.EPS).all()
-                    set_all_envs = envs_idx is None or torch.equal(
-                        torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+            # Fixed links with at least one geom and non-batched vertices cannot take env-specific orientations
+            if link.is_fixed and link.geoms and not link.entity._batch_fixed_verts:
+                quat = torch.as_tensor(quat, dtype=gs.tc_float, device=gs.device)
+                same_quat = quat.ndim < 2 or len(quat) == 1 or (torch.diff(quat, dim=0).abs() < gs.EPS).all()
+                set_all_envs = envs_idx is None or torch.equal(
+                    torch.sort(self._scene._sanitize_envs_idx(envs_idx)).values, self._scene._envs_idx
+                )
+                if not (set_all_envs and same_quat):
+                    gs.raise_exception(
+                        "Impossible to set env-specific quat for fixed links with at least one geometry."
                     )
-                    if not (set_all_envs and same_quat):
-                        gs.raise_exception(
-                            "Impossible to set env-specific quat for fixed links with at least one geometry."
-                        )
-                mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
-                assign_indexed_tensor(target, mask, quat)
+            mask = (0,) if self.n_envs == 0 else indices_to_mask(envs_idx)
+            assign_indexed_tensor(target, mask, quat)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2172,28 +2148,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-            qs_mask = indices_to_mask(qs_idx)
-            if (
-                (not qs_mask or isinstance(qs_mask[0], slice))
-                and isinstance(envs_idx, torch.Tensor)
-                and envs_idx.dtype == torch.bool
-            ):
-                qs_data = data[(slice(None), *qs_mask)]
-                if qpos.ndim == 2 and len(qpos) not in (1, len(qs_data)):
-                    # A fresh source view is needed because masked_scatter_ may reshape it in-place. Metal mis-scatters
-                    # a stride-0 broadcast mask, so it must be materialized to a dense full-shape mask there.
-                    envs_mask = envs_idx[:, None]
-                    if gs.backend == gs.metal:
-                        envs_mask = envs_mask.expand_as(qs_data).contiguous()
-                    qs_data.masked_scatter_(envs_mask, qpos.view_as(qpos))
-                else:
-                    qpos = broadcast_tensor(qpos, gs.tc_float, qs_data.shape)
-                    torch.where(envs_idx[:, None], qpos, qs_data, out=qs_data)
-            else:
-                mask = (0, *qs_mask) if self.n_envs == 0 else indices_to_mask(envs_idx, *qs_mask, boolean_mask=False)
-                assign_indexed_tensor(data, mask, qpos)
-                if mask and isinstance(mask[0], torch.Tensor):
-                    envs_idx = mask[0].reshape((-1,))
+            mask = (0, *indices_to_mask(qs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, qs_idx)
+            assign_indexed_tensor(data, mask, qpos)
+            if mask and isinstance(mask[0], torch.Tensor):
+                envs_idx = mask[0].reshape((-1,))
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
