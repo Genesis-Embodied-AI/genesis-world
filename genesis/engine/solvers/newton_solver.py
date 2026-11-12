@@ -101,6 +101,7 @@ from .fem_solver import (
     func_cloth_assemble,
     func_cloth_energy,
     func_cloth_init_line_search,
+    func_cloth_pin_constraints,
     func_cloth_publish_contact,
     func_cloth_publish_rows,
     func_cloth_scale_direction,
@@ -1748,6 +1749,8 @@ def kernel_newton_direction(
     'func_pcg_iteration'), and the direction and the first step of the line search follow (see
     'func_start_line_search').
     """
+    if qd.static(newton_config.has_cloth):
+        func_cloth_pin_constraints(fem_state, ipc_state, fem_info)
     if qd.static(mpm_config.has_rigid_contact):
         func_assemble_mpm_rigid_coupling_terms(
             mpm_state, sparse_grid, rigid_dofs, rigid_links, dyn_state, mpm_info, dyn_info, rigid_config, newton_config

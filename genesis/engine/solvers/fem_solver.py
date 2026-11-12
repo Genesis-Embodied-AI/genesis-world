@@ -305,14 +305,19 @@ class FEMClothVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
     (see FEMVertices).
 
     `pos_tilde` is the position the vertex reaches without forces, x + dt v + dt^2 g, `is_fixed` whether a constraint
-    holds it at its target over the substep, its row staying fixed, and `pos_start` and `displacement` the start point
-    and the direction of the line search.
+    holds it fixed, its row staying fixed, and `pos_start` and `displacement` the start point and the direction of the
+    line search. A constrained vertex is pulled toward `target_pos` by the potential 1/2 `constraint_mass` |x -
+    target_pos|^2 while it is not fixed, `is_kinematic` saying that a hard constraint drives it without inertia (see
+    'kernel_cloth_predict').
     """
 
     pos_tilde: qd.Tensor = field((float, 3))
     is_fixed: qd.Tensor = field(bool)
     pos_start: qd.Tensor = field((float, 3))
     displacement: qd.Tensor = field((float, 3))
+    is_kinematic: qd.Tensor = field(bool)
+    target_pos: qd.Tensor = field((float, 3))
+    constraint_mass: qd.Tensor = field(float)
 
 
 class FEMState(Data, kind=DataKind.STATE):
@@ -491,6 +496,10 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     cloth_triangles: FEMClothTriangles = field(labels=CLOTH)
     cloth_quadratic_hinges: FEMClothQuadraticHinges = field(labels=QUADRATIC_BENDING)
     cloth_dihedral_hinges: FEMClothDihedralHinges = field(labels=DIHEDRAL_BENDING)
+    # The ratio to its mass of the stiffness of the pull of a hard constraint of the cloth on its vertex, and the
+    # distance from its target within which the vertex is held fixed (see 'kernel_cloth_predict')
+    cloth_constraint_strength_ratio: qd.Tensor = field(float, shape=(), labels=CLOTH)
+    cloth_constraint_pin_dist: qd.Tensor = field(float, shape=(), labels=CLOTH)
 
 
 # TODO: constraints set after a saved state survive 'scene.reset' (see MPMParticleConstraints in mpm_solver.py)
@@ -500,7 +509,8 @@ class FEMVertexConstraints(Data, kind=DataKind.INFO, shape=(VERTICES, ENVS)):
 
     A constrained vertex is set to `target_pos`, or pulled toward it by a critically damped spring of stiffness
     `stiffness` for a soft constraint, the target following the rigid link `link_idx` when there is one, at the offset
-    `link_offset_pos` from where the link stood at `link_init_quat`.
+    `link_offset_pos` from where the link stood at `link_init_quat`. A vertex of the cloth is driven toward its target
+    within the Newton solve instead (see 'kernel_cloth_predict').
     """
 
     is_constrained: qd.Tensor = field(bool)
@@ -624,6 +634,13 @@ class FEMData(Data):
                     linesearch_tau=solver._linesearch_tau,
                     # The elimination runs in single precision (see 'FEMCoarseSolve')
                     coarse_pivot_rtol=1e-4,
+                )
+            if config.has_cloth:
+                ipc_options = solver._scene.options.ipc
+                velocity_tol = solver._scene.options.newton.velocity_tol
+                info_values.update(
+                    cloth_constraint_strength_ratio=ipc_options.vertex_constraint_strength_ratio,
+                    cloth_constraint_pin_dist=ipc_options.vertex_constraint_fix_tol * velocity_tol * substep_dt,
                 )
             unused = {
                 IMPLICIT: not is_implicit,
@@ -1496,7 +1513,26 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             Stiffness k of the springs of a soft constraint, in N/m. Defaults to 0.0.
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
+
+        Notes
+        -----
+        The vertices of a cloth move toward their targets within its solve, so that its contact stops them short of
+        crossing a surface rather than letting them jump there. A hard constraint drives its vertices without inertia,
+        as stiffly as 'IPCOptions.vertex_constraint_strength_ratio' sets, and holds each one fixed once it reaches its
+        target within 'IPCOptions.vertex_constraint_fix_tol'. A target at the current position of its vertex holds it
+        fixed at once. A soft constraint is a spring of stiffness k, without the critical damping of the springs of the
+        other FEM entities. A vertex whose constraint is removed keeps the velocity of its last substep. A cloth vertex
+        cannot follow a link that moves within the same solve.
         """
+        if self.fem_config.has_cloth:
+            if stiffness < 0.0:
+                gs.raise_exception(f"The stiffness of a vertex constraint must be non-negative, got {stiffness}.")
+            rigid_solver = self._sim.rigid_solver
+            if link_idx >= 0 and rigid_solver.is_solved_in_global_newton and not rigid_solver.links[link_idx].is_fixed:
+                gs.raise_exception(
+                    f"A cloth vertex cannot follow the link '{rigid_solver.links[link_idx].name}', which moves within the "
+                    "same solve as the cloth."
+                )
         if self._use_implicit_solver and not self._enable_vertex_constraints:
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
@@ -3348,8 +3384,13 @@ def kernel_cloth_predict(
     """
     Predict the substep of the cloth, and start its Newton solve at the positions at the start of the substep.
 
-    Every vertex reaches x + dt v + dt^2 g without forces. A constrained vertex, held or pulled toward its target, is
-    held at its target over the substep instead (see 'func_constraint_target').
+    Every vertex reaches x + dt v + dt^2 g without forces. A constrained vertex is pulled toward its target (see
+    'func_constraint_target') within the solve, so that the contact stops it short of crossing a surface. A hard
+    constraint drives its vertex without inertia, by the stiffness 'cloth_constraint_strength_ratio' times its mass,
+    and holds it fixed once within 'cloth_constraint_pin_dist' of its target, from the start of the substep on or as
+    soon as an iteration brings it there (see 'func_cloth_pin_constraints'). A soft constraint of stiffness k adds the
+    spring dt^2 k to the inertia of its vertex. The constraints are read once per substep, so a vertex released keeps
+    the velocity of its last substep.
     """
     dt = fem_info.substep_dt[None]
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
@@ -3357,13 +3398,38 @@ def kernel_cloth_predict(
         fem_state.cloth_vertices.pos_tilde[i_v, i_b] = (
             pos + dt * fem_state.vertices.vel[i_v, i_b] + dt * dt * fem_info.gravity[i_b]
         )
+        is_kinematic = False
         is_fixed = False
+        target_pos = pos
+        constraint_mass = gs.qd_float(0.0)
         if qd.static(is_constrained):
             if vertex_constraints.is_constrained[i_v, i_b]:
-                is_fixed = True
-                pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
+                target_pos = func_constraint_target(i_v, i_b, links_state, vertex_constraints)
+                if vertex_constraints.is_soft_constraint[i_v, i_b]:
+                    constraint_mass = dt * dt * vertex_constraints.stiffness[i_v, i_b]
+                else:
+                    is_kinematic = True
+                    constraint_mass = fem_info.cloth_constraint_strength_ratio[None] * fem_info.vertices.mass[i_v]
+                    pin_dist = fem_info.cloth_constraint_pin_dist[None]
+                    is_fixed = (pos - target_pos).norm_sqr() < pin_dist * pin_dist
+        fem_state.cloth_vertices.is_kinematic[i_v, i_b] = is_kinematic
         fem_state.cloth_vertices.is_fixed[i_v, i_b] = is_fixed
+        fem_state.cloth_vertices.target_pos[i_v, i_b] = target_pos
+        fem_state.cloth_vertices.constraint_mass[i_v, i_b] = constraint_mass
         fem_state.vertices.pos_next[i_v, i_b] = pos
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_pin_constraints(fem_state: FEMState, ipc_state: IPCState, fem_info: FEMInfo):
+    """Hold fixed the vertices of the cloth that a hard constraint drives and that reached their target since the
+    previous iteration of the Newton solve, in the cloth and in the contact surface, before the assembly reads them."""
+    pin_dist = fem_info.cloth_constraint_pin_dist[None]
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        if fem_state.cloth_vertices.is_kinematic[i_v, i_b] and not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
+            pos_error = fem_state.vertices.pos_next[i_v, i_b] - fem_state.cloth_vertices.target_pos[i_v, i_b]
+            if pos_error.norm_sqr() < pin_dist * pin_dist:
+                fem_state.cloth_vertices.is_fixed[i_v, i_b] = True
+                ipc_state.vertices.is_fixed[i_v, i_b] = True
 
 
 @qd.func
@@ -3409,8 +3475,9 @@ def func_cloth_assemble(newton_rows: NewtonRows, fem_state: FEMState, fem_info: 
     'func_contact_assemble' in genesis/engine/solvers/ipc_contact.py).
 
     The potential is the inertia 1/2 m |x - x_tilde|^2 of every vertex and dt^2 times the energies of the membrane of
-    its triangles and of the bending of its hinges (see materials/FEM/cloth.py). A fixed vertex keeps an identity block
-    and a zero gradient, so that its row moves it by nothing.
+    its triangles and of the bending of its hinges (see materials/FEM/cloth.py). A constrained vertex adds the pull 1/2
+    m_c |x - x_c|^2 toward its target, a hard constraint replacing its inertia (see 'kernel_cloth_predict'). A fixed
+    vertex keeps an identity block and a zero gradient, so that its row moves it by nothing.
     """
     # See TRIANGLE_PAIRS at module level
     TRIANGLE_PAIRS = qd.static(6)
@@ -3427,9 +3494,14 @@ def func_cloth_assemble(newton_rows: NewtonRows, fem_state: FEMState, fem_info: 
         hessian = qd.Matrix.identity(gs.qd_float, 3)
         if not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
             mass = fem_info.vertices.mass[i_v]
+            if fem_state.cloth_vertices.is_kinematic[i_v, i_b]:
+                mass = gs.qd_float(0.0)
+            constraint_mass = fem_state.cloth_vertices.constraint_mass[i_v, i_b]
             x = fem_state.vertices.pos_next[i_v, i_b]
-            gradient = mass * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b])
-            hessian = mass * qd.Matrix.identity(gs.qd_float, 3)
+            gradient = mass * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b]) + constraint_mass * (
+                x - fem_state.cloth_vertices.target_pos[i_v, i_b]
+            )
+            hessian = (mass + constraint_mass) * qd.Matrix.identity(gs.qd_float, 3)
         newton_rows.rows_env[i_r] = i_b
         newton_rows.gradient[i_r] = gradient
         func_write_triplet(newton_rows.matrix, triplet_start + i_r - row_start, i_r, i_r, hessian, is_symmetric=True)
@@ -3527,9 +3599,13 @@ def func_cloth_energy(
             i_v = i_th % n_vertices
             if envs_mask[i_b] and not fem_state.cloth_vertices.is_fixed[i_v, i_b]:
                 i_b_key = i_b
+                mass = fem_info.vertices.mass[i_v]
+                if fem_state.cloth_vertices.is_kinematic[i_v, i_b]:
+                    mass = gs.qd_float(0.0)
                 x = fem_state.vertices.pos_next[i_v, i_b]
-                energy = (
-                    0.5 * fem_info.vertices.mass[i_v] * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b]).norm_sqr()
+                energy = 0.5 * mass * (x - fem_state.cloth_vertices.pos_tilde[i_v, i_b]).norm_sqr() + 0.5 * (
+                    fem_state.cloth_vertices.constraint_mass[i_v, i_b]
+                    * (x - fem_state.cloth_vertices.target_pos[i_v, i_b]).norm_sqr()
                 )
         func_add_by_key(i_b_key, energy, energies)
 

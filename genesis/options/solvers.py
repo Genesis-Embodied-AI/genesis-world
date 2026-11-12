@@ -928,6 +928,15 @@ class IPCOptions(Options):
         Whether building the scene checks that no cloth crosses itself or another cloth, and raises an exception naming
         the crossing edge and triangle. The solve cannot separate cloths that start crossed, so the check finds the
         mistake at once, at the cost of a slower build. Defaults to False.
+    vertex_constraint_strength_ratio : float, optional
+        Stiffness of the pull of a hard vertex constraint of the cloth toward its target, as a ratio of the mass of the
+        vertex (see `FEMEntity.set_vertex_constraints`). The pull moves the vertex within the solve, so that the contact
+        stops it short of crossing a surface. A larger ratio reaches a moving target in fewer iterations, at the cost of
+        a stiffer solve while the vertex is held off its target. Defaults to 1e4.
+    vertex_constraint_fix_tol : float, optional
+        Distance from its target within which a hard vertex constraint of the cloth holds the vertex fixed, as a
+        fraction of `NewtonOptions.velocity_tol` times the substep. A held vertex leaves the solve, which speeds it up.
+        A larger fraction holds the vertex sooner, at the cost of a larger offset from its target. Defaults to 0.2.
     """
 
     d_hat: PositiveFloat = 1e-2
@@ -945,6 +954,8 @@ class IPCOptions(Options):
     init_collision_pair_capacity: PositiveInt = 1000
     capacity_grow_factor: PositiveFloat = 1.2
     intersection_check: StrictBool = False
+    vertex_constraint_strength_ratio: PositiveFloat = 1e4
+    vertex_constraint_fix_tol: PositiveFloat = 0.2
 
     def model_post_init(self, context: Any) -> None:
         if not self.adaptive_kappa_grow > 1.0:
