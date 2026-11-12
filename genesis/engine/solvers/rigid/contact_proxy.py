@@ -19,6 +19,13 @@ forward kinematics of q1(x), its rotation columns carrying the right Jacobian Jr
 linearized increment of the proxy is eliminated (dg = S B dx + d_p, see 'func_proxy_maps' in genesis/engine/ipc/se3.py),
 the proxy moving on its own screw along the line search, its exact mismatch with its link bounded by the FK-defect
 limiter and checked at every trial.
+
+The line search globalizes the solve as CGQ's (see 'kernel_line_search_trial' in newton_solver.py): a merit weighs the
+mismatch against the energy once the proxies lie within the solve tolerance, a filter takes the steps toward feasibility
+otherwise, and a line search that runs out of trials with infeasible proxies enters the restoration. Over one iteration,
+the slack s of the constraint of every moving proxy joins the unknowns in the rows of the proxy (dg = S B dx + d_p + N s,
+the linearized constraint ending at s), priced by an augmented Lagrangian dual . s + s^T K s / 2, K a multiple of the
+spatial inertia of its link. The hard iterations resume afterwards, the duals taking K c of the mismatch left.
 """
 
 from typing import NamedTuple
@@ -42,9 +49,11 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import func_forward_kin
 from genesis.engine.solvers.rigid.data import DOFS, JOINTS, LINKS, QS, DynInfo, DynState, RigidInfo
 from genesis.utils.data import ENVS, Data, DataKind, Size, field
 
-# The proxies, one per link holding collision geoms, and their vertices
+# The proxies, one per link holding collision geoms, their vertices, and the entries of the filter of the line search,
+# one per Newton iteration of a substep at most
 PROXIES = Size("proxies")
 PROXY_VERTICES = Size("proxy_vertices")
+PROXY_FILTER = Size("proxy_filter")
 
 
 class ContactProxies(NamedTuple):
@@ -145,6 +154,12 @@ class IPCProxies(Data, kind=DataKind.SCRATCH, shape=(PROXIES, ENVS)):
     search, `direction_pos` and `direction_rot` the world twist the step moves it by, `path_limit` the mismatch with its
     link the step keeps within (see 'func_proxies_limit_step'), and `target_pos` the center of mass of its link at the
     current iterate, about which its link Jacobian measures the motion of the link.
+
+    `gradient` and `hessian_particular` are the gradient g of the energy in its rows at the iterate and the product
+    H d_p there, which the slope of the merit takes (see 'kernel_proxies_merit_probe' in newton_solver.py), and
+    `hessian` the block H_pp of its rows. The restoration (see the module docstring) prices the slack s of its
+    constraint by `dual` . s + s^T K s / 2, K the `metric`, `slack` holding the slack of the Newton direction and
+    `slack_search` that of the search direction of the conjugate gradient across its product.
     """
 
     constraint: qd.Tensor = field((float, 6))
@@ -157,6 +172,13 @@ class IPCProxies(Data, kind=DataKind.SCRATCH, shape=(PROXIES, ENVS)):
     direction_rot: qd.Tensor = field((float, 3))
     path_limit: qd.Tensor = field(float)
     target_pos: qd.Tensor = field((float, 3))
+    gradient: qd.Tensor = field((float, 6))
+    hessian_particular: qd.Tensor = field((float, 6))
+    hessian: qd.Tensor = field((float, (6, 6)))
+    metric: qd.Tensor = field((float, (6, 6)))
+    dual: qd.Tensor = field((float, 6))
+    slack: qd.Tensor = field((float, 6))
+    slack_search: qd.Tensor = field((float, 6))
 
 
 class IPCProxiesEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
@@ -164,11 +186,43 @@ class IPCProxiesEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     The scalars of the proxies of every environment: `max_residual` is the largest surface mismatch |c_t| + r |c_w| of
     its proxies at the current iterate, `trial_max_residual` at the trial point of its line search, and `fk_alpha` the
     step the FK-defect limiter allows (see 'func_proxies_limit_step').
+
+    The line search accepts a step by the rules of 'kernel_line_search_trial' in newton_solver.py: `merit_rho` and
+    `merit_slope` are the weight and the slope of the merit E + rho h once `is_merit_active`, `is_merit_probe` asks for
+    them and `is_merit_evaluated` records that they were asked for in the iteration. `n_filter` entries of the filter
+    (see IPCProxiesFilter) hold, `is_filter_retry` forcing the filter on the next iteration. `is_restoration` prices the
+    slack of the constraints in the iteration, `is_restoration_entered` holds over the iteration that enters it,
+    `is_hard_probe` over the hard iterations that follow it until they converge, and `is_dual_update` asks the next
+    iteration to update the duals. `penalty` is the price of the slack that the energy at the start point holds, and
+    `penalty_trial` that of the trial point. `is_displacement_converged` says whether the Newton direction moves
+    everything by less than the tolerance, the step converging only once the FK-defect limiter keeps it whole.
     """
 
     max_residual: qd.Tensor = field(float)
     trial_max_residual: qd.Tensor = field(float)
     fk_alpha: qd.Tensor = field(float)
+    merit_rho: qd.Tensor = field(float)
+    merit_slope: qd.Tensor = field(float)
+    is_merit_active: qd.Tensor = field(bool)
+    is_merit_probe: qd.Tensor = field(bool)
+    is_merit_evaluated: qd.Tensor = field(bool)
+    n_filter: qd.Tensor = field(int)
+    is_filter_retry: qd.Tensor = field(bool)
+    is_restoration: qd.Tensor = field(bool)
+    is_restoration_entered: qd.Tensor = field(bool)
+    is_hard_probe: qd.Tensor = field(bool)
+    is_dual_update: qd.Tensor = field(bool)
+    penalty: qd.Tensor = field(float)
+    penalty_trial: qd.Tensor = field(float)
+    is_displacement_converged: qd.Tensor = field(bool)
+
+
+class IPCProxiesFilter(Data, kind=DataKind.SCRATCH, shape=(PROXY_FILTER, ENVS)):
+    """The filter of the line search of every environment, pairs of the largest surface mismatch and of the energy of
+    the iterates it accepted while restoring the feasibility of its proxies, one per Newton iteration at most."""
+
+    residual: qd.Tensor = field(float)
+    energy: qd.Tensor = field(float)
 
 
 class ProxyKinematics(Data, kind=DataKind.SCRATCH):
@@ -613,33 +667,67 @@ def func_proxy_restrict(
 @qd.func(requires_top_level=True)
 def func_proxies_init_substep(
     x: qd.Tensor,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
     dyn_state: DynState,
-    proxy_dofs_info: IPCProxyDofsInfo,
     proxies_info: IPCProxiesInfo,
+    proxy_dofs_info: IPCProxyDofsInfo,
+    dyn_info: DynInfo,
     rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    penalty_ratio: float,
 ):
     """
     Start the dofs of the entities with moving proxies at rest, x = -dt v0, where the configuration they reach is the one
-    at the start of the substep (see the module docstring), and constrain the links of the proxies.
+    at the start of the substep (see the module docstring), constrain the links of the proxies, and start the
+    globalization of the line search afresh (see IPCProxiesEnvs).
 
     The proxies start at the poses their links held when the last substep committed them, so that their constraint
     starts within its solve tolerance, where the FK-defect limiter certifies a full step. The constraint of the links
-    keeps them off the midpoint rule of the free bodies, whose position follows another map of x.
+    keeps them off the midpoint rule of the free bodies, whose position follows another map of x. The metric of the
+    restoration of a proxy is `penalty_ratio` times the spatial inertia of its link about its center of mass, its dual
+    starting at zero.
     """
     dt = rigid_info.substep_dt[None]
+    EPS = rigid_info.EPS[None]
     for i_d, i_b in qd.ndrange(*x.shape):
         if proxy_dofs_info.body_idx[i_d] >= 0:
             x[i_d, i_b] = -dt * dyn_state.dofs.vel[i_d, i_b]
     for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], x.shape[1]):
         if not proxies_info.is_fixed[i_p]:
             i_l = proxies_info.link_idx[i_p]
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             dyn_state.links.is_constrained[i_l, i_b] = True
+            rotation = gu.qd_quat_to_R(dyn_state.links.i_quat[i_l, i_b], EPS)
+            inertia = rotation @ dyn_info.links.inertial_i[I_l] @ rotation.transpose()
+            metric = qd.Matrix.zero(gs.qd_float, 6, 6)
+            for k, j in qd.static(qd.ndrange(3, 3)):
+                if qd.static(k == j):
+                    metric[k, j] = penalty_ratio * dyn_info.links.inertial_mass[I_l]
+                metric[3 + k, 3 + j] = penalty_ratio * inertia[k, j]
+            proxies.metric[i_p, i_b] = metric
+            proxies.dual[i_p, i_b] = qd.Vector.zero(gs.qd_float, 6)
+            proxies.slack[i_p, i_b] = qd.Vector.zero(gs.qd_float, 6)
+    for i_b in range(x.shape[1]):
+        proxies_envs.is_merit_active[i_b] = False
+        proxies_envs.is_merit_probe[i_b] = False
+        proxies_envs.is_merit_evaluated[i_b] = False
+        proxies_envs.n_filter[i_b] = 0
+        proxies_envs.is_filter_retry[i_b] = False
+        proxies_envs.is_restoration[i_b] = False
+        proxies_envs.is_restoration_entered[i_b] = False
+        proxies_envs.is_hard_probe[i_b] = False
+        proxies_envs.is_dual_update[i_b] = False
+        proxies_envs.penalty[i_b] = 0.0
+        proxies_envs.penalty_trial[i_b] = 0.0
 
 
 @qd.func(requires_top_level=True)
 def func_proxies_prepare(
     vertex_start: int,
+    envs_mask: qd.Tensor,
     x: qd.Tensor,
+    energy_start: qd.Tensor,
     newton_rows: NewtonRows,
     ipc_state: IPCState,
     proxies_envs: IPCProxiesEnvs,
@@ -658,12 +746,18 @@ def func_proxies_prepare(
     motions of its dofs, the constraint of every moving proxy and its maps (see 'func_proxy_maps' in
     genesis/engine/ipc/se3.py), the largest surface mismatch of every environment, and the rows of the proxies, whose
     gradients the contact adds to, published for their vertices from the contact vertex `vertex_start` on.
+
+    The duals of the environments selected that ask for it take K c (see IPCProxiesEnvs), and their energy at the start
+    point in `energy_start` takes the price of the slack c of their constraints over the restoration alone.
     """
     func_proxy_kinematics(x, kinematics, dyn_state, dyn_info, rigid_info, rigid_config, True)
     n_proxies = proxies_info.link_idx.shape[0]
     n_envs = proxies_state.pos.shape[1]
     for i_b in range(n_envs):
         proxies_envs.max_residual[i_b] = 0.0
+        if envs_mask[i_b]:
+            energy_start[i_b] = energy_start[i_b] - proxies_envs.penalty[i_b]
+            proxies_envs.penalty[i_b] = 0.0
     for i_p, i_b in qd.ndrange(n_proxies, n_envs):
         i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
         for k in qd.static(range(2)):
@@ -688,9 +782,21 @@ def func_proxies_prepare(
             proxies.particular[i_p, i_b] = particular
             residual = func_surface_residual(constraint, proxies_state.surface_radius[i_p, i_b])
             qd.atomic_max(proxies_envs.max_residual[i_b], residual)
+            if envs_mask[i_b]:
+                metric = proxies.metric[i_p, i_b]
+                if proxies_envs.is_dual_update[i_b]:
+                    proxies.dual[i_p, i_b] = proxies.dual[i_p, i_b] + metric @ constraint
+                if proxies_envs.is_restoration[i_b]:
+                    penalty = proxies.dual[i_p, i_b].dot(constraint) + 0.5 * constraint.dot(metric @ constraint)
+                    qd.atomic_add(proxies_envs.penalty[i_b], penalty)
+                    qd.atomic_add(energy_start[i_b], penalty)
     for i_pv, i_b in qd.ndrange(proxy_vertices_info.proxy_idx.shape[0], n_envs):
         i_p = proxy_vertices_info.proxy_idx[i_pv]
         ipc_state.vertices.row[vertex_start + i_pv, i_b] = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+    for i_b in range(n_envs):
+        if envs_mask[i_b]:
+            proxies_envs.is_dual_update[i_b] = False
+            proxies_envs.is_restoration_entered[i_b] = False
 
 
 @qd.func
@@ -742,6 +848,7 @@ def func_proxies_link_stiffness(
     for i_p, i_b in qd.ndrange(n_proxies, n_envs):
         if not proxies_info.is_fixed[i_p]:
             i_l = proxies_info.link_idx[i_p]
+            proxies.hessian[i_p, i_b] = link_stiffness[i_l, i_b]
             lever_skew = gu.qd_vec_to_skew(dyn_state.links.i_pos[i_l, i_b])
             tangent_rotation = proxies.tangent_rotation[i_p, i_b]
             lift = qd.Matrix.identity(gs.qd_float, 6)
@@ -757,6 +864,7 @@ def func_proxies_reduce_gradient(
     p_dot_ap: qd.Tensor,
     dofs_gradient: qd.Tensor,
     newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
     proxies: IPCProxies,
     kinematics: ProxyKinematics,
     proxies_info: IPCProxiesInfo,
@@ -765,11 +873,13 @@ def func_proxies_reduce_gradient(
 ):
     """
     Reduce the gradient of the rows and of the dofs of every environment selected to the unknowns of the Newton solve,
-    P^T (g + H d_p), d_p the particular step of the proxies, the rows of the proxies then holding no unknown.
+    P^T (g + H d_p), d_p the particular step of the proxies, the rows of the proxies holding the slack of their
+    constraints over the restoration alone (see the module docstring), no unknown otherwise.
 
     The product H d_p of the rows goes through the search direction and its product (see 'func_rows_matvec' in
     numerics/newton_rows.py), which the conjugate gradient starts afresh afterwards, and `p_dot_ap` takes the energy form
-    of the product along. The wrench of a proxy, its gradient plus its part of H d_p, restricts to `dofs_gradient`.
+    of the product along. The wrench of a proxy, its gradient plus its part of H d_p, restricts to `dofs_gradient`, and
+    over the restoration to its slack, N^T (g + H d_p) + dual.
     """
     n_proxies = proxies_info.link_idx.shape[0]
     n_envs = proxies.constraint.shape[1]
@@ -792,35 +902,68 @@ def func_proxies_reduce_gradient(
             if envs_mask[i_b]:
                 newton_rows.gradient[i_r] = newton_rows.gradient[i_r] + newton_rows.Ap[i_r]
     for i_p, i_b in qd.ndrange(n_proxies, n_envs):
+        i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+        slack_force = qd.Vector.zero(gs.qd_float, 3)
+        slack_torque = qd.Vector.zero(gs.qd_float, 3)
         if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
-            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
-            func_proxy_restrict(
-                i_p,
-                i_b,
-                newton_rows.gradient[i_r] + newton_rows.Ap[i_r],
-                newton_rows.gradient[i_r + 1] + newton_rows.Ap[i_r + 1],
-                dofs_gradient,
-                proxies,
-                kinematics,
-                proxies_info,
-                dyn_info,
-                rigid_config,
+            gradient_pos = newton_rows.gradient[i_r]
+            gradient_rot = newton_rows.gradient[i_r + 1]
+            product_pos = newton_rows.Ap[i_r]
+            product_rot = newton_rows.Ap[i_r + 1]
+            proxies.gradient[i_p, i_b] = qd.Vector(
+                [gradient_pos[0], gradient_pos[1], gradient_pos[2], gradient_rot[0], gradient_rot[1], gradient_rot[2]]
             )
-    for i_r in range(row_start, row_end):
-        newton_rows.gradient[i_r] = qd.Vector.zero(gs.qd_float, 3)
+            proxies.hessian_particular[i_p, i_b] = qd.Vector(
+                [product_pos[0], product_pos[1], product_pos[2], product_rot[0], product_rot[1], product_rot[2]]
+            )
+            force = gradient_pos + product_pos
+            torque = gradient_rot + product_rot
+            func_proxy_restrict(
+                i_p, i_b, force, torque, dofs_gradient, proxies, kinematics, proxies_info, dyn_info, rigid_config
+            )
+            if proxies_envs.is_restoration[i_b]:
+                dual = proxies.dual[i_p, i_b]
+                slack_force = force + qd.Vector([dual[0], dual[1], dual[2]])
+                slack_torque = proxies.normal_rotation[i_p, i_b].transpose() @ torque + qd.Vector(
+                    [dual[3], dual[4], dual[5]]
+                )
+        newton_rows.gradient[i_r] = slack_force
+        newton_rows.gradient[i_r + 1] = slack_torque
     for i_r in range(n_rows):
         newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
         newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.func(requires_top_level=True)
-def func_proxies_mask_rows(newton_rows: NewtonRows):
-    """Zero the preconditioner of the rows of the proxies, which hold no unknown of the conjugate gradient, so that their
-    residual and their search direction stay zero."""
-    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
-    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
-    for i_r in range(row_start, row_end):
-        newton_rows.jacobi[i_r] = qd.Matrix.zero(gs.qd_float, 3, 3)
+def func_proxies_precondition_rows(
+    newton_rows: NewtonRows, proxies_envs: IPCProxiesEnvs, proxies: IPCProxies, proxies_info: IPCProxiesInfo
+):
+    """
+    Set the preconditioner of the rows of the proxies: over the restoration, the inverses of the diagonal blocks of the
+    Hessian N^T H_pp N + K of the slack of a moving proxy, and zero otherwise, the rows holding no unknown of the
+    conjugate gradient, so that their residual and their search direction stay zero.
+    """
+    n_proxies = proxies_info.link_idx.shape[0]
+    for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
+        i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+        jacobi_pos = qd.Matrix.zero(gs.qd_float, 3, 3)
+        jacobi_rot = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if proxies_envs.is_restoration[i_b] and not proxies_info.is_fixed[i_p]:
+            hessian = proxies.hessian[i_p, i_b]
+            metric = proxies.metric[i_p, i_b]
+            normal_rotation = proxies.normal_rotation[i_p, i_b]
+            block_pos = qd.Matrix.zero(gs.qd_float, 3, 3)
+            block_rot = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for k, j in qd.static(qd.ndrange(3, 3)):
+                block_pos[k, j] = hessian[k, j] + metric[k, j]
+                block_rot[k, j] = hessian[3 + k, 3 + j]
+            block_rot = normal_rotation.transpose() @ block_rot @ normal_rotation
+            for k, j in qd.static(qd.ndrange(3, 3)):
+                block_rot[k, j] = block_rot[k, j] + metric[3 + k, 3 + j]
+            jacobi_pos = block_pos.inverse()
+            jacobi_rot = block_rot.inverse()
+        newton_rows.jacobi[i_r] = jacobi_pos
+        newton_rows.jacobi[i_r + 1] = jacobi_rot
 
 
 @qd.func(requires_top_level=True)
@@ -828,14 +971,18 @@ def func_proxies_expand(
     envs_mask: qd.Tensor,
     dofs_p: qd.Tensor,
     newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
     proxies: IPCProxies,
     kinematics: ProxyKinematics,
     proxies_info: IPCProxiesInfo,
     dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
-    """Write in the rows of every moving proxy of the environments selected the twist S B p of the search direction
-    `dofs_p` of the dofs, which the product of the rows carries to the other rows (see 'func_proxies_restrict')."""
+    """
+    Write in the rows of every moving proxy of the environments selected the twist S B p of the search direction
+    `dofs_p` of the dofs, plus N y over the restoration, y the slack of the search direction in the rows, which the
+    product of the rows carries to the other rows (see 'func_proxies_restrict').
+    """
     n_proxies = proxies_info.link_idx.shape[0]
     for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
         if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
@@ -843,6 +990,14 @@ def func_proxies_expand(
             twist_pos, twist_rot = func_proxy_expand(
                 i_p, i_b, dofs_p, proxies, kinematics, proxies_info, dyn_info, rigid_config
             )
+            if proxies_envs.is_restoration[i_b]:
+                slack_pos = newton_rows.p[i_r]
+                slack_rot = newton_rows.p[i_r + 1]
+                proxies.slack_search[i_p, i_b] = qd.Vector(
+                    [slack_pos[0], slack_pos[1], slack_pos[2], slack_rot[0], slack_rot[1], slack_rot[2]]
+                )
+                twist_pos = twist_pos + slack_pos
+                twist_rot = twist_rot + proxies.normal_rotation[i_p, i_b] @ slack_rot
             newton_rows.p[i_r] = twist_pos
             newton_rows.p[i_r + 1] = twist_rot
 
@@ -852,35 +1007,45 @@ def func_proxies_restrict(
     envs_mask: qd.Tensor,
     dofs_ap: qd.Tensor,
     newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
     proxies: IPCProxies,
     kinematics: ProxyKinematics,
     proxies_info: IPCProxiesInfo,
     dyn_info: DynInfo,
     rigid_config: qd.template(),
 ):
-    """Restrict the product of the rows of every moving proxy of the environments selected to `dofs_ap`, B^T S^T (H P p),
-    and clear the rows of the proxies, which hold no unknown (see 'func_proxies_expand')."""
+    """
+    Restrict the product of the rows of every moving proxy of the environments selected to `dofs_ap`, B^T S^T (H P p),
+    and over the restoration to the slack in its rows, N^T (H P p) + K y with y back in the search direction, the rows of
+    the proxies being cleared otherwise, as they hold no unknown (see 'func_proxies_expand').
+    """
     n_proxies = proxies_info.link_idx.shape[0]
     for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
-        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+        if envs_mask[i_b]:
             i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
-            func_proxy_restrict(
-                i_p,
-                i_b,
-                newton_rows.Ap[i_r],
-                newton_rows.Ap[i_r + 1],
-                dofs_ap,
-                proxies,
-                kinematics,
-                proxies_info,
-                dyn_info,
-                rigid_config,
-            )
-    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES))]
-    row_end = newton_rows.segments_start[qd.static(int(NewtonSegment.PROXIES)) + 1]
-    for i_r in range(row_start, row_end):
-        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
-        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+            product_pos = qd.Vector.zero(gs.qd_float, 3)
+            product_rot = qd.Vector.zero(gs.qd_float, 3)
+            slack_pos = qd.Vector.zero(gs.qd_float, 3)
+            slack_rot = qd.Vector.zero(gs.qd_float, 3)
+            if not proxies_info.is_fixed[i_p]:
+                force = newton_rows.Ap[i_r]
+                torque = newton_rows.Ap[i_r + 1]
+                func_proxy_restrict(
+                    i_p, i_b, force, torque, dofs_ap, proxies, kinematics, proxies_info, dyn_info, rigid_config
+                )
+                if proxies_envs.is_restoration[i_b]:
+                    slack = proxies.slack_search[i_p, i_b]
+                    product = proxies.metric[i_p, i_b] @ slack
+                    slack_pos = qd.Vector([slack[0], slack[1], slack[2]])
+                    slack_rot = qd.Vector([slack[3], slack[4], slack[5]])
+                    product_pos = force + qd.Vector([product[0], product[1], product[2]])
+                    product_rot = proxies.normal_rotation[i_p, i_b].transpose() @ torque + qd.Vector(
+                        [product[3], product[4], product[5]]
+                    )
+            newton_rows.Ap[i_r] = product_pos
+            newton_rows.Ap[i_r + 1] = product_rot
+            newton_rows.p[i_r] = slack_pos
+            newton_rows.p[i_r + 1] = slack_rot
 
 
 @qd.func(requires_top_level=True)
@@ -888,6 +1053,8 @@ def func_proxies_init_line_search(
     envs_mask: qd.Tensor,
     max_displacement: qd.Tensor,
     dofs_dx: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
     proxies: IPCProxies,
     proxies_state: IPCProxiesState,
     kinematics: ProxyKinematics,
@@ -897,12 +1064,14 @@ def func_proxies_init_line_search(
 ):
     """
     Set the Newton direction of every moving proxy of the environments selected, S B dx + d_p from the direction `dofs_dx`
-    of the dofs (see the module docstring), from its pose at the start of the line search.
+    of the dofs (see the module docstring), plus N s over the restoration, s the slack minus the solution of its rows,
+    from its pose at the start of the line search.
 
     The surface displacement |dt| + r |dw| of a proxy adds to the entry of its environment in `max_displacement`, the
     world displacement that measures the convergence of the rigid links.
     """
-    for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
+    n_proxies = proxies_info.link_idx.shape[0]
+    for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
         if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
             twist_pos, twist_rot = func_proxy_expand(
                 i_p, i_b, dofs_dx, proxies, kinematics, proxies_info, dyn_info, rigid_config
@@ -910,6 +1079,15 @@ def func_proxies_init_line_search(
             particular = proxies.particular[i_p, i_b]
             direction_pos = twist_pos + qd.Vector([particular[0], particular[1], particular[2]])
             direction_rot = twist_rot + qd.Vector([particular[3], particular[4], particular[5]])
+            slack = qd.Vector.zero(gs.qd_float, 6)
+            if proxies_envs.is_restoration[i_b]:
+                i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+                slack_pos = -newton_rows.solution[i_r]
+                slack_rot = -newton_rows.solution[i_r + 1]
+                slack = qd.Vector([slack_pos[0], slack_pos[1], slack_pos[2], slack_rot[0], slack_rot[1], slack_rot[2]])
+                direction_pos = direction_pos + slack_pos
+                direction_rot = direction_rot + proxies.normal_rotation[i_p, i_b] @ slack_rot
+            proxies.slack[i_p, i_b] = slack
             proxies.direction_pos[i_p, i_b] = direction_pos
             proxies.direction_rot[i_p, i_b] = direction_rot
             proxies.pos_iter[i_p, i_b] = proxies_state.pos[i_p, i_b]
@@ -986,7 +1164,8 @@ def func_proxies_limit_step(
                 j_l = dyn_info.links.parent_idx[J_l]
             rate_proxy = proxies.direction_rot[i_p, i_b].norm()
             curvature = rate_proxy * rate_proxy * radius + 2.0 * omega * speed + extra
-            alpha = func_fk_defect_prefix_cap(h0, 0.0, curvature, limit)
+            h_slack = func_surface_residual(proxies.slack[i_p, i_b], radius)
+            alpha = func_fk_defect_prefix_cap(h0, h_slack, curvature, limit)
             qd.atomic_min(proxies_envs.fk_alpha[i_b], alpha)
 
 
@@ -1033,6 +1212,100 @@ def func_proxies_publish_sweep(
             ipc_state.vertices.displacement[i_v, i_b] = (
                 direction_pos + gu.qd_transform_by_quat(lever, gu.qd_rotvec_to_quat(direction_rot)) - lever
             )
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_merit_slope(
+    envs_mask: qd.Tensor,
+    dofs_dx: qd.Tensor,
+    newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    kinematics: ProxyKinematics,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Add to the slope of the merit of every environment selected (see IPCProxiesEnvs) the terms of its moving proxies in
+    the derivative g . d of the energy along the Newton direction d, from the reduced slope over its unknowns.
+
+    A proxy adds g_p . d_p, d_p its own direction, takes off (g_p + H d_p) . S B dx, the part of its wrench that the
+    reduced gradient of the dofs holds, and takes off d_p . (H d_c), the part of H d_p that the reduced gradient of
+    the other rows holds, the product of the rows with the direction d_c of the other rows standing in their search
+    direction.
+    """
+    n_proxies = proxies_info.link_idx.shape[0]
+    for i_p, i_b in qd.ndrange(n_proxies, proxies.constraint.shape[1]):
+        if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
+            i_r = func_proxy_row(i_p, i_b, n_proxies, newton_rows)
+            twist_pos, twist_rot = func_proxy_expand(
+                i_p, i_b, dofs_dx, proxies, kinematics, proxies_info, dyn_info, rigid_config
+            )
+            gradient = proxies.gradient[i_p, i_b]
+            wrench = gradient + proxies.hessian_particular[i_p, i_b]
+            particular = proxies.particular[i_p, i_b]
+            direction_pos = proxies.direction_pos[i_p, i_b]
+            direction_rot = proxies.direction_rot[i_p, i_b]
+            product_pos = newton_rows.Ap[i_r]
+            product_rot = newton_rows.Ap[i_r + 1]
+            slope = gs.qd_float(0.0)
+            for k in qd.static(range(3)):
+                slope = (
+                    slope
+                    + gradient[k] * direction_pos[k]
+                    + gradient[3 + k] * direction_rot[k]
+                    - wrench[k] * twist_pos[k]
+                    - wrench[3 + k] * twist_rot[k]
+                    - particular[k] * product_pos[k]
+                    - particular[3 + k] * product_rot[k]
+                )
+            qd.atomic_add(proxies_envs.merit_slope[i_b], slope)
+
+
+@qd.func(requires_top_level=True)
+def func_proxies_init_merit(
+    envs_mask: qd.Tensor,
+    energy_start: qd.Tensor,
+    proxies_envs: IPCProxiesEnvs,
+    ipc_state: IPCState,
+    proxies_info: IPCProxiesInfo,
+    solve_tolerance: float,
+    residual_floor: float,
+    energy_roundoff: float,
+    has_ccd_partition: qd.template(),
+):
+    """
+    Set the merit E + rho h of every environment selected from the slope g . d of its energy in `merit_slope`, h the
+    largest surface mismatch of its proxies, as the merit of CGQ.
+
+    The merit holds once h lies in (`residual_floor`, `solve_tolerance`], the step decreases it, and the slope exceeds
+    the round-off of the energy, `energy_roundoff` (1 + |E0|). Its weight rho makes its slope g . d - rho h_rate as
+    negative as g . d is positive, h_rate the decrease of h over the step, h times the scale of the direction of the
+    proxies (the smaller of the FK-defect step and of the steps of their contact bodies).
+    """
+    for i_b in range(proxies_envs.merit_slope.shape[0]):
+        if envs_mask[i_b]:
+            scale = proxies_envs.fk_alpha[i_b]
+            if qd.static(has_ccd_partition):
+                for i_p in range(proxies_info.link_idx.shape[0]):
+                    if not proxies_info.is_fixed[i_p]:
+                        i_body = proxies_info.body_idx[i_p]
+                        scale = qd.min(scale, ipc_state.bodies.alpha[i_body, i_b])
+            h0 = proxies_envs.max_residual[i_b]
+            h_rate = scale * h0
+            slope = proxies_envs.merit_slope[i_b]
+            slope_floor = energy_roundoff * (1.0 + qd.abs(energy_start[i_b]))
+            rho = gs.qd_float(0.0)
+            is_merit_active = (
+                h0 > residual_floor and h0 <= solve_tolerance and h_rate > residual_floor and slope > slope_floor
+            )
+            if is_merit_active:
+                rho = (slope + qd.max(slope_floor, qd.abs(slope))) / h_rate
+                proxies_envs.merit_slope[i_b] = slope - rho * h_rate
+            proxies_envs.merit_rho[i_b] = rho
+            proxies_envs.is_merit_active[i_b] = is_merit_active
+            proxies_envs.is_merit_probe[i_b] = False
 
 
 @qd.func(requires_top_level=True)
@@ -1089,12 +1362,14 @@ def func_proxies_trial_residual(
 
     A mismatch beyond the path limit of its proxy, past the relative round-off `guard_tolerance`, breaks the certificate
     of the FK-defect limiter (see 'func_proxies_limit_step'): it sets the flag `guard_errno` in the errno of its
-    environment, never a shorter step.
+    environment, never a shorter step. Over the restoration, the price of the slack c of the constraints at the trial
+    point adds up in the environment (see IPCProxiesEnvs).
     """
     func_proxy_kinematics(x, kinematics, dyn_state, dyn_info, rigid_info, rigid_config, False)
     for i_b in range(proxies_envs.trial_max_residual.shape[0]):
         if envs_mask[i_b]:
             proxies_envs.trial_max_residual[i_b] = 0.0
+            proxies_envs.penalty_trial[i_b] = 0.0
     for i_p, i_b in qd.ndrange(proxies_info.link_idx.shape[0], proxies.constraint.shape[1]):
         if envs_mask[i_b] and not proxies_info.is_fixed[i_p]:
             i_l = proxies_info.link_idx[i_p]
@@ -1112,3 +1387,7 @@ def func_proxies_trial_residual(
             path_limit = proxies.path_limit[i_p, i_b]
             if residual > path_limit + guard_tolerance * (1.0 + path_limit):
                 qd.atomic_or(errno[i_b], guard_errno)
+            if proxies_envs.is_restoration[i_b]:
+                metric = proxies.metric[i_p, i_b]
+                penalty = proxies.dual[i_p, i_b].dot(constraint) + 0.5 * constraint.dot(metric @ constraint)
+                qd.atomic_add(proxies_envs.penalty_trial[i_b], penalty)

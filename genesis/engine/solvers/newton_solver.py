@@ -40,9 +40,11 @@ from genesis.engine.numerics.newton_rows import (
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
 from genesis.engine.solvers.rigid.contact_proxy import (
     PROXIES,
+    PROXY_FILTER,
     PROXY_VERTICES,
     IPCProxies,
     IPCProxiesEnvs,
+    IPCProxiesFilter,
     IPCProxiesInfo,
     IPCProxiesState,
     IPCProxyDofsInfo,
@@ -51,10 +53,12 @@ from genesis.engine.solvers.rigid.contact_proxy import (
     build_contact_proxies,
     func_proxies_expand,
     func_proxies_init_line_search,
+    func_proxies_init_merit,
     func_proxies_init_substep,
     func_proxies_limit_step,
     func_proxies_link_stiffness,
-    func_proxies_mask_rows,
+    func_proxies_merit_slope,
+    func_proxies_precondition_rows,
     func_proxies_prepare,
     func_proxies_publish_contact,
     func_proxies_publish_sweep,
@@ -169,6 +173,16 @@ class NewtonFailure(IntEnum):
     NON_FINITE = 2
 
 
+class LineSearchState(IntEnum):
+    """The state of the line search of the Newton iteration over all environments, the largest of theirs: it stops, it
+    runs on, or it runs on once the slope of the merit of some environment is evaluated (see
+    'kernel_proxies_merit_probe')."""
+
+    STOPPED = 0
+    RUNNING = 1
+    MERIT_PROBE = 2
+
+
 class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     """
     The progress and the scalars of the Newton solve of every environment.
@@ -235,6 +249,18 @@ class NewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
     proxy_path_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
     proxy_solve_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
     proxy_guard_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    # The globalization of the line search with moving proxies, as CGQ's (see 'kernel_line_search_trial'): the ratio of
+    # the metric of the restoration to the spatial inertia, (dt / tau)^2 with tau = 0.1 dt, the sufficient decrease of
+    # the merit and the margin of the filter, the relative round-off of the energy and of the merit, the relative change
+    # of the energy below which an exhausted line search stagnates, and the mismatch below which the merit and the filter
+    # see a feasible proxy, max(1e-12, 1e-6 * proxy_solve_tolerance)
+    proxy_penalty_ratio: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_armijo: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_filter_margin: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_energy_roundoff: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_merit_roundoff: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_stagnation_tolerance: qd.Tensor = field(float, labels=PROXIES_LABEL)
+    proxy_residual_floor: qd.Tensor = field(float, labels=PROXIES_LABEL)
 
 
 class NewtonConfig(Config):
@@ -281,6 +307,7 @@ class NewtonData(Data):
     proxies_envs: IPCProxiesEnvs = field(labels=PROXIES_LABEL)
     proxy_kinematics: ProxyKinematics = field(labels=PROXIES_LABEL)
     proxy_dofs_info: IPCProxyDofsInfo = field(labels=PROXIES_LABEL)
+    proxies_filter: IPCProxiesFilter = field(labels=PROXIES_LABEL)
 
 
 class NewtonSolver(Solver):
@@ -458,6 +485,7 @@ class NewtonSolver(Solver):
             has_adaptive_kappa=has_cloth and ipc_options.adaptive_kappa_mode == "per-vertex",
             is_kappa_tick_newton=ipc_options.adaptive_kappa_tick == "newton",
         )
+        proxy_solve_tolerance = min(self._options.velocity_tol * self._sim.substep_dt, 0.01 * ipc_options.d_hat)
         self.data_manager = NewtonData(
             sizes={
                 "envs": self._B,
@@ -473,6 +501,7 @@ class NewtonSolver(Solver):
                 BODIES: int(surface.vertices_body_idx.max(initial=-1)) + 1 if has_cloth else 0,
                 PROXIES: len(proxies.links_idx) if proxies is not None else 0,
                 PROXY_VERTICES: len(proxies.vertices_proxy_idx) if proxies is not None else 0,
+                PROXY_FILTER: self._options.max_iterations if proxies is not None else 0,
             },
             values=dict(
                 newton_info=dict(
@@ -483,10 +512,15 @@ class NewtonSolver(Solver):
                     pcg_max_iterations=self._options.pcg_max_iterations,
                     pcg_tol=self._options.pcg_tol,
                     proxy_path_tolerance=0.1 * ipc_options.d_hat,
-                    proxy_solve_tolerance=min(
-                        self._options.velocity_tol * self._sim.substep_dt, 0.01 * ipc_options.d_hat
-                    ),
+                    proxy_solve_tolerance=proxy_solve_tolerance,
                     proxy_guard_tolerance=1e-10,
+                    proxy_penalty_ratio=100.0,
+                    proxy_armijo=1e-4,
+                    proxy_filter_margin=1e-4,
+                    proxy_energy_roundoff=1e-12,
+                    proxy_merit_roundoff=64.0 * float(np.finfo(gs.np_float).eps),
+                    proxy_stagnation_tolerance=1e-10,
+                    proxy_residual_floor=max(1e-12, 1e-6 * proxy_solve_tolerance),
                 ),
                 ipc_info=dict(
                     substep_dt=self._sim.substep_dt,
@@ -631,6 +665,7 @@ class NewtonSolver(Solver):
                     "proxies",
                     "proxies_envs",
                     "proxy_kinematics",
+                    "proxies_filter",
                 ):
                     yield from iter_data(self.data_manager, name)
             yield from iter_data(self.data_manager, "errno", DataKind.STATE)
@@ -678,7 +713,7 @@ class NewtonSolver(Solver):
         proxies_state, proxies = self.data_manager.proxies_state, self.data_manager.proxies
         proxies_envs, proxy_kinematics = self.data_manager.proxies_envs, self.data_manager.proxy_kinematics
         proxies_info, proxy_vertices_info = self.data_manager.proxies_info, self.data_manager.proxy_vertices_info
-        proxy_dofs_info = self.data_manager.proxy_dofs_info
+        proxy_dofs_info, proxies_filter = self.data_manager.proxy_dofs_info, self.data_manager.proxies_filter
         args_info = (
             mpm_info,
             fem_info,
@@ -770,13 +805,16 @@ class NewtonSolver(Solver):
             proxies_state,
             proxies,
             proxies_envs,
+            proxies_filter,
             proxy_kinematics,
             self.rigid_dofs,
             self.rigid_links,
             dyn_state,
             constraint_state,
         )
-        kernel_init_substep(self.newton_envs, self.newton_loops, *args_state, *args_info, *args_config, errno)
+        kernel_init_substep(
+            self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config, errno
+        )
         for _ in range(self._options.max_iterations):
             if self.newton_config.has_adaptive_kappa and self.newton_config.is_kappa_tick_newton:
                 kernel_contact_kappa_iteration(self.newton_envs.is_active, self.ipc_state, self.ipc_info)
@@ -804,7 +842,9 @@ class NewtonSolver(Solver):
             if self.newton_config.has_moving_proxies:
                 kernel_proxies_prepare(
                     fem_solver.n_vertices,
+                    self.newton_envs.is_active,
                     self.rigid_dofs.x,
+                    self.newton_envs.energy_start,
                     self.newton_rows,
                     self.ipc_state,
                     proxies_envs,
@@ -865,6 +905,7 @@ class NewtonSolver(Solver):
                     self.newton_envs.p_dot_ap,
                     self.rigid_dofs.gradient,
                     self.newton_rows,
+                    proxies_envs,
                     proxies,
                     proxy_kinematics,
                     proxies_info,
@@ -923,8 +964,25 @@ class NewtonSolver(Solver):
                 kernel_line_search_trial(
                     self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config, errno
                 )
-                if not qd_to_numpy(self.newton_loops.is_line_search_running):
+                line_search_state = qd_to_numpy(self.newton_loops.is_line_search_running)
+                if line_search_state == LineSearchState.STOPPED:
                     break
+                if line_search_state == LineSearchState.MERIT_PROBE:
+                    kernel_proxies_merit_probe(
+                        self.newton_rows,
+                        self.newton_envs,
+                        fem_state,
+                        self.ipc_state,
+                        proxies_envs,
+                        proxies,
+                        proxy_kinematics,
+                        self.rigid_dofs,
+                        self.newton_info,
+                        proxies_info,
+                        dyn_info,
+                        rigid_solver.rigid_config,
+                        self.newton_config,
+                    )
             kernel_end_iteration(
                 self.newton_envs, self.newton_loops, proxies_envs, self.newton_info, self.newton_config, errno
             )
@@ -961,6 +1019,7 @@ def func_add_energies(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1049,7 +1108,9 @@ def kernel_set_segments(
 @qd.kernel(fastcache=True)
 def kernel_proxies_prepare(
     proxy_vertex_start: int,
+    envs_mask: qd.Tensor,
     x: qd.Tensor,
+    energy_start: qd.Tensor,
     newton_rows: NewtonRows,
     ipc_state: IPCState,
     proxies_envs: IPCProxiesEnvs,
@@ -1063,11 +1124,14 @@ def kernel_proxies_prepare(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Prepare the proxies for the Newton iteration at the iterate `x` of the dofs (see 'func_proxies_prepare' in
+    """Prepare the proxies for the Newton iteration at the iterate `x` of the dofs of the environments selected, and
+    price the slack of their restoration in their energy at the start point (see 'func_proxies_prepare' in
     rigid/contact_proxy.py)."""
     func_proxies_prepare(
         proxy_vertex_start,
+        envs_mask,
         x,
+        energy_start,
         newton_rows,
         ipc_state,
         proxies_envs,
@@ -1102,6 +1166,7 @@ def kernel_proxies_reduce_gradient(
     p_dot_ap: qd.Tensor,
     dofs_gradient: qd.Tensor,
     newton_rows: NewtonRows,
+    proxies_envs: IPCProxiesEnvs,
     proxies: IPCProxies,
     proxy_kinematics: ProxyKinematics,
     proxies_info: IPCProxiesInfo,
@@ -1111,7 +1176,16 @@ def kernel_proxies_reduce_gradient(
     """Reduce the gradient of the environments selected to the unknowns of the Newton solve, P^T (g + H d_p) (see
     'func_proxies_reduce_gradient' in rigid/contact_proxy.py)."""
     func_proxies_reduce_gradient(
-        envs_mask, p_dot_ap, dofs_gradient, newton_rows, proxies, proxy_kinematics, proxies_info, dyn_info, rigid_config
+        envs_mask,
+        p_dot_ap,
+        dofs_gradient,
+        newton_rows,
+        proxies_envs,
+        proxies,
+        proxy_kinematics,
+        proxies_info,
+        dyn_info,
+        rigid_config,
     )
 
 
@@ -1187,11 +1261,13 @@ def kernel_init_substep(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
     dyn_state: DynState,
     constraint_state: ConstraintState,
+    newton_info: NewtonInfo,
     mpm_info: MPMInfo,
     fem_info: FEMInfo,
     ipc_info: IPCInfo,
@@ -1245,7 +1321,18 @@ def kernel_init_substep(
         if qd.static(newton_config.has_mpm):
             func_mark_constrained_links(mpm_state, dyn_state, dyn_info)
         if qd.static(newton_config.has_moving_proxies):
-            func_proxies_init_substep(rigid_dofs.x, dyn_state, proxy_dofs_info, proxies_info, rigid_info)
+            func_proxies_init_substep(
+                rigid_dofs.x,
+                proxies_envs,
+                proxies,
+                dyn_state,
+                proxies_info,
+                proxy_dofs_info,
+                dyn_info,
+                rigid_info,
+                rigid_config,
+                newton_info.proxy_penalty_ratio[None],
+            )
     func_add_energies(
         newton_envs.energy_start,
         newton_envs.is_active,
@@ -1259,6 +1346,7 @@ def kernel_init_substep(
         proxies_state,
         proxies,
         proxies_envs,
+        proxies_filter,
         proxy_kinematics,
         rigid_dofs,
         rigid_links,
@@ -1291,6 +1379,7 @@ def kernel_refresh_energy_start(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1311,10 +1400,13 @@ def kernel_refresh_energy_start(
 ):
     """Evaluate again the energy at the start point of the iteration of every environment whose adaptive stiffness grew
     (see 'kernel_contact_kappa_iteration' in ipc_contact.py), so that its line search compares energies of one
-    stiffness."""
+    stiffness, the price of the slack of the restoration left to the preparation of the proxies (see
+    'func_proxies_prepare' in rigid/contact_proxy.py)."""
     for i_b in range(newton_envs.energy_start.shape[0]):
         if ipc_state.is_kappa_grown[i_b]:
             newton_envs.energy_start[i_b] = 0.0
+            if qd.static(newton_config.has_moving_proxies):
+                proxies_envs.penalty[i_b] = 0.0
     func_add_energies(
         newton_envs.energy_start,
         ipc_state.is_kappa_grown,
@@ -1328,6 +1420,7 @@ def kernel_refresh_energy_start(
         proxies_state,
         proxies,
         proxies_envs,
+        proxies_filter,
         proxy_kinematics,
         rigid_dofs,
         rigid_links,
@@ -1425,6 +1518,7 @@ def kernel_assemble_rigid(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1484,6 +1578,7 @@ def kernel_pcg_start(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1513,7 +1608,7 @@ def kernel_pcg_start(
     """
     func_rows_precond_invert(newton_rows)
     if qd.static(newton_config.has_moving_proxies):
-        func_proxies_mask_rows(newton_rows)
+        func_proxies_precondition_rows(newton_rows, proxies_envs, proxies, proxies_info)
     for i_b in range(newton_envs.is_active.shape[0]):
         newton_envs.is_pcg_active[i_b] = newton_envs.is_active[i_b]
         newton_envs.rz[i_b] = 0.0
@@ -1579,6 +1674,7 @@ def func_pcg_iteration(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     proxies: IPCProxies,
+    proxies_envs: IPCProxiesEnvs,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1607,6 +1703,7 @@ def func_pcg_iteration(
             newton_envs.is_pcg_active,
             rigid_dofs.p,
             newton_rows,
+            proxies_envs,
             proxies,
             proxy_kinematics,
             proxies_info,
@@ -1637,6 +1734,7 @@ def func_pcg_iteration(
                 newton_envs.is_pcg_active,
                 rigid_dofs.Ap,
                 newton_rows,
+                proxies_envs,
                 proxies,
                 proxy_kinematics,
                 proxies_info,
@@ -1748,6 +1846,7 @@ def kernel_pcg_loop(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1778,6 +1877,7 @@ def kernel_pcg_loop(
             mpm_state,
             sparse_grid,
             proxies,
+            proxies_envs,
             proxy_kinematics,
             rigid_dofs,
             rigid_links,
@@ -1811,6 +1911,7 @@ def kernel_start_line_search(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1843,6 +1944,10 @@ def kernel_start_line_search(
         newton_envs.max_displacement[i_b] = 0.0
         newton_envs.alpha[i_b] = 1.0
         newton_envs.n_line_search_iterations[i_b] = 0
+        if qd.static(newton_config.has_moving_proxies):
+            proxies_envs.is_merit_active[i_b] = False
+            proxies_envs.is_merit_probe[i_b] = False
+            proxies_envs.is_merit_evaluated[i_b] = False
     if qd.static(newton_config.has_mpm):
         func_mpm_init_line_search(
             newton_rows,
@@ -1875,6 +1980,8 @@ def kernel_start_line_search(
             newton_envs.is_active,
             newton_envs.max_displacement,
             rigid_dofs.dx,
+            newton_rows,
+            proxies_envs,
             proxies,
             proxies_state,
             proxy_kinematics,
@@ -1883,7 +1990,7 @@ def kernel_start_line_search(
             rigid_config,
         )
     for _ in range(1):
-        newton_loops.is_line_search_running[None] = 0
+        newton_loops.is_line_search_running[None] = int(LineSearchState.STOPPED)
     for i_b in range(newton_envs.is_active.shape[0]):
         is_active = newton_envs.is_active[i_b]
         if is_active:
@@ -1891,7 +1998,7 @@ def kernel_start_line_search(
             newton_envs.is_converged[i_b] = max_displacement < newton_info.displacement_tol[None]
             if not (qd_isfinite(max_displacement) and qd_isfinite(newton_envs.energy_start[i_b])):
                 newton_envs.failure[i_b] = NewtonFailure.NON_FINITE
-            qd.atomic_max(newton_loops.is_line_search_running[None], 1)
+            qd.atomic_max(newton_loops.is_line_search_running[None], int(LineSearchState.RUNNING))
         newton_envs.is_line_search_active[i_b] = is_active
     if qd.static(newton_config.has_moving_proxies):
         # The FK-defect limiter shrinks the whole direction of an environment, its convergence measured before, then
@@ -1909,6 +2016,11 @@ def kernel_start_line_search(
             rigid_config,
             newton_info.proxy_path_tolerance[None],
         )
+        for i_b in range(newton_envs.is_active.shape[0]):
+            if newton_envs.is_active[i_b]:
+                proxies_envs.is_displacement_converged[i_b] = newton_envs.is_converged[i_b]
+                if proxies_envs.fk_alpha[i_b] < 1.0:
+                    newton_envs.is_converged[i_b] = False
         func_cloth_scale_direction(
             newton_envs.is_active,
             proxies_envs.fk_alpha,
@@ -1947,6 +2059,7 @@ def kernel_line_search_trial(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
@@ -1974,7 +2087,16 @@ def kernel_line_search_trial(
 
     A converged or failed environment takes its step at once, and an environment out of trials keeps its last one. The
     exact mismatch of the proxies with their links at the trial point stays within the certificate of the FK-defect
-    limiter (see 'func_proxies_trial_residual' in rigid/contact_proxy.py).
+    limiter (see 'func_proxies_trial_residual' in rigid/contact_proxy.py). With the cloth, as CGQ's Newton loop, the step
+    of a converged iteration is no trial of a line search: it counts none, and no rule tests it.
+
+    With moving proxies, the rules of CGQ accept a step, h the largest surface mismatch of the proxies of the environment
+    and E its energy, the price of the slack over the restoration included (see rigid/contact_proxy.py): E at most E0 up
+    to round-off, or else the merit E + rho h by sufficient decrease once its slope is known. While h0 exceeds the solve
+    tolerance, or once a filter retry is due, a step decreases h or E by a margin of h0 over the start point and over
+    every entry of the filter, which takes its pair once accepted. A line search out of trials with h above the solve
+    tolerance enters the restoration, one that cuts h after deep backtracking or exhaustion forces the filter on the next
+    iteration, and one that changes E no more converges once the direction did and h lies within the solve tolerance.
     """
     if qd.static(newton_config.has_mpm):
         func_mpm_step_forward(sparse_grid, newton_envs.is_line_search_active, newton_envs.alpha)
@@ -2026,6 +2148,7 @@ def kernel_line_search_trial(
         proxies_state,
         proxies,
         proxies_envs,
+        proxies_filter,
         proxy_kinematics,
         rigid_dofs,
         rigid_links,
@@ -2045,21 +2168,223 @@ def kernel_line_search_trial(
         newton_config,
     )
     for _ in range(1):
-        newton_loops.is_line_search_running[None] = 0
+        newton_loops.is_line_search_running[None] = int(LineSearchState.STOPPED)
+    if qd.static(not newton_config.has_moving_proxies):
+        for i_b in range(newton_envs.is_active.shape[0]):
+            if newton_envs.is_line_search_active[i_b]:
+                is_accepted = newton_envs.is_converged[i_b] or newton_envs.failure[i_b] != NewtonFailure.NONE
+                # The contact of the cloth takes a converged step without a search, as CGQ (see the docstring)
+                is_trial = not is_accepted
+                if qd.static(not newton_config.has_cloth):
+                    is_trial = True
+                if is_trial:
+                    newton_envs.n_line_search_iterations[i_b] = newton_envs.n_line_search_iterations[i_b] + 1
+                if newton_envs.energy_trial[i_b] <= newton_envs.energy_start[i_b]:
+                    is_accepted = True
+                if newton_envs.n_line_search_iterations[i_b] >= newton_info.line_search_max_iterations[None]:
+                    is_accepted = True
+                if is_accepted:
+                    newton_envs.is_line_search_active[i_b] = False
+                    newton_envs.energy_start[i_b] = newton_envs.energy_trial[i_b]
+                else:
+                    newton_envs.alpha[i_b] = newton_info.line_search_shrink[None] * newton_envs.alpha[i_b]
+                    qd.atomic_max(newton_loops.is_line_search_running[None], int(LineSearchState.RUNNING))
+    else:
+        max_trials = newton_info.line_search_max_iterations[None]
+        solve_tolerance = newton_info.proxy_solve_tolerance[None]
+        residual_floor = newton_info.proxy_residual_floor[None]
+        filter_margin = newton_info.proxy_filter_margin[None]
+        n_filter_max = proxies_filter.residual.shape[0]
+        for i_b in range(newton_envs.is_active.shape[0]):
+            if newton_envs.is_line_search_active[i_b]:
+                energy = newton_envs.energy_trial[i_b] + proxies_envs.penalty_trial[i_b]
+                energy_start = newton_envs.energy_start[i_b]
+                residual = proxies_envs.trial_max_residual[i_b]
+                residual_start = proxies_envs.max_residual[i_b]
+                is_restoration = proxies_envs.is_restoration[i_b]
+                is_forced = newton_envs.is_converged[i_b] or newton_envs.failure[i_b] != NewtonFailure.NONE
+                is_energy_ok = energy <= energy_start + newton_info.proxy_energy_roundoff[None] * (
+                    1.0 + qd.abs(energy_start)
+                )
+                is_accepted = is_energy_ok
+                is_merit_ok = False
+                is_feasibility = False
+                # A step that raises the energy but brings feasible proxies closer to their links asks for the slope of
+                # the merit once per iteration, the trial running again with it (see 'kernel_proxies_merit_probe')
+                is_probe = (
+                    not is_forced
+                    and not is_restoration
+                    and not is_energy_ok
+                    and not proxies_envs.is_merit_active[i_b]
+                    and not proxies_envs.is_merit_evaluated[i_b]
+                    and not proxies_envs.is_filter_retry[i_b]
+                    and not proxies_envs.is_hard_probe[i_b]
+                    and residual_start > residual_floor
+                    and residual_start <= solve_tolerance
+                    and residual < residual_start
+                )
+                if not is_forced and not is_restoration and not is_probe:
+                    if proxies_envs.is_merit_active[i_b] and not is_energy_ok:
+                        rho = proxies_envs.merit_rho[i_b]
+                        merit_start = energy_start + rho * residual_start
+                        merit_bound = (
+                            merit_start
+                            + newton_info.proxy_armijo[None] * newton_envs.alpha[i_b] * proxies_envs.merit_slope[i_b]
+                        )
+                        is_merit_ok = energy + rho * residual <= merit_bound + newton_info.proxy_merit_roundoff[
+                            None
+                        ] * (1.0 + qd.abs(merit_start))
+                        is_accepted = is_merit_ok
+                    # Infeasible proxies take the steps that decrease the mismatch or the energy enough over the start
+                    # point and over every entry of the filter
+                    is_feasibility = residual_start > solve_tolerance or proxies_envs.is_filter_retry[i_b]
+                    if is_feasibility:
+                        is_accepted = (
+                            residual <= (1.0 - filter_margin) * residual_start
+                            or energy <= energy_start - filter_margin * residual_start
+                        )
+                        for i_f in range(proxies_envs.n_filter[i_b]):
+                            filter_residual = proxies_filter.residual[i_f, i_b]
+                            is_accepted = is_accepted and (
+                                residual <= (1.0 - filter_margin) * filter_residual
+                                or energy <= proxies_filter.energy[i_f, i_b] - filter_margin * filter_residual
+                            )
+                if is_probe:
+                    proxies_envs.is_merit_probe[i_b] = True
+                    proxies_envs.is_merit_evaluated[i_b] = True
+                    qd.atomic_max(newton_loops.is_line_search_running[None], int(LineSearchState.MERIT_PROBE))
+                else:
+                    i_trial = newton_envs.n_line_search_iterations[i_b]
+                    if not is_forced:
+                        newton_envs.n_line_search_iterations[i_b] = i_trial + 1
+                    is_exhausted = not is_forced and not is_accepted and i_trial + 1 >= max_trials
+                    is_entering_restoration = is_exhausted and not is_restoration and residual > solve_tolerance
+                    is_deep = (
+                        is_accepted
+                        and not is_feasibility
+                        and not is_merit_ok
+                        and i_trial >= 3
+                        and i_trial + 3 >= max_trials
+                    )
+                    is_filter_retry = (
+                        not is_forced
+                        and not is_restoration
+                        and not is_feasibility
+                        and residual_start > residual_floor
+                        and residual < residual_start
+                        and (is_exhausted or is_deep)
+                    )
+                    if is_entering_restoration:
+                        proxies_envs.is_restoration[i_b] = True
+                        proxies_envs.is_restoration_entered[i_b] = True
+                        proxies_envs.is_hard_probe[i_b] = False
+                    if is_accepted or is_exhausted or is_forced:
+                        if not is_forced and not is_restoration and not is_entering_restoration:
+                            if is_filter_retry:
+                                proxies_envs.is_filter_retry[i_b] = True
+                            if is_feasibility:
+                                # The accepted pair takes the place of the entries it dominates
+                                n_kept = 0
+                                for i_f in range(proxies_envs.n_filter[i_b]):
+                                    filter_residual = proxies_filter.residual[i_f, i_b]
+                                    filter_energy = proxies_filter.energy[i_f, i_b]
+                                    if not (residual <= filter_residual and energy <= filter_energy):
+                                        proxies_filter.residual[n_kept, i_b] = filter_residual
+                                        proxies_filter.energy[n_kept, i_b] = filter_energy
+                                        n_kept = n_kept + 1
+                                if n_kept < n_filter_max:
+                                    proxies_filter.residual[n_kept, i_b] = residual
+                                    proxies_filter.energy[n_kept, i_b] = energy
+                                    n_kept = n_kept + 1
+                                proxies_envs.n_filter[i_b] = n_kept
+                                proxies_envs.is_filter_retry[i_b] = False
+                            # An exhausted line search that changes the energy no more converges once the direction
+                            # did and the proxies lie within the solve tolerance
+                            if is_exhausted:
+                                stagnation = newton_info.proxy_stagnation_tolerance[None] * (1.0 + qd.abs(energy_start))
+                                if (
+                                    proxies_envs.is_displacement_converged[i_b]
+                                    and residual <= solve_tolerance
+                                    and qd.abs(energy - energy_start) <= stagnation
+                                ):
+                                    newton_envs.is_converged[i_b] = True
+                        newton_envs.is_line_search_active[i_b] = False
+                        newton_envs.energy_start[i_b] = energy
+                        proxies_envs.penalty[i_b] = proxies_envs.penalty_trial[i_b]
+                    else:
+                        newton_envs.alpha[i_b] = newton_info.line_search_shrink[None] * newton_envs.alpha[i_b]
+                        qd.atomic_max(newton_loops.is_line_search_running[None], int(LineSearchState.RUNNING))
+
+
+@qd.kernel(fastcache=True)
+def kernel_proxies_merit_probe(
+    newton_rows: NewtonRows,
+    newton_envs: NewtonEnvs,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    proxies_envs: IPCProxiesEnvs,
+    proxies: IPCProxies,
+    proxy_kinematics: ProxyKinematics,
+    rigid_dofs: NewtonRigidDofs,
+    newton_info: NewtonInfo,
+    proxies_info: IPCProxiesInfo,
+    dyn_info: DynInfo,
+    rigid_config: qd.template(),
+    newton_config: qd.template(),
+):
+    """
+    Evaluate the slope of the merit of every environment that asks for it at the start point of its line search, and
+    set its merit (see 'func_proxies_init_merit' in rigid/contact_proxy.py).
+
+    The slope is the derivative g . d of the energy along the Newton direction d: the reduced gradient over the unknowns,
+    the vertices of the cloth and the dofs, along their directions, with the terms of the proxies (see
+    'func_proxies_merit_slope'), the direction of the cloth standing in the search direction of the rows for the product
+    of the rows they take.
+    """
+    n_rows = newton_rows.segments_start[newton_rows.segments_start.shape[0] - 1]
     for i_b in range(newton_envs.is_active.shape[0]):
-        if newton_envs.is_line_search_active[i_b]:
-            newton_envs.n_line_search_iterations[i_b] = newton_envs.n_line_search_iterations[i_b] + 1
-            is_accepted = newton_envs.is_converged[i_b] or newton_envs.failure[i_b] != NewtonFailure.NONE
-            if newton_envs.energy_trial[i_b] <= newton_envs.energy_start[i_b]:
-                is_accepted = True
-            if newton_envs.n_line_search_iterations[i_b] >= newton_info.line_search_max_iterations[None]:
-                is_accepted = True
-            if is_accepted:
-                newton_envs.is_line_search_active[i_b] = False
-                newton_envs.energy_start[i_b] = newton_envs.energy_trial[i_b]
-            else:
-                newton_envs.alpha[i_b] = newton_info.line_search_shrink[None] * newton_envs.alpha[i_b]
-                qd.atomic_max(newton_loops.is_line_search_running[None], 1)
+        if proxies_envs.is_merit_probe[i_b]:
+            proxies_envs.merit_slope[i_b] = 0.0
+    for i_r in range(n_rows):
+        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
+    n_vertices = fem_state.vertices.pos.shape[0]
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
+    for i_v, i_b in qd.ndrange(n_vertices, fem_state.vertices.pos.shape[1]):
+        if proxies_envs.is_merit_probe[i_b]:
+            i_r = row_start + i_b * n_vertices + i_v
+            direction = fem_state.cloth_vertices.displacement[i_v, i_b]
+            newton_rows.p[i_r] = direction
+            qd.atomic_add(proxies_envs.merit_slope[i_b], newton_rows.gradient[i_r].dot(direction))
+    func_rows_matvec(newton_rows, proxies_envs.is_merit_probe, newton_envs.p_dot_ap, False)
+    for i_d, i_b in qd.ndrange(*rigid_dofs.dx.shape):
+        if proxies_envs.is_merit_probe[i_b]:
+            qd.atomic_add(proxies_envs.merit_slope[i_b], rigid_dofs.gradient[i_d, i_b] * rigid_dofs.dx[i_d, i_b])
+    func_proxies_merit_slope(
+        envs_mask=proxies_envs.is_merit_probe,
+        dofs_dx=rigid_dofs.dx,
+        newton_rows=newton_rows,
+        proxies_envs=proxies_envs,
+        proxies=proxies,
+        kinematics=proxy_kinematics,
+        proxies_info=proxies_info,
+        dyn_info=dyn_info,
+        rigid_config=rigid_config,
+    )
+    func_proxies_init_merit(
+        envs_mask=proxies_envs.is_merit_probe,
+        energy_start=newton_envs.energy_start,
+        proxies_envs=proxies_envs,
+        ipc_state=ipc_state,
+        proxies_info=proxies_info,
+        solve_tolerance=newton_info.proxy_solve_tolerance[None],
+        residual_floor=newton_info.proxy_residual_floor[None],
+        energy_roundoff=newton_info.proxy_energy_roundoff[None],
+        has_ccd_partition=newton_config.has_ccd_partition,
+    )
+    for i_r in range(n_rows):
+        newton_rows.p[i_r] = qd.Vector.zero(gs.qd_float, 3)
+        newton_rows.Ap[i_r] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)
@@ -2074,9 +2399,11 @@ def kernel_end_iteration(
     """
     Stop every environment that converged or failed, or reached the iteration cap, which it latches as a failure.
 
-    With moving proxies, an environment converges once its step also kept the whole direction and its proxies end within
-    the solve tolerance of their links, and a solve reaching the iteration cap unconverged sets the flag
-    PROXY_SOLVE_EXHAUSTED in its errno, the substep being left uncommitted.
+    With the cloth, an environment converges from its second iteration on, as in CGQ's Newton loop. With moving proxies, an environment converges once its proxies also end within the solve tolerance of their links,
+    and a solve reaching the iteration cap unconverged sets the flag PROXY_SOLVE_EXHAUSTED in its errno, the substep
+    being left uncommitted, as does a trial breaking the certificate of the FK-defect limiter at once. The restoration
+    lasts one iteration past the one that enters it, after which the hard iterations go on until they converge, the
+    duals taking the slack left at its end (see IPCProxiesEnvs).
     """
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
@@ -2084,13 +2411,27 @@ def kernel_end_iteration(
         if newton_envs.is_active[i_b]:
             newton_envs.n_iterations[i_b] = newton_envs.n_iterations[i_b] + 1
             is_converged = newton_envs.is_converged[i_b]
+            is_failed = newton_envs.failure[i_b] != NewtonFailure.NONE
             if qd.static(newton_config.has_moving_proxies):
-                is_converged = (
-                    is_converged
-                    and proxies_envs.fk_alpha[i_b] >= 1.0
-                    and proxies_envs.trial_max_residual[i_b] <= newton_info.proxy_solve_tolerance[None]
-                )
-            if is_converged or newton_envs.failure[i_b] != NewtonFailure.NONE:
+                is_feasible = proxies_envs.trial_max_residual[i_b] <= newton_info.proxy_solve_tolerance[None]
+                if proxies_envs.is_restoration[i_b]:
+                    if not proxies_envs.is_restoration_entered[i_b]:
+                        proxies_envs.is_dual_update[i_b] = not is_feasible
+                        proxies_envs.is_restoration[i_b] = False
+                        proxies_envs.is_hard_probe[i_b] = True
+                    is_converged = False
+                elif proxies_envs.is_hard_probe[i_b]:
+                    if is_converged and is_feasible:
+                        proxies_envs.is_hard_probe[i_b] = False
+                    else:
+                        is_converged = False
+                else:
+                    is_converged = is_converged and is_feasible
+                is_failed = is_failed or (errno[i_b] & NewtonErrorCode.INVALID_PROXY_PATH) != 0
+            # With the cloth, as CGQ's Newton loop, a converged first iteration goes on to a second one
+            if qd.static(newton_config.has_cloth):
+                is_converged = is_converged and newton_envs.n_iterations[i_b] > 1
+            if is_converged or is_failed:
                 newton_envs.is_active[i_b] = False
             elif newton_envs.n_iterations[i_b] >= newton_info.max_iterations[None]:
                 newton_envs.is_active[i_b] = False
@@ -2114,6 +2455,7 @@ def kernel_finish_rigid(
     proxies_state: IPCProxiesState,
     proxies: IPCProxies,
     proxies_envs: IPCProxiesEnvs,
+    proxies_filter: IPCProxiesFilter,
     proxy_kinematics: ProxyKinematics,
     rigid_dofs: NewtonRigidDofs,
     rigid_links: NewtonRigidLinks,
