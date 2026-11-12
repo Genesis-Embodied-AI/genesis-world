@@ -43,7 +43,6 @@ from genesis.engine.solvers.fem_solver import (
     func_element_energy_gradient_damped,
     func_element_mapping_matrix,
 )
-from genesis.engine.solvers.rigid.abd.forward_dynamics import func_solve_mass_block
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.constraint.solver import func_mark_link_constrained
 from genesis.engine.solvers.rigid.data import (
@@ -293,6 +292,8 @@ LINK_INCIDENCE = Size("link_incidence")
 LINK_WRENCH_SHARES = Size("link_wrench_shares")
 # The contact pairs of each environment over every kind of contact
 SAP_ENV_CONTACTS = Size("sap_env_contacts")
+# The entries of the mass blocks of the rigid dofs, each block holding the square of its dofs
+MASS_BLOCK_ENTRIES = Size("mass_block_entries")
 
 # Labels of the arrays that the solvers and the contact types of a scene leave unused
 FEM = "fem"
@@ -439,6 +440,9 @@ class SAPConstraintOrder(Data, kind=DataKind.SCRATCH):
     # kernel_sum_contact_patches)
     patch_key: qd.Tensor = field(qd.u64, shape=(CONSTRAINT_SLOTS,))
     patch_order: qd.Tensor = field(int, shape=(CONSTRAINT_SLOTS,))
+    # Hessian of the cost of the contacts of each share of each link with respect to its spatial velocity, about the
+    # root of its kinematic tree (see func_compute_link_wrench)
+    links_wrench_hessian: qd.Tensor = field((float, (6, 6)), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
 
 
 class SAPSolveLoops(Data, kind=DataKind.SCRATCH, shape=()):
@@ -478,6 +482,10 @@ class SAPState(Data, kind=DataKind.SCRATCH):
     rigid_pressure_gradient: qd.Tensor = field(
         (float, 3), shape=(RIGID_VOLUME_ELEMS, ENVS), kind=DataKind.DERIVED, labels=RIGID_VOLUME
     )
+    # Inverse of the Hessian of the cost of each mass block of the rigid dofs, and that Hessian, factored in place into
+    # its LDL^T factor, column by column (see dofs_mass_inv_start in SAPInfo and func_invert_rigid_hessian)
+    rigid_mass_inv: qd.Tensor = field(float, shape=(MASS_BLOCK_ENTRIES, ENVS), labels=RIGID)
+    rigid_hessian: qd.Tensor = field(float, shape=(MASS_BLOCK_ENTRIES, ENVS), labels=RIGID)
 
 
 class SAPLaggedFriction(Data, kind=DataKind.STATE):
@@ -559,6 +567,9 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     stiction_tolerance: qd.Tensor = field(float, shape=())
     # Relative precision of the simulation, below which a ratio of lengths or a norm is round-off
     precision: qd.Tensor = field(float, shape=())
+    # Offset of the column of each rigid dof in the matrices of its mass block, its entry at the row of dof i lying at the
+    # offset plus i, the blocks following each other (see rigid_mass_inv in SAPState)
+    dofs_mass_inv_start: qd.Tensor = field(int, shape=(DOFS,), labels=RIGID)
 
 
 # The contact pairs and the candidate pairs of a contact handler over every environment, and the joint equalities of an
@@ -1437,8 +1448,23 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     i_root = self.rigid_solver.links[i_root].parent_idx
                 dofs_root_link_idx[link.dof_start : link.dof_end] = i_root
 
+        # The column of each dof in the matrices of its mass block, each block holding the columns of its dofs in a row
+        dofs_mass_inv_start = np.zeros(n_dofs, dtype=gs.np_int)
+        n_mass_block_entries = 0
+        if n_dofs > 0:
+            dofs_mass_block_start = qd_to_numpy(self.rigid_solver.rigid_info.dofs_mass_block_start, transpose=True)
+            dofs_mass_block_end = qd_to_numpy(self.rigid_solver.rigid_info.dofs_mass_block_end, transpose=True)
+            for i_d in range(n_dofs):
+                if dofs_mass_block_start[i_d] == i_d:
+                    n_block_dofs = dofs_mass_block_end[i_d] - i_d
+                    dofs_mass_inv_start[i_d : i_d + n_block_dofs] = (
+                        n_mass_block_entries + n_block_dofs * np.arange(n_block_dofs) - i_d
+                    )
+                    n_mass_block_entries += n_block_dofs**2
+
         sizes = dict(
             envs=self._B,
+            mass_block_entries=n_mass_block_entries,
             vertices=self.fem_solver.n_vertices,
             elements=self.fem_solver.n_elements,
             dofs=self.rigid_solver.n_dofs,
@@ -1506,11 +1532,14 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             ),
             env_first={
                 (
+                    SAPData.sap_state.fem_vertices,
                     SAPData.sap_state.vertices_dofs_partials,
                     SAPData.sap_state.elements_partials,
                     SAPData.sap_state.fem_corner_forces,
                     SAPData.sap_state.constraint_order.fem_incidence_start,
                     SAPData.sap_state.constraint_order.link_incidence_start,
+                    SAPData.sap_state.rigid_mass_inv,
+                    SAPData.sap_state.rigid_hessian,
                 ): True,
             },
             unused=dict(
@@ -1551,6 +1580,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     gs.np_int, copy=False
                 )
             )
+        if n_dofs > 0:
+            sap_info.dofs_mass_inv_start.from_numpy(dofs_mass_inv_start)
         if has_rigid_contacts:
             sap_info.links_subtree_end.from_numpy(links_subtree_end)
             sap_info.dofs_link_idx.from_numpy(dofs_link_idx)
@@ -2000,7 +2031,7 @@ def kernel_order_constraints(
     contacts their slots in the order the threads find them, which changes from a run to another. Every sum of the solve
     runs over the constraints in their sorted order (see func_compute_constraints), and every FEM vertex and rigid link
     gathers its contacts in that order (see func_gather_fem_vertex and func_compute_link_wrench), so that the solve is
-    reproducible bitwise. An entry of the list of a vertex packs the rank of its contact with the corner of the contact
+    reproducible bitwise. An entry of the list of a vertex packs the slot of its contact with the corner of the contact
     at the vertex, and of a link with the side of the contact on the link. The entries of each vertex and link are
     counted as the keys are laid out, the counts summed into the start of each list, then the lanes of a block place the
     entries of an environment in their sorted order by tiles.
@@ -2019,8 +2050,8 @@ def kernel_order_constraints(
     )
     constraint_handlers = qd.static(handlers.constraints)
     # The FEM vertices a contact acts on at most, the corners of its two tets, and the links, its two sides. An entry of
-    # the lists of the contacts of each vertex and link packs the rank of the contact in their sorted order with its
-    # corner or its side.
+    # the lists of the contacts of each vertex and link packs the slot of the contact with its corner or its side, which
+    # spares the gathers a lookup of the slot of each sorted constraint.
     N_CORNERS_MAX = qd.static(8)
     N_SIDES_MAX = qd.static(2)
     # The items of a chunk of the sorted constraints (see CHUNK_SIZE)
@@ -2118,6 +2149,8 @@ def kernel_order_constraints(
                 n_passes=(sap_info.constraints_env_shift[None] + 7) // 8,
             )
     else:
+        # FIXME: quadrants#1098 - the device-resident count launches every phase of the sort with a saturating grid,
+        # whatever the number of constraints, which costs a few microseconds per phase at a single environment.
         radix_sort(
             sap_state.constraint_order.key,
             sap_state.constraint_order.key_scratch,
@@ -2168,6 +2201,7 @@ def kernel_order_constraints(
                 i_k = i_k_ * N_LANES + i_lane
                 i_s = i_s_start + i_k // N_ENTRIES_MAX
                 i_x = -1
+                i_q = -1
                 if i_k < n_env_constraints * N_ENTRIES_MAX:
                     i_q = sap_state.constraint_order.order[i_s]
                     for i_h, handler in qd.static(enumerate(constraint_handlers)):
@@ -2194,7 +2228,7 @@ def kernel_order_constraints(
                 if qd.static(N_LANES > 1):
                     i_n = su.qd_block_shuffle(i_n, i_lane_first)
                 if i_x >= 0:
-                    incidence.entries[i_n + i_rank] = i_s * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
+                    incidence.entries[i_n + i_rank] = i_q * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
 
 
 @qd.func
@@ -2787,7 +2821,7 @@ def func_gather_fem_vertex(
                 elastic = elastic + sap_state.fem_corner_forces[i_corner_start + i_k, i_b]
             elif i_k < n_corners + n_contacts:
                 i_entry = sap_state.constraint_order.fem_incidence[i_n_start + i_k - n_corners]
-                i_q = sap_state.constraint_order.order[i_entry // N_CORNERS_MAX]
+                i_q = i_entry // N_CORNERS_MAX
                 i_corner = i_entry % N_CORNERS_MAX
                 for i_h, handler in qd.static(enumerate(constraint_handlers)):
                     if qd.static(handler.n_fem_corners > 0):
@@ -2842,7 +2876,8 @@ def func_compute_link_wrench(
     (see CHUNK_SIZE), the lanes of each summing theirs along a fixed tree into one wrench per share. The force of a
     contact is its impulse for the gradient (op VertexDofOp.GRADIENT), and the product of its Hessian with the Jacobian
     of the search direction for the conjugate gradient (op VertexDofOp.PCG_PTAP). The dofs add up the wrenches of the
-    links of their subtree (see func_gather_rigid_dof).
+    links of their subtree (see func_gather_rigid_dof). The gradient also sums the Hessians of the contacts with respect
+    to the spatial velocity of the link, which precondition the rigid dofs (see func_invert_rigid_hessian).
     """
     # The sides an entry packs (see kernel_order_constraints)
     N_SIDES_MAX = qd.static(2)
@@ -2854,6 +2889,7 @@ def func_compute_link_wrench(
     i_l = i_t // (N_LANES * N_SHARES) % n_links
     i_b = i_t // (N_LANES * N_SHARES * n_links)
     wrench = qd.Vector.zero(gs.qd_float, 6)
+    hessian = qd.Matrix.zero(gs.qd_float, 6, 6)
     if envs_is_active[i_b]:
         i_n_start = sap_state.constraint_order.link_incidence_start[i_l, i_b]
         i_n_end = sap_state.constraint_order.link_incidence_start[i_l + 1, i_b]
@@ -2861,7 +2897,7 @@ def func_compute_link_wrench(
             i_n = i_n_start + (i_n_ * N_SHARES + i_w) * N_LANES + i_lane
             if i_n < i_n_end:
                 i_entry = sap_state.constraint_order.link_incidence[i_n]
-                i_q = sap_state.constraint_order.order[i_entry // N_SIDES_MAX]
+                i_q = i_entry // N_SIDES_MAX
                 i_side = i_entry % N_SIDES_MAX
                 for i_h, handler in qd.static(enumerate(constraint_handlers)):
                     if qd.static(handler.n_rigid_sides > 0):
@@ -2870,9 +2906,17 @@ def func_compute_link_wrench(
                             f, torque = handler.side_wrench(i_c, i_side, links_state.root_COM[i_l, i_b], op=op)
                             wrench[:3] = wrench[:3] + f
                             wrench[3:] = wrench[3:] + torque
+                            if qd.static(op == VertexDofOp.GRADIENT):
+                                hessian = hessian + handler.side_hessian(i_c, links_state.root_COM[i_l, i_b])
     if qd.static(N_LANES > 1):
         for k in qd.static(range(6)):
             wrench[k] = su.qd_block_sum(wrench[k])
+        if qd.static(op == VertexDofOp.GRADIENT):
+            for k, l in qd.static(qd.ndrange(6, 6)):
+                hessian[k, l] = su.qd_block_sum(hessian[k, l])
+    if qd.static(op == VertexDofOp.GRADIENT):
+        if i_lane == 0 and envs_is_active[i_b]:
+            sap_state.constraint_order.links_wrench_hessian[i_l * N_SHARES + i_w, i_b] = hessian
     if i_lane == 0 and envs_is_active[i_b]:
         sap_state.constraint_order.links_wrench_force[i_l * N_SHARES + i_w, i_b] = qd.Vector(
             [wrench[0], wrench[1], wrench[2]]
@@ -3316,13 +3360,14 @@ def kernel_sap_solve(
             rigid_info,
             sap_info,
             fem_config,
-            rigid_config,
             sap_config,
             constraint_handlers,
             equality_handler,
             op=VertexDofOp.GRADIENT,
         )
         func_update_envs_active(newton_counter, sap_state, fem_info, sap_info, sap_config, constraint_handlers)
+        if qd.static(sap_config.has_rigid):
+            func_invert_rigid_hessian(dofs_state, sap_state, rigid_info, sap_info, sap_config)
 
         # The Newton step
         func_init_pcg_solve(
@@ -3471,7 +3516,6 @@ def func_compute_vertices_dofs(
     rigid_info: RigidInfo,
     sap_info: SAPInfo,
     fem_config: qd.template(),
-    rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
     equality_handler: qd.template(),
@@ -3544,7 +3588,6 @@ def func_compute_vertices_dofs(
                                 sap_state,
                                 rigid_info,
                                 sap_info,
-                                rigid_config,
                                 sap_config,
                                 equality_handler,
                                 op=op,
@@ -3799,6 +3842,111 @@ def func_compute_fem_vertex(
 
 
 @qd.func
+def func_invert_rigid_hessian(
+    dofs_state: DofsState, sap_state: SAPState, rigid_info: RigidInfo, sap_info: SAPInfo, sap_config: qd.template()
+):
+    """
+    Invert the Hessian of the cost of every mass block of the rigid dofs of the active environments.
+
+    The Hessian of a block is its mass matrix plus J^T G J, the Hessians G of the contacts mapped to the dofs by their
+    Jacobians J. The contacts act on a dof through the links of its subtree, so that two dofs of a chain couple through
+    the contacts of the subtree of the deeper one, S_d^T K S_e, S the motion of a dof and K the Hessians of the contacts
+    of the links of that subtree with respect to their spatial velocity, summed in a fixed order (see
+    func_compute_link_wrench). Each block takes an LDL^T factor on its first dof, then each dof solves its unit vector,
+    its column of the inverse, which preconditions the rigid dofs of the conjugate gradient (see func_compute_rigid_dof).
+    """
+    N_SHARES = qd.static(2 if sap_config.enable_cooperative_kernels else 1)
+    # The Hessian, column by column: the entry of the dofs d and e lies at the start of the column of e plus d
+    for i_e, i_b in qd.ndrange(
+        sap_state.rigid_dofs.v.shape[0],
+        sap_state.envs.is_active.shape[0],
+        axes=qd.static(eoa(sap_state.rigid_dofs.v)),
+    ):
+        if sap_state.envs.is_active[i_b]:
+            i_n = sap_info.dofs_mass_inv_start[i_e]
+            for i_d in range(rigid_info.dofs_mass_block_start[i_e], rigid_info.dofs_mass_block_end[i_e]):
+                value = rigid_info.mass_mat[i_d, i_e, i_b]
+                if qd.static(sap_config.has_rigid_contacts):
+                    # The deeper of the two dofs, whose subtree holds the contacts acting on both of them
+                    i_l_d = sap_info.dofs_link_idx[i_d]
+                    i_l_e = sap_info.dofs_link_idx[i_e]
+                    i_l = qd.max(i_l_d, i_l_e)
+                    i_l_root = qd.min(i_l_d, i_l_e)
+                    if i_l < sap_info.links_subtree_end[i_l_root]:
+                        motion_d = qd.Vector.zero(gs.qd_float, 6)
+                        motion_d[:3] = dofs_state.cdof_vel[i_d, i_b]
+                        motion_d[3:] = dofs_state.cdof_ang[i_d, i_b]
+                        motion_e = qd.Vector.zero(gs.qd_float, 6)
+                        motion_e[:3] = dofs_state.cdof_vel[i_e, i_b]
+                        motion_e[3:] = dofs_state.cdof_ang[i_e, i_b]
+                        hessian_motion = qd.Vector.zero(gs.qd_float, 6)
+                        for i_w in range(i_l * N_SHARES, sap_info.links_subtree_end[i_l] * N_SHARES):
+                            hessian_motion = (
+                                hessian_motion + sap_state.constraint_order.links_wrench_hessian[i_w, i_b] @ motion_e
+                            )
+                        value = value + motion_d.dot(hessian_motion)
+                sap_state.rigid_hessian[i_n + i_d, i_b] = value
+
+    # The LDL^T factor of each block in place, L unit lower triangular below the diagonal of D
+    for i_d_start, i_b in qd.ndrange(
+        sap_state.rigid_dofs.v.shape[0],
+        sap_state.envs.is_active.shape[0],
+        axes=qd.static(eoa(sap_state.rigid_dofs.v)),
+    ):
+        if sap_state.envs.is_active[i_b] and rigid_info.dofs_mass_block_start[i_d_start] == i_d_start:
+            i_d_end = rigid_info.dofs_mass_block_end[i_d_start]
+            for j_d in range(i_d_start, i_d_end):
+                i_n_j = sap_info.dofs_mass_inv_start[j_d]
+                d_j = sap_state.rigid_hessian[i_n_j + j_d, i_b]
+                for k_d in range(i_d_start, j_d):
+                    i_n_k = sap_info.dofs_mass_inv_start[k_d]
+                    l_jk = sap_state.rigid_hessian[i_n_k + j_d, i_b]
+                    d_j = d_j - l_jk * l_jk * sap_state.rigid_hessian[i_n_k + k_d, i_b]
+                sap_state.rigid_hessian[i_n_j + j_d, i_b] = d_j
+                for i_d in range(j_d + 1, i_d_end):
+                    l_ij = sap_state.rigid_hessian[i_n_j + i_d, i_b]
+                    for k_d in range(i_d_start, j_d):
+                        i_n_k = sap_info.dofs_mass_inv_start[k_d]
+                        l_ij = l_ij - (
+                            sap_state.rigid_hessian[i_n_k + i_d, i_b]
+                            * sap_state.rigid_hessian[i_n_k + j_d, i_b]
+                            * sap_state.rigid_hessian[i_n_k + k_d, i_b]
+                        )
+                    sap_state.rigid_hessian[i_n_j + i_d, i_b] = l_ij / d_j
+
+    # The column of the inverse of each dof, its unit vector solved by the substitutions of the factor
+    for i_c, i_b in qd.ndrange(
+        sap_state.rigid_dofs.v.shape[0],
+        sap_state.envs.is_active.shape[0],
+        axes=qd.static(eoa(sap_state.rigid_dofs.v)),
+    ):
+        if sap_state.envs.is_active[i_b]:
+            i_d_start = rigid_info.dofs_mass_block_start[i_c]
+            i_d_end = rigid_info.dofs_mass_block_end[i_c]
+            i_n_c = sap_info.dofs_mass_inv_start[i_c]
+            for i_d in range(i_d_start, i_d_end):
+                x = gs.qd_float(0.0)
+                if i_d == i_c:
+                    x = 1.0
+                for k_d in range(i_d_start, i_d):
+                    i_n_k = sap_info.dofs_mass_inv_start[k_d]
+                    x = x - sap_state.rigid_hessian[i_n_k + i_d, i_b] * sap_state.rigid_mass_inv[i_n_c + k_d, i_b]
+                sap_state.rigid_mass_inv[i_n_c + i_d, i_b] = x
+            for i_d in range(i_d_start, i_d_end):
+                i_n_d = sap_info.dofs_mass_inv_start[i_d]
+                sap_state.rigid_mass_inv[i_n_c + i_d, i_b] = (
+                    sap_state.rigid_mass_inv[i_n_c + i_d, i_b] / sap_state.rigid_hessian[i_n_d + i_d, i_b]
+                )
+            for i_d_ in range(i_d_end - i_d_start):
+                i_d = i_d_end - i_d_ - 1
+                i_n_d = sap_info.dofs_mass_inv_start[i_d]
+                x = sap_state.rigid_mass_inv[i_n_c + i_d, i_b]
+                for k_d in range(i_d + 1, i_d_end):
+                    x = x - sap_state.rigid_hessian[i_n_d + k_d, i_b] * sap_state.rigid_mass_inv[i_n_c + k_d, i_b]
+                sap_state.rigid_mass_inv[i_n_c + i_d, i_b] = x
+
+
+@qd.func
 def func_compute_rigid_dof(
     i_d: int,
     i_b: int,
@@ -3807,7 +3955,6 @@ def func_compute_rigid_dof(
     sap_state: SAPState,
     rigid_info: RigidInfo,
     sap_info: SAPInfo,
-    rigid_config: qd.template(),
     sap_config: qd.template(),
     equality_handler: qd.template(),
     op: qd.template(),
@@ -3816,11 +3963,10 @@ def func_compute_rigid_dof(
     Run an operation of the solve on a rigid dof, and return its share of the sums of the operation.
 
     The dof is i_d of the environment i_b, and the sums those of func_compute_vertices_dofs (see VertexDofSum). The
-    factor of the mass matrix the rigid solver holds preconditions the rigid dofs, its solve running on the dofs of a
-    mass block in a row from its first dof, the others leaving it to that dof. That factor holds the implicit damping of
-    some integrators, which the Hessian of the solve leaves out, so that the Hessian applies the mass matrix itself, as
-    M p = M z + beta M p_prev: the product reads z, which no dof writes there, so that each dof updates its own share of
-    M p without the search direction of the others.
+    inverse of the Hessian of each mass block, the mass matrix plus the Hessians of its contacts, preconditions the rigid
+    dofs (see func_invert_rigid_hessian). The Hessian applies the mass matrix itself, as M p = M z + beta M p_prev: the
+    product reads z, which no dof writes there, so that each dof updates its own share of M p without the search
+    direction of the others.
     """
     # The sums of a chunk of vertices or dofs (see N_VERTEX_DOF_SUMS)
     N_SUMS = qd.static(8)
@@ -3835,28 +3981,30 @@ def func_compute_rigid_dof(
         sums[VertexDofSum.MOMENTUM_NORM] = sap_state.rigid_dofs.v[i_d, i_b] ** 2 * mass
         sums[VertexDofSum.IMPULSE_NORM] = Jt_gamma**2 / mass
     if qd.static(op == VertexDofOp.PCG_INIT or op == VertexDofOp.PCG_UPDATE):
-        if rigid_info.dofs_mass_block_start[i_d] == i_d:
-            block_dof_end = rigid_info.dofs_mass_block_end[i_d]
-            for j_d in range(i_d, block_dof_end):
-                if qd.static(op == VertexDofOp.PCG_INIT):
-                    sap_state.rigid_dofs.r[j_d, i_b] = -sap_state.rigid_dofs.gradient[j_d, i_b]
-                    sap_state.rigid_dofs.x[j_d, i_b] = 0.0
-                    sap_state.rigid_dofs.p[j_d, i_b] = 0.0
-                    sap_state.rigid_dofs.Mp[j_d, i_b] = 0.0
-                else:
-                    sap_state.rigid_dofs.r[j_d, i_b] = (
-                        sap_state.rigid_dofs.r[j_d, i_b] - alpha * sap_state.rigid_dofs.Ap[j_d, i_b]
-                    )
-                    sap_state.rigid_dofs.x[j_d, i_b] = (
-                        sap_state.rigid_dofs.x[j_d, i_b] + alpha * sap_state.rigid_dofs.p[j_d, i_b]
-                    )
-            func_solve_mass_block(
-                i_b, i_d, block_dof_end, sap_state.rigid_dofs.r, sap_state.rigid_dofs.z, rigid_info, rigid_config
+        # z = M^-1 r takes the row of the dof in the inverse of its mass block, which multiplies vectors that no dof
+        # writes in this loop: the gradient, the opposite of r, then A p, along which the update steps r and z alike.
+        mass_inv_y = gs.qd_float(0.0)
+        for j_d in range(rigid_info.dofs_mass_block_start[i_d], rigid_info.dofs_mass_block_end[i_d]):
+            y = sap_state.rigid_dofs.Ap[j_d, i_b]
+            if qd.static(op == VertexDofOp.PCG_INIT):
+                y = sap_state.rigid_dofs.gradient[j_d, i_b]
+            i_n = sap_info.dofs_mass_inv_start[j_d]
+            mass_inv_y = mass_inv_y + sap_state.rigid_mass_inv[i_n + i_d, i_b] * y
+        if qd.static(op == VertexDofOp.PCG_INIT):
+            sap_state.rigid_dofs.r[i_d, i_b] = -sap_state.rigid_dofs.gradient[i_d, i_b]
+            sap_state.rigid_dofs.z[i_d, i_b] = -mass_inv_y
+            sap_state.rigid_dofs.x[i_d, i_b] = 0.0
+            sap_state.rigid_dofs.p[i_d, i_b] = 0.0
+            sap_state.rigid_dofs.Mp[i_d, i_b] = 0.0
+        else:
+            sap_state.rigid_dofs.r[i_d, i_b] = (
+                sap_state.rigid_dofs.r[i_d, i_b] - alpha * sap_state.rigid_dofs.Ap[i_d, i_b]
             )
-            rTz = gs.qd_float(0.0)
-            for j_d in range(i_d, block_dof_end):
-                rTz = rTz + sap_state.rigid_dofs.r[j_d, i_b] * sap_state.rigid_dofs.z[j_d, i_b]
-            sums[VertexDofSum.RTZ] = rTz
+            sap_state.rigid_dofs.z[i_d, i_b] = sap_state.rigid_dofs.z[i_d, i_b] - alpha * mass_inv_y
+            sap_state.rigid_dofs.x[i_d, i_b] = (
+                sap_state.rigid_dofs.x[i_d, i_b] + alpha * sap_state.rigid_dofs.p[i_d, i_b]
+            )
+        sums[VertexDofSum.RTZ] = sap_state.rigid_dofs.r[i_d, i_b] * sap_state.rigid_dofs.z[i_d, i_b]
     if qd.static(op == VertexDofOp.PCG_SEARCH_DIRECTION):
         beta = sap_state.envs.beta[i_b]
         Mz = gs.qd_float(0.0)
@@ -3931,7 +4079,6 @@ def func_init_pcg_solve(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4043,7 +4190,6 @@ def func_one_pcg_iter(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4097,7 +4243,6 @@ def func_one_pcg_iter(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4115,7 +4260,6 @@ def func_one_pcg_iter(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4179,7 +4323,6 @@ def func_init_exact_linesearch(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4212,7 +4355,6 @@ def func_init_exact_linesearch(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4324,7 +4466,6 @@ def func_init_exact_linesearch(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -4372,7 +4513,6 @@ def func_one_exact_linesearch_iter(
         rigid_info,
         sap_info,
         fem_config,
-        rigid_config,
         sap_config,
         constraint_handlers,
         equality_handler,
@@ -5132,6 +5272,25 @@ class RigidContactHandler(BaseContactHandler):
         """
         f = self.rigid_side_sign(i_side) * self.contact_impulse(i_c, op=op)
         return f, (self.contact_pairs.contact_pos[i_c] - pos_ref).cross(f)
+
+    @qd.func
+    def side_hessian(self, i_c: int, pos_ref: qd.types.vector(3)):
+        """Return the Hessian of the cost of a contact pair with respect to the spatial velocity of a link at a side.
+
+        The spatial velocity stacks the linear velocity of the link at the point pos_ref and its angular velocity. The
+        velocity of the contact point is W^T times it, W = [I; [r]x] mapping a force to the wrench about pos_ref, r the
+        position of the contact relative to it, so that the Hessian is W G W^T, G the Hessian of the pair. The sign of
+        the side cancels out.
+        """
+        G = self.contact_hessian(i_c)
+        R = gu.qd_vec_to_skew(self.contact_pairs.contact_pos[i_c] - pos_ref)
+        R_G = R @ G
+        hessian = qd.Matrix.zero(gs.qd_float, 6, 6)
+        hessian[:3, :3] = G
+        hessian[:3, 3:] = R_G.transpose()
+        hessian[3:, :3] = R_G
+        hessian[3:, 3:] = R_G @ R.transpose()
+        return hessian
 
     @qd.func
     def compute_delassus(
