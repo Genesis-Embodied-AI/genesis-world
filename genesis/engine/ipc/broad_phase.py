@@ -765,6 +765,7 @@ class EFBroadPhase:
         tree_config, groups_tree_config = self.tree_config, self.groups_tree_config
         if self._is_thread_query:
             tree_config, groups_tree_config = self._query_configs_thread
+            self._is_thread_query = False
         kernel_ef_bounds_build(
             positions,
             displacements,

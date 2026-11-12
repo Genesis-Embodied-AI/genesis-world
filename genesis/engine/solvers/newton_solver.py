@@ -11,7 +11,7 @@ rigid/contact_proxy.py), whose data the Newton solver holds.
 """
 
 from collections.abc import Iterator
-from enum import IntEnum, auto
+from enum import IntEnum, IntFlag, auto
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -125,6 +125,7 @@ from .ipc_contact import (
     IPCPairs,
     IPCState,
     IPCSurfacePrimitives,
+    SearchStatus,
     func_contact_assemble,
     func_contact_ccd,
     func_contact_energy,
@@ -134,7 +135,6 @@ from .ipc_contact import (
     kernel_contact_init_kappa,
 )
 from .mpm_solver import (
-    STENCIL_PAIRS,
     MPMInfo,
     MPMSparseGrid,
     MPMState,
@@ -184,6 +184,24 @@ class LineSearchState(IntEnum):
     MERIT_PROBE = 2
 
 
+class NewtonStatus(IntFlag):
+    """
+    The status of the Newton solve of a substep, one word the device writes and the host reads back (see
+    'NewtonOptions.graph_mode').
+
+    RUNNING says that some environment iterates on, ROWS_OVERFLOW that the rows of the next Newton direction outgrow
+    their capacity (see 'func_check_rows'), SEARCH_OVERFLOW and TRUNCATED that the last search of the candidate pairs
+    must run again (see SearchStatus in ipc_contact.py), and FAILED_ITERATIONS that the solve of an environment reached
+    its iteration cap. The overflow bits hold the solve until the host grows what overflowed, then clears them.
+    """
+
+    RUNNING = 1
+    ROWS_OVERFLOW = 2
+    SEARCH_OVERFLOW = SearchStatus.OVERFLOW
+    TRUNCATED = SearchStatus.TRUNCATED
+    FAILED_ITERATIONS = 16
+
+
 class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     """
     The progress and the scalars of the Newton solve of every environment.
@@ -195,6 +213,8 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     of a dof along the direction. The scalars of the preconditioned conjugate gradient (PCG) follow: `rz` is r . z, `rz_tol` the value
     below which it stops, and `pcg_alpha` and `pcg_beta` its steps. `rigid_cost` is the cost of the constraint solve of
     the rigid solver at the current iterate of its dofs (see 'func_rigid_update_constraint' in rigid/global_newton.py).
+    `is_active_held` and `is_line_search_active_held` keep `is_active` and `is_line_search_active` over a line search
+    held by an overflow of the search (see 'func_line_search').
     """
 
     is_active: qd.Tensor = field(bool)
@@ -215,23 +235,28 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     pcg_alpha: qd.Tensor = field(float)
     pcg_beta: qd.Tensor = field(float)
     rigid_cost: qd.Tensor = field(float, labels=RIGID)
+    is_active_held: qd.Tensor = field(bool)
+    is_line_search_active_held: qd.Tensor = field(bool)
 
 
 class NewtonLoops(Data, kind=DataKind.SCRATCH, shape=()):
     """
     The flags that keep the loops of the Newton solve running as long as an environment iterates on, with the iterations
-    left to the preconditioned conjugate gradient (PCG).
+    left to the preconditioned conjugate gradient (PCG), and the status of the solve.
 
-    The flags are ndarrays on every backend, since a loop of a graph tests the same ndarray on every call. Between two
-    checks (see 'NewtonOptions.failure_check_interval'), `has_failed_iterations` latches a solve that reached its
-    iteration cap.
+    The flags are ndarrays on every backend, since a loop of a graph tests the same ndarray on every call. `status`
+    holds the bits of NewtonStatus, `segments_size` the rows and triplets of the nodes of the MPM solver and the
+    triplets of the contacts of the cloth that the next Newton direction takes (see 'func_check_rows'), and
+    `is_line_search_running_held` keeps `is_line_search_running` over a held line search (see 'func_line_search').
     """
 
     is_newton_running: qd.Tensor = field(qd.i32, ndarray=True)
     is_line_search_running: qd.Tensor = field(qd.i32, ndarray=True)
     is_pcg_running: qd.Tensor = field(qd.i32, ndarray=True)
     n_pcg_iterations_left: qd.Tensor = field(int, ndarray=True)
-    has_failed_iterations: qd.Tensor = field(int, ndarray=True)
+    status: qd.Tensor = field(qd.i32, ndarray=True)
+    segments_size: qd.Tensor = field(int, shape=(3,), ndarray=True)
+    is_line_search_running_held: qd.Tensor = field(qd.i32, ndarray=True)
 
 
 class NewtonInfo(Data, kind=DataKind.CONSTANT, shape=()):
@@ -690,13 +715,10 @@ class NewtonSolver(Solver):
         errno = self._errno
         if self.newton_config.has_rigid_dofs and self._rigid_contact_stiffness is None:
             self._rigid_contact_stiffness = RigidContactStiffness(self.rigid_links, dyn_state.dofs, dyn_info.links)
-        # The rows of every segment (see NewtonSegment): the nodes of the grid hold their kinetic block and the stencil
-        # blocks of the tasks of the assembly (see STENCIL_PAIRS in mpm_solver.py), and the vertices of the cloth their
-        # diagonal block and the blocks of their triangles and hinges (see TRIANGLE_PAIRS in fem_solver.py)
-        n_mpm_rows, n_mpm_triplets, n_cloth_rows, n_cloth_triplets = 0, 0, 0, 0
-        if self.newton_config.has_mpm:
-            n_mpm_rows = int(qd_to_numpy(sparse_grid.n_blocks)) * 64
-            n_mpm_triplets = n_mpm_rows + STENCIL_PAIRS * int(qd_to_numpy(mpm_state.sorted_particles.n_tasks))
+        # The rows of the segments sized once per scene (see NewtonSegment): the vertices of the cloth hold their diagonal
+        # block and the blocks of their triangles and hinges (see TRIANGLE_PAIRS in fem_solver.py), the others sizing on
+        # the device (see 'func_check_rows')
+        n_cloth_rows, n_cloth_triplets = 0, 0
         if self.newton_config.has_cloth:
             n_cloth_rows = self._B * fem_solver.n_vertices
             n_hinges = 0
@@ -784,20 +806,17 @@ class NewtonSolver(Solver):
                         f"'{tri_entity.name}'. The contact keeps crossed cloths crossed: place them apart."
                     )
         contact = self.ipc_contact
-        ipc_pairs, friction_pairs = self._ipc_pairs_unused, self._friction_pairs_unused
-        if contact is not None:
-            # The candidates at the start point of the substep give its first assembly and its friction pairs
-            contact.search(self.ipc_state, self.ipc_info, self.newton_config, is_swept=False)
-            contact.set_friction_pairs(
-                self.ipc_state, self.ipc_info, int(NewtonErrorCode.INVALID_CONTACT_THICKNESS), errno
-            )
-            ipc_pairs, friction_pairs = contact.pairs, contact.friction_pairs
+        if self.newton_rows is None:
+            self.newton_rows = grow_newton_rows(0, 0, None, self._newton_rows_replaced)
+        n_static_rows = n_cloth_rows + n_proxy_rows
+        args_sizes = (n_cloth_rows, n_cloth_triplets, n_proxy_rows)
+        status = self.newton_loops.status
         args_state = (
             mpm_state,
             sparse_grid,
             fem_state,
-            ipc_pairs,
-            friction_pairs,
+            self._ipc_pairs_unused,
+            self._friction_pairs_unused,
             self.ipc_state,
             proxies_state,
             proxies,
@@ -809,31 +828,34 @@ class NewtonSolver(Solver):
             dyn_state,
             constraint_state,
         )
-        kernel_init_substep(
-            self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config, errno
-        )
-        # Every Newton iteration runs on the device but for the broad phase, the host reading back whether some
-        # environment iterates on once per iteration
-        for _ in range(self._options.max_iterations):
-            # The triplets of the contacts of the cloth follow its own (see 'func_contact_assemble' in ipc_contact.py)
-            n_contact_triplets = 0
+        # The host reads back the status of the solve (see NewtonStatus) once after the start of the substep and once
+        # per Newton iteration, the counts of what overflowed only after an overflow
+        is_started = False
+        while not is_started:
             if contact is not None:
-                n_contact_triplets = contact.n_triplets
-                if self.newton_config.has_halfplanes:
-                    n_contact_triplets += n_cloth_rows
-            self.newton_rows = grow_newton_rows(
-                n_mpm_rows + n_cloth_rows + n_proxy_rows,
-                n_mpm_triplets + n_cloth_triplets + n_contact_triplets,
+                # The candidates at the start point of the substep give its first assembly and its friction pairs
+                contact.search(status, self.ipc_state, self.ipc_info, self.newton_config, is_swept=False)
+                contact.set_friction_pairs(
+                    self.ipc_state, self.ipc_info, int(NewtonErrorCode.INVALID_CONTACT_THICKNESS), errno
+                )
+                args_state = (*args_state[:3], contact.pairs, contact.friction_pairs, *args_state[5:])
+            kernel_init_substep(
+                *args_sizes,
                 self.newton_rows,
-                self._newton_rows_replaced,
+                self.newton_envs,
+                self.newton_loops,
+                *args_state,
+                self.newton_info,
+                *args_info,
+                *args_config,
+                errno,
             )
+            status_bits = int(qd_to_numpy(status))
+            is_started = not status_bits & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)
+            self._grow_overflowed(status_bits, n_static_rows, n_cloth_triplets)
+        for _ in range(self._options.max_iterations):
             kernel_newton_direction(
-                n_mpm_rows,
-                n_mpm_triplets,
-                n_cloth_rows,
-                n_cloth_triplets,
-                n_contact_triplets,
-                n_proxy_rows,
+                *args_sizes,
                 fem_solver.n_vertices,
                 self.newton_rows,
                 self.newton_envs,
@@ -844,34 +866,62 @@ class NewtonSolver(Solver):
                 *args_config,
                 self._rigid_contact_stiffness,
             )
-            if contact is not None:
-                # The candidates over the sweep along the direction serve the step bound, the line search and the
-                # assembly of the next iteration
-                contact.search(self.ipc_state, self.ipc_info, self.newton_config, is_swept=True)
-                ipc_pairs = contact.pairs
-                args_state = (*args_state[:3], ipc_pairs, *args_state[4:])
-            kernel_line_search(
-                self.newton_rows,
-                self.newton_envs,
-                self.newton_loops,
-                *args_state,
-                self.newton_info,
-                *args_info,
-                *args_config,
-                errno,
-            )
-            if not qd_to_numpy(self.newton_loops.is_newton_running):
+            is_searched = False
+            while not is_searched:
+                if contact is not None:
+                    # The candidates over the sweep along the direction serve the step bound, the line search and the
+                    # assembly of the next iteration
+                    contact.search(status, self.ipc_state, self.ipc_info, self.newton_config, is_swept=True)
+                    args_state = (*args_state[:3], contact.pairs, *args_state[4:])
+                kernel_line_search(
+                    *args_sizes,
+                    self.newton_rows,
+                    self.newton_envs,
+                    self.newton_loops,
+                    *args_state,
+                    self.newton_info,
+                    *args_info,
+                    *args_config,
+                    errno,
+                )
+                status_bits = int(qd_to_numpy(status))
+                is_searched = not status_bits & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)
+                self._grow_overflowed(status_bits, n_static_rows, n_cloth_triplets)
+            if not status_bits & NewtonStatus.RUNNING:
                 break
         kernel_flag_failures(self.newton_envs, errno)
         if self.newton_config.has_rigid_dofs:
             kernel_finish_rigid(self.newton_envs, *args_state, *args_info, *args_config, errno)
-        if self._sim.cur_substep_global % self._options.failure_check_interval == 0:
-            if qd_to_numpy(self.newton_loops.has_failed_iterations):
-                kernel_clear_failed_iterations(self.newton_loops)
-                gs.logger.warning(
-                    "The Newton solve of the implicit MPM solver or of the cloth stopped before converging: raise "
-                    "NewtonOptions(max_iterations) or loosen NewtonOptions(velocity_tol)."
-                )
+        if status_bits & NewtonStatus.FAILED_ITERATIONS:
+            gs.logger.warning(
+                "The Newton solve of the implicit MPM solver or of the cloth stopped before converging: raise "
+                "NewtonOptions(max_iterations) or loosen NewtonOptions(velocity_tol)."
+            )
+
+    def _grow_overflowed(self, status_bits: int, n_static_rows: int, n_static_triplets: int) -> None:
+        """
+        Grow what the Newton solve outgrew per the bits of its status, and clear them.
+
+        The search of the candidate pairs grows its lists (see 'IPCContact.grow_search'), and the rows grow to the sizes
+        the device set (see 'func_check_rows'), past the rows and triplets of the segments sized once per scene.
+        """
+        overflow_bits = status_bits & (
+            NewtonStatus.ROWS_OVERFLOW | NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED
+        )
+        if overflow_bits & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED):
+            self.ipc_contact.grow_search()
+        if overflow_bits & NewtonStatus.ROWS_OVERFLOW:
+            n_mpm_rows, n_mpm_triplets, n_contact_triplets = (
+                int(size) for size in qd_to_numpy(self.newton_loops.segments_size)
+            )
+            self.newton_rows = grow_newton_rows(
+                n_mpm_rows + n_static_rows,
+                n_mpm_triplets + n_static_triplets + n_contact_triplets,
+                self.newton_rows,
+                self._newton_rows_replaced,
+            )
+        if overflow_bits:
+            kernel_clear_status(int(overflow_bits), self.newton_loops)
 
 
 # ------------------------------------------------------------------------------------
@@ -1051,6 +1101,10 @@ def func_scale_directions(
 
 @qd.func(requires_top_level=True)
 def func_init_substep(
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_proxy_rows: int,
+    newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
@@ -1092,12 +1146,15 @@ def func_init_substep(
     'func_proxies_init_substep' in rigid/contact_proxy.py), and the links that the particles touch are constrained over
     the substep (see 'func_mark_constrained_links' in couplers/mpm_rigid_global_newton.py). The contact of the cloth takes the pose of
     the planes, its friction and its adaptive stiffness from the start of the substep (see
-    'func_contact_init_substep' in ipc_contact.py).
+    'func_contact_init_substep' in ipc_contact.py). The status then takes the bit RUNNING of the solve and loses the bit
+    FAILED_ITERATIONS of the previous one, and the rows of the first Newton direction take their sizes (see
+    'func_check_rows').
     """
     for _ in range(1):
         newton_loops.is_newton_running[None] = 0
     if qd.static(newton_config.has_cloth):
         func_contact_init_substep(
+            newton_loops.status,
             ipc_state,
             dyn_state,
             ipc_info,
@@ -1166,10 +1223,33 @@ def func_init_substep(
         rigid_config,
         newton_config,
     )
+    for _ in range(1):
+        status = newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)
+        if newton_loops.is_newton_running[None] != 0:
+            status = status | NewtonStatus.RUNNING
+        newton_loops.status[None] = status
+    func_check_rows(
+        n_cloth_rows,
+        n_cloth_triplets,
+        n_proxy_rows,
+        newton_rows,
+        newton_loops,
+        mpm_state,
+        sparse_grid,
+        ipc_pairs,
+        friction_pairs,
+        ipc_state,
+        ipc_info,
+        newton_config,
+    )
 
 
 @qd.kernel(fastcache=True)
 def kernel_init_substep(
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_proxy_rows: int,
+    newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
     mpm_state: MPMState,
@@ -1204,6 +1284,10 @@ def kernel_init_substep(
 ):
     """Initialize the Newton solve of the substep in every environment (see func_init_substep)."""
     func_init_substep(
+        n_cloth_rows,
+        n_cloth_triplets,
+        n_proxy_rows,
+        newton_rows,
         newton_envs,
         newton_loops,
         mpm_state,
@@ -1345,16 +1429,68 @@ def func_assemble_mpm_rigid_coupling_terms(
 
 
 @qd.func(requires_top_level=True)
-def func_assemble_rows(
-    n_mpm_rows: int,
-    n_mpm_triplets: int,
+def func_check_rows(
     n_cloth_rows: int,
     n_cloth_triplets: int,
-    n_contact_triplets: int,
+    n_proxy_rows: int,
+    newton_rows: NewtonRows,
+    newton_loops: NewtonLoops,
+    mpm_state: MPMState,
+    sparse_grid: MPMSparseGrid,
+    ipc_pairs: IPCPairs,
+    friction_pairs: IPCFrictionPairs,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    newton_config: qd.template(),
+):
+    """
+    Set the sizes of the segments of the rows that the next Newton direction takes, and flag ROWS_OVERFLOW in the status
+    when they outgrow the capacity of the rows.
+
+    The nodes of the MPM solver take a row each and the triplets of their stencils (see STENCIL_PAIRS in mpm_solver.py),
+    and the contacts of the cloth the triplets of their candidate and friction pairs and of the rigid vertices, with a
+    diagonal triplet per vertex of the cloth against the planes (see 'func_contact_assemble' in ipc_contact.py), the
+    other segments sizing once per scene (`n_cloth_rows`, `n_cloth_triplets` and `n_proxy_rows`). The sizes wait for the
+    search of the candidate pairs to hold every pair.
+    """
+    # See STENCIL_NODES in mpm_solver.py and PAIR_TRIPLETS and RIGID_POINT_PAIR_TRIPLETS in ipc_contact.py
+    STENCIL_NODES = qd.static(8)
+    STENCIL_PAIRS = qd.static(STENCIL_NODES * (STENCIL_NODES + 1) // 2)
+    PAIR_TRIPLETS = qd.static(10)
+    POINT_PAIR_TRIPLETS = qd.static(15 if newton_config.has_rigid_vertices else 10)
+    for _ in range(1):
+        if (newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)) == 0:
+            n_mpm_rows = 0
+            n_mpm_triplets = 0
+            if qd.static(newton_config.has_mpm):
+                n_mpm_rows = sparse_grid.n_blocks[None] * 64
+                n_mpm_triplets = n_mpm_rows + STENCIL_PAIRS * mpm_state.sorted_particles.n_tasks[None]
+            n_contact_triplets = 0
+            if qd.static(newton_config.has_cloth):
+                n_contact_triplets = POINT_PAIR_TRIPLETS * (ipc_pairs.counts[0] + friction_pairs.counts[0])
+                n_contact_triplets += PAIR_TRIPLETS * (ipc_pairs.counts[1] + friction_pairs.counts[1])
+                if qd.static(newton_config.has_rigid_vertices):
+                    n_contact_triplets += ipc_state.vertices.pos.shape[1] * ipc_info.vertices.is_rigid.shape[0]
+                if qd.static(newton_config.has_halfplanes):
+                    n_contact_triplets += n_cloth_rows
+            newton_loops.segments_size[0] = n_mpm_rows
+            newton_loops.segments_size[1] = n_mpm_triplets
+            newton_loops.segments_size[2] = n_contact_triplets
+            n_rows = n_mpm_rows + n_cloth_rows + n_proxy_rows
+            n_triplets = n_mpm_triplets + n_cloth_triplets + n_contact_triplets
+            if n_rows > newton_rows.rows_env.shape[0] or n_triplets > newton_rows.matrix.triplets_row.shape[0]:
+                newton_loops.status[None] = newton_loops.status[None] | NewtonStatus.ROWS_OVERFLOW
+
+
+@qd.func(requires_top_level=True)
+def func_assemble_rows(
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
     n_proxy_rows: int,
     proxy_vertex_start: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
+    newton_loops: NewtonLoops,
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     fem_state: FEMState,
@@ -1388,12 +1524,12 @@ def func_assemble_rows(
 
     The adaptive stiffness ticking per Newton iteration first stiffens the collapsed gaps (see
     'func_contact_kappa_iteration' in ipc_contact.py) and refreshes the energy at the start point (see
-    'func_refresh_energy_start'). The segments then take their rows and triplets (see NewtonSegment), the triplets of
-    the contacts of the cloth following its first `n_cloth_triplets` ones, and the proxies prepare the iteration at the
-    iterate of the dofs (see 'func_proxies_prepare' in rigid/contact_proxy.py), the vertices of the proxies starting
-    at the contact vertex `proxy_vertex_start`. The rows are the nodes of the MPM solver (see 'func_mpm_assemble' in
-    mpm_solver.py), the vertices of the cloth (see 'func_cloth_assemble' in fem_solver.py) and their contacts (see
-    'func_contact_assemble' in ipc_contact.py).
+    'func_refresh_energy_start'). The segments then take their rows and triplets (see NewtonSegment and
+    'func_check_rows'), the triplets of the contacts of the cloth following its first `n_cloth_triplets` ones, and the
+    proxies prepare the iteration at the iterate of the dofs (see 'func_proxies_prepare' in rigid/contact_proxy.py),
+    the vertices of the proxies starting at the contact vertex `proxy_vertex_start`. The rows are the nodes of the MPM
+    solver (see 'func_mpm_assemble' in mpm_solver.py), the vertices of the cloth (see 'func_cloth_assemble' in
+    fem_solver.py) and their contacts (see 'func_contact_assemble' in ipc_contact.py).
     """
     if qd.static(newton_config.has_adaptive_kappa and newton_config.is_kappa_tick_newton):
         func_contact_kappa_iteration(newton_envs.is_active, ipc_state, ipc_info)
@@ -1428,6 +1564,9 @@ def func_assemble_rows(
             newton_config,
         )
     for _ in range(1):
+        n_mpm_rows = newton_loops.segments_size[0]
+        n_mpm_triplets = newton_loops.segments_size[1]
+        n_contact_triplets = newton_loops.segments_size[2]
         func_set_segment(NewtonSegment.MPM_NODES, n_mpm_rows, n_mpm_triplets, newton_rows)
         func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets + n_contact_triplets, newton_rows)
         func_set_segment(NewtonSegment.PROXIES, n_proxy_rows, 0, newton_rows)
@@ -1793,11 +1932,8 @@ def func_pcg_iteration(
 
 @qd.func(requires_top_level=True)
 def func_newton_direction(
-    n_mpm_rows: int,
-    n_mpm_triplets: int,
     n_cloth_rows: int,
     n_cloth_triplets: int,
-    n_contact_triplets: int,
     n_proxy_rows: int,
     proxy_vertex_start: int,
     newton_rows: NewtonRows,
@@ -1837,8 +1973,8 @@ def func_newton_direction(
     Assemble and solve the Newton direction of every environment still iterating, and start its line search.
 
     The coupling of the particles with the rigid geoms stages its terms (see 'func_assemble_mpm_rigid_coupling_terms'),
-    the rows are assembled (see 'func_assemble_rows', which takes the sizes of the segments, `n_contact_triplets` and
-    `proxy_vertex_start`) and their triplets summed into the matrix (see 'func_sort_triplets' and
+    the rows are assembled (see 'func_assemble_rows', which takes the sizes of the segments and `proxy_vertex_start`)
+    and their triplets summed into the matrix (see 'func_sort_triplets' and
     'func_reduce_triplets' in numerics/bcoo.py), and the dofs assembled and factored with `rigid_contact_stiffness` (see
     'func_assemble_rigid'). The gradient of moving proxies then reduces to the unknowns (see
     'func_proxies_reduce_gradient' in rigid/contact_proxy.py), the preconditioned conjugate gradient (PCG) starts (see
@@ -1853,15 +1989,13 @@ def func_newton_direction(
             mpm_state, sparse_grid, rigid_dofs, rigid_links, dyn_state, mpm_info, dyn_info, rigid_config, newton_config
         )
     func_assemble_rows(
-        n_mpm_rows,
-        n_mpm_triplets,
         n_cloth_rows,
         n_cloth_triplets,
-        n_contact_triplets,
         n_proxy_rows,
         proxy_vertex_start,
         newton_rows,
         newton_envs,
+        newton_loops,
         mpm_state,
         sparse_grid,
         fem_state,
@@ -2029,11 +2163,8 @@ def func_newton_direction(
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_newton_direction(
-    n_mpm_rows: int,
-    n_mpm_triplets: int,
     n_cloth_rows: int,
     n_cloth_triplets: int,
-    n_contact_triplets: int,
     n_proxy_rows: int,
     proxy_vertex_start: int,
     newton_rows: NewtonRows,
@@ -2071,11 +2202,8 @@ def kernel_newton_direction(
 ):
     """Assemble and solve the Newton direction as one graph (see func_newton_direction)."""
     func_newton_direction(
-        n_mpm_rows,
-        n_mpm_triplets,
         n_cloth_rows,
         n_cloth_triplets,
-        n_contact_triplets,
         n_proxy_rows,
         proxy_vertex_start,
         newton_rows,
@@ -2656,7 +2784,7 @@ def func_end_iteration(
             elif newton_envs.n_iterations[i_b] >= newton_info.max_iterations[None]:
                 newton_envs.is_active[i_b] = False
                 newton_envs.failure[i_b] = NewtonFailure.ITERATIONS
-                qd.atomic_max(newton_loops.has_failed_iterations[None], 1)
+                qd.atomic_or(newton_loops.status[None], NewtonStatus.FAILED_ITERATIONS)
                 if qd.static(newton_config.has_moving_proxies):
                     qd.atomic_or(errno[i_b], NewtonErrorCode.PROXY_SOLVE_EXHAUSTED)
             else:
@@ -2665,6 +2793,9 @@ def func_end_iteration(
 
 @qd.func(requires_top_level=True)
 def func_line_search(
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_proxy_rows: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -2699,14 +2830,42 @@ def func_line_search(
     errno: qd.Tensor,
 ):
     """
-    Run the line search of the Newton iteration, and end the iteration.
+    Run the line search of the Newton iteration, end the iteration, and set the bit RUNNING of the status.
 
-    The contacts of the cloth first bound the step of every environment, or of its groups of contact bodies, which scale
-    the direction of their participants (see 'func_contact_ccd' and 'func_contact_partition' in ipc_contact.py, and
-    'func_scale_directions'). The trials then go on until every environment accepts its step (see
-    'func_line_search_trial'), the environments of moving proxies asking for the slope of their merit getting it before
-    the trial that follows (see 'func_proxies_merit_probe'), and the iteration ends (see 'func_end_iteration').
+    The rows of the next Newton direction first take their sizes (see 'func_check_rows'). The contacts of the cloth
+    then bound the step of every environment, or of its groups of contact bodies, which scale the direction of their
+    participants (see 'func_contact_ccd' and 'func_contact_partition' in ipc_contact.py, and 'func_scale_directions').
+    The trials go on until every environment accepts its step (see 'func_line_search_trial'), the environments of
+    moving proxies asking for the slope of their merit getting it before the trial that follows (see
+    'func_proxies_merit_probe'), and the iteration ends (see 'func_end_iteration').
+
+    After an overflow of the search of the candidate pairs (see NewtonStatus), the line search is held: every
+    environment sits it out, and the iteration keeps its state for the search and the line search to run again.
     """
+    func_check_rows(
+        n_cloth_rows,
+        n_cloth_triplets,
+        n_proxy_rows,
+        newton_rows,
+        newton_loops,
+        mpm_state,
+        sparse_grid,
+        ipc_pairs,
+        friction_pairs,
+        ipc_state,
+        ipc_info,
+        newton_config,
+    )
+    for _ in range(1):
+        newton_loops.is_line_search_running_held[None] = newton_loops.is_line_search_running[None]
+        if (newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)) != 0:
+            newton_loops.is_line_search_running[None] = int(LineSearchState.STOPPED)
+    for i_b in range(newton_envs.is_active.shape[0]):
+        if (newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)) != 0:
+            newton_envs.is_active_held[i_b] = newton_envs.is_active[i_b]
+            newton_envs.is_line_search_active_held[i_b] = newton_envs.is_line_search_active[i_b]
+            newton_envs.is_active[i_b] = False
+            newton_envs.is_line_search_active[i_b] = False
     if qd.static(newton_config.has_cloth):
         func_contact_ccd(newton_envs.is_active, newton_envs.alpha, ipc_pairs, ipc_state, ipc_info, newton_config)
         if qd.static(newton_config.has_ccd_partition):
@@ -2774,10 +2933,25 @@ def func_line_search(
             errno,
         )
     func_end_iteration(newton_envs, newton_loops, proxies_envs, newton_info, newton_config, errno)
+    for i_b in range(newton_envs.is_active.shape[0]):
+        if (newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)) != 0:
+            newton_envs.is_active[i_b] = newton_envs.is_active_held[i_b]
+            newton_envs.is_line_search_active[i_b] = newton_envs.is_line_search_active_held[i_b]
+    for _ in range(1):
+        if (newton_loops.status[None] & (NewtonStatus.SEARCH_OVERFLOW | NewtonStatus.TRUNCATED)) != 0:
+            newton_loops.is_line_search_running[None] = newton_loops.is_line_search_running_held[None]
+            newton_loops.is_newton_running[None] = 1
+        status = (newton_loops.status[None] | NewtonStatus.RUNNING) ^ NewtonStatus.RUNNING
+        if newton_loops.is_newton_running[None] != 0:
+            status = status | NewtonStatus.RUNNING
+        newton_loops.status[None] = status
 
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_line_search(
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_proxy_rows: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -2813,6 +2987,9 @@ def kernel_line_search(
 ):
     """Run the line search of the Newton iteration as one graph, and end the iteration (see func_line_search)."""
     func_line_search(
+        n_cloth_rows,
+        n_cloth_triplets,
+        n_proxy_rows,
         newton_rows,
         newton_envs,
         newton_loops,
@@ -2994,6 +3171,6 @@ def kernel_flag_failures(newton_envs: NewtonEnvs, errno: qd.Tensor):
 
 
 @qd.kernel(fastcache=True)
-def kernel_clear_failed_iterations(newton_loops: NewtonLoops):
+def kernel_clear_status(bits: int, newton_loops: NewtonLoops):
     for _ in range(1):
-        newton_loops.has_failed_iterations[None] = 0
+        newton_loops.status[None] = (newton_loops.status[None] | bits) ^ bits

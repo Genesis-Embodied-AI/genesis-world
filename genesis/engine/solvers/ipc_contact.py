@@ -27,6 +27,7 @@ grows with the closing of its gap (see IPCVerticesKappa).
 """
 
 import math
+from enum import IntFlag
 from typing import NamedTuple
 
 import numpy as np
@@ -100,6 +101,20 @@ RIGID_VERTICES = "rigid_vertices"
 # the same counts as locals.
 PAIR_TRIPLETS = 10
 RIGID_POINT_PAIR_TRIPLETS = 15
+
+
+class SearchStatus(IntFlag):
+    """
+    The bits of the status of the Newton solve that the search of the candidate pairs sets (see NewtonStatus in
+    newton_solver.py).
+
+    OVERFLOW stands for a list of the search or the pairs too short for their count, TRUNCATED for a query of the broad
+    phase that stopped short (see DOPBVHHits in genesis/engine/ipc/dop_bvh.py). Either asks for the search to run
+    again, after a growth of its lists or with its queries on one thread each.
+    """
+
+    OVERFLOW = 4
+    TRUNCATED = 8
 
 
 class IPCSurfacePrimitives(NamedTuple):
@@ -1101,6 +1116,7 @@ def func_contact_energy(
 
 @qd.func(requires_top_level=True)
 def func_contact_init_substep(
+    status: qd.Tensor,
     ipc_state: IPCState,
     dyn_state: DynState,
     ipc_info: IPCInfo,
@@ -1118,7 +1134,9 @@ def func_contact_init_substep(
     `penetration_errno` in the errno of its environment. A collapsed gap stiffens the vertex by the grow factor up to the
     largest scale, unless the stiffness grows within the Newton solve, where it only rearms the calm hold. A gap within
     the hysteresis band holds the stiffness and the hold. A calm vertex holds its stiffness over the calm time, then
-    relaxes it toward that of its material with the time constant of the relaxation.
+    relaxes it toward that of its material with the time constant of the relaxation. The stiffness updates once per
+    substep: a start whose search must run again (a bit of SearchStatus in `status`) leaves it for the start that runs
+    after the search.
     """
     if qd.static(newton_config.has_halfplanes):
         for i_h, i_b in qd.ndrange(*ipc_state.halfplanes.pos.shape):
@@ -1148,21 +1166,22 @@ def func_contact_init_substep(
         gap_ratio = ipc_info.kappa_gap_ratio[None]
         n_hold = qd.max(qd.cast(qd.ceil(ipc_info.kappa_calm_time[None] / dt), gs.qd_int), 1)
         for i_v, i_b in qd.ndrange(*ipc_state.vertices_kappa.scale.shape):
-            gap = ipc_state.vertices_kappa.frame_min_gap[i_v, i_b]
-            scale = ipc_state.vertices_kappa.scale[i_v, i_b]
-            calm = ipc_state.vertices_kappa.calm[i_v, i_b]
-            if gap < gap_ratio:
-                calm = 0
-                if qd.static(not newton_config.is_kappa_tick_newton):
-                    scale = qd.min(scale * ipc_info.kappa_grow[None], ipc_info.kappa_max_scale[None])
-            elif not (gap <= ipc_info.kappa_hysteresis[None] * gap_ratio):
-                if calm < n_hold:
-                    calm += 1
-                else:
-                    scale = qd.max(scale * qd.exp(-dt / ipc_info.kappa_relax_time[None]), 1.0)
-            ipc_state.vertices_kappa.scale[i_v, i_b] = scale
-            ipc_state.vertices_kappa.calm[i_v, i_b] = calm
-            ipc_state.vertices_kappa.frame_min_gap[i_v, i_b] = ipc_info.min_gap_unrecorded[None]
+            if (status[()] & (SearchStatus.OVERFLOW | SearchStatus.TRUNCATED)) == 0:
+                gap = ipc_state.vertices_kappa.frame_min_gap[i_v, i_b]
+                scale = ipc_state.vertices_kappa.scale[i_v, i_b]
+                calm = ipc_state.vertices_kappa.calm[i_v, i_b]
+                if gap < gap_ratio:
+                    calm = 0
+                    if qd.static(not newton_config.is_kappa_tick_newton):
+                        scale = qd.min(scale * ipc_info.kappa_grow[None], ipc_info.kappa_max_scale[None])
+                elif not (gap <= ipc_info.kappa_hysteresis[None] * gap_ratio):
+                    if calm < n_hold:
+                        calm += 1
+                    else:
+                        scale = qd.max(scale * qd.exp(-dt / ipc_info.kappa_relax_time[None]), 1.0)
+                ipc_state.vertices_kappa.scale[i_v, i_b] = scale
+                ipc_state.vertices_kappa.calm[i_v, i_b] = calm
+                ipc_state.vertices_kappa.frame_min_gap[i_v, i_b] = ipc_info.min_gap_unrecorded[None]
 
 
 @qd.kernel(fastcache=True)
@@ -1294,6 +1313,7 @@ def func_filter_sub_pairs(
 
 @qd.func(requires_top_level=True)
 def func_contact_filter(
+    status: qd.Tensor,
     groups_hits: DOPBVHHits,
     hits: DOPBVHHits,
     sub_pairs: EFSubPairs,
@@ -1305,8 +1325,8 @@ def func_contact_filter(
 ):
     """
     Keep the sub-pairs of the broad phase that may enter the band over the sweep of their vertices (see
-    'func_candidate_reach' in genesis/engine/ipc/ccd.py), the candidates, and gather the counts of the search in
-    `sub_pairs.summary`.
+    'func_candidate_reach' in genesis/engine/ipc/ccd.py), the candidates, gather the counts of the search in
+    `sub_pairs.summary` and set the bits of SearchStatus that they call for in `status`.
 
     A pair that only stays out of the band if its two sides take the same step links their contact bodies, with the
     partition of the step into contact bodies (see IPCBodies).
@@ -1333,10 +1353,23 @@ def func_contact_filter(
         sub_pairs.summary[4] = ipc_pairs.counts[0]
         sub_pairs.summary[5] = ipc_pairs.counts[1]
         sub_pairs.summary[6] = groups_hits.n_truncated[()] + hits.n_truncated[()]
+        is_overflow = (
+            groups_hits.count[()] > groups_hits.hits.shape[0]
+            or hits.count[()] > hits.hits.shape[0]
+            or sub_pairs.counts[0] > sub_pairs.pt.shape[0]
+            or sub_pairs.counts[1] > sub_pairs.ee.shape[0]
+            or ipc_pairs.counts[0] > ipc_pairs.pt.shape[0]
+            or ipc_pairs.counts[1] > ipc_pairs.ee.shape[0]
+        )
+        if is_overflow:
+            status[()] = status[()] | SearchStatus.OVERFLOW
+        if sub_pairs.summary[6] > 0:
+            status[()] = status[()] | SearchStatus.TRUNCATED
 
 
 @qd.kernel(fastcache=True)
 def kernel_contact_filter(
+    status: qd.Tensor,
     groups_hits: DOPBVHHits,
     hits: DOPBVHHits,
     sub_pairs: EFSubPairs,
@@ -1347,7 +1380,7 @@ def kernel_contact_filter(
     is_swept: qd.template(),
 ):
     """Keep the candidate pairs among the sub-pairs of the broad phase (see func_contact_filter)."""
-    func_contact_filter(groups_hits, hits, sub_pairs, ipc_pairs, ipc_state, ipc_info, newton_config, is_swept)
+    func_contact_filter(status, groups_hits, hits, sub_pairs, ipc_pairs, ipc_state, ipc_info, newton_config, is_swept)
 
 
 @qd.func(requires_top_level=True)
@@ -1670,9 +1703,6 @@ class IPCContact:
         )
         self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
         self.friction_pairs = IPCFrictionPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
-        # The numbers of point-triangle and edge-edge candidates and friction pairs, read back after each search
-        self.n_pairs = (0, 0)
-        self.n_friction_pairs = (0, 0)
 
     def _retire(self, struct: Data) -> None:
         for _, array in iter_state_arrays(struct):
@@ -1682,52 +1712,58 @@ class IPCContact:
     def _grown_capacity(self, count: int, capacity: int) -> int:
         return max(int(math.ceil(count * self._grow_factor)), capacity)
 
-    @property
-    def n_triplets(self) -> int:
-        """The triplets of the Hessians of the candidate and friction pairs and of the rigid vertices (see
-        'func_contact_assemble')."""
-        pt_slots = RIGID_POINT_PAIR_TRIPLETS if self._has_rigid else PAIR_TRIPLETS
-        n_triplets = pt_slots * (self.n_pairs[0] + self.n_friction_pairs[0])
-        n_triplets += PAIR_TRIPLETS * (self.n_pairs[1] + self.n_friction_pairs[1])
-        if self._has_rigid:
-            n_triplets += self._n_envs * self._ipc_info.vertices.is_rigid.shape[0]
-        return n_triplets
+    def search(self, status: qd.Tensor, ipc_state: IPCState, ipc_info: IPCInfo, newton_config, is_swept) -> None:
+        """
+        Find the candidate pairs over the sweep of the vertices along the Newton direction, or at their positions.
 
-    def search(self, ipc_state: IPCState, ipc_info: IPCInfo, newton_config, is_swept) -> None:
-        """Find the candidate pairs over the sweep of the vertices along the Newton direction, or at their positions,
-        growing the capacities until they hold every hit and every pair."""
-        is_complete = False
-        while not is_complete:
-            self._broad_phase.run(
-                ipc_state.vertices.pos,
-                ipc_state.vertices.displacement,
-                ipc_state.vertices.pivot,
-                ipc_state.vertices.rotation,
-                is_screw=self._has_rigid and is_swept,
-                is_swept=is_swept,
-                is_expanded=True,
-            )
-            kernel_contact_filter(
-                self._broad_phase.groups_hits,
-                self._broad_phase.hits,
-                self._broad_phase.sub_pairs,
-                self.pairs,
-                ipc_state,
-                ipc_info,
-                newton_config,
-                is_swept,
-            )
-            n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee, n_truncated = (
-                int(count) for count in qd_to_numpy(self._broad_phase.sub_pairs.summary)
-            )
-            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_truncated)
-            capacity = self.pairs.pt.shape[0]
-            if max(n_pt, n_ee) > capacity:
-                is_complete = False
-                self._retire(self.pairs)
-                capacity = self._grown_capacity(max(n_pt, n_ee), capacity)
-                self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
-        self.n_pairs = (n_pt, n_ee)
+        A list too short for its count, or a query that stopped short, sets its bit of SearchStatus in `status`, and the
+        caller then grows the lists (see 'grow_search') and runs the search again.
+        """
+        self._broad_phase.run(
+            ipc_state.vertices.pos,
+            ipc_state.vertices.displacement,
+            ipc_state.vertices.pivot,
+            ipc_state.vertices.rotation,
+            is_screw=self._has_rigid and is_swept,
+            is_swept=is_swept,
+            is_expanded=True,
+        )
+        kernel_contact_filter(
+            status,
+            self._broad_phase.groups_hits,
+            self._broad_phase.hits,
+            self._broad_phase.sub_pairs,
+            self.pairs,
+            ipc_state,
+            ipc_info,
+            newton_config,
+            is_swept,
+        )
+
+    def grow_search(self) -> None:
+        """
+        Grow the lists that the last search outgrew, from the counts it gathered (see EFSubPairs).
+
+        Called after the search set a bit of SearchStatus. A query that stopped short makes the next search run its
+        queries on one thread each.
+        """
+        n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee, n_truncated = (
+            int(count) for count in qd_to_numpy(self._broad_phase.sub_pairs.summary)
+        )
+        self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_truncated)
+        capacity = self.pairs.pt.shape[0]
+        if max(n_pt, n_ee) > capacity:
+            self._retire(self.pairs)
+            capacity = self._grown_capacity(max(n_pt, n_ee), capacity)
+            self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
+
+    def fit_friction_pairs(self) -> None:
+        """Grow the friction pairs to the capacity of the candidate pairs, before the friction pairs of a substep are set
+        (the friction pairs of a substep staying put over its Newton iterations)."""
+        capacity = self.pairs.pt.shape[0]
+        if self.friction_pairs.pt.shape[0] < capacity:
+            self._retire(self.friction_pairs)
+            self.friction_pairs = IPCFrictionPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
 
     def find_intersections(self, ipc_state: IPCState, ipc_info: IPCInfo) -> np.ndarray:
         """Return the (environment, edge, triangle) triplets of the contact edges that cross a contact triangle at the
@@ -1769,9 +1805,5 @@ class IPCContact:
     ) -> None:
         """Set the friction pairs of the substep from the candidate pairs at the lagged positions (see
         IPCFrictionPairs)."""
-        capacity = self.pairs.pt.shape[0]
-        if self.friction_pairs.pt.shape[0] < capacity:
-            self._retire(self.friction_pairs)
-            self.friction_pairs = IPCFrictionPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
+        self.fit_friction_pairs()
         kernel_contact_friction_pairs(self.pairs, self.friction_pairs, ipc_state, ipc_info, penetration_errno, errno)
-        self.n_friction_pairs = tuple(int(count) for count in qd_to_numpy(self.friction_pairs.counts))
