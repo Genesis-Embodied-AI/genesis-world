@@ -1026,6 +1026,9 @@ def func_compute_density_rate(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
+        # The pass counter advances here, where no thread reads it (see func_update_convergence)
+        if i_t == 0:
+            sph_state.solve_loop.n_passes[None] = sph_state.solve_loop.n_passes[None] + 1
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         ret = qd.Struct(drho=gs.qd_float(0.0), n_neighbors=0)
         if is_solved:
@@ -1154,13 +1157,6 @@ def func_solver_iteration(
     solve is its warm start, and the divergence solve checks its convergence before its first iteration, so its first
     pass leaves the velocities untouched.
     """
-    is_first_pass = sph_state.solve_loop.n_passes[None] == 0
-    warm_start = False
-    is_iterating = True
-    if qd.static(solve_density):
-        warm_start = is_first_pass
-    else:
-        is_iterating = not is_first_pass
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1169,6 +1165,17 @@ def func_solver_iteration(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
+        # Every thread reads the pass counter and one thread clears the loop flag, which spares the pass the launches of
+        # serial statements (see func_update_convergence).
+        if i_t == 0:
+            sph_state.solve_loop.is_looping[()] = 0
+        is_first_pass = sph_state.solve_loop.n_passes[None] == 0
+        warm_start = False
+        is_iterating = True
+        if qd.static(solve_density):
+            warm_start = is_first_pass
+        else:
+            is_iterating = not is_first_pass
         is_solved = (
             is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         )
@@ -1247,14 +1254,14 @@ def func_update_convergence(
     Each environment stops once the average density error of its own particles meets the tolerance, so that its result
     is the same whatever the other environments simulate alongside it, and the density solve only after its warm start.
     The error summed by the density rate pass is reset once read, for the next pass. The loop runs on as long as an
-    environment iterates on, for `n_iters_max` iterations at most after its first pass.
+    environment iterates on, for `n_iters_max` iterations at most after its first pass. The pass counter already counts
+    the current pass, and the loop flag starts the pass cleared (see func_solver_iteration).
     """
-    n_passes = sph_state.solve_loop.n_passes[None]
-    can_stop = True
-    if qd.static(solve_density):
-        can_stop = n_passes > 0
-    sph_state.solve_loop.is_looping[()] = 0
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
+        n_passes = sph_state.solve_loop.n_passes[None]
+        can_stop = True
+        if qd.static(solve_density):
+            can_stop = n_passes > 1
         if sph_state.envs_solve.is_solving[i_b]:
             err_tol = sph_info.divergence_err_tol[None]
             if qd.static(solve_density):
@@ -1267,9 +1274,8 @@ def func_update_convergence(
                 sph_state.envs_solve.err_sum[i_b] = 0.0
             if can_stop and err <= err_tol * sph_state.envs_solve.n_active[i_b]:
                 sph_state.envs_solve.is_solving[i_b] = False
-            elif n_passes < n_iters_max:
+            elif n_passes <= n_iters_max:
                 sph_state.solve_loop.is_looping[()] = 1
-    sph_state.solve_loop.n_passes[None] = n_passes + 1
 
 
 @qd.kernel(graph=True, fastcache=True)
