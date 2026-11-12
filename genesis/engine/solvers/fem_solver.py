@@ -3796,7 +3796,7 @@ def kernel_cloth_finish(fem_state: FEMState, fem_info: FEMInfo, newton_errno: qd
     Set the velocities of the vertices of the cloth at the end of the substep from their displacement over it.
 
     An environment whose Newton solve failed keeps the state of its vertices until the error raises (see
-    'kernel_flag_failures' in newton_solver.py).
+    'func_flag_failures' in newton_solver.py).
     """
     dt = fem_info.substep_dt[None]
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):

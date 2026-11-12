@@ -3253,7 +3253,7 @@ def kernel_mpm_g2p(
     transfer), then apply the return map of its material (see 'kernel_copy_next_to_curr').
 
     The particles of an environment that the Newton solver flagged keep their state, and so do the inactive particles
-    (see 'kernel_flag_failures' in newton_solver.py). A velocity that is not finite flags the environment of the
+    (see 'func_flag_failures' in newton_solver.py). A velocity that is not finite flags the environment of the
     particle.
     """
     n_particles, n_envs = mpm_state.particles.pos.shape

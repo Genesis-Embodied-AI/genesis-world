@@ -255,8 +255,8 @@ def func_primitive_bounds(
     return func_dop_expand(lower, upper, vertices_d_hat[i_v0])
 
 
-@qd.kernel(fastcache=True)
-def kernel_ef_bounds_build(
+@qd.func(requires_top_level=True)
+def func_ef_bounds_build(
     positions: qd.Tensor,
     displacements: qd.Tensor,
     pivots: qd.Tensor,
@@ -451,6 +451,52 @@ def kernel_ef_bounds_build(
     func_build_dop_bvh(groups_tree, groups_tree_config)
 
 
+@qd.kernel(fastcache=True)
+def kernel_ef_bounds_build(
+    positions: qd.Tensor,
+    displacements: qd.Tensor,
+    pivots: qd.Tensor,
+    rotations: qd.Tensor,
+    vertices_thickness: qd.Tensor,
+    vertices_d_hat: qd.Tensor,
+    edges_verts_idx: qd.Tensor,
+    triangles_verts_idx: qd.Tensor,
+    bounds: EFBounds,
+    groups: EFGroups,
+    queries: DOPBVHQueries,
+    tree: DOPBVHState,
+    groups_queries: DOPBVHQueries,
+    groups_tree: DOPBVHState,
+    topology: EFTopology,
+    tree_config: qd.template(),
+    groups_tree_config: qd.template(),
+    is_screw: qd.template(),
+    is_swept: qd.template(),
+):
+    """Bound the surface over the sweep and build its trees (see func_ef_bounds_build)."""
+    func_ef_bounds_build(
+        positions,
+        displacements,
+        pivots,
+        rotations,
+        vertices_thickness,
+        vertices_d_hat,
+        edges_verts_idx,
+        triangles_verts_idx,
+        bounds,
+        groups,
+        queries,
+        tree,
+        groups_queries,
+        groups_tree,
+        topology,
+        tree_config,
+        groups_tree_config,
+        is_screw,
+        is_swept,
+    )
+
+
 # ------------------------------------------------------------------------------------
 # ------------------------------------- query ----------------------------------------
 # ------------------------------------------------------------------------------------
@@ -511,8 +557,8 @@ def func_is_ee_leaf_kept(
     return is_kept
 
 
-@qd.kernel(fastcache=True)
-def kernel_ef_query(
+@qd.func(requires_top_level=True)
+def func_ef_query(
     vertices_d_hat: qd.Tensor,
     edges_verts_idx: qd.Tensor,
     triangles_verts_idx: qd.Tensor,
@@ -596,6 +642,48 @@ def kernel_ef_query(
                             sub_pairs.ee[i_p] = qd.Vector([i_b, i_e_other, i_e], dt=gs.qd_int)
 
 
+@qd.kernel(fastcache=True)
+def kernel_ef_query(
+    vertices_d_hat: qd.Tensor,
+    edges_verts_idx: qd.Tensor,
+    triangles_verts_idx: qd.Tensor,
+    bounds: EFBounds,
+    groups: EFGroups,
+    query_list: EFQueryList,
+    queries: DOPBVHQueries,
+    tree: DOPBVHState,
+    hits: DOPBVHHits,
+    groups_queries: DOPBVHQueries,
+    groups_tree: DOPBVHState,
+    groups_hits: DOPBVHHits,
+    sub_pairs: EFSubPairs,
+    topology: EFTopology,
+    tree_config: qd.template(),
+    groups_tree_config: qd.template(),
+    is_expanded: qd.template(),
+):
+    """Run the edge queries of the surface (see func_ef_query)."""
+    func_ef_query(
+        vertices_d_hat,
+        edges_verts_idx,
+        triangles_verts_idx,
+        bounds,
+        groups,
+        query_list,
+        queries,
+        tree,
+        hits,
+        groups_queries,
+        groups_tree,
+        groups_hits,
+        sub_pairs,
+        topology,
+        tree_config,
+        groups_tree_config,
+        is_expanded,
+    )
+
+
 class EFBroadPhase:
     """
     The edge-face broad phase of a surface over the environments of a scene (see the module docstring): its topology,
@@ -667,7 +755,7 @@ class EFBroadPhase:
     ) -> None:
         """
         Bound the surface over the sweep and run the edge queries, expanding their hits into sub-pairs with
-        `is_expanded` (see kernel_ef_query).
+        `is_expanded` (see func_ef_query).
 
         `positions` and `displacements` are the positions of the vertices of every environment and their sweep, which
         ends at the positions without `is_swept`. With `is_screw` the vertices sweep along screws of origins `pivots` and

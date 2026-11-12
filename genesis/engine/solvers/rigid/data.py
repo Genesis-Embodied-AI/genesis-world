@@ -60,7 +60,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
     qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
     # Whether an env keeps its state over the substep, which a solve of its substep coupled with another solver sets
-    # once it failed there (see 'kernel_finish_rigid' in newton_solver.py)
+    # once it failed there (see 'func_finish_rigid' in newton_solver.py)
     is_env_frozen: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.SCRATCH)
     geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Stored reversed under the cooperative constraint kernels (see RigidData), i_d1 innermost, for their readers

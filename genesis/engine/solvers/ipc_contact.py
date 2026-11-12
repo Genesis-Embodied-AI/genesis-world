@@ -1245,7 +1245,7 @@ def func_filter_sub_pairs(
     is_swept: qd.template(),
 ):
     """Keep the sub-pairs of the broad phase that may enter the band over the sweep of their vertices (see
-    'kernel_contact_filter')."""
+    'func_contact_filter')."""
     i_kind = qd.static(1 if is_edge_edge else 0)
     N_A = qd.static(2 if is_edge_edge else 1)
     for i_r in range(qd.min(n_sub_pairs, sub_pairs.shape[0])):
@@ -1292,8 +1292,8 @@ def func_filter_sub_pairs(
                 func_set_link(i_b, ipc_info.vertices.body_idx[i_v_a], ipc_info.vertices.body_idx[i_v_b], ipc_state)
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_filter(
+@qd.func(requires_top_level=True)
+def func_contact_filter(
     groups_hits: DOPBVHHits,
     hits: DOPBVHHits,
     sub_pairs: EFSubPairs,
@@ -1335,6 +1335,21 @@ def kernel_contact_filter(
         sub_pairs.summary[6] = groups_hits.n_truncated[()] + hits.n_truncated[()]
 
 
+@qd.kernel(fastcache=True)
+def kernel_contact_filter(
+    groups_hits: DOPBVHHits,
+    hits: DOPBVHHits,
+    sub_pairs: EFSubPairs,
+    ipc_pairs: IPCPairs,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    newton_config: qd.template(),
+    is_swept: qd.template(),
+):
+    """Keep the candidate pairs among the sub-pairs of the broad phase (see func_contact_filter)."""
+    func_contact_filter(groups_hits, hits, sub_pairs, ipc_pairs, ipc_state, ipc_info, newton_config, is_swept)
+
+
 @qd.func(requires_top_level=True)
 def func_set_friction_pairs(
     ipc_pairs: IPCPairs,
@@ -1345,7 +1360,7 @@ def func_set_friction_pairs(
     errno: qd.Tensor,
     is_edge_edge: qd.template(),
 ):
-    """Set the friction pairs of one kind from the candidate pairs (see 'kernel_contact_friction_pairs')."""
+    """Set the friction pairs of one kind from the candidate pairs (see 'func_contact_friction_pairs')."""
     i_kind = qd.static(1 if is_edge_edge else 0)
     for i_p in range(qd.min(ipc_pairs.counts[i_kind], ipc_pairs.pt.shape[0])):
         pair = qd.Vector.zero(gs.qd_int, 3)
@@ -1381,8 +1396,8 @@ def func_set_friction_pairs(
                 friction_pairs.pt_normal_force[i_f] = normal_force
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_friction_pairs(
+@qd.func(requires_top_level=True)
+def func_contact_friction_pairs(
     ipc_pairs: IPCPairs,
     friction_pairs: IPCFrictionPairs,
     ipc_state: IPCState,
@@ -1404,6 +1419,19 @@ def kernel_contact_friction_pairs(
         ipc_pairs, friction_pairs, ipc_state, ipc_info, penetration_errno, errno, is_edge_edge=False
     )
     func_set_friction_pairs(ipc_pairs, friction_pairs, ipc_state, ipc_info, penetration_errno, errno, is_edge_edge=True)
+
+
+@qd.kernel(fastcache=True)
+def kernel_contact_friction_pairs(
+    ipc_pairs: IPCPairs,
+    friction_pairs: IPCFrictionPairs,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    penetration_errno: int,
+    errno: qd.Tensor,
+):
+    """Set the friction pairs of the substep (see func_contact_friction_pairs)."""
+    func_contact_friction_pairs(ipc_pairs, friction_pairs, ipc_state, ipc_info, penetration_errno, errno)
 
 
 # ------------------------------------------------------------------------------------
@@ -1613,7 +1641,7 @@ class IPCContact:
 
     The edge-face broad phase finds the point-triangle and edge-edge sub-pairs whose bounds come within their gaps (see
     genesis/engine/ipc/broad_phase.py), the vertices of every contact body forming one group and the vertices that never
-    move another one, and a filter turns them into the candidate pairs (see 'kernel_contact_filter'). The pairs start at
+    move another one, and a filter turns them into the candidate pairs (see 'func_contact_filter'). The pairs start at
     'IPCOptions.init_collision_pair_capacity' per environment, and once a search finds more, their capacity grows to
     'IPCOptions.capacity_grow_factor' times the count and the search runs again, as it does when a list of the broad
     phase overflows.
