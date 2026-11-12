@@ -135,6 +135,13 @@ LINESEARCH_COST_RTOL = 1e-15
 # that a contact without a pressure increasing into a side has no stiffness.
 CONTACT_GRADIENT_RTOL = 4.0
 
+# Smallest pivot of the Cholesky factorization of the Hessian restricted to the rigid motions of a FEM entity, relative
+# to its diagonal entry and in units of the precision of the simulation, below which the pivot is round-off and its
+# rigid motion depends on the previous ones (see func_inverse_psd6). The rounding of an n x n factorization perturbs each
+# diagonal entry by up to n + 1 units of the precision times that entry, 7 here, which the bound multiplies by 4 for the
+# growth of the factors of the previous pivots.
+COARSE_PIVOT_RTOL = 28.0
+
 # Smallest area of a contact polygon, stiffness of a contact and largest signed distance of a contact, in SI units,
 # below which (above which for the distance) a contact transmits no force a solve resolves. These are physical floors,
 # the same in both precisions, whereas the round-off bounds above scale with the precision. In single precision, the
@@ -413,7 +420,8 @@ class SAPFEMCoarse(Data, kind=DataKind.SCRATCH, shape=(FEM_ENTITIES, ENVS)):
     mass: qd.Tensor = field(float)
     mass_first: qd.Tensor = field((float, 3))
     mass_second: qd.Tensor = field((float, (3, 3)))
-    # Inverse of the Hessian of the cost restricted to the rigid motions
+    # Generalized inverse of the Hessian of the cost restricted to the rigid motions, which is singular when the free
+    # vertices of the entity do not span them, as when all of them but one are constrained (see func_inverse_psd6).
     A_inv: qd.Tensor = field((float, (6, 6)))
     # Rigid motion solving the residual restricted to the rigid motions
     sol: qd.Tensor = field((float, 6))
@@ -576,8 +584,9 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     hydroelastic_stiffness: qd.Tensor = field(float, shape=())
     rigid_floor_vert_stiffness: qd.Tensor = field(float, shape=())
     cos_angle_threshold: qd.Tensor = field(float, shape=())
-    # See CONTACT_GRADIENT_RTOL, CONTACT_AREA_MIN and CAP_RESIDUAL_MAX
+    # See CONTACT_GRADIENT_RTOL, COARSE_PIVOT_RTOL, CONTACT_AREA_MIN and CAP_RESIDUAL_MAX
     contact_gradient_rtol: qd.Tensor = field(float, shape=())
+    coarse_pivot_rtol: qd.Tensor = field(float, shape=())
     contact_area_min: qd.Tensor = field(float, shape=())
     contact_stiffness_min: qd.Tensor = field(float, shape=())
     contact_separation_max: qd.Tensor = field(float, shape=())
@@ -1084,27 +1093,33 @@ def get_contact_capacities(options: SAPCouplerOptions, n_contacts_max: int, n_ca
 
 
 @qd.func
-def func_inverse_spd6(A: qd.types.matrix(6, 6)):
-    """Return the inverse of a 6x6 symmetric positive-definite matrix, by a Cholesky factorization."""
+def func_inverse_psd6(A: qd.types.matrix(6, 6), pivot_rtol: float):
+    """Return a generalized inverse of a 6x6 symmetric positive semi-definite matrix, by Cholesky factorization.
+
+    A pivot at most `pivot_rtol` times its diagonal entry marks a direction that depends on the previous ones, which the
+    factorization drops. The result inverts the matrix on its range, and is its inverse when no pivot is dropped.
+    """
     L = qd.Matrix.zero(gs.qd_float, 6, 6)
     for j in qd.static(range(6)):
         d = A[j, j]
         for k in qd.static(range(j)):
             d = d - L[j, k] * L[j, k]
-        L[j, j] = qd.sqrt(d)
-        for i in qd.static(range(j + 1, 6)):
-            l = A[i, j]
-            for k in qd.static(range(j)):
-                l = l - L[i, k] * L[j, k]
-            L[i, j] = l / L[j, j]
-    # The inverse of L by forward substitution, then L^-T L^-1
+        if d > pivot_rtol * A[j, j]:
+            L[j, j] = qd.sqrt(d)
+            for i in qd.static(range(j + 1, 6)):
+                l = A[i, j]
+                for k in qd.static(range(j)):
+                    l = l - L[i, k] * L[j, k]
+                L[i, j] = l / L[j, j]
+    # The inverse of L by forward substitution, then L^-T L^-1, the rows of the dropped directions being zero
     L_inv = qd.Matrix.zero(gs.qd_float, 6, 6)
     for j in qd.static(range(6)):
         for i in qd.static(range(j, 6)):
-            l = gs.qd_float(qd.static(float(i == j)))
-            for k in qd.static(range(j, i)):
-                l = l - L[i, k] * L_inv[k, j]
-            L_inv[i, j] = l / L[i, i]
+            if L[i, i] > 0.0:
+                l = gs.qd_float(qd.static(float(i == j)))
+                for k in qd.static(range(j, i)):
+                    l = l - L[i, k] * L_inv[k, j]
+                L_inv[i, j] = l / L[i, i]
     return L_inv.transpose() @ L_inv
 
 
@@ -1554,6 +1569,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     rigid_floor_vert_stiffness=RIGID_FLOOR_VERT_STIFFNESS,
                     cos_angle_threshold=COS_ANGLE_THRESHOLD,
                     contact_gradient_rtol=CONTACT_GRADIENT_RTOL * precision,
+                    coarse_pivot_rtol=COARSE_PIVOT_RTOL * precision,
                     contact_area_min=CONTACT_AREA_MIN,
                     contact_stiffness_min=CONTACT_STIFFNESS_MIN,
                     contact_separation_max=CONTACT_SEPARATION_MAX,
@@ -1755,6 +1771,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sap_state,
             self.fem_surface_tet_bvh_state,
             fem_solver.fem_info,
+            fem_solver.vertex_constraints,
             rigid_solver.dyn_info.links,
             rigid_solver.dyn_info.faces,
             rigid_solver.dyn_info.verts,
@@ -1802,6 +1819,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self.sap_state,
             self.sap_data.lagged_friction,
             fem_info,
+            vertex_constraints,
             entities_info,
             links_info,
             rigid_solver.dyn_info.equalities,
@@ -1981,6 +1999,7 @@ def kernel_update_contact(
     sap_state: SAPState,
     fem_tets_state: BVHState,
     fem_info: FEMInfo,
+    vertex_constraints: FEMVertexConstraints,
     links_info: LinksInfo,
     faces_info: FacesInfo,
     verts_info: VertsInfo,
@@ -2024,12 +2043,14 @@ def kernel_update_contact(
             sap_state,
             fem_tets_state,
             fem_info,
+            vertex_constraints,
             links_info,
             verts_info,
             faces_info,
             geoms_info,
             sap_info,
             rigid_config,
+            sap_config,
             errno,
         )
     for i_h, handler in qd.static(enumerate(constraint_handlers)):
@@ -2451,6 +2472,7 @@ def kernel_compute_regularization(
     sap_state: SAPState,
     lagged_friction: SAPLaggedFriction,
     fem_info: FEMInfo,
+    vertex_constraints: FEMVertexConstraints,
     entities_info: EntitiesInfo,
     links_info: LinksInfo,
     equalities_info: EqualitiesInfo,
@@ -2484,7 +2506,16 @@ def kernel_compute_regularization(
     contact_handlers = qd.static(handlers.contacts)
     for contact in qd.static(contact_handlers):
         contact.compute_regularization(
-            fem_state, dofs_state, links_state, sap_state, fem_info, links_info, rigid_info, sap_info, sap_config
+            fem_state,
+            dofs_state,
+            links_state,
+            sap_state,
+            fem_info,
+            vertex_constraints,
+            links_info,
+            rigid_info,
+            sap_info,
+            sap_config,
         )
     if qd.static(sap_config.has_equality_constraints):
         equality_handler.compute_regularization(entities_info, equalities_info, rigid_info, sap_info)
@@ -2763,6 +2794,23 @@ def func_is_fem_vertex_free(
     is_free = True
     if qd.static(sap_config.enable_vertex_constraints):
         is_free = not vertex_constraints.is_constrained[i_v, i_b]
+    return is_free
+
+
+@qd.func
+def func_is_fem_element_free(
+    i_e: int, i_b: int, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints, sap_config: qd.template()
+) -> bool:
+    """Whether any vertex of a FEM element moves in the solve, unconstrained.
+
+    The element is i_e of the environment i_b. A contact of elements whose vertices are all constrained against the
+    floor, a static link or other such elements moves nothing, its Delassus operator being zero, so that the detection
+    drops it.
+    """
+    is_free = False
+    for i in qd.static(range(4)):
+        i_v = fem_info.elements.el2v[i_e][i]
+        is_free = is_free or func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config)
     return is_free
 
 
@@ -3083,7 +3131,7 @@ def func_update_envs_active(
                         A[:3, 3:] = A[:3, 3:] - first
                         A[3:, :3] = A[3:, :3] + first
                         A[3:, 3:] = A[3:, 3:] + sap_state.fem_coarse.mass_second[i_e, i_b]
-                        sap_state.fem_coarse.A_inv[i_e, i_b] = func_inverse_spd6(A)
+                        sap_state.fem_coarse.A_inv[i_e, i_b] = func_inverse_psd6(A, sap_info.coarse_pivot_rtol[None])
 
 
 @qd.func
@@ -3315,6 +3363,27 @@ def func_link_point_delassus(
     if qd.static(N_LANES > 1):
         for i, j in qd.static(qd.ndrange(3, 3)):
             W[i, j] = su.qd_block_sum(W_lane[i, j])
+    return W
+
+
+@qd.func
+def func_fem_delassus_vertex(
+    i_v: int,
+    i_b: int,
+    w: float,
+    fem_state: FEMState,
+    fem_info: FEMInfo,
+    vertex_constraints: FEMVertexConstraints,
+    sap_config: qd.template(),
+):
+    """Return the share of a weighted FEM vertex in the Delassus operator of a contact, J A^-1 J^T.
+
+    The vertex is i_v of the environment i_b, and its weight `w`. A constrained vertex follows its target whatever the
+    contact impulse, so that it has no share.
+    """
+    W = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+        W = w**2 * fem_info.dt2_inv[None] * fem_state.vertices_solve.prec[i_v, i_b]
     return W
 
 
@@ -5173,6 +5242,7 @@ class BaseContactHandler(RBC):
         links_state: LinksState,
         sap_state: SAPState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_info: SAPInfo,
@@ -5206,6 +5276,7 @@ class BaseContactHandler(RBC):
                     dofs_state=dofs_state,
                     links_state=links_state,
                     fem_info=fem_info,
+                    vertex_constraints=vertex_constraints,
                     links_info=links_info,
                     rigid_info=rigid_info,
                     sap_config=sap_config,
@@ -5227,6 +5298,7 @@ class BaseContactHandler(RBC):
                     dofs_state,
                     links_state,
                     fem_info,
+                    vertex_constraints,
                     links_info,
                     rigid_info,
                     sap_config,
@@ -5245,6 +5317,7 @@ class BaseContactHandler(RBC):
                     dofs_state=dofs_state,
                     links_state=links_state,
                     fem_info=fem_info,
+                    vertex_constraints=vertex_constraints,
                     links_info=links_info,
                     rigid_info=rigid_info,
                     sap_config=sap_config,
@@ -5450,6 +5523,7 @@ class RigidContactHandler(BaseContactHandler):
         dofs_state: DofsState,
         links_state: LinksState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
@@ -5555,18 +5629,7 @@ def func_clip_polygon_by_tet(
 
 
 @qd.data_oriented
-class FEMContactHandler(BaseContactHandler):
-    @qd.func
-    def fem_delassus_vertex(self, i_v: int, i_b: int, w: float, fem_state: FEMState, fem_info: FEMInfo):
-        """Return the share of a weighted FEM vertex in the Delassus operator of a contact, J A^-1 J^T.
-
-        The weight of the vertex is `w`.
-        """
-        return w**2 * fem_info.dt2_inv[None] * fem_state.vertices_solve.prec[i_v, i_b]
-
-
-@qd.data_oriented
-class FEMSelfContactHandler(FEMContactHandler):
+class FEMSelfContactHandler(BaseContactHandler):
     """
     Class for handling self-contact between tetrahedral elements in a simulation using hydroelastic model.
 
@@ -5635,12 +5698,14 @@ class FEMSelfContactHandler(FEMContactHandler):
         sap_state: SAPState,
         fem_tets_state: BVHState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         verts_info: VertsInfo,
         faces_info: FacesInfo,
         geoms_info: GeomsInfo,
         sap_info: SAPInfo,
         rigid_config: qd.template(),
+        sap_config: qd.template(),
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
@@ -5654,6 +5719,11 @@ class FEMSelfContactHandler(FEMContactHandler):
             i_b, i_sa, i_sq = self.query_results.triplets[i_r]
             i_a = fem_info.surface_elements[i_sa]
             i_q = fem_info.surface_elements[i_sq]
+            if not (
+                func_is_fem_element_free(i_a, i_b, fem_info, vertex_constraints, sap_config)
+                or func_is_fem_element_free(i_q, i_b, fem_info, vertex_constraints, sap_config)
+            ):
+                continue
             i_v0 = fem_info.elements.el2v[i_a][0]
             i_v1 = fem_info.elements.el2v[i_q][0]
             x0 = fem_state.vertices.pos[i_v0, i_b]
@@ -5890,6 +5960,7 @@ class FEMSelfContactHandler(FEMContactHandler):
         dofs_state: DofsState,
         links_state: LinksState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
@@ -5901,16 +5972,18 @@ class FEMSelfContactHandler(FEMContactHandler):
         W = qd.Matrix.zero(gs.qd_float, 3, 3)
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e0][i]
-            W = W + self.fem_delassus_vertex(i_v, i_b, self.contact_pairs.barycentric0[i_p][i], fem_state, fem_info)
+            w = self.contact_pairs.barycentric0[i_p][i]
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e1][i]
-            W = W + self.fem_delassus_vertex(i_v, i_b, self.contact_pairs.barycentric1[i_p][i], fem_state, fem_info)
+            w = self.contact_pairs.barycentric1[i_p][i]
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
         world = self.contact_frame(i_p)
         return world.transpose() @ W @ world
 
 
 @qd.data_oriented
-class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
+class FEMFloorContactHandler(FloorContactMixin, BaseContactHandler):
     """
     Class for handling contact between tetrahedral elements and a floor in a simulation using point contact model.
 
@@ -5942,12 +6015,14 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
         sap_state: SAPState,
         fem_tets_state: BVHState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         verts_info: VertsInfo,
         faces_info: FacesInfo,
         geoms_info: GeomsInfo,
         sap_info: SAPInfo,
         rigid_config: qd.template(),
+        sap_config: qd.template(),
         errno: qd.Tensor,
     ):
         n_envs = self.contact_pairs.envs_n_pairs.shape[0]
@@ -5957,7 +6032,7 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
             pos_v = fem_state.vertices.pos[i_v, i_b]
             i_g = sap_info.ground_geom_idx[None]
             distance = pos_v.z - geoms_state.pos[i_g, i_b].z
-            if distance > 0.0:
+            if distance > 0.0 or not func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
                 continue
             i_p = func_add_slot(
                 i_b,
@@ -6028,6 +6103,7 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
         dofs_state: DofsState,
         links_state: LinksState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
@@ -6035,7 +6111,8 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
     ):
         # With floor, J is Identity
         i_v = self.contact_pairs.geom_idx[i_p]
-        return self.fem_delassus_vertex(i_v, self.contact_pairs.batch_idx[i_p], 1.0, fem_state, fem_info)
+        i_b = self.contact_pairs.batch_idx[i_p]
+        return func_fem_delassus_vertex(i_v, i_b, 1.0, fem_state, fem_info, vertex_constraints, sap_config)
 
 
 @qd.data_oriented
@@ -6059,12 +6136,14 @@ class RigidFloorContactHandler(FloorContactMixin, RigidContactHandler):
         sap_state: SAPState,
         fem_tets_state: BVHState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         verts_info: VertsInfo,
         faces_info: FacesInfo,
         geoms_info: GeomsInfo,
         sap_info: SAPInfo,
         rigid_config: qd.template(),
+        sap_config: qd.template(),
         errno: qd.Tensor,
     ):
         n_envs = self.contact_pairs.envs_n_pairs.shape[0]
@@ -6169,12 +6248,14 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         sap_state: SAPState,
         fem_tets_state: BVHState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         verts_info: VertsInfo,
         faces_info: FacesInfo,
         geoms_info: GeomsInfo,
         sap_info: SAPInfo,
         rigid_config: qd.template(),
+        sap_config: qd.template(),
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
@@ -6187,6 +6268,13 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         for i_r in range(self.query_results.count[0]):
             i_b, i_a, i_sq = self.query_results.triplets[i_r]
             i_q = fem_info.surface_elements[i_sq]
+            i_g = faces_info.geom_idx[i_a]
+            i_l = geoms_info.link_idx[i_g]
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            if links_info.is_fixed[I_l] and not func_is_fem_element_free(
+                i_q, i_b, fem_info, vertex_constraints, sap_config
+            ):
+                continue
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
             tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -6332,6 +6420,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         dofs_state: DofsState,
         links_state: LinksState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
@@ -6357,12 +6446,8 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         i_e = self.contact_pairs.geom_idx0[i_p]
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e][i]
-            W = (
-                W
-                + self.contact_pairs.barycentric0[i_p][i] ** 2
-                * fem_info.dt2_inv[None]
-                * fem_state.vertices_solve.prec[i_v, i_b]
-            )
+            w = self.contact_pairs.barycentric0[i_p][i]
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
         world = self.contact_frame(i_p)
         return world.transpose() @ W @ world
 
@@ -6487,12 +6572,14 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
         sap_state: SAPState,
         fem_tets_state: BVHState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         verts_info: VertsInfo,
         faces_info: FacesInfo,
         geoms_info: GeomsInfo,
         sap_info: SAPInfo,
         rigid_config: qd.template(),
+        sap_config: qd.template(),
         errno: qd.Tensor,
     ):
         n_envs = self.contact_candidates.envs_n_candidates.shape[0]
@@ -6688,6 +6775,7 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
         dofs_state: DofsState,
         links_state: LinksState,
         fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
