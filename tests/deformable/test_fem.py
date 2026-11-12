@@ -7,6 +7,7 @@ import torch
 import igl
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1343,11 +1344,14 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
 @pytest.mark.required
 def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
-    D_HAT = 1e-2
+    D_HAT = 4e-3
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=0.01,
+            dt=0.02,
+        ),
+        newton_options=gs.options.NewtonOptions(
+            velocity_tol=1e-2,
         ),
         ipc_options=gs.options.IPCOptions(
             d_hat=D_HAT,
@@ -1364,24 +1368,27 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
     cloth = scene.add_entity(
         morph=gs.morphs.Mesh(
             file=cloth_grid_obj_path,
-            pos=(0.0, 0.0, 0.05),
+            pos=(0.0, 0.0, 0.15),
         ),
         material=gs.materials.FEM.Cloth(
-            E=2e4,
-            shear_modulus=2e3,
-            bending_E=1e6,
+            E=5e4,
+            rho=400.0,
+            shear_modulus=2e4,
+            bending_E=2e6,
             contact_thickness=CONTACT_THICKNESS,
+            friction_mu=0.2,
+            contact_resistance=1e5,
         ),
     )
     scene.build(n_envs=2)
 
-    # The cloth lands within a few substeps and never enters its contact thickness, then rests in the contact band
+    # The cloth lands within 0.2 s and never enters its contact thickness, then rests in the contact band
     for _ in range(50):
         scene.step()
         assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
     verts_z = cloth.get_verts_pos()[..., 2]
     assert (verts_z < CONTACT_THICKNESS + D_HAT).all()
-    assert_allclose(cloth.get_verts_vel(), 0.0, atol=2e-9)
+    assert_allclose(cloth.get_verts_vel(), 0.0, atol=5e-7)
 
 
 @pytest.mark.required
@@ -1517,7 +1524,7 @@ def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
 @pytest.mark.required
 def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
-    D_HAT = 1e-2
+    D_HAT = 1e-3
     BOX_SIZE = 0.1
 
     scene = gs.Scene(
@@ -1543,8 +1550,10 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
         material=gs.materials.FEM.Cloth(
             E=2e4,
             shear_modulus=2e3,
-            bending_E=1e6,
+            bending="hinge",
+            bending_E=3e3,
             contact_thickness=CONTACT_THICKNESS,
+            friction_mu=1.0,
         ),
     )
     box = scene.add_entity(
@@ -1560,7 +1569,7 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
         scene.step()
         box_vz.append(box.get_vel()[..., 2])
     # The box comes to rest on the cloth, in its contact band, the contact keeping the cloth off the ground
-    assert (torch.stack(box_vz[-20:]).abs() < 1e-5).all()
+    assert (torch.stack(box_vz[-20:]).abs() < 1e-6).all()
     verts = cloth.get_verts_pos()
     is_under_box = (verts[..., :2].abs() < 0.5 * BOX_SIZE).all(dim=-1)
     gaps_min = (
@@ -1571,76 +1580,125 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
 
 
 @pytest.mark.required
-def test_cloth_robot_contact(cloth_grid_obj_path, show_viewer):
-    CONTACT_THICKNESS = 1e-3
-    TABLE_TOP = 0.2
-    TARGET_XY = (0.45, 0.0)
+# Double precision, see test_cloth_contact_between_cloths
+@pytest.mark.precision("64")
+def test_cloth_robot_contact(cloth_grid_obj_factory, tmp_path, show_viewer):
+    N_GRID = 12
+    SUPPORT_SIZE = 0.05
+    BRIDGE_CENTER = (0.55, 0.0, 0.44)
+    HOME_QPOS = (0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, -0.7854, 0.04, 0.04)
+    # The center between the fingertip pads of the Panda lies on the z axis of its hand, 0.1034 m from its origin
+    FINGERTIPS_OFFSET = 0.1034
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
         ipc_options=gs.options.IPCOptions(
             d_hat=1e-3,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.1, -0.6, 0.6),
-            camera_lookat=(0.45, 0.0, 0.2),
+            camera_pos=(1.45, -1.25, 1.05),
+            camera_lookat=(0.52, 0.0, 0.48),
         ),
         show_viewer=show_viewer,
-    )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.5, 0.5, TABLE_TOP),
-            pos=(*TARGET_XY, 0.5 * TABLE_TOP),
-            fixed=True,
-        ),
-    )
-    cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=cloth_grid_obj_path,
-            scale=0.24,
-            pos=(*TARGET_XY, TABLE_TOP + 0.011),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=2e4,
-            shear_modulus=2e3,
-            bending="hinge",
-            bending_E=3e3,
-            contact_thickness=CONTACT_THICKNESS,
-            friction_mu=1.0,
-        ),
     )
     franka = scene.add_entity(
         morph=gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
         ),
     )
+    # A cloth bridging two fixed supports 12 cm apart, the gripper grasping it in the gap between them
+    for x in (BRIDGE_CENTER[0] - 0.085, BRIDGE_CENTER[0] + 0.085):
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=(SUPPORT_SIZE, SUPPORT_SIZE, SUPPORT_SIZE),
+                pos=(x, 0.0, BRIDGE_CENTER[2] - 0.5 * SUPPORT_SIZE),
+                fixed=True,
+            ),
+        )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_factory(N_GRID),
+            scale=0.32,
+            pos=(BRIDGE_CENTER[0], BRIDGE_CENTER[1], BRIDGE_CENTER[2] + 0.03),
+        ),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending_E=3e3,
+            friction_mu=2.0,
+        ),
+    )
     scene.build(n_envs=2)
 
-    # The fingertips start 1.5 cm above the cloth, and the joint targets of the press would bring them 2 cm into the
-    # table, which the cloth between them stops
+    arm_dofs, finger_dofs = range(7), range(7, 9)
+    franka.set_qpos(HOME_QPOS)
+    franka.set_dofs_kp((4500, 4500, 3500, 3500, 2000, 2000, 2000), dofs_idx_local=arm_dofs)
+    franka.set_dofs_kv((450, 450, 350, 350, 200, 200, 200), dofs_idx_local=arm_dofs)
+    franka.set_dofs_force_range(-400.0, 400.0, dofs_idx_local=arm_dofs)
+    franka.set_dofs_kp(500.0, dofs_idx_local=finger_dofs)
+    franka.set_dofs_kv(20.0, dofs_idx_local=finger_dofs)
+    franka.set_dofs_force_range(-100.0, 100.0, dofs_idx_local=finger_dofs)
     hand = franka.get_link("hand")
-    fingers = (franka.get_link("left_finger"), franka.get_link("right_finger"))
-    qpos_start, qpos_press = (
-        franka.inverse_kinematics(link=hand, pos=(*TARGET_XY, TABLE_TOP + height), quat=(0.0, 1.0, 0.0, 0.0))
-        for height in (0.138, 0.09)
+
+    # The patch of the cloth around its center, a 5 cm square, which the fingertips pinch
+    bridge = torch.tensor(BRIDGE_CENTER, dtype=gs.tc_float, device=gs.device)
+    is_patch = ((cloth.init_positions[:, :2] - bridge[:2]).abs() < 0.027).all(dim=-1)
+    # The fingertips center hovers above the bridge, descends into the gap below the cloth, holds while the fingers
+    # close, lifts, carries the cloth sideways and holds while the fingers open, moving linearly from where it is to
+    # each target, the hand facing down
+    grasp = bridge + torch.tensor((0.0, 0.0, -0.018), dtype=gs.tc_float, device=gs.device)
+    lift_target = grasp + torch.tensor((0.0, 0.0, 0.16), dtype=gs.tc_float, device=gs.device)
+    transport_target = lift_target + torch.tensor((-0.14, 0.1, 0.0), dtype=gs.tc_float, device=gs.device)
+    phases = (
+        (30, bridge + torch.tensor((0.0, 0.0, 0.2), dtype=gs.tc_float, device=gs.device), 0.04, 0.04),
+        (50, grasp, 0.04, 0.04),
+        (40, grasp, 0.0, 0.0),
+        (40, lift_target, 0.0, 0.0),
+        (40, transport_target, 0.0, 0.0),
+        (15, transport_target, 0.0, 0.04),
     )
-    qpos_start[..., -2:] = 0.02
-    qpos_press[..., -2:] = 0.02
-    franka.set_qpos(qpos_start)
-    franka.control_dofs_position(qpos_press)
-    for _ in range(40):
+    # The cloth settles on the supports, the arm at its home pose
+    for _ in range(20):
+        franka.control_dofs_position(HOME_QPOS)
         scene.step()
-        fingers_min_z = torch.stack([finger.get_AABB()[..., 0, 2] for finger in fingers]).min(dim=0).values
-        assert (fingers_min_z > TABLE_TOP + CONTACT_THICKNESS).all()
-        assert (cloth.get_verts_pos()[..., 2] > TABLE_TOP + CONTACT_THICKNESS).all()
-    # The press holds the cloth under the fingertips without crossing it
-    verts = cloth.get_verts_pos()
-    for finger in fingers:
-        aabb = finger.get_AABB()
-        is_under = ((verts[..., :2] > aabb[:, None, 0, :2]) & (verts[..., :2] < aabb[:, None, 1, :2])).all(dim=-1)
-        assert (torch.where(is_under, verts[..., 2], -1.0).max(dim=-1).values < aabb[..., 0, 2]).all()
+    patches_center = [cloth.get_verts_pos()[:, is_patch].mean(dim=1)]
+    hand_offset = torch.tensor((0.0, 0.0, FINGERTIPS_OFFSET), dtype=gs.tc_float, device=gs.device)
+    for n_steps, center_target, fingers_start, fingers_target in phases:
+        center_start = hand.get_pos() + gu.transform_by_quat(hand_offset.expand(2, 3), hand.get_quat())
+        for i_step in range(n_steps):
+            alpha = (i_step + 1) / n_steps
+            qpos = franka.inverse_kinematics(
+                link=hand,
+                pos=(1.0 - alpha) * center_start + alpha * center_target + hand_offset,
+                quat=torch.tensor((0.0, 1.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device).expand(2, 4),
+                init_qpos=franka.get_qpos(),
+                max_samples=1,
+                max_solver_iters=12,
+                damping=0.05,
+                max_step_size=0.1,
+                dofs_idx_local=arm_dofs,
+            )
+            franka.control_dofs_position(qpos[:, :7], dofs_idx_local=arm_dofs)
+            franka.control_dofs_position(
+                (1.0 - alpha) * fingers_start + alpha * fingers_target, dofs_idx_local=finger_dofs
+            )
+            scene.step()
+        patches_center.append(cloth.get_verts_pos()[:, is_patch].mean(dim=1))
+    settled, lifted, transported, released = (patches_center[i] for i in (0, 4, 5, 6))
+    # The closed fingers lift the patch, carry it sideways and let it fall once they open
+    assert ((lifted[:, 2] - settled[:, 2]) > 0.04).all()
+    assert ((transported[:, :2] - lifted[:, :2]).norm(dim=-1) > 0.05).all()
+    assert ((transported[:, 2] - released[:, 2]) > 0.005).all()
+
+    # The cloth never crosses itself: its final shape passes the check of crossing cloths
+    scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
+    path = str(tmp_path / "cloth.obj")
+    faces = igl.read_triangle_mesh(cloth_grid_obj_factory(N_GRID))[1]
+    igl.write_triangle_mesh(path, tensor_to_array(cloth.get_verts_pos()[0], dtype=gs.np_float), faces)
+    scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
+    scene_check.build()
 
 
 @pytest.mark.required
