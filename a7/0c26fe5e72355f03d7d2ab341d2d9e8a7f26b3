@@ -1,0 +1,21 @@
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_4e532cc51f4368::t_c2593ed9a74f8f 338-339,1395-1396,1401-1412
+genesis/utils/path_planning.py
+  s_4e532cc51f4368::t_c2593ed9a74f8f 136,202,568,952
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a70c26fe5e72355f03d7d2ab341d2d9e8a7f26b3",
+  "prompts": {},
+  "sessions": {
+    "s_4e532cc51f4368": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "70ed08a1-5a04-49fd-9697-c03270ba2dff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
