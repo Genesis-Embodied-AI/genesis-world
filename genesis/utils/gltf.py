@@ -101,12 +101,14 @@ def get_glb_image(glb, image_index, images, image_type=None):
     glb_image = glb.images[image_index]
     image_path = None
     if glb_image.bufferView is None and not glb_image.uri.startswith("data:"):
-        image_path = os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri))
+        image_path = os.path.normpath(os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri)))
     if images is None:
         return _decode_glb_image(glb, glb_image, image_path, image_type)
-    # An image stored in a file of its own changes along with that file, whatever the glTF file does
-    image_mtime = None if image_path is None else os.path.getmtime(image_path)
-    key = (glb.path, os.path.getmtime(glb.path), image_index, image_type, image_mtime)
+    # An image stored in a file of its own is keyed on that file alone, so that the glTF files sharing it decode it once
+    if image_path is None:
+        key = (glb.path, os.path.getmtime(glb.path), image_index, image_type)
+    else:
+        key = (image_path, os.path.getmtime(image_path), image_type)
     image_array = _GLB_IMAGES_CACHE.find(key)
     if image_array is None:
         image_array = _decode_glb_image(glb, glb_image, image_path, image_type)
