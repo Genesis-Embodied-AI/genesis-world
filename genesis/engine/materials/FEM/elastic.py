@@ -91,16 +91,21 @@ def func_linear_energy(mu: float, lam: float, F: qd.types.matrix(3, 3)):
 
 @qd.func
 def func_stable_neohookean_stress(mu: float, lam: float, J: float, F: qd.types.matrix(3, 3)):
-    """Return the first Piola-Kirchhoff stress of the stable Neo-Hookean model."""
-    IC = F.norm_sqr()
+    """Return the first Piola-Kirchhoff stress of the stable Neo-Hookean model, the gradient of its energy density."""
+    lam_shifted = lam + mu
+    alpha = 1.0 + mu / lam_shifted
     dJdF = qd.Matrix.cols([F[:, 1].cross(F[:, 2]), F[:, 2].cross(F[:, 0]), F[:, 0].cross(F[:, 1])])
-    alpha = 1 + 0.75 * mu / lam
-    return mu * (1 - 1 / (IC + 1)) * F + lam * (J - alpha) * dJdF
+    return mu * F + lam_shifted * (J - alpha) * dJdF
 
 
 @qd.func
 def func_stable_neohookean_energy(mu: float, lam: float, J: float, F: qd.types.matrix(3, 3)):
-    """Return the energy density of the stable Neo-Hookean model."""
+    """
+    Return the energy density of the stable Neo-Hookean model.
+
+    The first Lame parameter shifted by the second one gives the model the stiffness of linear elasticity with the same
+    parameters under small strains, and the rest volume ratio `alpha` leaves the undeformed element free of stress.
+    """
     lam_shifted = lam + mu
     alpha = 1.0 + mu / lam_shifted
     return 0.5 * (mu * (F.norm_sqr() - 3.0) + lam_shifted * (J - alpha) ** 2)

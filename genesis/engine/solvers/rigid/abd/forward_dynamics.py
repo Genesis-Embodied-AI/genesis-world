@@ -158,10 +158,10 @@ def func_link_force_initialize(i_l: int, i_b: int, dyn_state: DynState, rigid_co
         )
 
         dyn_state.links.cfrc_vel[i_l, i_b] = (
-            f1_vel + f3_vel + dyn_state.links.cfrc_applied_vel[i_l, i_b] + dyn_state.links.cfrc_coupling_vel[i_l, i_b]
+            f1_vel + f3_vel + dyn_state.links.cfrc_input_vel[i_l, i_b] + dyn_state.links.cfrc_external_vel[i_l, i_b]
         )
         dyn_state.links.cfrc_ang[i_l, i_b] = (
-            f1_ang + f3_ang + dyn_state.links.cfrc_applied_ang[i_l, i_b] + dyn_state.links.cfrc_coupling_ang[i_l, i_b]
+            f1_ang + f3_ang + dyn_state.links.cfrc_input_ang[i_l, i_b] + dyn_state.links.cfrc_external_ang[i_l, i_b]
         )
 
 
@@ -1997,8 +1997,8 @@ def func_midpoint_free_body(
     for j_l in range(i_l, rigid_info.links_root_end[i_l]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
-            ext_ang += dyn_state.links.cfrc_applied_ang[j_l, i_b] + dyn_state.links.cfrc_coupling_ang[j_l, i_b]
-            ext_vel += dyn_state.links.cfrc_applied_vel[j_l, i_b] + dyn_state.links.cfrc_coupling_vel[j_l, i_b]
+            ext_ang += dyn_state.links.cfrc_input_ang[j_l, i_b] + dyn_state.links.cfrc_external_ang[j_l, i_b]
+            ext_vel += dyn_state.links.cfrc_input_vel[j_l, i_b] + dyn_state.links.cfrc_external_vel[j_l, i_b]
     w_body = gs.qd_vec3(
         [
             dyn_state.dofs.vel[dof_start + 3, i_b],
@@ -2282,19 +2282,19 @@ def func_integrate(
 
 
 @qd.func
-def func_clear_coupling_wrench(
+def func_clear_external_wrench(
     dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
-    """Clear the coupling wrench of every link, and count the substep in the settled-step counter of every awake link.
+    """Clear the external wrench of every link, and count the substep in the settled-step counter of every awake link.
 
-    The coupling wrench of a substep is consumed once integrated: the bias force and the midpoint integration read it,
+    The external wrench of a substep is consumed once integrated: the bias force and the midpoint integration read it,
     and the coupler accumulates the next one after the substep. It is cleared after the integration and apart from it,
     since the reversal of the integration reads it.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.cfrc_coupling_ang))):
-        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.cfrc_external_ang))):
+        dyn_state.links.cfrc_external_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_external_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if qd.static(rigid_config.use_hibernation):
             if not dyn_state.links.is_hibernated[i_l, i_b]:
                 func_count_settled_step(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
@@ -2450,8 +2450,3 @@ def func_implicit_damping(dyn_state: DynState, dyn_info: DynInfo, rigid_info: Ri
                     dyn_state.dofs.acc[i_d, i_b] = (
                         dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qacc_damping_implicit[i_d, i_b]
                     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.rigid_solver_dynamics_decomp")

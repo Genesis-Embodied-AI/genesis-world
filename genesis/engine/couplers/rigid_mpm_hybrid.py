@@ -8,16 +8,17 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities import HybridEntity
-from genesis.engine.solvers.mpm_solver import MPMInfo, MPMSolver, MPMState, func_add_coupling_force
+from genesis.engine.solvers.mpm_solver import MPMInfo, MPMSolver, MPMState, func_add_particle_vel
+from genesis.engine.solvers.rigid.abd.misc import func_add_external_wrench
 from genesis.engine.solvers.rigid.data import GeomsInfo, LinksState
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.grad.bridge import reversed_with
 from genesis.utils.data import Data, DataKind, Size, eoa, field
+from genesis.utils.geom import PARTICLES
 from genesis.utils.misc import qd_from_torch
 
-# The muscle groups of the soft parts of every hybrid entity, and the particles of these soft parts
+# The muscle groups of the soft parts of every hybrid entity
 GROUPS = Size("groups")
-PARTICLES = Size("particles")
 
 
 class RigidMPMHybridInfo(Data, kind=DataKind.CONSTANT):
@@ -48,40 +49,41 @@ def kernel_update_hybrid_soft_part(
     links_state: LinksState,
     mpm_info: MPMInfo,
     geoms_info: GeomsInfo,
-    hybrid_info: RigidMPMHybridInfo,
+    rigid_mpm_hybrid_info: RigidMPMHybridInfo,
     mpm_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Move the soft particles of the hybrid entities with their rigid links and couple their velocities both ways.
+    """
+    Move the soft particles of the hybrid entities with their rigid links and couple their velocities both ways.
 
     Each particle follows the link of its muscle group (see RigidMPMHybridInfo). The particles are read once the substep
     integrated them, past the grid-to-particle transfer. Their forces add exactly to the coupling forces of the links
-    with `is_deterministic` (see func_add_coupling_force), except in the variant autodiff reverses (`is_backward`).
+    with `is_deterministic` (see func_add_external_wrench), except in the variant autodiff reverses (`is_backward`).
     """
     for i_hp, i_b in qd.ndrange(
-        hybrid_info.particles_idx.shape[0],
+        rigid_mpm_hybrid_info.particles_idx.shape[0],
         mpm_state.particles.pos.shape[1],
         axes=qd.static(eoa(mpm_state.particles.pos)),
     ):
-        i_p = hybrid_info.particles_idx[i_hp]
+        i_p = rigid_mpm_hybrid_info.particles_idx[i_hp]
         if mpm_state.particles.is_active[i_p, i_b]:
-            i_group_start = hybrid_info.particles_group_start[i_hp]
+            i_group_start = rigid_mpm_hybrid_info.particles_group_start[i_hp]
             i_group = i_group_start + mpm_info.particles.muscle_group[i_p]
-            link_idx = hybrid_info.groups_link_idx[i_group]
-            geom_idx = hybrid_info.groups_geom_idx[i_group]
-            trans_local_to_global = hybrid_info.groups_trans_local_to_global[i_group]
-            quat_local_to_global = hybrid_info.groups_quat_local_to_global[i_group]
+            i_l = rigid_mpm_hybrid_info.groups_link_idx[i_group]
+            i_g = rigid_mpm_hybrid_info.groups_geom_idx[i_group]
+            trans_local_to_global = rigid_mpm_hybrid_info.groups_trans_local_to_global[i_group]
+            quat_local_to_global = rigid_mpm_hybrid_info.groups_quat_local_to_global[i_group]
 
-            g_pos_0 = geoms_info.pos[geom_idx]
-            g_quat_0 = geoms_info.quat[geom_idx]
+            g_pos_0 = geoms_info.pos[i_g]
+            g_quat_0 = geoms_info.quat[i_g]
 
             # The target position follows the link in minimal coordinates
             x_init_local = gu.qd_inv_transform_by_trans_quat(
-                hybrid_info.particles_init_pos[i_hp], trans_local_to_global, quat_local_to_global
+                rigid_mpm_hybrid_info.particles_init_pos[i_hp], trans_local_to_global, quat_local_to_global
             )
             scaled_pos = gu.qd_transform_by_quat(gu.qd_inv_transform_by_quat(g_pos_0, g_quat_0), g_quat_0)
             tx_pos, tx_quat = gu.qd_transform_pos_quat_by_trans_quat(
-                scaled_pos, g_quat_0, links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
+                scaled_pos, g_quat_0, links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
             )
             new_x_pos = gu.qd_transform_by_trans_quat(x_init_local, trans=tx_pos, quat=tx_quat)
 
@@ -89,25 +91,26 @@ def kernel_update_hybrid_soft_part(
             # scaled linearly between the time steps of the soft and rigid solvers
             x_pos = mpm_state.particles.pos[i_p, i_b]
             xd_vel = (new_x_pos - x_pos) / substep_dt * (substep_dt / rigid_dt)
-            vel_d = (xd_vel - mpm_state.particles.vel[i_p, i_b]) * qd.exp(-dt * hybrid_info.groups_damping[i_group])
+            vel_d = (xd_vel - mpm_state.particles.vel[i_p, i_b]) * qd.exp(
+                -dt * rigid_mpm_hybrid_info.groups_damping[i_group]
+            )
 
             # Soft-to-rigid coupling, the rigid time step integrating the force within the substep of the soft solver
             mass_real = mpm_info.particles.mass[i_p] / mpm_info.particle_volume_scale[None]
             # The force on the link is the reaction of the force the link applies the particle
-            func_add_coupling_force(
-                link_idx,
+            func_add_external_wrench(
+                i_l,
                 i_b,
                 x_pos,
-                -mass_real * (vel_d / rigid_dt),
-                links_state,
-                mpm_state.coupling_forces,
-                mpm_info,
+                force=-mass_real * (vel_d / rigid_dt),
+                torque=qd.Vector.zero(gs.qd_float, 3),
+                links_state=links_state,
                 is_exact=mpm_config.is_deterministic and not is_backward,
             )
 
             # Rigid-to-soft coupling, which may feed an unstable loop back
-            mpm_state.particles.vel[i_p, i_b] = (
-                mpm_state.particles.vel[i_p, i_b] + vel_d * hybrid_info.groups_soft_dv_coef[i_group]
+            func_add_particle_vel(
+                i_p, i_b, vel=vel_d * rigid_mpm_hybrid_info.groups_soft_dv_coef[i_group], mpm_state=mpm_state
             )
 
 
@@ -124,7 +127,7 @@ class RigidMPMHybrid:
         self._entities = entities
         self.mpm_solver = mpm_solver
         self.rigid_solver = rigid_solver
-        self.hybrid_info: RigidMPMHybridInfo | None = None
+        self.rigid_mpm_hybrid_info: RigidMPMHybridInfo | None = None
 
     def build(self) -> None:
         for entity in self._entities:
@@ -133,25 +136,22 @@ class RigidMPMHybrid:
         soft_parts = [entity.mpm_hybrid_part for entity in self._entities]
         groups_count = [len(part.groups_link_idx) for part in soft_parts]
         particles_count = [len(part.particles_idx) for part in soft_parts]
-        self.hybrid_info = RigidMPMHybridInfo(sizes=dict(groups=sum(groups_count), particles=sum(particles_count)))
-        particles_group_start = [
-            np.full(n_particles, i_g) for n_particles, i_g in zip(particles_count, np.cumsum([0, *groups_count[:-1]]))
-        ]
-        arrays = (
-            self.hybrid_info.groups_link_idx,
-            self.hybrid_info.groups_geom_idx,
-            self.hybrid_info.groups_trans_local_to_global,
-            self.hybrid_info.groups_quat_local_to_global,
-            self.hybrid_info.groups_damping,
-            self.hybrid_info.groups_soft_dv_coef,
-            self.hybrid_info.particles_idx,
-            self.hybrid_info.particles_init_pos,
-            self.hybrid_info.particles_group_start,
-        )
-        for array, values in zip(arrays, [*zip(*soft_parts), particles_group_start]):
+        hybrid_info = RigidMPMHybridInfo(sizes=dict(groups=sum(groups_count), particles=sum(particles_count)))
+        for array, values in (
+            (hybrid_info.groups_link_idx, [part.groups_link_idx for part in soft_parts]),
+            (hybrid_info.groups_geom_idx, [part.groups_geom_idx for part in soft_parts]),
+            (hybrid_info.groups_trans_local_to_global, [part.groups_trans_local_to_global for part in soft_parts]),
+            (hybrid_info.groups_quat_local_to_global, [part.groups_quat_local_to_global for part in soft_parts]),
+            (hybrid_info.groups_damping, [part.groups_damping for part in soft_parts]),
+            (hybrid_info.groups_soft_dv_coef, [part.groups_soft_dv_coef for part in soft_parts]),
+            (hybrid_info.particles_idx, [part.particles_idx for part in soft_parts]),
+            (hybrid_info.particles_init_pos, [part.particles_init_pos for part in soft_parts]),
+            (hybrid_info.particles_group_start, [np.repeat(np.cumsum([0, *groups_count[:-1]]), particles_count)]),
+        ):
             qd_from_torch(array, torch.from_numpy(np.concatenate(values)))
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
+        self.rigid_mpm_hybrid_info = hybrid_info
 
     def update_soft_parts(self) -> None:
         kernel_update_hybrid_soft_part(
@@ -162,7 +162,7 @@ class RigidMPMHybrid:
             self.rigid_solver.dyn_state.links,
             self.mpm_solver.mpm_info,
             self.rigid_solver.dyn_info.geoms,
-            self.hybrid_info,
+            self.rigid_mpm_hybrid_info,
             self.mpm_solver.mpm_config,
             is_backward=False,
         )

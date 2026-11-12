@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.data import DynInfo, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, RigidInfo
 from genesis.utils.data import WORKERS, Data, DataKind, field
 from . import support_field
 from .constants import MPR_STAGE, MPR_SUPPORT_TYPE, PORTAL_STATUS
@@ -386,7 +386,6 @@ def guess_geoms_center(
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
     normal_ws: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
     mpr_info: MPRInfo,
@@ -428,9 +427,9 @@ def guess_geoms_center(
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         if (qd.abs(normal_ws) > mpr_info.CCD_EPS[None]).any():
             # Must start from the center of each bounding box
-            center_a_local = 0.5 * (geoms_init_AABB[i_ga, 7] + geoms_init_AABB[i_ga, 0])
+            center_a_local = 0.5 * (rigid_info.geoms_init_AABB[i_ga, 7] + rigid_info.geoms_init_AABB[i_ga, 0])
             center_a = gu.qd_transform_by_trans_quat(center_a_local, pos_a, quat_a)
-            center_b_local = 0.5 * (geoms_init_AABB[i_gb, 7] + geoms_init_AABB[i_gb, 0])
+            center_b_local = 0.5 * (rigid_info.geoms_init_AABB[i_gb, 7] + rigid_info.geoms_init_AABB[i_gb, 0])
             center_b = gu.qd_transform_by_trans_quat(center_b_local, pos_b, quat_b)
             delta = center_a - center_b
 
@@ -449,8 +448,8 @@ def guess_geoms_center(
                     dir_offset = offset / offset_norm
                     dir_offset_local_a = gu.qd_inv_transform_by_quat(dir_offset, quat_a)
                     dir_offset_local_b = gu.qd_inv_transform_by_quat(dir_offset, quat_b)
-                    box_size_a = geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]
-                    box_size_b = geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]
+                    box_size_a = rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0]
+                    box_size_b = rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0]
                     length_a = box_size_a.dot(qd.abs(dir_offset_local_a))
                     length_b = box_size_b.dot(qd.abs(dir_offset_local_b))
 
@@ -473,10 +472,10 @@ def func_mpr_contact_from_centers(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
+    rigid_info: RigidInfo,
     mpr_info: MPRInfo,
     support_field_info: SupportFieldInfo,
     rigid_config: qd.template(),
@@ -484,7 +483,7 @@ def func_mpr_contact_from_centers(
 ):
     ccd_tol = mpr_info.CCD_TOLERANCE[None]
     if qd.static(not rigid_config.enable_mujoco_compatibility):
-        ccd_tol = ccd_tol * func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+        ccd_tol = ccd_tol * func_compute_geom_pair_scale(i_ga, i_gb, dyn_info, rigid_info)
 
     is_col = False
     pos = gs.qd_vec3([0.0, 0.0, 0.0])
@@ -749,7 +748,6 @@ def func_mpr_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    geoms_init_AABB: GeomsInitAABB,
     collider_state: ColliderState,
     mpr_state: MPRState,
     dyn_info: DynInfo,
@@ -767,7 +765,6 @@ def func_mpr_contact(
         pos_b,
         quat_b,
         normal_ws,
-        geoms_init_AABB,
         dyn_info,
         rigid_info,
         mpr_info,
@@ -783,17 +780,12 @@ def func_mpr_contact(
         quat_a,
         pos_b,
         quat_b,
-        geoms_init_AABB,
         collider_state,
         mpr_state,
         dyn_info,
+        rigid_info,
         mpr_info,
         support_field_info,
         rigid_config,
         collider_config,
     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.mpr_decomp")

@@ -11,12 +11,14 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.bvh import BVHPackedTrees, build_packed_bvh
 from genesis.options.sensors.options import ProbesWithNormalSensorOptionsMixin
 from genesis.utils.data import opt_in
 from genesis.utils.misc import concat_with_tensor, gaussian_crosstalk_kernel, make_tensor_field
 from genesis.utils.sdf import SDFInfo
 
 if TYPE_CHECKING:
+    from genesis.utils.raycast_qd import CandidateGeoms, ClosestQuery
     from genesis.utils.ring_buffer import TensorRingBuffer
 
 
@@ -36,10 +38,6 @@ def next_pow2(n: int) -> int:
 
 
 # ==================== BVH helpers (shared by point-cloud and triangle-mesh sensors) ====================
-
-
-BVH_LEAF_SIZE = 8
-BVH_STACK_SIZE = 32
 
 
 def get_mesh_geom_chunks(link, prefer_visual: bool) -> list[tuple[object, np.ndarray, np.ndarray]]:
@@ -72,207 +70,69 @@ def get_mesh_geom_chunks(link, prefer_visual: bool) -> list[tuple[object, np.nda
     return chunks
 
 
-def build_static_chunk_bvh(
-    centroids: np.ndarray, aabb_mins: np.ndarray, aabb_maxs: np.ndarray, global_rows: np.ndarray, leaf_size: int
-) -> tuple[np.ndarray, ...]:
-    """
-    Median-split AABB BVH over a static set of elements (points, triangles, etc.) in link-local frame.
-
-    Split decisions use ``centroids`` along the longest-spread axis; node AABBs union the per-element
-    ``aabb_mins``/``aabb_maxs``. For point-cloud BVHs, callers pass ``centroids == aabb_mins == aabb_maxs``
-    (the points themselves); for triangle BVHs, callers pass per-triangle centroid + min/max bounds.
-
-    Leaves carry the caller-provided ``global_rows`` (absolute rows into the sensor-class element table);
-    the kernel indexes directly into that table with no extra indirection. Internal nodes use -1 for
-    ``node_left`` / ``node_right``. Returns ``(node_min, node_max, node_left, node_right, node_elem_start,
-    node_elem_n, elem_idx)``.
-    """
-    node_min: list[np.ndarray] = []
-    node_max: list[np.ndarray] = []
-    node_left: list[int] = []
-    node_right: list[int] = []
-    node_elem_start: list[int] = []
-    node_elem_n: list[int] = []
-    elem_idx: list[int] = []
-
-    def _alloc() -> int:
-        i = len(node_min)
-        node_min.append(np.zeros(3, dtype=gs.np_float))
-        node_max.append(np.zeros(3, dtype=gs.np_float))
-        node_left.append(-1)
-        node_right.append(-1)
-        node_elem_start.append(-1)
-        node_elem_n.append(0)
-        return i
-
-    def _build(rows: np.ndarray, cents: np.ndarray, a_mins: np.ndarray, a_maxs: np.ndarray) -> int:
-        nid = _alloc()
-        bmin = a_mins.min(axis=0).astype(gs.np_float)
-        bmax = a_maxs.max(axis=0).astype(gs.np_float)
-        node_min[nid] = bmin
-        node_max[nid] = bmax
-        if rows.shape[0] <= leaf_size:
-            start = len(elem_idx)
-            elem_idx.extend(int(r) for r in rows)
-            node_elem_start[nid] = start
-            node_elem_n[nid] = int(rows.shape[0])
-            return nid
-        axis = int(np.argmax(bmax - bmin))
-        order = np.argsort(cents[:, axis], kind="stable")
-        mid = order.shape[0] // 2
-        node_left[nid] = _build(rows[order[:mid]], cents[order[:mid]], a_mins[order[:mid]], a_maxs[order[:mid]])
-        node_right[nid] = _build(rows[order[mid:]], cents[order[mid:]], a_mins[order[mid:]], a_maxs[order[mid:]])
-        return nid
-
-    if centroids.shape[0] == 0:
-        return (
-            np.zeros((0, 3), dtype=gs.np_float),
-            np.zeros((0, 3), dtype=gs.np_float),
-            np.zeros((0,), dtype=gs.np_int),
-            np.zeros((0,), dtype=gs.np_int),
-            np.zeros((0,), dtype=gs.np_int),
-            np.zeros((0,), dtype=gs.np_int),
-            np.zeros((0,), dtype=gs.np_int),
-        )
-
-    root = _build(
-        global_rows.astype(gs.np_int, copy=False),
-        centroids.astype(gs.np_float, copy=False),
-        aabb_mins.astype(gs.np_float, copy=False),
-        aabb_maxs.astype(gs.np_float, copy=False),
-    )
-    assert root == 0
-    return (
-        np.stack(node_min, axis=0),
-        np.stack(node_max, axis=0),
-        np.asarray(node_left, dtype=gs.np_int),
-        np.asarray(node_right, dtype=gs.np_int),
-        np.asarray(node_elem_start, dtype=gs.np_int),
-        np.asarray(node_elem_n, dtype=gs.np_int),
-        np.asarray(elem_idx, dtype=gs.np_int),
-    )
-
-
 @qd.func
 def func_vec3_at(i: int, values: qd.types.ndarray()) -> qd.types.vector(3):
     return qd.Vector([values[i, 0], values[i, 1], values[i, 2]], dt=float)
 
 
-@qd.func
-def func_sphere_intersects_aabb(center, radius_sq, bmin, bmax):  # -> bool
-    """
-    Squared-distance sphere-vs-AABB test: True iff the closest AABB point to ``center`` is within ``radius_sq``.
-
-    Reused as a closest-point cull by passing ``radius_sq = current_best_dist_sq``.
-    """
-    d_sq = gs.qd_float(0.0)
-    for k in qd.static(range(3)):
-        v = center[k]
-        lo = bmin[k]
-        hi = bmax[k]
-        if v < lo:
-            d = lo - v
-            d_sq = d_sq + d * d
-        elif v > hi:
-            d = v - hi
-            d_sq = d_sq + d * d
-    return d_sq <= radius_sq
-
-
-@qd.func
-def func_aabb_intersects_aabb(amin, amax, bmin, bmax):  # -> bool
-    """
-    Standard 6-axis AABB-vs-AABB overlap test.
-    """
-    return (
-        amin[0] <= bmax[0]
-        and amax[0] >= bmin[0]
-        and amin[1] <= bmax[1]
-        and amax[1] >= bmin[1]
-        and amin[2] <= bmax[2]
-        and amax[2] >= bmin[2]
-    )
-
-
 @dataclass(eq=True, kw_only=False, frozen=True)
 class ChunkedBVHData:
-    """
-    Bundle of the flat ``BVHMetadata`` scaffolding tensors passed to a traversal kernel as one argument.
-
-    See ``BVHMetadata`` for the field semantics. Element payload tables (``tri_verts``, point-cloud
-    positions, ...) stay separate kernel arguments because they differ per sensor class.
-    """
+    """The chunks of a sensor class and their trees, as one traversal-kernel argument (see BVHMetadata)."""
 
     sensor_chunk_start: qd.types.ndarray()
     sensor_chunk_count: qd.types.ndarray()
     chunk_link_idx: qd.types.ndarray()
-    chunk_node_start: qd.types.ndarray()
-    node_min: qd.types.ndarray()
-    node_max: qd.types.ndarray()
-    node_left: qd.types.ndarray()
-    node_right: qd.types.ndarray()
-    node_leaf_start: qd.types.ndarray()
-    node_leaf_count: qd.types.ndarray()
-    leaf_elem_idx: qd.types.ndarray()
+    trees: BVHPackedTrees
 
 
 @dataclass
 class BVHMetadata:
     """
-    Element-agnostic scaffolding for a static, link-local, chunked AABB BVH shared across one sensor class.
+    The chunks of the static elements of one sensor class, each over the elements of a tracked link in its local frame.
 
-    One *chunk* per (sensor, tracked_link): each chunk is a small subtree built once at scene init in the
-    tracked link's local frame and never rebuilt. Subclasses (PointCloudBVH, TriangleMeshBVH) layer on
-    element-specific payload tables; ``leaf_elem_idx`` entries are absolute rows into those tables.
+    One chunk per (sensor, tracked_link) holds a tree of its elements, built once with the trees of every chunk (see
+    BVHPackedTrees) and never rebuilt. Subclasses (PointCloudBVH, TriangleMeshBVH) hold the payload tables of their
+    elements, whose rows follow the chunks in order, so that leaf i_a of any chunk tree holds row i_a of those tables.
 
-    Per-sensor slice into the chunk arrays:
-        ``chunks[sensor_chunk_start[s] : sensor_chunk_start[s] + sensor_chunk_count[s]]``
-    Per-chunk slice into the flat node arrays:
-        ``nodes[chunk_node_start[c] : chunk_node_start[c] + chunk_node_count[c]]``
-    Per-leaf slice into ``leaf_elem_idx``:
-        ``leaf_elem_idx[node_leaf_start[n] : node_leaf_start[n] + node_leaf_count[n]]``
-    ``node_left == -1`` marks a leaf; otherwise ``node_left``/``node_right`` are absolute child indices.
+    Per-sensor slice into the chunks: ``chunks[sensor_chunk_start[s] : sensor_chunk_start[s] + sensor_chunk_count[s]]``
     """
 
     sensor_chunk_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     sensor_chunk_count: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-
     chunk_link_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    chunk_node_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    chunk_node_count: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    # The boxes of the elements of every chunk in the order of the rows of the payload tables, until the trees are built
+    chunks_aabb_min: list[np.ndarray] = field(default_factory=list)
+    chunks_aabb_max: list[np.ndarray] = field(default_factory=list)
+    # The chunks as one traversal-kernel argument, built with their trees once the last sensor of the class is built
+    kernel_bvh: ChunkedBVHData | None = None
 
-    node_min: torch.Tensor = make_tensor_field((0, 3))
-    node_max: torch.Tensor = make_tensor_field((0, 3))
-    node_left: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    node_right: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    def append_chunks(
+        self, links_idx: list[int], chunks_aabb_min: list[np.ndarray], chunks_aabb_max: list[np.ndarray]
+    ) -> None:
+        """Append the chunks of one sensor, one per tracked link, over the next rows of the payload tables in order.
 
-    node_leaf_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    node_leaf_count: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    leaf_elem_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-
-    # Cached scaffolding bundle for kernel calls, built once on first use (the BVH is static after scene init).
-    _kernel_bvh: "ChunkedBVHData | None" = field(default=None, init=False, compare=False, repr=False)
-
-    @property
-    def kernel_bvh(self) -> ChunkedBVHData:
+        The elements of chunk i span the boxes [chunks_aabb_min[i], chunks_aabb_max[i]] in the local frame of the link
+        links_idx[i]. A sensor without chunks still takes its empty slice.
         """
-        The scaffolding fields bundled into a single ``ChunkedBVHData`` traversal-kernel argument.
-        """
-        if self._kernel_bvh is None:
-            self._kernel_bvh = ChunkedBVHData(
-                sensor_chunk_start=self.sensor_chunk_start,
-                sensor_chunk_count=self.sensor_chunk_count,
-                chunk_link_idx=self.chunk_link_idx,
-                chunk_node_start=self.chunk_node_start,
-                node_min=self.node_min,
-                node_max=self.node_max,
-                node_left=self.node_left,
-                node_right=self.node_right,
-                node_leaf_start=self.node_leaf_start,
-                node_leaf_count=self.node_leaf_count,
-                leaf_elem_idx=self.leaf_elem_idx,
-            )
-        return self._kernel_bvh
+        self.sensor_chunk_start = concat_with_tensor(self.sensor_chunk_start, self.chunk_link_idx.shape[0], expand=(1,))
+        self.sensor_chunk_count = concat_with_tensor(self.sensor_chunk_count, len(links_idx), expand=(1,))
+        if not links_idx:
+            return
+        links_idx_t = torch.tensor(links_idx, dtype=gs.tc_int, device=gs.device)
+        self.chunk_link_idx = concat_with_tensor(self.chunk_link_idx, links_idx_t, expand=(len(links_idx),))
+        self.chunks_aabb_min.extend(chunks_aabb_min)
+        self.chunks_aabb_max.extend(chunks_aabb_max)
+
+    def build(self) -> None:
+        """Build the trees of the chunks of every sensor of the class at once."""
+        self.kernel_bvh = ChunkedBVHData(
+            sensor_chunk_start=self.sensor_chunk_start,
+            sensor_chunk_count=self.sensor_chunk_count,
+            chunk_link_idx=self.chunk_link_idx,
+            trees=build_packed_bvh(self.chunks_aabb_min, self.chunks_aabb_max),
+        )
+        self.chunks_aabb_min.clear()
+        self.chunks_aabb_max.clear()
 
 
 # ============================ FFT helpers ============================
@@ -515,13 +375,14 @@ class ContactDepthQueryMetadataMixin:
 
     When mode is ``"raycast"``, the collision/visual BVHs come from the shared ``RaycastContext`` (the sensor's
     ``shared_context``), built lazily on raycast opt-in and refreshed once per step by ``SensorManager``.
-    ``sensor_candidate_geom_mask`` is a per-(env, sensor, geom) bool gate - scattered per step from the contact
-    prefilter (KinematicTactile family) or once at build from ``sensor_track_geom_idx`` (ElastomerTaxel) - so BVH
-    leaves whose ``faces_info.geom_idx`` falls outside the mask are skipped.
+    ``closest_query`` is the closest-triangle query of the probes in raycast mode, built once the last sensor of the
+    class is built, and ``candidate_geoms`` the geoms it may reach per sensor, scattered per step from the contact
+    prefilter (KinematicTactile family) or set once from ``sensor_track_geom_idx`` (ElastomerTaxel).
     """
 
     contact_depth_query: str | None = None
-    sensor_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
+    candidate_geoms: "CandidateGeoms | None" = None
+    closest_query: "ClosestQuery | None" = None
 
 
 def resolve_contact_depth_query(metadata: ContactDepthQueryMetadataMixin, mode: str | None, sensor_name: str) -> None:

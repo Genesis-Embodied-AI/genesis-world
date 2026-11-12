@@ -1591,7 +1591,7 @@ def func_safe_gjk_support(
 
     Parameters:
     ----------
-    dir: gs.qd_vec3
+    dir: qd.types.vector(3)
         The unit direction in which to find the support points, from [ga] (obj 1) to [gb] (obj 2).
     """
     EPS = rigid_info.EPS[None]
@@ -1714,8 +1714,3 @@ def func_count_support(
         )
 
     return count
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.gjk_decomp")

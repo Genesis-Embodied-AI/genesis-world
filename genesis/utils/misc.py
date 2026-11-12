@@ -31,6 +31,7 @@ from quadrants.lang._fast_caching import args_hasher, src_hasher
 from quadrants.lang._perf_dispatch import PerformanceDispatcher
 from quadrants.lang._template_mapper import TemplateMapper
 from quadrants.lang.kernel import Kernel
+from quadrants.lang.util import to_pytorch_type
 from quadrants.types.enums import AutodiffMode
 
 import genesis as gs
@@ -1147,8 +1148,9 @@ PerformanceDispatcher.__init__ = _perf_dispatcher_init_released_on_reset
 def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:
     """Write a torch tensor into a Quadrants field / ndarray, in the native layout of the latter (see qd_to_torch).
 
-    On Metal, call `torch.mps.synchronize()` once after a batch of writes, before the next quadrants kernel reads the
-    values (see qd_zero_grad).
+    The values are cast to the dtype of the field / ndarray, whatever the backend. On Metal, call
+    `torch.mps.synchronize()` once after a batch of writes, before the next quadrants kernel reads the values (see
+    qd_zero_grad).
     """
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
@@ -1156,7 +1158,7 @@ def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor
         view = qd_to_torch(value, copy=False)
         view.copy_(tensor)
     else:
-        value.from_torch(tensor)
+        value.from_torch(tensor.to(to_pytorch_type(value.dtype)))
 
 
 @qd.func

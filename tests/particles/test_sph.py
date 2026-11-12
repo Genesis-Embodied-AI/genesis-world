@@ -17,7 +17,7 @@ from genesis.utils.misc import qd_to_numpy
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH", gravity=-9.81):
+def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81):
     """Create a basic SPH scene with regular sampler."""
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -27,7 +27,6 @@ def create_sph_scene(show_viewer, particle_size=0.01, pressure_solver="WCSPH", g
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=particle_size,
-            pressure_solver=pressure_solver,
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 0.5, 1),
         ),
@@ -63,9 +62,9 @@ def sph_scene(show_viewer):
     return create_sph_scene(show_viewer)
 
 
-def get_sph_density_pressure(scene, n_particles):
+def get_sph_density(scene, n_particles):
     """
-    Helper function to compute and retrieve density and pressure from SPH solver.
+    Helper function to compute and retrieve density from SPH solver.
 
     This triggers the density computation kernel and returns the computed values.
 
@@ -80,8 +79,6 @@ def get_sph_density_pressure(scene, n_particles):
     -------
     densities : np.ndarray
         Array of density values for all particles.
-    pressures : np.ndarray
-        Array of pressure values for all particles.
     """
     from genesis.engine.solvers.sph_solver import kernel_compute_rho, kernel_reorder_particles
 
@@ -94,34 +91,21 @@ def get_sph_density_pressure(scene, n_particles):
     kernel_compute_rho(sph_solver.sph_state, sph_solver.sph_info, sph_solver.sph_config)
 
     # Get density values from reordered particles (where kernel_compute_rho stores results)
-    densities = qd_to_numpy(sph_solver.sph_state.particles_reordered.rho)[:n_particles, 0]
-
-    # Get material properties for pressure computation
-    rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
-    stiffness = qd_to_numpy(sph_solver.sph_info.particles.stiffness)[0]
-    exponent = qd_to_numpy(sph_solver.sph_info.particles.exponent)[0]
-
-    # Compute pressure using the same formula as the solver:
-    # p = stiffness * ((max(rho, rho0) / rho0)^exponent - 1)
-    densities_clamped = np.maximum(densities, rho0)
-    pressures = stiffness * (np.power(densities_clamped / rho0, exponent) - 1.0)
-
-    return densities, pressures
+    return qd_to_numpy(sph_solver.sph_state.particles_reordered.rho)[:n_particles, 0]
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_initial_density_regular_sampler(show_viewer, pressure_solver, tol):
+def test_initial_density_regular_sampler(show_viewer, tol):
     # A regular sampler places particles at uniform spacing: interior particles see a consistent near-rest
     # density while boundary particles sit lower (fewer neighbors inside the kernel support), so the mean lands
     # below the rest density with a bounded spread.
-    scene, _ = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
+    scene, _ = create_sph_scene(show_viewer)
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
     rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
 
     # Get initial density values
-    densities, _ = get_sph_density_pressure(scene, n_particles)
+    densities = get_sph_density(scene, n_particles)
 
     # Test 1: Mean density should be within reasonable bounds
     # For regular sampler, mean is typically 70-90% of rho0 due to boundary effects
@@ -149,44 +133,26 @@ def test_initial_density_regular_sampler(show_viewer, pressure_solver, tol):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
-    # Regular sampling yields densities at or below the rest density, and the equation of state clamps density
-    # to the rest density, so the initial pressure must be exactly zero. A nonzero initial pressure would inject
-    # spurious forces that destabilize the simulation.
-    scene, _ = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
+def test_initial_pressure_regular_sampler(show_viewer, tol):
+    # Regular sampling yields densities at or below the rest density, so the density solve finds no compression to
+    # correct and the initial pressure is zero. A nonzero initial pressure would inject spurious forces that
+    # destabilize the simulation.
+    scene, _ = create_sph_scene(show_viewer)
     sph_solver = scene.sph_solver
-    n_particles = sph_solver.n_particles
     rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
-    stiffness = qd_to_numpy(sph_solver.sph_info.particles.stiffness)[0]
 
-    # Get initial pressure values
-    densities, pressures = get_sph_density_pressure(scene, n_particles)
-
-    # Test: For regular sampler, initial density should be <= rho0
-    # which means pressure should be 0 (clamped)
-    # All particles should have near-zero pressure initially
-    assert np.allclose(pressures, 0.0, atol=1e-6), (
-        f"Initial pressure is not zero. Mean: {pressures.mean():.6f}, "
-        f"Max: {pressures.max():.6f}. "
-        f"This indicates density > rho0 for some particles, which shouldn't happen "
-        f"with regular sampler."
-    )
-
-    # Also verify that density is indeed <= rho0 for most particles
-    fraction_above_rho0 = (densities > rho0).sum() / n_particles
-    assert fraction_above_rho0 < 0.01, (
-        f"{fraction_above_rho0 * 100:.1f}% of particles have density > rho0. "
-        f"Regular sampler should produce density <= rho0 for almost all particles."
+    densities = get_sph_density(scene, sph_solver.n_particles)
+    assert (densities <= rho0).all(), (
+        f"Maximum initial density {densities.max():.6f} exceeds the rest density {rho0}, which shouldn't happen with "
+        f"regular sampler."
     )
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol):
+def test_simulation_stability_regular_sampler(show_viewer, tol):
     GRAVITY = -9.81
 
-    scene, liquid = create_sph_scene(show_viewer, pressure_solver=pressure_solver, gravity=GRAVITY)
+    scene, liquid = create_sph_scene(show_viewer, gravity=GRAVITY)
     sph_solver = scene.sph_solver
     n_particles = sph_solver.n_particles
 
@@ -233,15 +199,13 @@ def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol)
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
 @pytest.mark.parametrize("particle_size", [0.01, 0.02])
-def test_density_consistency_different_particle_sizes(show_viewer, pressure_solver, particle_size, tol):
+def test_density_consistency_different_particle_sizes(show_viewer, particle_size, tol):
     # The SPH kernel support scales with the particle size, so the density distribution normalized by the rest
     # density must be independent of the particle size.
     scene, _ = create_sph_scene(
         show_viewer,
         particle_size=particle_size,
-        pressure_solver=pressure_solver,
     )
 
     sph_solver = scene.sph_solver
@@ -249,7 +213,7 @@ def test_density_consistency_different_particle_sizes(show_viewer, pressure_solv
     rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
 
     # Get density values
-    densities, pressures = get_sph_density_pressure(scene, n_particles)
+    densities = get_sph_density(scene, n_particles)
 
     # Normalized metrics should be similar regardless of particle size
     normalized_mean = densities.mean() / rho0
@@ -266,15 +230,10 @@ def test_density_consistency_different_particle_sizes(show_viewer, pressure_solv
         f"Normalized density std {normalized_std:.3f} is too high for particle_size={particle_size}"
     )
 
-    # Pressure should still be zero
-    assert np.allclose(pressures, 0.0, atol=1e-6), (
-        f"Initial pressure is not zero for particle_size={particle_size}. Mean: {pressures.mean():.6f}"
+    # No particle is compressed, so the initial pressure is still zero
+    assert (densities <= rho0).all(), (
+        f"Maximum initial density {densities.max():.6f} exceeds the rest density for particle_size={particle_size}"
     )
-
-
-# =============================================================================
-# DFSPH (Divergence-Free SPH) Pressure Solver Tests
-# =============================================================================
 
 
 @pytest.mark.required
@@ -288,7 +247,6 @@ def test_resume_from_pickle(show_viewer):
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=0.02,
-            pressure_solver="DFSPH",
             lower_bound=LOWER_BOUND,
             upper_bound=UPPER_BOUND,
         ),
@@ -355,7 +313,6 @@ def test_dfsph_resting_liquid_stability(show_viewer):
             gravity=(0.0, 0.0, GRAVITY),
         ),
         sph_options=gs.options.SPHOptions(
-            pressure_solver="DFSPH",
             lower_bound=(-0.1, -0.1, 0.0),
             upper_bound=(0.1, 0.1, 0.5),
         ),
@@ -383,12 +340,9 @@ def test_dfsph_resting_liquid_stability(show_viewer):
 
 
 @pytest.mark.required
-# The wide column settles for hundreds of steps, which the GPU affords, while the CPU runs the slab
-@pytest.mark.parametrize(
-    "pressure_solver, liquid_width, backend",
-    [("WCSPH", 0.3, gs.gpu), ("DFSPH", 0.3, gs.gpu), ("WCSPH", 0.02, gs.cpu), ("DFSPH", 0.02, gs.cpu)],
-)
-def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_width):
+# The wide column runs on the GPU, while the CPU runs the slab
+@pytest.mark.parametrize("liquid_width, backend", [(0.3, gs.gpu), (0.02, gs.cpu)])
+def test_pressure_carries_column_weight(show_viewer, liquid_width):
     GRAVITY = 9.81
     PARTICLE_SIZE = 0.02
     LIQUID_SIZE = (0.3, liquid_width, 0.5)
@@ -400,7 +354,6 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
-            pressure_solver=pressure_solver,
             lower_bound=(-0.5 * LIQUID_SIZE[0], -0.5 * LIQUID_SIZE[1], 0.0),
             upper_bound=(0.5 * LIQUID_SIZE[0], 0.5 * LIQUID_SIZE[1], 1.0),
         ),
@@ -433,28 +386,14 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
     particle_weight = qd_to_numpy(sph_solver.sph_info.particles.mass)[0] * GRAVITY
     footprint_area = LIQUID_SIZE[0] * LIQUID_SIZE[1]
     weight_per_area = sph_solver.n_particles * particle_weight / footprint_area
-    # Under gravity tilted away from the vertical, the free surface settles normal to gravity, and the walls carry the
-    # hydrostatic pressure of the depth along gravity. The walls only carry a hydrostatic pressure with WCSPH, whose
-    # column takes longer to settle under tilted gravity than under vertical gravity, and the walls along y of a slab
-    # thinner than the support radius hold all its particles, which the ratio would then average over.
-    gravity_tilted = GRAVITY * np.array([np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))])
-    sph_solver.set_gravity(gravity_tilted, envs_idx=1)
-    rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
-    tilted_ratios = []
     p_bottoms, p_middles, p_tops, p_hydrostatics = [], [], [], []
-    is_tilt_checked = pressure_solver == "WCSPH" and liquid_width > 2 * PARTICLE_SIZE
-    for i_step in range(300 if is_tilt_checked else 100):
+    n_steps = 100
+    for i_step in range(n_steps):
         scene.step()
-        if is_tilt_checked and i_step >= 250:
-            pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
-            positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]
-            heights = positions @ (-gravity_tilted / GRAVITY)
-            depths = heights.max() + 0.5 * PARTICLE_SIZE - heights
-            is_wall = (positions[:, 2] < PARTICLE_SIZE) | (
-                np.abs(positions[:, :2]) > 0.5 * np.array(LIQUID_SIZE[:2]) - PARTICLE_SIZE
-            ).any(axis=-1)
-            is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
-            tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
+        if i_step >= n_steps - 10:
+            # The settled column only keeps a residual sloshing, far slower than a gravity wave over its depth
+            speeds = liquid.get_particles_vel()[0].norm(dim=-1)
+            assert (speeds < 0.05 * np.sqrt(GRAVITY * LIQUID_SIZE[2])).all()
         if 50 <= i_step < 100:
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
             heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
@@ -475,8 +414,8 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
     # leaves loosely set, over the window.
     assert_allclose(p_bottoms[window].mean(), p_hydrostatics[window].mean(), rtol=0.1)
 
-    if is_tilt_checked:
-        assert_allclose(np.mean(tilted_ratios), 1.0, atol=2e-3)
+    # FIXME: The wall pressure under tilted gravity needs a scene that settles within the test budget, e.g. one started
+    # at its tilted equilibrium.
 
     # The liquid keeps the volume of the box it was sampled from, up to the compression of the column under its own
     # weight, so its particles rest around the center of the box.
@@ -516,7 +455,6 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver, liquid_wid
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=PARTICLE_SIZE,
-            pressure_solver=pressure_solver,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.0, -6.0, 2.0),

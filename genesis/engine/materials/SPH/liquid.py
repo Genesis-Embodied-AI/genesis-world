@@ -11,10 +11,6 @@ class Liquid(Base):
     ----------
     rho : float, optional
         The rest density (kg/m³). Default is 1000.0.
-    stiffness : float, optional
-        State stiffness (N/m²). Controls how pressure increases with compression. Default is 50000.0.
-    exponent : float, optional
-        State exponent. Controls how nonlinearly pressure scales with density. Default is 7.0.
     mu : float, optional
         The viscosity of the liquid. Default is 0.005.
     surface_tension : float, optional
@@ -27,8 +23,6 @@ class Liquid(Base):
     """
 
     rho: PositiveFloat = 1000.0
-    stiffness: PositiveFloat = 50000.0
-    exponent: PositiveFloat = 7.0
     mu: NonNegativeFloat = 0.005
     surface_tension: NonNegativeFloat = 0.0728
     sampler: SamplerType = "regular"

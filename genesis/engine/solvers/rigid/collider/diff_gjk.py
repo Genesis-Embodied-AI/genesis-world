@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from . import contact, epa, gjk as GJK
 from .data import ColliderInfo, ColliderState, DiffContactInput, GJKInfo, GJKState
 from .support_field import SupportFieldInfo
@@ -19,7 +19,6 @@ def func_gjk_contact(
     gb_quat: qd.types.vector(4),
     pos_tol: float,
     normal_tol: float,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     collider_state: ColliderState,
     gjk_state: GJKState,
@@ -219,7 +218,6 @@ def func_gjk_contact(
                             i_gb,
                             i_b,
                             -gjk_state.polytope_faces.normal[i_f, i_b],
-                            geoms_init_AABB,
                             dyn_state,
                             dyn_info,
                             rigid_info,
@@ -693,7 +691,6 @@ def func_contact_orthogonals(
     i_gb: int,
     i_b: int,
     normal: qd.types.vector(3),
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -708,9 +705,9 @@ def func_contact_orthogonals(
     # by the volume of their respective bounding box.
     i_g = i_gb
     if dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE:
-        size_ga = geoms_init_AABB[i_ga, 7]
+        size_ga = rigid_info.geoms_init_AABB[i_ga, 7]
         volume_ga = size_ga[0] * size_ga[1] * size_ga[2]
-        size_gb = geoms_init_AABB[i_gb, 7]
+        size_gb = rigid_info.geoms_init_AABB[i_gb, 7]
         volume_gb = size_gb[0] * size_gb[1] * size_gb[2]
         i_g = i_ga if volume_ga < volume_gb else i_gb
 
@@ -970,8 +967,3 @@ def func_triangle_affine_coords(
         (v3 - point).cross(v1 - point).dot(normal) * inv_nn,
         (v1 - point).cross(v2 - point).dot(normal) * inv_nn,
     )
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.diff_gjk_decomp")

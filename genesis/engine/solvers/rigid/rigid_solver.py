@@ -22,7 +22,7 @@ from genesis.grad.bridge import custom_backward, is_recording_launches
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
-from genesis.utils.data import ConfigItem, DataItem
+from genesis.utils.data import ConfigItem, DataItem, is_opted_in
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -81,7 +81,7 @@ from .abd.accessor import (
 )
 from .abd.diff import func_copy_next_to_curr, kernel_copy_next_to_curr_clear_coupling
 from .abd.forward_dynamics import (
-    func_clear_coupling_wrench,
+    func_clear_external_wrench,
     func_forward_dynamics,
     func_integrate,
     func_update_acc,
@@ -106,6 +106,7 @@ from .abd.misc import (
     kernel_apply_links_external_wrench,
     kernel_apply_links_external_wrench_at_pos,
     kernel_clear_external_force,
+    kernel_flush_external_wrenches,
     kernel_init_entity_fields,
     kernel_init_equality_fields,
     kernel_init_geom_fields,
@@ -131,6 +132,7 @@ from .constraint.solver import (
     ConstraintSolver,
     func_add_equality_constraints,
     func_add_inequality_constraints,
+    func_clear_links_constrained,
     func_resolve_post,
     func_solve_body,
 )
@@ -772,6 +774,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
         self.data_manager = RigidData(self, kinematic_only=False)
         self._errno = self.data_manager.errno
+        self._is_external_wrench_exact = is_opted_in(RigidData.dyn_state.links.cfrc_external_sums)
 
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
@@ -1129,8 +1132,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.dyn_info.dofs.dof_length.from_numpy(dof_length)
 
     def _init_geom_fields(self):
-        self.geoms_init_AABB = self.rigid_info.geoms_init_AABB
-
         if self.n_geoms > 0:
             geoms = self.geoms
             geoms_sol_params = np.array([geom.desc.sol_params for geom in geoms], dtype=gs.np_float)
@@ -1205,9 +1206,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
                 np.array(geoms_is_hollow, dtype=gs.np_bool),
-                self.geoms_init_AABB,
                 self.dyn_state,
                 self.dyn_info,
+                self.rigid_info,
                 self.rigid_config,
             )
 
@@ -1274,7 +1275,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self):
-        from genesis.engine.couplers import SAPCoupler
+        from genesis.engine.couplers import IPCCoupler, SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
         # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
@@ -1284,9 +1285,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if is_recording:
             is_forward_pos_updated = is_forward_vel_updated = False
 
+        # The wrenches the other solvers summed exactly over the previous substep join the external wrench of the links
+        if self._is_external_wrench_exact:
+            kernel_flush_external_wrenches(self.dyn_state.links)
+
         # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
-        if self._use_hibernation and len(self.sim.active_solvers) > 1:
+        # kernel_wakeup_coupled_links in abd/misc.py). They exist when another solver is active, or when the IPC coupler
+        # couples rigid links with its own bodies.
+        is_ipc_coupled = isinstance(self.sim.coupler, IPCCoupler) and self.sim.coupler.has_any_rigid_coupling
+        if self._use_hibernation and (len(self.sim.active_solvers) > 1 or is_ipc_coupled):
             kernel_wakeup_coupled_links(
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
@@ -1437,11 +1444,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         constraint_state = self.constraint_solver.constraint_state
-        # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise (see
-        # "Pure read-write data accessors on the hot path" in CLAUDE.md). gs.use_zerocopy encodes every zero-copy
-        # availability condition for these buffers (standalone dense allocations with DLPack-supported dtypes; the
-        # platform gates live in gs.init). torch (MPS) and quadrants do not share a compute stream on Metal, so the
-        # writes are flushed before the next kernels (see set_base_links_quat).
+        # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise.
+        # gs.use_zerocopy encodes every zero-copy availability condition for these buffers (standalone dense allocations
+        # with DLPack-supported dtypes; the platform gates live in gs.init). torch (MPS) and quadrants do not share a
+        # compute stream on Metal, so the writes are flushed before the next kernels (see set_base_links_quat).
         if gs.use_zerocopy:
             acc_grad = qd_to_torch(self.dyn_state.dofs.acc.grad, copy=False)
             dL_dqacc = qd_to_torch(constraint_state.dL_dqacc, copy=False)
@@ -1537,7 +1543,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             Defaults to 'link_origin'.
         local: bool, optional
             Whether `force`, `torque` and `pos` are expressed in the coordinates of the `ref` frame rather than the
-            world frame. Defaults to False.
+            world frame, a convenience to set a world wrench from local coordinates. The wrench is converted to world
+            when the call is made and held constant in world over the substeps of the step, so it does not turn with the
+            link during the step. Defaults to False.
         """
         if force is None and torque is None:
             gs.raise_exception("Either 'force' or 'torque' must be specified.")
@@ -3208,7 +3216,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def clear_external_force(self):
         # The recording of a step needs the kernel, which the backward pass of the step reverses
         if gs.use_zerocopy and not is_recording_launches():
-            for tensor in (self.dyn_state.links.cfrc_applied_ang, self.dyn_state.links.cfrc_applied_vel):
+            for tensor in (self.dyn_state.links.cfrc_input_ang, self.dyn_state.links.cfrc_input_vel):
                 out = qd_to_torch(tensor, copy=False)
                 out.zero_()
             if gs.backend == gs.metal:
@@ -3343,7 +3351,11 @@ def kernel_step_1(
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
 ):
-    """Run the first half of a substep on its own (see func_step_1)."""
+    """Run the first half of a substep on its own (see func_step_1).
+
+    The constraint involvement of the links is reset, which the constraint assembly or a coupler solving instead of it
+    marks back (see func_mark_link_constrained).
+    """
     func_step_1(
         dyn_state,
         constraint_state,
@@ -3354,6 +3366,7 @@ def kernel_step_1(
         is_forward_vel_updated,
         is_backward=False,
     )
+    func_clear_links_constrained(dyn_state.links, rigid_config)
 
 
 @qd.func
@@ -3370,7 +3383,7 @@ def func_step_2(
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
     func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
-    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
+    func_clear_external_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         func_update_cartesian_space(
             dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=False

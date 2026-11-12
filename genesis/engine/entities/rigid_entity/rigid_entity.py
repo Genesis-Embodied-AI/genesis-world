@@ -2192,7 +2192,9 @@ class RigidEntity(KinematicEntity):
             Defaults to 'link_origin'.
         local: bool, optional
             Whether `force`, `torque` and `pos` are expressed in the coordinates of the `ref` frame rather than the
-            world frame. Defaults to False.
+            world frame, a convenience to set a world wrench from local coordinates. The wrench is converted to world
+            when the call is made and held constant in world over the substeps of the step, so it does not turn with the
+            link during the step. Defaults to False.
         """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
         self._solver.apply_links_external_wrench(force, torque, links_idx, envs_idx, pos=pos, ref=ref, local=local)

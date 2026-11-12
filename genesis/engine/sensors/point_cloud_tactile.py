@@ -1,6 +1,7 @@
+import dataclasses
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 import numpy as np
@@ -11,15 +12,16 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import BVHTreeState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
+from genesis.engine.bvh import func_aabb_intersects_aabb, func_bvh_traverse
+from genesis.engine.solvers.rigid.data import DynInfo, DynState
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
 )
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_torch, tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
-from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
+from genesis.utils.raycast_qd import CandidateGeoms, ClosestQuery, func_sphere_intersects_aabb
 from genesis.utils.sdf import SDFInfo
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
@@ -33,8 +35,6 @@ from .probe import (
 )
 from .raycaster import RaycastContext
 from .tactile_shared import (
-    BVH_LEAF_SIZE,
-    BVH_STACK_SIZE,
     BVHMetadata,
     ChunkedBVHData,
     ContactDepthQueryMetadataMixin,
@@ -44,9 +44,6 @@ from .tactile_shared import (
     SpatialCrosstalkMixin,
     ViscoelasticHysteresisMetadataMixin,
     ViscoelasticHysteresisMixin,
-    build_static_chunk_bvh,
-    func_aabb_intersects_aabb,
-    func_sphere_intersects_aabb,
     func_vec3_at,
     get_mesh_geom_chunks,
     next_pow2,
@@ -109,27 +106,6 @@ class GridFFTMeta(NamedTuple):
     compressibility: float
     dilation_reg: float
     elastomer_thickness: float = 0.0
-
-
-def _build_candidate_geom_mask(
-    B: int, n_sensors: int, n_geoms: int, geom_starts: torch.Tensor, geom_ns: torch.Tensor, geom_idx: torch.Tensor
-) -> torch.Tensor:
-    """
-    Build a ``(B, n_sensors, n_geoms)`` bool mask marking, per sensor, which scene geoms are candidates.
-
-    ``geom_idx`` is the flat per-sensor concatenation of candidate geom indices; ``geom_starts``/``geom_ns`` give
-    each sensor's slice into it. The mask is broadcast identically across all ``B`` environments.
-    """
-    mask = torch.zeros((B, n_sensors, n_geoms), dtype=gs.tc_bool, device=gs.device)
-    starts = tensor_to_array(geom_starts)
-    ns = tensor_to_array(geom_ns)
-    idx = tensor_to_array(geom_idx)
-    for i_s in range(n_sensors):
-        lo = int(starts[i_s])
-        hi = lo + int(ns[i_s])
-        if hi > lo:
-            mask[:, i_s, idx[lo:hi]] = True
-    return mask
 
 
 def _mesh_area(verts: np.ndarray, faces: np.ndarray) -> float:
@@ -256,9 +232,8 @@ class PointCloudBVH(BVHMetadata):
     """
     BVH over the tracked point clouds of one sensor class.
 
-    ``leaf_elem_idx`` entries are absolute rows into ``pc_pos_link`` / ``pc_active_envs_mask`` / ``pc_normal_link``
-    so a leaf hit resolves to per-point data with one indirection. See ``BVHMetadata`` for the shared scaffolding
-    semantics.
+    A chunk spans a run of the points of one tracked link, so that leaf i_a holds the row i_a of the points (see
+    PointCloudPoints). See ``BVHMetadata`` for the shared scaffolding semantics.
     """
 
     # Inverse of sensor_chunk_start/count: chunk_sensor_idx[i_c] is the owning sensor's index. Enables
@@ -266,92 +241,127 @@ class PointCloudBVH(BVHMetadata):
     # in every thread; ProximityTaxel parallelizes per-probe and does not consume this field.
     chunk_sensor_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
 
-    def append_sensor(self, *, pc_start_row: int, idx_cat: torch.Tensor, pos_cat: torch.Tensor) -> None:
+    def append_sensor(self, idx_cat: torch.Tensor, pos_cat: torch.Tensor) -> None:
         """
-        Build per-tracked-link chunks for one sensor and append into the flat tensors.
+        Append the chunks of one sensor, one per tracked link, over its points in the frame of that link.
 
-        Must be called immediately after extending ``pc_pos_link`` by ``pos_cat`` so each leaf's element index
-        (``pc_start_row + local_row``) addresses the freshly-grown rows.
+        Must be called immediately after extending ``pc_pos_link`` by ``pos_cat``.
         """
-        n_local = int(pos_cat.shape[0])
-        if n_local == 0:
+        if pos_cat.shape[0] == 0:
             gs.raise_exception("PointCloudBVH.append_sensor called with empty point cloud.")
-
-        idx_np = tensor_to_array(idx_cat).astype(gs.np_int)
-        pos_np = tensor_to_array(pos_cat).astype(gs.np_float, copy=False)
-        unique_links = np.unique(idx_np)
-
-        chunk_start_for_sensor = int(self.chunk_link_idx.shape[0])
-        node_offset = int(self.node_min.shape[0])
-        point_offset = int(self.leaf_elem_idx.shape[0])
-
-        new_chunk_link_idx: list[int] = []
-        new_chunk_node_start: list[int] = []
-        new_chunk_node_count: list[int] = []
-        all_node_min: list[np.ndarray] = []
-        all_node_max: list[np.ndarray] = []
-        all_node_left: list[np.ndarray] = []
-        all_node_right: list[np.ndarray] = []
-        all_node_leaf_start: list[np.ndarray] = []
-        all_node_leaf_count: list[np.ndarray] = []
-        all_leaf_elem_idx: list[np.ndarray] = []
-
-        for link_idx in unique_links:
-            local_rows = np.nonzero(idx_np == int(link_idx))[0].astype(gs.np_int)
-            global_rows = (int(pc_start_row) + local_rows).astype(gs.np_int)
-            pts_link = pos_np[local_rows]
-
-            # Point cloud: AABB per element is degenerate (the point itself), so pass the points as both
-            # centroids and the per-element min/max bounds.
-            nmin, nmax, nleft, nright, npstart, npn, pidx = build_static_chunk_bvh(
-                pts_link, pts_link, pts_link, global_rows, BVH_LEAF_SIZE
-            )
-
-            new_chunk_link_idx.append(int(link_idx))
-            new_chunk_node_start.append(node_offset)
-            new_chunk_node_count.append(int(nmin.shape[0]))
-
-            all_node_min.append(nmin)
-            all_node_max.append(nmax)
-            # Rebase intra-chunk child / leaf-start indices into the flat tensors' absolute space.
-            all_node_left.append(np.where(nleft >= 0, nleft + node_offset, nleft).astype(gs.np_int))
-            all_node_right.append(np.where(nright >= 0, nright + node_offset, nright).astype(gs.np_int))
-            all_node_leaf_start.append(np.where(npn > 0, npstart + point_offset, npstart).astype(gs.np_int))
-            all_node_leaf_count.append(npn)
-            all_leaf_elem_idx.append(pidx)
-
-            node_offset += int(nmin.shape[0])
-            point_offset += int(pidx.shape[0])
-
-        nm = torch.tensor(np.concatenate(all_node_min, axis=0), dtype=gs.tc_float, device=gs.device)
-        nx = torch.tensor(np.concatenate(all_node_max, axis=0), dtype=gs.tc_float, device=gs.device)
-        nl = torch.tensor(np.concatenate(all_node_left, axis=0), dtype=gs.tc_int, device=gs.device)
-        nr = torch.tensor(np.concatenate(all_node_right, axis=0), dtype=gs.tc_int, device=gs.device)
-        nps = torch.tensor(np.concatenate(all_node_leaf_start, axis=0), dtype=gs.tc_int, device=gs.device)
-        npn_t = torch.tensor(np.concatenate(all_node_leaf_count, axis=0), dtype=gs.tc_int, device=gs.device)
-        pidx_t = torch.tensor(np.concatenate(all_leaf_elem_idx, axis=0), dtype=gs.tc_int, device=gs.device)
-        cli = torch.tensor(new_chunk_link_idx, dtype=gs.tc_int, device=gs.device)
-        cns = torch.tensor(new_chunk_node_start, dtype=gs.tc_int, device=gs.device)
-        cnn = torch.tensor(new_chunk_node_count, dtype=gs.tc_int, device=gs.device)
-        # Sensor index for this batch of chunks = current sensor count (the entry we're about to add).
-        sensor_idx_for_chunks = int(self.sensor_chunk_start.shape[0])
-        csi = torch.full((len(unique_links),), sensor_idx_for_chunks, dtype=gs.tc_int, device=gs.device)
-
-        self.node_min = concat_with_tensor(self.node_min, nm, expand=(nm.shape[0], 3))
-        self.node_max = concat_with_tensor(self.node_max, nx, expand=(nx.shape[0], 3))
-        self.node_left = concat_with_tensor(self.node_left, nl, expand=(nl.shape[0],))
-        self.node_right = concat_with_tensor(self.node_right, nr, expand=(nr.shape[0],))
-        self.node_leaf_start = concat_with_tensor(self.node_leaf_start, nps, expand=(nps.shape[0],))
-        self.node_leaf_count = concat_with_tensor(self.node_leaf_count, npn_t, expand=(npn_t.shape[0],))
-        self.leaf_elem_idx = concat_with_tensor(self.leaf_elem_idx, pidx_t, expand=(pidx_t.shape[0],))
-        self.chunk_link_idx = concat_with_tensor(self.chunk_link_idx, cli, expand=(cli.shape[0],))
-        self.chunk_sensor_idx = concat_with_tensor(self.chunk_sensor_idx, csi, expand=(csi.shape[0],))
-        self.chunk_node_start = concat_with_tensor(self.chunk_node_start, cns, expand=(cns.shape[0],))
-        self.chunk_node_count = concat_with_tensor(self.chunk_node_count, cnn, expand=(cnn.shape[0],))
-        self.sensor_chunk_start = concat_with_tensor(self.sensor_chunk_start, chunk_start_for_sensor, expand=(1,))
-        self.sensor_chunk_count = concat_with_tensor(self.sensor_chunk_count, len(unique_links), expand=(1,))
+        idx_np = tensor_to_array(idx_cat)
+        pos_np = tensor_to_array(pos_cat)
+        # The sampler emits the points of each tracked link as one run, a chunk per run keeping the rows in order. A
+        # point is its own box.
+        runs_start = np.flatnonzero(np.diff(idx_np, prepend=-1))
+        runs_end = np.append(runs_start[1:], len(idx_np))
+        links_idx = idx_np[runs_start].tolist()
+        chunks_pos = [pos_np[i_start:i_end] for i_start, i_end in zip(runs_start, runs_end)]
+        sensor_idx = torch.full((len(links_idx),), self.sensor_chunk_start.shape[0], dtype=gs.tc_int, device=gs.device)
+        self.chunk_sensor_idx = concat_with_tensor(self.chunk_sensor_idx, sensor_idx, expand=(len(links_idx),))
+        self.append_chunks(links_idx, chunks_pos, chunks_pos)
 
 
+# The tracked points of a point-cloud tactile sensor class
+PC_POINTS = Size("pc_points")
+
+
+class PointCloudPoints(Data, kind=DataKind.CONSTANT, shape=(PC_POINTS,)):
+    """The tracked points of a sensor class in the frame of their tracked link, and whether each environment carries
+    each."""
+
+    pos_link: qd.Tensor = field((float, 3))
+    is_active: qd.Tensor = field(bool, shape=(PC_POINTS, ENVS))
+
+
+# Elastomer geoms of an elastomer taxel class, and its sensors
+ELASTOMER_GEOMS = Size("elastomer_geoms")
+ELASTOMER_SENSORS = Size("elastomer_sensors")
+
+
+class ElastomerGeoms(Data, kind=DataKind.CONSTANT):
+    """The elastomer geoms of each sensor of a class, and the signed distances anchoring and releasing its shear."""
+
+    sensors_geom_start: qd.Tensor = field(int, shape=(ELASTOMER_SENSORS,))
+    sensors_geom_n: qd.Tensor = field(int, shape=(ELASTOMER_SENSORS,))
+    # A surface point anchors below -sd_enter and releases above sd_exit
+    sensors_sd_enter: qd.Tensor = field(float, shape=(ELASTOMER_SENSORS,))
+    sensors_sd_exit: qd.Tensor = field(float, shape=(ELASTOMER_SENSORS,))
+    geoms_idx: qd.Tensor = field(int, shape=(ELASTOMER_GEOMS,))
+    geoms_is_active: qd.Tensor = field(bool, shape=(ELASTOMER_GEOMS, ENVS))
+
+
+class SurfaceState(Data, kind=DataKind.STATE, shape=(PC_POINTS, ENVS)):
+    """The state of each tracked point at the surface of the elastomer of its sensor in each environment."""
+
+    # Position in the frame of the link of the sensor
+    pos_sensor: qd.Tensor = field((float, 3))
+    # Position where the point anchored, zero while released
+    entry_pos_sensor: qd.Tensor = field((float, 3))
+    depth: qd.Tensor = field(float)
+    is_initialized: qd.Tensor = field(bool)
+    # Whether the point lies near the elastomer of its sensor, cleared every step
+    is_candidate: qd.Tensor = field(bool)
+
+
+# The taxels of a proximity taxel class
+TAXELS = Size("taxels")
+
+
+class ProximitySums(Data, kind=DataKind.SCRATCH, shape=(TAXELS, ENVS)):
+    """The pressure of the points of a chunk within the radius of each taxel, and its first moment about the taxel in
+    the frame of the chunk, for the ground-truth radius then the measured one."""
+
+    pressure: qd.Tensor = field((float, 2))
+    moment: qd.Tensor = field((float, (2, 3)))
+
+
+@qd.data_oriented
+class ProximityPoints:
+    """The visitor of the points of a chunk within the radius of a taxel, accumulating its pressure per radius.
+
+    The query is the taxel in the frame of the chunk and its radii (see Query), the query index being the taxel. It
+    reads the tracked points (see PointCloudPoints), and accumulates the pressure of each taxel in each environment and
+    its moment, from which the velocity terms, linear in the offsets of the points, follow per chunk (see
+    ProximitySums).
+    """
+
+    is_instance_level = False
+
+    def __init__(self, points: PointCloudPoints, sums: ProximitySums, eps: qd.Tensor) -> None:
+        self.points = points
+        self.sums = sums
+        self.eps = eps
+        # The taxel in the frame of the chunk, then its ground-truth and measured radii
+        self.Query = qd.types.struct(probe=qd.types.vector(3, gs.qd_float), radii=qd.types.vector(2, gs.qd_float))
+
+    @qd.func
+    def is_node_hit(
+        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+    ) -> bool:
+        return func_sphere_intersects_aabb(query.probe, bound, node_min, node_max)
+
+    @qd.func
+    def visit_leaf(self, i_t: int, i_q: int, i_k: int, i_a: int, query, bound: float) -> float:
+        if self.points.is_active[i_a, i_t]:
+            radii = query.radii
+            d_link = self.points.pos_link[i_a] - query.probe
+            dist = d_link.norm()
+            if dist < qd.max(radii[0], radii[1]) and dist > self.eps[None]:
+                pressure = self.sums.pressure[i_q, i_t]
+                moment = self.sums.moment[i_q, i_t]
+                for i_r in qd.static(range(2)):
+                    point_pressure = radii[i_r] - dist
+                    if point_pressure > 0.0:
+                        pressure[i_r] = pressure[i_r] + point_pressure
+                        for j in qd.static(range(3)):
+                            moment[i_r, j] = moment[i_r, j] + point_pressure * d_link[j]
+                self.sums.pressure[i_q, i_t] = pressure
+                self.sums.moment[i_q, i_t] = moment
+        return bound
+
+
+# Fastcache stays off for a kernel taking a visitor or a target (see RaycastTarget)
 @qd.kernel
 def _kernel_point_cloud_proximity_taxel_bvh(
     probe_sensor_idx: qd.types.ndarray(),
@@ -362,8 +372,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
     probe_local_normal: qd.types.ndarray(),
     n_probes_per_sensor: qd.types.ndarray(),
     bvh: ChunkedBVHData,
-    pc_pos_link: qd.types.ndarray(),
-    pc_active_envs_mask: qd.types.ndarray(),
+    proximity_query: qd.template(),
     probe_radii: qd.types.ndarray(),
     probe_radii_noise: qd.types.ndarray(),
     probe_gains: qd.types.ndarray(),
@@ -376,7 +385,6 @@ def _kernel_point_cloud_proximity_taxel_bvh(
     taxel_signal_buf: qd.types.ndarray(),
     dyn_state: DynState,
     eps: float,
-    bvh_stack_size: qd.template(),
 ):
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
@@ -409,106 +417,63 @@ def _kernel_point_cloud_proximity_taxel_bvh(
             a_w[j] = a_w[j] / a_norm
 
         R_gt = probe_radii[i_p]
-        R_gt_sq = R_gt * R_gt
         probe_radius_noise = probe_radii_noise[i_p]
         use_noised_radius = probe_radius_noise > eps
         R_m = R_gt
         if use_noised_radius:
             R_m = func_noised_probe_radius(R_gt, probe_radius_noise, eps)
-        R_m_sq = R_m * R_m
-        # Conservative traversal radius covers both branches; exact tests run per leaf candidate.
-        R_query = qd.max(R_gt, R_m)
-        R_query_sq = R_query * R_query
 
+        sum_p = qd.Vector.zero(gs.qd_float, 2)
+        omega_w = qd.Vector.zero(gs.qd_float, 2)
+        fv = qd.Matrix.zero(gs.qd_float, 2, 3)
         v_tax = s_vel + s_ang.cross(probe_world - s_com)
-
-        sum_p_gt = gs.qd_float(0.0)
-        fv_gt = qd.Vector.zero(gs.qd_float, 3)
-        omega_w_gt = gs.qd_float(0.0)
-        sum_p_m = gs.qd_float(0.0)
-        fv_m = qd.Vector.zero(gs.qd_float, 3)
-        omega_w_m = gs.qd_float(0.0)
-
-        chunk_start = bvh.sensor_chunk_start[i_s]
-        n_chunks = bvh.sensor_chunk_count[i_s]
-        for c_off in range(n_chunks):
-            i_c = chunk_start + c_off
+        for i_c in range(bvh.sensor_chunk_start[i_s], bvh.sensor_chunk_start[i_s] + bvh.sensor_chunk_count[i_s]):
             track_link_idx = bvh.chunk_link_idx[i_c]
             track_pos = dyn_state.links.pos[track_link_idx, i_b]
             track_quat = dyn_state.links.quat[track_link_idx, i_b]
-            rcom_o = dyn_state.links.root_COM[track_link_idx, i_b]
-            cdv_o = dyn_state.links.cd_vel[track_link_idx, i_b]
             cda_o = dyn_state.links.cd_ang[track_link_idx, i_b]
-            omega_c = (cda_o - s_ang).dot(a_w)  # Relative spin rate of the tracked link about the normal
-            # BVH nodes live in tracked-link local frame: bring the probe sphere center over.
-            probe_link = gu.qd_inv_transform_by_trans_quat(probe_world, track_pos, track_quat)
-
-            stack = qd.Vector.zero(gs.qd_int, qd.static(bvh_stack_size))
-            stack[0] = bvh.chunk_node_start[i_c]
-            stack_idx = 1
-
-            while stack_idx > 0:
-                stack_idx -= 1
-                n = stack[stack_idx]
-                bmin = func_vec3_at(n, bvh.node_min)
-                bmax = func_vec3_at(n, bvh.node_max)
-                if not func_sphere_intersects_aabb(probe_link, R_query_sq, bmin, bmax):
-                    continue
-                left = bvh.node_left[n]
-                if left == -1:
-                    pstart = bvh.node_leaf_start[n]
-                    pn = bvh.node_leaf_count[n]
-                    for j in range(pn):
-                        i_o = bvh.leaf_elem_idx[pstart + j]
-                        if not pc_active_envs_mask[i_o, i_b]:
-                            continue
-                        pos_l = func_vec3_at(i_o, pc_pos_link)
-                        d_link = pos_l - probe_link
-                        dsq = d_link.dot(d_link)
-                        dist = qd.sqrt(dsq)
-
-                        hit_gt = dsq <= R_gt_sq and dist > eps
-                        hit_m = use_noised_radius and dsq <= R_m_sq and dist > eps
-                        if hit_gt or hit_m:
-                            # d_link is the probe->point offset in the tracked-link frame; rotating it to world
-                            # and adding to probe_world yields the point's world position without a second transform.
-                            d_world = gu.qd_transform_by_quat(d_link, track_quat)
-                            pw = probe_world + d_world
-                            v_pc = cdv_o + cda_o.cross(pw - rcom_o)
-                            v_rel = v_pc - v_tax
-                            vdota = v_rel.dot(a_w)
-                            v_t = qd.Vector.zero(gs.qd_float, 3)
-                            for k2 in qd.static(range(3)):
-                                v_t[k2] = v_rel[k2] - a_w[k2] * vdota
-
-                            if hit_gt:
-                                P_i_gt = R_gt - dist
-                                if P_i_gt > 0.0:
-                                    sum_p_gt = sum_p_gt + P_i_gt
-                                    omega_w_gt = omega_w_gt + P_i_gt * omega_c
-                                    for k2 in qd.static(range(3)):
-                                        fv_gt[k2] = fv_gt[k2] + P_i_gt * v_t[k2]
-                            if hit_m:
-                                P_i_m = R_m - dist
-                                if P_i_m > 0.0:
-                                    sum_p_m = sum_p_m + P_i_m
-                                    omega_w_m = omega_w_m + P_i_m * omega_c
-                                    for k2 in qd.static(range(3)):
-                                        fv_m[k2] = fv_m[k2] + P_i_m * v_t[k2]
-                else:
-                    right = bvh.node_right[n]
-                    # Median split bounds depth at log2(N / leaf_size) << BVH_STACK_SIZE; the guard mirrors the
-                    # global rigid-BVH kernel so a future build strategy can't silently overflow the stack.
-                    if stack_idx < qd.static(bvh_stack_size - 2):
-                        stack[stack_idx] = left
-                        stack[stack_idx + 1] = right
-                        stack_idx += 2
-
-        if not use_noised_radius:
-            sum_p_m = sum_p_gt
-            omega_w_m = omega_w_gt
-            for j in qd.static(range(3)):
-                fv_m[j] = fv_gt[j]
+            # The tree of the chunk lives in the frame of its tracked link
+            probe = gu.qd_inv_transform_by_trans_quat(probe_world, track_pos, track_quat)
+            proximity_query.sums.pressure[i_p, i_b] = qd.Vector.zero(gs.qd_float, 2)
+            proximity_query.sums.moment[i_p, i_b] = qd.Matrix.zero(gs.qd_float, 2, 3)
+            i_root = bvh.trees.trees_root[i_c]
+            leaf_offset = bvh.trees.trees_leaf_offset[i_c]
+            func_bvh_traverse(
+                i_b,
+                i_p,
+                i_root,
+                leaf_offset,
+                leaf_base=0,
+                query=proximity_query.Query(probe=probe, radii=qd.Vector([R_gt, R_m])),
+                bound=qd.max(R_gt, R_m) ** 2,
+                tree=bvh.trees.tree,
+                visitor=proximity_query,
+            )
+            # The relative velocity of a point is affine in its offset d from the taxel in the frame of the chunk,
+            # v_rel = v_0 + cda_o x (R d), so the sums of the pressure P and of P d give the sum of P v_rel. The spin
+            # rate of the tracked link about the normal is common to the points of the chunk.
+            v_0 = (
+                dyn_state.links.cd_vel[track_link_idx, i_b]
+                + cda_o.cross(probe_world - dyn_state.links.root_COM[track_link_idx, i_b])
+                - v_tax
+            )
+            omega_c = (cda_o - s_ang).dot(a_w)
+            pressure = proximity_query.sums.pressure[i_p, i_b]
+            moment = proximity_query.sums.moment[i_p, i_b]
+            for i_r in qd.static(range(2)):
+                moment_world = gu.qd_transform_by_quat(
+                    qd.Vector([moment[i_r, 0], moment[i_r, 1], moment[i_r, 2]]), track_quat
+                )
+                fv_rel = pressure[i_r] * v_0 + cda_o.cross(moment_world)
+                fv_t = fv_rel - a_w * fv_rel.dot(a_w)
+                sum_p[i_r] = sum_p[i_r] + pressure[i_r]
+                omega_w[i_r] = omega_w[i_r] + pressure[i_r] * omega_c
+                for j in qd.static(range(3)):
+                    fv[i_r, j] = fv[i_r, j] + fv_t[j]
+        sum_p_gt, sum_p_m = sum_p[0], sum_p[1]
+        omega_w_gt, omega_w_m = omega_w[0], omega_w[1]
+        fv_gt = qd.Vector([fv[0, 0], fv[0, 1], fv[0, 2]])
+        fv_m = qd.Vector([fv[1, 0], fv[1, 1], fv[1, 2]])
 
         # Penetration-weighted average of the spin rate over contacts; the per-probe gain cancels in the ratio, so
         # this uses the pre-gain accumulators.
@@ -582,7 +547,9 @@ class PointCloudTactileSharedMetadata(ProbeSensorMetadataMixin, RigidSensorMetad
     pc_active_envs_mask: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
     sensor_pc_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     sensor_pc_n: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    pc_bvh: PointCloudBVH = field(default_factory=PointCloudBVH)
+    pc_bvh: PointCloudBVH = dataclasses.field(default_factory=PointCloudBVH)
+    # The tracked points of every sensor, built with the trees once the last sensor of the class is built
+    points: PointCloudPoints | None = None
 
 
 class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointCloudTactileSharedMetadata](
@@ -631,9 +598,15 @@ class PointCloudTactileSensorMixin[PointCloudTactileSensorMetadataMixinT: PointC
             self._shared_metadata.sensor_pc_n, self._shared_metadata.pc_pos_link.shape[0] - pc_start_row, expand=(1,)
         )
 
-        # BVH growth follows pc_pos_link growth in lockstep: each leaf's leaf_elem_idx is an absolute
-        # row into the just-grown pc_pos_link.
-        self._shared_metadata.pc_bvh.append_sensor(pc_start_row=pc_start_row, idx_cat=idx_cat, pos_cat=pos_cat)
+        # BVH growth follows pc_pos_link growth in lockstep: the leaves of the chunks follow the rows of the points
+        self._shared_metadata.pc_bvh.append_sensor(idx_cat, pos_cat)
+        if self._idx == len(self._manager._sensors_by_type[type(self)]) - 1:
+            self._shared_metadata.pc_bvh.build()
+            n_points, B = self._shared_metadata.pc_active_envs_mask.shape
+            points = PointCloudPoints(sizes=dict(pc_points=n_points, envs=B))
+            points.pos_link.from_numpy(tensor_to_array(self._shared_metadata.pc_pos_link))
+            points.is_active.from_numpy(tensor_to_array(self._shared_metadata.pc_active_envs_mask))
+            self._shared_metadata.points = points
 
     def _draw_debug_probes(
         self,
@@ -703,6 +676,8 @@ class ProximityTaxelMetadata(
     twist_scalar: torch.Tensor = make_tensor_field((0,))
     proximity_density_scale: torch.Tensor = make_tensor_field((0, 0))
     taxel_signal_buf: torch.Tensor = make_tensor_field((0, 0))
+    # The query of the points within the radius of each taxel, built once the last sensor of the class is built
+    proximity_query: ProximityPoints | None = None
 
 
 class ProximityTaxelSensor(
@@ -751,6 +726,11 @@ class ProximityTaxelSensor(
         self._shared_metadata.taxel_signal_buf = torch.zeros(
             (self._shared_metadata.total_n_probes, self._manager._sim._B), dtype=gs.tc_float, device=gs.device
         )
+        if self._idx == len(self._manager._sensors_by_type[type(self)]) - 1:
+            sums = ProximitySums(sizes=dict(taxels=self._shared_metadata.total_n_probes, envs=self._manager._sim._B))
+            self._shared_metadata.proximity_query = ProximityPoints(
+                self._shared_metadata.points, sums, self._shared_metadata.solver.rigid_info.EPS
+            )
 
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
         shape = (*self._probe_layout_shape, 3)
@@ -788,8 +768,7 @@ class ProximityTaxelSensor(
             shared_metadata.probe_local_normal,
             shared_metadata.n_probes_per_sensor,
             bvh.kernel_bvh,
-            shared_metadata.pc_pos_link,
-            shared_metadata.pc_active_envs_mask,
+            shared_metadata.proximity_query,
             shared_metadata.probe_radii,
             shared_metadata.probe_radii_noise,
             shared_metadata.probe_gains,
@@ -802,7 +781,6 @@ class ProximityTaxelSensor(
             shared_metadata.taxel_signal_buf,
             solver.dyn_state,
             gs.EPS,
-            BVH_STACK_SIZE,
         )
         if ground_truth_data_timeline is not None:
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
@@ -826,10 +804,10 @@ class ProximityTaxelSensor(
 def _func_elastomer_min_sdf_over_active_geoms(
     i_b: int,
     geom_start: int,
-    geom_idx: qd.types.ndarray(),
+    geom_idx: qd.Tensor,
     point_world: qd.types.vector(3),
     geom_n: int,
-    geom_active_envs_mask: qd.types.ndarray(),
+    geom_active_envs_mask: qd.Tensor,
     dyn_state: DynState,
     dyn_info: DynInfo,
     sdf_info: SDFInfo,
@@ -874,17 +852,14 @@ def _func_elastomer_update_surface_anchor(
     point_sensor: qd.types.vector(3),
     sdf_enter: float,
     sdf_exit: float,
-    surface_entry_pos_sensor_buf: qd.types.ndarray(),
-    surface_initialized_buf: qd.types.ndarray(),
+    surface: SurfaceState,
 ):
     if sdf_value > sdf_exit:
-        surface_initialized_buf[i_b, i_o] = False
-        for k in qd.static(range(3)):
-            surface_entry_pos_sensor_buf[i_b, i_o, k] = 0.0
-    elif (not surface_initialized_buf[i_b, i_o]) and sdf_value < -sdf_enter:
-        surface_initialized_buf[i_b, i_o] = True
-        for k in qd.static(range(3)):
-            surface_entry_pos_sensor_buf[i_b, i_o, k] = point_sensor[k]
+        surface.is_initialized[i_o, i_b] = False
+        surface.entry_pos_sensor[i_o, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    elif (not surface.is_initialized[i_o, i_b]) and sdf_value < -sdf_enter:
+        surface.is_initialized[i_o, i_b] = True
+        surface.entry_pos_sensor[i_o, i_b] = point_sensor
 
 
 @qd.func
@@ -1074,107 +1049,25 @@ def _dilate_kernel_builder(meta_entry: GridFFTMeta, fft_n: tuple[int, int]) -> t
     )
 
 
-@qd.func
-def _func_elastomer_min_signed_dist_bvh(
-    i_t: int,
-    i_b: int,
-    i_s: int,
-    probe_world: qd.types.vector(3),
-    track_geom_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-    max_query_dist: float,
-    eps: float,
-) -> float:
-    """
-    BVH-based signed distance from ``probe_world`` to the nearest triangle of any geom flagged for this sensor in
-    ``track_geom_mask`` (shape ``(B, n_sensors, n_geoms)``).
-
-    Sign is positive when the probe is outside the surface (closest-triangle face-normal points away from probe),
-    negative when inside. Mirrors the return contract of ``_func_elastomer_min_sdf_over_active_geoms`` so callers
-    consume ``max(0, -signed)`` identically.
-
-    Uses ``max_query_dist`` as the BVH cull radius: probes farther than that from every candidate triangle are
-    treated as fully outside (returns ``+max_query_dist``), which downstream maps to depth = 0.
-    """
-    # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-    best_dist = max_query_dist
-    best_dist_sq = best_dist * best_dist
-    best_signed = max_query_dist
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-
-        if not func_sphere_intersects_aabb(
-            probe_world, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
-        ):
-            continue
-
-        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-        if i_left == -1:
-            sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
-            i_g = dyn_info.faces.geom_idx[i_f]
-            if not track_geom_mask[i_b, i_s, i_g]:
-                continue
-
-            tri = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
-            v0 = tri[:, 0]
-            v1 = tri[:, 1]
-            v2 = tri[:, 2]
-            closest = closest_point_on_triangle(probe_world, v0, v1, v2)
-            diff = probe_world - closest
-            d_sq = diff.dot(diff)
-            if d_sq < best_dist_sq:
-                d = qd.sqrt(d_sq)
-                fn = triangle_face_normal(v0, v1, v2, eps)
-                # Sign: probe outside if (probe - closest) aligns with outward face normal.
-                sign_v = qd.select(diff.dot(fn) >= gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(-1.0))
-                best_signed = d * sign_v
-                best_dist = d
-                best_dist_sq = d_sq
-        else:
-            if stack_idx < STACK_SIZE - 2:
-                node_stack[stack_idx] = i_left
-                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                stack_idx += 2
-
-    return best_signed
-
-
-@qd.kernel(fastcache=True)
+# Fastcache stays off for a kernel taking a visitor or a target (see RaycastTarget)
+@qd.kernel
 def _kernel_elastomer_probe_depth_bvh(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
-    env_bvh_idx_a: qd.types.ndarray(),
-    env_bvh_idx_b: qd.types.ndarray(),
     probe_positions_local: qd.types.ndarray(),
     probe_radii: qd.types.ndarray(),
-    track_geom_mask: qd.types.ndarray(),
     probe_depth_buf: qd.types.ndarray(),
+    closest_query: qd.template(),
     dyn_state: DynState,
-    bvh_tree_state_a: BVHTreeState,
-    bvh_tree_state_b: BVHTreeState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     max_query_dist: float,
-    is_split: qd.template(),
 ):
     """
-    Per-probe contact depth from the rigid solver's collision BVH entries (folded when split), gated by
-    ``track_geom_mask``.
+    Per-probe contact depth from the closest triangle of the collision geoms of the rigid solver that
+    are candidates of the tracked geoms of its sensor (see ClosestTriangles).
 
     Mirrors ``_kernel_elastomer_probe_depth``'s output contract (write into ``probe_depth_buf``); the dilate
-    accumulator consumes the same buffer downstream.
+    accumulator consumes the same buffer downstream. A probe farther than ``max_query_dist`` from every candidate
+    triangle reads as outside.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = probe_depth_buf.shape[0]
@@ -1187,39 +1080,9 @@ def _kernel_elastomer_probe_depth_bvh(
         sensor_link_idx = links_idx[i_s]
         link_pos = dyn_state.links.pos[sensor_link_idx, i_b]
         link_quat = dyn_state.links.quat[sensor_link_idx, i_b]
-        probe_local = func_vec3_at(i_p, probe_positions_local)
-        probe_world = link_pos + gu.qd_transform_by_quat(probe_local, link_quat)
-
-        signed = _func_elastomer_min_signed_dist_bvh(
-            env_bvh_idx_a[i_b],
-            i_b,
-            i_s,
-            probe_world,
-            track_geom_mask,
-            dyn_state,
-            bvh_tree_state_a,
-            dyn_info,
-            max_query_dist,
-            eps=rigid_info.EPS[None],
-        )
-        if is_split:
-            # The collision faces are partitioned over two trees (see RaycastContext.activate); |signed| is the
-            # distance the query minimizes, so the smaller magnitude is the globally nearest triangle's answer.
-            signed_b = _func_elastomer_min_signed_dist_bvh(
-                env_bvh_idx_b[i_b],
-                i_b,
-                i_s,
-                probe_world,
-                track_geom_mask,
-                dyn_state,
-                bvh_tree_state_b,
-                dyn_info,
-                max_query_dist,
-                eps=rigid_info.EPS[None],
-            )
-            if qd.abs(signed_b) < qd.abs(signed):
-                signed = signed_b
-        probe_depth_buf[i_b, i_p] = qd.max(gs.qd_float(0.0), -signed)
+        probe_world = link_pos + gu.qd_transform_by_quat(func_vec3_at(i_p, probe_positions_local), link_quat)
+        signed_dist, _geom, _normal = closest_query.closest(i_b, i_p, probe_world, max_query_dist)
+        probe_depth_buf[i_b, i_p] = qd.max(gs.qd_float(0.0), -signed_dist)
 
 
 @qd.kernel(fastcache=True)
@@ -1347,338 +1210,181 @@ def _kernel_elastomer_dilate_accumulate(
             output[cache_start + _i_p * 3 + k, i_b] = acc[k]
 
 
-@qd.kernel(fastcache=True)
-def _kernel_elastomer_surface_state_bvh(
-    links_idx: qd.types.ndarray(),
-    sensor_elastomer_geom_start: qd.types.ndarray(),
-    elastomer_geom_idx: qd.types.ndarray(),
-    bvh_chunk_sensor_idx: qd.types.ndarray(),
-    sensor_elastomer_geom_n: qd.types.ndarray(),
-    elastomer_geom_active_envs_mask: qd.types.ndarray(),
-    bvh: ChunkedBVHData,
-    pc_pos_link: qd.types.ndarray(),
-    pc_active_envs_mask: qd.types.ndarray(),
-    sdf_enter: qd.types.ndarray(),
-    sdf_exit: qd.types.ndarray(),
-    surface_pos_sensor_buf: qd.types.ndarray(),
-    surface_entry_pos_sensor_buf: qd.types.ndarray(),
-    surface_depth_buf: qd.types.ndarray(),
-    surface_initialized_buf: qd.types.ndarray(),
-    surface_candidate_buf: qd.types.ndarray(),
-    dyn_state: DynState,
-    dyn_info: DynInfo,
-    sdf_info: SDFInfo,
-    aabb_margin: float,
-    bvh_stack_size: qd.template(),
-):
-    """Per-(env, chunk): compute the chunk-local query AABB in registers, BVH-traverse, and write
-    per-candidate surface state.
+@qd.data_oriented
+class SurfacePoints:
+    """The visitor of the active points of a chunk inside a box, writing their surface state from their signed distance
+    to the elastomer geoms of their sensor.
 
-    The AABB fill and BVH traversal share one kernel so the AABB stays in thread-local state instead of
-    round-tripping through a (B, n_chunks, 3) buffer. No probe work happens here -- the shear contribution is
-    accumulated in a separate target-major kernel that reads surface_pos_sensor_buf / surface_depth_buf /
-    surface_entry_pos_sensor_buf.
+    The query is the box of the points in the frame of the chunk with the poses and the search radius the visits need
+    (see Query), the query index being the sensor. It reads the tracked points (see PointCloudPoints) and the elastomer
+    geoms of each sensor (see ElastomerGeoms), and writes the state of the points it visits (see SurfaceState). The
+    signed distance comes from the closest triangle of the elastomer geoms with `closest_query`, and from their signed
+    distance fields otherwise.
     """
-    n_batches = surface_pos_sensor_buf.shape[0]
-    n_chunks = bvh_chunk_sensor_idx.shape[0]
 
-    for i_b, i_c in qd.ndrange(n_batches, n_chunks):
-        i_s = bvh_chunk_sensor_idx[i_c]
+    is_instance_level = False
 
-        # 1) Build the world-space elastomer-geom union AABB for sensor i_s, env i_b.
-        wmin = qd.Vector([gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf)], dt=gs.qd_float)
-        wmax = qd.Vector(
-            [gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf)], dt=gs.qd_float
+    def __init__(
+        self,
+        points: PointCloudPoints,
+        elastomer_geoms: ElastomerGeoms,
+        surface: SurfaceState,
+        dyn_state: DynState,
+        dyn_info: DynInfo,
+        sdf_info: SDFInfo | None,
+        closest_query: ClosestQuery | None,
+    ) -> None:
+        self.points = points
+        self.elastomer_geoms = elastomer_geoms
+        self.surface = surface
+        self.dyn_state = dyn_state
+        self.dyn_info = dyn_info
+        self.sdf_info = sdf_info
+        self.closest_query = closest_query
+        self.is_raycast = closest_query is not None
+        # The box in the frame of the chunk, the poses in the world of the tracked link of the chunk and of the link of
+        # the sensor, and the radius of the closest-point search
+        self.Query = qd.types.struct(
+            aabb_min=qd.types.vector(3, gs.qd_float),
+            aabb_max=qd.types.vector(3, gs.qd_float),
+            track_pos=qd.types.vector(3, gs.qd_float),
+            track_quat=qd.types.vector(4, gs.qd_float),
+            sensor_pos=qd.types.vector(3, gs.qd_float),
+            sensor_quat=qd.types.vector(4, gs.qd_float),
+            radius=gs.qd_float,
         )
-        any_active = False
-        gm_start = sensor_elastomer_geom_start[i_s]
-        gm_n = sensor_elastomer_geom_n[i_s]
-        for i_gm in range(gm_start, gm_start + gm_n):
-            if not elastomer_geom_active_envs_mask[i_gm, i_b]:
-                continue
-            i_g = elastomer_geom_idx[i_gm]
-            gmin = dyn_state.geoms.aabb_min[i_g, i_b]
-            gmax = dyn_state.geoms.aabb_max[i_g, i_b]
-            for k in qd.static(range(3)):
-                if gmin[k] < wmin[k]:
-                    wmin[k] = gmin[k]
-                if gmax[k] > wmax[k]:
-                    wmax[k] = gmax[k]
-            any_active = True
 
-        if not any_active:
-            continue
+    @qd.func
+    def is_node_hit(
+        self,
+        i_t: int,
+        i_q: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
+    ) -> bool:
+        return func_aabb_intersects_aabb(node_min, node_max, query.aabb_min, query.aabb_max)
 
-        # 2) Expand by sdf_exit + margin so any point with sdf <= sdf_exit (the surface-state
-        # exit threshold) is inside the AABB.
-        expand = sdf_exit[i_s] + gs.qd_float(aabb_margin)
-        for k in qd.static(range(3)):
-            wmin[k] = wmin[k] - expand
-            wmax[k] = wmax[k] + expand
-
-        # 3) Transform 8 corners into the chunk's tracked-link local frame to get qmin/qmax.
-        track_link_idx = bvh.chunk_link_idx[i_c]
-        track_pos = dyn_state.links.pos[track_link_idx, i_b]
-        track_quat = dyn_state.links.quat[track_link_idx, i_b]
-        qmin = qd.Vector([gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf)], dt=gs.qd_float)
-        qmax = qd.Vector(
-            [gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf)], dt=gs.qd_float
-        )
-        for cx in qd.static(range(2)):
-            for cy in qd.static(range(2)):
-                for cz in qd.static(range(2)):
-                    cw_x = wmax[0] if cx == 1 else wmin[0]
-                    cw_y = wmax[1] if cy == 1 else wmin[1]
-                    cw_z = wmax[2] if cz == 1 else wmin[2]
-                    corner_world = qd.Vector([cw_x, cw_y, cw_z], dt=gs.qd_float)
-                    corner_link = gu.qd_inv_transform_by_trans_quat(corner_world, track_pos, track_quat)
-                    for k in qd.static(range(3)):
-                        if corner_link[k] < qmin[k]:
-                            qmin[k] = corner_link[k]
-                        if corner_link[k] > qmax[k]:
-                            qmax[k] = corner_link[k]
-
-        # 4) BVH-traverse the chunk with the chunk-local query AABB. For each visited active point:
-        # mark candidate, write point_sensor / depth, run anchor (enter/exit hysteresis).
-        sensor_link_idx = links_idx[i_s]
-        sensor_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        sensor_quat = dyn_state.links.quat[sensor_link_idx, i_b]
-
-        stack = qd.Vector.zero(gs.qd_int, qd.static(bvh_stack_size))
-        stack[0] = bvh.chunk_node_start[i_c]
-        stack_idx = 1
-
-        while stack_idx > 0:
-            stack_idx -= 1
-            n = stack[stack_idx]
-            bmin = func_vec3_at(n, bvh.node_min)
-            bmax = func_vec3_at(n, bvh.node_max)
-            if not func_aabb_intersects_aabb(bmin, bmax, qmin, qmax):
-                continue
-            left = bvh.node_left[n]
-            if left == -1:
-                pstart = bvh.node_leaf_start[n]
-                pn = bvh.node_leaf_count[n]
-                for j in range(pn):
-                    i_o = bvh.leaf_elem_idx[pstart + j]
-                    if not pc_active_envs_mask[i_o, i_b]:
-                        continue
-                    surface_candidate_buf[i_b, i_o] = True
-
-                    point_link = func_vec3_at(i_o, pc_pos_link)
-                    point_world = track_pos + gu.qd_transform_by_quat(point_link, track_quat)
-                    point_sensor = gu.qd_inv_transform_by_trans_quat(point_world, sensor_pos, sensor_quat)
-                    for k in qd.static(range(3)):
-                        surface_pos_sensor_buf[i_b, i_o, k] = point_sensor[k]
-
-                    min_sdf = _func_elastomer_min_sdf_over_active_geoms(
-                        i_b,
-                        sensor_elastomer_geom_start[i_s],
-                        elastomer_geom_idx,
-                        point_world,
-                        sensor_elastomer_geom_n[i_s],
-                        elastomer_geom_active_envs_mask,
-                        dyn_state,
-                        dyn_info,
-                        sdf_info,
-                    )
-
-                    surface_depth_buf[i_b, i_o] = qd.max(gs.qd_float(0.0), -min_sdf)
-
-                    _func_elastomer_update_surface_anchor(
-                        i_b,
-                        i_o,
-                        min_sdf,
-                        point_sensor,
-                        sdf_enter[i_s],
-                        sdf_exit[i_s],
-                        surface_entry_pos_sensor_buf,
-                        surface_initialized_buf,
-                    )
+    @qd.func
+    def visit_leaf(self, i_t: int, i_q: int, i_k: int, i_a: int, query, bound: float) -> float:
+        if self.points.is_active[i_a, i_t]:
+            self.surface.is_candidate[i_a, i_t] = True
+            point_world = gu.qd_transform_by_trans_quat(self.points.pos_link[i_a], query.track_pos, query.track_quat)
+            point_sensor = gu.qd_inv_transform_by_trans_quat(point_world, query.sensor_pos, query.sensor_quat)
+            self.surface.pos_sensor[i_a, i_t] = point_sensor
+            min_sdf = gs.qd_float(0.0)
+            if qd.static(self.is_raycast):
+                min_sdf, _geom, _normal = self.closest_query.closest(i_t, i_a, point_world, radius=query.radius)
             else:
-                right = bvh.node_right[n]
-                # Median split bounds depth at log2(N / leaf_size) << BVH_STACK_SIZE; the guard mirrors the
-                # global rigid-BVH kernel so a future build strategy can't silently overflow the stack.
-                if stack_idx < qd.static(bvh_stack_size - 2):
-                    stack[stack_idx] = left
-                    stack[stack_idx + 1] = right
-                    stack_idx += 2
+                min_sdf = _func_elastomer_min_sdf_over_active_geoms(
+                    i_t,
+                    self.elastomer_geoms.sensors_geom_start[i_q],
+                    self.elastomer_geoms.geoms_idx,
+                    point_world,
+                    self.elastomer_geoms.sensors_geom_n[i_q],
+                    self.elastomer_geoms.geoms_is_active,
+                    self.dyn_state,
+                    self.dyn_info,
+                    self.sdf_info,
+                )
+            self.surface.depth[i_a, i_t] = qd.max(0.0, -min_sdf)
+            _func_elastomer_update_surface_anchor(
+                i_t,
+                i_a,
+                min_sdf,
+                point_sensor,
+                self.elastomer_geoms.sensors_sd_enter[i_q],
+                self.elastomer_geoms.sensors_sd_exit[i_q],
+                self.surface,
+            )
+        return bound
 
 
-@qd.kernel(fastcache=True)
-def _kernel_elastomer_surface_state_via_global_bvh(
+# Fastcache stays off for a kernel taking a visitor or a target (see RaycastTarget)
+@qd.kernel
+def _kernel_elastomer_surface_state(
     links_idx: qd.types.ndarray(),
-    env_bvh_idx_a: qd.types.ndarray(),
-    env_bvh_idx_b: qd.types.ndarray(),
-    sensor_elastomer_geom_start: qd.types.ndarray(),
-    elastomer_geom_idx: qd.types.ndarray(),
     bvh_chunk_sensor_idx: qd.types.ndarray(),
-    sensor_elastomer_geom_n: qd.types.ndarray(),
-    elastomer_geom_active_envs_mask: qd.types.ndarray(),
-    elastomer_candidate_geom_mask: qd.types.ndarray(),
     bvh: ChunkedBVHData,
-    pc_pos_link: qd.types.ndarray(),
-    pc_active_envs_mask: qd.types.ndarray(),
-    sdf_enter: qd.types.ndarray(),
-    sdf_exit: qd.types.ndarray(),
-    surface_pos_sensor_buf: qd.types.ndarray(),
-    surface_entry_pos_sensor_buf: qd.types.ndarray(),
-    surface_depth_buf: qd.types.ndarray(),
-    surface_initialized_buf: qd.types.ndarray(),
-    surface_candidate_buf: qd.types.ndarray(),
+    surface_query: qd.template(),
     dyn_state: DynState,
-    global_bvh_tree_a: BVHTreeState,
-    global_bvh_tree_b: BVHTreeState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
     aabb_margin: float,
     max_query_dist: float,
-    bvh_stack_size: qd.template(),
-    is_split: qd.template(),
 ):
-    """
-    Raycast variant of ``_kernel_elastomer_surface_state_bvh``.
+    """Write the surface state of the active points near the elastomer geoms of their sensor in every environment,
+    the state of the other points being released.
 
-    Same outer (env, chunk) traversal over the point-cloud BVH per tracked link, but the inner signed-distance query
-    at each PC point uses ``_func_elastomer_min_signed_dist_bvh`` over the rigid solver's collision BVH entries
-    (folded when split, gated by ``elastomer_candidate_geom_mask``) instead of the analytic SDF. Output contract matches the SDF variant so the
-    dilate / shear pipeline downstream is unchanged.
+    The box of the points of each chunk is the union of the boxes of the active elastomer geoms of its sensor, grown by
+    its release threshold and a margin so that any point whose signed distance lies below that threshold is inside,
+    then taken into the frame of the tracked link of the chunk (see SurfacePoints).
     """
-    n_batches = surface_pos_sensor_buf.shape[0]
-    n_chunks = bvh_chunk_sensor_idx.shape[0]
+    for i_o, i_b in qd.ndrange(
+        surface_query.surface.is_candidate.shape[0], surface_query.surface.is_candidate.shape[1]
+    ):
+        surface_query.surface.is_candidate[i_o, i_b] = False
 
-    for i_b, i_c in qd.ndrange(n_batches, n_chunks):
+    for i_b, i_c in qd.ndrange(surface_query.surface.is_candidate.shape[1], bvh_chunk_sensor_idx.shape[0]):
         i_s = bvh_chunk_sensor_idx[i_c]
+        world_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+        world_max = -world_min
+        is_any_active = False
+        i_gm_start = surface_query.elastomer_geoms.sensors_geom_start[i_s]
+        for i_gm in range(i_gm_start, i_gm_start + surface_query.elastomer_geoms.sensors_geom_n[i_s]):
+            if surface_query.elastomer_geoms.geoms_is_active[i_gm, i_b]:
+                i_g = surface_query.elastomer_geoms.geoms_idx[i_gm]
+                world_min = qd.min(world_min, dyn_state.geoms.aabb_min[i_g, i_b])
+                world_max = qd.max(world_max, dyn_state.geoms.aabb_max[i_g, i_b])
+                is_any_active = True
+        if is_any_active:
+            query_margin = surface_query.elastomer_geoms.sensors_sd_exit[i_s] + aabb_margin
+            track_link_idx = bvh.chunk_link_idx[i_c]
+            track_pos = dyn_state.links.pos[track_link_idx, i_b]
+            track_quat = dyn_state.links.quat[track_link_idx, i_b]
+            track_quat_inv = gu.qd_inv_quat(track_quat)
+            query_min, query_max = gu.qd_transform_aabb(
+                world_min - query_margin,
+                world_max + query_margin,
+                trans=-gu.qd_transform_by_quat(track_pos, track_quat_inv),
+                quat=track_quat_inv,
+            )
+            sensor_link_idx = links_idx[i_s]
+            i_root = bvh.trees.trees_root[i_c]
+            leaf_offset = bvh.trees.trees_leaf_offset[i_c]
+            func_bvh_traverse(
+                i_b,
+                i_s,
+                i_root,
+                leaf_offset,
+                leaf_base=0,
+                query=surface_query.Query(
+                    aabb_min=query_min,
+                    aabb_max=query_max,
+                    track_pos=track_pos,
+                    track_quat=track_quat,
+                    sensor_pos=dyn_state.links.pos[sensor_link_idx, i_b],
+                    sensor_quat=dyn_state.links.quat[sensor_link_idx, i_b],
+                    radius=max_query_dist,
+                ),
+                bound=0.0,
+                tree=bvh.trees.tree,
+                visitor=surface_query,
+            )
 
-        wmin = qd.Vector([gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf)], dt=gs.qd_float)
-        wmax = qd.Vector(
-            [gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf)], dt=gs.qd_float
-        )
-        any_active = False
-        gm_start = sensor_elastomer_geom_start[i_s]
-        gm_n = sensor_elastomer_geom_n[i_s]
-        for i_gm in range(gm_start, gm_start + gm_n):
-            if not elastomer_geom_active_envs_mask[i_gm, i_b]:
-                continue
-            i_g = elastomer_geom_idx[i_gm]
-            gmin = dyn_state.geoms.aabb_min[i_g, i_b]
-            gmax = dyn_state.geoms.aabb_max[i_g, i_b]
-            for k in qd.static(range(3)):
-                if gmin[k] < wmin[k]:
-                    wmin[k] = gmin[k]
-                if gmax[k] > wmax[k]:
-                    wmax[k] = gmax[k]
-            any_active = True
+    # The anchor of a point left out this step is released
+    for i_o, i_b in qd.ndrange(
+        surface_query.surface.is_candidate.shape[0], surface_query.surface.is_candidate.shape[1]
+    ):
+        if not surface_query.surface.is_candidate[i_o, i_b]:
+            surface_query.surface.is_initialized[i_o, i_b] = False
+            surface_query.surface.entry_pos_sensor[i_o, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
-        if not any_active:
-            continue
 
-        expand = sdf_exit[i_s] + gs.qd_float(aabb_margin)
-        for k in qd.static(range(3)):
-            wmin[k] = wmin[k] - expand
-            wmax[k] = wmax[k] + expand
-
-        track_link_idx = bvh.chunk_link_idx[i_c]
-        track_pos = dyn_state.links.pos[track_link_idx, i_b]
-        track_quat = dyn_state.links.quat[track_link_idx, i_b]
-        qmin = qd.Vector([gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf), gs.qd_float(qd.math.inf)], dt=gs.qd_float)
-        qmax = qd.Vector(
-            [gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf), gs.qd_float(-qd.math.inf)], dt=gs.qd_float
-        )
-        for cx in qd.static(range(2)):
-            for cy in qd.static(range(2)):
-                for cz in qd.static(range(2)):
-                    cw_x = wmax[0] if cx == 1 else wmin[0]
-                    cw_y = wmax[1] if cy == 1 else wmin[1]
-                    cw_z = wmax[2] if cz == 1 else wmin[2]
-                    corner_world = qd.Vector([cw_x, cw_y, cw_z], dt=gs.qd_float)
-                    corner_link = gu.qd_inv_transform_by_trans_quat(corner_world, track_pos, track_quat)
-                    for k in qd.static(range(3)):
-                        if corner_link[k] < qmin[k]:
-                            qmin[k] = corner_link[k]
-                        if corner_link[k] > qmax[k]:
-                            qmax[k] = corner_link[k]
-
-        sensor_link_idx = links_idx[i_s]
-        sensor_pos = dyn_state.links.pos[sensor_link_idx, i_b]
-        sensor_quat = dyn_state.links.quat[sensor_link_idx, i_b]
-
-        stack = qd.Vector.zero(gs.qd_int, qd.static(bvh_stack_size))
-        stack[0] = bvh.chunk_node_start[i_c]
-        stack_idx = 1
-
-        while stack_idx > 0:
-            stack_idx -= 1
-            n = stack[stack_idx]
-            bmin = func_vec3_at(n, bvh.node_min)
-            bmax = func_vec3_at(n, bvh.node_max)
-            if not func_aabb_intersects_aabb(bmin, bmax, qmin, qmax):
-                continue
-            left = bvh.node_left[n]
-            if left == -1:
-                pstart = bvh.node_leaf_start[n]
-                pn = bvh.node_leaf_count[n]
-                for j in range(pn):
-                    i_o = bvh.leaf_elem_idx[pstart + j]
-                    if not pc_active_envs_mask[i_o, i_b]:
-                        continue
-                    surface_candidate_buf[i_b, i_o] = True
-
-                    point_link = func_vec3_at(i_o, pc_pos_link)
-                    point_world = track_pos + gu.qd_transform_by_quat(point_link, track_quat)
-                    point_sensor = gu.qd_inv_transform_by_trans_quat(point_world, sensor_pos, sensor_quat)
-                    for k in qd.static(range(3)):
-                        surface_pos_sensor_buf[i_b, i_o, k] = point_sensor[k]
-
-                    min_sdf = _func_elastomer_min_signed_dist_bvh(
-                        env_bvh_idx_a[i_b],
-                        i_b,
-                        i_s,
-                        point_world,
-                        elastomer_candidate_geom_mask,
-                        dyn_state,
-                        global_bvh_tree_a,
-                        dyn_info,
-                        max_query_dist,
-                        eps=rigid_info.EPS[None],
-                    )
-                    if is_split:
-                        # See _kernel_elastomer_probe_depth_bvh for the two-tree fold.
-                        min_sdf_b = _func_elastomer_min_signed_dist_bvh(
-                            env_bvh_idx_b[i_b],
-                            i_b,
-                            i_s,
-                            point_world,
-                            elastomer_candidate_geom_mask,
-                            dyn_state,
-                            global_bvh_tree_b,
-                            dyn_info,
-                            max_query_dist,
-                            eps=rigid_info.EPS[None],
-                        )
-                        if qd.abs(min_sdf_b) < qd.abs(min_sdf):
-                            min_sdf = min_sdf_b
-
-                    surface_depth_buf[i_b, i_o] = qd.max(gs.qd_float(0.0), -min_sdf)
-
-                    _func_elastomer_update_surface_anchor(
-                        i_b,
-                        i_o,
-                        min_sdf,
-                        point_sensor,
-                        sdf_enter[i_s],
-                        sdf_exit[i_s],
-                        surface_entry_pos_sensor_buf,
-                        surface_initialized_buf,
-                    )
-            else:
-                right = bvh.node_right[n]
-                # Median split bounds depth at log2(N / leaf_size) << BVH_STACK_SIZE; the guard mirrors the
-                # global rigid-BVH kernel so a future build strategy can't silently overflow the stack.
-                if stack_idx < qd.static(bvh_stack_size - 2):
-                    stack[stack_idx] = left
-                    stack[stack_idx + 1] = right
-                    stack_idx += 2
+@qd.kernel(fastcache=True)
+def _kernel_elastomer_reset_surface(envs_idx: qd.types.ndarray(), surface: SurfaceState):
+    for i_o, i_b_ in qd.ndrange(surface.is_initialized.shape[0], envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        surface.is_initialized[i_o, i_b] = False
 
 
 @qd.kernel(fastcache=True)
@@ -1693,23 +1399,21 @@ def _kernel_elastomer_shear_accumulate(
     probe_radii: qd.types.ndarray(),
     lambda_s: qd.types.ndarray(),
     shear_scale: qd.types.ndarray(),
-    surface_pos_sensor_buf: qd.types.ndarray(),
-    surface_entry_pos_sensor_buf: qd.types.ndarray(),
-    surface_depth_buf: qd.types.ndarray(),
     shear_active_pc_count: qd.types.ndarray(),
     output: qd.types.ndarray(),
+    surface: SurfaceState,
     eps: float,
 ):
     """Target-major shear accumulator: per (env, target_probe), iterate over the sensor's compact active surface-point
     index and sum Gaussian contributions into a register, then += the result into ``output``.
 
     No atomic_add (each (i_b, i_p) thread owns its output slot). Consumes the compact index produced by
-    ``_build_shear_active_pc_index`` (must run after the surface-state kernel AND after the post-kernel
-    ``surface_initialized_buf &= candidate`` cleanup). Inner-loop cost is O(active_count[i_b, i_s]) rather than
-    O(sensor_pc_n[i_s]), so the kernel scales with contact density rather than total point-cloud size.
+    ``_build_shear_active_pc_index`` (must run after the surface-state kernel). Inner-loop cost is
+    O(active_count[i_b, i_s]) rather than O(sensor_pc_n[i_s]), so the kernel scales with contact density rather than
+    total point-cloud size.
     """
     total_n_probes = probe_positions_local.shape[0]
-    n_batches = surface_pos_sensor_buf.shape[0]
+    n_batches = surface.depth.shape[1]
 
     for i_b, i_p in qd.ndrange(n_batches, total_n_probes):
         i_s = probe_sensor_idx[i_p]
@@ -1731,27 +1435,18 @@ def _kernel_elastomer_shear_accumulate(
         acc = qd.Vector.zero(gs.qd_float, 3)
         for j in range(n_active):
             i_o = shear_active_pc_idx[i_b, pc_start + j]
-            depth = surface_depth_buf[i_b, i_o]
+            depth = surface.depth[i_o, i_b]
             if depth <= eps:
                 continue
-            point_sensor = qd.Vector(
-                [
-                    surface_pos_sensor_buf[i_b, i_o, 0],
-                    surface_pos_sensor_buf[i_b, i_o, 1],
-                    surface_pos_sensor_buf[i_b, i_o, 2],
-                ],
-                dt=gs.qd_float,
-            )
-            entry = qd.Vector(
-                [
-                    surface_entry_pos_sensor_buf[i_b, i_o, 0],
-                    surface_entry_pos_sensor_buf[i_b, i_o, 1],
-                    surface_entry_pos_sensor_buf[i_b, i_o, 2],
-                ],
-                dt=gs.qd_float,
-            )
             contribution = _func_elastomer_direct_shear_contribution(
-                point_sensor, entry, probe_local, probe_normal, depth, lam, scale, eps
+                surface.pos_sensor[i_o, i_b],
+                surface.entry_pos_sensor[i_o, i_b],
+                probe_local,
+                probe_normal,
+                depth,
+                lam,
+                scale,
+                eps,
             )
             for k in qd.static(range(3)):
                 acc[k] = acc[k] + contribution[k]
@@ -1904,11 +1599,6 @@ class ElastomerTaxelSensorMetadata(
     sensor_elastomer_geom_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     sensor_elastomer_geom_n: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
 
-    # Per-(B, sensor, geom) bitmask of elastomer (sensor-own) geoms, used by the global-BVH surface-state kernel
-    # to gate triangles back to the sensor's elastomer surface. Separate from ``sensor_candidate_geom_mask`` which
-    # gates by tracked-object geoms for the probe-depth kernel.
-    elastomer_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
-
     lambda_d: torch.Tensor = make_tensor_field((0,))
     lambda_s: torch.Tensor = make_tensor_field((0,))
     dilate_scale: torch.Tensor = make_tensor_field((0,))
@@ -1924,21 +1614,15 @@ class ElastomerTaxelSensorMetadata(
     shear_anchor_sd_exit: torch.Tensor = make_tensor_field((0,))
 
     probe_depth_buf: torch.Tensor = make_tensor_field((0, 0))
-    surface_pos_sensor_buf: torch.Tensor = make_tensor_field((0, 0, 3))
-    surface_entry_pos_sensor_buf: torch.Tensor = make_tensor_field((0, 0, 3))
-    surface_depth_buf: torch.Tensor = make_tensor_field((0, 0))
-    surface_initialized_buf: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-
-    # Per-(env, pc-row) BVH-candidate flag, zeroed each step and written True by the surface-state
-    # kernel for every visited active point. Post-kernel torch ops use ``!candidate`` to invalidate
-    # stale surface_initialized / surface_entry_pos for points the BVH skipped this step.
-    surface_candidate_buf: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
+    # The query writing the surface state of the points near the elastomer of their sensor, built once the last sensor
+    # of the class is built if any sensor shears
+    surface_query: SurfacePoints | None = None
 
     # Compact per-(env, sensor) active surface-point index, rebuilt every step right after the
-    # ``surface_initialized_buf &= candidate`` cleanup and consumed by ``_kernel_elastomer_shear_accumulate``.
+    # surface-state kernel and consumed by ``_kernel_elastomer_shear_accumulate``.
     # For sensor ``s`` in env ``i_b``, the first ``shear_active_pc_count[i_b, s]`` entries of
-    # ``shear_active_pc_idx[i_b, sensor_pc_start[s]:]`` hold the global pc-row indices whose
-    # ``surface_initialized_buf`` is True. Sensors with ``shear_scale == 0`` have count = 0.
+    # ``shear_active_pc_idx[i_b, sensor_pc_start[s]:]`` hold the global pc-row indices whose surface state is
+    # initialized. Sensors with ``shear_scale == 0`` have count = 0.
     shear_active_pc_idx: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_int)
     shear_active_pc_count: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_int)
 
@@ -2095,20 +1779,6 @@ class ElastomerTaxelSensor(
             (B, self._shared_metadata.total_n_probes), dtype=gs.tc_float, device=gs.device
         )
         total_n_surface = self._shared_metadata.pc_pos_link.shape[0]
-        self._shared_metadata.surface_pos_sensor_buf = torch.zeros(
-            (B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._shared_metadata.surface_entry_pos_sensor_buf = torch.zeros(
-            (B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._shared_metadata.surface_depth_buf = torch.zeros((B, total_n_surface), dtype=gs.tc_float, device=gs.device)
-        self._shared_metadata.surface_initialized_buf = torch.zeros(
-            (B, total_n_surface), dtype=gs.tc_bool, device=gs.device
-        )
-
-        self._shared_metadata.surface_candidate_buf = torch.zeros(
-            (B, total_n_surface), dtype=gs.tc_bool, device=gs.device
-        )
 
         # Compact active-point index for the shear accumulator. Re-allocated on each ElastomerTaxel build so the
         # ``(B, total_n_surface)`` idx buffer and ``(B, n_sensors)`` count buffer absorb the newly registered sensor.
@@ -2119,28 +1789,6 @@ class ElastomerTaxelSensor(
         self._shared_metadata.shear_active_pc_count = torch.zeros(
             (B, n_sensors_built), dtype=gs.tc_int, device=gs.device
         )
-
-        # Build the (B, n_sensors, n_geoms) candidate-geom masks scattered from track_geom_idx (probe-depth) and
-        # elastomer_geom_idx (surface-anchor). Only needed in raycast mode but allocated cheaply (bool, total
-        # scene-geom count) so we tolerate the small idle cost in sdf mode.
-        if self._shared_metadata.contact_depth_query == "raycast":
-            n_geoms = solver.n_geoms
-            self._shared_metadata.sensor_candidate_geom_mask = _build_candidate_geom_mask(
-                B,
-                n_sensors_built,
-                n_geoms,
-                self._shared_metadata.sensor_track_geom_start,
-                self._shared_metadata.sensor_track_geom_n,
-                self._shared_metadata.track_geom_idx,
-            )
-            self._shared_metadata.elastomer_candidate_geom_mask = _build_candidate_geom_mask(
-                B,
-                n_sensors_built,
-                n_geoms,
-                self._shared_metadata.sensor_elastomer_geom_start,
-                self._shared_metadata.sensor_elastomer_geom_n,
-                self._shared_metadata.elastomer_geom_idx,
-            )
 
         self._shared_metadata.use_grid_fft = concat_with_tensor(
             self._shared_metadata.use_grid_fft, self._use_grid_fft, expand=(1,)
@@ -2199,6 +1847,65 @@ class ElastomerTaxelSensor(
             self._shared_metadata.grid_tangent_v, grid_tangent_v, expand=(1, 3)
         )
 
+        n_sensors = len(self._manager._sensors_by_type[type(self)])
+        if self._idx < n_sensors - 1:
+            return
+        sensor_pc_n = tensor_to_array(self._shared_metadata.sensor_pc_n)
+        closest_queries = []
+        if self._shared_metadata.contact_depth_query == "raycast":
+            # The probes reach the tracked geoms of their sensor, and the tracked points the elastomer geoms of theirs,
+            # the same in every environment
+            for queries_sensor_idx, sensors_geom_n, geoms_idx in (
+                (
+                    tensor_to_array(self._shared_metadata.probe_sensor_idx),
+                    self._shared_metadata.sensor_track_geom_n,
+                    self._shared_metadata.track_geom_idx,
+                ),
+                (
+                    np.repeat(np.arange(n_sensors, dtype=gs.np_int), sensor_pc_n),
+                    self._shared_metadata.sensor_elastomer_geom_n,
+                    self._shared_metadata.elastomer_geom_idx,
+                ),
+            ):
+                is_candidate = np.zeros((n_sensors, solver.n_geoms, 1), dtype=bool)
+                sensors_idx = np.repeat(np.arange(n_sensors), tensor_to_array(sensors_geom_n))
+                is_candidate[sensors_idx, tensor_to_array(geoms_idx)] = True
+                candidate_geoms = CandidateGeoms(
+                    sizes=dict(candidate_sensors=n_sensors, candidate_geoms=solver.n_geoms, envs=1)
+                )
+                candidate_geoms.is_candidate.from_numpy(is_candidate)
+                closest_queries.append(
+                    self._shared_context.collision_target.build_closest_query(queries_sensor_idx, candidate_geoms)
+                )
+            self._shared_metadata.closest_query = closest_queries[0]
+        if self._shared_metadata.any_shear:
+            elastomer_geoms = ElastomerGeoms(
+                sizes=dict(
+                    elastomer_sensors=n_sensors,
+                    elastomer_geoms=len(self._shared_metadata.elastomer_geom_idx),
+                    envs=B,
+                )
+            )
+            for elastomer_field, values in (
+                (elastomer_geoms.sensors_geom_start, self._shared_metadata.sensor_elastomer_geom_start),
+                (elastomer_geoms.sensors_geom_n, self._shared_metadata.sensor_elastomer_geom_n),
+                (elastomer_geoms.sensors_sd_enter, self._shared_metadata.shear_anchor_sd_enter),
+                (elastomer_geoms.sensors_sd_exit, self._shared_metadata.shear_anchor_sd_exit),
+                (elastomer_geoms.geoms_idx, self._shared_metadata.elastomer_geom_idx),
+                (elastomer_geoms.geoms_is_active, self._shared_metadata.elastomer_geom_active_envs_mask),
+            ):
+                elastomer_field.from_numpy(tensor_to_array(values))
+            is_raycast = self._shared_metadata.contact_depth_query == "raycast"
+            self._shared_metadata.surface_query = SurfacePoints(
+                self._shared_metadata.points,
+                elastomer_geoms,
+                SurfaceState(sizes=dict(pc_points=total_n_surface, envs=B)),
+                solver.dyn_state,
+                solver.dyn_info,
+                sdf_info=None if is_raycast else solver.collider.sdf.sdf_info,
+                closest_query=closest_queries[1] if is_raycast else None,
+            )
+
     def _get_return_format(self) -> tuple[int, ...]:
         return (*self._probe_layout_shape, 3)
 
@@ -2211,8 +1918,17 @@ class ElastomerTaxelSensor(
         super().reset(shared_metadata, shared_ground_truth_cache, envs_idx)
         # Only the hysteresis flag needs clearing on env reset. probe_depth_buf is overwritten every
         # step; surface_pos/entry/depth are only consumed where surface_initialized=True so they're
-        # implicitly invalidated by clearing it; surface_candidate_buf is .zero_()'d at step start.
-        shared_metadata.surface_initialized_buf[envs_idx, :] = False
+        # implicitly invalidated by clearing it; the surface candidates are cleared at step start.
+        if shared_metadata.surface_query is not None:
+            surface = shared_metadata.surface_query.surface
+            if gs.use_zerocopy:
+                surface_is_initialized = qd_to_torch(surface.is_initialized, transpose=True, copy=False)
+                surface_is_initialized[envs_idx] = False
+                # The next kernel reads the buffer, written on the torch stream
+                if gs.backend == gs.metal:
+                    torch.mps.synchronize()
+            else:
+                _kernel_elastomer_reset_surface(envs_idx, surface)
 
     @classmethod
     def _apply_transform(
@@ -2247,7 +1963,7 @@ class ElastomerTaxelSensor(
         solver = shared_metadata.solver
         # No pre-zeros: probe_depth is fully overwritten by _kernel_elastomer_probe_depth;
         # current_ground_truth_data_T is fully overwritten by FFT-dilate union dilate-accumulate (then
-        # shear-accumulate += on top); surface_depth_buf is only read where surface_initialized=True,
+        # shear-accumulate += on top); the surface depth is only read where the surface state is initialized,
         # which is set in lockstep with that same depth write; measured is .copy_'d at the end.
         measured = measured_data_timeline.at(0, copy=False)
 
@@ -2267,24 +1983,15 @@ class ElastomerTaxelSensor(
                 solver.collider.sdf.sdf_info,
             )
         else:
-            collision_bvh_contexts = shared_context.collision_bvh_contexts
-            entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
             _kernel_elastomer_probe_depth_bvh(
                 shared_metadata.probe_sensor_idx,
                 shared_metadata.links_idx,
-                entry_a.env_bvh_idx,
-                entry_b.env_bvh_idx,
                 shared_metadata.probe_positions,
                 shared_metadata.probe_radii,
-                shared_metadata.sensor_candidate_geom_mask,
                 shared_metadata.probe_depth_buf,
+                shared_metadata.closest_query,
                 solver.dyn_state,
-                entry_a.bvh_state.tree,
-                entry_b.bvh_state.tree,
-                solver.dyn_info,
-                solver.rigid_info,
                 _ELASTOMER_RAYCAST_QUERY_DIST,
-                is_split=entry_b is not entry_a,
             )
         _kernel_elastomer_dilate_accumulate(
             shared_metadata.probe_sensor_idx,
@@ -2320,76 +2027,18 @@ class ElastomerTaxelSensor(
             current_ground_truth_data_T,
         )
         if shared_metadata.any_shear:
-            bvh = shared_metadata.pc_bvh
-            shared_metadata.surface_candidate_buf.zero_()
-            if (shared_metadata.contact_depth_query or "sdf") == "sdf":
-                _kernel_elastomer_surface_state_bvh(
-                    shared_metadata.links_idx,
-                    shared_metadata.sensor_elastomer_geom_start,
-                    shared_metadata.elastomer_geom_idx,
-                    bvh.chunk_sensor_idx,
-                    shared_metadata.sensor_elastomer_geom_n,
-                    shared_metadata.elastomer_geom_active_envs_mask,
-                    bvh.kernel_bvh,
-                    shared_metadata.pc_pos_link,
-                    shared_metadata.pc_active_envs_mask,
-                    shared_metadata.shear_anchor_sd_enter,
-                    shared_metadata.shear_anchor_sd_exit,
-                    shared_metadata.surface_pos_sensor_buf,
-                    shared_metadata.surface_entry_pos_sensor_buf,
-                    shared_metadata.surface_depth_buf,
-                    shared_metadata.surface_initialized_buf,
-                    shared_metadata.surface_candidate_buf,
-                    solver.dyn_state,
-                    solver.dyn_info,
-                    solver.collider.sdf.sdf_info,
-                    _ELASTOMER_QUERY_AABB_MARGIN,
-                    BVH_STACK_SIZE,
-                )
-            else:
-                collision_bvh_contexts = shared_context.collision_bvh_contexts
-                entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
-                _kernel_elastomer_surface_state_via_global_bvh(
-                    shared_metadata.links_idx,
-                    entry_a.env_bvh_idx,
-                    entry_b.env_bvh_idx,
-                    shared_metadata.sensor_elastomer_geom_start,
-                    shared_metadata.elastomer_geom_idx,
-                    bvh.chunk_sensor_idx,
-                    shared_metadata.sensor_elastomer_geom_n,
-                    shared_metadata.elastomer_geom_active_envs_mask,
-                    shared_metadata.elastomer_candidate_geom_mask,
-                    bvh.kernel_bvh,
-                    shared_metadata.pc_pos_link,
-                    shared_metadata.pc_active_envs_mask,
-                    shared_metadata.shear_anchor_sd_enter,
-                    shared_metadata.shear_anchor_sd_exit,
-                    shared_metadata.surface_pos_sensor_buf,
-                    shared_metadata.surface_entry_pos_sensor_buf,
-                    shared_metadata.surface_depth_buf,
-                    shared_metadata.surface_initialized_buf,
-                    shared_metadata.surface_candidate_buf,
-                    solver.dyn_state,
-                    entry_a.bvh_state.tree,
-                    entry_b.bvh_state.tree,
-                    solver.dyn_info,
-                    solver.rigid_info,
-                    _ELASTOMER_QUERY_AABB_MARGIN,
-                    _ELASTOMER_RAYCAST_QUERY_DIST,
-                    BVH_STACK_SIZE,
-                    is_split=entry_b is not entry_a,
-                )
-            # Invalidate stale surface state for points the BVH did not visit. surface_initialized
-            # and entry-pos survive across steps; depth/pos are gated by initialized downstream so
-            # they don't need clearing. The shear accumulator below reads from a compact index
-            # rebuilt from surface_initialized -- without this step, stale True from a prior step
-            # would inject phantom contributions.
-            cand = shared_metadata.surface_candidate_buf
-            shared_metadata.surface_initialized_buf &= cand
-            # Implicit bool->float broadcast zeros entries where cand=False, no `~` allocation.
-            shared_metadata.surface_entry_pos_sensor_buf.mul_(cand.unsqueeze(-1))
+            surface = shared_metadata.surface_query.surface
+            _kernel_elastomer_surface_state(
+                shared_metadata.links_idx,
+                shared_metadata.pc_bvh.chunk_sensor_idx,
+                shared_metadata.pc_bvh.kernel_bvh,
+                shared_metadata.surface_query,
+                solver.dyn_state,
+                _ELASTOMER_QUERY_AABB_MARGIN,
+                _ELASTOMER_RAYCAST_QUERY_DIST,
+            )
             _build_shear_active_pc_index(
-                shared_metadata.surface_initialized_buf,
+                qd_to_torch(surface.is_initialized, transpose=True),
                 shared_metadata.sensor_pc_start,
                 shared_metadata.sensor_pc_n,
                 shared_metadata.shear_scale,
@@ -2407,11 +2056,9 @@ class ElastomerTaxelSensor(
                 shared_metadata.probe_radii,
                 shared_metadata.lambda_s,
                 shared_metadata.shear_scale,
-                shared_metadata.surface_pos_sensor_buf,
-                shared_metadata.surface_entry_pos_sensor_buf,
-                shared_metadata.surface_depth_buf,
                 shared_metadata.shear_active_pc_count,
                 current_ground_truth_data_T,
+                surface,
                 gs.EPS,
             )
 

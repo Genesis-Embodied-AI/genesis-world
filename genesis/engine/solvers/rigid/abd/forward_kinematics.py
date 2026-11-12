@@ -541,27 +541,35 @@ def func_forward_kinematics_root(
 
 @qd.func
 def func_update_geom_aabb(
-    i_g: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
+    i_g: int,
+    i_b: int,
+    dyn_state: DynState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+    force_update_all_geoms: qd.template(),
 ):
     """Fit the world-frame axis-aligned bounding box (AABB) of geom i_g in env i_b on its pose.
 
-    A geom of a heterogeneous variant that the environment does not carry gets an empty box, which overlaps nothing and
-    drops out of any union of boxes.
+    A geom of a heterogeneous variant that the environment does not carry, which only force_update_all_geoms places,
+    gets an empty box, which overlaps nothing and drops out of any union of boxes.
     """
-    i_l = dyn_info.geoms.link_idx[i_g]
-    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    # See func_update_geoms
-    is_carried = dyn_info.links.geom_start[I_l] <= i_g < dyn_info.links.geom_end[I_l]
+    is_carried = True
+    if qd.static(force_update_all_geoms):
+        i_l = dyn_info.geoms.link_idx[i_g]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        # See func_update_geoms
+        is_carried = dyn_info.links.geom_start[I_l] <= i_g < dyn_info.links.geom_end[I_l]
 
     lower = gu.qd_vec3(qd.math.inf)
     upper = gu.qd_vec3(-qd.math.inf)
     if is_carried:
         g_pos = dyn_state.geoms.pos[i_g, i_b]
         g_quat = dyn_state.geoms.quat[i_g, i_b]
-        for i_corner in qd.static(range(8)):
-            corner_pos = gu.qd_transform_by_trans_quat(rigid_info.geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
-            lower = qd.min(lower, corner_pos)
-            upper = qd.max(upper, corner_pos)
+        # The first and last corners are the lower and upper ones (see kernel_init_geom_fields)
+        lower, upper = gu.qd_transform_aabb(
+            rigid_info.geoms_init_AABB[i_g, 0], rigid_info.geoms_init_AABB[i_g, 7], g_pos, g_quat
+        )
 
     dyn_state.geoms.aabb_min[i_g, i_b] = lower
     dyn_state.geoms.aabb_max[i_g, i_b] = upper
@@ -605,7 +613,7 @@ def func_update_geoms_link(
                     dyn_state.links.quat[i_l, i_b],
                 )
                 dyn_state.geoms.verts_updated[i_g, i_b] = False
-                func_update_geom_aabb(i_g, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+                func_update_geom_aabb(i_g, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
 
 
 @qd.func
@@ -618,7 +626,7 @@ def func_update_geoms_root(
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
 ):
-    """Place the geoms of every awake link of kinematic root i_l_root of env i_b on their link.
+    """Place the geoms of every awake link of kinematic root i_l_root of env i_b on their link and fit their box.
 
     Every geom is placed under force_update_all_geoms alone (see func_update_geoms_link, func_update_kinematics_root).
     """
@@ -636,13 +644,15 @@ def func_update_geoms(
     rigid_info: RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
+    is_backward: qd.template(),
 ):
     """Place the movable geoms of every awake link of every env on their link and fit their bounding box.
 
     Under force_update_all_geoms every geom of an awake link is placed instead, the fixed ones and those of the variants
-    the env holds inactive included, as func_update_geoms_link does. The geoms take one thread each rather than
-    following their link, so that a link carrying many geoms does not serialize their placement, and so that the
-    reverse of the sweep runs as wide. The loop is the outermost one of its kernel (see func_update_cartesian_space).
+    the env holds inactive included, as func_update_geoms_link does. The replay of the reversal (`is_backward`) leaves
+    the boxes, which nothing reverses, as they are. The geoms take one thread each rather than following their link, so
+    that a link carrying many geoms does not serialize their placement, and so that the reverse of the sweep runs as
+    wide. The loop is the outermost one of its kernel (see func_update_cartesian_space).
     """
     qd.loop_config(
         name="update_cartesian_space_geoms", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
@@ -667,7 +677,8 @@ def func_update_geoms(
                 dyn_state.links.quat[i_l, i_b],
             )
             dyn_state.geoms.verts_updated[i_g, i_b] = False
-            func_update_geom_aabb(i_g, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(not is_backward):
+                func_update_geom_aabb(i_g, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
 
 
 @qd.func
@@ -1226,7 +1237,9 @@ def func_update_cartesian_space(
                         )
 
     if qd.static(not (force_update_all_geoms or is_backward)):
-        func_update_geoms(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False)
+        func_update_geoms(
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=False
+        )
 
     func_COM_links(dyn_state, dyn_info, rigid_info, rigid_config)
 
@@ -1275,7 +1288,7 @@ def kernel_update_geoms_replay(
     dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
     # The reversed kernels place every geom (see reverse_cartesian_space)
-    func_update_geoms(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=True)
+    func_update_geoms(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=True, is_backward=True)
 
 
 @qd.kernel(fastcache=True)

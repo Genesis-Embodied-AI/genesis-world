@@ -8,7 +8,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.base_solver import VFACES, VVERTS, ErrorCode
-from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field
+from genesis.utils.data import ENVS, Config, Data, DataKind, Size, field, is_opted_in
+from genesis.utils.simt import ExactSums
 
 
 class RigidErrorCode(ErrorCode):
@@ -297,17 +298,22 @@ class LinksState(Data, kind=DataKind.DERIVED, shape=(LINKS, ENVS)):
     cacc_lin: qd.Tensor = field((float, 3), grad=True)
     cfrc_ang: qd.Tensor = field((float, 3), grad=True)
     cfrc_vel: qd.Tensor = field((float, 3), grad=True)
-    cfrc_applied_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    cfrc_applied_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    # The wrench the couplers accumulate during a substep, which the next substep consumes
-    cfrc_coupling_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
-    cfrc_coupling_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    cfrc_input_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    cfrc_input_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    # The wrench the other solvers apply the links during a substep, which the next substep consumes
+    cfrc_external_ang: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
+    cfrc_external_vel: qd.Tensor = field((float, 3), kind=DataKind.STATE, grad=True)
     contact_force: qd.Tensor = field((float, 3), grad=True)
     # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
     # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
     # again the step it exceeds the tolerance or wakes.
     is_hibernated: qd.Tensor = field(int, kind=DataKind.STATE)
     awake_steps: qd.Tensor = field(int, kind=DataKind.STATE)
+    # The forces and torques the other solvers apply the links over a substep, summed exactly whatever their order, slot
+    # 6 i_l + i_c holding the torque then the force components of link i_l. The solvers coupled with the rigid solver
+    # opt it in when the accumulation order must be fixed, and the rigid solver adds it to the external wrench of the
+    # links before its next substep reads it (see kernel_flush_external_wrenches).
+    cfrc_external_sums: ExactSums = field(opt_in=True, kind=DataKind.STATE, labels=DYNAMICS)
 
 
 class JointsInfo(Data, kind=DataKind.INFO, shape=(JOINTS, JOINTS_INFO_ENVS)):
@@ -698,6 +704,9 @@ class RigidData(Data):
                 n_candidate_equalities=solver.n_candidate_equalities_,
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )
+        is_external_wrench_exact = is_dynamic and is_opted_in(RigidData.dyn_state.links.cfrc_external_sums)
+        if is_external_wrench_exact:
+            sizes.update(exact_sum_slots=6 * solver.n_links_, exact_sum_bins=8)
         super().__init__(
             sizes=sizes,
             values=dict(rigid_info=values),
@@ -716,6 +725,8 @@ class RigidData(Data):
             ),
             requires_grad=solver._requires_grad,
         )
-
-
-GeomsInitAABB = qd.Tensor
+        if is_external_wrench_exact:
+            # Units from 2^-120 up to 2^104 N or N.m, 2^32 apart (see ExactSums)
+            self.dyn_state.links.cfrc_external_sums.bins_unit.from_numpy(
+                2.0 ** (-120 + 32 * np.arange(8, dtype=gs.np_float))
+            )

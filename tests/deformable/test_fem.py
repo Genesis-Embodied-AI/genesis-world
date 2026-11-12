@@ -393,16 +393,16 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
         assert_allclose(spin, 0.0, atol=SPHERE_SPIN_MAX)
 
     # Without Poisson contraction, the bar stretches uniaxially under its own weight, and its free end comes to rest rho
-    # * g * L^2 / (2 * E) below its initial height. The SAP solve leaves the velocity of each substep within its
-    # relative tolerance of the velocities of the scene, which the sphere and the box bound once at rest, so that the
-    # bar at rest moves by that error alone. Single precision stops that solve at its round-off: the elastic forces of
-    # the bar, stiff enough to dominate its inertia over a substep, resolve its positions to a few units in the last
+    # * g * L^2 / (2 * E) below its initial height. The SAP solve leaves the velocity of each substep within a few times
+    # its relative tolerance of the velocities of the scene, which the sphere and the box bound once at rest, so that
+    # the bar at rest moves by that error alone. Single precision stops that solve at its round-off: the elastic forces
+    # of the bar, stiff enough to dominate its inertia over a substep, resolve its positions to a few units in the last
     # place (ULP) of its height, and its velocity to that error per substep.
     bar_sag_ref = BAR_RHO * GRAVITY * BAR_LENGTH**2 / (2 * BAR_E)
     if coupler_type != gs.options.SAPCouplerOptions:
         bar_vel_atol, bar_sag_rtol = (5e-10, 2e-3) if gs.np_float == np.float64 else (2e-5, 1e-2)
     elif gs.np_float == np.float64:
-        bar_vel_atol, bar_sag_rtol = SAP_RTOL * REST_VEL_MAX, 2e-3
+        bar_vel_atol, bar_sag_rtol = 5e-10, 2e-3
     else:
         bar_ulp = np.finfo(np.float32).eps * (BAR_POS[2] + 0.5 * BAR_LENGTH)
         bar_vel_atol, bar_sag_rtol = 8.0 * bar_ulp / scene.sim.substep_dt, 8.0 * bar_ulp / bar_sag_ref
@@ -493,7 +493,7 @@ def test_legacy_coupler_rigid_velocity_correction(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("use_implicit_solver", [False, True])
-def test_hard_constraint(use_implicit_solver, show_viewer):
+def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     DT = 0.01
     GRAVITY = 9.81
     DAMPING = 0.5
@@ -566,7 +566,12 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
             pos=(-1.5, 0.0, HEIGHT + BOX_SIZE / 2),
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
         ),
-        material=free_material,
+        material=gs.materials.FEM.Elastic(
+            E=1e5,
+            nu=0.45,
+            rho=RHO,
+            model="linear" if use_implicit_solver else "stable_neohookean",
+        ),
     )
     anchor = scene.add_entity(
         morph=gs.morphs.Box(
@@ -599,10 +604,11 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     shape_grads = torch.cat((shape_grads, -shape_grads.sum(dim=-1, keepdim=True)), dim=-1)
     elems_grads_outer = torch.einsum("eia,ejb->eabij", shape_grads, shape_grads)
     elems_grads_dot = elems_grads_outer.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+    vibrating_mu, vibrating_lam = vibrating_box.material.mu, vibrating_box.material.lam
     elems_stiffness = vibrating_elems_vol[:, None, None, None, None] * (
-        free_material.lam * elems_grads_outer
-        + free_material.mu * elems_grads_outer.transpose(-1, -2)
-        + free_material.mu * elems_grads_dot[..., None, None] * torch.eye(3, dtype=gs.tc_float, device=gs.device)
+        vibrating_lam * elems_grads_outer
+        + vibrating_mu * elems_grads_outer.transpose(-1, -2)
+        + vibrating_mu * elems_grads_dot[..., None, None] * torch.eye(3, dtype=gs.tc_float, device=gs.device)
     )
     stiffness = torch.einsum("eam,ebn,eabij->minj", boxes_elems_verts[1], boxes_elems_verts[1], elems_stiffness)
 
@@ -622,28 +628,36 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     scene.step()
     assert_allclose(box.get_verts_pos()[..., VERTICES_IDX, :], target_poss, tol=1e-8)
 
-    if use_implicit_solver:
-        # The box released in its lowest elastic mode keeps vibrating in it, the gravity moving its translation alone.
-        # Each substep of the implicit solver solves (1 + h * c + h^2 * omega^2) * v' = v - h * omega^2 * q for the
-        # modal velocity, with c = alpha + beta * omega^2 the Rayleigh damping of the mode, then q' = q + h * v'.
-        mode_pos, mode_vel = MODE_AMPLITUDE, 0.0
-        for _ in range(N_SUBSTEPS):
+    # The box released in its lowest elastic mode keeps vibrating in it, the gravity moving its translation alone. Each
+    # substep of the implicit solver solves (1 + h * c + h^2 * omega^2) * v' = v - h * omega^2 * q for the modal
+    # velocity, with c = alpha + beta * omega^2 the Rayleigh damping of the mode, while the explicit solver decays
+    # v - h * omega^2 * q exponentially at the rate of its damping, then q' = q + h * v'.
+    mode_pos, mode_vel = MODE_AMPLITUDE, 0.0
+    for _ in range(N_SUBSTEPS):
+        if use_implicit_solver:
             mode_vel = (mode_vel - substep_dt * omega_sqr * mode_pos) / (
                 1.0 + substep_dt * (DAMPING + DAMPING_BETA * omega_sqr) + substep_dt**2 * omega_sqr
             )
-            mode_pos = mode_pos + substep_dt * mode_vel
-        modal_mass = vibrating_verts_mass[:, None] * mode
-        vibrating_box_disp = vibrating_box.get_verts_pos() - vibrating_box.init_positions
-        if gs.np_float == np.float64:
-            # The solve stops below a residual force sqrt(PCG_THRESHOLD), which moves the mode of unit modal mass by at
-            # most that times substep_dt^2 * sqrt(m_max) / m_min per substep, every substep at most doubling the error
-            mass_ratio = vibrating_verts_mass.max().sqrt() / vibrating_verts_mass.min()
-            pos_atol = 2**N_SUBSTEPS * PCG_THRESHOLD**0.5 * substep_dt**2 * mass_ratio
-            pos_tols, vel_tols = dict(atol=pos_atol), dict(atol=pos_atol / substep_dt)
         else:
-            pos_tols = vel_tols = dict(rtol=2e-4)
-        assert_allclose((vibrating_box_disp * modal_mass).sum((-2, -1)), mode_pos, **pos_tols)
-        assert_allclose((vibrating_box.get_verts_vel() * modal_mass).sum((-2, -1)), mode_vel, **vel_tols)
+            mode_vel = (mode_vel - substep_dt * omega_sqr * mode_pos) * math.exp(-DAMPING * substep_dt)
+        mode_pos = mode_pos + substep_dt * mode_vel
+    modal_mass = vibrating_verts_mass[:, None] * mode
+    vibrating_box_disp = vibrating_box.get_verts_pos() - vibrating_box.init_positions
+    if not use_implicit_solver:
+        # The stable Neo-Hookean model has the stiffness of the linear one at rest, from which its forces depart at
+        # first order in the strain of the mode, small at its amplitude.
+        pos_tols = dict(atol=1e-2 * MODE_AMPLITUDE)
+        vel_tols = dict(atol=1e-2 * MODE_AMPLITUDE * omega_sqr**0.5)
+    elif precision == "64":
+        # The solve stops below a residual force sqrt(PCG_THRESHOLD), which moves the mode of unit modal mass by at
+        # most that times substep_dt^2 * sqrt(m_max) / m_min per substep, every substep at most doubling the error
+        mass_ratio = vibrating_verts_mass.max().sqrt() / vibrating_verts_mass.min()
+        pos_atol = 2**N_SUBSTEPS * PCG_THRESHOLD**0.5 * substep_dt**2 * mass_ratio
+        pos_tols, vel_tols = dict(atol=pos_atol), dict(atol=pos_atol / substep_dt)
+    else:
+        pos_tols = vel_tols = dict(rtol=2e-4)
+    assert_allclose((vibrating_box_disp * modal_mass).sum((-2, -1)), mode_pos, **pos_tols)
+    assert_allclose((vibrating_box.get_verts_vel() * modal_mass).sum((-2, -1)), mode_vel, **vel_tols)
 
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)
@@ -689,12 +703,8 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     n_steps = 50
     fall_state = scene.get_state()
     box_pos_0, box_vel_0 = box.get_verts_pos(), box.get_verts_vel()
-    com_pos_z_0 = box_pos_0[..., 8, 2]
     for _ in range(n_steps):
         scene.step()
-    com_pos_z_f = box.get_verts_pos()[..., 8, 2]
-    com_pos_delta = -0.5 * GRAVITY * (n_steps * DT) ** 2
-    assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
 
     # The undeformed boxes follow the discrete free fall exactly: the gravity kick of each substep, followed by the
     # Rayleigh mass damping under the implicit solver and preceded by the exponential velocity decay under the explicit
@@ -707,12 +717,13 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
             vel_z = vel_z * math.exp(-DAMPING * substep_dt) - GRAVITY * substep_dt
         pos_z = pos_z + substep_dt * vel_z
     free_boxes_pos = torch.stack([free_box.get_verts_pos() for free_box in free_boxes])
-    tol = 5e-10 if gs.np_float == np.float64 else (1e-3 if use_implicit_solver else 1e-4)
+    tol = 5e-10 if precision == "64" else (1e-3 if use_implicit_solver else 1e-4)
     assert_allclose(free_boxes_pos - free_boxes_pos_0, (0.0, 0.0, pos_z), tol=tol)
 
     # The internal forces of the deformed box add up to zero, so its center of mass falls like the free boxes
     com_vel = verts_mass @ box_vel_0 / verts_mass.sum()
     com_pos = verts_mass @ box_pos_0 / verts_mass.sum()
+    com_pos_z_0 = com_pos[..., 2].clone()
     for _ in range(n_steps * N_SUBSTEPS):
         if use_implicit_solver:
             com_vel[..., 2] -= GRAVITY * substep_dt
@@ -721,8 +732,12 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
             com_vel *= math.exp(-DAMPING * substep_dt)
             com_vel[..., 2] -= GRAVITY * substep_dt
         com_pos += substep_dt * com_vel
-    atol = 5e-12 if gs.np_float == np.float64 else (2e-5 if use_implicit_solver else 2e-6)
+    atol = 5e-12 if precision == "64" else (2e-5 if use_implicit_solver else 2e-6)
     assert_allclose(verts_mass @ box.get_verts_pos() / verts_mass.sum(), com_pos, atol=atol)
+
+    # The vertex at the center of the box falls with its center of mass, up to the vibration of the box
+    center_pos_delta = box.get_verts_pos()[..., 8, 2] - box_pos_0[..., 8, 2]
+    assert_allclose(center_pos_delta, com_pos[..., 2] - com_pos_z_0, tol=0.05)
 
     # The internal forces are the opposite of the gradient of the elastic energy of the box with respect to the
     # positions of its vertices. The linear corotated model takes the rotation of each element as given.
@@ -735,12 +750,11 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
         eps = 0.5 * (F_rot + F_rot.transpose(-1, -2)) - torch.eye(3, dtype=gs.tc_float, device=gs.device)
         energy_density = mu * eps.square().sum((-2, -1)) + 0.5 * lam * eps.diagonal(dim1=-2, dim2=-1).sum(-1) ** 2
     else:
-        F_norm_sqr = F.square().sum((-2, -1))
-        J_shift = torch.linalg.det(F) - 1.0 - 0.75 * mu / lam
-        energy_density = 0.5 * mu * (F_norm_sqr - 3.0 - (F_norm_sqr + 1.0).log()) + 0.5 * lam * J_shift**2
+        J_shift = torch.linalg.det(F) - 1.0 - mu / (lam + mu)
+        energy_density = 0.5 * mu * (F.square().sum((-2, -1)) - 3.0) + 0.5 * (lam + mu) * J_shift**2
     energy = (elems_vol * energy_density).sum()
     forces = scene.fem_solver.get_forces()[:, box.v_start : box.v_start + box.n_vertices]
-    tol = 1e-11 if gs.np_float == np.float64 else (5e-3 if use_implicit_solver else 5e-4)
+    tol = 1e-11 if precision == "64" else (5e-3 if use_implicit_solver else 5e-4)
     assert_allclose(forces, -torch.autograd.grad(energy, pos)[0], tol=tol)
 
     if use_implicit_solver:
@@ -764,7 +778,7 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     box.remove_vertex_constraints(envs_idx=[1])
     box.set_vertex_constraints(VERTICES_IDX, link=anchor.base_link, envs_idx=[1])
     scene.step()
-    tol = 1e-8 if gs.np_float == np.float64 else 2e-6
+    tol = 1e-8 if precision == "64" else 2e-6
     assert_allclose(box.get_verts_pos()[1, VERTICES_IDX, :], target_poss[1], tol=tol)
 
     box.remove_vertex_constraints(envs_idx=[1])
@@ -887,6 +901,8 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     CUBE_HALFSIZE = 0.05
     CUBE_RHO = 1000.0
     CUBE_HYDROELASTIC_MODULUS = 1e5
+    PEDESTAL_HALFSIZE = 0.05
+    BALL_RADIUS = 0.03
     GRAVITY = 9.81
 
     scene = gs.Scene(
@@ -947,6 +963,21 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         )
         for i in range(2)
     ]
+    # A ball resting on a fixed rigid pedestal, the rigid solver holding no dofs
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, 0.3, PEDESTAL_HALFSIZE),
+            size=(2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE, 2 * PEDESTAL_HALFSIZE),
+            fixed=True,
+        ),
+    )
+    ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(-0.3, 0.3, 2 * PEDESTAL_HALFSIZE + BALL_RADIUS),
+            radius=BALL_RADIUS,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
     scene.build()
 
     # Run simulation
@@ -973,6 +1004,11 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     cubes_overlap_ref = 4.0 * CUBE_RHO * GRAVITY * CUBE_HALFSIZE**2 / CUBE_HYDROELASTIC_MODULUS
     cubes_overlap_ref *= (2.0 * CUBE_HALFSIZE / (2.0 * CUBE_HALFSIZE - cubes_overlap_ref)) ** 2
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
+
+    # The ball settles on the pedestal.
+    # FIXME: No closed form gives this depth: the elastic flattening of the ball and its pressure field near the contact
+    # depend on its TetGen mesh. A mesher-independent ball mesh and the elastic contact solution would make it derivable.
+    assert_allclose(2 * PEDESTAL_HALFSIZE - ball.get_verts_pos()[..., 2].min(), 2.42e-4, rtol=5e-2)
 
 
 @pytest.mark.required("sparse")

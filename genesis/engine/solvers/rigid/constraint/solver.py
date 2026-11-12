@@ -18,7 +18,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     linear_to_lower_tri,
 )
 from genesis.engine.solvers.rigid.collider.data import ColliderState
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidErrorCode, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, LinksState, RigidErrorCode, RigidInfo
 from genesis.grad.bridge import no_grad
 from genesis.utils.data import DataItem, eoa, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
@@ -1531,6 +1531,22 @@ def func_equality_joint(
 
 
 @qd.func
+def func_clear_links_constrained(links_state: LinksState, rigid_config: qd.template()):
+    """Reset the constraint involvement of every link (see is_constrained in rigid/data.py), which the constraint
+    assembly or a coupler solving instead of it marks back for the substep."""
+    qd.loop_config(name="clear_links_constrained", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_l, i_b in qd.ndrange(*links_state.pos.shape, axes=qd.static(eoa(links_state.is_constrained))):
+        links_state.is_constrained[i_l, i_b] = False
+
+
+@qd.func
+def func_mark_link_constrained(i_l: int, i_b: int, links_state: LinksState):
+    """Mark a link involved in a constraint for the substep, which keeps its free body on the standard update (see
+    func_midpoint_eligible)."""
+    links_state.is_constrained[i_l, i_b] = True
+
+
+@qd.func
 def func_add_equality_constraints(
     dyn_state: DynState,
     constraint_state: ConstraintState,
@@ -1540,11 +1556,8 @@ def func_add_equality_constraints(
 ):
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
-    # Reset the per-link constraint involvement (see is_constrained in rigid/data.py); the equality funcs below and
-    # the collision assembly mark it back.
-    qd.loop_config(name="clear_links_constrained", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(*dyn_state.links.pos.shape, axes=qd.static(eoa(dyn_state.links.is_constrained))):
-        dyn_state.links.is_constrained[i_l, i_b] = False
+    # The equality funcs below and the collision assembly mark the constrained links back
+    func_clear_links_constrained(dyn_state.links, rigid_config)
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b in range(_B):
@@ -6107,8 +6120,3 @@ def func_update_qacc(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
         constraint_state.is_warmstart[i_b] = True
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.constraint_solver_decomp")

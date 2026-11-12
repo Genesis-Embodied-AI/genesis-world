@@ -1,6 +1,20 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+from genesis.utils.misc import qd_isfinite
+
+# The base-2 logarithm of the lanes of a block, the unit of the subgroup helpers below
+BLOCK_LOG2_LANES = 5
+
+
+def requires_deterministic_accumulation() -> bool:
+    """Return whether the accumulations of parallel threads must be independent of the order of the threads.
+
+    These are the atomic adds, scatters and sums of terms from several threads. This holds with deterministic algorithms,
+    except on a single thread of the CPU, which accumulates in a fixed order already.
+    """
+    return gs.use_deterministic_algorithms and not (gs.backend == gs.cpu and qd.cfg.cpu_max_num_threads == 1)
 
 
 @qd.func
@@ -302,3 +316,75 @@ def qd_segment_min(tid, i_slot, i_slot_prev, i_slot_next, i_row, value, sh_min):
     total, is_tail = qd_segmented_min(tid, i_slot, i_slot_prev, i_slot_next, value)
     if is_tail:
         sh_min[i_row + i_slot] = qd.min(sh_min[i_row + i_slot], total)
+
+
+# The values summed exactly whatever the order of their terms, and the bins each of them is cut into (see ExactSums)
+EXACT_SUM_SLOTS = Size("exact_sum_slots")
+EXACT_SUM_BINS = Size("exact_sum_bins")
+
+
+class ExactSums(Data, kind=DataKind.SCRATCH, shape=(EXACT_SUM_SLOTS, EXACT_SUM_BINS, ENVS)):
+    """
+    Sums of floating-point terms added from parallel threads, whose result is the same whatever the order of the terms.
+
+    A term is cut exactly into integer multiples of the unit of each bin, from the highest bin down, and each bin adds
+    its multiples as a 64-bit integer, which integer addition makes independent of the order (see func_exact_sum_add).
+    With units 2^b apart, a term adds less than 2^b to every bin but the highest, so a bin holds 2^(63 - b) terms before
+    it overflows, and the highest bin holds terms below 2^(63 - b) times its unit. The part of a term below the unit of
+    the lowest bin is dropped, the same whatever the order.
+    """
+
+    # The low and high 32 bits of the 64-bit integer sum of each bin
+    bins_lo: qd.Tensor = field(int)
+    bins_hi: qd.Tensor = field(int)
+    # The unit of each bin, a power of two, in increasing order
+    bins_unit: qd.Tensor = field(float, shape=(EXACT_SUM_BINS,), kind=DataKind.CONSTANT)
+    # The sum of the terms of each slot that are 'inf' or 'nan', which no bin can hold and which the sum takes, 0 without
+    # any. It is the same whatever the order of the terms, 'nan' absorbing every term and the infinities of opposite
+    # signs giving 'nan'.
+    slots_nonfinite: qd.Tensor = field(float, shape=(EXACT_SUM_SLOTS, ENVS))
+
+
+@qd.func
+def func_exact_sum_add(i_s: int, i_b: int, value: float, exact_sums: ExactSums):
+    """
+    Add a term to a slot of exact sums.
+
+    The cut of the term into bins is exact: from the highest bin down, the integer part of the term at the unit of a bin
+    holds the leading bits of its mantissa, and the remainder the trailing ones. A bin adds its 64 bits as two 32-bit
+    halves, the low half carrying into the high one.
+    """
+    if not qd_isfinite(value):
+        qd.atomic_add(exact_sums.slots_nonfinite[i_s, i_b], value)
+    remainder = qd.select(qd_isfinite(value), value, 0.0)
+    for k_ in range(exact_sums.bins_unit.shape[0]):
+        k = exact_sums.bins_unit.shape[0] - 1 - k_
+        unit = exact_sums.bins_unit[k]
+        count = qd.cast(remainder / unit, qd.i64)
+        if count != 0:
+            remainder = remainder - qd.cast(count, gs.qd_float) * unit
+            count_lo = qd.cast(count & qd.i64(0xFFFFFFFF), qd.u32)
+            lo_prev = qd.cast(qd.atomic_add(exact_sums.bins_lo[i_s, k, i_b], qd.cast(count_lo, gs.qd_int)), qd.u32)
+            carry = qd.select(lo_prev + count_lo < lo_prev, 1, 0)
+            qd.atomic_add(exact_sums.bins_hi[i_s, k, i_b], qd.cast(count >> 32, gs.qd_int) + carry)
+
+
+@qd.func
+def func_exact_sum_take(i_s: int, i_b: int, exact_sums: ExactSums):
+    """
+    Return the sum of a slot of exact sums, from the highest bin down, and empty the slot for the next sum.
+
+    The sum is 'inf' or 'nan' if a term was, for the reader to detect.
+    """
+    total = gs.qd_float(0.0)
+    for k_ in range(exact_sums.bins_unit.shape[0]):
+        k = exact_sums.bins_unit.shape[0] - 1 - k_
+        count = (qd.cast(exact_sums.bins_hi[i_s, k, i_b], qd.i64) << 32) | qd.cast(
+            qd.cast(exact_sums.bins_lo[i_s, k, i_b], qd.u32), qd.i64
+        )
+        total = total + qd.cast(count, gs.qd_float) * exact_sums.bins_unit[k]
+        exact_sums.bins_lo[i_s, k, i_b] = 0
+        exact_sums.bins_hi[i_s, k, i_b] = 0
+    total = total + exact_sums.slots_nonfinite[i_s, i_b]
+    exact_sums.slots_nonfinite[i_s, i_b] = 0.0
+    return total

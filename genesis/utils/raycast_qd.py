@@ -1,11 +1,29 @@
+from typing import TYPE_CHECKING
+
+import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import BVHState, BVHTreeState, func_build_bvh
-from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
+from genesis.engine.bvh import (
+    BVHState,
+    InstancesQuery,
+    PackedInstances,
+    build_packed_instances,
+    func_build_bvh,
+    func_bvh_traverse,
+    get_bvh_data,
+    kernel_build_instances_tree,
+)
 from genesis.engine.solvers.rigid.data import DynInfo, DynState
-from genesis.utils.data import ENVS, Data, DataKind, field
+from genesis.engine.state_change import StateChange, Subscriber
+from genesis.utils.cache import OwnedCache
+from genesis.utils.data import ENVS, Data, DataKind, Size, field
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.kinematic_solver import KinematicSolver
 
 
 class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
@@ -19,117 +37,82 @@ class RaycastResult(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     normal: qd.Tensor = field((float, 3))
 
 
-# FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
-# differ only in the leaf-data fetch (fixed/free verts split vs vverts_state_idx + FK fallback) and in the dataclass
-# shapes of geoms_state vs vgeoms_state. Quadrants does not currently support a qd.func arg that accepts either of
-# two dataclasses with different field sets, so we cannot factor the BVH traversal into a single shared kernel; the
-# kernel-call argument-fusion step strictly matches the annotated dataclass shape and rejects either union typing or
-# qd.template() for dataclass-typed args. Until Quadrants gains generic-dataclass dispatch, the visual variants below
-# stay as parallel copies.
+# Faces of the visual geoms of a solver whose vertices are set per environment
+WORLD_FACES = Size("world_faces")
 
 
-@qd.func
-def get_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
+class WorldFaces(Data, kind=DataKind.CONSTANT, shape=(WORLD_FACES,)):
+    """The faces of the visual geoms of a solver whose vertices are set per environment (see set_vverts)."""
+
+    # Vertices of each face, as their slots of the per-environment vertices
+    faces_verts_idx: qd.Tensor = field((int, 3))
+    faces_geom_idx: qd.Tensor = field(int)
+
+
+# Sensors and geoms of the closest-point queries a mask of geoms restricts (see CandidateGeoms)
+CANDIDATE_SENSORS = Size("candidate_sensors")
+CANDIDATE_GEOMS = Size("candidate_geoms")
+
+
+class CandidateGeoms(Data, kind=DataKind.SCRATCH, shape=(CANDIDATE_SENSORS, CANDIDATE_GEOMS, ENVS)):
+    """The geoms of a solver that the closest-point queries of each sensor may reach in each environment, or in every
+    environment for a single one."""
+
+    is_candidate: qd.Tensor = field(bool)
+
+
+# Closest-point queries of a sensor class, each of one query point (see ClosestQuery)
+CLOSEST_QUERIES = Size("closest_queries")
+
+
+class ClosestQueries(Data, kind=DataKind.CONSTANT, shape=(CLOSEST_QUERIES,)):
+    """The sensor of each closest-point query, which selects the geoms it may reach (see CandidateGeoms)."""
+
+    sensor_idx: qd.Tensor = field(int)
+
+
+class ClosestHits(Data, kind=DataKind.SCRATCH, shape=(CLOSEST_QUERIES, ENVS)):
+    """The closest triangle of each closest-point query: its signed distance, geom and outward normal in the world."""
+
+    signed_dist: qd.Tensor = field(float)
+    geom_idx: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3))
+
+
+_SOLVER_MESHES_CACHE = OwnedCache()
+
+
+def get_solver_meshes(
+    solver: "KinematicSolver", is_visual: bool, faces_is_used: np.ndarray | None = None
+) -> PackedInstances:
+    """Return the trees of the faces of the geoms of a solver, or of its visual geoms, in the frame of each geom.
+
+    The geoms of one mesh share its tree. A geom holding a face that `faces_is_used` drops gets no tree. The trees are
+    built once and shared by every user of the solver.
     """
-    Get the three vertices of a triangle in world space.
 
-    Returns
-    -------
-    tri_vertices : qd.Matrix
-        3x3 matrix where each column is a vertex position.
-    """
-    tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        i_v = dyn_info.faces.verts_idx[i_f][i]
-        i_fv = dyn_info.verts.verts_state_idx[i_v]
-        if dyn_info.verts.is_fixed[i_v]:
-            tri_vertices[:, i] = dyn_state.fixed_verts.pos[i_fv]
+    def compute():
+        dyn_info = solver.dyn_info
+        if is_visual:
+            verts = qd_to_numpy(dyn_info.vverts.init_pos, transpose=True)
+            faces_verts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
+            geoms_face_start = qd_to_numpy(dyn_info.vgeoms.vface_start, transpose=True)
+            geoms_face_end = qd_to_numpy(dyn_info.vgeoms.vface_end, transpose=True)
         else:
-            tri_vertices[:, i] = dyn_state.free_verts.pos[i_fv, i_b]
-    return tri_vertices
+            verts = qd_to_numpy(dyn_info.verts.init_pos, transpose=True)
+            faces_verts_idx = qd_to_numpy(dyn_info.faces.verts_idx, transpose=True)
+            geoms_face_start = qd_to_numpy(dyn_info.geoms.face_start, transpose=True)
+            geoms_face_end = qd_to_numpy(dyn_info.geoms.face_end, transpose=True)
+        geoms_aabb_min, geoms_aabb_max = [], []
+        for i_f_start, i_f_end in zip(geoms_face_start.tolist(), geoms_face_end.tolist()):
+            tris = verts[faces_verts_idx[i_f_start:i_f_end]]
+            if faces_is_used is not None and not faces_is_used[i_f_start:i_f_end].all():
+                tris = tris[:0]
+            geoms_aabb_min.append(tris.min(axis=1))
+            geoms_aabb_max.append(tris.max(axis=1))
+        return build_packed_instances(geoms_face_start.tolist(), geoms_aabb_min, geoms_aabb_max)
 
-
-@qd.func
-def bvh_ray_cast(
-    i_t: int,
-    i_b: int,
-    ray_start: qd.types.vector(3),
-    ray_dir: qd.types.vector(3),
-    max_range: float,
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    dyn_info: DynInfo,
-    eps: float,
-):
-    """
-    Cast a ray through a BVH and find the closest intersection.
-
-    ``i_t`` selects the tree and ``i_b`` the env whose verts back the leaf triangles: ``i_t == i_b`` for a per-env
-    BVH, while a grouped static BVH shared by several envs routes ``i_t`` through ``env_bvh_idx`` (the routed envs
-    have bit-identical verts, so each env reads its own).
-
-    Returns
-    -------
-    hit_face : gs.qd_int
-        index of the hit (global) triangle (-1 if no hit)
-    hit_distance : gs.qd_float
-        distance to hit point (unchanged max_range if no hit)
-    hit_normal : qd.math.vec3
-        normal vector at hit point (zero vector if no hit)
-    """
-    # The BVH's own leaf count. For a subset BVH this is the subset size, smaller than the solver's face count.
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-
-    hit_face = -1
-    closest_distance = gs.qd_float(max_range)
-    hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-
-    axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
-
-    # Stack for non-recursive BVH traversal
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0  # Start at root node
-    stack_idx = 1
-    if not is_valid_dir:
-        # A direction too short to define a ray leaves the stack empty, reporting no hit.
-        stack_idx = 0
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-
-        # Check if ray hits the node's bounding box
-        aabb_t = ray_aabb_intersection(
-            ray_start, ray_dir, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx], eps
-        )
-
-        if aabb_t >= 0.0 and aabb_t < closest_distance:
-            i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-            if i_left == -1:  # Leaf node
-                # The leaf payload carries the global face index; see kernel_refresh_collision_bvh.
-                i_f = bvh_tree_state.leaves_idx[i_t, node_idx - (n_triangles - 1)]
-
-                # Get triangle vertices
-                tri_vertices = get_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
-                v0, v1, v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
-
-                # Perform ray-triangle intersection
-                hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
-
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
-                    closest_distance = hit_distance
-                    hit_face = i_f
-                    hit_normal = triangle_face_normal(v0, v1, v2, eps)
-            else:  # Internal node
-                # Push children onto stack
-                if stack_idx < STACK_SIZE - 2:
-                    node_stack[stack_idx] = i_left
-                    node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                    stack_idx += 2
-
-    return hit_face, closest_distance, hit_normal
+    return _SOLVER_MESHES_CACHE.get(solver, (solver, is_visual), compute)
 
 
 @qd.func
@@ -326,6 +309,18 @@ def closest_point_on_triangle(
 
 
 @qd.func
+def func_sphere_intersects_aabb(
+    center: qd.types.vector(3), radius_sq: float, aabb_min: qd.types.vector(3), aabb_max: qd.types.vector(3)
+) -> bool:
+    """Return whether the point of a box closest to the center of a sphere lies within the sphere.
+
+    A closest-point search passes its best squared distance as `radius_sq` to cull the boxes beyond it.
+    """
+    offset = qd.max(aabb_min - center, 0.0) + qd.max(center - aabb_max, 0.0)
+    return offset.norm_sqr() <= radius_sq
+
+
+@qd.func
 def triangle_face_normal(v0: qd.types.vector(3), v1: qd.types.vector(3), v2: qd.types.vector(3), eps: float):
     """
     Return the outward unit normal of the triangle (v0, v1, v2) under right-hand winding.
@@ -335,654 +330,539 @@ def triangle_face_normal(v0: qd.types.vector(3), v1: qd.types.vector(3), v2: qd.
     return gu.qd_normalize((v1 - v0).cross(v2 - v0), eps)
 
 
-@qd.func
-def update_face_aabb(
-    i_t: int,
-    i_a: int,
-    i_f: int,
-    i_b: int,
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    """Fit leaf i_a of tree i_t to face i_f from env i_b's current vertex positions.
-
-    ``i_t == i_b`` for a per-env BVH; a grouped static BVH builds each tree slot from its representative env (see
-    RaycastContext update).
-
-    A face contributes to env i_b only if its geom lies in that env's active geom range (links_info.geom_start /
-    geom_end); otherwise its AABB is left inverted (unhittable) and skipped by ray queries. For a homogeneous solver
-    every geom is always in range, so this never excludes anything. For a heterogeneous solver, where all envs share
-    one vertex buffer but activate different per-env geom ranges, it makes each env cast against only its own variant
-    instead of the union of every variant.
-    """
-    leaf_min = qd.math.vec3(qd.math.inf, qd.math.inf, qd.math.inf)
-    leaf_max = -leaf_min
-
-    i_g = dyn_info.faces.geom_idx[i_f]
-    i_l = dyn_info.geoms.link_idx[i_g]
-    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    if dyn_info.links.geom_start[I_l] <= i_g and i_g < dyn_info.links.geom_end[I_l]:
-        for i in qd.static(range(3)):
-            i_v = dyn_info.faces.verts_idx[i_f][i]
-            i_fv = dyn_info.verts.verts_state_idx[i_v]
-            pos_v = qd.math.vec3(0.0, 0.0, 0.0)
-            if dyn_info.verts.is_fixed[i_v]:
-                pos_v = dyn_state.fixed_verts.pos[i_fv]
-            else:
-                pos_v = dyn_state.free_verts.pos[i_fv, i_b]
-            leaf_min = qd.min(leaf_min, pos_v)
-            leaf_max = qd.max(leaf_max, pos_v)
-    bvh_state.leaves.aabbs_min[i_t, i_a] = leaf_min
-    bvh_state.leaves.aabbs_max[i_t, i_a] = leaf_max
-
-
-@qd.func
-def get_visual_vvert_pos(i_vv: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
-    """
-    Return the world-space position of a visual vertex, branching between the custom buffer and FK on the fly.
-
-    Opt-in entities (morph.enable_custom_vverts=True) own a slot in vverts_state.pos referenced by vverts_state_idx.
-    Non-opt-in entities (vverts_state_idx<0) have no slot; their position is recomputed by transforming the rest-pose
-    init_pos with the owning vgeom's current pose.
-    """
-    pos = qd.math.vec3(0.0, 0.0, 0.0)
-    i_state = dyn_info.vverts.vverts_state_idx[i_vv]
-    if i_state >= 0:
-        pos = dyn_state.vverts.pos[i_state, i_b]
-    else:
-        i_vg = dyn_info.vverts.vgeom_idx[i_vv]
-        pos = gu.qd_transform_by_trans_quat(
-            dyn_info.vverts.init_pos[i_vv], dyn_state.vgeoms.pos[i_vg, i_b], dyn_state.vgeoms.quat[i_vg, i_b]
-        )
-    return pos
-
-
-@qd.func
-def get_visual_triangle_vertices(i_f: int, i_b: int, dyn_state: DynState, dyn_info: DynInfo):
-    """Get the three vertices of a triangle from the visual mesh in world space."""
-    tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i in qd.static(range(3)):
-        i_vv = dyn_info.vfaces.vverts_idx[i_f][i]
-        tri_vertices[:, i] = get_visual_vvert_pos(i_vv, i_b, dyn_state, dyn_info)
-    return tri_vertices
-
-
-@qd.func
-def bvh_ray_cast_visual(
-    i_t, i_b, ray_start, ray_dir, max_range, dyn_state: DynState, bvh_tree_state: BVHTreeState, dyn_info: DynInfo, eps
-):
-    """Cast a single ray against the visual-mesh BVH; returns (hit_face, distance, normal).
-
-    See bvh_ray_cast for the tree slot (i_t) / env (i_b) split.
-    """
-    n_triangles = bvh_tree_state.leaves_idx.shape[1]
-
-    hit_face = -1
-    closest_distance = gs.qd_float(max_range)
-    hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-
-    axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
-
-    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
-    STACK_SIZE = qd.static(64)
-    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
-    node_stack[0] = 0
-    stack_idx = 1
-    if not is_valid_dir:
-        stack_idx = 0
-
-    while stack_idx > 0:
-        stack_idx -= 1
-        node_idx = node_stack[stack_idx]
-        aabb_t = ray_aabb_intersection(
-            ray_start, ray_dir, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx], eps
-        )
-
-        if aabb_t >= 0.0 and aabb_t < closest_distance:
-            i_left = bvh_tree_state.nodes_left[i_t, node_idx]
-            if i_left == -1:
-                i_f = bvh_tree_state.leaves_idx[i_t, node_idx - (n_triangles - 1)]
-
-                tri_vertices = get_visual_triangle_vertices(i_f, i_b, dyn_state, dyn_info)
-                v0, v1, v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
-
-                hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
-
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
-                    closest_distance = hit_distance
-                    hit_face = i_f
-                    hit_normal = triangle_face_normal(v0, v1, v2, eps)
-            else:
-                if stack_idx < STACK_SIZE - 2:
-                    node_stack[stack_idx] = i_left
-                    node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
-                    stack_idx += 2
-
-    return hit_face, closest_distance, hit_normal
-
-
-@qd.func
-def update_visual_face_aabb(
-    i_t: int,
-    i_f: int,
-    i_b: int,
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    rigid_config: qd.template(),
-):
-    """Fit the AABB of vface i_f in tree slot i_t from env i_b's visual mesh (i_t == i_b for a per-env BVH).
-
-    A vface that does not contribute to env i_b is left with an inverted AABB (min=+inf, max=-inf), which ray queries
-    treat as a definitive miss: either face_mask holds 0, meaning its entity did not opt into raycasting, or its vgeom
-    falls outside env i_b's active vgeom range (links_info.vgeom_start / vgeom_end). For a homogeneous solver every
-    vgeom is always in range. For a heterogeneous solver, where all envs share one visual mesh but activate different
-    per-env vgeom ranges, this keeps each env casting against its own variant alone.
-    """
-    leaf_min = qd.math.vec3(qd.math.inf, qd.math.inf, qd.math.inf)
-    leaf_max = -leaf_min
-    if face_mask[i_f] != 0:
-        i_vg = dyn_info.vfaces.vgeom_idx[i_f]
-        i_l = dyn_info.vgeoms.link_idx[i_vg]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.vgeom_start[I_l] <= i_vg and i_vg < dyn_info.links.vgeom_end[I_l]:
-            for i in qd.static(range(3)):
-                i_vv = dyn_info.vfaces.vverts_idx[i_f][i]
-                pos_v = get_visual_vvert_pos(i_vv, i_b, dyn_state, dyn_info)
-                leaf_min = qd.min(leaf_min, pos_v)
-                leaf_max = qd.max(leaf_max, pos_v)
-    bvh_state.leaves.aabbs_min[i_t, i_f] = leaf_min
-    bvh_state.leaves.aabbs_max[i_t, i_f] = leaf_max
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_collision_bvh(
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-    update_verts: qd.template(),
-):
-    """Fit the leaf boxes of a per-env collision BVH set covering every face in order and rebuild its trees, after a
-    refresh of the world-space vertices when asked."""
-    if qd.static(update_verts):
-        func_update_all_verts(dyn_state, dyn_info, rigid_config)
-    # The leaves cover every face in order, one tree per env
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_f, i_f, i_t, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_collision_subset_bvh(
-    faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-    update_verts: qd.template(),
-):
-    """Fit the leaf boxes of a per-env collision BVH set over a face subset, rebuild its trees and remap the leaves to
-    global faces, after a refresh of the world-space vertices when asked."""
-    if qd.static(update_verts):
-        func_update_all_verts(dyn_state, dyn_info, rigid_config)
-    for i_t, i_a in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_a, faces_idx[i_a], i_t, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
-    # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
-    for i_t, i_leaf in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
-        bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_collision_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped collision BVH set covering every face in order and build one tree per group.
-
-    The boxes come from the already refreshed vertices of the representative envs, and the trees take the first slots.
-    """
-    for i_t, i_f in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_f, i_f, batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_collision_subset_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    faces_idx: qd.types.ndarray(ndim=1),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped collision BVH set over a face subset and build one tree per group.
-
-    The boxes come from the already refreshed vertices of the representative envs. The trees take the first slots, their
-    sorted leaves naming the global faces of the subset.
-    """
-    for i_t, i_a in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_face_aabb(i_t, i_a, faces_idx[i_a], batch_repr_env[i_t], dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
-    # The sorted leaf payloads name subset slots: rewritten to global face indices, every traversal reads global faces
-    for i_t, i_leaf in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
-        bvh_state.tree.leaves_idx[i_t, i_leaf] = faces_idx[i_a]
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_visual_bvh(
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a per-env visual BVH set, unhittable where the face mask is 0, and rebuild its trees."""
-    for i_t, i_f in qd.ndrange(bvh_state.leaves.aabbs_min.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_visual_face_aabb(i_t, i_f, i_t, face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
-def kernel_refresh_grouped_visual_bvh(
-    batch_repr_env: qd.types.ndarray(ndim=1),
-    face_mask: qd.types.ndarray(),
-    dyn_state: DynState,
-    bvh_state: BVHState,
-    dyn_info: DynInfo,
-    bvh_config: qd.template(),
-    rigid_config: qd.template(),
-    eps: float,
-):
-    """Fit the leaf boxes of a grouped visual BVH set from its representative envs and build one tree per group.
-
-    A face masked by 0 is unhittable, and the trees take the first slots (see RaycastContext.update for the grouping).
-    """
-    for i_t, i_f in qd.ndrange(batch_repr_env.shape[0], bvh_state.leaves.aabbs_min.shape[1]):
-        update_visual_face_aabb(i_t, i_f, batch_repr_env[i_t], face_mask, dyn_state, bvh_state, dyn_info, rigid_config)
-    func_build_bvh(batch_repr_env.shape[0], bvh_state, bvh_config, eps)
-
-
-@qd.kernel(fastcache=True)
+# Fastcache stays off for a kernel taking a visitor or a target (see RaycastTarget)
+@qd.kernel
 def kernel_cast_ray(
-    rays_start: qd.types.ndarray(ndim=2),  # (n_envs, 3)
-    envs_idx: qd.types.ndarray(ndim=1),  # [n_envs]
-    ray_direction: qd.types.ndarray(ndim=1),  # (3,)
-    dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
-    result: RaycastResult,
-    dyn_info: DynInfo,
+    envs_idx: qd.types.ndarray(ndim=1),
     max_range: float,
-    eps: float,
-    is_visual: qd.template(),
+    rays_start: qd.types.ndarray(ndim=2),
+    ray_direction: qd.types.ndarray(ndim=1),
+    target: qd.template(),
 ):
+    """Cast one ray of common direction against the target of each environment in parallel (see RaycastTarget.cast).
+
+    rays_start[i_b] is the start of the ray in the coordinates of environment i_b, and the closest hit of that
+    environment is written to the result of the target (see RaycastResult), the environments outside envs_idx being
+    left without hit (geom_idx -1, distance +inf). The viewer alone aggregates across environments.
     """
-    Cast one ray of common direction against each env's BVH in parallel.
-
-    Per-env: rays_start[i_b] is the start of the ray in the coordinates of env i_b, the ones its BVH and result[i_b] are
-    in, and the closest hit on that env is written to result[i_b]; envs not in envs_idx are left as no-hit (geom_idx ==
-    -1, distance == +inf). Aggregation across envs is intentionally out of scope, because cross-env reduction has no use
-    beyond the viewer.
-
-    `is_visual` selects the mesh the BVH covers: the visual mesh (vfaces, result.geom_idx holds the hit vgeom) or
-    the collision mesh (faces, result.geom_idx holds the hit geom).
-    """
-    ray_direction_world = qd.math.vec3(ray_direction[0], ray_direction[1], ray_direction[2])
-
-    for i_b in range(result.geom_idx.shape[0]):
-        result.distance[i_b] = qd.math.inf
-        result.geom_idx[i_b] = -1
-        result.hit_point[i_b] = qd.math.vec3(0.0, 0.0, 0.0)
-        result.normal[i_b] = qd.math.vec3(0.0, 0.0, 0.0)
-
+    ray_dir = qd.Vector([ray_direction[0], ray_direction[1], ray_direction[2]], dt=gs.qd_float)
+    for i_b in range(target.hits.geom_idx.shape[0]):
+        target.hits.distance[i_b] = qd.math.inf
+        target.hits.geom_idx[i_b] = -1
+        target.hits.hit_point[i_b] = qd.Vector.zero(gs.qd_float, 3)
+        target.hits.normal[i_b] = qd.Vector.zero(gs.qd_float, 3)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        ray_start = qd.math.vec3(rays_start[i_b, 0], rays_start[i_b, 1], rays_start[i_b, 2])
-        # Declared before the compile-time branch, whose body is a nested scope in quadrants.
-        cur_hit_face = -1
-        cur_distance = gs.qd_float(max_range)
-        cur_hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-        if qd.static(is_visual):
-            cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast_visual(
-                i_b,
-                i_b,
-                ray_start,
-                ray_direction_world,
-                max_range,
-                dyn_state,
-                bvh_tree_state,
-                dyn_info,
-                eps,
-            )
-        else:
-            cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
-                i_b,
-                i_b,
-                ray_start,
-                ray_direction_world,
-                max_range,
-                dyn_state,
-                bvh_tree_state,
-                dyn_info,
-                eps,
-            )
-        if cur_hit_face >= 0:
-            result.distance[i_b] = cur_distance
-            if qd.static(is_visual):
-                result.geom_idx[i_b] = dyn_info.vfaces.vgeom_idx[cur_hit_face]
-            else:
-                result.geom_idx[i_b] = dyn_info.faces.geom_idx[cur_hit_face]
-            result.normal[i_b] = cur_hit_normal
-            result.hit_point[i_b] = ray_start + cur_distance * ray_direction_world
+        ray_start = qd.Vector([rays_start[i_b, 0], rays_start[i_b, 1], rays_start[i_b, 2]], dt=gs.qd_float)
+        # The target records the geom and the normal of the closest hit (see RaycastTarget)
+        distance = target.cast(i_b, i_b, ray_start, ray_dir, max_range)
+        if target.hits.geom_idx[i_b] >= 0:
+            target.hits.distance[i_b] = distance
+            target.hits.hit_point[i_b] = ray_start + distance * ray_dir
 
 
-@qd.func
-def write_ray_hit(
-    i_b: int,
-    i_p: int,
-    i_s: int,
-    hit_face: int,
-    hit_distance: float,
-    ray_start_world,
-    ray_direction_world,
-    ray_dir_local,
-    is_world_frame: qd.types.ndarray(ndim=1),
-    max_ranges: qd.types.ndarray(ndim=1),
-    no_hit_values: qd.types.ndarray(ndim=1),
-    sensor_cache_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_counts: qd.types.ndarray(ndim=1),
-    sensor_return_points: qd.types.ndarray(ndim=1),
-    output_hits: qd.types.ndarray(ndim=2),
-    eps: float,
-    is_merge: qd.template(),
-    is_last: qd.template(),
-):
-    """Write the hit of a ray of a sensor at its slots of the output, the common tail of the cast kernels.
-
-    `is_merge` and `is_last` are compile-time flags marking a cast's position in a chain of BVH passes sharing one
-    output buffer (first pass is_merge=False, subsequent passes is_merge=True, final pass is_last=True): the first
-    pass writes a value into every slot, and each later pass only overwrites a slot when it found a closer hit, so
-    the chain composes with no scratch storage. A miss must not beat a real hit from another pass whatever the
-    sensor's ``no_hit_value`` (it may be below max_range, e.g. 0 or -1): a miss on a non-final pass seeds the slot
-    with ``max_range`` - a hit is always strictly below it, so a hit wins every distance comparison - and
-    ``no_hit_value`` is stamped only by the final pass, over any slot still holding that sentinel.
-
-    `sensor_return_points[i_s]` gates the hit-point writes; a distances-only sensor skips them.
-    """
-    i_p_sensor = i_p - sensor_point_offsets[i_s]
-    i_p_offset = sensor_cache_offsets[i_s]
-    # Distances follow the point block (num_rays*3) when points are stored, else start at the block front.
-    i_p_dist = i_p_offset + i_p_sensor
-    if sensor_return_points[i_s]:
-        i_p_dist += sensor_point_counts[i_s] * 3
-    if hit_face >= 0 and (not is_merge or hit_distance < output_hits[i_p_dist, i_b]):
-        output_hits[i_p_dist, i_b] = hit_distance
-
-        if sensor_return_points[i_s]:
-            hit_point = qd.math.vec3(0.0, 0.0, 0.0)
-            if is_world_frame[i_s]:
-                hit_point = ray_start_world + hit_distance * ray_direction_world
-            else:
-                # Local frame output along provided local ray direction
-                hit_point = hit_distance * gu.qd_normalize(ray_dir_local, eps)
-            # Store points at: cache_offset + point_idx_in_sensor * 3
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
-    elif not is_merge:
-        # First-pass miss: zero the point and seed the distance - no_hit_value if this pass is also the last (single
-        # BVH), else the max_range sentinel so a later pass's hit wins.
-        if sensor_return_points[i_s]:
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
-        if is_last:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
-        else:
-            output_hits[i_p_dist, i_b] = max_ranges[i_s]
-    elif is_last:
-        # Final-pass miss: a slot still at the sentinel means every pass missed, so stamp no_hit_value.
-        if output_hits[i_p_dist, i_b] >= max_ranges[i_s]:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
-
-
-@qd.func
-def func_ray_of_thread(
-    i_flat: int,
-    n_points: int,
-    n_envs: int,
+# Fastcache stays off for a kernel taking a visitor or a target (see RaycastTarget)
+@qd.kernel
+def kernel_cast_rays(
     points_to_sensor_idx: qd.types.ndarray(ndim=1),
     links_pos: qd.types.ndarray(ndim=3),
     links_quat: qd.types.ndarray(ndim=3),
     ray_starts: qd.types.ndarray(ndim=2),
     ray_directions: qd.types.ndarray(ndim=2),
+    max_ranges: qd.types.ndarray(ndim=1),
+    no_hit_values: qd.types.ndarray(ndim=1),
+    is_world_frame: qd.types.ndarray(ndim=1),
+    sensor_cache_offsets: qd.types.ndarray(ndim=1),
+    sensor_point_offsets: qd.types.ndarray(ndim=1),
+    sensor_point_counts: qd.types.ndarray(ndim=1),
+    sensor_return_points: qd.types.ndarray(ndim=1),
+    output_hits: qd.types.ndarray(ndim=2),
+    target: qd.template(),
     eps: float,
-    is_env_major: qd.template(),
+    is_merge: qd.template(),
+    is_last: qd.template(),
 ):
-    """Map a thread of a cast kernel to its env, ray and sensor, and return the ray in world frame with its local
-    direction."""
-    # The thread -> (ray, env) split is chosen at compile time from is_env_major:
-    #  - env-major (one tree serves several envs): env is the fastest-varying index, so a warp spans consecutive
-    #    envs mostly reading the same tree's nodes -> a coalesced broadcast.
-    #  - ray-major (distinct per-env trees): the ray is the fastest-varying index, so a warp stays within one env's
-    #    tree and rides ray coherence instead of diverging across n_env different trees.
-    i_p = 0
-    i_b = 0
-    if qd.static(is_env_major):
+    """Cast every ray of every sensor in every environment against a target (see RaycastTarget.cast).
+
+    The output holds per environment, for each sensor at its cache offset, the hit points of its rays when it returns
+    them (three values per ray), then the distances of its rays.
+
+    `is_merge` and `is_last` chain the launches over several targets into one output: the first writes every slot and
+    each later one overwrites a slot only with a closer hit. A miss never beats a hit of another launch whatever the
+    `no_hit_value` of the sensor (it may lie below the range, e.g. 0 or -1): a miss of a launch before the last seeds
+    the slot with the range, which every hit lies strictly below, and the last launch alone stamps `no_hit_value` on
+    the slots still holding the range.
+    """
+    n_envs = output_hits.shape[-1]
+    for i_flat in range(ray_starts.shape[0] * n_envs):
+        # The environment varies fastest, so that the threads of a warp read the same trees of the meshes
         i_p = i_flat // n_envs
         i_b = i_flat % n_envs
-    else:
-        i_b = i_flat // n_points
-        i_p = i_flat % n_points
-    i_s = points_to_sensor_idx[i_p]
-    link_pos = qd.math.vec3(links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2])
-    link_quat = qd.math.vec4(
-        links_quat[i_b, i_s, 0], links_quat[i_b, i_s, 1], links_quat[i_b, i_s, 2], links_quat[i_b, i_s, 3]
-    )
-    ray_start_local = qd.math.vec3(ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2])
-    ray_start_world = gu.qd_transform_by_trans_quat(ray_start_local, link_pos, link_quat)
-    ray_dir_local = qd.math.vec3(ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2])
-    ray_direction_world = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, link_quat), eps)
-    return i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local
+        i_s = points_to_sensor_idx[i_p]
+        link_pos = qd.Vector([links_pos[i_b, i_s, 0], links_pos[i_b, i_s, 1], links_pos[i_b, i_s, 2]])
+        link_quat = qd.Vector(
+            [links_quat[i_b, i_s, 0], links_quat[i_b, i_s, 1], links_quat[i_b, i_s, 2], links_quat[i_b, i_s, 3]]
+        )
+        ray_start = gu.qd_transform_by_trans_quat(
+            qd.Vector([ray_starts[i_p, 0], ray_starts[i_p, 1], ray_starts[i_p, 2]]), link_pos, link_quat
+        )
+        ray_dir_local = qd.Vector([ray_directions[i_p, 0], ray_directions[i_p, 1], ray_directions[i_p, 2]])
+        ray_dir = gu.qd_normalize(gu.qd_transform_by_quat(ray_dir_local, link_quat), eps)
+        max_range = max_ranges[i_s]
+        distance = target.cast(i_b, i_p, ray_start, ray_dir, max_range)
+        is_hit = distance < max_range
+
+        i_p_sensor = i_p - sensor_point_offsets[i_s]
+        i_p_offset = sensor_cache_offsets[i_s]
+        # The distances follow the block of the points when the sensor returns them
+        i_p_dist = i_p_offset + i_p_sensor
+        if sensor_return_points[i_s]:
+            i_p_dist += sensor_point_counts[i_s] * 3
+        if is_hit and (not is_merge or distance < output_hits[i_p_dist, i_b]):
+            output_hits[i_p_dist, i_b] = distance
+            if sensor_return_points[i_s]:
+                hit_point = distance * gu.qd_normalize(ray_dir_local, eps)
+                if is_world_frame[i_s]:
+                    hit_point = ray_start + distance * ray_dir
+                for j in qd.static(range(3)):
+                    output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = hit_point[j]
+        elif not is_merge:
+            if sensor_return_points[i_s]:
+                for j in qd.static(range(3)):
+                    output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = 0.0
+            output_hits[i_p_dist, i_b] = no_hit_values[i_s] if is_last else max_range
+        elif is_last:
+            if output_hits[i_p_dist, i_b] >= max_range:
+                output_hits[i_p_dist, i_b] = no_hit_values[i_s]
 
 
 @qd.kernel(fastcache=True)
-def kernel_cast_rays(
-    points_to_sensor_idx: qd.types.ndarray(ndim=1),  # [n_points]
-    env_bvh_idx_a: qd.types.ndarray(ndim=1),  # [n_env] - BVH tree slot each env casts against
-    env_bvh_idx_b: qd.types.ndarray(ndim=1),
-    links_pos: qd.types.ndarray(ndim=3),  # [n_env, n_sensors, 3]
-    links_quat: qd.types.ndarray(ndim=3),  # [n_env, n_sensors, 4]
-    ray_starts: qd.types.ndarray(ndim=2),  # [n_points, 3]
-    ray_directions: qd.types.ndarray(ndim=2),  # [n_points, 3]
-    max_ranges: qd.types.ndarray(ndim=1),  # [n_sensors]
-    no_hit_values: qd.types.ndarray(ndim=1),  # [n_sensors]
-    is_world_frame: qd.types.ndarray(ndim=1),  # [n_sensors]
-    sensor_cache_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - cache start index for each sensor
-    sensor_point_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - point start index for each sensor
-    sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
-    sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
-    output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
-    dyn_state: DynState,
-    bvh_tree_state_a: BVHTreeState,
-    bvh_tree_state_b: BVHTreeState,
-    dyn_info: DynInfo,
+def kernel_fit_mesh_instances(
+    geoms_link_idx: qd.Tensor,
+    links_geom_start: qd.Tensor,
+    links_geom_end: qd.Tensor,
+    geoms_pos: qd.Tensor,
+    geoms_quat: qd.Tensor,
+    instances: BVHState,
+    meshes: PackedInstances,
+    rigid_config: qd.template(),
+    bvh_config: qd.template(),
     eps: float,
-    is_merge: qd.template(),
-    is_last: qd.template(),
-    is_env_major: qd.template(),
-    is_split: qd.template(),
 ):
-    """Cast every ray of every env against the collision BVH set of a solver, or against its two sets when its faces
-    are split between static and movable links (see RaycastContext.activate), taking the closer hit.
+    """Fit the box of each geom of every environment posed in the world from the root of its tree, the leaves of the
+    top-level trees, and build them.
 
-    The second set casts with the distance of the first hit as its range, so it reports a hit only when closer.
-    See write_ray_hit for `is_merge` / `is_last`, which chain the launches over several BVH sets into one output
-    buffer. ``output_hits`` is a 2D array of shape (total_cache_size, n_env) where in the first dimension each
-    sensor's data is stored as [sensor_points (n_points * 3), sensor_ranges (n_points)], the point block being present
-    only for sensors with sensor_return_points set.
-
-    env_bvh_idx routes each env to the BVH tree slot it casts against: identity for per-env trees, all-zero for one
-    shared tree, group ids for a grouped static BVH (N distinct geometries, N <= n_env). is_env_major is a
-    compile-time flag selecting the thread -> (ray, env) mapping matching that tree layout.
+    A geom without tree or that the environment does not carry (see func_update_geoms) gets an empty box, which no
+    query reaches.
     """
-    n_points = ray_starts.shape[0]
-    n_envs = output_hits.shape[-1]
-    for i_flat in range(n_points * n_envs):
-        i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
-            i_flat,
-            n_points,
-            n_envs,
-            points_to_sensor_idx,
-            links_pos,
-            links_quat,
-            ray_starts,
-            ray_directions,
-            eps,
-            is_env_major,
-        )
-        hit_face, hit_distance, _hit_normal = bvh_ray_cast(
-            env_bvh_idx_a[i_b],
-            i_b,
-            ray_start_world,
-            ray_direction_world,
-            max_ranges[i_s],
-            dyn_state,
-            bvh_tree_state_a,
-            dyn_info,
-            eps,
-        )
-        if qd.static(is_split):
-            hit_range = max_ranges[i_s] if hit_face < 0 else hit_distance
-            hit_face_b, hit_distance_b, _hit_normal_b = bvh_ray_cast(
-                env_bvh_idx_b[i_b],
-                i_b,
-                ray_start_world,
-                ray_direction_world,
-                hit_range,
-                dyn_state,
-                bvh_tree_state_b,
-                dyn_info,
-                eps,
+    for i_g, i_b in qd.ndrange(instances.leaves.aabbs_min.shape[1], instances.leaves.aabbs_min.shape[0]):
+        aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+        aabb_max = -aabb_min
+        i_tree = meshes.instances_tree_idx[i_g]
+        i_l = geoms_link_idx[i_g]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if i_tree >= 0 and links_geom_start[I_l] <= i_g and i_g < links_geom_end[I_l]:
+            i_root = meshes.trees_root[i_tree]
+            aabb_min, aabb_max = gu.qd_transform_aabb(
+                meshes.tree.nodes_min[0, i_root],
+                meshes.tree.nodes_max[0, i_root],
+                trans=geoms_pos[i_g, i_b],
+                quat=geoms_quat[i_g, i_b],
             )
-            if hit_face_b >= 0:
-                hit_face = hit_face_b
-                hit_distance = hit_distance_b
-        write_ray_hit(
-            i_b,
-            i_p,
-            i_s,
-            hit_face,
-            hit_distance,
-            ray_start_world,
-            ray_direction_world,
-            ray_dir_local,
-            is_world_frame,
-            max_ranges,
-            no_hit_values,
-            sensor_cache_offsets,
-            sensor_point_offsets,
-            sensor_point_counts,
-            sensor_return_points,
-            output_hits,
-            eps,
-            is_merge,
-            is_last,
-        )
+        instances.leaves.aabbs_min[i_b, i_g] = aabb_min
+        instances.leaves.aabbs_max[i_b, i_g] = aabb_max
+    func_build_bvh(instances.leaves.aabbs_min.shape[0], instances, bvh_config, eps)
 
 
 @qd.kernel(fastcache=True)
-def kernel_cast_rays_visual(
-    points_to_sensor_idx: qd.types.ndarray(ndim=1),
-    env_bvh_idx: qd.types.ndarray(ndim=1),
-    links_pos: qd.types.ndarray(ndim=3),
-    links_quat: qd.types.ndarray(ndim=3),
-    ray_starts: qd.types.ndarray(ndim=2),
-    ray_directions: qd.types.ndarray(ndim=2),
-    max_ranges: qd.types.ndarray(ndim=1),
-    no_hit_values: qd.types.ndarray(ndim=1),
-    is_world_frame: qd.types.ndarray(ndim=1),
-    sensor_cache_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_offsets: qd.types.ndarray(ndim=1),
-    sensor_point_counts: qd.types.ndarray(ndim=1),
-    sensor_return_points: qd.types.ndarray(ndim=1),
-    output_hits: qd.types.ndarray(ndim=2),
+def kernel_fit_world_faces(
     dyn_state: DynState,
-    bvh_tree_state: BVHTreeState,
+    bvh_state: BVHState,
     dyn_info: DynInfo,
+    faces: WorldFaces,
+    rigid_config: qd.template(),
+    bvh_config: qd.template(),
     eps: float,
-    is_merge: qd.template(),
-    is_last: qd.template(),
-    is_env_major: qd.template(),
 ):
-    """Cast every ray of every env against one visual BVH set.
+    """Fit the box of each face of every environment in the world, the leaves of the trees of the environments, and
+    build them.
 
-    See kernel_cast_rays for the arguments.
+    A face of a visual geom that the environment does not carry gets an empty box, which no query reaches.
     """
-    n_points = ray_starts.shape[0]
-    n_envs = output_hits.shape[-1]
-    for i_flat in range(n_points * n_envs):
-        i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
-            i_flat,
-            n_points,
-            n_envs,
-            points_to_sensor_idx,
-            links_pos,
-            links_quat,
-            ray_starts,
-            ray_directions,
-            eps,
-            is_env_major,
+    for i_f, i_b in qd.ndrange(bvh_state.leaves.aabbs_min.shape[1], bvh_state.leaves.aabbs_min.shape[0]):
+        aabb_min = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
+        aabb_max = -aabb_min
+        i_g = faces.faces_geom_idx[i_f]
+        i_l = dyn_info.vgeoms.link_idx[i_g]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.vgeom_start[I_l] <= i_g and i_g < dyn_info.links.vgeom_end[I_l]:
+            for j in qd.static(range(3)):
+                i_v = faces.faces_verts_idx[i_f][j]
+                aabb_min = qd.min(aabb_min, dyn_state.vverts.pos[i_v, i_b])
+                aabb_max = qd.max(aabb_max, dyn_state.vverts.pos[i_v, i_b])
+        bvh_state.leaves.aabbs_min[i_b, i_f] = aabb_min
+        bvh_state.leaves.aabbs_max[i_b, i_f] = aabb_max
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
+
+
+@qd.data_oriented
+class RayTriangles:
+    """The visitor of the triangles of a tree that a ray crosses, its bound being the distance of the closest crossing.
+
+    The query is the ray in the frame of the tree, with the projection a triangle test needs, computed once per frame
+    (see Query and ray_projection). It reads the vertices of each face, `faces_verts_idx`, among `verts`, and the poses
+    of the geoms (`geoms_state`). Without `faces_geom_idx`, the tree spans a mesh in the frame of its geom, the vertices
+    are those of the meshes, and the geom is the instance i_k the walk entered (see InstancesQuery). With it, the
+    vertices are those of each environment in the world, each face giving its geom (see WorldFaces). With `hits`, it
+    records the geom and the outward normal in the world of the closest crossing of each environment, the query index
+    being the environment (see RaycastResult).
+    """
+
+    is_instance_level = False
+
+    def __init__(
+        self,
+        verts: qd.Tensor,
+        faces_verts_idx: qd.Tensor,
+        geoms_state,
+        eps: qd.Tensor,
+        faces_geom_idx: qd.Tensor | None,
+        hits: RaycastResult | None,
+    ) -> None:
+        self.verts = verts
+        self.faces_verts_idx = faces_verts_idx
+        self.geoms_state = geoms_state
+        self.eps = eps
+        self.faces_geom_idx = faces_geom_idx
+        self.hits = hits
+        self.is_world_verts = faces_geom_idx is not None
+        self.is_recording_hits = hits is not None
+        # The start and the direction of the ray, then its projection (see ray_projection)
+        self.Query = qd.types.struct(
+            start=qd.types.vector(3, gs.qd_float),
+            dir=qd.types.vector(3, gs.qd_float),
+            shear=qd.types.vector(3, gs.qd_float),
+            axes=qd.types.vector(3, gs.qd_int),
         )
-        hit_face, hit_distance, _hit_normal = bvh_ray_cast_visual(
-            env_bvh_idx[i_b],
-            i_b,
-            ray_start_world,
-            ray_direction_world,
-            max_ranges[i_s],
-            dyn_state,
-            bvh_tree_state,
-            dyn_info,
-            eps,
+
+    @qd.func
+    def is_node_hit(
+        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+    ) -> bool:
+        aabb_t = ray_aabb_intersection(query.start, query.dir, node_min, node_max, self.eps[None])
+        return aabb_t >= 0.0 and aabb_t < bound
+
+    @qd.func
+    def is_instance_kept(self, i_t: int, i_q: int, i_k: int) -> bool:
+        return True
+
+    @qd.func
+    def to_frame(self, query, pos: qd.types.vector(3), quat: qd.types.vector(4)):
+        ray_dir = gu.qd_inv_transform_by_quat(query.dir, quat)
+        axes, shear, _is_valid = ray_projection(ray_dir, self.eps[None])
+        return self.Query(
+            start=gu.qd_inv_transform_by_trans_quat(query.start, pos, quat), dir=ray_dir, shear=shear, axes=axes
         )
-        write_ray_hit(
-            i_b,
-            i_p,
-            i_s,
-            hit_face,
-            hit_distance,
-            ray_start_world,
-            ray_direction_world,
-            ray_dir_local,
-            is_world_frame,
-            max_ranges,
-            no_hit_values,
-            sensor_cache_offsets,
-            sensor_point_offsets,
-            sensor_point_counts,
-            sensor_return_points,
-            output_hits,
-            eps,
-            is_merge,
-            is_last,
+
+    @qd.func
+    def visit_leaf(self, i_t: int, i_q: int, i_k: int, i_a: int, query, bound: float) -> float:
+        tri_verts = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for j in qd.static(range(3)):
+            i_v = self.faces_verts_idx[i_a][j]
+            if qd.static(self.is_world_verts):
+                tri_verts[:, j] = self.verts[i_v, i_t]
+            else:
+                tri_verts[:, j] = self.verts[i_v]
+        v0, v1, v2 = tri_verts[:, 0], tri_verts[:, 1], tri_verts[:, 2]
+        distance = ray_triangle_intersection(query.axes, query.start, query.shear, v0, v1, v2, self.eps[None])
+        if distance >= 0.0 and distance < bound:
+            bound = distance
+            if qd.static(self.is_recording_hits):
+                normal = triangle_face_normal(v0, v1, v2, self.eps[None])
+                if qd.static(self.is_world_verts):
+                    self.hits.geom_idx[i_q] = self.faces_geom_idx[i_a]
+                else:
+                    self.hits.geom_idx[i_q] = i_k
+                    normal = gu.qd_transform_by_quat(normal, self.geoms_state.quat[i_k, i_t])
+                self.hits.normal[i_q] = normal
+        return bound
+
+
+@qd.data_oriented
+class ClosestTriangles:
+    """The visitor of the triangles of the trees of the geoms within a radius of a point, its bound being the squared
+    distance of the closest one.
+
+    The query is the point, in the frame of the geom the walk entered (see InstancesQuery). It reads the vertices of
+    the meshes in the frame of their geom, the vertices of each face, the poses of the geoms (`geoms_state`), the
+    sensor of each query and the geoms each sensor may reach (see ClosestQueries and CandidateGeoms), and records the
+    closest triangle of each query (see ClosestHits).
+    """
+
+    is_instance_level = False
+
+    def __init__(
+        self,
+        verts_init_pos: qd.Tensor,
+        faces_verts_idx: qd.Tensor,
+        geoms_state,
+        eps: qd.Tensor,
+        queries: ClosestQueries,
+        candidate_geoms: CandidateGeoms,
+        hits: ClosestHits,
+    ) -> None:
+        self.verts_init_pos = verts_init_pos
+        self.faces_verts_idx = faces_verts_idx
+        self.geoms_state = geoms_state
+        self.eps = eps
+        self.queries = queries
+        self.candidate_geoms = candidate_geoms
+        self.hits = hits
+        self.Query = qd.types.struct(point=qd.types.vector(3, gs.qd_float))
+
+    @qd.func
+    def is_node_hit(
+        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+    ) -> bool:
+        return func_sphere_intersects_aabb(query.point, bound, node_min, node_max)
+
+    @qd.func
+    def is_instance_kept(self, i_t: int, i_q: int, i_k: int) -> bool:
+        i_s = self.queries.sensor_idx[i_q]
+        i_b = i_t if self.candidate_geoms.is_candidate.shape[2] > 1 else 0
+        return self.candidate_geoms.is_candidate[i_s, i_k, i_b]
+
+    @qd.func
+    def to_frame(self, query, pos: qd.types.vector(3), quat: qd.types.vector(4)):
+        return self.Query(point=gu.qd_inv_transform_by_trans_quat(query.point, pos, quat))
+
+    @qd.func
+    def visit_leaf(self, i_t: int, i_q: int, i_k: int, i_a: int, query, bound: float) -> float:
+        i_vs = self.faces_verts_idx[i_a]
+        v0 = self.verts_init_pos[i_vs[0]]
+        v1 = self.verts_init_pos[i_vs[1]]
+        v2 = self.verts_init_pos[i_vs[2]]
+        diff = query.point - closest_point_on_triangle(query.point, v0, v1, v2)
+        dist_sq = diff.norm_sqr()
+        if dist_sq < bound:
+            bound = dist_sq
+            normal = triangle_face_normal(v0, v1, v2, self.eps[None])
+            self.hits.signed_dist[i_q, i_t] = qd.select(diff.dot(normal) >= 0.0, 1.0, -1.0) * qd.sqrt(dist_sq)
+            self.hits.geom_idx[i_q, i_t] = i_k
+            self.hits.normal[i_q, i_t] = gu.qd_transform_by_quat(normal, self.geoms_state.quat[i_k, i_t])
+        return bound
+
+
+@qd.data_oriented
+class ClosestQuery:
+    """The closest-point query of the triangles of the geoms of a target that the candidate geoms of each sensor
+    select, a query per point and environment (see ClosestTriangles)."""
+
+    def __init__(self, instances_query: InstancesQuery, instances: BVHState) -> None:
+        self.instances_query = instances_query
+        self.instances = instances
+
+    @qd.func
+    def closest(self, i_t: int, i_q: int, point: qd.types.vector(3), radius: float):
+        """Return the triangle closest to the point of query i_q in environment i_t within a radius.
+
+        The result is the signed distance (negative when the point lies behind the face of the triangle), the geom and
+        the outward normal in the world, `radius`, -1 and zero without triangle within the radius.
+        """
+        self.instances_query.inner.hits.signed_dist[i_q, i_t] = radius
+        self.instances_query.inner.hits.geom_idx[i_q, i_t] = -1
+        self.instances_query.inner.hits.normal[i_q, i_t] = qd.Vector.zero(gs.qd_float, 3)
+        func_bvh_traverse(
+            i_t,
+            i_q,
+            i_root=0,
+            leaf_offset=self.instances.tree.leaves_idx.shape[1] - 1,
+            leaf_base=0,
+            query=self.instances_query.Query(point=point),
+            bound=radius * radius,
+            tree=self.instances.tree,
+            visitor=self.instances_query,
         )
+        return (
+            self.instances_query.inner.hits.signed_dist[i_q, i_t],
+            self.instances_query.inner.hits.geom_idx[i_q, i_t],
+            self.instances_query.inner.hits.normal[i_q, i_t],
+        )
+
+
+# FIXME: quadrants#1039 - the fastcache key misses the fields a data_oriented visitor or target reads through its
+# methods, so the kernels taking one go without fastcache, their Python front end compiled again in every process.
+@qd.data_oriented
+class RaycastTarget:
+    """The collision or the visual geoms of a solver as a target of ray casts and closest-point queries.
+
+    The trees of their meshes (see get_solver_meshes) lie under a top-level tree per environment over the geoms. With
+    `hits`, its ray casts record the geom and the normal of the closest hit of each environment there.
+    """
+
+    def __init__(
+        self, solver: "KinematicSolver", is_visual: bool, meshes: PackedInstances, hits: RaycastResult | None
+    ) -> None:
+        self.solver = solver
+        self.is_visual = is_visual
+        self.meshes = meshes
+        self.hits = hits
+        self.eps = solver.rigid_info.EPS
+        dyn_info, dyn_state = solver.dyn_info, solver.dyn_state
+        self.geoms_info = dyn_info.vgeoms if is_visual else dyn_info.geoms
+        self.geoms_state = dyn_state.vgeoms if is_visual else dyn_state.geoms
+        # The arrays alone, the collision and the visual structs naming their fields differently
+        self.verts_init_pos = dyn_info.vverts.init_pos if is_visual else dyn_info.verts.init_pos
+        self.faces_verts_idx = dyn_info.vfaces.vverts_idx if is_visual else dyn_info.faces.verts_idx
+        bvh = get_bvh_data(solver._B, meshes.instances_tree_idx.shape[0])
+        self.tree_state = bvh.state
+        self.tree_config = bvh.config
+        self.ray_query = InstancesQuery(
+            RayTriangles(
+                self.verts_init_pos, self.faces_verts_idx, self.geoms_state, self.eps, faces_geom_idx=None, hits=hits
+            ),
+            meshes,
+            self.geoms_state,
+        )
+
+    def update(self) -> None:
+        """Fit the top-level trees to the current poses of the geoms."""
+        if self.is_visual:
+            self.solver.update_forward_pos()
+            self.solver.update_vgeoms()
+            dyn_info = self.solver.dyn_info
+            kernel_fit_mesh_instances(
+                self.geoms_info.link_idx,
+                dyn_info.links.vgeom_start,
+                dyn_info.links.vgeom_end,
+                self.geoms_state.pos,
+                self.geoms_state.quat,
+                self.tree_state,
+                self.meshes,
+                self.solver.rigid_config,
+                self.tree_config,
+                eps=gs.EPS,
+            )
+        else:
+            # The forward kinematics of the rigid solver refits the box of each geom with its pose (see
+            # func_update_geom_aabb), before the sensors and the viewer read it.
+            kernel_build_instances_tree(
+                i_k_excluded=-1,
+                instances_aabb_min=self.geoms_state.aabb_min,
+                instances_aabb_max=self.geoms_state.aabb_max,
+                bvh_state=self.tree_state,
+                packed_instances=self.meshes,
+                bvh_config=self.tree_config,
+                eps=gs.EPS,
+            )
+
+    def build_closest_query(self, queries_sensor_idx: np.ndarray, candidate_geoms: CandidateGeoms) -> ClosestQuery:
+        """Return the closest-point query of the triangles of the geoms, of the given sensor per query, among the
+        candidate geoms of each sensor."""
+        queries = ClosestQueries(sizes=dict(closest_queries=len(queries_sensor_idx)))
+        queries.sensor_idx.from_numpy(queries_sensor_idx)
+        hits = ClosestHits(sizes=dict(closest_queries=len(queries_sensor_idx), envs=self.solver._B))
+        closest_triangles = ClosestTriangles(
+            self.verts_init_pos, self.faces_verts_idx, self.geoms_state, self.eps, queries, candidate_geoms, hits
+        )
+        return ClosestQuery(InstancesQuery(closest_triangles, self.meshes, self.geoms_state), self.tree_state)
+
+    @qd.func
+    def cast(
+        self, i_t: int, i_q: int, ray_start: qd.types.vector(3), ray_dir: qd.types.vector(3), max_range: float
+    ) -> float:
+        """Cast ray i_q against the geoms of environment i_t, and return the distance of its closest hit, `max_range`
+        without hit or for a direction too short to define a ray."""
+        distance = max_range
+        axes, shear, is_valid = ray_projection(ray_dir, self.eps[None])
+        if is_valid:
+            distance = func_bvh_traverse(
+                i_t,
+                i_q,
+                i_root=0,
+                leaf_offset=self.tree_state.tree.leaves_idx.shape[1] - 1,
+                leaf_base=0,
+                query=self.ray_query.Query(start=ray_start, dir=ray_dir, shear=shear, axes=axes),
+                bound=max_range,
+                tree=self.tree_state.tree,
+                visitor=self.ray_query,
+            )
+        return distance
+
+
+@qd.data_oriented
+class RaycastWorldTarget(RaycastTarget):
+    """The visual geoms of a solver opted into raycasting whose vertices are set per environment in the world (see
+    set_vverts) as a target of ray casts: a tree per environment over their faces.
+
+    The trees are rebuilt when a change of the geometry of the solver is pending and at the first update. With `hits`,
+    its ray casts record the geom and the normal of the closest hit of each environment there.
+    """
+
+    def __init__(self, solver: "KinematicSolver", faces_idx: np.ndarray, hits: RaycastResult | None) -> None:
+        self.solver = solver
+        self.is_visual = True
+        self.hits = hits
+        self.eps = solver.rigid_info.EPS
+        dyn_info = solver.dyn_info
+        vverts_state_idx = qd_to_numpy(dyn_info.vverts.vverts_state_idx, transpose=True)
+        faces_vverts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
+        self.faces = WorldFaces(sizes=dict(world_faces=len(faces_idx)))
+        self.faces.faces_verts_idx.from_numpy(vverts_state_idx[faces_vverts_idx[faces_idx]])
+        self.faces.faces_geom_idx.from_numpy(qd_to_numpy(dyn_info.vfaces.vgeom_idx, transpose=True)[faces_idx])
+        bvh = get_bvh_data(solver._B, len(faces_idx))
+        self.tree_state = bvh.state
+        self.tree_config = bvh.config
+        self.ray_query = RayTriangles(
+            solver.dyn_state.vverts.pos,
+            self.faces.faces_verts_idx,
+            solver.dyn_state.vgeoms,
+            self.eps,
+            faces_geom_idx=self.faces.faces_geom_idx,
+            hits=hits,
+        )
+        self.subscriber = Subscriber(to=frozenset({StateChange.GEOMETRY}))
+        solver.subscribe(self.subscriber)
+        self.is_stale = True
+
+    def update(self) -> None:
+        """Rebuild the trees if the vertices may have changed since the last build."""
+        if not (self.is_stale or self.subscriber.pending):
+            return
+        self.subscriber.clear()
+        self.is_stale = False
+        kernel_fit_world_faces(
+            self.solver.dyn_state,
+            self.tree_state,
+            self.solver.dyn_info,
+            self.faces,
+            self.solver.rigid_config,
+            self.tree_config,
+            eps=gs.EPS,
+        )
+
+
+def get_raycast_targets(
+    solver: "KinematicSolver", is_visual: bool, hits: RaycastResult | None = None
+) -> list[RaycastTarget]:
+    """Return the targets of the collision geoms of a solver, or of its visual geoms opted into raycasting, recording
+    the geom and the normal of the closest hit of each environment in `hits` if given.
+
+    The visual geoms whose vertices are set per environment (see set_vverts) form a target of their own. A target
+    without face is left out.
+    """
+    dyn_info = solver.dyn_info
+    if not is_visual:
+        if dyn_info.faces.verts_idx.shape[0] == 0:
+            return []
+        return [RaycastTarget(solver, is_visual, get_solver_meshes(solver, is_visual), hits)]
+    faces_vverts_idx = qd_to_numpy(dyn_info.vfaces.vverts_idx, transpose=True)
+    faces_is_world = qd_to_numpy(dyn_info.vverts.vverts_state_idx, transpose=True)[faces_vverts_idx[:, 0]] >= 0
+    faces_is_used = tensor_to_array(solver.vfaces_raycast_mask, dtype=bool)
+    faces_is_mesh = faces_is_used & ~faces_is_world
+    targets = []
+    if faces_is_mesh.any():
+        targets.append(RaycastTarget(solver, is_visual, get_solver_meshes(solver, is_visual, faces_is_mesh), hits))
+    if (faces_is_used & faces_is_world).any():
+        targets.append(RaycastWorldTarget(solver, np.flatnonzero(faces_is_used & faces_is_world), hits))
+    return targets

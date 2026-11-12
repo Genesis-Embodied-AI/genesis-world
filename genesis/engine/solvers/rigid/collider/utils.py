@@ -3,7 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import GEOM_TYPE
-from genesis.engine.solvers.rigid.data import DynInfo, DynState, GeomsInitAABB, RigidInfo
+from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 
 
 @qd.func
@@ -90,7 +90,6 @@ def func_is_geom_boxes_overlap(
     i_ga: int,
     i_gb: int,
     i_b: int,
-    geoms_init_AABB: GeomsInitAABB,
     dyn_state: DynState,
     dyn_info: DynInfo,
     rigid_info: RigidInfo,
@@ -116,10 +115,10 @@ def func_is_geom_boxes_overlap(
         and dyn_info.geoms.type[i_gb] != GEOM_TYPE.TERRAIN
     ):
         EPS = rigid_info.EPS[None]
-        half_a = 0.5 * (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0])
-        half_b = 0.5 * (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0])
-        center_a = 0.5 * (geoms_init_AABB[i_ga, 7] + geoms_init_AABB[i_ga, 0])
-        center_b = 0.5 * (geoms_init_AABB[i_gb, 7] + geoms_init_AABB[i_gb, 0])
+        half_a = 0.5 * (rigid_info.geoms_init_AABB[i_ga, 7] - rigid_info.geoms_init_AABB[i_ga, 0])
+        half_b = 0.5 * (rigid_info.geoms_init_AABB[i_gb, 7] - rigid_info.geoms_init_AABB[i_gb, 0])
+        center_a = 0.5 * (rigid_info.geoms_init_AABB[i_ga, 7] + rigid_info.geoms_init_AABB[i_ga, 0])
+        center_b = 0.5 * (rigid_info.geoms_init_AABB[i_gb, 7] + rigid_info.geoms_init_AABB[i_gb, 0])
 
         # The axes of box b and the offset of its center, in the frame of box a
         quat_a = dyn_state.geoms.quat[i_ga, i_b]

@@ -476,8 +476,3 @@ def _func_count_supports_box(d: qd.types.vector(3), quat: qd.types.vector(4)):
     d_box = gu.qd_inv_transform_by_quat(d, quat)
 
     return 2 ** (d_box == 0.0).cast(gs.qd_int).sum()
-
-
-from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
-
-create_virtual_deprecated_module(__name__, "genesis.engine.solvers.rigid.support_field_decomp")

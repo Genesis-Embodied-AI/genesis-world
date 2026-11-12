@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 import torch
 
+import trimesh
+
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -398,6 +401,19 @@ def test_deformable_parallel(show_viewer):
     assert final_cloth_pos[..., 2].min() > -1e-5
     assert final_water_pos[..., 2].min() > -1e-5
 
+    # The liquid at rest on a rigid floor stands half a particle size above it, up to the discretization of the boundary
+    # FIXME: Within a support radius of a wall, the ghost lattice and the continuous plane disagree on the boundary
+    # volume, which lowers the corner layer. Replacing the wall lattice by exact boundaries removes it.
+    sph_solver = scene.sph_solver
+    water_pos = tensor_to_array(final_water_pos)
+    is_middle = (
+        (water_pos[..., :2] > sph_solver.boundary_lower[:2] + sph_solver.support_radius)
+        & (water_pos[..., :2] < sph_solver.boundary_upper[:2] - sph_solver.support_radius)
+    ).all(axis=-1)
+    is_bottom_middle = is_middle & (water_pos[..., 2] < sph_solver.particle_size)
+    bottom_height = (water_pos[..., 2] * is_bottom_middle).sum(axis=-1) / is_bottom_middle.sum(axis=-1)
+    assert_allclose(bottom_height, 0.5 * sph_solver.particle_size, atol=0.1 * sph_solver.particle_size)
+
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
     assert_allclose(entity_fem.get_verts_vel(), 0, atol=1e-3)
@@ -635,22 +651,28 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
         scene.step()
     slider.set_dofs_velocity([1.0], dofs_idx_local=[0])
     push_force = 0.5 * MU * pushed.get_mass() * GRAVITY
-    slider_vel, slider_height, pushed_vel = [], [], []
+    slider_vel, slider_height, pushed_slip = [], [], []
     for _ in range(70):
         pushed.control_dofs_force(push_force[..., None], dofs_idx_local=[0])
         scene.step()
         slider_vel.append(tensor_to_array(slider.get_vel()))
         slider_height.append(tensor_to_array(slider.get_pos()[..., 2]) - PLANES_HEIGHT)
-        pushed_vel.append(tensor_to_array(pushed.get_vel()))
-    slider_vel, slider_height, pushed_vel = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_vel)
+        # The velocity of the center of the bottom face of the pushed box, where it slips on the ground
+        pushed_quat = pushed.get_quat()
+        bottom_arm = gu.transform_by_quat(
+            pushed_quat.new_tensor((0.0, 0.0, -0.05)).expand(*pushed_quat.shape[:-1], 3), pushed_quat
+        )
+        pushed_slip.append(tensor_to_array(pushed.get_vel() + torch.linalg.cross(pushed.get_ang(), bottom_arm)))
+    slider_vel, slider_height, pushed_slip = np.stack(slider_vel), np.stack(slider_height), np.stack(pushed_slip)
 
     # The sliding box stays on the ground, decelerating at the rate of Coulomb friction until it stops
     assert_allclose(slider_height, 0.05, atol=1e-3)
     assert_allclose(np.diff(slider_vel[:10, ..., 0], axis=0), -MU * GRAVITY * DT, tol=2e-3)
     assert_allclose(slider_vel[15:], 0.0, atol=1e-3)
 
-    # The pushed box sticks, creeping at most at the stiction tolerance
-    assert (np.linalg.norm(pushed_vel[..., :2], axis=-1) < 1e-4).all()
+    # The pushed box sticks, slipping at most at the stiction tolerance. Its center of mass moves faster while the box
+    # rocks on its compliant contact, which involves no slip.
+    assert (np.linalg.norm(pushed_slip[..., :2], axis=-1) < 1e-4).all()
 
     # All the entities must be still
     for entity in scene.entities:
@@ -668,6 +690,276 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
     assert (robot_1_aabb[..., 0, :2] < 0.4).all() and (robot_2_aabb[..., 0, :2] < 0.4).all()
     assert (robot_1_aabb[..., 1, 2] - PLANES_HEIGHT > 2 * BOX_HALFHEIGHT).all()
     assert (robot_2_aabb[..., 1, 2] > robot_1_aabb[..., 1, 2] + 0.05).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("model_name", ["scaled_mjcf_joint_equalities"])
+@pytest.mark.parametrize("n_envs, is_batched", [(0, False), (2, True)])
+def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched, tol):
+    DT = 1e-2
+    SCALE = 2.0
+    COEFFICIENTS = (0.2, 0.4, -0.3, 0.2, -0.1)
+    DRIVER_POSITION = 0.5
+    DRIVER_VELOCITY = 0.4
+    FOLLOWER_POSITION = sum([coefficient * DRIVER_POSITION**degree for degree, coefficient in enumerate(COEFFICIENTS)])
+    DERIVATIVE = sum(
+        [degree * coefficient * DRIVER_POSITION ** (degree - 1) for degree, coefficient in enumerate(COEFFICIENTS)]
+    )
+    FOLLOWER_VELOCITY = DRIVER_VELOCITY * DERIVATIVE
+    TARGET_POSITION = 0.25
+    UNRELATED_POSITION = 1.0
+    MAX_RESIDUAL_RATIO = 1e-3
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_joints_info=is_batched,
+            batch_dofs_info=is_batched,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            rigid_rigid_contact_type="none",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.15, -0.75, 4.0),
+            camera_lookat=(0.15, -0.75, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=xml_path,
+            scale=SCALE,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # Driver and follower joints of each pair, with the scale of their coordinates
+    joints_pairs = []
+    for driver_type, follower_type in (("hinge", "hinge"), ("slide", "slide"), ("slide", "hinge"), ("hinge", "slide")):
+        driver_joint = entity.get_joint(f"{driver_type}_{follower_type}_driver")
+        follower_joint = entity.get_joint(f"{driver_type}_{follower_type}_follower")
+        driver_scale = SCALE if driver_type == "slide" else 1.0
+        follower_scale = SCALE if follower_type == "slide" else 1.0
+        joints_pairs.append((driver_joint, follower_joint, driver_scale, follower_scale))
+    (i_target_q,) = entity.get_joint("target").qs_idx_local
+    (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+
+    # A velocity tangent to the polynomial triggers no constraint impulse
+    qpos = entity.get_qpos()
+    dofs_vel = entity.get_dofs_velocity()
+    for driver_joint, follower_joint, driver_scale, follower_scale in joints_pairs:
+        qpos[..., driver_joint.qs_idx_local[0]] = DRIVER_POSITION * driver_scale
+        qpos[..., follower_joint.qs_idx_local[0]] = FOLLOWER_POSITION * follower_scale
+        dofs_vel[..., driver_joint.dofs_idx_local[0]] = DRIVER_VELOCITY * driver_scale
+        dofs_vel[..., follower_joint.dofs_idx_local[0]] = FOLLOWER_VELOCITY * follower_scale
+    qpos[..., i_target_q] = TARGET_POSITION * SCALE
+    qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
+    entity.set_qpos(qpos)
+    entity.set_dofs_velocity(dofs_vel)
+    scene.step()
+    assert_allclose(entity.get_qpos(), qpos + dofs_vel * DT, tol=tol)
+
+    # From rest, the solve leaves the share R / (R + J M^-1 J^T) of the linearized residual, which the regularization R
+    # keeps below MAX_RESIDUAL_RATIO. Every driver at its reference pose checks the Jacobian at poly(0) = a0 and
+    # poly'(0) = a1, and the target joint, which has no second joint, is pulled to a0.
+    for driver_joint, follower_joint, _, _ in joints_pairs:
+        qpos[..., driver_joint.qs_idx_local[0]] = 0.0
+        qpos[..., follower_joint.qs_idx_local[0]] = 0.0
+    qpos[..., i_target_q] = 0.0
+    entity.set_qpos(qpos)
+    mass_mat = entity.get_mass_mat()
+    scene.step()
+
+    qpos_after = entity.get_qpos()
+    for driver_joint, follower_joint, driver_scale, follower_scale in joints_pairs:
+        (i_driver_q,) = driver_joint.qs_idx_local
+        (i_follower_q,) = follower_joint.qs_idx_local
+        (i_driver_d,) = driver_joint.dofs_idx_local
+        (i_follower_d,) = follower_joint.dofs_idx_local
+        driver_displacement = (qpos_after[..., i_driver_q] - qpos[..., i_driver_q]) / driver_scale
+        expected_follower_position = COEFFICIENTS[0] + COEFFICIENTS[1] * driver_displacement
+        assert_allclose(
+            qpos_after[..., i_follower_q] / follower_scale,
+            expected_follower_position,
+            atol=MAX_RESIDUAL_RATIO * COEFFICIENTS[0],
+        )
+
+        # Each joint has its own root link, so its generalized impulse is M_ii * delta_q / dt. The two impulses have the
+        # ratio -poly'(driver), including the scaling of the coordinates.
+        driver_impulse = (
+            mass_mat[..., i_driver_d, i_driver_d] * (qpos_after[..., i_driver_q] - qpos[..., i_driver_q]) / DT
+        )
+        follower_impulse = (
+            mass_mat[..., i_follower_d, i_follower_d] * (qpos_after[..., i_follower_q] - qpos[..., i_follower_q]) / DT
+        )
+        assert_allclose(driver_impulse, -COEFFICIENTS[1] * follower_scale / driver_scale * follower_impulse, tol=tol)
+
+    assert_allclose(qpos_after[..., i_target_q] / SCALE, TARGET_POSITION, atol=MAX_RESIDUAL_RATIO * TARGET_POSITION)
+    assert_allclose(qpos_after[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
+
+
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("rigid_floor_contact_type", ["tet", "vert"])
+def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_viewer):
+    SLAB_SIZE = (0.4, 0.4, 0.2)
+    CUBE_SIZE = (0.1, 0.1, 0.1)
+    RHO = 1000.0
+    GRAVITY = 9.81
+    DT = 1 / 60
+    SUBSTEPS = 2
+    SAP_TAUD = 0.1
+    SAP_BETA = 0.125
+    # Stiffness of each contact of the vertex floor
+    VERT_STIFFNESS = 1e6
+    FRICTION_MU = 0.5
+    STICTION_TOLERANCE = 1e-4
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            sap_taud=SAP_TAUD,
+            sap_beta=SAP_BETA,
+            stiction_tolerance=STICTION_TOLERANCE,
+            rigid_floor_contact_type=rigid_floor_contact_type,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -2.0, 1.0),
+            camera_lookat=(0.0, 0.2, 0.1),
+        ),
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    # A slab in the first environment and a small cube in the second, each starting slightly sunk into the ground. The
+    # second environment keeps the slab where it was last placed, sunk deep into the ground, which it must not touch.
+    variants = scene.add_entity(
+        morph=(
+            gs.morphs.Box(
+                size=SLAB_SIZE,
+                pos=(0.0, 0.0, 0.5 * SLAB_SIZE[2] - 0.002),
+            ),
+            gs.morphs.Box(
+                size=CUBE_SIZE,
+                pos=(0.0, 0.0, 0.5 * CUBE_SIZE[2] - 0.002),
+            ),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    # A small cube dropped from a few centimeters
+    dropped_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=CUBE_SIZE,
+            pos=(0.6, 0.0, 0.5 * CUBE_SIZE[2] + 0.048),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    # A small cube released on one of its edges, tilted by 20 degrees
+    tilted_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=CUBE_SIZE,
+            pos=(-0.6, 0.0, 0.5 * CUBE_SIZE[2] * (np.cos(np.radians(20.0)) + np.sin(np.radians(20.0)))),
+            euler=(0.0, 20.0, 0.0),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    # A small cube whose faces are split into 4 triangles, with 9 vertices on its bottom face instead of 4
+    cube_mesh = trimesh.creation.box(CUBE_SIZE)
+    refined_cube_mesh = cube_mesh.subdivide()
+    refined_cube_path = str(asset_tmp_path / "refined_cube.obj")
+    refined_cube_mesh.export(refined_cube_path)
+    refined_cube = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=refined_cube_path,
+            pos=(0.0, -0.6, 0.5 * CUBE_SIZE[2]),
+            decimate=False,
+            convexify=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    # A slab pushed sideways by half the force that would make it slide
+    pushed_slab = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=SLAB_SIZE,
+            pos=(0.0, 0.8, 0.5 * SLAB_SIZE[2]),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+            coup_friction=FRICTION_MU,
+        ),
+    )
+    scene.build(n_envs=2)
+
+    push_force = 0.5 * FRICTION_MU * RHO * np.prod(SLAB_SIZE) * GRAVITY
+    for _ in range(100):
+        pushed_slab.control_dofs_force(push_force, dofs_idx_local=0)
+        scene.step()
+
+    # Each environment rests still on its own variant, and the other cubes rest still, flat on the ground
+    for entity in (variants, dropped_cube, tilted_cube, refined_cube):
+        assert_allclose(entity.get_vel(), 0.0, atol=1e-5)
+        assert_allclose(entity.get_ang(), 0.0, atol=1e-4)
+        assert_allclose(entity.get_quat()[..., 1:3], 0.0, atol=1e-3)
+
+    # The pushed slab sticks, creeping at most at the stiction tolerance
+    assert (torch.linalg.norm(pushed_slab.get_vel(), dim=-1) < STICTION_TOLERANCE).all()
+
+    # The contacts of a body at rest form one patch, regularized as one contact whatever their number. Each contact of
+    # stiffness k takes the regularization max(beta^2 / (4 pi^2) * |W| / 3 * K / k, 1 / (dt * k * (dt + taud))), from the
+    # Delassus operator W = I / m + [r]x I^-1 [r]x^T of the contact at r from the center of mass and the stiffness K of
+    # the patch, the near-rigid one for light bodies and the compliant one for heavy ones. At rest, each contact carries
+    # the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The vertex floor holds a
+    # box on the vertices of its bottom face, all of stiffness VERT_STIFFNESS. The tet floor holds it on slices spread
+    # over that face, closer to its center of mass than the corners, so that it rests less deep.
+    substep_dt = DT / SUBSTEPS
+    rest_depths = []
+    for size, mesh in (
+        (SLAB_SIZE, trimesh.creation.box(SLAB_SIZE)),
+        (CUBE_SIZE, cube_mesh),
+        (CUBE_SIZE, refined_cube_mesh),
+    ):
+        mass = RHO * np.prod(size)
+        inertia = np.diag(mass / 12.0 * (np.sum(np.square(size)) - np.square(size)))
+        arms = mesh.vertices[np.isclose(mesh.vertices[:, 2], -0.5 * size[2])]
+        arms_cross = np.cross(arms[:, None], np.eye(3))
+        delassus = np.eye(3) / mass + arms_cross @ np.linalg.inv(inertia) @ arms_cross.transpose(0, 2, 1)
+        near_rigid_regularizations = SAP_BETA**2 / (4.0 * np.pi**2) * np.linalg.norm(delassus, axis=(1, 2)) / 3.0
+        regularizations = np.maximum(
+            near_rigid_regularizations * len(arms), 1.0 / (substep_dt * VERT_STIFFNESS * (substep_dt + SAP_TAUD))
+        )
+        rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) / np.sum(1.0 / regularizations))
+    rest_depths = torch.tensor(rest_depths, dtype=gs.tc_float, device=gs.device)
+    rest_heights = 0.5 * torch.tensor((SLAB_SIZE[2], CUBE_SIZE[2]), dtype=gs.tc_float, device=gs.device)
+    # The tet floor bounds the depth of the refined cube by that of a cube held on its corners
+    refined_cube_rest_depth = rest_depths[2] if rigid_floor_contact_type == "vert" else rest_depths[1]
+    for entity, entity_rest_heights, entity_rest_depths in (
+        (variants, rest_heights, rest_depths[:2]),
+        (dropped_cube, rest_heights[1], rest_depths[1]),
+        (tilted_cube, rest_heights[1], rest_depths[1]),
+        (refined_cube, rest_heights[1], refined_cube_rest_depth),
+    ):
+        entity_depths = entity_rest_heights - entity.get_pos()[..., 2]
+        if rigid_floor_contact_type == "vert":
+            # A few roundings of the height of a body in single precision take a share of its depth
+            assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
+        else:
+            assert ((entity_depths > 0.0) & (entity_depths < entity_rest_depths)).all()
 
 
 @pytest.mark.required("sparse")
