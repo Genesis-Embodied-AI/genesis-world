@@ -173,25 +173,15 @@ class _NamedOrdinalIndex(_OrdinalIndex):
     names: Annotated[StrArrayType, Field(min_length=1)] | None = None
 
     @model_validator(mode="after")
-    def _check_names_alone(self) -> Self:
-        if self.names is not None and not super().is_all:
+    def _check_single_selection(self) -> Self:
+        if (self.names is not None) != super().is_all:
             gs.raise_exception(f"{type(self).__name__} takes one of ordinals, a mask, a span and names.")
         return self
-
-    @classmethod
-    def all(cls) -> Self:
-        """Select every geom."""
-        return cls()
 
     @classmethod
     def named(cls, *names: str) -> Self:
         """Select the geoms of the given names, each an exact geom name or a glob pattern."""
         return cls(names=names)
-
-    @property
-    def is_all(self) -> bool:
-        """Whether the selection holds every element."""
-        return super().is_all and self.names is None
 
     def matches(self, geom_name: str) -> bool:
         """Whether a selection by name holds the geom of a given name."""

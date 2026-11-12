@@ -1502,31 +1502,35 @@ class KinematicEntityDescription(EntityDescription):
 
         # The link and geom options are set on the collision geoms before post-processing, so that geoms of different
         # options never fuse. Their density stays out of the authored ones, which anchor an aligned link where a
-        # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options override the link
-        # options, and two selections of equal specificity giving one field of one geom raise an error. A selection by
-        # name may match no geom of this link, 'resolve' checking that it matches a geom of the entity.
+        # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options of the entity rank
+        # below the link options, which rank below the geom options of the links, and two selections of one rank giving
+        # one field of one geom raise an error. A selection by name may match no geom of this link, 'resolve' checking
+        # that it matches a geom of the entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
         if isinstance(self.options, gs.entities.Rigid) and cg_infos:
             link_name = link_path[-1]
-            link_fields, geoms_fields = {}, [{} for _ in cg_infos]
+            entity_geoms_fields, link_fields, link_geoms_fields = [{} for _ in cg_infos], {}, [{} for _ in cg_infos]
             fields_options = []
-            geoms_options = list(self.options.geoms.items())
+            for geom_index, geom_options in self.options.geoms.items():
+                for i_g in geom_index.resolve(geoms_name):
+                    fields_options.append((entity_geoms_fields[i_g], geom_options, f"geom {i_g} of link '{link_name}'"))
             for link_index, link_options in self.options.links.items():
                 if link_index.matches(link_path):
                     fields_options.append((link_fields, link_options, f"link '{link_name}'"))
-                    geoms_options.extend(link_options.geoms.items())
-            for geom_index, geom_options in geoms_options:
-                for i_g in geom_index.resolve(geoms_name):
-                    fields_options.append((geoms_fields[i_g], geom_options, f"geom {i_g} of link '{link_name}'"))
+                    for geom_index, geom_options in link_options.geoms.items():
+                        for i_g in geom_index.resolve(geoms_name):
+                            target = f"geom {i_g} of link '{link_name}'"
+                            fields_options.append((link_geoms_fields[i_g], geom_options, target))
             for fields, options, target in fields_options:
                 for name, value in options.model_dump(exclude={"geoms"}, exclude_unset=True, exclude_none=True).items():
                     if name in fields:
                         gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
                     fields[name] = value
-            for g_info, geom_fields in zip(cg_infos, geoms_fields):
-                if link_fields or geom_fields:
-                    g_info["geom_options"] = gs.options.Geom(**{**link_fields, **geom_fields})
+            for g_info, entity_geom_fields, link_geom_fields in zip(cg_infos, entity_geoms_fields, link_geoms_fields):
+                geom_fields = {**entity_geom_fields, **link_fields, **link_geom_fields}
+                if geom_fields:
+                    g_info["geom_options"] = gs.options.Geom(**geom_fields)
                     if g_info["geom_options"].rho is not None:
                         resolution.links_path_with_density.add(link_path)
 
