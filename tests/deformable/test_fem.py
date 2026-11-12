@@ -951,6 +951,8 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
     PEDESTAL_HALFSIZE = 0.05
     BALL_RADIUS = 0.03
     CUBES_GAP = 1e-3
+    LID_HALFSIZE = 0.06
+    LID_HALFHEIGHT = 0.01
     GRAVITY = 9.81
 
     scene = gs.Scene(
@@ -961,6 +963,7 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
         ),
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
+            enable_vertex_constraints=True,
         ),
         # The capacity holds the contacts of the scene but not the pairs of tets of the sphere neighbouring each other
         # at rest, which the contact search must skip.
@@ -1047,7 +1050,25 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
             hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
         ),
     )
+    # A rigid lid resting on a light cube whose vertices are all pinned, which hold the lid whatever their mass
+    pinned_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, -0.3, CUBE_HALFSIZE),
+            size=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE),
+        ),
+        material=gs.materials.FEM.Elastic(
+            rho=10.0,
+            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        ),
+    )
+    lid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.3, -0.3, 2 * CUBE_HALFSIZE + LID_HALFHEIGHT),
+            size=(2 * LID_HALFSIZE, 2 * LID_HALFSIZE, 2 * LID_HALFHEIGHT),
+        ),
+    )
     scene.build()
+    pinned_cube.set_vertex_constraints(range(pinned_cube.n_vertices))
 
     # Run simulation
     for _ in range(40):
@@ -1088,6 +1109,19 @@ def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show
     # FIXME: No closed form gives this depth: the elastic flattening of the ball and its pressure field near the contact
     # depend on its TetGen mesh. A mesher-independent ball mesh and the elastic contact solution would make it derivable.
     assert_allclose(2 * PEDESTAL_HALFSIZE - ball.get_verts_pos()[..., 2].min(), 2.42e-4, rtol=5e-2)
+
+    # The lid sinks into the pressure field of the pinned cube, which peaks at the single vertex TetGen inserts inside
+    # it, depth h below the top face. Only the tets joining that face to that vertex have a pressure gradient normal to
+    # the lid, E * d / h at depth d over a face of side 2 * L * (1 - d / h), L the half size of the cube. One fixed-point
+    # iteration from the unshrunk face solves the balance with the weight of the lid well within the tolerance.
+    assert_allclose(lid.get_vel(), 0.0, atol=1e-5)
+    cube_z = pinned_cube.init_positions[:, 2]
+    apex_depth = 2 * CUBE_HALFSIZE - cube_z[(cube_z > gs.EPS) & (cube_z < 2 * CUBE_HALFSIZE - gs.EPS)]
+    assert apex_depth.numel() == 1
+    lid_depth = 2 * CUBE_HALFSIZE + LID_HALFHEIGHT - lid.get_pos()[..., 2]
+    lid_depth_ref = lid.get_mass() * GRAVITY * apex_depth / (CUBE_HYDROELASTIC_MODULUS * (2.0 * CUBE_HALFSIZE) ** 2)
+    lid_depth_ref /= (1.0 - lid_depth_ref / apex_depth) ** 2
+    assert_allclose(lid_depth, lid_depth_ref, rtol=0.01)
 
 
 @pytest.mark.required("sparse")
