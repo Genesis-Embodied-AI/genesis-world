@@ -43,6 +43,8 @@ LOGGER = logging.getLogger(__name__)
 _WIN_STD_ERROR_HANDLE = -12
 _WIN_HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2
 
+_UNSIGNED_TO_SIGNED_DTYPES = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}
+
 
 class DeprecationError(Exception):
     pass
@@ -1551,6 +1553,16 @@ def assign_indexed_tensor(
     value: "np.typing.ArrayLike",
     dim_names: tuple[str, ...] | list[str] | None = None,
 ) -> None:
+    # See broadcast_tensor for arrays with negative strides
+    if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
+        value = value.copy()
+    # Torch writes no unsigned integer wider than 8 bits through a mask or an index on CPU and CUDA, so such a tensor is
+    # written as its signed bits, which is exact.
+    if isinstance(tensor, torch.Tensor) and tensor.dtype in _UNSIGNED_TO_SIGNED_DTYPES:
+        signed_dtype = _UNSIGNED_TO_SIGNED_DTYPES[tensor.dtype]
+        value = torch.as_tensor(value, dtype=tensor.dtype, device=tensor.device).view(signed_dtype)
+        tensor = tensor.view(signed_dtype)
+
     # A boolean mask selecting along one axis, the others being sliced, writes through the mask itself. Indexing by it
     # would count its entries on the device and read the count back, which synchronizes the host.
     mask_axis = None
@@ -1576,9 +1588,6 @@ def assign_indexed_tensor(
             if not is_value_explicit:
                 selection = None
     if isinstance(tensor, np.ndarray):
-        # See broadcast_tensor for arrays with negative strides
-        if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
-            value = value.copy()
         value = torch.as_tensor(value)
     elif selection is not None:
         spread = [1] * selection.ndim
