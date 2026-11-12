@@ -1499,7 +1499,7 @@ def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     scene = gs.Scene()
     scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
     scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
-    with pytest.raises(gs.GenesisException, match="fixed planes as the only rigid entities"):
+    with pytest.raises(gs.GenesisException, match="fixed rigid links alone"):
         scene.build()
 
     scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True))

@@ -6,7 +6,8 @@ energy and their solve come from the solvers that own them: the MPM solver for t
 'func_mpm_assemble' in mpm_solver.py), the FEM solver for the vertices of the cloth (see 'func_cloth_assemble' in
 fem_solver.py), the rigid solver for its dofs (see rigid/global_newton.py), the coupling for the contacts between the
 particles and the rigid geoms (see couplers/mpm_rigid_global_newton.py), and the incremental potential contact of the
-cloth with itself and with the fixed planes (see ipc_contact.py), whose data the Newton solver holds.
+cloth with itself, with the fixed planes and with the rigid contact proxies of the links (see ipc_contact.py and
+rigid/contact_proxy.py), whose data the Newton solver holds.
 """
 
 from collections.abc import Iterator
@@ -35,6 +36,16 @@ from genesis.engine.numerics.newton_rows import (
     grow_newton_rows,
 )
 from genesis.engine.solvers.rigid.constraint.data import ConstraintState
+from genesis.engine.solvers.rigid.contact_proxy import (
+    PROXIES,
+    PROXY_VERTICES,
+    IPCProxiesInfo,
+    IPCProxiesState,
+    IPCProxyVerticesInfo,
+    build_contact_proxies,
+    func_proxies_publish_contact,
+    kernel_proxies_init_pose,
+)
 from genesis.engine.solvers.rigid.data import DynInfo, DynState, RigidInfo
 from genesis.engine.solvers.rigid.global_newton import (
     NewtonRigidDofs,
@@ -66,20 +77,29 @@ from .fem_solver import (
     func_cloth_assemble,
     func_cloth_energy,
     func_cloth_init_line_search,
+    func_cloth_publish_contact,
+    func_cloth_publish_rows,
+    func_cloth_scale_direction,
     func_cloth_step_forward,
 )
 from .ipc_contact import (
     BODIES,
+    CONTACT_EDGES,
+    CONTACT_TRIANGLES,
+    CONTACT_VERTICES,
     EE_PAIRS,
+    HALFPLANE_VERTICES,
     HALFPLANES_LABEL,
     KAPPA,
     PARTITION,
     PT_PAIRS,
+    RIGID_VERTICES,
     IPCContact,
     IPCFrictionPairs,
     IPCInfo,
     IPCPairs,
     IPCState,
+    IPCSurfacePrimitives,
     func_contact_assemble,
     func_contact_energy,
     func_contact_init_substep,
@@ -105,9 +125,11 @@ if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 # The arrays of the dofs and of the links of the rigid solver in the Newton solve, which a solve without them leaves out,
-# and those of the contact of the cloth with the fixed planes, which a scene without them leaves out
+# and those of the contact of the cloth, which a scene without it leaves out
 RIGID = "rigid"
 IPC = "ipc"
+# The arrays of the rigid contact proxies, which a scene without them leaves out
+PROXIES_LABEL = "proxies"
 
 
 class NewtonErrorCode(ErrorCode):
@@ -200,6 +222,8 @@ class NewtonConfig(Config):
     has_mpm: bool
     has_cloth: bool
     has_halfplanes: bool
+    # Whether the contact surface holds rigid vertices, those of the rigid contact proxies (see ipc_contact.py)
+    has_rigid_vertices: bool
     # The contact of the cloth (see 'gs.options.IPCOptions'): whether its time of contact bounds the closing rate of a
     # pair rather than the motion of its vertices, whether every group of contact bodies takes a step of its own, whether
     # its stiffness adapts, and whether it grows at the start of every Newton iteration rather than of every substep
@@ -220,6 +244,9 @@ class NewtonData(Data):
     errno: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
     ipc_state: IPCState = field(labels=IPC)
     ipc_info: IPCInfo = field(labels=IPC)
+    proxies_state: IPCProxiesState = field(labels=PROXIES_LABEL)
+    proxies_info: IPCProxiesInfo = field(labels=PROXIES_LABEL)
+    proxy_vertices_info: IPCProxyVerticesInfo = field(labels=PROXIES_LABEL)
 
 
 class NewtonSolver(Solver):
@@ -231,7 +258,7 @@ class NewtonSolver(Solver):
     MPMSparseGrid), and when the rigid geoms couple with the particles, the accelerations of the dofs of the rigid
     solver, whose constraint solve then joins the energy (see 'RigidSolver.is_solved_in_global_newton'), or the
     positions of the vertices of the cloth at its end (see 'FEMSolver.is_solved_in_global_newton'), with their contacts
-    with the fixed planes of the scene. Every iteration solves the projected Hessian against the gradient by a
+    over the contact surface (see ipc_contact.py). Every iteration solves the projected Hessian against the gradient by a
     preconditioned conjugate gradient (PCG) and searches a step along the direction that lowers the energy, every
     environment iterating until its own convergence. The solve runs once every solver has prepared its substep and the
     coupler has run, and before the solvers finish it, since the MPM solver moves its particles by the displacement
@@ -297,6 +324,7 @@ class NewtonSolver(Solver):
         has_mpm = mpm_solver.is_active and mpm_solver._use_implicit_solver
         has_cloth = fem_solver.is_solved_in_global_newton
         halfplanes_geom_idx = []
+        links_geoms = []
         if has_cloth and gs.qd_float == qd.f32:
             gs.logger.warning(
                 "The cloth runs in single precision, where its contact with itself and with other cloths is less "
@@ -310,14 +338,31 @@ class NewtonSolver(Solver):
                 )
             if not all([isinstance(entity.material, FEM.Cloth) for entity in fem_solver.entities]):
                 gs.raise_exception("The cloth is not supported together with volumetric FEM entities.")
+            # The fixed planes bound the cloth as halfplanes, and every link holding other collision geoms of an entity
+            # coupling with the cloth owns a rigid contact proxy (see rigid/contact_proxy.py)
+            entities_moving = []
             for entity in rigid_solver.entities:
-                for geom in entity.geoms:
-                    if geom.type != gs.GEOM_TYPE.PLANE or not geom.is_fixed:
-                        gs.raise_exception(
-                            "The cloth supports fixed planes as the only rigid entities ('gs.morphs.Plane' fixed in "
-                            f"the world), got a geom of type {geom.type.name} in entity '{entity.name}'."
-                        )
-                    halfplanes_geom_idx.append(geom.idx)
+                for link in entity.links:
+                    geoms = []
+                    for geom in link.geoms:
+                        if geom.type == gs.GEOM_TYPE.PLANE:
+                            if not geom.is_fixed:
+                                gs.raise_exception(
+                                    f"The cloth supports fixed planes alone, got a plane on the moving link "
+                                    f"'{link.name}' of entity '{entity.name}'."
+                                )
+                            halfplanes_geom_idx.append(geom.idx)
+                        elif entity.material.needs_coup:
+                            geoms.append(geom)
+                    if geoms:
+                        if not link.is_fixed:
+                            gs.raise_exception(
+                                "The cloth supports fixed rigid links alone for now, got the moving link "
+                                f"'{link.name}' of entity '{entity.name}'."
+                            )
+                        if not link.is_fixed and entity not in entities_moving:
+                            entities_moving.append(entity)
+                        links_geoms.append((link, entities_moving.index(entity) if not link.is_fixed else -1, geoms))
         rigid_options = self._scene.options.rigid
         has_rigid_dofs = rigid_solver.is_solved_in_global_newton
         if has_rigid_dofs:
@@ -340,12 +385,30 @@ class NewtonSolver(Solver):
                     )
         has_halfplanes = len(halfplanes_geom_idx) > 0
         ipc_options = self._scene.options.ipc
+        # The contact surface, every participant publishing its primitives into its own range, the cloth first
+        surface, proxies = None, None
+        if has_cloth:
+            surface = fem_solver.build_cloth_contact_surface()
+        if links_geoms:
+            proxies = build_contact_proxies(links_geoms, len(fem_solver.entities), ipc_options.d_hat)
+            n_cloth_vertices = len(surface.vertices_body_idx)
+            surface = IPCSurfacePrimitives(
+                *[
+                    np.concatenate((cloth_values, proxy_values + n_cloth_vertices if is_indices else proxy_values))
+                    for cloth_values, proxy_values, is_indices in zip(
+                        surface,
+                        proxies.surface,
+                        [name in ("edges_verts_idx", "triangles_verts_idx") for name in IPCSurfacePrimitives._fields],
+                    )
+                ]
+            )
         self.newton_config = NewtonConfig(
             has_rigid_dofs=has_rigid_dofs,
             has_rigid_rows=not rigid_options.disable_constraint,
             has_mpm=has_mpm,
             has_cloth=has_cloth,
             has_halfplanes=has_halfplanes,
+            has_rigid_vertices=proxies is not None,
             is_ccd_directional=ipc_options.ccd_bound == "directional",
             has_ccd_partition=has_cloth and ipc_options.ccd_partition,
             has_adaptive_kappa=has_cloth and ipc_options.adaptive_kappa_mode == "per-vertex",
@@ -356,9 +419,14 @@ class NewtonSolver(Solver):
                 "envs": self._B,
                 "dofs": max(rigid_solver.n_dofs, 1),
                 "links": max(rigid_solver.n_links, 1),
-                "vertices": fem_solver.n_vertices,
                 "halfplanes": len(halfplanes_geom_idx),
-                BODIES: len(fem_solver.entities),
+                HALFPLANE_VERTICES: fem_solver.n_vertices,
+                CONTACT_VERTICES: len(surface.vertices_body_idx) if has_cloth else 0,
+                CONTACT_EDGES: len(surface.edges_verts_idx) if has_cloth else 0,
+                CONTACT_TRIANGLES: len(surface.triangles_verts_idx) if has_cloth else 0,
+                BODIES: int(surface.vertices_body_idx.max(initial=-1)) + 1 if has_cloth else 0,
+                PROXIES: len(proxies.links_idx) if proxies is not None else 0,
+                PROXY_VERTICES: len(proxies.vertices_proxy_idx) if proxies is not None else 0,
             },
             values=dict(
                 newton_info=dict(
@@ -370,6 +438,7 @@ class NewtonSolver(Solver):
                     pcg_tol=self._options.pcg_tol,
                 ),
                 ipc_info=dict(
+                    substep_dt=self._sim.substep_dt,
                     friction_eps_v=ipc_options.friction_eps_v,
                     ccd_eta=0.2,
                     ccd_max_iterations=50000,
@@ -394,11 +463,13 @@ class NewtonSolver(Solver):
             # The labels of the parts of the contact of the cloth select arrays within those of the IPC label
             unused={
                 RIGID: not has_rigid_dofs,
+                PROXIES_LABEL: proxies is None,
                 **(
                     {
                         HALFPLANES_LABEL: not has_halfplanes,
                         PARTITION: not self.newton_config.has_ccd_partition,
                         KAPPA: not self.newton_config.has_adaptive_kappa,
+                        RIGID_VERTICES: not self.newton_config.has_rigid_vertices,
                     }
                     if has_cloth
                     else {IPC: True}
@@ -430,6 +501,38 @@ class NewtonSolver(Solver):
         if has_halfplanes:
             self.ipc_info.halfplanes_geom_idx.from_numpy(np.array(halfplanes_geom_idx, dtype=gs.np_int))
         if has_cloth:
+            vertices, edges, triangles = self.ipc_info.vertices, self.ipc_info.edges, self.ipc_info.triangles
+            surface_values = [
+                (vertices.thickness, surface.vertices_thickness),
+                (vertices.d_hat, surface.vertices_d_hat),
+                (vertices.area_weight, surface.vertices_area_weight),
+                (vertices.resistance, surface.vertices_resistance),
+                (vertices.friction_mu, surface.vertices_friction_mu),
+                (vertices.body_idx, surface.vertices_body_idx),
+                (vertices.is_rigid, surface.vertices_is_rigid),
+                (edges.verts_idx, surface.edges_verts_idx),
+                (edges.area_weight, surface.edges_area_weight),
+                (edges.rest_length2, surface.edges_rest_length2),
+                (triangles.verts_idx, surface.triangles_verts_idx),
+                (triangles.area_weight, surface.triangles_area_weight),
+            ]
+            if proxies is not None:
+                proxies_info, proxy_vertices_info = (
+                    self.data_manager.proxies_info,
+                    self.data_manager.proxy_vertices_info,
+                )
+                surface_values += [
+                    (proxies_info.link_idx, proxies.links_idx),
+                    (proxies_info.is_fixed, proxies.is_fixed),
+                    (proxies_info.surface_radius, proxies.surface_radius),
+                    (proxy_vertices_info.proxy_idx, proxies.vertices_proxy_idx),
+                    (proxy_vertices_info.local_pos, proxies.vertices_local_pos),
+                ]
+            # The arrays take the dtypes of Genesis, the meshes giving their own
+            for array, values in surface_values:
+                if values.dtype != bool:
+                    values = values.astype(gs.np_float if array.dtype == gs.qd_float else gs.np_int, copy=False)
+                array.from_numpy(values)
             if self.newton_config.has_adaptive_kappa:
                 kernel_contact_init_kappa(self.ipc_state, self.ipc_info)
         else:
@@ -448,6 +551,10 @@ class NewtonSolver(Solver):
             if self.newton_config.has_cloth:
                 yield from iter_data(self.data_manager, "ipc_info")
                 yield from iter_data(self.data_manager, "ipc_state")
+            if self.newton_config.has_rigid_vertices:
+                yield from iter_data(self.data_manager, "proxies_info")
+                yield from iter_data(self.data_manager, "proxy_vertices_info")
+                yield from iter_data(self.data_manager, "proxies_state")
             yield from iter_data(self.data_manager, "errno", DataKind.STATE)
         if self.newton_rows is not None:
             yield from iter_data(self, "newton_rows")
@@ -492,15 +599,31 @@ class NewtonSolver(Solver):
             )
         args_info = (mpm_info, fem_info, self.ipc_info, dyn_info, rigid_info)
         args_config = (mpm_solver.mpm_config, fem_solver.fem_config, rigid_solver.rigid_config, self.newton_config)
-        # The broad phase reads the triangles and the edges of the cloth, which the FEM solver builds after this one
+        proxies_state = self.data_manager.proxies_state
+        proxies_info, proxy_vertices_info = self.data_manager.proxies_info, self.data_manager.proxy_vertices_info
+        if self.newton_config.has_rigid_vertices and self.ipc_contact is None:
+            kernel_proxies_init_pose(proxies_state, dyn_state, proxies_info)
+        if self.newton_config.has_cloth:
+            kernel_publish_contact(
+                fem_solver.n_vertices,
+                self.ipc_state,
+                fem_state,
+                proxies_state,
+                dyn_state,
+                proxies_info,
+                proxy_vertices_info,
+                self.newton_config,
+            )
         if self.newton_config.has_cloth and self.ipc_contact is None:
-            self.ipc_contact = IPCContact(self._B, fem_solver.n_vertices, fem_info, self._scene.options.ipc)
+            self.ipc_contact = IPCContact(
+                self._B, self.ipc_info, self.newton_config.has_rigid_vertices, self._scene.options.ipc
+            )
             if self._scene.options.ipc.intersection_check:
-                intersections = self.ipc_contact.find_intersections(fem_state, fem_info, self.ipc_info)
+                intersections = self.ipc_contact.find_intersections(self.ipc_state, self.ipc_info)
                 if len(intersections) > 0:
                     i_b, i_e, i_t = intersections[0]
-                    edge = qd_to_numpy(fem_info.cloth_edges.verts_idx)[i_e]
-                    tri = qd_to_numpy(fem_info.cloth_triangles.verts_idx)[i_t]
+                    edge = qd_to_numpy(self.ipc_info.edges.verts_idx)[i_e]
+                    tri = qd_to_numpy(self.ipc_info.triangles.verts_idx)[i_t]
                     entities_v_start = np.array([entity.v_start for entity in fem_solver.entities])
                     edge_entity = fem_solver.entities[np.searchsorted(entities_v_start, edge[0], side="right") - 1]
                     tri_entity = fem_solver.entities[np.searchsorted(entities_v_start, tri[0], side="right") - 1]
@@ -514,9 +637,9 @@ class NewtonSolver(Solver):
         ipc_pairs, friction_pairs = self._ipc_pairs_unused, self._friction_pairs_unused
         if contact is not None:
             # The candidates at the start point of the substep give its first assembly and its friction pairs
-            contact.search(fem_state, self.ipc_state, fem_info, self.ipc_info, self.newton_config, is_swept=False)
+            contact.search(self.ipc_state, self.ipc_info, self.newton_config, is_swept=False)
             contact.set_friction_pairs(
-                fem_state, fem_info, self.ipc_info, int(NewtonErrorCode.INVALID_CONTACT_THICKNESS), errno
+                self.ipc_state, self.ipc_info, int(NewtonErrorCode.INVALID_CONTACT_THICKNESS), errno
             )
             ipc_pairs, friction_pairs = contact.pairs, contact.friction_pairs
         args_state = (
@@ -612,21 +735,20 @@ class NewtonSolver(Solver):
             if contact is not None:
                 # The candidates over the sweep along the direction serve the step bound, the line search and the
                 # assembly of the next iteration
-                contact.search(fem_state, self.ipc_state, fem_info, self.ipc_info, self.newton_config, is_swept=True)
+                contact.search(self.ipc_state, self.ipc_info, self.newton_config, is_swept=True)
                 ipc_pairs = contact.pairs
                 args_state = (*args_state[:3], ipc_pairs, *args_state[4:])
                 kernel_contact_ccd(
                     self.newton_envs.is_active,
                     self.newton_envs.alpha,
                     ipc_pairs,
-                    fem_state,
                     self.ipc_state,
-                    fem_info,
                     self.ipc_info,
                     self.newton_config,
                 )
                 if self.newton_config.has_ccd_partition:
-                    kernel_contact_partition(self.newton_envs.is_active, fem_state, self.ipc_state, fem_info)
+                    kernel_contact_partition(self.newton_envs.is_active, self.ipc_state)
+                    kernel_scale_directions(self.newton_envs.is_active, fem_state, self.ipc_state, self.ipc_info)
             while True:
                 kernel_line_search_trial(
                     self.newton_envs, self.newton_loops, *args_state, self.newton_info, *args_info, *args_config
@@ -717,9 +839,7 @@ def func_add_energies(
         func_mpm_kinetic_energy(energies, envs_mask, sparse_grid, mpm_info)
     if qd.static(newton_config.has_cloth):
         func_cloth_energy(energies, envs_mask, fem_state, fem_info, fem_config)
-        func_contact_energy(
-            energies, envs_mask, fem_state, ipc_pairs, friction_pairs, ipc_state, fem_info, ipc_info, newton_config
-        )
+        func_contact_energy(energies, envs_mask, ipc_pairs, friction_pairs, ipc_state, ipc_info, newton_config)
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_update_constraint(
             rigid_cost, rigid_dofs, dyn_state, constraint_state, rigid_info, rigid_config, newton_config.has_rigid_rows
@@ -738,6 +858,34 @@ def kernel_set_segments(
     for _ in range(1):
         func_set_segment(NewtonSegment.MPM_NODES, n_mpm_rows, n_mpm_triplets, newton_rows)
         func_set_segment(NewtonSegment.CLOTH_VERTICES, n_cloth_rows, n_cloth_triplets, newton_rows)
+
+
+@qd.kernel(fastcache=True)
+def kernel_publish_contact(
+    proxy_vertex_start: int,
+    ipc_state: IPCState,
+    fem_state: FEMState,
+    proxies_state: IPCProxiesState,
+    dyn_state: DynState,
+    proxies_info: IPCProxiesInfo,
+    proxy_vertices_info: IPCProxyVerticesInfo,
+    newton_config: qd.template(),
+):
+    """Publish the participants of the contact into the contact surface at the start point of the substep: the cloth
+    (see 'func_cloth_publish_contact' in fem_solver.py), then the rigid contact proxies from the contact vertex
+    `proxy_vertex_start` on (see 'func_proxies_publish_contact' in rigid/contact_proxy.py)."""
+    func_cloth_publish_contact(ipc_state, fem_state, newton_config.has_rigid_vertices)
+    if qd.static(newton_config.has_rigid_vertices):
+        func_proxies_publish_contact(
+            proxy_vertex_start, ipc_state, proxies_state, dyn_state, proxies_info, proxy_vertices_info
+        )
+
+
+@qd.kernel(fastcache=True)
+def kernel_scale_directions(envs_mask: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, ipc_info: IPCInfo):
+    """Scale the Newton direction of the participants of the contact of every environment selected by the steps of their
+    groups of contact bodies (see 'kernel_contact_partition' in ipc_contact.py)."""
+    func_cloth_scale_direction(envs_mask, fem_state, ipc_state, ipc_info)
 
 
 @qd.kernel(fastcache=True)
@@ -779,10 +927,8 @@ def kernel_init_substep(
         newton_loops.is_newton_running[None] = 0
     if qd.static(newton_config.has_cloth):
         func_contact_init_substep(
-            fem_state,
             ipc_state,
             dyn_state,
-            fem_info,
             ipc_info,
             dyn_info,
             newton_config,
@@ -942,17 +1088,10 @@ def kernel_assemble_rows(
         func_mpm_assemble(newton_rows, mpm_state, sparse_grid, mpm_info, mpm_config)
     if qd.static(newton_config.has_cloth):
         func_cloth_assemble(newton_rows, fem_state, fem_info, fem_config)
+        func_cloth_publish_rows(newton_rows, ipc_state, fem_state)
         triplet_start = newton_rows.segments_triplet_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
         func_contact_assemble(
-            triplet_start + n_cloth_triplets,
-            newton_rows,
-            fem_state,
-            ipc_pairs,
-            friction_pairs,
-            ipc_state,
-            fem_info,
-            ipc_info,
-            newton_config,
+            triplet_start + n_cloth_triplets, newton_rows, ipc_pairs, friction_pairs, ipc_state, ipc_info, newton_config
         )
 
 
@@ -1335,7 +1474,14 @@ def kernel_start_line_search(
             mpm_info,
         )
     if qd.static(newton_config.has_cloth):
-        func_cloth_init_line_search(newton_rows, newton_envs.is_active, newton_envs.max_displacement, fem_state)
+        func_cloth_init_line_search(
+            newton_rows,
+            newton_envs.is_active,
+            newton_envs.max_displacement,
+            fem_state,
+            ipc_state,
+            newton_config.has_rigid_vertices,
+        )
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_init_line_search(rigid_dofs, newton_envs.is_active, newton_envs.max_displacement)
     for _ in range(1):
@@ -1385,7 +1531,9 @@ def kernel_line_search_trial(
     if qd.static(newton_config.has_mpm):
         func_mpm_step_forward(sparse_grid, newton_envs.is_line_search_active, newton_envs.alpha)
     if qd.static(newton_config.has_cloth):
-        func_cloth_step_forward(newton_envs.is_line_search_active, newton_envs.alpha, fem_state)
+        func_cloth_step_forward(
+            newton_envs.is_line_search_active, newton_envs.alpha, fem_state, ipc_state, newton_config.has_rigid_vertices
+        )
     if qd.static(newton_config.has_rigid_dofs):
         func_rigid_step_forward(rigid_dofs, newton_envs.is_line_search_active, newton_envs.alpha)
     for i_b in range(newton_envs.is_active.shape[0]):

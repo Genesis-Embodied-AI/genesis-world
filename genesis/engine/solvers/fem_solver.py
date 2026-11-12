@@ -86,6 +86,7 @@ from .base_solver import (
     kernel_get_values,
     kernel_set_actu,
 )
+from .ipc_contact import IPCInfo, IPCState, IPCSurfacePrimitives, surface_area_weights
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -147,7 +148,6 @@ CLOTH = "cloth"
 QUADRATIC_BENDING = "quadratic_bending"
 DIHEDRAL_BENDING = "dihedral_bending"
 CLOTH_TRIANGLES = Size("cloth_triangles")
-CLOTH_EDGES = Size("cloth_edges")
 QUADRATIC_HINGES = Size("quadratic_hinges")
 DIHEDRAL_HINGES = Size("dihedral_hinges")
 
@@ -385,8 +385,7 @@ class FEMClothTriangles(Data, kind=DataKind.CONSTANT, shape=(CLOTH_TRIANGLES,)):
     materials/FEM/cloth.py).
 
     `rest_inv` is the inverse of the edges of a triangle at rest in its own plane, `volume` its rest area times the
-    thickness of the shell, the stiffnesses those of its material, and `contact_area_weight` its rest area, the area it
-    stands for in its contacts (see genesis/engine/solvers/ipc_contact.py).
+    thickness of the shell, and the stiffnesses those of its material.
     """
 
     verts_idx: qd.Tensor = field((int, 3))
@@ -395,21 +394,6 @@ class FEMClothTriangles(Data, kind=DataKind.CONSTANT, shape=(CLOTH_TRIANGLES,)):
     stretch_stiffness: qd.Tensor = field(float)
     shear_stiffness: qd.Tensor = field(float)
     strain_limit_multiplier: qd.Tensor = field(float)
-    contact_area_weight: qd.Tensor = field(float)
-
-
-class FEMClothEdges(Data, kind=DataKind.CONSTANT, shape=(CLOTH_EDGES,)):
-    """
-    The edges of the triangles of the cloth solved by the Newton solver, each once, its vertices in increasing order.
-
-    The edges of an entity follow one another in the lexicographic order of their vertices. `contact_area_weight` is a
-    third of the rest area of the triangles around an edge, the area it stands for in its contacts, and `rest_length2`
-    its squared length at rest, which sets the mollifier of its contacts with nearly parallel edges.
-    """
-
-    verts_idx: qd.Tensor = field((int, 2))
-    contact_area_weight: qd.Tensor = field(float)
-    rest_length2: qd.Tensor = field(float)
 
 
 class FEMClothQuadraticHinges(Data, kind=DataKind.CONSTANT, shape=(QUADRATIC_HINGES,)):
@@ -429,23 +413,6 @@ class FEMClothDihedralHinges(Data, kind=DataKind.CONSTANT, shape=(DIHEDRAL_HINGE
     rest_angle: qd.Tensor = field(float)
     weight: qd.Tensor = field(float)
     stiffness: qd.Tensor = field(float)
-
-
-class FEMClothVerticesInfo(Data, kind=DataKind.CONSTANT, shape=(VERTICES,)):
-    """
-    The contact parameters of the vertices of the cloth solved by the Newton solver, from their material, and the area
-    of the surface each vertex stands for in its contacts (see genesis/engine/solvers/ipc_contact.py).
-
-    `contact_d_hat` is the width of the contact band of a vertex (see 'gs.options.IPCOptions'), and `contact_body_idx`
-    the rank of its entity among the cloth entities, the contact body of the vertex.
-    """
-
-    contact_thickness: qd.Tensor = field(float)
-    contact_area_weight: qd.Tensor = field(float)
-    friction_mu: qd.Tensor = field(float)
-    contact_resistance: qd.Tensor = field(float)
-    contact_d_hat: qd.Tensor = field(float)
-    contact_body_idx: qd.Tensor = field(int)
 
 
 class FEMInfo(Data, kind=DataKind.CONSTANT):
@@ -522,10 +489,8 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     coarse_entities_entry_start: qd.Tensor = field(int, shape=(COARSE_ENTITIES + 1,), labels=IMPLICIT)
     # The cloth solved by the Newton solver
     cloth_triangles: FEMClothTriangles = field(labels=CLOTH)
-    cloth_edges: FEMClothEdges = field(labels=CLOTH)
     cloth_quadratic_hinges: FEMClothQuadraticHinges = field(labels=QUADRATIC_BENDING)
     cloth_dihedral_hinges: FEMClothDihedralHinges = field(labels=DIHEDRAL_BENDING)
-    cloth_vertices: FEMClothVerticesInfo = field(labels=CLOTH)
 
 
 # TODO: constraints set after a saved state survive 'scene.reset' (see MPMParticleConstraints in mpm_solver.py)
@@ -600,10 +565,6 @@ class FEMClothRest(NamedTuple):
     triangles_stretch_stiffness: np.ndarray
     triangles_shear_stiffness: np.ndarray
     triangles_strain_limit_multiplier: np.ndarray
-    triangles_contact_area_weight: np.ndarray
-    edges_verts_idx: np.ndarray
-    edges_contact_area_weight: np.ndarray
-    edges_rest_length2: np.ndarray
     quadratic_hinges_verts_idx: np.ndarray
     quadratic_hinges_bending_form: np.ndarray
     quadratic_hinges_stiffness: np.ndarray
@@ -612,12 +573,6 @@ class FEMClothRest(NamedTuple):
     dihedral_hinges_weight: np.ndarray
     dihedral_hinges_stiffness: np.ndarray
     vertices_mass: np.ndarray
-    vertices_contact_thickness: np.ndarray
-    vertices_contact_area_weight: np.ndarray
-    vertices_friction_mu: np.ndarray
-    vertices_contact_resistance: np.ndarray
-    vertices_contact_d_hat: np.ndarray
-    vertices_contact_body_idx: np.ndarray
 
 
 class FEMData(Data):
@@ -679,10 +634,9 @@ class FEMData(Data):
                 QUADRATIC_BENDING: not config.has_quadratic_bending,
                 DIHEDRAL_BENDING: not config.has_dihedral_bending,
             }
-        n_cloth_triangles, n_cloth_edges, n_quadratic_hinges, n_dihedral_hinges = 0, 0, 0, 0
+        n_cloth_triangles, n_quadratic_hinges, n_dihedral_hinges = 0, 0, 0
         if cloth_rest is not None:
             n_cloth_triangles = len(cloth_rest.triangles_verts_idx)
-            n_cloth_edges = len(cloth_rest.edges_verts_idx)
             n_quadratic_hinges = len(cloth_rest.quadratic_hinges_verts_idx)
             n_dihedral_hinges = len(cloth_rest.dihedral_hinges_verts_idx)
         super().__init__(
@@ -701,7 +655,6 @@ class FEMData(Data):
                 coarse_entities=len(clusters.coarse_entities_cluster_start) - 1,
                 coarse_entries=clusters.coarse_entities_entry_start[-1],
                 cloth_triangles=n_cloth_triangles,
-                cloth_edges=n_cloth_edges,
                 quadratic_hinges=n_quadratic_hinges,
                 dihedral_hinges=n_dihedral_hinges,
             ),
@@ -968,7 +921,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 cloth_triangles = self.fem_info.cloth_triangles
                 quadratic_hinges = self.fem_info.cloth_quadratic_hinges
                 dihedral_hinges = self.fem_info.cloth_dihedral_hinges
-                cloth_vertices = self.fem_info.cloth_vertices
                 topology_values += [
                     (cloth_triangles.verts_idx, cloth_rest.triangles_verts_idx),
                     (cloth_triangles.rest_inv, cloth_rest.triangles_rest_inv),
@@ -976,10 +928,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     (cloth_triangles.stretch_stiffness, cloth_rest.triangles_stretch_stiffness),
                     (cloth_triangles.shear_stiffness, cloth_rest.triangles_shear_stiffness),
                     (cloth_triangles.strain_limit_multiplier, cloth_rest.triangles_strain_limit_multiplier),
-                    (cloth_triangles.contact_area_weight, cloth_rest.triangles_contact_area_weight),
-                    (self.fem_info.cloth_edges.verts_idx, cloth_rest.edges_verts_idx),
-                    (self.fem_info.cloth_edges.contact_area_weight, cloth_rest.edges_contact_area_weight),
-                    (self.fem_info.cloth_edges.rest_length2, cloth_rest.edges_rest_length2),
                     (quadratic_hinges.verts_idx, cloth_rest.quadratic_hinges_verts_idx),
                     (quadratic_hinges.bending_form, cloth_rest.quadratic_hinges_bending_form),
                     (quadratic_hinges.stiffness, cloth_rest.quadratic_hinges_stiffness),
@@ -988,12 +936,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     (dihedral_hinges.weight, cloth_rest.dihedral_hinges_weight),
                     (dihedral_hinges.stiffness, cloth_rest.dihedral_hinges_stiffness),
                     (self.fem_info.vertices.mass, cloth_rest.vertices_mass),
-                    (cloth_vertices.contact_thickness, cloth_rest.vertices_contact_thickness),
-                    (cloth_vertices.contact_area_weight, cloth_rest.vertices_contact_area_weight),
-                    (cloth_vertices.friction_mu, cloth_rest.vertices_friction_mu),
-                    (cloth_vertices.contact_resistance, cloth_rest.vertices_contact_resistance),
-                    (cloth_vertices.contact_d_hat, cloth_rest.vertices_contact_d_hat),
-                    (cloth_vertices.contact_body_idx, cloth_rest.vertices_contact_body_idx),
                 ]
             # An empty array keeps the single slot every array is sized to at least, which no kernel reads
             for array, values in topology_values:
@@ -1012,14 +954,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         Every triangle reads its edges in its own plane, rotated onto the xy plane by the shortest rotation taking its
         normal onto +z, which sets the stretch axes of its membrane, an antiparallel normal keeping the x and y axes
-        reversed. A vertex carries a third of the mass and of the area of the triangles around it, the shell being
-        2 * thickness thick, and an edge a third of the area of the triangles around it. The edges and the hinges, the
-        edges shared by exactly two triangles, follow the increasing order of their vertices, the wings in the order of
-        their triangles.
+        reversed. A vertex carries a third of the mass of the triangles around it, the shell being 2 * thickness thick.
+        The hinges, the edges shared by exactly two triangles, follow the increasing order of their vertices, the wings
+        in the order of their triangles.
         """
-        d_hat = self._scene.options.ipc.d_hat
         entities_rest = []
-        for i_body, entity in enumerate(self._entities):
+        for entity in self._entities:
             material = entity.material
             pos = tensor_to_array(entity.init_positions, dtype=gs.np_float)
             tris = entity.elems
@@ -1037,16 +977,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             shear_modulus = material.E / 2.0 if material.shear_modulus is None else material.shear_modulus
             vertices_mass = np.zeros(entity.n_vertices, dtype=gs.np_float)
             np.add.at(vertices_mass, tris, (2.0 * thickness * material.rho / 3.0 * areas)[:, None])
-            vertices_area_weight = np.zeros(entity.n_vertices, dtype=gs.np_float)
-            np.add.at(vertices_area_weight, tris, (areas / 3.0)[:, None])
 
             # The hinges: every edge of a triangle with the vertex opposite to it, grouped by edge
             corners = tris[:, ((0, 1, 2), (1, 2, 0), (2, 0, 1))].reshape((-1, 3))
             edges = np.sort(corners[:, :2], axis=-1)
-            unique_edges, edges_inverse = np.unique(edges, axis=0, return_inverse=True)
-            edges_area_weight = np.bincount(
-                edges_inverse.reshape(-1), weights=np.repeat(areas / 3.0, 3), minlength=len(unique_edges)
-            )
             order = np.lexsort((edges[:, 1], edges[:, 0]))
             _, edges_start, edges_count = np.unique(edges[order], axis=0, return_index=True, return_counts=True)
             first, second = order[edges_start[edges_count == 2]], order[edges_start[edges_count == 2] + 1]
@@ -1101,10 +1035,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     triangles_strain_limit_multiplier=np.full(
                         n_tris, material.strain_limit_multiplier, dtype=gs.np_float
                     ),
-                    triangles_contact_area_weight=areas,
-                    edges_verts_idx=unique_edges + entity.v_start,
-                    edges_contact_area_weight=edges_area_weight,
-                    edges_rest_length2=((pos[unique_edges[:, 1]] - pos[unique_edges[:, 0]]) ** 2).sum(axis=-1),
                     quadratic_hinges_verts_idx=np.stack((edge0, edge1, wing0, wing1), axis=-1)[is_quadratic]
                     + entity.v_start,
                     quadratic_hinges_bending_form=bending_form[is_quadratic],
@@ -1115,21 +1045,45 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     dihedral_hinges_weight=weight[is_dihedral],
                     dihedral_hinges_stiffness=np.full(is_dihedral.sum(), 0.5 * rigidity, dtype=gs.np_float),
                     vertices_mass=vertices_mass,
-                    vertices_contact_thickness=np.full(
-                        entity.n_vertices,
-                        thickness if material.contact_thickness is None else material.contact_thickness,
-                        dtype=gs.np_float,
-                    ),
-                    vertices_contact_area_weight=vertices_area_weight,
-                    vertices_friction_mu=np.full(entity.n_vertices, material.friction_mu, dtype=gs.np_float),
-                    vertices_contact_resistance=np.full(
-                        entity.n_vertices, material.contact_resistance, dtype=gs.np_float
-                    ),
-                    vertices_contact_d_hat=np.full(entity.n_vertices, d_hat, dtype=gs.np_float),
-                    vertices_contact_body_idx=np.full(entity.n_vertices, i_body, dtype=gs.np_int),
                 )
             )
         return FEMClothRest(*[np.concatenate(arrays) for arrays in zip(*entities_rest)])
+
+    def build_cloth_contact_surface(self) -> IPCSurfacePrimitives:
+        """
+        Compute the contact primitives the cloth publishes into the contact surface (see 'IPCSurfacePrimitives' in
+        genesis/engine/solvers/ipc_contact.py), from the initial positions and the materials of its entities.
+
+        The vertices keep their indices in the solver. A vertex stands for a third of the area of the triangles around
+        it, an edge likewise and a triangle for its area, and its contact thickness defaults to the thickness of its
+        shell. Every cloth entity is a contact body, in the order of the entities.
+        """
+        d_hat = self._scene.options.ipc.d_hat
+        entities_primitives = []
+        for i_body, entity in enumerate(self._entities):
+            material = entity.material
+            pos = tensor_to_array(entity.init_positions, dtype=gs.np_float)
+            areas, edges_verts_idx, edges_area_weight, edges_rest_length2, vertices_area_weight = surface_area_weights(
+                pos, entity.elems
+            )
+            thickness = material.thickness if material.contact_thickness is None else material.contact_thickness
+            entities_primitives.append(
+                IPCSurfacePrimitives(
+                    vertices_thickness=np.full(entity.n_vertices, thickness, dtype=gs.np_float),
+                    vertices_d_hat=np.full(entity.n_vertices, d_hat, dtype=gs.np_float),
+                    vertices_area_weight=vertices_area_weight,
+                    vertices_resistance=np.full(entity.n_vertices, material.contact_resistance, dtype=gs.np_float),
+                    vertices_friction_mu=np.full(entity.n_vertices, material.friction_mu, dtype=gs.np_float),
+                    vertices_body_idx=np.full(entity.n_vertices, i_body, dtype=gs.np_int),
+                    vertices_is_rigid=np.zeros(entity.n_vertices, dtype=bool),
+                    edges_verts_idx=edges_verts_idx + entity.v_start,
+                    edges_area_weight=edges_area_weight,
+                    edges_rest_length2=edges_rest_length2,
+                    triangles_verts_idx=entity.elems + entity.v_start,
+                    triangles_area_weight=areas,
+                )
+            )
+        return IPCSurfacePrimitives(*[np.concatenate(arrays) for arrays in zip(*entities_primitives)])
 
     def init_constraints(self) -> None:
         """Allocate the vertex constraints, none constrained."""
@@ -3651,14 +3605,20 @@ def func_cloth_energy(
 
 @qd.func(requires_top_level=True)
 def func_cloth_init_line_search(
-    newton_rows: NewtonRows, envs_mask: qd.Tensor, max_displacement: qd.Tensor, fem_state: FEMState
+    newton_rows: NewtonRows,
+    envs_mask: qd.Tensor,
+    max_displacement: qd.Tensor,
+    fem_state: FEMState,
+    ipc_state: IPCState,
+    has_rigid: qd.template(),
 ):
     """
     Set the Newton direction of the vertices of the cloth of every environment selected, minus the solution of the
-    linear solve, from their start point, a fixed vertex staying still.
+    linear solve, from their start point, a fixed vertex staying still, and publish it as their sweep in the contact
+    surface (see 'func_cloth_publish_contact').
 
     The largest update of the position of a vertex adds to the entry of its environment in `max_displacement`. The
-    contacts of the cloth bound the step along the direction afterwards (see 'kernel_contact_ccd' in
+    contacts bound the step along the direction afterwards (see 'kernel_contact_ccd' in
     genesis/engine/solvers/ipc_contact.py).
     """
     n_vertices = fem_state.vertices.pos.shape[0]
@@ -3671,18 +3631,70 @@ def func_cloth_init_line_search(
             x = fem_state.vertices.pos_next[i_v, i_b]
             fem_state.cloth_vertices.pos_start[i_v, i_b] = x
             fem_state.cloth_vertices.displacement[i_v, i_b] = displacement
+            ipc_state.vertices.displacement[i_v, i_b] = displacement
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot_displacement[i_v, i_b] = displacement
             qd.atomic_max(max_displacement[i_b], qd.max(qd.abs(displacement).max(), 0.0))
 
 
 @qd.func(requires_top_level=True)
-def func_cloth_step_forward(envs_mask: qd.Tensor, alpha: qd.Tensor, fem_state: FEMState):
+def func_cloth_step_forward(
+    envs_mask: qd.Tensor, alpha: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, has_rigid: qd.template()
+):
     """Move the vertices of the cloth of every environment selected to the trial point of its step `alpha` along the
-    Newton direction."""
+    Newton direction, and publish their positions in the contact surface (see 'func_cloth_publish_contact')."""
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
         if envs_mask[i_b]:
-            fem_state.vertices.pos_next[i_v, i_b] = (
+            x = (
                 fem_state.cloth_vertices.pos_start[i_v, i_b]
                 + alpha[i_b] * fem_state.cloth_vertices.displacement[i_v, i_b]
+            )
+            fem_state.vertices.pos_next[i_v, i_b] = x
+            ipc_state.vertices.pos[i_v, i_b] = x
+            if qd.static(has_rigid):
+                ipc_state.vertices.pivot[i_v, i_b] = x
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_publish_contact(ipc_state: IPCState, fem_state: FEMState, has_rigid: qd.template()):
+    """
+    Publish the vertices of the cloth at the start point of the substep into their range of the contact surface, its
+    first one, the indices of the vertices in the solver (see IPCVertices in genesis/engine/solvers/ipc_contact.py).
+
+    A vertex stands at its start point, its lagged position being its position at the start of the substep, and a
+    vertex held at its target takes no contact terms. A vertex of the cloth moves straight, its own pivot without
+    rotation.
+    """
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        x = fem_state.vertices.pos_next[i_v, i_b]
+        ipc_state.vertices.pos[i_v, i_b] = x
+        ipc_state.vertices.pos_lagged[i_v, i_b] = fem_state.vertices.pos[i_v, i_b]
+        ipc_state.vertices.is_fixed[i_v, i_b] = fem_state.cloth_vertices.is_fixed[i_v, i_b]
+        if qd.static(has_rigid):
+            ipc_state.vertices.pivot[i_v, i_b] = x
+            ipc_state.vertices.pivot_displacement[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            ipc_state.vertices.rotation[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_publish_rows(newton_rows: NewtonRows, ipc_state: IPCState, fem_state: FEMState):
+    """Publish the row of every vertex of the cloth in the contact surface, in the segment of the cloth (see
+    'func_cloth_assemble')."""
+    n_vertices = fem_state.vertices.pos.shape[0]
+    row_start = newton_rows.segments_start[qd.static(int(NewtonSegment.CLOTH_VERTICES))]
+    for i_v, i_b in qd.ndrange(n_vertices, fem_state.vertices.pos.shape[1]):
+        ipc_state.vertices.row[i_v, i_b] = row_start + i_b * n_vertices + i_v
+
+
+@qd.func(requires_top_level=True)
+def func_cloth_scale_direction(envs_mask: qd.Tensor, fem_state: FEMState, ipc_state: IPCState, ipc_info: IPCInfo):
+    """Scale the Newton direction of the vertices of the cloth of every environment selected by the step of the group of
+    contact bodies of its entity (see IPCBodies in genesis/engine/solvers/ipc_contact.py)."""
+    for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape):
+        if envs_mask[i_b]:
+            i_body = ipc_info.vertices.body_idx[i_v]
+            fem_state.cloth_vertices.displacement[i_v, i_b] = (
+                ipc_state.bodies.alpha[i_body, i_b] * fem_state.cloth_vertices.displacement[i_v, i_b]
             )
 
 
