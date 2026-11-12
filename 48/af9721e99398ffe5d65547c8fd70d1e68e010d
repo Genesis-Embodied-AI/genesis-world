@@ -1,0 +1,19 @@
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_cac666a4c8adbf 70-71,87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "48af9721e99398ffe5d65547c8fd70d1e68e010d",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
