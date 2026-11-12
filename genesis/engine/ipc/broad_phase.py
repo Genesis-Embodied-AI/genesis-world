@@ -22,7 +22,7 @@ thickness plus the bulge of its path, and that of an edge-edge pair the larger a
 """
 
 import math
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 
@@ -35,6 +35,7 @@ from genesis.utils.misc import qd_to_numpy
 from genesis.utils.simt import qd_segmented_min, qd_segmented_sum, qd_slot_neighbors
 
 from .dop_bvh import (
+    DOPBVHConfig,
     DOPBVHHits,
     DOPBVHQueries,
     DOPBVHState,
@@ -132,6 +133,23 @@ class EFQueryList(Data, kind=DataKind.SCRATCH):
     offsets: qd.Tensor = field(int, shape=(ENVS * EF_EDGES,), ndarray=True)
     n_flags: qd.Tensor = field(int, shape=(), ndarray=True)
     scanner: ExclusiveSumScratch
+
+
+class EFSearch(NamedTuple):
+    """The data of the edge-face broad phase that a search reads and writes, in the order the funcs of a search take
+    them (see 'func_ef_bounds_build' and 'func_ef_query')."""
+
+    bounds: EFBounds
+    groups: EFGroups
+    query_list: EFQueryList
+    queries: DOPBVHQueries
+    tree: DOPBVHState
+    hits: DOPBVHHits
+    groups_queries: DOPBVHQueries
+    groups_tree: DOPBVHState
+    groups_hits: DOPBVHHits
+    sub_pairs: EFSubPairs
+    topology: EFTopology
 
 
 def get_ef_topology(
@@ -762,10 +780,7 @@ class EFBroadPhase:
         rotation vectors `rotations`. The queries run on one thread each after a run whose queries stopped short (see
         `grow`).
         """
-        tree_config, groups_tree_config = self.tree_config, self.groups_tree_config
-        if self._is_thread_query:
-            tree_config, groups_tree_config = self._query_configs_thread
-            self._is_thread_query = False
+        tree_config, groups_tree_config = self.take_query_configs()
         kernel_ef_bounds_build(
             positions,
             displacements,
@@ -806,6 +821,31 @@ class EFBroadPhase:
             groups_tree_config,
             is_expanded,
         )
+
+    @property
+    def search(self) -> EFSearch:
+        """The data that a search reads and writes, the lists grown so far."""
+        return EFSearch(
+            self.bounds,
+            self.groups,
+            self.query_list,
+            self.queries,
+            self.tree,
+            self.hits,
+            self.groups_queries,
+            self.groups_tree,
+            self.groups_hits,
+            self.sub_pairs,
+            self.topology,
+        )
+
+    def take_query_configs(self) -> tuple[DOPBVHConfig, DOPBVHConfig]:
+        """Return the configs of the tree of the proxies and of the tree of the groups for the next queries, on one
+        thread each for the one search after queries stopped short (see 'grow')."""
+        if self._is_thread_query:
+            self._is_thread_query = False
+            return self._query_configs_thread
+        return self.tree_config, self.groups_tree_config
 
     def grow(self, n_groups_hits: int, n_hits: int, n_sub_pt: int, n_sub_ee: int, n_truncated: int) -> bool:
         """

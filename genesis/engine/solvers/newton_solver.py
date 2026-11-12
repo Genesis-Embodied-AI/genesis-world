@@ -187,7 +187,7 @@ class LineSearchState(IntEnum):
 class NewtonStatus(IntFlag):
     """
     The status of the Newton solve of a substep, one word the device writes and the host reads back (see
-    'NewtonOptions.graph_mode').
+    'NewtonSolver.substep_post_coupling').
 
     RUNNING says that some environment iterates on, ROWS_OVERFLOW that the rows of the next Newton direction outgrow
     their capacity (see 'func_check_rows'), SEARCH_OVERFLOW and TRUNCATED that the last search of the candidate pairs
@@ -214,7 +214,8 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     below which it stops, and `pcg_alpha` and `pcg_beta` its steps. `rigid_cost` is the cost of the constraint solve of
     the rigid solver at the current iterate of its dofs (see 'func_rigid_update_constraint' in rigid/global_newton.py).
     `is_active_held` and `is_line_search_active_held` keep `is_active` and `is_line_search_active` over a line search
-    held by an overflow of the search (see 'func_line_search').
+    held by an overflow of the search (see 'func_line_search'). `n_line_search_trials` and `n_pcg_iterations` count the
+    line-search trials and the PCG iterations of the substep.
     """
 
     is_active: qd.Tensor = field(bool)
@@ -237,6 +238,8 @@ class NewtonEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     rigid_cost: qd.Tensor = field(float, labels=RIGID)
     is_active_held: qd.Tensor = field(bool)
     is_line_search_active_held: qd.Tensor = field(bool)
+    n_line_search_trials: qd.Tensor = field(int)
+    n_pcg_iterations: qd.Tensor = field(int)
 
 
 class NewtonLoops(Data, kind=DataKind.SCRATCH, shape=()):
@@ -787,9 +790,7 @@ class NewtonSolver(Solver):
                 self.newton_config,
             )
         if self.newton_config.has_cloth and self.ipc_contact is None:
-            self.ipc_contact = IPCContact(
-                self._B, self.ipc_info, self.newton_config.has_rigid_vertices, self._scene.options.ipc
-            )
+            self.ipc_contact = IPCContact(self._B, self.ipc_info, self._scene.options.ipc)
             if self._scene.options.ipc.intersection_check:
                 intersections = self.ipc_contact.find_intersections(self.ipc_state, self.ipc_info)
                 if len(intersections) > 0:
@@ -1169,6 +1170,8 @@ def func_init_substep(
         newton_envs.is_converged[i_b] = False
         newton_envs.failure[i_b] = NewtonFailure.NONE
         newton_envs.n_iterations[i_b] = 0
+        newton_envs.n_line_search_trials[i_b] = 0
+        newton_envs.n_pcg_iterations[i_b] = 0
         newton_envs.energy_start[i_b] = 0.0
         if is_active:
             qd.atomic_max(newton_loops.is_newton_running[None], 1)
@@ -2159,6 +2162,10 @@ def func_newton_direction(
         rigid_config,
         newton_config,
     )
+    for i_b in range(newton_envs.is_active.shape[0]):
+        if newton_envs.is_active[i_b]:
+            n_pcg_iterations = newton_info.pcg_max_iterations[None] - newton_loops.n_pcg_iterations_left[None]
+            newton_envs.n_pcg_iterations[i_b] = newton_envs.n_pcg_iterations[i_b] + n_pcg_iterations
 
 
 @qd.kernel(graph=True, fastcache=True)
@@ -2760,6 +2767,9 @@ def func_end_iteration(
     for i_b in range(newton_envs.is_active.shape[0]):
         if newton_envs.is_active[i_b]:
             newton_envs.n_iterations[i_b] = newton_envs.n_iterations[i_b] + 1
+            newton_envs.n_line_search_trials[i_b] = (
+                newton_envs.n_line_search_trials[i_b] + newton_envs.n_line_search_iterations[i_b]
+            )
             is_converged = newton_envs.is_converged[i_b]
             is_failed = newton_envs.failure[i_b] != NewtonFailure.NONE
             if qd.static(newton_config.has_moving_proxies):

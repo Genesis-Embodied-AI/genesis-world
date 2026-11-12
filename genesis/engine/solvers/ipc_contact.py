@@ -45,7 +45,17 @@ from genesis.engine.ipc.barrier import (
     func_pair_barrier_parameters,
     func_point_halfplane_barrier_gradient_hessian,
 )
-from genesis.engine.ipc.broad_phase import EFBroadPhase, EFSubPairs, func_vertex_bulge
+from genesis.engine.ipc.broad_phase import (
+    EFBounds,
+    EFBroadPhase,
+    EFGroups,
+    EFQueryList,
+    EFSubPairs,
+    EFTopology,
+    func_ef_bounds_build,
+    func_ef_query,
+    func_vertex_bulge,
+)
 from genesis.engine.ipc.ccd import (
     func_additive_ccd,
     func_candidate_reach,
@@ -61,7 +71,7 @@ from genesis.engine.ipc.distance import (
     func_point_triangle_distance_flag,
     func_point_triangle_flagged_distance2,
 )
-from genesis.engine.ipc.dop_bvh import DOPBVHHits
+from genesis.engine.ipc.dop_bvh import DOPBVHHits, DOPBVHQueries, DOPBVHState
 from genesis.engine.ipc.friction import (
     func_edge_edge_friction_frame,
     func_friction_energy,
@@ -1367,20 +1377,130 @@ def func_contact_filter(
             status[()] = status[()] | SearchStatus.TRUNCATED
 
 
-@qd.kernel(fastcache=True)
-def kernel_contact_filter(
+@qd.func(requires_top_level=True)
+def func_contact_search(
     status: qd.Tensor,
-    groups_hits: DOPBVHHits,
+    bounds: EFBounds,
+    groups: EFGroups,
+    query_list: EFQueryList,
+    queries: DOPBVHQueries,
+    tree: DOPBVHState,
     hits: DOPBVHHits,
+    groups_queries: DOPBVHQueries,
+    groups_tree: DOPBVHState,
+    groups_hits: DOPBVHHits,
     sub_pairs: EFSubPairs,
+    topology: EFTopology,
     ipc_pairs: IPCPairs,
     ipc_state: IPCState,
     ipc_info: IPCInfo,
+    tree_config: qd.template(),
+    groups_tree_config: qd.template(),
+    query_tree_config: qd.template(),
+    query_groups_tree_config: qd.template(),
     newton_config: qd.template(),
     is_swept: qd.template(),
 ):
-    """Keep the candidate pairs among the sub-pairs of the broad phase (see func_contact_filter)."""
+    """
+    Find the candidate pairs over the sweep of the vertices along the Newton direction, or at their positions without
+    `is_swept`, and set the bits of SearchStatus that the search calls for in `status`.
+
+    The edge-face broad phase bounds the contact surface and builds its trees with `tree_config` and
+    `groups_tree_config`, queries them with `query_tree_config` and `query_groups_tree_config` (see
+    'EFBroadPhase.take_query_configs' in genesis/engine/ipc/broad_phase.py), the rigid vertices sweeping along their
+    screws, and the filter keeps the candidates among its sub-pairs (see 'func_contact_filter').
+    """
+    func_ef_bounds_build(
+        ipc_state.vertices.pos,
+        ipc_state.vertices.displacement,
+        ipc_state.vertices.pivot,
+        ipc_state.vertices.rotation,
+        ipc_info.vertices.thickness,
+        ipc_info.vertices.d_hat,
+        ipc_info.edges.verts_idx,
+        ipc_info.triangles.verts_idx,
+        bounds,
+        groups,
+        queries,
+        tree,
+        groups_queries,
+        groups_tree,
+        topology,
+        tree_config,
+        groups_tree_config,
+        is_screw=qd.static(newton_config.has_rigid_vertices and is_swept),
+        is_swept=is_swept,
+    )
+    func_ef_query(
+        ipc_info.vertices.d_hat,
+        ipc_info.edges.verts_idx,
+        ipc_info.triangles.verts_idx,
+        bounds,
+        groups,
+        query_list,
+        queries,
+        tree,
+        hits,
+        groups_queries,
+        groups_tree,
+        groups_hits,
+        sub_pairs,
+        topology,
+        query_tree_config,
+        query_groups_tree_config,
+        is_expanded=True,
+    )
     func_contact_filter(status, groups_hits, hits, sub_pairs, ipc_pairs, ipc_state, ipc_info, newton_config, is_swept)
+
+
+@qd.kernel(graph=True, fastcache=True)
+def kernel_contact_search(
+    status: qd.Tensor,
+    bounds: EFBounds,
+    groups: EFGroups,
+    query_list: EFQueryList,
+    queries: DOPBVHQueries,
+    tree: DOPBVHState,
+    hits: DOPBVHHits,
+    groups_queries: DOPBVHQueries,
+    groups_tree: DOPBVHState,
+    groups_hits: DOPBVHHits,
+    sub_pairs: EFSubPairs,
+    topology: EFTopology,
+    ipc_pairs: IPCPairs,
+    ipc_state: IPCState,
+    ipc_info: IPCInfo,
+    tree_config: qd.template(),
+    groups_tree_config: qd.template(),
+    query_tree_config: qd.template(),
+    query_groups_tree_config: qd.template(),
+    newton_config: qd.template(),
+    is_swept: qd.template(),
+):
+    """Find the candidate pairs over the sweep of the vertices or at their positions (see func_contact_search)."""
+    func_contact_search(
+        status,
+        bounds,
+        groups,
+        query_list,
+        queries,
+        tree,
+        hits,
+        groups_queries,
+        groups_tree,
+        groups_hits,
+        sub_pairs,
+        topology,
+        ipc_pairs,
+        ipc_state,
+        ipc_info,
+        tree_config,
+        groups_tree_config,
+        query_tree_config,
+        query_groups_tree_config,
+        newton_config,
+        is_swept,
+    )
 
 
 @qd.func(requires_top_level=True)
@@ -1674,16 +1794,15 @@ class IPCContact:
 
     The edge-face broad phase finds the point-triangle and edge-edge sub-pairs whose bounds come within their gaps (see
     genesis/engine/ipc/broad_phase.py), the vertices of every contact body forming one group and the vertices that never
-    move another one, and a filter turns them into the candidate pairs (see 'func_contact_filter'). The pairs start at
+    move another one, and a filter turns them into the candidate pairs (see 'func_contact_search'). The pairs start at
     'IPCOptions.init_collision_pair_capacity' per environment, and once a search finds more, their capacity grows to
     'IPCOptions.capacity_grow_factor' times the count and the search runs again, as it does when a list of the broad
     phase overflows.
     """
 
-    def __init__(self, n_envs: int, ipc_info: IPCInfo, has_rigid: bool, ipc_options) -> None:
+    def __init__(self, n_envs: int, ipc_info: IPCInfo, ipc_options) -> None:
         self._n_envs = n_envs
         self._ipc_info = ipc_info
-        self._has_rigid = has_rigid
         self._grow_factor = ipc_options.capacity_grow_factor
         # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct could
         # take over from a dead one, so the structs replaced stay referenced, with their arrays freed.
@@ -1719,23 +1838,16 @@ class IPCContact:
         A list too short for its count, or a query that stopped short, sets its bit of SearchStatus in `status`, and the
         caller then grows the lists (see 'grow_search') and runs the search again.
         """
-        self._broad_phase.run(
-            ipc_state.vertices.pos,
-            ipc_state.vertices.displacement,
-            ipc_state.vertices.pivot,
-            ipc_state.vertices.rotation,
-            is_screw=self._has_rigid and is_swept,
-            is_swept=is_swept,
-            is_expanded=True,
-        )
-        kernel_contact_filter(
+        broad_phase = self._broad_phase
+        kernel_contact_search(
             status,
-            self._broad_phase.groups_hits,
-            self._broad_phase.hits,
-            self._broad_phase.sub_pairs,
+            *broad_phase.search,
             self.pairs,
             ipc_state,
             ipc_info,
+            broad_phase.tree_config,
+            broad_phase.groups_tree_config,
+            *broad_phase.take_query_configs(),
             newton_config,
             is_swept,
         )
