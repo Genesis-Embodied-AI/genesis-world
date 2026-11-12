@@ -38,8 +38,6 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    material : Material
-        Material used to determine physical behavior (e.g., Snow, Sand, Muscle).
     morph : Morph
         Shape description used for particle sampling.
     surface : Surface
@@ -60,7 +58,6 @@ class MPMEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "MPMSolver",
-        material: "gs.materials.MPM.Base",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -72,12 +69,11 @@ class MPMEntity(ParticleEntity):
         name: str | None = None,
     ) -> None:
         need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
+            options.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
         )
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -96,7 +92,7 @@ class MPMEntity(ParticleEntity):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(self.active, self._particle_start, self._material, self._particles)
+        self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

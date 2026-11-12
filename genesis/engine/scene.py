@@ -427,7 +427,6 @@ class Scene(BuildableMixin, RBC):
         morph = options.morph
         material = options.material
         surface = options.surface
-        visualize_contact = isinstance(options, gs.entities.Rigid) and options.visualize_contact
         name = options.name
         if surface is None:
             # assign a local surface, otherwise modification will apply on global default surface
@@ -470,7 +469,7 @@ class Scene(BuildableMixin, RBC):
                 f"Expected one of: {list(vis_modes)}."
             )
 
-        entity = self._sim.add_entity(morph, material, surface, visualize_contact, name, options)
+        entity = self._sim.add_entity(morph, surface, name, options)
 
         return entity
 

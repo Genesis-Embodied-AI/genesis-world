@@ -116,8 +116,6 @@ class PBDTetEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
-        Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
     surface : Surface
@@ -140,7 +138,6 @@ class PBDTetEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        material: "gs.materials.PBD.Cloth | gs.materials.PBD.Elastic",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -155,7 +152,6 @@ class PBDTetEntity(PBDBaseEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -172,7 +168,7 @@ class PBDTetEntity(PBDBaseEntity):
         self._solver.add_particles(
             self._particle_start,
             is_active=True,
-            material_type=self._material_type,
+            material_type=self.material_type,
             mass=float(self._particle_mass),
             rho_rest=0.0,
             mu_s=self.material.static_friction,
@@ -246,8 +242,6 @@ class PBD2DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
-        Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
     surface : Surface
@@ -272,7 +266,6 @@ class PBD2DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        material: "gs.materials.PBD.Cloth",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -288,7 +281,6 @@ class PBD2DEntity(PBDTetEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -302,7 +294,7 @@ class PBD2DEntity(PBDTetEntity):
         )
 
         self._inner_edge_start = inner_edge_start
-        self._material_type = int(self.solver.MATERIAL.CLOTH)
+        self.material_type = int(self.solver.MATERIAL.CLOTH)
 
     def sample(self):
         """Sample and preprocess the 2D mesh for the PBD cloth-like entity."""
@@ -363,8 +355,6 @@ class PBD3DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
-        Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
     surface : Surface
@@ -389,7 +379,6 @@ class PBD3DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        material: "gs.materials.PBD.Elastic",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -405,7 +394,6 @@ class PBD3DEntity(PBDTetEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -420,7 +408,7 @@ class PBD3DEntity(PBDTetEntity):
 
         self._elem_start = elem_start
 
-        self._material_type = int(self.solver.MATERIAL.ELASTIC)
+        self.material_type = int(self.solver.MATERIAL.ELASTIC)
 
     def sample(self):
         super().sample()
@@ -496,8 +484,6 @@ class PBDParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
-        Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
     surface : Surface
@@ -514,7 +500,6 @@ class PBDParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        material: "gs.materials.PBD.Liquid",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -526,7 +511,6 @@ class PBDParticleEntity(PBDBaseEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -542,8 +526,8 @@ class PBDParticleEntity(PBDBaseEntity):
             self._particle_start,
             is_active=self.active,
             material_type=int(self._solver.MATERIAL.LIQUID),
-            mass=self._material.rho,
-            rho_rest=self._material.rho,
+            mass=self.material.rho,
+            rho_rest=self.material.rho,
             mu_s=0.0,
             mu_k=0.0,
             air_resistance=0.0,
@@ -569,8 +553,6 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
-        Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
     surface : Surface
@@ -587,7 +569,6 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        material: "gs.materials.PBD.Particle",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -599,7 +580,6 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -615,8 +595,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
             self._particle_start,
             is_active=self.active,
             material_type=int(self._solver.MATERIAL.PARTICLE),
-            mass=self._material.rho,
-            rho_rest=self._material.rho,
+            mass=self.material.rho,
+            rho_rest=self.material.rho,
             mu_s=0.0,
             mu_k=0.0,
             air_resistance=0.0,

@@ -58,9 +58,6 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    material : genesis.materials.Hybrid
-        The hybrid material that includes both rigid and soft sub-materials,
-        and defines coupling behavior.
     morph : genesis.morphs.Morph
         The shape/morphology of the entity. Must be either a `URDF` or `Mesh`.
     surface : genesis.surfaces.Surface
@@ -71,14 +68,14 @@ class HybridEntity(Entity):
         self,
         idx: int,
         scene: "Scene",
-        material: "gs.materials.Hybrid",
         morph: Morph,
         surface: Surface,
         options: "gs.entities.Hybrid",
         name: str | None = None,
     ) -> None:
-        super().__init__(idx, scene, morph, None, material, surface, name=name, options=options)
+        super().__init__(idx, scene, morph, None, surface, name=name, options=options)
 
+        material = options.material
         material_rigid = material.material_rigid
         material_soft = material.material_soft
 

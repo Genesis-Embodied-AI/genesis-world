@@ -24,8 +24,6 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    material : Material
-        Material properties (e.g., density, stiffness).
     morph : Morph
         Morphological configuration.
     surface : Surface
@@ -42,7 +40,6 @@ class SPHEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "SPHSolver",
-        material: "gs.materials.SPH.Base",
         morph: Morph,
         surface: Surface,
         particle_size: float,
@@ -54,7 +51,6 @@ class SPHEntity(ParticleEntity):
         super().__init__(
             scene,
             solver,
-            material,
             morph,
             surface,
             particle_size,
@@ -74,7 +70,7 @@ class SPHEntity(ParticleEntity):
         GenesisException
             If the sampler is not one of the supported types: 'regular', 'pbs', or 'pbs-sdf_res'.
         """
-        self.sampler = self._material.sampler
+        self.sampler = self.material.sampler
 
         match self.sampler.split("-"):
             case ["regular"]:
@@ -93,7 +89,7 @@ class SPHEntity(ParticleEntity):
                 )
 
     def _add_particles_to_solver(self):
-        self._solver.add_particles(self.active, self._particle_start, self._material, self._particles)
+        self._solver.add_particles(self.active, self._particle_start, self.material, self._particles)
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

@@ -12,7 +12,6 @@ from genesis.engine.entities.rigid_entity.description import KinematicEntityDesc
 from genesis.engine.entities.rigid_entity.rigid_entity import get_variants_kinematics
 from genesis.engine.entities.rigid_entity.rigid_equality import RigidEquality
 from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
-from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     IKScratch,
     kernel_forward_kinematics_query,
@@ -193,11 +192,9 @@ class KinematicSolver(Solver):
     def add_entity(
         self,
         idx: int,
-        material: Kinematic,
         morph: Morph | Sequence[Morph] | None,
         surface: Surface | None,
         options: "gs.entities.Kinematic | gs.entities.Rigid",
-        visualize_contact: bool = False,
         name: str | None = None,
         desc: KinematicEntityDescription | None = None,
     ) -> KinematicEntity:
@@ -216,7 +213,6 @@ class KinematicSolver(Solver):
                 self._options,
                 self._enable_mujoco_compatibility,
                 options,
-                visualize_contact,
                 name,
             )
         else:
