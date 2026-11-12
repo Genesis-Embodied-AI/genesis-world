@@ -158,8 +158,8 @@ class Link(_GeomFields):
     Parameters
     ----------
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
-        The options of collision geoms of each selected link, a ``gs.GeomIndex`` counting the collision geoms of the
-        link as its asset states them. They override the options of the link. Default is no geom options.
+        The options of collision geoms of each selected link, a ``gs.GeomIndex`` ordinal counting the collision geoms of
+        that link alone (see ``gs.GeomIndex.at``). They override the options of the link. Default is no geom options.
     """
 
     geoms: FrozenDictType[GeomIndex, Geom] = {}
@@ -184,9 +184,9 @@ class Rigid(BaseEntity["RigidEntity"]):
         select it. Two keys selecting one link stand at equal specificity whatever the number of links they name, so
         they cannot give one field. Default is no link options.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
-        The options of the collision geoms each key selects by name in any link of the entity, raising if no link has a
-        geom of that name. They override the material of the entity, and the options of the links override them in
-        turn. Select geoms by ordinal through the options of their link in 'links'. Default is no geom options.
+        The options of the collision geoms each key selects among the collision geoms of the whole entity, by ordinal
+        (see ``gs.GeomIndex.at``) or by name in any of its links, raising if it selects no geom. They override the
+        material of the entity, and the options of the links override them in turn. Default is no geom options.
     """
 
     _solver_options_cls = RigidOptions
@@ -195,15 +195,6 @@ class Rigid(BaseEntity["RigidEntity"]):
     visualize_contact: StrictBool = False
     links: FrozenDictType[LinkIndex, Link] = {}
     geoms: FrozenDictType[GeomIndex, Geom] = {}
-
-    @model_validator(mode="after")
-    def _check_consistency(self) -> "Rigid":
-        if any(geom_index.names is None for geom_index in self.geoms):
-            gs.raise_exception(
-                "Geom options of an entity select geoms with 'gs.GeomIndex.named'. Select geoms by ordinal through the "
-                "options of their link."
-            )
-        return self
 
 
 class Kinematic(BaseEntity["KinematicEntity"]):

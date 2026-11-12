@@ -148,7 +148,7 @@ class _OrdinalIndex(_Selection):
 
 
 class _NamedOrdinalIndex(_OrdinalIndex):
-    """Select the geoms of a link by their ordinal in the asset, counted within the link, or by name.
+    """Select geoms by their ordinal in the asset or by name.
 
     A name is an exact name or a glob pattern (see ``LinkIndex``).
     """
@@ -162,6 +162,17 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         return self
 
     @classmethod
+    def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
+        """Select the geoms a numpy index picks among the collision geoms: an ordinal, ordinals, a boolean mask or a slice.
+
+        Keying the 'geoms' of entity options, the index counts the collision geoms of the whole entity, link after link
+        in the order of the asset. Keying the 'geoms' of link options, it counts the collision geoms of each selected
+        link alone, so 'gs.GeomIndex.at(0)' there selects the first collision geom of every link the key of the link
+        options selects.
+        """
+        return super().at(idx)
+
+    @classmethod
     def named(cls, *names: str) -> Self:
         """Select the geoms of the given names, each an exact geom name or a glob pattern."""
         return cls(names=names)
@@ -170,19 +181,22 @@ class _NamedOrdinalIndex(_OrdinalIndex):
         """Whether a selection by name holds the geom of a given name."""
         return any(fnmatchcase(geom_name, name) for name in self.names)
 
-    def resolve(self, geoms_name: list[str]) -> np.ndarray:
+    def resolve(self, geoms_name: list[str], geoms_start: int, n_geoms: int) -> np.ndarray:
         """Return the ordinals of the selected geoms among the geoms of a link, given their names.
 
-        A selection by name may match no geom of a link, so that it combines with a selection of several links. A
-        selection by name that matches no geom of the whole entity raises when the entity is added.
+        An ordinal counts 'n_geoms' collision geoms, of which the geoms of the link start at 'geoms_start'. A selection
+        may match no geom of a link, so that it combines with a selection of several links. A selection by name that
+        matches no geom of the whole entity raises when the entity is added, and so does an ordinal out of range.
         """
         if self.names is None:
-            return self._resolve_ordinals(len(geoms_name), "geom")
+            ordinals = self._resolve_ordinals(n_geoms, "geom")
+            is_in_link = (ordinals >= geoms_start) & (ordinals < geoms_start + len(geoms_name))
+            return ordinals[is_in_link] - geoms_start
         return np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
 
 
 class GeomIndex(_NamedOrdinalIndex):
-    """Select the collision geoms of a link by their ordinal in the asset, counted within the link, or by name.
+    """Select collision geoms by their ordinal in the asset (see ``GeomIndex.at``) or by name.
 
     Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
     so the ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is

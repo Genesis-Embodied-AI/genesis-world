@@ -173,11 +173,15 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                     },
                 ),
             },
-            # The caps take the rolling friction of the entity, while the slice of their link overrides its torsional one
+            # The caps take the rolling friction of the entity, while the slice of their link overrides its torsional one.
+            # An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule.
             geoms={
                 gs.GeomIndex.named("*_cap"): gs.options.Geom(
                     friction_torsional=0.05,
                     friction_rolling=0.002,
+                ),
+                gs.GeomIndex.at(4): gs.options.Geom(
+                    friction_rolling=0.001,
                 ),
             },
         ),
@@ -297,9 +301,9 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         scene.add_entity(
             options=arm.options.model_copy(update={"links": {gs.LinkIndex.named("arm3"): gs.options.Link()}})
         )
-    with pytest.raises(gs.GenesisException, match="by ordinal through the options of their link"):
+    with pytest.raises(gs.GenesisException, match="selects no valid geom among 2"):
         scene.add_entity(
-            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(0): gs.options.Geom(friction=1.0)}})
+            options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(2): gs.options.Geom(friction=1.0)}})
         )
 
     # The options of an entity hand out copies of what they hold, so editing them leaves the entity as it is
@@ -334,9 +338,9 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
     inertia_yy = boxes_mass @ ((boxes_x - com_x) ** 2 + 2.0 * 0.2**2 / 12.0)
     assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
     # The pieces of the decomposed torus take the options of its name, the box those of the mask and of the slice, and
-    # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity and the
-    # capsule of the child link the name its subtree selection gives. The ring, given no options, keeps the friction
-    # of the entity, its pieces fusing with none of the torus.
+    # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity. The
+    # capsule of the child link takes the name its subtree selection gives and the ordinal of the entity. The ring,
+    # given no options, keeps the friction of the entity, its pieces fusing with none of the torus.
     meshes_friction = torch.stack(
         [geom.get_friction() for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
     )
@@ -346,7 +350,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
         gs.GEOM_TYPE.MESH: (None, 0.01, 0.0005),
         gs.GEOM_TYPE.BOX: (1.5, 0.03, 0.002),
         gs.GEOM_TYPE.SPHERE: (0.3, 0.03, 0.002),
-        gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.0005),
+        gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.001),
     }
     for geom in mixed_geoms_body.geoms:
         friction, friction_torsional, friction_rolling = geoms_friction[geom.type]
