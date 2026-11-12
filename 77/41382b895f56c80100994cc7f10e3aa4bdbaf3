@@ -1,0 +1,19 @@
+genesis/logging/time_elapser.py
+  s_dd630a9a6426d2::t_78f3c40d13d68f 12-13,47,58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7741382b895f56c80100994cc7f10e3aa4bdbaf3",
+  "prompts": {},
+  "sessions": {
+    "s_dd630a9a6426d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "684ee9e2-8edd-4b04-a303-b7729b36ad6f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
