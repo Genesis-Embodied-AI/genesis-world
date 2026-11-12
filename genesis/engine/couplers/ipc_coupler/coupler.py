@@ -293,6 +293,16 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     f"The IPC coupler simulates entity '{entity.name}' at the density of its material alone, so "
                     "the link and geom options cannot give a density."
                 )
+            if any(
+                options.friction is not None
+                or options.friction_torsional is not None
+                or options.friction_rolling is not None
+                for options in (*links_options, *geoms_options)
+            ):
+                gs.logger.warning(
+                    f"The IPC coupler simulates the contacts of entity '{entity.name}' with the friction of its material, "
+                    "so the friction its link and geom options give applies to the contacts the rigid solver handles alone."
+                )
 
             # Resolve link filter from material
             link_filter_names = entity.material.coup_links
