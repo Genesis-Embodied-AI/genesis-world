@@ -155,6 +155,9 @@ class SPHState(Data, kind=DataKind.STATE):
     hash_grid: SpatialHashGrid
     # The error flags of each env, which no kernel of the solver raises (see 'ErrnoMixin.register_errors')
     errno: qd.Tensor = field(int, shape=(ENVS,))
+    # Whether each sorted particle lies within the reach of the walls or of the moving boundaries over the substep, which
+    # weigh the stiffness of its neighbors (see func_solver_iteration)
+    particles_is_near_boundary_reordered: qd.Tensor = field(bool, shape=(PARTICLES, ENVS), kind=DataKind.SCRATCH)
 
 
 class SPHInfo(Data, kind=DataKind.CONSTANT):
@@ -972,6 +975,21 @@ def kernel_compute_rho_and_dfsph_factor(sph_state: SPHState, sph_info: SPHInfo, 
             sph_state.particles_reordered.rho[i_p, i_b] = rho
             sph_state.particles_normal_reordered[i_p, i_b] = wall_volume_grad + ret.normal
 
+            # The walls weigh the stiffness of the neighbors through kernel gradients that are all zero beyond the
+            # support radius of the particle (see func_wall_volume). The distance to the surface of the moving
+            # boundaries takes a margin of one particle size, as their quadrature points lie on that surface. The
+            # particles keep their positions over the solves of the substep.
+            pos = sph_state.particles_reordered.pos[i_p, i_b]
+            support_radius = sph_info.support_radius[None]
+            walls_dist = qd.min(
+                (pos - sph_info.boundary.lower[None]).min(), (sph_info.boundary.upper[None] - pos).min()
+            )
+            is_near_boundary = walls_dist < support_radius
+            if qd.static(sph_config.has_boundary):
+                if sph_state.boundary.surface_dist[i_o, i_b] < support_radius + sph_info.particle_size[None]:
+                    is_near_boundary = True
+            sph_state.particles_is_near_boundary_reordered[i_p, i_b] = is_near_boundary
+
             # The walls, at rest, change the density of the particle by its own velocity, which they change with its
             # own stiffness and with the stiffness they take from it among the liquid around it (see
             # func_solver_iteration), weighted by its share of the kernel sum of the liquid. The relative density of the
@@ -1213,17 +1231,9 @@ def func_solver_iteration(
         if qd.static(solve_density):
             dv_scale = sph_info.substep_dt[None]
         k_i = sph_state.particles_k_reordered[i_p, i_b]
-        # The neighbors weigh the stiffness of the walls, which acts through kernel gradients that are all zero beyond
-        # the support radius of the particle (see func_wall_volume). The distance to the surface of the moving
-        # boundaries takes a margin of one particle size, as their quadrature points lie on that surface.
+        # The neighbors weigh the stiffness of the walls near them alone (see 'particles_is_near_boundary_reordered')
         pos = sph_state.particles_reordered.pos[i_p, i_b]
-        support_radius = sph_info.support_radius[None]
-        walls_dist = qd.min((pos - sph_info.boundary.lower[None]).min(), (sph_info.boundary.upper[None] - pos).min())
-        is_near_boundary = walls_dist < support_radius
-        if qd.static(sph_config.has_boundary):
-            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
-            if sph_state.boundary.surface_dist[i_o, i_b] < support_radius + sph_info.particle_size[None]:
-                is_near_boundary = True
+        is_near_boundary = sph_state.particles_is_near_boundary_reordered[i_p, i_b]
         ret = qd.Struct(
             dv=qd.Vector.zero(gs.qd_float, 3),
             k_i=k_i,
