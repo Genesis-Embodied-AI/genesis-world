@@ -881,8 +881,16 @@ def kernel_advect_position(sph_state: SPHState, sph_info: SPHInfo):
         *sph_state.particles_reordered.pos.shape, axes=qd.static(eoa(sph_state.particles_reordered.pos))
     ):
         if sph_state.particles_reordered.is_active[i_p, i_b]:
+            pos = sph_state.particles_reordered.pos[i_p, i_b]
+            # A particle reaching a wall stops approaching it, as it does the moving boundaries (see
+            # kernel_sph_boundaries_impulse). The density solve holds the liquid off the wall only where the particle has
+            # enough neighbors, which a particle carried ahead of the liquid lacks.
+            approach_dist = 0.25 * sph_info.particle_size[None]
+            is_near_lower = pos - sph_info.boundary.lower[None] < approach_dist
+            is_near_upper = sph_info.boundary.upper[None] - pos < approach_dist
             vel = sph_state.particles_reordered.vel[i_p, i_b]
-            pos = sph_state.particles_reordered.pos[i_p, i_b] + sph_info.substep_dt[None] * vel
+            vel = qd.select(is_near_lower, qd.max(vel, 0.0), qd.select(is_near_upper, qd.min(vel, 0.0), vel))
+            pos = pos + sph_info.substep_dt[None] * vel
             pos, vel = func_impose_cube_boundary(pos, vel, sph_info.boundary)
             sph_state.particles_reordered.pos[i_p, i_b] = pos
             sph_state.particles_reordered.vel[i_p, i_b] = vel
