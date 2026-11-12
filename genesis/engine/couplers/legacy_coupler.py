@@ -2176,13 +2176,17 @@ def func_project_on_bounds(
     Return the velocity nearest to a free velocity that meets at most 4 lower bounds on its components along normals,
     with the indices of the bounds met as equalities and their multipliers.
 
-    Where no velocity meets all the bounds, as for a particle squeezed between two approaching boundaries, the bounds are
-    all lowered by the least common slack that lets a velocity meet them, which violates each of the opposing bounds by
-    the same amount. By duality, that slack is the largest weighted mean of the bounds over the non-negative weights
-    that sum to one and cancel the weighted sum of their normals. The nearest velocity then meets as equalities the
-    first set of at most 3 bounds whose multipliers are non-negative and whose solution meets all the others, the
-    solution of a strictly convex problem being unique.
+    Where no velocity meets all the bounds within sqrt(3) times the largest bound in magnitude, the speed that three
+    bounds at right angles call for, the bounds are all lowered by the least common slack that lets such a velocity
+    meet them. This covers a particle squeezed between two approaching boundaries, whose nearly opposite normals would
+    call for a speed growing without limit as they turn opposite, and violates each of the opposing bounds by the same
+    amount. By duality, a velocity meeting the bounds is at least as fast as the mean of the bounds over the length of
+    the mean of their normals, for any non-negative weights summing to one. The slack is the largest excess of the mean
+    of the bounds over the speed limit times that length, at the weights cancelling the normals of each subset best.
+    The nearest velocity then meets as equalities the first set of at most 3 bounds whose multipliers are non-negative
+    and whose solution meets all the others, the solution of a strictly convex problem being unique.
     """
+    speed_max = qd.sqrt(3.0) * qd.abs(bounds).max()
     slack = gs.qd_float(0.0)
     for i_mask in range(16):
         # The subsets of at least 2 of the bounds, as the columns of the normals and a row of ones, unused ones padded
@@ -2202,9 +2206,12 @@ def func_project_on_bounds(
                     gram[i_k, i_k] = 1.0
             if gram.determinant() > legacy_coupler_info.normals_independence_min[None]:
                 weights = gram.inverse() @ rhs
-                residual = (mixing @ weights - qd.Vector([0.0, 0.0, 0.0, 1.0], dt=gs.qd_float)).norm()
-                if weights.min() >= 0.0 and residual < legacy_coupler_info.normals_independence_min[None]:
-                    slack = qd.max(slack, weights.dot(bounds))
+                weights_sum = weights.sum()
+                if weights.min() >= 0.0 and weights_sum > 0.0:
+                    weights = weights / weights_sum
+                    normals_mean = mixing @ weights
+                    normals_mean_norm = qd.Vector([normals_mean[0], normals_mean[1], normals_mean[2]]).norm()
+                    slack = qd.max(slack, weights.dot(bounds) - speed_max * normals_mean_norm)
     bounds_relaxed = bounds - slack * qd.Vector([1.0, 1.0, 1.0, 1.0], dt=gs.qd_float)
 
     vel = vel_free
