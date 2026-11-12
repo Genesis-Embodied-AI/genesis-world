@@ -141,10 +141,6 @@ jobs:
         run: |
           pip install ".[dev,render,usd]"
 
-          # FIXME: matplotlib 3.11.0 changed text rasterization, breaking the MPLPlotter PNG snapshot
-          # (test_recorders.py::test_plotter). Pin below 3.11 until the snapshot is regenerated.
-          pip install "matplotlib<3.11"
-
       - name: Run unit tests
         run: |
           pytest -v -ra --logical ${{ matrix.GS_ENABLE_NDARRAY != '0' && '--dev' || '' }} --backend ${{ matrix.GS_BACKEND }} -m 'required and not slow' --forked --failure-artifacts-dir "${{ runner.temp }}/failure_artifacts" ./tests
