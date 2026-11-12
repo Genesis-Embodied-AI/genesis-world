@@ -333,10 +333,14 @@ def swinging_spindle():
     ET.SubElement(nut, "joint", name="travel", type="slide", axis="0 0 1")
     ET.SubElement(nut, "joint", name="turn", type="hinge", axis="0 0 1")
     ET.SubElement(nut, "geom", type="box", size="0.05 0.05 0.01")
-    # The spindle passes through the solid free nut, which only stays on it because the screw stops their collision
+    # The spindle passes through the solid free nuts, which only stay on it because the screw stops their collision.
+    # The frame of the eccentric nut stands off its center of mass.
     free_nut = ET.SubElement(worldbody, "body", name="free_nut", pos="0 0 0.5")
     ET.SubElement(free_nut, "freejoint")
     ET.SubElement(free_nut, "geom", type="box", size="0.05 0.05 0.01")
+    eccentric_nut = ET.SubElement(worldbody, "body", name="eccentric_nut", pos="0 0 0.85")
+    ET.SubElement(eccentric_nut, "freejoint")
+    ET.SubElement(eccentric_nut, "geom", type="box", size="0.05 0.05 0.01", pos="0.02 0.01 0", euler="20 0 0")
     return ET.tostring(mjcf, encoding="unicode")
 
 
