@@ -173,8 +173,8 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                     },
                 ),
             },
-            # The caps take the rolling friction of the entity, while the slice of their link overrides its torsional one.
-            # An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule.
+            # The caps take the rolling friction of the entity, while the slice of their link overrides their torsional
+            # one. An ordinal of the entity counts its collision geoms over every link, so the fifth one is the capsule.
             geoms={
                 gs.GeomIndex.named("*_cap"): gs.options.Geom(
                     friction_torsional=0.05,

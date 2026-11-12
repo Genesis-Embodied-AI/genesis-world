@@ -215,7 +215,9 @@ class InteractiveScene:
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
             entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``
-                (morph, material, surface, visualize_contact, vis_mode). The dict key becomes the entity's name.
+                (morph, material, surface, visualize_contact, vis_mode). A dict holding ``options`` constructs the
+                entity from those entity options, its ``morph`` replacing theirs. The dict key becomes the entity's
+                name.
             sensors_kwargs: Iterable of ``SensorOptions`` instances forwarded to ``scene.add_sensor``.
         """
         if InteractiveFeature.REBUILD not in self.supported_features:
@@ -280,7 +282,7 @@ class InteractiveScene:
                     # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
                     # takes no name. Every other morph is a single entity added by name.
                     if isinstance(morph, gs.morphs.USD):
-                        scene.add_stage(**kwargs)
+                        scene.add_stage(**{key: value for key, value in kwargs.items() if key != "options"})
                     # An entity handed the very objects its description was resolved from is unchanged by the edit, so
                     # it is created from that description without reading its asset again. An edit hands in new objects.
                     elif (
@@ -293,6 +295,9 @@ class InteractiveScene:
                         and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
                     ):
                         scene._sim._add_entity(desc=desc)
+                    elif "options" in kwargs:
+                        options = kwargs["options"].model_copy(update={"morph": kwargs["morph"], "name": name})
+                        scene.add_entity(options=options)
                     else:
                         scene.add_entity(name=name, **kwargs)
                 for sensor_opts in self._sensors_kwargs:

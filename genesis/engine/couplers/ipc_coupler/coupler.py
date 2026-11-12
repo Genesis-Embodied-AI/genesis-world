@@ -300,8 +300,9 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 for options in (*links_options, *geoms_options)
             ):
                 gs.logger.warning(
-                    f"The IPC coupler simulates the contacts of entity '{entity.name}' with the friction of its material, "
-                    "so the friction its link and geom options give applies to the contacts the rigid solver handles alone."
+                    f"The IPC coupler simulates the contacts of entity '{entity.name}' with the friction of its "
+                    "material, so the friction its link and geom options give applies to the contacts the rigid solver "
+                    "handles alone."
                 )
 
             # Resolve link filter from material

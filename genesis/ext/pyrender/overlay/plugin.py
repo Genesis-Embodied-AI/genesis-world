@@ -315,9 +315,10 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 morph = tuple(entity.morphs) if len(entity.morphs) > 1 else entity.main_morph
             else:
                 morph = entity.morph
-            kwargs: dict[str, Any] = {"morph": morph}
-            # Carry the material and surface so a rebuild preserves the entity's solver (e.g. a Kinematic entity must
-            # not silently become Rigid, the add_entity default). visualize_contact is rigid-only.
+            # The options carry what the editor leaves as it is, such as the solver of the entity and its link and geom
+            # options, and the morph the editor edits replaces theirs on rebuild
+            kwargs: dict[str, Any] = {"morph": morph, "options": entity.options}
+            # The material and the surface tell the rebuild whether the entity is unchanged (see 'InteractiveScene')
             if isinstance(entity, gs.engine.entities.KinematicEntity):
                 kwargs["material"] = entity.material
                 kwargs["surface"] = entity.surface
