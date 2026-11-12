@@ -178,7 +178,9 @@ def func_mollified_barrier_gradient_hessian(
     which takes 'rank_tolerance', 'eigen_tolerance' and 'max_sweeps'), then symmetrized. Returns the gradient vector and
     the Hessian matrix.
     """
-    PROJECTION_MAX_RANK = qd.static(6)
+    # The Hessian is invariant to translating the four vertices together, so its rank is at most 9, and the product rule
+    # fills it: a budget of 9 keeps every Hessian on the reduced path of the projection
+    PROJECTION_MAX_RANK = qd.static(9)
     cross_norm2, cross_norm2_gradient, cross_norm2_hessian = func_edge_edge_cross_norm2(ea0, ea1, eb0, eb1)
     distance2_hessian = func_edge_edge_flagged_distance2_hessian(flag, ea0, ea1, eb0, eb1)
     energy, first, second = func_barrier(distance2, d_hat, thickness, kappa)
