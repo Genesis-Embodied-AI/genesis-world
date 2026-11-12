@@ -910,9 +910,16 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
         iterations of an environment stop. A larger value saves iterations and leaves a larger error in the solve.
         Defaults to 1e-6. Only used when `use_implicit_solver` is True.
     pcg_threshold : float, optional
-        Threshold for the PCG solver. Defaults to 1e-6. Only used when `use_implicit_solver` is True, without
-        `requires_grad`: a differentiable scene solves to the precision of the simulation instead, which its gradients
-        need, at the cost of more iterations.
+        Accuracy of the linear solves of the implicit solver, as the reduction of their squared residual relative to the
+        start of each Newton iteration. A smaller value leaves a smaller error in the positions, which scales with the
+        square root of this value, each tenfold reduction costing a roughly constant number of extra linear iterations.
+        Defaults to None, resolved from the simulation:
+        - 1e-6 in single precision, whose rounding caps the accuracy of stiff bodies below that value anyway;
+        - 1e-9 in double precision, an error of about 1e-7 of the motion of stiff bodies and 1e-5 of soft ones;
+        - the round-off of the simulation precision when `requires_grad` is True, since gradients need the exact
+          solution of each substep.
+        An explicit value applies in every case, a value below the round-off of the simulation precision acting as that
+        round-off. Only used when `use_implicit_solver` is True.
     linesearch_c : float, optional
         Line search sufficient decrease parameter. Defaults to 1e-4. Only used when `use_implicit_solver` is True.
     linesearch_tau : float, optional
@@ -931,7 +938,7 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     n_pcg_iterations: PositiveInt = 500
     n_linesearch_iterations: NonNegativeInt = 0
     newton_dx_threshold: PositiveFloat = 1e-6
-    pcg_threshold: PositiveFloat = 1e-6
+    pcg_threshold: PositiveFloat | None = None
     linesearch_c: PositiveFloat = 1e-4
     linesearch_tau: PositiveFloat = 0.5
     damping_alpha: NonNegativeFloat = 0.5

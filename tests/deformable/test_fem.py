@@ -415,20 +415,25 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_implicit_newton_dx_threshold(show_viewer):
+@pytest.mark.parametrize("requires_grad, n_linesearch_iterations", [(False, 0), (True, 4)])
+def test_implicit_newton_dx_threshold(requires_grad, n_linesearch_iterations, show_viewer):
     # A truncated PCG solve leaves the first Newton iteration short of the solution, so that later iterations move the
-    # vertices, unless a threshold above the first displacement ends them.
+    # vertices, unless a threshold above the first displacement ends them. A differentiable scene runs the iterations
+    # from the host when its data are ndarrays.
     N_PCG_ITERATIONS = 5
 
     verts_pos = []
     # The options of the solver hold for the whole scene, hence a second build for the single Newton iteration
     for n_newton_iterations, newton_dx_threshold in ((10, 1.0), (1, 1e-6)):
         scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                requires_grad=requires_grad,
+            ),
             fem_options=gs.options.FEMOptions(
                 use_implicit_solver=True,
                 n_newton_iterations=n_newton_iterations,
                 n_pcg_iterations=N_PCG_ITERATIONS,
+                n_linesearch_iterations=n_linesearch_iterations,
                 newton_dx_threshold=newton_dx_threshold,
             ),
             viewer_options=gs.options.ViewerOptions(
@@ -550,7 +555,8 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     MOTION_SPEED = 0.005
     VERTICES_IDX = [5, 7]
     MODE_AMPLITUDE = 1e-3
-    PCG_THRESHOLD = 1e-20
+    # Below the round-off floor of either precision, so that the implicit solves run to round-off
+    PCG_THRESHOLD = 1e-40
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -692,10 +698,8 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
         pos_tols = dict(atol=1e-2 * MODE_AMPLITUDE)
         vel_tols = dict(atol=1e-2 * MODE_AMPLITUDE * omega_sqr**0.5)
     elif precision == "64":
-        # The solve stops below a residual force sqrt(PCG_THRESHOLD), which moves the mode of unit modal mass by at
-        # most that times substep_dt^2 * sqrt(m_max) / m_min per substep, every substep at most doubling the error
-        mass_ratio = vibrating_verts_mass.max().sqrt() / vibrating_verts_mass.min()
-        pos_atol = 2**N_SUBSTEPS * PCG_THRESHOLD**0.5 * substep_dt**2 * mass_ratio
+        # The solve runs to round-off, which leaves the modal coordinates with the rounding of the positions they project
+        pos_atol = 4.0 * gs.EPS * (vibrating_box.get_verts_pos().abs() * modal_mass.abs()).sum()
         pos_tols, vel_tols = dict(atol=pos_atol), dict(atol=pos_atol / substep_dt)
     else:
         pos_tols = vel_tols = dict(rtol=2e-4)
