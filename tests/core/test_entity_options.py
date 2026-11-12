@@ -302,6 +302,10 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             options=arm.options.model_copy(update={"geoms": {gs.GeomIndex.at(0): gs.options.Geom(friction=1.0)}})
         )
 
+    # The options of an entity hand out copies of what they hold, so editing them leaves the entity as it is
+    arm.options.morph.pos = (9.0, 9.0, 9.0)
+    assert_allclose(arm.options.morph.pos, (0.0, -1.0, 0.6), tol=gs.EPS)
+
     scene.build(n_envs=2)
     # The mass of each box is its volume, 0.2^3 m^3, times the density its geom options give
     assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)
