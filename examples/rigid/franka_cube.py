@@ -29,8 +29,22 @@ def main():
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
+    # The five fingertip pads, which follow the finger mesh in each finger link, grip the cube with a higher friction
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        options=gs.entities.Rigid(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            links={
+                gs.LinkIndex.named("left_finger", "right_finger"): gs.options.Link(
+                    geoms={
+                        gs.GeomIndex.at(slice(1, 6)): gs.options.Geom(
+                            friction=1.5,
+                        ),
+                    },
+                ),
+            },
+        ),
     )
 
     cube = scene.add_entity(
