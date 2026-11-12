@@ -17,7 +17,7 @@ from genesis.utils.misc import qd_to_numpy, tensor_to_array
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81):
+def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81, mu=0.005):
     """Create a basic SPH scene with regular sampler."""
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -39,6 +39,7 @@ def create_sph_scene(show_viewer, particle_size=0.01, gravity=-9.81):
 
     liquid = scene.add_entity(
         material=gs.materials.SPH.Liquid(
+            mu=mu,
             sampler="regular",
         ),
         morph=gs.morphs.Box(
@@ -136,8 +137,8 @@ def test_initial_density_regular_sampler(show_viewer, tol):
 def test_initial_pressure_regular_sampler(show_viewer, tol):
     # Regular sampling yields densities at or below the rest density, so the density solve finds no compression to
     # correct and the initial pressure is zero. A nonzero initial pressure would inject spurious forces that
-    # destabilize the simulation.
-    scene, _ = create_sph_scene(show_viewer)
+    # destabilize the simulation. The liquid is inviscid, which leaves the stable timestep unbounded.
+    scene, _ = create_sph_scene(show_viewer, mu=0.0)
     sph_solver = scene.sph_solver
     rho0 = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
 
@@ -158,6 +159,14 @@ def test_simulation_stability_regular_sampler(show_viewer, tol):
 
     # Get initial positions for comparison
     initial_pos = liquid.get_particles_pos().clone()
+
+    # The upper quarter of the liquid on one side slides through the rest, so that the viscosity acts between particles
+    # of different densities along the free surface.
+    particles_pos = tensor_to_array(initial_pos)
+    is_sliding = (particles_pos[:, 0] < particles_pos[:, 0].mean()) & (particles_pos[:, 2] > particles_pos[:, 2].mean())
+    particles_vel = np.zeros((n_particles, 3))
+    particles_vel[is_sliding, 0] = 1.0
+    liquid.set_particles_vel(particles_vel)
 
     # Run simulation for a few steps
     num_steps = 5
@@ -192,10 +201,14 @@ def test_simulation_stability_regular_sampler(show_viewer, tol):
     )
 
     # The liquid is still far above the floor, so it is in free fall: the particle interactions are internal and
-    # cancel out in the momentum balance, leaving the mean velocity to gain gravity times the elapsed time. The
-    # tolerance absorbs the momentum drift of the viscosity, which weights each pair by the density of the neighbor
-    # alone, so the forces between two particles of different densities do not cancel.
-    assert_allclose(liquid.get_particles_vel()[..., 2].mean(), GRAVITY * num_steps * scene.dt, tol=1e-4)
+    # cancel out in the momentum balance, leaving the mean velocity to keep its initial value and to gain gravity times
+    # the elapsed time. The tolerance absorbs the momentum drift of the surface tension, which pushes each particle
+    # along its own normal to the free surface.
+    assert_allclose(
+        liquid.get_particles_vel().mean(dim=0),
+        particles_vel.mean(axis=0) + (0.0, 0.0, GRAVITY * num_steps * scene.dt),
+        tol=2e-6,
+    )
 
 
 @pytest.mark.required
