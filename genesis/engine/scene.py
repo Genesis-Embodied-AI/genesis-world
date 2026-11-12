@@ -400,9 +400,9 @@ class Scene(RBC):
             if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
                 morph = tuple(morph)
             if vis_mode is not None:
-                if surface is None:
-                    surface = gs.surfaces.Default()
-                surface.vis_mode = vis_mode
+                surface = (gs.surfaces.Default() if surface is None else surface).model_copy(
+                    update={"vis_mode": vis_mode}
+                )
             if material is None:
                 material = gs.materials.Rigid()
             options_cls = get_entity_options_cls(material)
@@ -424,11 +424,10 @@ class Scene(RBC):
             gs.raise_exception("Entity construction requires a morph.")
         morph = options.morph
         material = options.material
-        surface = options.surface
         name = options.name
-        if surface is None:
-            # assign a local surface, otherwise modification will apply on global default surface
-            surface = gs.surfaces.Default()
+        # The entity resolves the defaults of its surface on a copy of its own, since a surface may be shared by other
+        # entities and options. The morph resolves in place, as some shared morphs rely on (see 'Entity.options').
+        surface = gs.surfaces.Default() if options.surface is None else options.surface.model_copy()
 
         # some morph should not smooth surface normal
         if isinstance(options.morphs[0], (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
@@ -886,7 +885,7 @@ class Scene(RBC):
         if surface is None:
             surface = gs.surfaces.Default(color=(0.6, 0.8, 1.0, 1.0))
         if surface.vis_mode is None:
-            surface.vis_mode = "particle"
+            surface = surface.model_copy(update={"vis_mode": "particle"})
         if surface.vis_mode == "visual":
             gs.raise_exception("surface.vis_mode='visual' is not supported for fluid emitters.")
 
