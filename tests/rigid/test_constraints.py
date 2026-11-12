@@ -141,7 +141,9 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     # angle phi such that gap / 2 * cos(phi) - 2 * h * sin(phi) = -gap / 2, h being the half size of the boxes.
     BOX_HALF_SIZE = 0.02
     box_hung = boxes.get_link("box_hung")
-    (connect,) = boxes.equalities
+    box_welded = boxes.get_link("box_welded")
+    welded_pos, welded_quat = box_welded.get_pos(), box_welded.get_quat()
+    connect, _ = boxes.equalities
     gap = 2.0 * (connect.eq_data[0] - BOX_HALF_SIZE)
     rest_angle = np.arctan2(-2.0 * BOX_HALF_SIZE, 0.5 * gap) + np.arccos(
         -0.5 * gap / np.hypot(0.5 * gap, 2.0 * BOX_HALF_SIZE)
@@ -194,8 +196,17 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
+    mjcf_weld = (box_welded.idx, boxes.get_link("box_fixed").idx)
     no_weld = (-1, -1)
-    assert_equal(links_ab, [[box_weld, no_weld], [box_weld, no_weld], [cube_weld, box_weld], [box_weld, no_weld]])
+    assert_equal(
+        links_ab,
+        [
+            [mjcf_weld, box_weld, no_weld],
+            [mjcf_weld, box_weld, no_weld],
+            [mjcf_weld, cube_weld, box_weld],
+            [mjcf_weld, box_weld, no_weld],
+        ],
+    )
     for _ in range(110):
         scene.step()
     cubes_pos, cubes_quat = cube.get_pos(), tensor_to_array(cube.get_quat())
@@ -204,6 +215,8 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(cubes_pos[2] - cubes_pos[0], ee_pos_up - ee_pos_down, tol=1e-3)
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
     assert_allclose(gu.quat_to_rotvec(tensor_to_array(box_hung.get_quat())), (0.0, rest_angle, 0.0), atol=1e-2)
+    assert_allclose(box_welded.get_pos(), welded_pos, tol=1e-3)
+    assert_allclose(box_welded.get_quat(), welded_quat, tol=1e-3)
 
 
 @pytest.mark.required
