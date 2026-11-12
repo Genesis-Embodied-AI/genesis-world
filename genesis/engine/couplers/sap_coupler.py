@@ -2000,7 +2000,7 @@ def kernel_order_constraints(
     contacts their slots in the order the threads find them, which changes from a run to another. Every sum of the solve
     runs over the constraints in their sorted order (see func_compute_constraints), and every FEM vertex and rigid link
     gathers its contacts in that order (see func_gather_fem_vertex and func_compute_link_wrench), so that the solve is
-    reproducible bitwise. An entry of the list of a vertex packs the rank of its contact with the corner of the contact
+    reproducible bitwise. An entry of the list of a vertex packs the slot of its contact with the corner of the contact
     at the vertex, and of a link with the side of the contact on the link. The entries of each vertex and link are
     counted as the keys are laid out, the counts summed into the start of each list, then the lanes of a block place the
     entries of an environment in their sorted order by tiles.
@@ -2019,8 +2019,8 @@ def kernel_order_constraints(
     )
     constraint_handlers = qd.static(handlers.constraints)
     # The FEM vertices a contact acts on at most, the corners of its two tets, and the links, its two sides. An entry of
-    # the lists of the contacts of each vertex and link packs the rank of the contact in their sorted order with its
-    # corner or its side.
+    # the lists of the contacts of each vertex and link packs the slot of the contact with its corner or its side, which
+    # spares the gathers a lookup of the slot of each sorted constraint.
     N_CORNERS_MAX = qd.static(8)
     N_SIDES_MAX = qd.static(2)
     # The items of a chunk of the sorted constraints (see CHUNK_SIZE)
@@ -2118,6 +2118,8 @@ def kernel_order_constraints(
                 n_passes=(sap_info.constraints_env_shift[None] + 7) // 8,
             )
     else:
+        # FIXME: quadrants#1098 - the device-resident count launches every phase of the sort with a saturating grid,
+        # whatever the number of constraints, which costs a few microseconds per phase at a single environment.
         radix_sort(
             sap_state.constraint_order.key,
             sap_state.constraint_order.key_scratch,
@@ -2168,6 +2170,7 @@ def kernel_order_constraints(
                 i_k = i_k_ * N_LANES + i_lane
                 i_s = i_s_start + i_k // N_ENTRIES_MAX
                 i_x = -1
+                i_q = -1
                 if i_k < n_env_constraints * N_ENTRIES_MAX:
                     i_q = sap_state.constraint_order.order[i_s]
                     for i_h, handler in qd.static(enumerate(constraint_handlers)):
@@ -2194,7 +2197,7 @@ def kernel_order_constraints(
                 if qd.static(N_LANES > 1):
                     i_n = su.qd_block_shuffle(i_n, i_lane_first)
                 if i_x >= 0:
-                    incidence.entries[i_n + i_rank] = i_s * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
+                    incidence.entries[i_n + i_rank] = i_q * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
 
 
 @qd.func
@@ -2787,7 +2790,7 @@ def func_gather_fem_vertex(
                 elastic = elastic + sap_state.fem_corner_forces[i_corner_start + i_k, i_b]
             elif i_k < n_corners + n_contacts:
                 i_entry = sap_state.constraint_order.fem_incidence[i_n_start + i_k - n_corners]
-                i_q = sap_state.constraint_order.order[i_entry // N_CORNERS_MAX]
+                i_q = i_entry // N_CORNERS_MAX
                 i_corner = i_entry % N_CORNERS_MAX
                 for i_h, handler in qd.static(enumerate(constraint_handlers)):
                     if qd.static(handler.n_fem_corners > 0):
@@ -2861,7 +2864,7 @@ def func_compute_link_wrench(
             i_n = i_n_start + (i_n_ * N_SHARES + i_w) * N_LANES + i_lane
             if i_n < i_n_end:
                 i_entry = sap_state.constraint_order.link_incidence[i_n]
-                i_q = sap_state.constraint_order.order[i_entry // N_SIDES_MAX]
+                i_q = i_entry // N_SIDES_MAX
                 i_side = i_entry % N_SIDES_MAX
                 for i_h, handler in qd.static(enumerate(constraint_handlers)):
                     if qd.static(handler.n_rigid_sides > 0):
