@@ -305,7 +305,7 @@ def _func_delta(i_t: int, i_leaf: int, j_leaf: int, bvh_state: BVHState) -> int:
 
 
 @qd.func
-def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: qd.template()):
+def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: qd.template(), node_fit: qd.template()):
     """Walk from a sorted leaf to the root, fitting each node whose two children are fitted.
 
     The leaves of a tree walk at once. The second child to arrive at a node fits it and goes on, the first one stops,
@@ -316,6 +316,8 @@ def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: 
     i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
     bvh_state.tree.nodes_min[i_t, i_n] = bvh_state.leaves.aabbs_min[i_t, i_a]
     bvh_state.tree.nodes_max[i_t, i_n] = bvh_state.leaves.aabbs_max[i_t, i_a]
+    if qd.static(bool(node_fit)):
+        node_fit.fit_leaf(i_t, i_n, i_a)
     for _ in range(n_leaves):
         i_parent = bvh_state.nodes_parent[i_t, i_n]
         if i_parent < 0:
@@ -337,6 +339,8 @@ def _func_fit_ancestors(i_t: int, i_leaf: int, bvh_state: BVHState, bvh_config: 
         bvh_state.tree.nodes_max[i_t, i_parent] = qd.max(
             bvh_state.tree.nodes_max[i_t, i_left], bvh_state.tree.nodes_max[i_t, i_right]
         )
+        if qd.static(bool(node_fit)):
+            node_fit.fit_node(i_t, i_parent, i_left, i_right)
         i_n = i_parent
 
 
@@ -360,7 +364,7 @@ def _func_push_fit_parent(i_t: int, i_n: int, i_next: int, is_active: bool, sh_f
 
 
 @qd.func
-def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: int):
+def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: int, node_fit: qd.template()):
     """Fit the node boxes of a tree by one block of threads, sweeping a frontier of ready nodes up the tree.
 
     A round fits the nodes both children of which were fitted by earlier rounds and pushes their parents, on their
@@ -383,6 +387,8 @@ def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: 
             i_a = bvh_state.tree.leaves_idx[i_t, i_leaf]
             bvh_state.tree.nodes_min[i_t, i_n] = bvh_state.leaves.aabbs_min[i_t, i_a]
             bvh_state.tree.nodes_max[i_t, i_n] = bvh_state.leaves.aabbs_max[i_t, i_a]
+            if qd.static(bool(node_fit)):
+                node_fit.fit_leaf(i_t, i_n, i_a)
         _func_push_fit_parent(i_t, i_n, 0, is_active, sh_frontier_count, bvh_state)
     qd.simt.grid.mem_fence()
     qd.simt.block.sync()
@@ -404,6 +410,8 @@ def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: 
                 bvh_state.tree.nodes_max[i_t, i_n] = qd.max(
                     bvh_state.tree.nodes_max[i_t, i_left], bvh_state.tree.nodes_max[i_t, i_right]
                 )
+                if qd.static(bool(node_fit)):
+                    node_fit.fit_node(i_t, i_n, i_left, i_right)
             _func_push_fit_parent(i_t, i_n, 1 - i_cur, is_active, sh_frontier_count, bvh_state)
         qd.simt.grid.mem_fence()
         qd.simt.block.sync()
@@ -414,12 +422,18 @@ def _func_fit_tree_block(i_t: int, i_lane: int, bvh_state: BVHState, block_dim: 
 
 
 @qd.func
-def func_build_bvh(n_trees: int, bvh_state: BVHState, bvh_config: qd.template(), eps: float):
+def func_build_bvh(
+    n_trees: int, bvh_state: BVHState, bvh_config: qd.template(), eps: float, node_fit: qd.template() = None
+):
     """Build the first trees of the set from the boxes of their leaves, at the top level of a kernel.
 
     The passes run in order: the extent of each tree, the morton key of each leaf, the sort of the keys, the leaf index
     of each sorted slot, the radix tree and the node boxes. The build covers n_trees trees, under the config
     get_bvh_config returns for that number of trees built.
+
+    The closure `node_fit`, if any, fits data of its own per node along the node boxes, which a visitor reads to prune
+    the nodes (see func_bvh_traverse): `fit_leaf(i_t, i_n, i_a)` at the leaf node i_n of leaf i_a, and
+    `fit_node(i_t, i_n, i_left, i_right)` at the internal node i_n once both its children are fitted.
     """
     n_leaves = bvh_state.leaves.aabbs_min.shape[1]
     # The device-wide radix sort reads its key count on the device
@@ -600,19 +614,19 @@ def func_build_bvh(n_trees: int, bvh_state: BVHState, bvh_config: qd.template(),
         FIT_BLOCK_DIM = qd.static(128)
         qd.loop_config(block_dim=FIT_BLOCK_DIM)
         for i_flat in range(n_trees * FIT_BLOCK_DIM):
-            _func_fit_tree_block(i_flat // FIT_BLOCK_DIM, i_flat % FIT_BLOCK_DIM, bvh_state, FIT_BLOCK_DIM)
+            _func_fit_tree_block(i_flat // FIT_BLOCK_DIM, i_flat % FIT_BLOCK_DIM, bvh_state, FIT_BLOCK_DIM, node_fit)
     else:
         for i_t, i_leaf in qd.ndrange(n_trees, n_leaves):
-            _func_fit_ancestors(i_t, i_leaf, bvh_state, bvh_config)
+            _func_fit_ancestors(i_t, i_leaf, bvh_state, bvh_config, node_fit)
 
 
 @qd.kernel(fastcache=True)
-def build_bvh(bvh_state: BVHState, bvh_config: qd.template(), eps: float):
-    """Build every tree of the set from the boxes of its leaves.
+def build_bvh(bvh_state: BVHState, bvh_config: qd.template(), eps: float, node_fit: qd.template()):
+    """Build every tree of the set from the boxes of its leaves, and the data of its nodes that `node_fit` fits.
 
     The kernel runs func_build_bvh for a caller outside a kernel.
     """
-    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps)
+    func_build_bvh(bvh_state.leaves.aabbs_min.shape[0], bvh_state, bvh_config, eps, node_fit)
 
 
 def build_packed_bvh(
@@ -649,7 +663,7 @@ def build_packed_bvh(
         # The boxes come in the dtype of their source, which a device without double precision cannot copy from
         bvh_state.leaves.aabbs_min.from_numpy(np.stack([trees_aabb_min[i_t] for i_t in trees_idx], dtype=gs.np_float))
         bvh_state.leaves.aabbs_max.from_numpy(np.stack([trees_aabb_max[i_t] for i_t in trees_idx], dtype=gs.np_float))
-        build_bvh(bvh_state, bvh_config, eps=gs.EPS)
+        build_bvh(bvh_state, bvh_config, eps=gs.EPS, node_fit=None)
         # The nodes and the leaves of each tree, its rows first, the children of a packed node being absolute
         tree_left = qd_to_numpy(bvh_state.tree.nodes_left, transpose=True).T
         tree_right = qd_to_numpy(bvh_state.tree.nodes_right, transpose=True).T
@@ -750,10 +764,10 @@ def func_bvh_traverse(
     The tree is row i_t of a tree set, or the single row of a set of one row, from node i_root, the leaf node i_n
     holding the leaf leaves_idx[row, i_n - leaf_offset], visited as the element leaf_base + leaf (see BVHTreeState).
     The visitor is a closure over the arrays it reads and writes, its funcs handed the environment i_t, the query
-    index i_q, the query, a value of the struct type `visitor.Query`, and the bound: `is_node_hit(i_t, i_q, node_min,
-    node_max, query, bound)` accepts the nodes to descend into, and `visit_leaf(i_t, i_q, i_k, i_a, query, bound)`
-    visits element i_a and returns the bound, which a closest-hit search lowers to prune the nodes beyond its best hit.
-    A visitor writes its other results into its own arrays.
+    index i_q, the query, a value of the struct type `visitor.Query`, and the bound: `is_node_hit(i_t, i_q, i_n,
+    node_min, node_max, query, bound)` accepts the nodes to descend into, i_n indexing the node in its tree, and
+    `visit_leaf(i_t, i_q, i_k, i_a, query, bound)` visits element i_a and returns the bound, which a closest-hit search
+    lowers to prune the nodes beyond its best hit. A visitor writes its other results into its own arrays.
 
     A visitor whose `is_instance_level` holds walks a top-level tree whose leaves are instances of its packed trees
     `instances`: `enter_instance(i_t, i_q, i_k, query, bound)` returns the packed tree of instance i_k, -1 for none,
@@ -791,9 +805,9 @@ def func_bvh_traverse(
         # The inner visitor of an instance-level one tests the nodes of both levels
         is_node_hit = False
         if qd.static(visitor.is_instance_level):
-            is_node_hit = visitor.inner.is_node_hit(i_t, i_q, node_min, node_max, query_node, bound)
+            is_node_hit = visitor.inner.is_node_hit(i_t, i_q, i_n_node, node_min, node_max, query_node, bound)
         else:
-            is_node_hit = visitor.is_node_hit(i_t, i_q, node_min, node_max, query_node, bound)
+            is_node_hit = visitor.is_node_hit(i_t, i_q, i_n_node, node_min, node_max, query_node, bound)
         if is_node_hit:
             if is_top:
                 i_left = tree.nodes_left[i_row, i_n]
@@ -859,7 +873,14 @@ class BoxQuery:
 
     @qd.func
     def is_node_hit(
-        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+        self,
+        i_t: int,
+        i_q: int,
+        i_n: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
     ) -> bool:
         return func_aabb_intersects_aabb(node_min, node_max, query.aabb_min, query.aabb_max)
 

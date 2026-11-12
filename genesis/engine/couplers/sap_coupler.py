@@ -19,6 +19,7 @@ import genesis.utils.geom as gu
 import genesis.utils.simt as su
 from genesis.constants import IntEnum
 from genesis.engine.bvh import (
+    BVH_NODES,
     BVHLeaves,
     BVHQueryResults,
     BVHState,
@@ -741,6 +742,19 @@ class FEMSurfaceTets(Data, kind=DataKind.CONSTANT):
     rest_aabb_max: qd.Tensor = field((float, 3), shape=(SURFACE_ELEMENTS,))
 
 
+class FEMSurfaceTetNodes(Data, kind=DataKind.SCRATCH, shape=(BVH_NODES, ENVS)):
+    """The bounds of the surface tets under each node of the tree of the FEM surface tets of each environment."""
+
+    # The entity of the surface tets of each node, -1 for several
+    entity_idx: qd.Tensor = field(int)
+    # The largest lower bound and the smallest upper bound of the rest boxes of its surface tets, so that every one of
+    # them meets a box exactly when the box meets these two bounds as a box (see func_aabb_intersects_aabb)
+    rest_aabb_min_max: qd.Tensor = field((float, 3))
+    rest_aabb_max_min: qd.Tensor = field((float, 3))
+    # The smallest index of its surface tets
+    surface_tet_idx_min: qd.Tensor = field(int)
+
+
 class RigidRigidGeoms(Data, kind=DataKind.CONSTANT):
     """The geoms of the tets of the rigid-rigid contacts, and the pairs of geoms that may collide."""
 
@@ -878,37 +892,78 @@ class FEMSurfaceTetsQuery(BoxQuery):
     whose boxes overlap in the rest configuration of the entity, tets sharing a vertex included, as the rigid collider
     drops the pairs of links colliding in their neutral configuration, unless `has_neutral_collision` keeps them too.
     It reads the surface tets of the FEM entities (see FEMSurfaceTets).
+
+    It fits the bounds of the surface tets under each node as the tree is built (see FEMSurfaceTetNodes), and skips the
+    nodes whose every pair it drops, a leaf node bounding its single tet, so that the walk never reaches the tets of
+    the entity of the query it drops.
     """
 
     def __init__(
         self,
         results: BVHQueryResults,
         surface_tets: FEMSurfaceTets,
+        nodes: FEMSurfaceTetNodes,
         has_self_collision: bool,
         has_neutral_collision: bool,
     ) -> None:
         super().__init__(results)
         self.surface_tets = surface_tets
+        self.nodes = nodes
         self.has_self_collision = has_self_collision
         self.has_neutral_collision = has_neutral_collision
 
     @qd.func
-    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
-        is_kept = i_a < i_q
-        if self.surface_tets.entity_idx[i_a] == self.surface_tets.entity_idx[i_q]:
+    def fit_leaf(self, i_t: int, i_n: int, i_a: int):
+        self.nodes.entity_idx[i_n, i_t] = self.surface_tets.entity_idx[i_a]
+        self.nodes.rest_aabb_min_max[i_n, i_t] = self.surface_tets.rest_aabb_min[i_a]
+        self.nodes.rest_aabb_max_min[i_n, i_t] = self.surface_tets.rest_aabb_max[i_a]
+        self.nodes.surface_tet_idx_min[i_n, i_t] = i_a
+
+    @qd.func
+    def fit_node(self, i_t: int, i_n: int, i_left: int, i_right: int):
+        i_e = self.nodes.entity_idx[i_left, i_t]
+        if i_e != self.nodes.entity_idx[i_right, i_t]:
+            i_e = -1
+        self.nodes.entity_idx[i_n, i_t] = i_e
+        self.nodes.rest_aabb_min_max[i_n, i_t] = qd.max(
+            self.nodes.rest_aabb_min_max[i_left, i_t], self.nodes.rest_aabb_min_max[i_right, i_t]
+        )
+        self.nodes.rest_aabb_max_min[i_n, i_t] = qd.min(
+            self.nodes.rest_aabb_max_min[i_left, i_t], self.nodes.rest_aabb_max_min[i_right, i_t]
+        )
+        self.nodes.surface_tet_idx_min[i_n, i_t] = qd.min(
+            self.nodes.surface_tet_idx_min[i_left, i_t], self.nodes.surface_tet_idx_min[i_right, i_t]
+        )
+
+    @qd.func
+    def is_node_hit(
+        self,
+        i_t: int,
+        i_q: int,
+        i_n: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
+    ) -> bool:
+        # Each unordered pair is kept once, by the tet of higher index
+        is_hit = self.nodes.surface_tet_idx_min[i_n, i_t] < i_q
+        if is_hit:
+            is_hit = func_aabb_intersects_aabb(node_min, node_max, query.aabb_min, query.aabb_max)
+        if is_hit and self.nodes.entity_idx[i_n, i_t] == self.surface_tets.entity_idx[i_q]:
             is_dropped = True
             if qd.static(self.has_neutral_collision):
                 is_dropped = False
             elif qd.static(self.has_self_collision):
                 is_dropped = func_aabb_intersects_aabb(
-                    self.surface_tets.rest_aabb_min[i_a],
-                    self.surface_tets.rest_aabb_max[i_a],
+                    self.nodes.rest_aabb_min_max[i_n, i_t],
+                    self.nodes.rest_aabb_max_min[i_n, i_t],
                     self.surface_tets.rest_aabb_min[i_q],
                     self.surface_tets.rest_aabb_max[i_q],
                 )
             if is_dropped:
-                is_kept = False
-        return is_kept
+                is_hit = False
+        return is_hit
 
 
 @qd.data_oriented
@@ -1647,7 +1702,12 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_solver.fem_state, self.fem_surface_tet_bvh_state.leaves, fem_solver.fem_info
             )
         if self._has_fem_tet_contact:
-            build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
+            build_bvh(
+                self.fem_surface_tet_bvh_state,
+                self.fem_surface_tet_bvh_config,
+                eps=gs.EPS,
+                node_fit=self.handlers.fem_self.query,
+            )
         for contact in (self.handlers.rigid_rigid, self.handlers.rigid_fem):
             if contact is not None:
                 contact.update_geoms_tree(rigid_solver.dyn_state.geoms)
@@ -5403,9 +5463,14 @@ class FEMSelfContactHandler(FEMContactHandler):
         self.query_results = BVHQueryResults(
             sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
         )
+        # The nodes of one environment are neighbours in memory, as the threads fitting and walking a tree take them
+        surface_tet_nodes = FEMSurfaceTetNodes(
+            sizes=dict(bvh_nodes=2 * len(surface_elements) - 1, envs=simulator._B), env_first=True
+        )
         self.query = FEMSurfaceTetsQuery(
             self.query_results,
             self.surface_tets,
+            surface_tet_nodes,
             has_self_collision=options.enable_fem_self_collision,
             has_neutral_collision=options.enable_fem_self_collision and options.enable_fem_neutral_collision,
         )
