@@ -6,6 +6,8 @@ import torch
 
 import igl
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
@@ -1491,7 +1493,21 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
 @pytest.mark.required
 # The contact between cloths resolves its gaps in double precision, the precision of its reference
 @pytest.mark.precision("64")
-def test_cloth_contact_between_cloths(cloth_grid_obj_factory, tmp_path, show_viewer):
+@pytest.mark.parametrize(
+    "graph_mode",
+    [
+        "multi",
+        pytest.param(
+            "mono",
+            marks=pytest.mark.skipif(
+                not getattr(qd, "CHECKPOINT_TASK_REGIONS", False),
+                reason="The mono graph mode requires a Quadrants built locally from the dev-fast branch of "
+                "alanray-tech/quadrants (task-level checkpoint regions), which no released Quadrants has yet.",
+            ),
+        ),
+    ],
+)
+def test_cloth_contact_between_cloths(graph_mode, cloth_grid_obj_factory, tmp_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
     VELOCITY_TOL = 1e-1
     CUBE_SIZE = 0.05
@@ -1502,6 +1518,7 @@ def test_cloth_contact_between_cloths(cloth_grid_obj_factory, tmp_path, show_vie
         ),
         newton_options=gs.options.NewtonOptions(
             velocity_tol=VELOCITY_TOL,
+            graph_mode=graph_mode,
         ),
         # The capacity of the pairs starts below the pairs of the first contact, so that it grows to keep them all
         ipc_options=gs.options.IPCOptions(

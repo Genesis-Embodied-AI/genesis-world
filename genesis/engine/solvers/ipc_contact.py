@@ -1797,7 +1797,7 @@ class IPCContact:
     move another one, and a filter turns them into the candidate pairs (see 'func_contact_search'). The pairs start at
     'IPCOptions.init_collision_pair_capacity' per environment, and once a search finds more, their capacity grows to
     'IPCOptions.capacity_grow_factor' times the count and the search runs again, as it does when a list of the broad
-    phase overflows.
+    phase overflows. The mono kernel of the Newton solver searches on its own with the data of `broad_phase`.
     """
 
     def __init__(self, n_envs: int, ipc_info: IPCInfo, ipc_options) -> None:
@@ -1809,7 +1809,7 @@ class IPCContact:
         self._replaced: list = []
         capacity = ipc_options.init_collision_pair_capacity * n_envs
         vertices_body_idx = qd_to_numpy(ipc_info.vertices.body_idx)
-        self._broad_phase = EFBroadPhase(
+        self.broad_phase = EFBroadPhase(
             n_envs,
             ipc_info.edges.verts_idx,
             ipc_info.triangles.verts_idx,
@@ -1838,7 +1838,7 @@ class IPCContact:
         A list too short for its count, or a query that stopped short, sets its bit of SearchStatus in `status`, and the
         caller then grows the lists (see 'grow_search') and runs the search again.
         """
-        broad_phase = self._broad_phase
+        broad_phase = self.broad_phase
         kernel_contact_search(
             status,
             *broad_phase.search,
@@ -1860,9 +1860,9 @@ class IPCContact:
         queries on one thread each.
         """
         n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee, n_truncated = (
-            int(count) for count in qd_to_numpy(self._broad_phase.sub_pairs.summary)
+            int(count) for count in qd_to_numpy(self.broad_phase.sub_pairs.summary)
         )
-        self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_truncated)
+        self.broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_truncated)
         capacity = self.pairs.pt.shape[0]
         if max(n_pt, n_ee) > capacity:
             self._retire(self.pairs)
@@ -1883,7 +1883,7 @@ class IPCContact:
         intersections = DOPBVHHits(sizes=dict(dop_hits=self.pairs.pt.shape[0]))
         is_complete = False
         while not is_complete:
-            self._broad_phase.run(
+            self.broad_phase.run(
                 ipc_state.vertices.pos,
                 ipc_state.vertices.displacement,
                 ipc_state.vertices.pivot,
@@ -1892,14 +1892,14 @@ class IPCContact:
                 is_swept=False,
                 is_expanded=False,
             )
-            kernel_contact_intersections(self._broad_phase.hits, intersections, ipc_state, ipc_info)
+            kernel_contact_intersections(self.broad_phase.hits, intersections, ipc_state, ipc_info)
             n_groups_hits, n_hits = (
-                int(qd_to_numpy(hits.count)) for hits in (self._broad_phase.groups_hits, self._broad_phase.hits)
+                int(qd_to_numpy(hits.count)) for hits in (self.broad_phase.groups_hits, self.broad_phase.hits)
             )
             n_truncated = sum(
-                int(qd_to_numpy(hits.n_truncated)) for hits in (self._broad_phase.groups_hits, self._broad_phase.hits)
+                int(qd_to_numpy(hits.n_truncated)) for hits in (self.broad_phase.groups_hits, self.broad_phase.hits)
             )
-            is_complete = not self._broad_phase.grow(
+            is_complete = not self.broad_phase.grow(
                 n_groups_hits, n_hits, n_sub_pt=0, n_sub_ee=0, n_truncated=n_truncated
             )
             n_intersections = int(qd_to_numpy(intersections.count))

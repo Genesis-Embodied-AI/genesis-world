@@ -846,6 +846,13 @@ class NewtonOptions(Options):
     failure_check_interval : int, optional
         Substeps between two checks of whether a solve reached 'max_iterations', which logs a warning. A smaller
         interval reports it sooner, at the cost of a slower simulation. Defaults to 32.
+    graph_mode : str, optional
+        How the iterations of a substep run on the device. 'multi' has the host check the solve after every iteration,
+        which runs on every Quadrants build and compiles fastest, at the cost of the device waiting on the host at each
+        iteration. 'mono' has the host check the solve once per substep, which runs the scenes with cloth faster and
+        those of implicit MPM particles alone slightly slower, at the cost of a longer compilation on first use. It
+        requires a Quadrants built locally from the dev-fast branch of alanray-tech/quadrants, which has task-level
+        checkpoint regions: no released Quadrants has them yet. Both give the same motion. Defaults to 'multi'.
     """
 
     velocity_tol: PositiveFloat = 5e-2
@@ -855,6 +862,7 @@ class NewtonOptions(Options):
     pcg_max_iterations: PositiveInt = 1024
     pcg_tol: PositiveFloat = 1e-4
     failure_check_interval: PositiveInt = 32
+    graph_mode: Literal["mono", "multi"] = "multi"
 
     def model_post_init(self, context: Any) -> None:
         if self.line_search_shrink >= 1.0:
