@@ -1,0 +1,29 @@
+tests/rigid/test_serialization.py
+  s_c62ec9da443b15::t_0204bef6d08a35 572,576-582,591
+examples/rigid/single_franka_batch_render.py
+  s_c62ec9da443b15::t_7419b5c4aea0d2 41
+tests/core/test_surface.py
+  s_c62ec9da443b15::t_ed5d043d7dde9a 68,75-91
+genesis/options/textures.py
+  s_c62ec9da443b15::t_0e582d142396f9 26,31,381-554
+genesis/options/surfaces.py
+  s_c62ec9da443b15::t_c44291950e8ec2 15,142-148,174-180,283,289-291,299,354-357,359-361,528-529,618-619,714-715
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_ec741a777aaad2 420
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6a7f4cb14b7da4503042d3b9caa272fd50cc7562",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
