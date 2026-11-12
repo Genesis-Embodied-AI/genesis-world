@@ -103,15 +103,17 @@ class SignedDistanceFieldDescription:
         # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
         # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
         # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
-        # so a wall is finely sampled along its tangent axes too (see get_wall_thickness). The probe needs a closed
-        # surface, since inward rays escape an open mesh through its holes, and the mesh it probes stands for this
-        # collision mesh, so both share their watertightness.
+        # so a wall is finely sampled along its tangent axes too. For example, the thin vertical wall of a mug extends
+        # along the vertical axis although the only wall facing that axis is its thick bottom, so no axis can be
+        # coarsened to the thickness of the walls facing it. The probe needs a closed surface, since inward rays escape
+        # an open mesh through its holes, and the mesh it probes stands for this collision mesh, so both share their
+        # watertightness.
         sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
         cell_size_target = material.sdf_cell_size
         if not mesh.is_convex:
             if mesh.is_watertight:
                 wall_thickness = mu.get_wall_thickness(
-                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces), quantile=0.25
                 )
                 cell_size_target = min(cell_size_target, wall_thickness / 2.0)
             else:

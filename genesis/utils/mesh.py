@@ -10,6 +10,7 @@ import numpy as np
 import coacd
 import igl
 import Imath
+import numba as nb
 import OpenEXR
 import tetgen
 import trimesh
@@ -41,6 +42,11 @@ DEFAULT_PLANE_TEXTURE_PATH = "textures/checker.png"  # use checkerboard texture 
 # The GPU interpolates the attributes of a triangle in low precision, so a triangle hundreds of meters wide makes the
 # edges of its texture flicker and shift under a rounding change of the camera pose. Cells of this size keep them still.
 PLANE_MAX_CELL_SIZE = 50.0
+# Number of rays cast to estimate the wall thickness of a mesh, whatever its number of faces. The fraction of the
+# surface thinner than the estimate departs from the quantile asked by an error decreasing as its inverse square root.
+WALL_THICKNESS_N_RAYS = 4096
+# Number of triangles per leaf of the bounding volume hierarchy of 'cast_rays'
+BVH_LEAF_SIZE = 4
 
 
 def color_f32_to_u8(color) -> np.ndarray:
@@ -85,23 +91,161 @@ def convex_hull(tmesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return trimesh.convex.convex_hull(tmesh, repair=not is_flat)
 
 
-def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float = 0.25) -> float:
-    """Estimate a watertight mesh's characteristic wall thickness by probing its local diameter with inward rays.
+@nb.jit(nopython=True, cache=True)
+def _cast_rays_bvh(
+    rays_start: np.ndarray,
+    rays_dir: np.ndarray,
+    rays_tri_idx_skip: np.ndarray,
+    tris: np.ndarray,
+    leaves_tris_idx: np.ndarray,
+    nodes_children_idx: np.ndarray,
+    nodes_lower: np.ndarray,
+    nodes_upper: np.ndarray,
+) -> np.ndarray:
+    eps = np.finfo(np.float64).eps
+    n_leaves, n_nodes = len(leaves_tris_idx), len(nodes_lower)
+    rays_dist = np.full(len(rays_start), np.inf)
+    # A pop pushes the two children of a node, so the stack never holds more than one node per level plus one
+    nodes_stack = np.empty(int(np.ceil(np.log2(n_leaves))) + 1, dtype=np.int64)
+    for i_r in range(len(rays_start)):
+        start, ray_dir = rays_start[i_r], rays_dir[i_r]
 
-    A ray is cast inward along the face normal from a stride-subsampled set of face centroids to the first opposite
-    surface. The `quantile` of those hit distances, weighted by probed face area so the estimate measures surface
-    rather than tessellation density (a thin wall spanned by a handful of large faces must not be outvoted by many
-    small decorative facets), is returned: a low quantile approximates the thinnest wall and the median the typical
-    one. The mesh must be watertight: inward rays escape through holes of an open surface, so the estimate is
-    meaningless there and an exception is raised (the caller is expected to skip the probe for non-watertight meshes).
+        # Ray frame of the watertight ray-triangle test (see 'ray_projection' in genesis/utils/raycast_qd.py)
+        kz = 0
+        if abs(ray_dir[1]) > abs(ray_dir[0]):
+            kz = 1
+        if abs(ray_dir[2]) > abs(ray_dir[kz]):
+            kz = 2
+        kx = (kz + 1) % 3
+        ky = (kx + 1) % 3
+        if ray_dir[kz] < 0.0:
+            kx, ky = ky, kx
+        # A direction of zero length defines no ray, which crosses no triangle
+        if ray_dir[kz] == 0.0:
+            continue
+        shear_x, shear_y, shear_z = ray_dir[kx] / ray_dir[kz], ray_dir[ky] / ray_dir[kz], 1.0 / ray_dir[kz]
+        # The direction is floored only to keep its inverse finite (see 'ray_aabb_intersection' in raycast_qd.py)
+        dir_inv = np.where(ray_dir < 0.0, -1.0, 1.0) / np.maximum(np.abs(ray_dir), eps * eps)
 
-    The estimate is deliberately a scalar, not per-axis: the SDF grid it sizes does not only resolve walls along
-    their normal - it certifies contact penetrations through Lipschitz cone bounds whose slack grows with the
-    lattice spacing in every direction around the contact point, tangent axes included. On a closed shell each
-    wall's tangent directions are other walls' normals (a mug's vertical wall lies tangent to the vertical axis
-    even though the only wall facing that axis, the thick bottom, would justify coarse vertical cells), so relaxing
-    any one axis to the thickness of the walls facing it measurably degrades the certified pens of every wall
-    tangent to it, and no bound-side search can recover the loss (the lateral sample offset is a lattice property).
+        dist_min = np.inf
+        nodes_stack[0] = n_nodes - 1
+        n_stack = 1
+        while n_stack > 0:
+            n_stack -= 1
+            i_n = nodes_stack[n_stack]
+
+            # Slab test of the box of the node, widened by its rounding so that no box the ray touches is culled
+            t_near, t_far = 0.0, np.inf
+            for i in range(3):
+                t_lower = (nodes_lower[i_n, i] - start[i]) * dir_inv[i]
+                t_upper = (nodes_upper[i_n, i] - start[i]) * dir_inv[i]
+                t_near = max(t_near, min(t_lower, t_upper))
+                t_far = min(t_far, max(t_lower, t_upper))
+            if t_near * (1.0 - 2.0 * eps) > t_far * (1.0 + 2.0 * eps) or t_near > dist_min:
+                continue
+            if i_n >= n_leaves:
+                nodes_stack[n_stack : n_stack + 2] = nodes_children_idx[i_n - n_leaves]
+                n_stack += 2
+                continue
+
+            # Watertight ray-triangle test (see 'ray_triangle_intersection' in genesis/utils/raycast_qd.py)
+            for i_t in leaves_tris_idx[i_n]:
+                if i_t < 0 or i_t == rays_tri_idx_skip[i_r]:
+                    continue
+                # Coordinates of the vertices in the ray frame, held in registers: an array allocated per
+                # triangle would dominate the cost of the test.
+                along_0 = tris[i_t, 0, kz] - start[kz]
+                along_1 = tris[i_t, 1, kz] - start[kz]
+                along_2 = tris[i_t, 2, kz] - start[kz]
+                x_0 = tris[i_t, 0, kx] - start[kx] - shear_x * along_0
+                x_1 = tris[i_t, 1, kx] - start[kx] - shear_x * along_1
+                x_2 = tris[i_t, 2, kx] - start[kx] - shear_x * along_2
+                y_0 = tris[i_t, 0, ky] - start[ky] - shear_y * along_0
+                y_1 = tris[i_t, 1, ky] - start[ky] - shear_y * along_1
+                y_2 = tris[i_t, 2, ky] - start[ky] - shear_y * along_2
+                area_0, area_1, area_2 = y_1 * x_2 - x_1 * y_2, y_2 * x_0 - x_2 * y_0, y_0 * x_1 - x_0 * y_1
+                norm_x = math.sqrt(x_0 * x_0 + x_1 * x_1 + x_2 * x_2)
+                norm_y = math.sqrt(y_0 * y_0 + y_1 * y_1 + y_2 * y_2)
+                area_bound = 2.0 * eps * norm_x * norm_y
+                has_neg = area_0 < -area_bound or area_1 < -area_bound or area_2 < -area_bound
+                has_pos = area_0 > area_bound or area_1 > area_bound or area_2 > area_bound
+                det = area_0 + area_1 + area_2
+                if not (has_neg and has_pos) and det != 0.0:
+                    dist = shear_z * (area_0 * along_0 + area_1 * along_1 + area_2 * along_2) / det
+                    if 0.0 < dist < dist_min:
+                        dist_min = dist
+        rays_dist[i_r] = dist_min
+    return rays_dist
+
+
+def cast_rays(
+    tris: np.ndarray, rays_start: np.ndarray, rays_dir: np.ndarray, rays_tri_idx_skip: np.ndarray
+) -> np.ndarray:
+    """Compute the distance along each ray to the first triangle it crosses, infinite for a ray crossing none.
+
+    'tris' holds the vertices of each triangle, and 'rays_start' and 'rays_dir' the origin and the direction of each
+    ray, the distance being expressed in units of the direction. Each ray ignores the triangle of index
+    'rays_tri_idx_skip', typically the one it starts from, -1 ignoring none, and counts crossings at positive distance
+    alone. A ray crossing an edge or a vertex shared by several triangles crosses all of them, so it never slips through
+    a closed surface.
+    """
+    n_tris = len(tris)
+    tris_center = tris.mean(axis=1)
+    centers_lower, centers_upper = tris_center.min(axis=0), tris_center.max(axis=0)
+    centers_extent = np.where(centers_upper > centers_lower, centers_upper - centers_lower, 1.0)
+    # The rays are cast against a bounding volume hierarchy, a binary tree over the triangles sorted along the Morton
+    # curve of their centers on a lattice of 1024 cells per axis, whose order keeps nearby triangles together.
+    tris_cell = ((tris_center - centers_lower) * (1023.0 / centers_extent)).astype(np.uint64)
+    tris_code = np.zeros(n_tris, dtype=np.uint64)
+    axes_shift = np.arange(2, -1, -1, dtype=np.uint64)
+    for i_bit in range(10):
+        tris_bit = (tris_cell >> np.uint64(i_bit)) & np.uint64(1)
+        tris_code |= np.bitwise_or.reduce(tris_bit << (np.uint64(3 * i_bit) + axes_shift), axis=1)
+    tris_order = np.argsort(tris_code, kind="stable")
+
+    # The nodes are numbered level by level from the leaves up, so that the root comes last. Each level pairs the
+    # consecutive nodes of the level below, the last one moving up unpaired when their number is odd.
+    n_leaves = -(-n_tris // BVH_LEAF_SIZE)
+    n_slots_empty = n_leaves * BVH_LEAF_SIZE - n_tris
+    leaves_tris_idx = np.concatenate((tris_order, np.full(n_slots_empty, -1))).reshape((n_leaves, BVH_LEAF_SIZE))
+    slots_lower = np.concatenate((tris[tris_order].min(axis=1), np.full((n_slots_empty, 3), np.inf)))
+    slots_upper = np.concatenate((tris[tris_order].max(axis=1), np.full((n_slots_empty, 3), -np.inf)))
+    level_lower = slots_lower.reshape((n_leaves, BVH_LEAF_SIZE, 3)).min(axis=1)
+    level_upper = slots_upper.reshape((n_leaves, BVH_LEAF_SIZE, 3)).max(axis=1)
+    level_nodes_idx = np.arange(n_leaves)
+    nodes_lower, nodes_upper, nodes_children_idx = [level_lower], [level_upper], [np.empty((0, 2), dtype=np.int64)]
+    n_nodes = n_leaves
+    while len(level_nodes_idx) > 1:
+        n_pairs = len(level_nodes_idx) // 2
+        pairs_lower = level_lower[: 2 * n_pairs].reshape((n_pairs, 2, 3)).min(axis=1)
+        pairs_upper = level_upper[: 2 * n_pairs].reshape((n_pairs, 2, 3)).max(axis=1)
+        nodes_lower.append(pairs_lower)
+        nodes_upper.append(pairs_upper)
+        nodes_children_idx.append(level_nodes_idx[: 2 * n_pairs].reshape((n_pairs, 2)))
+        level_nodes_idx = np.concatenate((n_nodes + np.arange(n_pairs), level_nodes_idx[2 * n_pairs :]))
+        n_nodes += n_pairs
+        level_lower = np.concatenate((pairs_lower, level_lower[2 * n_pairs :]))
+        level_upper = np.concatenate((pairs_upper, level_upper[2 * n_pairs :]))
+
+    return _cast_rays_bvh(
+        rays_start,
+        rays_dir,
+        rays_tri_idx_skip,
+        tris,
+        leaves_tris_idx,
+        np.concatenate(nodes_children_idx),
+        np.concatenate(nodes_lower),
+        np.concatenate(nodes_upper),
+    )
+
+
+def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float) -> float:
+    """Estimate the wall thickness of a watertight mesh, as a quantile of its local diameter over its surface.
+
+    'quantile' is the fraction of the surface thinner than the estimate: a low quantile approximates the thinnest wall
+    and the median the typical one. The estimate is deterministic, scales with the mesh, and weights the surface by area
+    rather than by number of faces. An exception is raised if the mesh is not watertight, since the inward rays probing
+    the local diameter escape an open surface through its holes.
     """
     cache = get_wth_cache(verts, faces, quantile)
     wall_thickness = cache.load()
@@ -111,23 +255,22 @@ def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float = 0
     mesh = trimesh.Trimesh(verts, faces, process=False)
     if not mesh.is_watertight:
         gs.raise_exception("Wall-thickness estimation requires a watertight mesh.")
-    # A face of no area has no normal to cast a ray along, and a ray hitting it divides by its area, so the faces of no
-    # area are left out of the probe, the surface they cover being none
-    mesh.update_faces(mesh.nondegenerate_faces())
-    diag = np.linalg.norm(verts.max(axis=0) - verts.min(axis=0))
-    stride = max(1, len(faces) // 1000)
-    centers = mesh.triangles_center[::stride]
-    normals = mesh.face_normals[::stride]
-    origins = centers - 1e-3 * diag * normals
-    locations, ray_idx, _ = mesh.ray.intersects_location(origins, -normals, multiple_hits=False)
-    thickness = np.linalg.norm(locations - origins[ray_idx], axis=1)
-    # A hit at the ray origin's own face reads as zero thickness; drop those self-hits before taking the quantile.
-    is_hit_valid = thickness > 1e-4 * diag
-    thickness = thickness[is_hit_valid]
-    areas = mesh.area_faces[::stride][ray_idx][is_hit_valid]
-    order = np.argsort(thickness)
-    areas_cum = np.cumsum(areas[order])
-    wall_thickness = thickness[order][np.searchsorted(areas_cum, quantile * areas_cum[-1])]
+    # A fixed number of rays starts from points spread over the surface in proportion to area, so the estimate measures
+    # surface rather than tessellation density: a thin wall made of a few large faces must not be outvoted by many small
+    # facets. Stratifying the cumulative area gives each face its share of the points up to one, which spares the
+    # variance of drawing the faces at random. A face of no area gets none, having no normal to cast a ray along.
+    areas_cum = np.cumsum(mesh.area_faces)
+    rays_area_cum = (np.arange(WALL_THICKNESS_N_RAYS) + 0.5) * (areas_cum[-1] / WALL_THICKNESS_N_RAYS)
+    rays_face_idx = np.searchsorted(areas_cum, rays_area_cum)
+    tris = mesh.triangles
+    rays_bary = np.random.default_rng(seed=0).dirichlet(np.ones(3), WALL_THICKNESS_N_RAYS)
+    rays_start = np.einsum("ij,ijk->ik", rays_bary, tris[rays_face_idx])
+    # The rays start on the surface and skip the face they start from, so no offset biases their length. They go against
+    # the normals, into the solid as the signed distance field sees it from the winding of the faces (see
+    # 'Mesh.get_sdf_grid'). The rays of a shell wound inward escape it, and the thickness is infinite when all do.
+    rays_dist = cast_rays(tris, rays_start, -mesh.face_normals[rays_face_idx], rays_face_idx)
+    rays_dist = rays_dist[np.isfinite(rays_dist)]
+    wall_thickness = np.quantile(rays_dist, quantile, method="inverted_cdf") if len(rays_dist) > 0 else np.inf
 
     cache.save(wall_thickness)
     return wall_thickness

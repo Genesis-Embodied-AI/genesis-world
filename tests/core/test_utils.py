@@ -19,6 +19,7 @@ from scipy.spatial.transform import Rotation, Slerp
 
 import genesis as gs
 import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.utils import warnings
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array, unique_rows
@@ -26,6 +27,7 @@ from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
 
+from ..conftest import TOL_DOUBLE
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from ..utils.collision import display_collision_pairs, get_genuine_interpenetration
@@ -654,6 +656,33 @@ def test_mesh_inertial_properties():
     sphere_far = sphere.copy()
     sphere_far.apply_translation((1000.0, 1000.0, 1000.0))
     assert_allclose(gs.Mesh.from_trimesh(sphere_far).volume, gs.Mesh.from_trimesh(sphere).volume, tol=TOL)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_mesh_wall_thickness():
+    WALL = 5e-4
+    FIN = 2e-3
+
+    # A hollow cube whose walls are far thinner than its size, at several scales
+    outer = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    inner = trimesh.creation.box(extents=(1.0 - 2.0 * WALL, 1.0 - 2.0 * WALL, 1.0 - 2.0 * WALL))
+    inner.invert()
+    hollow_box = trimesh.util.concatenate((outer, inner))
+    for scale in (1e-3, 1.0, 1e3):
+        for quantile in (0.02, 0.25):
+            wall_thickness = mu.get_wall_thickness(scale * hollow_box.vertices, hollow_box.faces, quantile=quantile)
+            assert_allclose(wall_thickness, scale * WALL, rtol=TOL_DOUBLE)
+
+    # A thick slab, finely tessellated, next to a thin fin covering a sixth of the surface with a handful of faces
+    slab = trimesh.creation.box(extents=(1.0, 1.0, 0.2))
+    for _ in range(6):
+        slab = slab.subdivide()
+    fin = trimesh.creation.box(extents=(1.0, FIN, 0.3))
+    fin.apply_translation((0.0, 0.7, 0.0))
+    slab_fin = trimesh.util.concatenate((slab, fin))
+    assert_allclose(mu.get_wall_thickness(slab_fin.vertices, slab_fin.faces, quantile=0.02), FIN, rtol=TOL_DOUBLE)
+    assert_allclose(mu.get_wall_thickness(slab_fin.vertices, slab_fin.faces, quantile=0.25), 0.2, rtol=TOL_DOUBLE)
 
 
 @pytest.mark.required
