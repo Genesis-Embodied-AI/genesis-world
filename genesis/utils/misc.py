@@ -1156,7 +1156,14 @@ def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor
         value = value._unwrap()
     if gs.use_zerocopy.is_supported:
         view = qd_to_torch(value, copy=False)
-        view.copy_(tensor)
+        # A host tensor goes to the device by chunks, as a single copy holds a staging buffer as large as the tensor,
+        # which a unified-memory GPU counts as device memory
+        if tensor.device.type == "cpu" and tensor.shape == view.shape and view.ndim > 0:
+            n_rows = max(2**24 // max(view[0].numel(), 1), 1)
+            for i_row in range(0, view.shape[0], n_rows):
+                view[i_row : i_row + n_rows].copy_(tensor[i_row : i_row + n_rows])
+        else:
+            view.copy_(tensor)
     else:
         value.from_torch(tensor.to(to_pytorch_type(value.dtype)))
 
