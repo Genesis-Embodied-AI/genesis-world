@@ -78,7 +78,7 @@ from genesis.utils.data import (
     field,
     iter_data,
 )
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.misc import get_gpu_block_shared_memory_bytes, qd_to_numpy, tensor_to_array
 from genesis.utils.raycast_qd import get_solver_meshes
 
 if TYPE_CHECKING:
@@ -174,7 +174,7 @@ N_CONSTRAINT_SUMS = 3
 # contacts takes several subgroups, and that each dof adds up in order (see func_compute_link_wrench).
 N_LINK_WRENCH_SHARES = 2
 # The most dofs of the kinematic chain of a contact the kernels hold in registers, by scene (see SAPConfig)
-CHAIN_DOFS_SIZES = (8, 16, 32, 64)
+CHAIN_DOFS_SIZES = (16, 64)
 
 
 class ConstraintOp(IntEnum):
@@ -304,6 +304,8 @@ LINK_WRENCH_SHARES = Size("link_wrench_shares")
 SAP_ENV_CONTACTS = Size("sap_env_contacts")
 # The entries of the mass blocks of the rigid dofs, each block holding the square of its dofs
 MASS_BLOCK_ENTRIES = Size("mass_block_entries")
+# The slots of the two kinematic chains of a contact of every CPU thread (see func_link_point_delassus)
+CHAIN_SLOTS = Size("chain_slots")
 
 # Labels of the arrays that the solvers and the contact types of a scene leave unused
 FEM = "fem"
@@ -315,6 +317,7 @@ RIGID_CONTACTS = "rigid_contacts"
 HOST_SORT = "host_sort"
 DEVICE_SORT = "device_sort"
 LAGGED_FRICTION = "lagged_friction"
+CHAIN_SCRATCH = "chain_scratch"
 
 
 class SAPFEMVertices(Data, kind=DataKind.SCRATCH, shape=(VERTICES, ENVS)):
@@ -496,6 +499,10 @@ class SAPState(Data, kind=DataKind.SCRATCH):
     # its LDL^T factor, column by column (see dofs_mass_inv_start in SAPInfo and func_invert_rigid_hessian)
     rigid_mass_inv: qd.Tensor = field(float, shape=(MASS_BLOCK_ENTRIES, ENVS), labels=RIGID)
     rigid_hessian: qd.Tensor = field(float, shape=(MASS_BLOCK_ENTRIES, ENVS), labels=RIGID)
+    # The dofs of the two kinematic chains of the contact each CPU thread takes, and their rows of L^-T J^T (see
+    # func_link_point_delassus)
+    chains_dof: qd.Tensor = field(int, shape=(CHAIN_SLOTS,), labels=CHAIN_SCRATCH)
+    chains_w: qd.Tensor = field(float, shape=(3 * CHAIN_SLOTS,), labels=CHAIN_SCRATCH)
 
 
 class SAPLaggedFriction(Data, kind=DataKind.STATE):
@@ -546,6 +553,8 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     patches_body_bits: qd.Tensor = field(int, shape=())
     patches_handler_shift: qd.Tensor = field(int, shape=())
     patches_env_shift: qd.Tensor = field(int, shape=())
+    # The most dofs a link and its ancestors hold, the slots of a kinematic chain of the scratch (see CHAIN_SLOTS)
+    n_chain_dofs: qd.Tensor = field(int, shape=())
     # The rigid ground plane, -1 without one (see 'SAPCoupler.build')
     ground_geom_idx: qd.Tensor = field(int, shape=())
     substep_dt: qd.Tensor = field(float, shape=())
@@ -860,6 +869,16 @@ class ContactIncidence(NamedTuple):
     is_fem: bool
 
 
+class ChainStorage(IntEnum):
+    """
+    Enum for where the kinematic chains of a contact live while its Delassus operator is computed.
+    """
+
+    REGISTERS = 0  # Registers of the thread of the contact
+    SHARED = 1  # Shared memory of a group of lanes per contact
+    SCRATCH = 2  # Scratch of the CPU thread of the contact
+
+
 class SAPConfig(Config):
     """The compile-time configuration of the kernels of the SAP coupler."""
 
@@ -874,7 +893,9 @@ class SAPConfig(Config):
     # Whether the lanes of a GPU subgroup take the items of a chunk together (see CHUNK_SIZE), a link summing the wrench
     # of its contacts in several shares (see N_LINK_WRENCH_SHARES), where one CPU thread takes them in a row.
     enable_cooperative_kernels: bool
-    # Most dofs the kinematic chain of a contact holds, from CHAIN_DOFS_SIZES
+    # Where the kinematic chains of a contact live while its Delassus operator is computed, and the most dofs a chain
+    # holds in registers or in shared memory (see func_link_point_delassus)
+    chain_storage: ChainStorage
     n_max_chain_dofs: int
     # Key bits the device radix sort orders, and the base-256 logarithm of the key count
     constraints_sort_end_bit: int
@@ -1407,9 +1428,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
         # A contact moves rigid dofs only when the rigid solver holds any, a link without dofs being fixed
         has_rigid_contacts = n_env_link_entries > 0 and self.rigid_solver.n_dofs > 0
-        # The most dofs a link and its ancestors hold, which bounds the kinematic chain of a contact that
-        # func_link_point_delassus keeps in registers, so that the bound is static. It snaps to a bounded set, and
-        # outside performance mode to its largest value, whose kernels serve every scene.
+        # The most dofs a link and its ancestors hold, which bounds the kinematic chain of a contact. A CPU thread keeps
+        # the chains in a scratch of its own, sized by it. A GPU thread keeps them in registers up to the largest size
+        # of CHAIN_DOFS_SIZES, snapped up to a size of it (the largest outside performance mode, whose kernels serve
+        # every scene), and a group of lanes beyond in the shared memory of its block, which the device bounds.
         n_chain_dofs_max = 1
         for link in self.rigid_solver.links if self.rigid_solver.is_active else ():
             n_chain_dofs, i_l = link.n_dofs, link.parent_idx
@@ -1417,14 +1439,23 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 n_chain_dofs += self.rigid_solver.links[i_l].n_dofs
                 i_l = self.rigid_solver.links[i_l].parent_idx
             n_chain_dofs_max = max(n_chain_dofs_max, n_chain_dofs)
-        if n_chain_dofs_max > CHAIN_DOFS_SIZES[-1]:
-            gs.raise_exception(
-                f"{type(self).__name__} supports kinematic chains of {CHAIN_DOFS_SIZES[-1]} dofs at most, a link of "
-                f"the scene and its ancestors holding {n_chain_dofs_max}."
-            )
         n_max_chain_dofs = CHAIN_DOFS_SIZES[-1]
-        if not gs.use_ndarray:
-            n_max_chain_dofs = min([size for size in CHAIN_DOFS_SIZES if size >= n_chain_dofs_max])
+        if gs.backend == gs.cpu:
+            chain_storage = ChainStorage.SCRATCH
+        elif n_chain_dofs_max <= CHAIN_DOFS_SIZES[-1]:
+            chain_storage = ChainStorage.REGISTERS
+            if not gs.use_ndarray:
+                n_max_chain_dofs = min([size for size in CHAIN_DOFS_SIZES if size >= n_chain_dofs_max])
+        else:
+            chain_storage = ChainStorage.SHARED
+            # Each dof of the two chains takes its index and its row of L^-T J^T
+            n_bytes_chain_dof = 2 * (np.dtype(gs.np_int).itemsize + 3 * np.dtype(gs.np_float).itemsize)
+            n_max_chain_dofs = get_gpu_block_shared_memory_bytes() // n_bytes_chain_dof
+            if n_chain_dofs_max > n_max_chain_dofs:
+                gs.raise_exception(
+                    f"{type(self).__name__} supports kinematic chains of {n_max_chain_dofs} dofs at most on this device, a "
+                    f"link of the scene and its ancestors holding {n_chain_dofs_max}."
+                )
         enable_cooperative_kernels = gs.backend != gs.cpu
         n_link_wrench_shares = N_LINK_WRENCH_SHARES if enable_cooperative_kernels else 1
 
@@ -1483,6 +1514,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             link_incidence=self._B * n_env_link_entries,
             link_wrench_shares=n_links * n_link_wrench_shares,
             sap_env_contacts=sum([handler.max_contact_pairs // self._B for handler in self.handlers.contacts]),
+            chain_slots=qd.cfg.cpu_max_num_threads * 2 * n_chain_dofs_max,
         )
         precision = np.finfo(gs.np_float).eps
         self.sap_data = SAPData(
@@ -1499,6 +1531,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     patches_body_bits=patches_body_bits,
                     patches_handler_shift=2 * patches_body_bits,
                     patches_env_shift=2 * patches_body_bits + handler_bits,
+                    n_chain_dofs=n_chain_dofs_max,
                     ground_geom_idx=ground_geom_idx,
                     substep_dt=self.sim._substep_dt,
                     dt2=self.sim._substep_dt**2,
@@ -1551,6 +1584,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 host_sort=is_device_sort,
                 device_sort=not is_device_sort,
                 lagged_friction=not self._enable_lagged_friction,
+                chain_scratch=chain_storage != ChainStorage.SCRATCH,
             ),
         )
         self.sap_state, self.sap_info = self.sap_data.sap_state, self.sap_data.sap_info
@@ -1596,6 +1630,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
             enable_cooperative_kernels=enable_cooperative_kernels,
+            chain_storage=chain_storage,
             n_max_chain_dofs=n_max_chain_dofs,
             constraints_sort_end_bit=constraints_sort_end_bit,
             constraints_sort_log256=constraints_sort_log256,
@@ -3188,12 +3223,17 @@ def func_link_point_delassus(
     i_l0: int,
     i_l1: int,
     i_b: int,
+    i_lane: int,
+    i_slot0: int,
     pos: qd.types.vector(3),
+    chains_dof: qd.Tensor,
+    chains_w: qd.Tensor,
     dofs_state: DofsState,
     links_state: LinksState,
     links_info: LinksInfo,
     rigid_info: RigidInfo,
     sap_config: qd.template(),
+    n_chain: int,
 ):
     """
     Return the Delassus operator J M^-1 J^T in the world frame of a point attached to two links.
@@ -3203,11 +3243,16 @@ def func_link_point_delassus(
     D^-1 w where w = L^-T J^T. The rows of L only couple a dof to its ancestors, so that w is nonzero at the dofs of the
     two kinematic chains alone. The func walks each chain from its link to the root, the dofs in decreasing order,
     computing w0 and w1 of each chain apart and their cross terms at the dofs both chains share.
+
+    The dofs of the chains and their rows of w take the `n_chain` slots of each chain from i_slot0 in `chains_dof` and
+    `chains_w`: registers of the thread, shared memory of its block, or the scratch of its CPU thread (see
+    ChainStorage). The rows of w are flat, three entries each, as a local matrix of the registers takes no row access. In shared memory, the i_lane-th lane of the block sums its share of each row of w and of the cross
+    terms, which the block then adds up.
     """
-    N_CHAIN = qd.static(sap_config.n_max_chain_dofs)
-    chains_dof = qd.Vector([-1] * (2 * N_CHAIN), dt=gs.qd_int)
-    chains_w = qd.Matrix.zero(gs.qd_float, 2 * N_CHAIN, 3)
+    N_LANES = qd.static(32 if sap_config.chain_storage == ChainStorage.SHARED else 1)
     W = qd.Matrix.zero(gs.qd_float, 3, 3)
+    n_chain0 = 0
+    n_chain1 = 0
     for i_c in range(2):
         i_l_ = i_l0
         if i_c == 1:
@@ -3221,24 +3266,55 @@ def func_link_point_delassus(
                 _, w = gu.qd_transform_motion_by_trans_quat(
                     dofs_state.cdof_ang[i_d, i_b], dofs_state.cdof_vel[i_d, i_b], t_pos, gu.qd_identity_quat()
                 )
-                for i_k in range(n_dofs):
-                    j_d = chains_dof[i_c * N_CHAIN + i_k]
-                    L_ji = rigid_info.mass_mat_L[j_d, i_d, i_b]
+                # The first lane starts from the row and every lane subtracts its share, so that a single lane
+                # subtracts the terms in the order of the chain
+                w_lane = qd.Vector.zero(gs.qd_float, 3)
+                if i_lane == 0:
+                    w_lane = w
+                for i_k_ in range((n_dofs + N_LANES - 1) // N_LANES):
+                    i_k = i_k_ * N_LANES + i_lane
+                    if i_k < n_dofs:
+                        j_d = chains_dof[i_slot0 + i_c * n_chain + i_k]
+                        L_ji = rigid_info.mass_mat_L[j_d, i_d, i_b]
+                        for i in qd.static(range(3)):
+                            w_lane[i] = w_lane[i] - L_ji * chains_w[3 * (i_slot0 + i_c * n_chain + i_k) + i]
+                w = w_lane
+                if qd.static(N_LANES > 1):
                     for i in qd.static(range(3)):
-                        w[i] = w[i] - L_ji * chains_w[i_c * N_CHAIN + i_k, i]
-                chains_dof[i_c * N_CHAIN + n_dofs] = i_d
-                for i in qd.static(range(3)):
-                    chains_w[i_c * N_CHAIN + n_dofs, i] = w[i]
+                        w[i] = su.qd_block_sum(w_lane[i])
+                    qd.simt.block.sync()
+                if i_lane == 0:
+                    chains_dof[i_slot0 + i_c * n_chain + n_dofs] = i_d
+                    for i in qd.static(range(3)):
+                        chains_w[3 * (i_slot0 + i_c * n_chain + n_dofs) + i] = w[i]
+                if qd.static(N_LANES > 1):
+                    qd.simt.block.sync()
                 n_dofs = n_dofs + 1
                 W = W + rigid_info.mass_mat_D_inv[i_d, i_b] * w.outer_product(w)
             i_l_ = links_info.parent_idx[I_l]
-    for i_k0 in range(N_CHAIN):
-        i_d = chains_dof[i_k0]
-        for i_k1 in range(N_CHAIN):
-            if i_d >= 0 and i_d == chains_dof[N_CHAIN + i_k1]:
-                w0 = qd.Vector([chains_w[i_k0, i] for i in qd.static(range(3))])
-                w1 = qd.Vector([chains_w[N_CHAIN + i_k1, i] for i in qd.static(range(3))])
-                W = W - rigid_info.mass_mat_D_inv[i_d, i_b] * (w0.outer_product(w1) + w1.outer_product(w0))
+        if i_c == 0:
+            n_chain0 = n_dofs
+        else:
+            n_chain1 = n_dofs
+    # The cross terms follow the same split over the lanes as the rows of w
+    W_lane = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if i_lane == 0:
+        W_lane = W
+    for i_k0_ in range((n_chain0 + N_LANES - 1) // N_LANES):
+        i_k0 = i_k0_ * N_LANES + i_lane
+        if i_k0 < n_chain0:
+            i_d = chains_dof[i_slot0 + i_k0]
+            for i_k1 in range(n_chain1):
+                if i_d == chains_dof[i_slot0 + n_chain + i_k1]:
+                    w0 = qd.Vector([chains_w[3 * (i_slot0 + i_k0) + i] for i in qd.static(range(3))])
+                    w1 = qd.Vector([chains_w[3 * (i_slot0 + n_chain + i_k1) + i] for i in qd.static(range(3))])
+                    W_lane = W_lane - rigid_info.mass_mat_D_inv[i_d, i_b] * (
+                        w0.outer_product(w1) + w1.outer_product(w0)
+                    )
+    W = W_lane
+    if qd.static(N_LANES > 1):
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            W[i, j] = su.qd_block_sum(W_lane[i, j])
     return W
 
 
@@ -5108,44 +5184,108 @@ class BaseContactHandler(RBC):
         """
         dt = sap_info.substep_dt[None]
         taud = sap_info.taud[None]
-        for i_p in range(self.contact_pairs.n_pairs[None]):
-            W = self.compute_delassus(
-                i_p, fem_state, dofs_state, links_state, fem_info, links_info, rigid_info, sap_config
-            )
-            # A near-rigid patch is as stiff as one contact, whatever the number of its pairs: each pair takes the
-            # regularization of the patch over its share of the stiffness of the patch.
-            k = self.contact_pairs.contact_info.k[i_p]
-            w_rms = W.norm() / 3.0 * self.contact_pairs.contact_info.k_patch[i_p] / k
-            Rn = qd.max(sap_info.beta_factor[None] * w_rms, 1.0 / (dt * k * (dt + taud)))
-            Rt = sap_info.sigma[None] * w_rms
-            self.contact_pairs.contact_info.Rn[i_p] = Rn
-            self.contact_pairs.contact_info.Rt[i_p] = Rt
-            self.contact_pairs.contact_info.Rn_inv[i_p] = 1.0 / Rn
-            self.contact_pairs.contact_info.Rt_inv[i_p] = 1.0 / Rt
-            self.contact_pairs.contact_info.vn_hat[i_p] = -self.contact_pairs.contact_info.phi0[i_p] / (dt + taud)
-            self.contact_pairs.contact_info.mu_hat[i_p] = self.contact_pairs.contact_info.mu[i_p] * Rt / Rn
-            self.contact_pairs.contact_info.mu_factor[i_p] = 1.0 / (
-                1.0 + self.contact_pairs.contact_info.mu[i_p] * self.contact_pairs.contact_info.mu_hat[i_p]
-            )
-            if qd.static(sap_config.enable_lagged_friction):
-                # The normal impulse at the velocities the solve starts from, the start-of-step ones for the entities in
-                # contact (see kernel_init_sap_solve), which a pair the last solve also held replaces with the impulse
-                # it gave (see kernel_compute_regularization).
-                vc = self.compute_Jx(
+        # A handler without rigid side reads no chain, and keeps a chain of a single slot in registers
+        N_CHAIN = qd.static(sap_config.n_max_chain_dofs if self.n_rigid_sides > 0 else 1)
+        # The chains of a contact of a rigid handler in shared memory take a group of lanes, one block per contact (see
+        # func_link_point_delassus)
+        N_LANES = qd.static(32 if sap_config.chain_storage == ChainStorage.SHARED and self.n_rigid_sides > 0 else 1)
+        if qd.static(N_LANES > 1):
+            qd.loop_config(block_dim=N_LANES)
+        for i_p, i_lane in qd.ndrange(self.contact_pairs.n_pairs[None], N_LANES):
+            W = qd.Matrix.zero(gs.qd_float, 3, 3)
+            if qd.static(N_LANES > 1):
+                sh_chains_dof = qd.simt.block.SharedArray((2 * N_CHAIN,), gs.qd_int)
+                sh_chains_w = qd.simt.block.SharedArray((6 * N_CHAIN,), gs.qd_float)
+                W = self.compute_delassus(
                     i_p,
-                    sap_state.fem_vertices.v,
-                    sap_state.rigid_dofs.v,
+                    i_lane,
+                    i_slot0=0,
+                    chains_dof=sh_chains_dof,
+                    chains_w=sh_chains_w,
+                    fem_state=fem_state,
+                    dofs_state=dofs_state,
+                    links_state=links_state,
+                    fem_info=fem_info,
+                    links_info=links_info,
+                    rigid_info=rigid_info,
+                    sap_config=sap_config,
+                    n_chain=N_CHAIN,
+                )
+            elif qd.static(sap_config.chain_storage == ChainStorage.SCRATCH):
+                n_chain = sap_info.n_chain_dofs[None]
+                # FIXME: quadrants#1097 - the thread index is a raw expression until bound to a local, which costs
+                # nothing but this extra line.
+                i_thread = qd.global_thread_idx()
+                i_slot0 = i_thread * 2 * n_chain
+                W = self.compute_delassus(
+                    i_p,
+                    i_lane,
+                    i_slot0,
+                    sap_state.chains_dof,
+                    sap_state.chains_w,
+                    fem_state,
                     dofs_state,
                     links_state,
                     fem_info,
                     links_info,
+                    rigid_info,
                     sap_config,
+                    n_chain,
                 )
-                self.contact_pairs.contact_info.mu_n0[i_p] = (
-                    self.contact_pairs.contact_info.mu[i_p]
-                    * qd.max(self.contact_pairs.contact_info.vn_hat[i_p] - vc[2], 0.0)
-                    / Rn
+            else:
+                chains_dof = qd.Vector([0] * (2 * N_CHAIN), dt=gs.qd_int)
+                chains_w = qd.Vector.zero(gs.qd_float, 6 * N_CHAIN)
+                W = self.compute_delassus(
+                    i_p,
+                    i_lane,
+                    i_slot0=0,
+                    chains_dof=chains_dof,
+                    chains_w=chains_w,
+                    fem_state=fem_state,
+                    dofs_state=dofs_state,
+                    links_state=links_state,
+                    fem_info=fem_info,
+                    links_info=links_info,
+                    rigid_info=rigid_info,
+                    sap_config=sap_config,
+                    n_chain=N_CHAIN,
                 )
+            # The lanes of a block hold the same operator, which the first writes
+            if i_lane == 0:
+                # A near-rigid patch is as stiff as one contact, whatever the number of its pairs: each pair takes the
+                # regularization of the patch over its share of the stiffness of the patch.
+                k = self.contact_pairs.contact_info.k[i_p]
+                w_rms = W.norm() / 3.0 * self.contact_pairs.contact_info.k_patch[i_p] / k
+                Rn = qd.max(sap_info.beta_factor[None] * w_rms, 1.0 / (dt * k * (dt + taud)))
+                Rt = sap_info.sigma[None] * w_rms
+                self.contact_pairs.contact_info.Rn[i_p] = Rn
+                self.contact_pairs.contact_info.Rt[i_p] = Rt
+                self.contact_pairs.contact_info.Rn_inv[i_p] = 1.0 / Rn
+                self.contact_pairs.contact_info.Rt_inv[i_p] = 1.0 / Rt
+                self.contact_pairs.contact_info.vn_hat[i_p] = -self.contact_pairs.contact_info.phi0[i_p] / (dt + taud)
+                self.contact_pairs.contact_info.mu_hat[i_p] = self.contact_pairs.contact_info.mu[i_p] * Rt / Rn
+                self.contact_pairs.contact_info.mu_factor[i_p] = 1.0 / (
+                    1.0 + self.contact_pairs.contact_info.mu[i_p] * self.contact_pairs.contact_info.mu_hat[i_p]
+                )
+                if qd.static(sap_config.enable_lagged_friction):
+                    # The normal impulse at the velocities the solve starts from, the start-of-step ones for the entities in
+                    # contact (see kernel_init_sap_solve), which a pair the last solve also held replaces with the impulse
+                    # it gave (see kernel_compute_regularization).
+                    vc = self.compute_Jx(
+                        i_p,
+                        sap_state.fem_vertices.v,
+                        sap_state.rigid_dofs.v,
+                        dofs_state,
+                        links_state,
+                        fem_info,
+                        links_info,
+                        sap_config,
+                    )
+                    self.contact_pairs.contact_info.mu_n0[i_p] = (
+                        self.contact_pairs.contact_info.mu[i_p]
+                        * qd.max(self.contact_pairs.contact_info.vn_hat[i_p] - vc[2], 0.0)
+                        / Rn
+                    )
 
     @qd.func
     def compute_contact_cost_gamma_G(
@@ -5302,6 +5442,10 @@ class RigidContactHandler(BaseContactHandler):
     def compute_delassus(
         self,
         i_p: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -5309,17 +5453,23 @@ class RigidContactHandler(BaseContactHandler):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
+        n_chain: int,
     ):
         return func_link_point_delassus(
             self.contact_pairs.link_idx[i_p],
             -1,
             self.contact_pairs.batch_idx[i_p],
+            i_lane,
+            i_slot0,
             self.contact_pairs.contact_pos[i_p],
+            chains_dof,
+            chains_w,
             dofs_state,
             links_state,
             links_info,
             rigid_info,
             sap_config,
+            n_chain,
         )
 
     @qd.func
@@ -5732,6 +5882,10 @@ class FEMSelfContactHandler(FEMContactHandler):
     def compute_delassus(
         self,
         i_p: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -5739,6 +5893,7 @@ class FEMSelfContactHandler(FEMContactHandler):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
+        n_chain: int,
     ):
         i_b = self.contact_pairs.batch_idx[i_p]
         i_e0 = self.contact_pairs.geom_idx0[i_p]
@@ -5865,6 +6020,10 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
     def compute_delassus(
         self,
         i_p: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -5872,6 +6031,7 @@ class FEMFloorContactHandler(FloorContactMixin, FEMContactHandler):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
+        n_chain: int,
     ):
         # With floor, J is Identity
         i_v = self.contact_pairs.geom_idx[i_p]
@@ -6164,6 +6324,10 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
     def compute_delassus(
         self,
         i_p: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -6171,18 +6335,24 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
+        n_chain: int,
     ):
         i_b = self.contact_pairs.batch_idx[i_p]
         W = func_link_point_delassus(
             self.contact_pairs.link_idx[i_p],
             -1,
             i_b,
+            i_lane,
+            i_slot0,
             self.contact_pairs.contact_pos[i_p],
+            chains_dof,
+            chains_w,
             dofs_state,
             links_state,
             links_info,
             rigid_info,
             sap_config,
+            n_chain,
         )
         i_e = self.contact_pairs.geom_idx0[i_p]
         for i in qd.static(range(4)):
@@ -6510,6 +6680,10 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
     def compute_delassus(
         self,
         i_p: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
@@ -6517,18 +6691,24 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
         links_info: LinksInfo,
         rigid_info: RigidInfo,
         sap_config: qd.template(),
+        n_chain: int,
     ):
         world = self.contact_frame(i_p)
         W = func_link_point_delassus(
             self.contact_pairs.link_idx0[i_p],
             self.contact_pairs.link_idx1[i_p],
             self.contact_pairs.batch_idx[i_p],
+            i_lane,
+            i_slot0,
             self.contact_pairs.contact_pos[i_p],
+            chains_dof,
+            chains_w,
             dofs_state,
             links_state,
             links_info,
             rigid_info,
             sap_config,
+            n_chain,
         )
         return world.transpose() @ W @ world
 

@@ -331,6 +331,13 @@ def get_gpu_core_count() -> int:
     return 256 * cores_per_unit
 
 
+def get_gpu_block_shared_memory_bytes() -> int:
+    """Return the shared memory a block of threads holds on the active GPU, in bytes."""
+    # FIXME: quadrants#976 - the shared memory of a block is a 64 KiB lower bound on AMDGPU, which caps what CDNA4
+    # (gfx950) holds below its 160 KiB per block.
+    return qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+
+
 def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
@@ -349,9 +356,7 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
     itemsize = 4 if gs.qd_float == qd.f32 else 8
-    # FIXME: quadrants#976 - the shared memory of a block is a 64 KiB lower bound on AMDGPU, which caps the tiles of
-    # CDNA4 (gfx950) below what its 160 KiB per block holds.
-    block_bytes = qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+    block_bytes = get_gpu_block_shared_memory_bytes()
     unit_bytes, reserved_bytes, granule_bytes, max_blocks = block_bytes, 0, 1, block_bytes // (8 * 9 * itemsize)
     if torch.cuda.is_available():
         # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), whose slots bound the resident blocks.
