@@ -1,0 +1,38 @@
+genesis/options/entities.py
+  s_c62ec9da443b15::t_46d325469f9fe0 129-131,139-140
+genesis/utils/mesh.py
+  s_c62ec9da443b15::t_46d325469f9fe0 459
+genesis/engine/couplers/ipc_coupler/coupler.py
+  s_c62ec9da443b15::t_b8aaf4da81cec9 303-305
+tests/core/test_entity_options.py
+  s_c62ec9da443b15::t_b8aaf4da81cec9 176-177
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_46d325469f9fe0 420-423,1426-1427
+genesis/engine/entities/base_entity.py
+  s_c62ec9da443b15::t_46d325469f9fe0 128-129
+genesis/options/indices.py
+  s_c62ec9da443b15::t_46d325469f9fe0 4,29-30
+  s_c62ec9da443b15::t_b8aaf4da81cec9 167
+genesis/ext/pyrender/overlay/plugin.py
+  s_c62ec9da443b15::t_0d04d4449cdc57 318-321
+genesis/engine/interactive_scene.py
+  s_c62ec9da443b15::t_0d04d4449cdc57 298
+  s_c62ec9da443b15::t_dd024c64dfb14a 218-220,285
+  s_c62ec9da443b15::t_b8aaf4da81cec9 299-300
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "64af761d5673b24c8a2347bda52b9c2d2b273d00",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
