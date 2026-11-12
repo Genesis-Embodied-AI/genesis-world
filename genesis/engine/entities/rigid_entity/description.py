@@ -1417,6 +1417,11 @@ class KinematicEntityDescription(EntityDescription):
             # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the body is unaligned
             if any(links_path[i_l] in resolution.links_path_with_density for i_l in subtree):
                 root.is_aligned = False
+                gs.logger.warning(
+                    f"The link or geom options give a density in the body of link '{root.name}', which may move its "
+                    "center of mass off its frame. The body is simulated unaligned, its frame staying where 'align' puts "
+                    "it from the densities of the asset."
+                )
 
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent
         # geometry, offset and init_qpos.
