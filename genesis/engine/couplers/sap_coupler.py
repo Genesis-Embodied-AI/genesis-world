@@ -528,7 +528,6 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     patches_body_bits: qd.Tensor = field(int, shape=())
     patches_handler_shift: qd.Tensor = field(int, shape=())
     patches_env_shift: qd.Tensor = field(int, shape=())
-    n_dofs: qd.Tensor = field(int, shape=())
     # The rigid ground plane, -1 without one (see 'SAPCoupler.build')
     ground_geom_idx: qd.Tensor = field(int, shape=())
     substep_dt: qd.Tensor = field(float, shape=())
@@ -838,6 +837,18 @@ class SAPHandlers(NamedTuple):
         return tuple([handler for handler in self if handler is not None])
 
 
+class ContactIncidence(NamedTuple):
+    """The lists of the contacts of the FEM vertices or of the rigid links (see kernel_order_constraints)."""
+
+    starts: qd.Tensor
+    entries: qd.Tensor
+    # Capacity of the lists of an environment
+    n_env_entries: qd.Tensor
+    # Most entries of a contact, its corners at the FEM vertices or its sides on the rigid links
+    n_entries_max: int
+    is_fem: bool
+
+
 class SAPConfig(Config):
     """The compile-time configuration of the kernels of the SAP coupler."""
 
@@ -1136,7 +1147,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self._rigid_compliant = False
         self._has_fem_pressure = False
         self._has_equality_constraints = False
-        self.has_contact = False
         self.sap_data: SAPData | None = None
         self.sap_state: SAPState | None = None
         self.sap_info: SAPInfo | None = None
@@ -1463,7 +1473,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     patches_body_bits=patches_body_bits,
                     patches_handler_shift=2 * patches_body_bits,
                     patches_env_shift=2 * patches_body_bits + handler_bits,
-                    n_dofs=self.rigid_solver.n_dofs,
                     ground_geom_idx=ground_geom_idx,
                     substep_dt=self.sim._substep_dt,
                     dt2=self.sim._substep_dt**2,
@@ -1549,7 +1558,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         sap_info.handlers_slot_start.from_numpy(handlers_slot_start.astype(gs.np_int))
         self.sap_config = SAPConfig(
             has_fem=self.fem_solver.is_active,
-            has_rigid=self.rigid_solver.is_active,
+            has_rigid=self.rigid_solver.is_active and self.rigid_solver.n_dofs > 0,
             has_equality_constraints=self._has_equality_constraints,
             has_fem_contacts=n_env_fem_entries > 0,
             has_rigid_contacts=has_rigid_contacts,
@@ -1644,7 +1653,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             if contact is not None:
                 contact.update_geoms_tree(rigid_solver.dyn_state.geoms)
 
-        self.has_contact = kernel_update_contact(
+        kernel_update_contact(
             fem_solver.fem_state,
             rigid_solver.dyn_state.geoms,
             rigid_solver.dyn_state.free_verts,
@@ -1668,78 +1677,75 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         )
 
     def couple(self):
-        # Equality constraints bind the rigid dofs whether anything is in contact or not, and the solve gives the FEM
-        # vertices their velocities, the implicit solver skipping its free solve (see kernel_init_sap_solve).
-        if self.has_contact or self._has_equality_constraints or self.fem_solver.is_active:
-            fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
-            fem_state, fem_info = fem_solver.fem_state, fem_solver.fem_info
-            vertex_constraints, fem_config = fem_solver.vertex_constraints, fem_solver.fem_config
-            dofs_state, links_state = rigid_solver.dyn_state.dofs, rigid_solver.dyn_state.links
-            entities_info, links_info = rigid_solver.dyn_info.entities, rigid_solver.dyn_info.links
-            rigid_info, rigid_config = rigid_solver.rigid_info, rigid_solver.rigid_config
-            loops = self.sap_state.loops
-            kernel_init_sap_solve(
-                loops.newton_counter,
-                loops.pcg_counter,
-                fem_state,
-                dofs_state,
-                self.sap_state,
-                fem_info,
-                vertex_constraints,
-                self.sap_info,
-                fem_config,
-                self.sap_config,
-            )
-            # The regularization reads the preconditioner of the FEM vertices (see kernel_init_sap_solve),
-            # the factor of the rigid mass matrix of this substep, which the rigid solver computes after the detection
-            # of the contacts, and the velocities the solve starts from.
-            kernel_compute_regularization(
-                fem_state,
-                dofs_state,
-                links_state,
-                self.sap_state,
-                self.sap_data.lagged_friction,
-                fem_info,
-                entities_info,
-                links_info,
-                rigid_solver.dyn_info.equalities,
-                rigid_info,
-                self.sap_info,
-                rigid_config,
-                self.sap_config,
-                *self.handlers,
-            )
-            kernel_sap_solve(
-                loops.newton_counter,
-                loops.pcg_counter,
-                loops.linesearch_counter,
-                fem_state,
-                dofs_state,
-                links_state,
-                self.sap_state,
-                fem_info,
-                vertex_constraints,
-                links_info,
-                rigid_info,
-                self.sap_info,
-                fem_config,
-                rigid_config,
-                self.sap_config,
-                *self.handlers,
-            )
-            kernel_update_vel(
-                fem_state,
-                dofs_state,
-                links_state,
-                self.sap_state,
-                self.sap_data.lagged_friction,
-                self.sap_info,
-                self.sap_config,
-                *self.handlers,
-                self.sap_data.errno,
-            )
-        elif self._enable_lagged_friction:
-            kernel_clear_normal_impulses(self.sim.scene._envs_idx, self.sap_data.lagged_friction)
+        # The solve runs at every substep, the environments without constraint leaving it at once (see
+        # kernel_init_sap_solve), so that whether anything is in contact never goes back to the host.
+        fem_solver, rigid_solver = self.fem_solver, self.rigid_solver
+        fem_state, fem_info = fem_solver.fem_state, fem_solver.fem_info
+        vertex_constraints, fem_config = fem_solver.vertex_constraints, fem_solver.fem_config
+        dofs_state, links_state = rigid_solver.dyn_state.dofs, rigid_solver.dyn_state.links
+        entities_info, links_info = rigid_solver.dyn_info.entities, rigid_solver.dyn_info.links
+        rigid_info, rigid_config = rigid_solver.rigid_info, rigid_solver.rigid_config
+        loops = self.sap_state.loops
+        kernel_init_sap_solve(
+            loops.newton_counter,
+            loops.pcg_counter,
+            fem_state,
+            dofs_state,
+            self.sap_state,
+            fem_info,
+            vertex_constraints,
+            self.sap_info,
+            fem_config,
+            self.sap_config,
+        )
+        # The regularization reads the preconditioner of the FEM vertices (see kernel_init_sap_solve), the factor of the
+        # rigid mass matrix of this substep, which the rigid solver computes after the detection of the contacts, and the
+        # velocities the solve starts from.
+        kernel_compute_regularization(
+            fem_state,
+            dofs_state,
+            links_state,
+            self.sap_state,
+            self.sap_data.lagged_friction,
+            fem_info,
+            entities_info,
+            links_info,
+            rigid_solver.dyn_info.equalities,
+            rigid_info,
+            self.sap_info,
+            rigid_config,
+            self.sap_config,
+            *self.handlers,
+        )
+        kernel_sap_solve(
+            loops.newton_counter,
+            loops.pcg_counter,
+            loops.linesearch_counter,
+            fem_state,
+            dofs_state,
+            links_state,
+            self.sap_state,
+            fem_info,
+            vertex_constraints,
+            links_info,
+            rigid_info,
+            self.sap_info,
+            fem_config,
+            rigid_config,
+            self.sap_config,
+            *self.handlers,
+        )
+        kernel_update_vel(
+            fem_state,
+            dofs_state,
+            links_state,
+            self.sap_state,
+            self.sap_data.lagged_friction,
+            self.sap_info,
+            self.sap_config,
+            *self.handlers,
+            self.sap_data.errno,
+        )
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- Properties -------------------------------------
@@ -1897,8 +1903,8 @@ def kernel_update_contact(
     rigid_fem_tri_tet_handler: qd.template(),
     equality_handler: qd.template(),
     errno: qd.Tensor,
-) -> bool:
-    """Detect the contacts of every handler, and return whether any contact is found.
+):
+    """Detect the contacts of every handler.
 
     A handler past the share of the capacity of an environment drops its new contacts and flags its errors.
     """
@@ -1919,7 +1925,6 @@ def kernel_update_contact(
     for i_b in range(errno.shape[0]):
         for contact in qd.static(contact_handlers):
             contact.clear_contacts(i_b)
-    n_contact_pairs = 0
     for contact in qd.static(contact_handlers):
         contact.detection(
             fem_state,
@@ -1937,12 +1942,10 @@ def kernel_update_contact(
             rigid_config,
             errno,
         )
-        n_contact_pairs = n_contact_pairs + contact.n_constraints()
     for i_h, handler in qd.static(enumerate(constraint_handlers)):
         sap_state.constraint_order.handlers_n_constraints[i_h + 1] = (
             sap_state.constraint_order.handlers_n_constraints[i_h] + handler.n_constraints()
         )
-    return n_contact_pairs > 0
 
 
 @qd.func
@@ -1998,7 +2001,9 @@ def kernel_order_constraints(
     runs over the constraints in their sorted order (see func_compute_constraints), and every FEM vertex and rigid link
     gathers its contacts in that order (see func_gather_fem_vertex and func_compute_link_wrench), so that the solve is
     reproducible bitwise. An entry of the list of a vertex packs the rank of its contact with the corner of the contact
-    at the vertex, and of a link with the side of the contact on the link. One thread per environment fills its lists.
+    at the vertex, and of a link with the side of the contact on the link. The entries of each vertex and link are
+    counted as the keys are laid out, the counts summed into the start of each list, then the lanes of a block place the
+    entries of an environment in their sorted order by tiles.
     """
     handlers = qd.static(
         SAPHandlers(
@@ -2021,6 +2026,30 @@ def kernel_order_constraints(
     # The items of a chunk of the sorted constraints (see CHUNK_SIZE)
     CHUNK_DIM = qd.static(32)
     N_HANDLERS = qd.static(len(constraint_handlers))
+    N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
+    # The lists of the contacts of the FEM vertices then of the rigid links
+    INCIDENCES = qd.static(
+        (
+            ContactIncidence(
+                sap_state.constraint_order.fem_incidence_start,
+                sap_state.constraint_order.fem_incidence,
+                sap_info.n_env_fem_entries,
+                n_entries_max=N_CORNERS_MAX,
+                is_fem=True,
+            ),
+        )
+        * sap_config.has_fem_contacts
+        + (
+            ContactIncidence(
+                sap_state.constraint_order.link_incidence_start,
+                sap_state.constraint_order.link_incidence,
+                sap_info.n_env_link_entries,
+                n_entries_max=N_SIDES_MAX,
+                is_fem=False,
+            ),
+        )
+        * sap_config.has_rigid_contacts
+    )
     n_envs = sap_state.constraint_order.envs_constraint_start.shape[0] - 1
     key_shift = qd.u64(sap_info.constraints_key_shift[None])
     env_shift = qd.u64(sap_info.constraints_env_shift[None])
@@ -2046,6 +2075,16 @@ def kernel_order_constraints(
         sap_state.constraint_order.envs_unit_start[n_envs] = i_u
         sap_state.constraint_order.n_units[None] = i_u
 
+    # The entries of each target of an incidence are counted at the next target
+    for i_t in range(n_envs * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES
+        for incidence in qd.static(INCIDENCES):
+            for i_x_ in range((incidence.starts.shape[0] + N_LANES - 1) // N_LANES):
+                i_x = i_x_ * N_LANES + i_lane
+                if i_x < incidence.starts.shape[0]:
+                    incidence.starts[i_x, i_b] = 0
+
     # The key of every constraint, laid out by environment on CPU, then sorted. The device radix sort runs on GPU alone,
     # while on CPU each environment sorts its own constraints by a radix sort of 8 bits per pass.
     sap_state.constraint_order.n_sorted[None] = sap_state.constraint_order.handlers_n_constraints[N_HANDLERS]
@@ -2064,6 +2103,11 @@ def kernel_order_constraints(
                     (qd.u64(i_b) << env_shift) | (qd.u64(i_h) << key_shift) | handler.constraint_key(i_c)
                 )
                 sap_state.constraint_order.order[i_s] = sap_info.handlers_slot_start[i_h] + i_c
+                for incidence in qd.static(INCIDENCES):
+                    for i_k in range(incidence.n_entries_max):
+                        i_x = func_contact_target(i_c, i_k, fem_info, handler, is_fem=incidence.is_fem)
+                        if i_x >= 0:
+                            qd.atomic_add(incidence.starts[i_x + 1, i_b], 1)
     if qd.static(gs.backend == gs.cpu):
         for i_b in range(n_envs):
             func_sort_env_keys(
@@ -2087,84 +2131,88 @@ def kernel_order_constraints(
             log256_max_n=qd.static(sap_config.constraints_sort_log256),
         )
 
-    # The contacts of each FEM vertex, counted at the next vertex, then summed into the start of the list of each
-    # vertex, which the second pass moves to its end while filling it, the last loop moving it back.
-    if qd.static(sap_config.has_fem_contacts):
-        n_vertices = sap_state.constraint_order.fem_incidence_start.shape[0] - 1
-        for i_b in range(n_envs):
-            i_n_start = i_b * sap_info.n_env_fem_entries[None]
-            for i_v in range(n_vertices + 1):
-                sap_state.constraint_order.fem_incidence_start[i_v, i_b] = 0
-            for i_pass in range(2):
-                if i_pass == 1:
-                    i_n = i_n_start
-                    for i_v in range(n_vertices + 1):
-                        i_n = i_n + sap_state.constraint_order.fem_incidence_start[i_v, i_b]
-                        sap_state.constraint_order.fem_incidence_start[i_v, i_b] = i_n
-                for i_s in range(
-                    sap_state.constraint_order.envs_constraint_start[i_b],
-                    sap_state.constraint_order.envs_constraint_start[i_b + 1],
-                ):
-                    i_q = sap_state.constraint_order.order[i_s]
-                    for i_h, handler in qd.static(enumerate(constraint_handlers)):
-                        if qd.static(handler.n_fem_corners > 0):
-                            if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
-                                i_c = i_q - sap_info.handlers_slot_start[i_h]
-                                for i_corner in range(handler.n_fem_corners):
-                                    i_v = handler.fem_corner_vertex(i_c, i_corner, fem_info)
-                                    if i_pass == 0:
-                                        sap_state.constraint_order.fem_incidence_start[i_v + 1, i_b] = (
-                                            sap_state.constraint_order.fem_incidence_start[i_v + 1, i_b] + 1
-                                        )
-                                    else:
-                                        i_n = sap_state.constraint_order.fem_incidence_start[i_v, i_b]
-                                        sap_state.constraint_order.fem_incidence[i_n] = i_s * N_CORNERS_MAX + i_corner
-                                        sap_state.constraint_order.fem_incidence_start[i_v, i_b] = i_n + 1
-            for i_v_ in range(n_vertices):
-                i_v = n_vertices - i_v_
-                sap_state.constraint_order.fem_incidence_start[i_v, i_b] = (
-                    sap_state.constraint_order.fem_incidence_start[i_v - 1, i_b]
-                )
-            sap_state.constraint_order.fem_incidence_start[0, i_b] = i_n_start
+    # The counts of each environment summed into the start of the list of each target, which the slot of the next target
+    # holds, the first slot holding the start of the lists of the environment.
+    for i_t in range(n_envs * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES
+        for incidence in qd.static(INCIDENCES):
+            n_targets = incidence.starts.shape[0] - 1
+            i_n = i_b * incidence.n_env_entries[None]
+            if i_lane == 0:
+                incidence.starts[0, i_b] = i_n
+            for i_x_ in range((n_targets + N_LANES - 1) // N_LANES):
+                i_x = i_x_ * N_LANES + i_lane
+                n_entries = 0
+                if i_x < n_targets:
+                    n_entries = incidence.starts[i_x + 1, i_b]
+                n_entries_prefix = n_entries
+                n_entries_total = n_entries
+                if qd.static(N_LANES > 1):
+                    n_entries_prefix, n_entries_total = su.qd_block_scan(n_entries)
+                if i_x < n_targets:
+                    incidence.starts[i_x + 1, i_b] = i_n + n_entries_prefix - n_entries
+                i_n = i_n + n_entries_total
 
-    # The contacts of each rigid link, listed the same way
-    if qd.static(sap_config.has_rigid_contacts):
-        n_links = sap_state.constraint_order.link_incidence_start.shape[0] - 1
-        for i_b in range(n_envs):
-            i_n_start = i_b * sap_info.n_env_link_entries[None]
-            for i_l in range(n_links + 1):
-                sap_state.constraint_order.link_incidence_start[i_l, i_b] = 0
-            for i_pass in range(2):
-                if i_pass == 1:
-                    i_n = i_n_start
-                    for i_l in range(n_links + 1):
-                        i_n = i_n + sap_state.constraint_order.link_incidence_start[i_l, i_b]
-                        sap_state.constraint_order.link_incidence_start[i_l, i_b] = i_n
-                for i_s in range(
-                    sap_state.constraint_order.envs_constraint_start[i_b],
-                    sap_state.constraint_order.envs_constraint_start[i_b + 1],
-                ):
+    # The entries of each environment, placed by tiles in the sorted order of their constraints, each tile moving the
+    # start of the list of each target it holds to the next one, so that the lists end at the start of the next target.
+    # A lane ranks its entry among the entries of the same target in the tile, the first of them reserving their slots.
+    for i_t in range(n_envs * N_LANES):
+        i_lane = i_t % N_LANES
+        i_b = i_t // N_LANES
+        i_s_start = sap_state.constraint_order.envs_constraint_start[i_b]
+        n_env_constraints = sap_state.constraint_order.envs_constraint_start[i_b + 1] - i_s_start
+        for incidence in qd.static(INCIDENCES):
+            N_ENTRIES_MAX = qd.static(incidence.n_entries_max)
+            for i_k_ in range((n_env_constraints * N_ENTRIES_MAX + N_LANES - 1) // N_LANES):
+                i_k = i_k_ * N_LANES + i_lane
+                i_s = i_s_start + i_k // N_ENTRIES_MAX
+                i_x = -1
+                if i_k < n_env_constraints * N_ENTRIES_MAX:
                     i_q = sap_state.constraint_order.order[i_s]
                     for i_h, handler in qd.static(enumerate(constraint_handlers)):
-                        if qd.static(handler.n_rigid_sides > 0):
-                            if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
-                                i_c = i_q - sap_info.handlers_slot_start[i_h]
-                                for i_side in range(handler.n_rigid_sides):
-                                    i_l = handler.rigid_side_link(i_c, i_side)
-                                    if i_pass == 0:
-                                        sap_state.constraint_order.link_incidence_start[i_l + 1, i_b] = (
-                                            sap_state.constraint_order.link_incidence_start[i_l + 1, i_b] + 1
-                                        )
-                                    else:
-                                        i_n = sap_state.constraint_order.link_incidence_start[i_l, i_b]
-                                        sap_state.constraint_order.link_incidence[i_n] = i_s * N_SIDES_MAX + i_side
-                                        sap_state.constraint_order.link_incidence_start[i_l, i_b] = i_n + 1
-            for i_l_ in range(n_links):
-                i_l = n_links - i_l_
-                sap_state.constraint_order.link_incidence_start[i_l, i_b] = (
-                    sap_state.constraint_order.link_incidence_start[i_l - 1, i_b]
-                )
-            sap_state.constraint_order.link_incidence_start[0, i_b] = i_n_start
+                        if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
+                            i_c = i_q - sap_info.handlers_slot_start[i_h]
+                            i_x = func_contact_target(
+                                i_c, i_k % N_ENTRIES_MAX, fem_info, handler, is_fem=incidence.is_fem
+                            )
+                i_rank = 0
+                i_lane_first = i_lane
+                n_tile_entries = 1
+                if qd.static(N_LANES > 1):
+                    i_lane_first = N_LANES
+                    n_tile_entries = 0
+                    for i_lane_other in range(N_LANES):
+                        if su.qd_block_shuffle(i_x, i_lane_other) == i_x:
+                            i_lane_first = qd.min(i_lane_first, i_lane_other)
+                            n_tile_entries = n_tile_entries + 1
+                            if i_lane_other < i_lane:
+                                i_rank = i_rank + 1
+                i_n = 0
+                if i_x >= 0 and i_lane == i_lane_first:
+                    i_n = qd.atomic_add(incidence.starts[i_x + 1, i_b], n_tile_entries)
+                if qd.static(N_LANES > 1):
+                    i_n = su.qd_block_shuffle(i_n, i_lane_first)
+                if i_x >= 0:
+                    incidence.entries[i_n + i_rank] = i_s * N_ENTRIES_MAX + i_k % N_ENTRIES_MAX
+
+
+@qd.func
+def func_contact_target(i_c: int, i_k: int, fem_info: FEMInfo, handler: qd.template(), is_fem: qd.template()):
+    """Return the FEM vertex at a corner of a constraint, or the rigid link at its side, -1 past those of its handler.
+
+    The constraint is i_c of `handler`, and i_k its corner, or its side when `is_fem` is off.
+    """
+    i_x = -1
+    if qd.static(is_fem):
+        if qd.static(handler.n_fem_corners > 0):
+            if i_k < handler.n_fem_corners:
+                i_x = handler.fem_corner_vertex(i_c, i_k, fem_info)
+    else:
+        if qd.static(handler.n_rigid_sides > 0):
+            if i_k < handler.n_rigid_sides:
+                i_x = handler.rigid_side_link(i_c, i_k)
+    return i_x
 
 
 @qd.kernel
@@ -2269,14 +2317,6 @@ def kernel_sum_contact_patches(
                                     k_patch = k_patch + handler.contact_pairs.contact_info.k[i_c]
                                 else:
                                     handler.contact_pairs.contact_info.k_patch[i_c] = k_patch
-
-
-@qd.kernel
-def kernel_clear_normal_impulses(envs_idx: qd.Tensor, lagged_friction: SAPLaggedFriction):
-    """Forget the contact pairs of the last solve of the given environments, whose next substep estimates them."""
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        lagged_friction.n_contacts[i_b] = 0
 
 
 @qd.kernel
@@ -2443,7 +2483,9 @@ def kernel_update_vel(
         for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(fem_state.vertices.vel))):
             fem_state.vertices.vel_next[i_v, i_b] = sap_state.fem_vertices.v[i_v, i_b]
     if qd.static(sap_config.has_rigid):
-        for i_d, i_b in qd.ndrange(sap_info.n_dofs[None], errno.shape[0], axes=qd.static(eoa(dofs_state.vel))):
+        for i_d, i_b in qd.ndrange(
+            sap_state.rigid_dofs.v.shape[0], errno.shape[0], axes=qd.static(eoa(dofs_state.vel))
+        ):
             dofs_state.vel[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b]
     if qd.static(sap_config.has_rigid_contacts):
         # A free body in contact keeps the standard update, which carries the contact impulse (see
@@ -2531,7 +2573,9 @@ def kernel_init_sap_solve(
         # The rigid dofs of each kinematic tree, in contact when the contact lists of the links of the subtree of its
         # root hold any contact.
         for i_d, i_b in qd.ndrange(
-            sap_info.n_dofs[None], sap_state.envs.is_active.shape[0], axes=qd.static(eoa(sap_state.rigid_dofs.v))
+            sap_state.rigid_dofs.v.shape[0],
+            sap_state.envs.is_active.shape[0],
+            axes=qd.static(eoa(sap_state.rigid_dofs.v)),
         ):
             is_in_contact = False
             if qd.static(sap_config.has_rigid_contacts):
@@ -2545,8 +2589,16 @@ def kernel_init_sap_solve(
             if is_in_contact:
                 v = dofs_state.vel_prev[i_d, i_b]
             sap_state.rigid_dofs.v[i_d, i_b] = v
+    # An environment without constraint nor FEM vertex starts at the minimum of its cost, its free velocities, which its
+    # solve keeps without iterating.
     for i_b in range(sap_state.envs.is_active.shape[0]):
-        sap_state.envs.is_active[i_b] = True
+        is_active = (
+            sap_state.constraint_order.envs_constraint_start[i_b + 1]
+            > sap_state.constraint_order.envs_constraint_start[i_b]
+        )
+        if qd.static(sap_config.has_fem):
+            is_active = True
+        sap_state.envs.is_active[i_b] = is_active
         sap_state.envs.energy_newton_prev[i_b] = qd.math.inf
     if qd.static(sap_config.has_fem):
         # The gradient of the cost of the FEM vertices at their reference velocity, and its diagonal Hessian blocks. The
@@ -3036,13 +3088,13 @@ def func_compute_fem_corner_force(
 
 @qd.func
 def func_compute_rigid_mass_mat_vec_product(
-    vec: qd.Tensor, out: qd.Tensor, envs_is_active: qd.Tensor, rigid_info: RigidInfo, sap_info: SAPInfo
+    vec: qd.Tensor, out: qd.Tensor, envs_is_active: qd.Tensor, rigid_info: RigidInfo
 ):
     """Compute the product of the rigid mass matrix with a vector of the dofs, for the active environments."""
-    for i_d1, i_b in qd.ndrange(sap_info.n_dofs[None], out.shape[1], axes=qd.static(eoa(rigid_info.mass_mat))):
+    for i_d1, i_b in qd.ndrange(*out.shape, axes=qd.static(eoa(rigid_info.mass_mat))):
         if envs_is_active[i_b]:
             prod = gs.qd_float(0.0)
-            for i_d0 in range(sap_info.n_dofs[None]):
+            for i_d0 in range(vec.shape[0]):
                 prod = prod + rigid_info.mass_mat[i_d1, i_d0, i_b] * vec[i_d0, i_b]
             out[i_d1, i_b] = prod
 
@@ -3396,11 +3448,13 @@ def func_init_unconstrained_gradient(
         )
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(
-            sap_info.n_dofs[None], sap_state.envs.is_active.shape[0], axes=qd.static(eoa(sap_state.rigid_dofs.v))
+            sap_state.rigid_dofs.v.shape[0],
+            sap_state.envs.is_active.shape[0],
+            axes=qd.static(eoa(sap_state.rigid_dofs.v)),
         ):
             sap_state.rigid_dofs.v_diff[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b] - dofs_state.vel[i_d, i_b]
         func_compute_rigid_mass_mat_vec_product(
-            sap_state.rigid_dofs.v_diff, sap_state.rigid_dofs.gradient, sap_state.envs.is_active, rigid_info, sap_info
+            sap_state.rigid_dofs.v_diff, sap_state.rigid_dofs.gradient, sap_state.envs.is_active, rigid_info
         )
 
 
@@ -3481,7 +3535,7 @@ def func_compute_vertices_dofs(
                 if qd.static(sap_config.has_rigid):
                     if i_k >= n_vertex_chunks:
                         i_d = (i_k - n_vertex_chunks) * CHUNK_DIM + i_i
-                        if i_d < sap_info.n_dofs[None]:
+                        if i_d < sap_state.rigid_dofs.v.shape[0]:
                             sums = sums + func_compute_rigid_dof(
                                 i_d,
                                 i_b,
@@ -3527,47 +3581,41 @@ def func_compute_constraints(
     `envs_is_active` holds the flags of the environments it runs on, and `op` is the operation, see ConstraintOp. The
     constraints of each environment run in their sorted order (see kernel_order_constraints) by chunks, each summing the
     values of its constraints into its partials in a fixed order, and each handler running its own branch, so that the
-    operation takes one launch whatever the number of handlers. The matrix-vector product also computes the elastic
-    corner forces along the search direction (see func_compute_fem_corner_force), independent work that shares the
-    launch, its threads coming first. On GPU, the capacity of the chunks bounds the loop, since a bound read on the
-    device launches a full grid at every call, while on CPU the threads take the chunks in use alone.
+    operation takes one launch whatever the number of handlers. The matrix-vector product first computes the elastic
+    corner forces along the search direction (see func_compute_fem_corner_force). On GPU, the capacity of the chunks
+    bounds the loop, since a bound read on the device launches a full grid at every call, while on CPU the threads take
+    the chunks in use alone.
     """
     # The sums of a chunk of constraints (see N_CONSTRAINT_SUMS)
     N_SUMS = qd.static(3)
     # The items of a chunk (see CHUNK_SIZE)
     CHUNK_DIM = qd.static(32)
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
-    HAS_ELEMENTS = qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT and sap_config.has_fem)
-    n_envs = envs_is_active.shape[0]
-    # The element threads fill whole subgroups, so that the lanes of a chunk sum their shares together
-    n_elements = 0
-    n_element_threads = 0
-    if qd.static(HAS_ELEMENTS):
-        n_elements = fem_info.elements.V.shape[0]
-        n_element_threads = (n_envs * n_elements + CHUNK_DIM - 1) // CHUNK_DIM * CHUNK_DIM
+    # The corner forces take a loop of their own: a loop bound reassigned under a static condition is read on the device,
+    # which launches a full grid, where a bound assigned once is a compile-time constant on fields.
+    if qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT and sap_config.has_fem):
+        for i_t in range(envs_is_active.shape[0] * fem_info.elements.V.shape[0]):
+            i_b = i_t // fem_info.elements.V.shape[0]
+            if envs_is_active[i_b]:
+                func_compute_fem_corner_force(
+                    i_t % fem_info.elements.V.shape[0],
+                    i_b,
+                    sap_state.fem_vertices.p,
+                    fem_state,
+                    sap_state,
+                    fem_info,
+                    vertex_constraints,
+                    sap_info,
+                    fem_config,
+                )
     n_units = sap_state.constraint_order.units_env.shape[0]
     if qd.static(gs.backend == gs.cpu):
         n_units = sap_state.constraint_order.n_units[None]
-    for i_t in range(n_element_threads + n_units * N_LANES):
-        if qd.static(HAS_ELEMENTS):
-            if i_t < n_envs * n_elements:
-                i_b_e = i_t // n_elements
-                if envs_is_active[i_b_e]:
-                    func_compute_fem_corner_force(
-                        i_t % n_elements,
-                        i_b_e,
-                        sap_state.fem_vertices.p,
-                        fem_state,
-                        sap_state,
-                        fem_info,
-                        vertex_constraints,
-                        sap_info,
-                        fem_config,
-                    )
+    for i_t in range(n_units * N_LANES):
         i_lane = i_t % N_LANES
-        i_u = qd.max(i_t - n_element_threads, 0) // N_LANES
+        i_u = i_t // N_LANES
         i_b = sap_state.constraint_order.units_env[i_u]
-        is_active = i_t >= n_element_threads and i_u < sap_state.constraint_order.n_units[None] and envs_is_active[i_b]
+        is_active = i_u < sap_state.constraint_order.n_units[None] and envs_is_active[i_b]
         sums = qd.Vector.zero(gs.qd_float, N_SUMS)
         if is_active:
             i_s_end = sap_state.constraint_order.envs_constraint_start[i_b + 1]
@@ -3621,10 +3669,9 @@ def func_gather_constraints(
     op: qd.template(),
 ):
     """
-    Gather the contacts into the wrench of each rigid link and into each FEM vertex, in one loop.
+    Gather the contacts into the wrench of each rigid link and into each FEM vertex.
 
-    The threads of the links come first, then those of the vertices (see func_compute_link_wrench and
-    func_gather_fem_vertex), independent work that shares one launch. `op` is the operation, see VertexDofOp.
+    See func_compute_link_wrench and func_gather_fem_vertex. `op` is the operation, see VertexDofOp.
     """
     # The lanes gathering a vertex (see func_gather_fem_vertex)
     LOG2_GATHER_LANES = qd.static(3)
@@ -3633,31 +3680,24 @@ def func_gather_constraints(
     N_LINK_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     N_VERTEX_LANES = qd.static(2**LOG2_GATHER_LANES if sap_config.enable_cooperative_kernels else 1)
     n_envs = envs_is_active.shape[0]
-    n_link_threads = 0
     if qd.static(HAS_LINKS):
-        n_link_threads = sap_state.constraint_order.links_wrench_force.shape[0] * n_envs * N_LINK_LANES
-    n_vertex_threads = 0
+        for i_t in range(sap_state.constraint_order.links_wrench_force.shape[0] * n_envs * N_LINK_LANES):
+            func_compute_link_wrench(
+                i_t, envs_is_active, links_state, sap_state, sap_info, sap_config, constraint_handlers, op=op
+            )
     if qd.static(sap_config.has_fem):
-        n_vertex_threads = n_envs * sap_state.fem_vertices.v.shape[0] * N_VERTEX_LANES
-    for i_t in range(n_link_threads + n_vertex_threads):
-        if qd.static(HAS_LINKS):
-            if i_t < n_link_threads:
-                func_compute_link_wrench(
-                    i_t, envs_is_active, links_state, sap_state, sap_info, sap_config, constraint_handlers, op=op
-                )
-        if qd.static(sap_config.has_fem):
-            if i_t >= n_link_threads:
-                func_gather_fem_vertex(
-                    i_t - n_link_threads,
-                    envs_is_active,
-                    sap_state,
-                    fem_info,
-                    vertex_constraints,
-                    sap_info,
-                    sap_config,
-                    constraint_handlers,
-                    op=op,
-                )
+        for i_t in range(n_envs * sap_state.fem_vertices.v.shape[0] * N_VERTEX_LANES):
+            func_gather_fem_vertex(
+                i_t,
+                envs_is_active,
+                sap_state,
+                fem_info,
+                vertex_constraints,
+                sap_info,
+                sap_config,
+                constraint_handlers,
+                op=op,
+            )
 
 
 @qd.func
@@ -4148,7 +4188,9 @@ def func_init_exact_linesearch(
     # The shares of the cost of the solve at the start of the line search
     if qd.static(sap_config.has_rigid):
         for i_d, i_b in qd.ndrange(
-            sap_info.n_dofs[None], sap_state.envs.is_active.shape[0], axes=qd.static(eoa(sap_state.rigid_dofs.v))
+            sap_state.rigid_dofs.v.shape[0],
+            sap_state.envs.is_active.shape[0],
+            axes=qd.static(eoa(sap_state.rigid_dofs.v)),
         ):
             if sap_state.envs.is_linesearch_active[i_b]:
                 sap_state.rigid_dofs.v_diff[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b] - dofs_state.vel[i_d, i_b]
@@ -4157,7 +4199,6 @@ def func_init_exact_linesearch(
             sap_state.rigid_dofs.mass_v_diff,
             sap_state.envs.is_linesearch_active,
             rigid_info,
-            sap_info,
         )
     func_compute_vertices_dofs(
         sap_state.envs.is_linesearch_active,
@@ -4233,7 +4274,7 @@ def func_init_exact_linesearch(
         )
     if qd.static(sap_config.has_rigid):
         func_compute_rigid_mass_mat_vec_product(
-            sap_state.rigid_dofs.x, sap_state.rigid_dofs.dp, sap_state.envs.is_linesearch_active, rigid_info, sap_info
+            sap_state.rigid_dofs.x, sap_state.rigid_dofs.dp, sap_state.envs.is_linesearch_active, rigid_info
         )
     func_compute_constraints(
         sap_state.envs.is_linesearch_active,
@@ -4434,7 +4475,7 @@ def func_one_exact_linesearch_iter(
                             sap_state.fem_vertices.x_prev[i_v, i_b] + sap_state.fem_vertices.x[i_v, i_b]
                         )
                 if qd.static(sap_config.has_rigid):
-                    for i_d in range(sap_info.n_dofs[None]):
+                    for i_d in range(sap_state.rigid_dofs.v.shape[0]):
                         sap_state.rigid_dofs.v[i_d, i_b] = (
                             sap_state.rigid_dofs.x_prev[i_d, i_b] + sap_state.rigid_dofs.x[i_d, i_b]
                         )
@@ -4598,7 +4639,7 @@ class RigidConstraintHandler(RBC):
                         self.joint_equalities.M_inv_Jt[i_c, i_d]
                         - rigid_info.mass_mat_L[j_d, i_d, i_b] * self.joint_equalities.M_inv_Jt[i_c, j_d]
                     )
-        for i_c, i_d in qd.ndrange(self.n_constraints(), sap_info.n_dofs[None]):
+        for i_c, i_d in qd.ndrange(self.n_constraints(), self.joint_equalities.M_inv_Jt.shape[1]):
             i_b = self.joint_equalities.constraints.batch_idx[i_c]
             self.joint_equalities.M_inv_Jt[i_c, i_d] = (
                 self.joint_equalities.M_inv_Jt[i_c, i_d] * rigid_info.mass_mat_D_inv[i_d, i_b]
