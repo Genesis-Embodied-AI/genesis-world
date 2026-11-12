@@ -1242,25 +1242,22 @@ def func_equality_jdotv(
 
 
 @qd.func
-def func_equality_links(
-    i_b: int,
-    i_e: int,
-    dyn_state: DynState,
-    constraint_state: ConstraintState,
-    dyn_info: DynInfo,
-    rigid_info: RigidInfo,
-    rigid_config: qd.template(),
+def func_equality_link_rows(
+    i_b: int, i_e: int, dyn_state: DynState, dyn_info: DynInfo, rigid_info: RigidInfo, rigid_config: qd.template()
 ):
-    """Add the rows of an equality constraint coupling two links: a connect, a weld or a screw.
+    """Return the rows of an equality constraint coupling two links: a connect, a weld or a screw.
 
-    The equality is the one i_e of env i_b. Each type sets the directions, errors and inverse weights of its rows, and
-    all types share one walk of the kinematic chains for the Jacobian of their rows and one for its bias. A connect keeps
-    an anchor of each link together with 3 rows, a weld also keeps their orientations with 3 more, and a screw leaves
-    link2 a single dof relative to link1 with 5 rows. The data of the equality holds:
+    The equality is the one i_e of env i_b. Row r constrains lin_dirs[r] . (v1 - v2) + ang_dirs[r] . (w1 - w2) to bring
+    errors[r] to zero, v1 being the velocity of point1 attached to link1, v2 of point2 attached to link2, and w1, w2
+    their angular velocities. A connect keeps an anchor of each link together with 3 rows, a weld also keeps their
+    orientations with 3 more, and a screw leaves link2 a single dof relative to link1 with 5 rows. The data of the
+    equality holds:
     connect [0:3] the anchor in the frame of link1, [3:6] in the frame of link2
     weld    [0:3] the anchor in the frame of link2, [3:6] in the frame of link1, [6:10] the orientation of link2 relative
             to link1, [10] the torque scale of the rotation rows
     screw   see func_screw_frame
+    Returns the number of rows, point1, point2, lin_dirs, ang_dirs, errors and the inverse weight of each row, the
+    unused rows being zero.
     """
     EPS = rigid_info.EPS[None]
 
@@ -1380,6 +1377,33 @@ def func_equality_links(
         rows_invweight[2] = invweight[1]
         rows_invweight[3] = invweight[1]
         rows_invweight[4] = pitch_cos**2 * invweight[0] + pitch_sin**2 * invweight[1]
+    return n_rows, point1, point2, lin_dirs, ang_dirs, errors, rows_invweight
+
+
+@qd.func
+def func_equality_links(
+    i_b: int,
+    i_e: int,
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Add the rows of an equality constraint coupling two links: a connect, a weld or a screw.
+
+    The equality is the one i_e of env i_b, its rows those of func_equality_link_rows. All types share one walk of the
+    kinematic chains for the Jacobian of their rows and one for its bias.
+    """
+    EPS = rigid_info.EPS[None]
+
+    eq_type = dyn_info.equalities.eq_type[i_e, i_b]
+    i_l1 = dyn_info.equalities.eq_obj1id[i_e, i_b]
+    i_l2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+    eq_data = dyn_info.equalities.eq_data[i_e, i_b]
+    n_rows, point1, point2, lin_dirs, ang_dirs, errors, rows_invweight = func_equality_link_rows(
+        i_b, i_e, dyn_state, dyn_info, rigid_info, rigid_config
+    )
 
     dyn_state.links.is_constrained[i_l1, i_b] = True
     if i_l2 > -1:

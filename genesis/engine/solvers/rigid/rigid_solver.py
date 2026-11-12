@@ -3144,6 +3144,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """
         if self._requires_grad:
             gs.raise_exception("Screw constraints are not supported yet when requires_grad is True.")
+        if limit is not None or frictionloss > 0.0:
+            from genesis.engine.couplers import SAPCoupler
+
+            if isinstance(self.sim.coupler, SAPCoupler):
+                gs.raise_exception(
+                    f"{type(self.sim.coupler).__name__} does not support the travel limit and the dry friction of a "
+                    "screw constraint yet."
+                )
         axis = np.asarray(axis, dtype=gs.np_float)
         axis_norm = np.linalg.norm(axis)
         anchor_pos = np.zeros(3, dtype=gs.np_float) if pos is None else np.asarray(pos, dtype=gs.np_float)

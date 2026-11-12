@@ -47,12 +47,16 @@ from genesis.engine.solvers.fem_solver import (
     func_element_mapping_matrix,
 )
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
-from genesis.engine.solvers.rigid.constraint.solver import func_mark_link_constrained
+from genesis.engine.solvers.rigid.collider.broadphase import func_is_link_pair_bound
+from genesis.engine.solvers.rigid.constraint.data import ConstraintState
+from genesis.engine.solvers.rigid.constraint.solver import func_equality_link_rows, func_mark_link_constrained
 from genesis.engine.solvers.rigid.data import (
     DOFS,
     GEOMS,
     LINKS,
     DofsState,
+    DynInfo,
+    DynState,
     EntitiesInfo,
     EqualitiesInfo,
     FacesInfo,
@@ -159,6 +163,12 @@ COS_ANGLE_THRESHOLD = math.cos(math.pi * 5.0 / 8.0)
 # number of vertices. The softer of it and the near-rigid regularization of the contact (see 'sap_beta' in
 # SAPCouplerOptions) sets the compliance of the contact, this stiffness for heavy bodies.
 RIGID_FLOOR_VERT_STIFFNESS = 1.0e6
+
+# Near-rigid threshold of the equality constraints: the regularization keeps the period of a constraint above
+# EQUALITY_BETA substeps, so that the solve resolves it as rigid as it can, and the stiffness of a joint equality (see
+# compute_regularization of JointEqualityHandler and regularize of LinkEqualityHandler).
+EQUALITY_BETA = 0.1
+EQUALITY_STIFFNESS = 1.0e8
 
 # Largest residual of a SAP solve stopped at its Newton iteration cap, relative to the momentum and the impulses of its
 # environment (see func_update_envs_active): a momentum left unbalanced above a tenth of them leaves velocities off by
@@ -320,7 +330,7 @@ RIGID = "rigid"
 FEM_PRESSURE = "fem_pressure"
 RIGID_VOLUME = "rigid_volume"
 TET_TABLES = "tet_tables"
-RIGID_CONTACTS = "rigid_contacts"
+LINK_CONSTRAINTS = "link_constraints"
 HOST_SORT = "host_sort"
 DEVICE_SORT = "device_sort"
 LAGGED_FRICTION = "lagged_friction"
@@ -460,18 +470,18 @@ class SAPConstraintOrder(Data, kind=DataKind.SCRATCH):
     # Start of the list of the contacts of each FEM vertex, then of each rigid link
     fem_incidence_start: qd.Tensor = field(int, shape=(VERTICES + 1, ENVS), labels=FEM)
     fem_incidence: qd.Tensor = field(int, shape=(FEM_INCIDENCE,), labels=FEM)
-    link_incidence_start: qd.Tensor = field(int, shape=(LINKS + 1, ENVS), labels=RIGID_CONTACTS)
-    link_incidence: qd.Tensor = field(int, shape=(LINK_INCIDENCE,), labels=RIGID_CONTACTS)
+    link_incidence_start: qd.Tensor = field(int, shape=(LINKS + 1, ENVS), labels=LINK_CONSTRAINTS)
+    link_incidence: qd.Tensor = field(int, shape=(LINK_INCIDENCE,), labels=LINK_CONSTRAINTS)
     # Wrench of each share of the contacts of each link (see func_compute_link_wrench)
-    links_wrench_force: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
-    links_wrench_torque: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
+    links_wrench_force: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=LINK_CONSTRAINTS)
+    links_wrench_torque: qd.Tensor = field((float, 3), shape=(LINK_WRENCH_SHARES, ENVS), labels=LINK_CONSTRAINTS)
     # Patch key of each sorted constraint, and the rank of each one sorted by it in the sorted constraints (see
     # kernel_sum_contact_patches)
     patch_key: qd.Tensor = field(qd.u64, shape=(CONSTRAINT_SLOTS,))
     patch_order: qd.Tensor = field(int, shape=(CONSTRAINT_SLOTS,))
     # Hessian of the cost of the contacts of each share of each link with respect to its spatial velocity, about the
     # root of its kinematic tree (see func_compute_link_wrench)
-    links_wrench_hessian: qd.Tensor = field((float, (6, 6)), shape=(LINK_WRENCH_SHARES, ENVS), labels=RIGID_CONTACTS)
+    links_wrench_hessian: qd.Tensor = field((float, (6, 6)), shape=(LINK_WRENCH_SHARES, ENVS), labels=LINK_CONSTRAINTS)
 
 
 class SAPSolveLoops(Data, kind=DataKind.SCRATCH, shape=()):
@@ -552,9 +562,9 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     fem_vertices_entity_idx: qd.Tensor = field(int, shape=(VERTICES,), labels=FEM)
     fem_corners_rank: qd.Tensor = field(int, shape=(4 * ELEMENTS,), labels=FEM)
     # End of the subtree of each link in depth-first order, and the link and tree root of each dof
-    links_subtree_end: qd.Tensor = field(int, shape=(LINKS,), labels=RIGID_CONTACTS)
-    dofs_link_idx: qd.Tensor = field(int, shape=(DOFS,), labels=RIGID_CONTACTS)
-    dofs_root_link_idx: qd.Tensor = field(int, shape=(DOFS,), labels=RIGID_CONTACTS)
+    links_subtree_end: qd.Tensor = field(int, shape=(LINKS,), labels=LINK_CONSTRAINTS)
+    dofs_link_idx: qd.Tensor = field(int, shape=(DOFS,), labels=LINK_CONSTRAINTS)
+    dofs_root_link_idx: qd.Tensor = field(int, shape=(DOFS,), labels=LINK_CONSTRAINTS)
     # First constraint slot of each handler
     handlers_slot_start: qd.Tensor = field(int, shape=(CONSTRAINT_HANDLERS + 1,))
     n_vertex_chunks: qd.Tensor = field(int, shape=())
@@ -608,12 +618,13 @@ class SAPInfo(Data, kind=DataKind.CONSTANT):
     dofs_mass_inv_start: qd.Tensor = field(int, shape=(DOFS,), labels=RIGID)
 
 
-# The contact pairs and the candidate pairs of a contact handler over every environment, and the joint equalities of an
-# environment and of every environment.
+# The contact pairs and the candidate pairs of a contact handler over every environment, the joint equalities of an
+# environment and of every environment, and the equalities coupling two links of every environment.
 CONTACT_PAIRS = Size("contact_pairs")
 CONTACT_CANDIDATES = Size("contact_candidates")
 ENV_JOINT_EQUALITIES = Size("env_joint_equalities")
 JOINT_EQUALITIES = Size("joint_equalities")
+LINK_EQUALITIES = Size("link_equalities")
 # The tets of the geoms of the rigid-rigid contacts
 RIGID_RIGID_TETS = Size("rigid_rigid_tets")
 
@@ -828,8 +839,7 @@ class SAPJointEqualityConstraints(Data, kind=DataKind.CONSTANT, shape=(JOINT_EQU
 class SAPJointEqualities(Data, kind=DataKind.CONSTANT):
     """The joint equality constraints of the rigid solver, which the SAP coupler solves with the contacts."""
 
-    # Stiffness of every constraint, and the near-rigid threshold: the regularization keeps the period of a constraint
-    # above beta time steps.
+    # See EQUALITY_STIFFNESS and EQUALITY_BETA
     stiffness: qd.Tensor = field(float, shape=())
     beta: qd.Tensor = field(float, shape=())
     # Joint equalities of the rigid solver that each environment holds
@@ -837,6 +847,47 @@ class SAPJointEqualities(Data, kind=DataKind.CONSTANT):
     constraints: SAPJointEqualityConstraints
     # Mass matrix solved against the transposed Jacobian of every constraint
     M_inv_Jt: qd.Tensor = field(float, shape=(JOINT_EQUALITIES, DOFS), kind=DataKind.SCRATCH)
+
+
+class SAPLinkEqualityConstraints(Data, kind=DataKind.SCRATCH, shape=(LINK_EQUALITIES,)):
+    """The equality constraints coupling two links of every environment, with their rows (see func_equality_link_rows).
+
+    The rows past those of a constraint are zero.
+    """
+
+    # Environment of each constraint, its equality, and the links it couples, the second one being -1 for the world
+    batch_idx: qd.Tensor = field(int)
+    equality_idx: qd.Tensor = field(int)
+    link_idx0: qd.Tensor = field(int)
+    link_idx1: qd.Tensor = field(int)
+    # Point of each link the rows constrain, and the directions of the rows in the linear and angular velocities
+    point0: qd.Tensor = field((float, 3))
+    point1: qd.Tensor = field((float, 3))
+    lin_dirs: qd.Tensor = field((float, (6, 3)))
+    ang_dirs: qd.Tensor = field((float, (6, 3)))
+    # Stabilization velocity of the rows, the Hessian of the cost of the rows, the inverse of their regularization, and
+    # that Hessian mapped to the velocity of the point and the angular velocity of the links, D^T G D for the directions
+    # D of the rows (see side_hessian)
+    v_hat: qd.Tensor = field((float, 6))
+    G: qd.Tensor = field((float, (6, 6)))
+    K: qd.Tensor = field((float, (6, 6)))
+    # Impulse of the rows, the product of the Hessian with the Jacobian of the search direction, the change of the
+    # velocity of the rows along the Newton step, and the product of the Hessian with it
+    gamma: qd.Tensor = field((float, 6))
+    GJp: qd.Tensor = field((float, 6))
+    dvc: qd.Tensor = field((float, 6))
+    G_dvc: qd.Tensor = field((float, 6))
+
+
+class SAPLinkEqualities(Data, kind=DataKind.SCRATCH):
+    """The equality constraints coupling two links that the environments hold, solved with the contacts."""
+
+    # See EQUALITY_BETA
+    beta: qd.Tensor = field(float, shape=(), kind=DataKind.CONSTANT)
+    # Constraints in use, in total and by environment
+    n_constraints: qd.Tensor = field(int, shape=())
+    envs_n_constraints: qd.Tensor = field(int, shape=(ENVS,))
+    constraints: SAPLinkEqualityConstraints
 
 
 class SAPData(Data):
@@ -868,15 +919,16 @@ class SAPHandlers(NamedTuple):
     rigid_floor: "RigidFloorContactHandler | None"
     rigid_rigid: "RigidRigidContactHandler | None"
     rigid_fem: "RigidFEMContactHandler | None"
-    equality: "RigidConstraintHandler | None"
+    link_equality: "LinkEqualityHandler | None"
+    joint_equality: "JointEqualityHandler | None"
 
     @property
     def contacts(self) -> tuple["BaseContactHandler", ...]:
         """The contact handlers that are present, in order."""
-        return tuple([handler for handler in self[:-1] if handler is not None])
+        return tuple([handler for handler in self if isinstance(handler, BaseContactHandler)])
 
     @property
-    def constraints(self) -> tuple["BaseContactHandler | RigidConstraintHandler", ...]:
+    def constraints(self) -> tuple["BaseContactHandler | LinkEqualityHandler | JointEqualityHandler", ...]:
         """The handlers that are present, in order, the contact handlers first."""
         return tuple([handler for handler in self if handler is not None])
 
@@ -908,9 +960,10 @@ class SAPConfig(Config):
 
     has_fem: bool
     has_rigid: bool
-    has_equality_constraints: bool
+    has_link_equalities: bool
+    has_joint_equalities: bool
     has_fem_contacts: bool
-    has_rigid_contacts: bool
+    has_link_constraints: bool
     enable_lagged_friction: bool
     enable_vertex_constraints: bool
     batch_links_info: bool
@@ -1013,12 +1066,25 @@ class RigidTetsQuery(BoxQuery):
 
     Each pair of geoms that may collide is found once, the tet of the higher geom querying the tree of the lower one.
     The query is the four vertices of the tet, one per row, and their box, which tests the nodes. It reads the geom of
-    each queried tet and the pairs of geoms that may collide (see RigidRigidGeoms).
+    each queried tet and the pairs of geoms that may collide (see RigidRigidGeoms), less those of the links a dynamic
+    weld or screw holds in the environment (see func_is_link_pair_bound), as the collider drops them.
     """
 
-    def __init__(self, results: BVHQueryResults, rigid_geoms: RigidRigidGeoms) -> None:
+    def __init__(
+        self,
+        results: BVHQueryResults,
+        rigid_geoms: RigidRigidGeoms,
+        constraint_state: ConstraintState,
+        geoms_info: GeomsInfo,
+        equalities_info: EqualitiesInfo,
+        rigid_info: RigidInfo,
+    ) -> None:
         super().__init__(results)
         self.rigid_geoms = rigid_geoms
+        self.constraint_state = constraint_state
+        self.geoms_info = geoms_info
+        self.equalities_info = equalities_info
+        self.rigid_info = rigid_info
         self.Query = qd.types.struct(
             verts=qd.types.matrix(4, 3, gs.qd_float),
             aabb_min=qd.types.vector(3, gs.qd_float),
@@ -1028,7 +1094,14 @@ class RigidTetsQuery(BoxQuery):
     @qd.func
     def is_instance_kept(self, i_t: int, i_q: int, i_k: int) -> bool:
         i_g = self.rigid_geoms.tets_geom_idx[i_q]
-        return i_k < i_g and self.rigid_geoms.geoms_is_pair[i_k, i_g]
+        is_kept = i_k < i_g and self.rigid_geoms.geoms_is_pair[i_k, i_g]
+        if is_kept:
+            i_la = self.geoms_info.link_idx[i_k]
+            i_lb = self.geoms_info.link_idx[i_g]
+            is_kept = not func_is_link_pair_bound(
+                i_la, i_lb, i_t, self.constraint_state, self.equalities_info, self.rigid_info
+            )
+        return is_kept
 
     @qd.func
     def to_frame(self, query, pos: qd.types.vector(3), quat: qd.types.vector(4)):
@@ -1245,7 +1318,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         self._rigid_compliant = False
         self._has_fem_pressure = False
-        self._has_equality_constraints = False
+        self._has_joint_equalities = False
+        self._has_link_equalities = False
         self.sap_data: SAPData | None = None
         self.sap_state: SAPState | None = None
         self.sap_info: SAPInfo | None = None
@@ -1259,17 +1333,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self._has_fem_tet_contact = self.fem_solver.is_active and (
             len(self.fem_solver.entities) > 1 or self.options.enable_fem_self_collision
         )
-
-        # The coupler enforces the joint equalities of the rigid solver alone, unless constraints are disabled
-        if not self.rigid_solver._options.disable_constraint:
-            for entity in self.rigid_solver.entities:
-                unsupported_types = sorted({equality.type for equality in entity.equalities} - {gs.EQUALITY_TYPE.JOINT})
-                if unsupported_types:
-                    unsupported_names = ", ".join([equality_type.name.lower() for equality_type in unsupported_types])
-                    gs.raise_exception(
-                        f"{type(self).__name__} enforces joint equalities only, but entity '{entity.name}' holds "
-                        f"{unsupported_names} ones."
-                    )
 
         # The floor contacts model a horizontal floor at the current height of the rigid ground plane of each
         # environment, whose orientation is checked at build only, and every other contact leaves that plane out. A
@@ -1340,11 +1403,16 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             rigid_rigid_geoms = [geom for geom, is_geom_paired in zip(volume_geoms, is_paired) if is_geom_paired]
             self._rigid_compliant = len(rigid_rigid_geoms) > 0
             has_tet_tables |= self._rigid_compliant
-            # The rigid solver leaves its joint equality constraints to this coupler, unless constraints are disabled
-            # TODO: Dynamically added constraints are not supported for now
-            self._has_equality_constraints = not self.rigid_solver._options.disable_constraint and any(
-                [equality.type == gs.EQUALITY_TYPE.JOINT for equality in self.rigid_solver.equalities]
-            )
+            # The rigid solver leaves its equality constraints to this coupler, unless constraints are disabled. The
+            # joint equalities are those of the scene, while the slots of the equalities coupling two links also take
+            # the ones added after the build (see 'RigidSolver.add_weld_constraint').
+            if not self.rigid_solver._options.disable_constraint:
+                equalities_type = [equality.type for equality in self.rigid_solver.equalities]
+                self._has_joint_equalities = gs.EQUALITY_TYPE.JOINT in equalities_type
+                self._has_link_equalities = (
+                    any([eq_type != gs.EQUALITY_TYPE.JOINT for eq_type in equalities_type])
+                    or self.rigid_solver._options.max_dynamic_constraints > 0
+                )
 
         # The floor holds each FEM entity as a rigid half-space holds it in hydroelastic contact, the pressure growing
         # with depth at the rate of its pressure field (the modulus over its deepest vertex), which the hydroelastic
@@ -1384,7 +1452,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         # The contact handlers accumulate into the same gradients, so their order sets the rounding of the solve
         options = self.options
-        fem_floor = fem_self = rigid_floor = rigid_rigid = rigid_fem = equality = None
+        fem_floor = fem_self = rigid_floor = rigid_rigid = rigid_fem = link_equality = joint_equality = None
         if self.fem_solver.is_active:
             if ground_geom_idx >= 0:
                 fem_floor = FEMFloorContactHandler(self.sim, options, fem_floor_stiffness)
@@ -1399,9 +1467,13 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 )
         if self._has_rigid_fem_contact:
             rigid_fem = RigidFEMContactHandler(self.sim, options, ground_geom_idx)
-        if self._has_equality_constraints:
-            equality = RigidConstraintHandler(self.sim)
-        self.handlers = SAPHandlers(fem_floor, fem_self, rigid_floor, rigid_rigid, rigid_fem, equality)
+        if self._has_link_equalities:
+            link_equality = LinkEqualityHandler(self.sim)
+        if self._has_joint_equalities:
+            joint_equality = JointEqualityHandler(self.sim)
+        self.handlers = SAPHandlers(
+            fem_floor, fem_self, rigid_floor, rigid_rigid, rigid_fem, link_equality, joint_equality
+        )
 
         # The chunks of the FEM vertices of each entity, then of the rigid dofs and the FEM elements (see CHUNK_SIZE)
         chunks_vertex_start, chunks_vertex_end, entities_chunk_start = [], [], [0]
@@ -1453,7 +1525,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             [handler.max_constraints // self._B * handler.n_rigid_sides for handler in self.handlers.constraints]
         )
         # A contact moves rigid dofs only when the rigid solver holds any, a link without dofs being fixed
-        has_rigid_contacts = n_env_link_entries > 0 and self.rigid_solver.n_dofs > 0
+        has_link_constraints = n_env_link_entries > 0 and self.rigid_solver.n_dofs > 0
         # The most dofs a link and its ancestors hold, which bounds the kinematic chain of a contact. A CPU thread keeps
         # the chains in a scratch of its own, sized by it. A GPU thread keeps them in registers up to the largest size
         # of CHAIN_DOFS_SIZES, snapped up to a size of it (the largest outside performance mode, whose kernels serve
@@ -1479,8 +1551,8 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             n_max_chain_dofs = get_gpu_block_shared_memory_bytes() // n_bytes_chain_dof
             if n_chain_dofs_max > n_max_chain_dofs:
                 gs.raise_exception(
-                    f"{type(self).__name__} supports kinematic chains of {n_max_chain_dofs} dofs at most on this device, a "
-                    f"link of the scene and its ancestors holding {n_chain_dofs_max}."
+                    f"{type(self).__name__} supports kinematic chains of {n_max_chain_dofs} dofs at most on this "
+                    f"device, a link of the scene and its ancestors holding {n_chain_dofs_max}."
                 )
         enable_cooperative_kernels = gs.backend != gs.cpu
         n_link_wrench_shares = N_LINK_WRENCH_SHARES if enable_cooperative_kernels else 1
@@ -1607,7 +1679,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_pressure=not self._has_fem_pressure,
                 rigid_volume=not self._rigid_compliant,
                 tet_tables=not has_tet_tables,
-                rigid_contacts=not has_rigid_contacts,
+                link_constraints=not has_link_constraints,
                 host_sort=is_device_sort,
                 device_sort=not is_device_sort,
                 lagged_friction=not self._enable_lagged_friction,
@@ -1642,7 +1714,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             )
         if n_dofs > 0:
             sap_info.dofs_mass_inv_start.from_numpy(dofs_mass_inv_start)
-        if has_rigid_contacts:
+        if has_link_constraints:
             sap_info.links_subtree_end.from_numpy(links_subtree_end)
             sap_info.dofs_link_idx.from_numpy(dofs_link_idx)
             sap_info.dofs_root_link_idx.from_numpy(dofs_root_link_idx)
@@ -1650,9 +1722,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         self.sap_config = SAPConfig(
             has_fem=self.fem_solver.is_active,
             has_rigid=self.rigid_solver.is_active and self.rigid_solver.n_dofs > 0,
-            has_equality_constraints=self._has_equality_constraints,
+            has_link_equalities=self._has_link_equalities,
+            has_joint_equalities=self._has_joint_equalities,
             has_fem_contacts=n_env_fem_entries > 0,
-            has_rigid_contacts=has_rigid_contacts,
+            has_link_constraints=has_link_constraints,
             enable_lagged_friction=self._enable_lagged_friction,
             enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
@@ -1774,6 +1847,18 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             if contact is not None:
                 contact.update_geoms_tree(rigid_solver.dyn_state.geoms)
 
+        # The constraints of the equalities coupling two links come first, as the count of every handler closes the
+        # detection of the contacts (see kernel_update_contact)
+        if self._has_link_equalities:
+            kernel_update_link_equalities(
+                rigid_solver.dyn_state,
+                rigid_solver.constraint_solver.constraint_state,
+                rigid_solver.dyn_info,
+                rigid_solver.rigid_info,
+                self.sap_info,
+                rigid_solver.rigid_config,
+                self.handlers.link_equality,
+            )
         kernel_update_contact(
             fem_solver.fem_state,
             rigid_solver.dyn_state.geoms,
@@ -2005,6 +2090,20 @@ def kernel_compute_fem_surface_tet_aabb(fem_state: FEMState, bvh_leaves: BVHLeav
 
 
 @qd.kernel(fastcache=True)
+def kernel_update_link_equalities(
+    dyn_state: DynState,
+    constraint_state: ConstraintState,
+    dyn_info: DynInfo,
+    rigid_info: RigidInfo,
+    sap_info: SAPInfo,
+    rigid_config: qd.template(),
+    link_equality_handler: qd.template(),
+):
+    """Build the constraints of the equalities coupling two links of every environment (see LinkEqualityHandler)."""
+    link_equality_handler.update(dyn_state, constraint_state, dyn_info, rigid_info, sap_info, rigid_config)
+
+
+@qd.kernel(fastcache=True)
 def kernel_update_contact(
     fem_state: FEMState,
     geoms_state: GeomsState,
@@ -2026,7 +2125,8 @@ def kernel_update_contact(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     errno: qd.Tensor,
 ):
     """Detect the contacts of every handler.
@@ -2040,7 +2140,8 @@ def kernel_update_contact(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
     constraint_handlers = qd.static(handlers.constraints)
@@ -2114,7 +2215,8 @@ def kernel_order_constraints(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Sort the constraints of every environment, split them into chunks, and list the contacts of each vertex and link.
@@ -2135,7 +2237,8 @@ def kernel_order_constraints(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
     constraint_handlers = qd.static(handlers.constraints)
@@ -2169,7 +2272,7 @@ def kernel_order_constraints(
                 is_fem=False,
             ),
         )
-        * sap_config.has_rigid_contacts
+        * sap_config.has_link_constraints
     )
     n_envs = sap_state.constraint_order.envs_constraint_start.shape[0] - 1
     key_shift = qd.u64(sap_info.constraints_key_shift[None])
@@ -2351,7 +2454,8 @@ def kernel_sum_contact_patches(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Sum the stiffness of the contact pairs of every patch into each of its pairs.
@@ -2368,7 +2472,8 @@ def kernel_sum_contact_patches(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
     constraint_handlers = qd.static(handlers.constraints)
@@ -2386,7 +2491,7 @@ def kernel_sum_contact_patches(
         for i_h, handler in qd.static(enumerate(constraint_handlers)):
             if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
                 patch_key = patch_key | (qd.u64(i_h) << handler_shift)
-                if qd.static(handler.n_rigid_sides + handler.n_fem_corners > 0):
+                if qd.static(isinstance(handler, BaseContactHandler)):
                     i_c = i_q - sap_info.handlers_slot_start[i_h]
                     i_body0, i_body1 = handler.patch_bodies(i_c, fem_info, rigid_info, sap_info)
                     patch_key = patch_key | (qd.u64(i_body0) << body_shift) | qd.u64(i_body1)
@@ -2430,7 +2535,7 @@ def kernel_sum_contact_patches(
                     i_s = sap_state.constraint_order.patch_order[i_m]
                     i_q = sap_state.constraint_order.order[i_s]
                     for i_h, handler in qd.static(enumerate(constraint_handlers)):
-                        if qd.static(handler.n_rigid_sides + handler.n_fem_corners > 0):
+                        if qd.static(isinstance(handler, BaseContactHandler)):
                             if sap_info.handlers_slot_start[i_h] <= i_q and i_q < sap_info.handlers_slot_start[i_h + 1]:
                                 i_c = i_q - sap_info.handlers_slot_start[i_h]
                                 if i_pass == 0:
@@ -2499,7 +2604,8 @@ def kernel_compute_regularization(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """Compute the regularization of every contact and equality constraint from its Delassus operator.
 
@@ -2514,25 +2620,28 @@ def kernel_compute_regularization(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
+    constraint_handlers = qd.static(handlers.constraints)
     contact_handlers = qd.static(handlers.contacts)
-    for contact in qd.static(contact_handlers):
-        contact.compute_regularization(
-            fem_state,
-            dofs_state,
-            links_state,
-            sap_state,
-            fem_info,
-            vertex_constraints,
-            links_info,
-            rigid_info,
-            sap_info,
-            sap_config,
-        )
-    if qd.static(sap_config.has_equality_constraints):
-        equality_handler.compute_regularization(entities_info, equalities_info, rigid_info, sap_info)
+    for handler in qd.static(constraint_handlers):
+        if qd.static(isinstance(handler, DelassusRegularizationMixin)):
+            handler.compute_regularization(
+                fem_state,
+                dofs_state,
+                links_state,
+                sap_state,
+                fem_info,
+                vertex_constraints,
+                links_info,
+                rigid_info,
+                sap_info,
+                sap_config,
+            )
+    if qd.static(sap_config.has_joint_equalities):
+        joint_equality_handler.compute_regularization(entities_info, equalities_info, rigid_info, sap_info)
     if qd.static(sap_config.enable_lagged_friction):
         # The normal impulse of a near-rigid contact is so stiff in the normal velocity that no function of the
         # start-of-step state predicts it, where the last solve gives it within its change over a substep. The pairs of
@@ -2576,7 +2685,8 @@ def kernel_update_vel(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     errno: qd.Tensor,
 ):
     """
@@ -2594,9 +2704,11 @@ def kernel_update_vel(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
+    constraint_handlers = qd.static(handlers.constraints)
     contact_handlers = qd.static(handlers.contacts)
     for i_b in range(errno.shape[0]):
         if sap_state.envs.is_active[i_b] and sap_state.envs.relative_residual[i_b] >= sap_info.cap_residual_max[None]:
@@ -2609,13 +2721,13 @@ def kernel_update_vel(
             sap_state.rigid_dofs.v.shape[0], errno.shape[0], axes=qd.static(eoa(dofs_state.vel))
         ):
             dofs_state.vel[i_d, i_b] = sap_state.rigid_dofs.v[i_d, i_b]
-    if qd.static(sap_config.has_rigid_contacts):
-        # A free body in contact keeps the standard update, which carries the contact impulse (see
+    if qd.static(sap_config.has_link_constraints):
+        # A free body in contact or constrained keeps the standard update, which carries the impulse (see
         # func_midpoint_eligible)
-        for handler in qd.static(contact_handlers):
+        for handler in qd.static(constraint_handlers):
             if qd.static(handler.n_rigid_sides > 0):
-                for i_c in range(handler.contact_pairs.n_pairs[None]):
-                    i_b = handler.contact_pairs.batch_idx[i_c]
+                for i_c in range(handler.n_constraints()):
+                    i_b = handler.constraint_env(i_c)
                     for i_side in qd.static(range(handler.n_rigid_sides)):
                         i_l = handler.rigid_side_link(i_c, i_side)
                         if i_l >= 0:
@@ -2741,7 +2853,7 @@ def kernel_init_sap_solve(
             axes=qd.static(eoa(sap_state.rigid_dofs.v)),
         ):
             is_in_contact = False
-            if qd.static(sap_config.has_rigid_contacts):
+            if qd.static(sap_config.has_link_constraints):
                 i_r = sap_info.dofs_root_link_idx[i_d]
                 i_l_end = sap_info.links_subtree_end[i_r]
                 is_in_contact = (
@@ -3038,7 +3150,7 @@ def func_gather_rigid_dof(
     sap_state: SAPState,
     sap_info: SAPInfo,
     sap_config: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     op: qd.template(),
 ):
     """
@@ -3049,13 +3161,13 @@ def func_gather_rigid_dof(
     """
     N_SHARES = qd.static(2 if sap_config.enable_cooperative_kernels else 1)
     Jt_x = gs.qd_float(0.0)
-    if qd.static(sap_config.has_rigid_contacts):
+    if qd.static(sap_config.has_link_constraints):
         i_l = sap_info.dofs_link_idx[i_d]
         for i_w in range(i_l * N_SHARES, sap_info.links_subtree_end[i_l] * N_SHARES):
             Jt_x = Jt_x + dofs_state.cdof_vel[i_d, i_b].dot(sap_state.constraint_order.links_wrench_force[i_w, i_b])
             Jt_x = Jt_x + dofs_state.cdof_ang[i_d, i_b].dot(sap_state.constraint_order.links_wrench_torque[i_w, i_b])
-    if qd.static(sap_config.has_equality_constraints):
-        Jt_x = Jt_x + equality_handler.gather_dof(i_d, i_b, op=op)
+    if qd.static(sap_config.has_joint_equalities):
+        Jt_x = Jt_x + joint_equality_handler.gather_dof(i_d, i_b, op=op)
     return Jt_x
 
 
@@ -3259,13 +3371,15 @@ def func_link_point_jacobian_product(
     sap_config: qd.template(),
 ):
     """
-    Return the product of the Jacobian of the velocity of a point attached to a link with a vector of the rigid dofs.
+    Return the products of the Jacobians of the velocity of a point attached to a link and of the angular velocity of
+    the link with a vector of the rigid dofs.
 
-    The point is `pos`, the link i_l and the vector `x`. The Jacobian J is nonzero at the dofs of the link and of its
-    ancestors alone, which this func walks up to the root, so that no contact pair stores a row of the Jacobian over
-    every dof.
+    The point is `pos`, the link i_l and the vector `x`. The Jacobians are nonzero at the dofs of the link and of its
+    ancestors alone, which this func walks up to the root, so that no constraint stores a row of the Jacobian over every
+    dof.
     """
     Jx = qd.Vector.zero(gs.qd_float, 3)
+    Jx_ang = qd.Vector.zero(gs.qd_float, 3)
     i_l_ = i_l
     while i_l_ > -1:
         I_l = [i_l_, i_b] if qd.static(sap_config.batch_links_info) else i_l_
@@ -3275,8 +3389,9 @@ def func_link_point_jacobian_product(
                 dofs_state.cdof_ang[i_d, i_b], dofs_state.cdof_vel[i_d, i_b], t_pos, gu.qd_identity_quat()
             )
             Jx = Jx + J_d * x[i_d, i_b]
+            Jx_ang = Jx_ang + dofs_state.cdof_ang[i_d, i_b] * x[i_d, i_b]
         i_l_ = links_info.parent_idx[I_l]
-    return Jx
+    return Jx, Jx_ang
 
 
 @qd.func
@@ -3295,20 +3410,25 @@ def func_link_point_delassus(
     rigid_info: RigidInfo,
     sap_config: qd.template(),
     n_chain: int,
+    mode: int,
 ):
     """
     Return the Delassus operator J M^-1 J^T in the world frame of a point attached to two links.
 
     J is the Jacobian of the velocity of the point `pos` attached to the link i_l0 minus the one of the same point
-    attached to the link i_l1 (-1 for none). With the factorization M = L^T D L of the mass matrix, J M^-1 J^T = w^T
-    D^-1 w where w = L^-T J^T. The rows of L only couple a dof to its ancestors, so that w is nonzero at the dofs of the
-    two kinematic chains alone. The func walks each chain from its link to the root, the dofs in decreasing order,
+    attached to the link i_l1 (-1 for none) for `mode` 0, of their angular velocities for `mode` 1, and for `mode` 2 + s
+    of the sum of the velocity and of the angular velocity shifted by s rows, row k summing the linear row k and the
+    angular row (k + s) % 3. The diagonal of the last three gives the operator coupling the two velocities (see
+    LinkEqualityHandler.compute_delassus). With the factorization M = L^T D L of the mass matrix, J M^-1 J^T =
+    w^T D^-1 w where w = L^-T J^T. The rows of L only couple a dof to its ancestors, so that w is nonzero at the dofs of
+    the two kinematic chains alone. The func walks each chain from its link to the root, the dofs in decreasing order,
     computing w0 and w1 of each chain apart and their cross terms at the dofs both chains share.
 
     The dofs of the chains and their rows of w take the `n_chain` slots of each chain from i_slot0 in `chains_dof` and
     `chains_w`: registers of the thread, shared memory of its block, or the scratch of its CPU thread (see
-    ChainStorage). The rows of w are flat, three entries each, as a local matrix of the registers takes no row access. In shared memory, the i_lane-th lane of the block sums its share of each row of w and of the cross
-    terms, which the block then adds up.
+    ChainStorage). The rows of w are flat, three entries each, as a local matrix of the registers takes no row access.
+    In shared memory, the i_lane-th lane of the block sums its share of each row of w and of the cross terms, which the
+    block then adds up.
     """
     N_LANES = qd.static(32 if sap_config.chain_storage == ChainStorage.SHARED else 1)
     W = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -3324,9 +3444,18 @@ def func_link_point_delassus(
             t_pos = pos - links_state.root_COM[i_l_, i_b]
             for i_d_ in range(links_info.n_dofs[I_l]):
                 i_d = links_info.dof_end[I_l] - 1 - i_d_
-                _, w = gu.qd_transform_motion_by_trans_quat(
+                w_ang, w_lin = gu.qd_transform_motion_by_trans_quat(
                     dofs_state.cdof_ang[i_d, i_b], dofs_state.cdof_vel[i_d, i_b], t_pos, gu.qd_identity_quat()
                 )
+                w = w_lin
+                if mode == 1:
+                    w = w_ang
+                elif mode == 2:
+                    w = w_lin + w_ang
+                elif mode == 3:
+                    w = w_lin + qd.Vector([w_ang[1], w_ang[2], w_ang[0]])
+                elif mode == 4:
+                    w = w_lin + qd.Vector([w_ang[2], w_ang[0], w_ang[1]])
                 # The first lane starts from the row and every lane subtracts its share, so that a single lane
                 # subtracts the terms in the order of the chain
                 w_lane = qd.Vector.zero(gs.qd_float, 3)
@@ -3429,7 +3558,8 @@ def kernel_sap_solve(
     rigid_floor_handler: qd.template(),
     rigid_rigid_handler: qd.template(),
     rigid_fem_handler: qd.template(),
-    equality_handler: qd.template(),
+    link_equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Run the Newton iterations of the SAP solve, each solving its step by preconditioned conjugate gradient and searching
@@ -3447,7 +3577,8 @@ def kernel_sap_solve(
             rigid_floor_handler,
             rigid_rigid_handler,
             rigid_fem_handler,
-            equality_handler,
+            link_equality_handler,
+            joint_equality_handler,
         )
     )
     constraint_handlers = qd.static(handlers.constraints)
@@ -3469,7 +3600,7 @@ def kernel_sap_solve(
             rigid_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
         )
         func_compute_constraints(
             sap_state.envs.is_active,
@@ -3486,7 +3617,7 @@ def kernel_sap_solve(
             rigid_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
             op=ConstraintOp.GRADIENT_HESSIAN,
         )
         func_gather_constraints(
@@ -3504,7 +3635,7 @@ def kernel_sap_solve(
             rigid_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
             op=VertexDofOp.GRADIENT,
         )
         func_compute_vertices_dofs(
@@ -3521,7 +3652,7 @@ def kernel_sap_solve(
             fem_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
             op=VertexDofOp.GRADIENT,
         )
         func_update_envs_active(newton_counter, sap_state, fem_info, sap_info, sap_config, constraint_handlers)
@@ -3543,7 +3674,7 @@ def kernel_sap_solve(
             rigid_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
         )
         while qd.graph.do_while(pcg_counter):
             func_one_pcg_iter(
@@ -3561,7 +3692,7 @@ def kernel_sap_solve(
                 rigid_config,
                 sap_config,
                 constraint_handlers,
-                equality_handler,
+                joint_equality_handler,
             )
 
         # The step size
@@ -3579,7 +3710,7 @@ def kernel_sap_solve(
             rigid_config,
             sap_config,
             constraint_handlers,
-            equality_handler,
+            joint_equality_handler,
         )
         while qd.graph.do_while(linesearch_counter):
             func_one_exact_linesearch_iter(
@@ -3597,7 +3728,7 @@ def kernel_sap_solve(
                 rigid_config,
                 sap_config,
                 constraint_handlers,
-                equality_handler,
+                joint_equality_handler,
             )
 
 
@@ -3616,7 +3747,7 @@ def func_init_unconstrained_gradient(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Set the diagonal blocks of the Hessian of the FEM vertices to their free motion ones, and compute the part of the
@@ -3674,7 +3805,7 @@ def func_compute_vertices_dofs(
     fem_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     op: qd.template(),
 ):
     """
@@ -3767,7 +3898,7 @@ def func_compute_vertices_dofs(
                                 rigid_info,
                                 sap_info,
                                 sap_config,
-                                equality_handler,
+                                joint_equality_handler,
                                 op=op,
                             )
         for i_q in qd.static(SUMS_IDX):
@@ -3855,7 +3986,7 @@ def func_compute_constraints(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     op: qd.template(),
 ):
     """
@@ -3942,7 +4073,7 @@ def func_gather_constraints(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     op: qd.template(),
 ):
     """
@@ -3952,7 +4083,7 @@ def func_gather_constraints(
     """
     # The lanes gathering a vertex (see func_gather_fem_vertex)
     LOG2_GATHER_LANES = qd.static(3)
-    HAS_LINKS = qd.static(sap_config.has_rigid_contacts and op != VertexDofOp.LINESEARCH_D2ELLA)
+    HAS_LINKS = qd.static(sap_config.has_link_constraints and op != VertexDofOp.LINESEARCH_D2ELLA)
     # The wrenches hold a row per share of each link, which the lanes of a chunk take together
     N_LINK_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     N_VERTEX_LANES = qd.static(2**LOG2_GATHER_LANES if sap_config.enable_cooperative_kernels else 1)
@@ -4121,7 +4252,7 @@ def func_invert_rigid_hessian(
             i_n = sap_info.dofs_mass_inv_start[i_e]
             for i_d in range(rigid_info.dofs_mass_block_start[i_e], rigid_info.dofs_mass_block_end[i_e]):
                 value = rigid_info.mass_mat[i_d, i_e, i_b]
-                if qd.static(sap_config.has_rigid_contacts):
+                if qd.static(sap_config.has_link_constraints):
                     # The deeper of the two dofs, whose subtree holds the contacts acting on both of them
                     i_l_d = sap_info.dofs_link_idx[i_d]
                     i_l_e = sap_info.dofs_link_idx[i_e]
@@ -4211,7 +4342,7 @@ def func_compute_rigid_dof(
     rigid_info: RigidInfo,
     sap_info: SAPInfo,
     sap_config: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
     op: qd.template(),
 ):
     """
@@ -4227,7 +4358,9 @@ def func_compute_rigid_dof(
     N_SUMS = qd.static(8)
     sums = qd.Vector.zero(gs.qd_float, N_SUMS)
     if qd.static(op == VertexDofOp.GRADIENT):
-        Jt_gamma = func_gather_rigid_dof(i_d, i_b, dofs_state, sap_state, sap_info, sap_config, equality_handler, op=op)
+        Jt_gamma = func_gather_rigid_dof(
+            i_d, i_b, dofs_state, sap_state, sap_info, sap_config, joint_equality_handler, op=op
+        )
         gradient = sap_state.rigid_dofs.gradient[i_d, i_b] - Jt_gamma
         sap_state.rigid_dofs.gradient[i_d, i_b] = gradient
         sap_state.rigid_dofs.impulse[i_d, i_b] = Jt_gamma
@@ -4269,7 +4402,7 @@ def func_compute_rigid_dof(
         sap_state.rigid_dofs.Mp[i_d, i_b] = Mz + beta * sap_state.rigid_dofs.Mp[i_d, i_b]
     if qd.static(op == VertexDofOp.PCG_PTAP):
         Ap = sap_state.rigid_dofs.Mp[i_d, i_b] + func_gather_rigid_dof(
-            i_d, i_b, dofs_state, sap_state, sap_info, sap_config, equality_handler, op=op
+            i_d, i_b, dofs_state, sap_state, sap_info, sap_config, joint_equality_handler, op=op
         )
         sap_state.rigid_dofs.Ap[i_d, i_b] = Ap
         sums[VertexDofSum.PTAP] = sap_state.rigid_dofs.p[i_d, i_b] * Ap
@@ -4305,7 +4438,7 @@ def func_init_pcg_solve(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Start the conjugate gradient of the active environments from the sums of their residuals.
@@ -4346,7 +4479,7 @@ def func_init_pcg_solve(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.PCG_INIT,
     )
     for i_t in range(sap_state.envs.is_active.shape[0] * N_LANES):
@@ -4438,7 +4571,7 @@ def func_one_pcg_iter(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Run one iteration of the preconditioned conjugate gradient solve of the Newton step.
@@ -4465,7 +4598,7 @@ def func_one_pcg_iter(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.PCG_SEARCH_DIRECTION,
     )
     func_compute_constraints(
@@ -4483,7 +4616,7 @@ def func_one_pcg_iter(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=ConstraintOp.MATRIX_VECTOR_PRODUCT,
     )
     func_gather_constraints(
@@ -4501,7 +4634,7 @@ def func_one_pcg_iter(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.PCG_PTAP,
     )
     func_compute_vertices_dofs(
@@ -4518,7 +4651,7 @@ def func_one_pcg_iter(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.PCG_PTAP,
     )
     func_compute_vertices_dofs(
@@ -4535,7 +4668,7 @@ def func_one_pcg_iter(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.PCG_UPDATE,
     )
     for i_t in range(sap_state.envs.is_active.shape[0] * N_LANES):
@@ -4593,7 +4726,7 @@ def func_init_exact_linesearch(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Start the exact line search of the active environments along the Newton step, from the largest step size.
@@ -4624,7 +4757,7 @@ def func_init_exact_linesearch(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.LINESEARCH_INIT,
     )
     # The shares of the cost of the solve at the start of the line search
@@ -4656,7 +4789,7 @@ def func_init_exact_linesearch(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.ENERGY,
     )
     if qd.static(sap_config.has_fem):
@@ -4697,7 +4830,7 @@ def func_init_exact_linesearch(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=ConstraintOp.ENERGY,
     )
     # The product of the Hessian of the free motion with the Newton step
@@ -4732,7 +4865,7 @@ def func_init_exact_linesearch(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=ConstraintOp.SEARCH_DIRECTION,
     )
     func_gather_constraints(
@@ -4750,7 +4883,7 @@ def func_init_exact_linesearch(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.LINESEARCH_D2ELLA,
     )
     func_compute_vertices_dofs(
@@ -4767,7 +4900,7 @@ def func_init_exact_linesearch(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.LINESEARCH_D2ELLA,
     )
 
@@ -4788,7 +4921,7 @@ def func_one_exact_linesearch_iter(
     rigid_config: qd.template(),
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
-    equality_handler: qd.template(),
+    joint_equality_handler: qd.template(),
 ):
     """
     Run one pass of the exact line search using rtsafe, a Newton-Raphson iteration safeguarded by bisection.
@@ -4814,7 +4947,7 @@ def func_one_exact_linesearch_iter(
         fem_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=VertexDofOp.LINESEARCH_VELOCITY,
     )
     func_compute_constraints(
@@ -4832,7 +4965,7 @@ def func_one_exact_linesearch_iter(
         rigid_config,
         sap_config,
         constraint_handlers,
-        equality_handler,
+        joint_equality_handler,
         op=ConstraintOp.LINE_DERIVATIVES,
     )
     for i_b in range(sap_state.envs.is_active.shape[0]):
@@ -4980,8 +5113,108 @@ def func_one_exact_linesearch_iter(
 # gathering its impulse in their fixed order (see func_gather_fem_vertex and func_compute_link_wrench).
 
 
+class DelassusRegularizationMixin:
+    """The regularization of the constraints of a handler from their Delassus operator.
+
+    The handler computes the Delassus operator of a constraint with `compute_delassus`, the kinematic chains of its
+    rigid sides in the storage the configuration picks (see ChainStorage), and sets the regularization of the constraint
+    from it with `regularize`.
+    """
+
+    @qd.func
+    def compute_regularization(
+        self,
+        fem_state: FEMState,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        sap_state: SAPState,
+        fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
+        links_info: LinksInfo,
+        rigid_info: RigidInfo,
+        sap_info: SAPInfo,
+        sap_config: qd.template(),
+    ):
+        """Compute the regularization of every constraint of the handler from its Delassus operator."""
+        # A handler without rigid side reads no chain, and keeps a chain of a single slot in registers
+        N_CHAIN = qd.static(sap_config.n_max_chain_dofs if self.n_rigid_sides > 0 else 1)
+        # The chains of a contact of a rigid handler in shared memory take a group of lanes, one block per contact (see
+        # func_link_point_delassus)
+        N_LANES = qd.static(32 if sap_config.chain_storage == ChainStorage.SHARED and self.n_rigid_sides > 0 else 1)
+        N_ROWS = qd.static(self.n_delassus_rows)
+        if qd.static(N_LANES > 1):
+            qd.loop_config(block_dim=N_LANES)
+        for i_c, i_lane in qd.ndrange(self.n_constraints(), N_LANES):
+            W = qd.Matrix.zero(gs.qd_float, N_ROWS, N_ROWS)
+            if qd.static(N_LANES > 1):
+                sh_chains_dof = qd.simt.block.SharedArray((2 * N_CHAIN,), gs.qd_int)
+                sh_chains_w = qd.simt.block.SharedArray((6 * N_CHAIN,), gs.qd_float)
+                W = self.compute_delassus(
+                    i_c,
+                    i_lane,
+                    i_slot0=0,
+                    chains_dof=sh_chains_dof,
+                    chains_w=sh_chains_w,
+                    fem_state=fem_state,
+                    dofs_state=dofs_state,
+                    links_state=links_state,
+                    fem_info=fem_info,
+                    vertex_constraints=vertex_constraints,
+                    links_info=links_info,
+                    rigid_info=rigid_info,
+                    sap_config=sap_config,
+                    n_chain=N_CHAIN,
+                )
+            elif qd.static(sap_config.chain_storage == ChainStorage.SCRATCH):
+                n_chain = sap_info.n_chain_dofs[None]
+                # FIXME: quadrants#1097 - the thread index is a raw expression until bound to a local, which costs
+                # nothing but this extra line.
+                i_thread = qd.global_thread_idx()
+                i_slot0 = i_thread * 2 * n_chain
+                W = self.compute_delassus(
+                    i_c,
+                    i_lane,
+                    i_slot0,
+                    sap_state.chains_dof,
+                    sap_state.chains_w,
+                    fem_state,
+                    dofs_state,
+                    links_state,
+                    fem_info,
+                    vertex_constraints,
+                    links_info,
+                    rigid_info,
+                    sap_config,
+                    n_chain,
+                )
+            else:
+                chains_dof = qd.Vector([0] * (2 * N_CHAIN), dt=gs.qd_int)
+                chains_w = qd.Vector.zero(gs.qd_float, 6 * N_CHAIN)
+                W = self.compute_delassus(
+                    i_c,
+                    i_lane,
+                    i_slot0=0,
+                    chains_dof=chains_dof,
+                    chains_w=chains_w,
+                    fem_state=fem_state,
+                    dofs_state=dofs_state,
+                    links_state=links_state,
+                    fem_info=fem_info,
+                    vertex_constraints=vertex_constraints,
+                    links_info=links_info,
+                    rigid_info=rigid_info,
+                    sap_config=sap_config,
+                    n_chain=N_CHAIN,
+                )
+            # The lanes of a block hold the same operator, which the first applies
+            if i_lane == 0:
+                self.regularize(
+                    i_c, W, fem_state, dofs_state, links_state, sap_state, fem_info, links_info, sap_info, sap_config
+                )
+
+
 @qd.data_oriented
-class RigidConstraintHandler(RBC):
+class JointEqualityHandler(RBC):
     """
     The joint equality constraints of the rigid bodies in the SAP coupler.
 
@@ -4994,7 +5227,7 @@ class RigidConstraintHandler(RBC):
     n_fem_corners = 0
     n_rigid_sides = 0
 
-    def __init__(self, simulator: "Simulator", stiffness: float = 1e8, beta: float = 0.1) -> None:
+    def __init__(self, simulator: "Simulator") -> None:
         rigid_solver = simulator.rigid_solver
         # The joint equalities are the same in every environment
         joint_equalities_idx = [
@@ -5007,7 +5240,7 @@ class RigidConstraintHandler(RBC):
             sizes=dict(
                 env_joint_equalities=n_env_constraints, joint_equalities=self.max_constraints, dofs=rigid_solver.n_dofs
             ),
-            values=dict(stiffness=stiffness, beta=beta),
+            values=dict(stiffness=EQUALITY_STIFFNESS, beta=EQUALITY_BETA),
         )
         self.joint_equalities.joint_equalities_idx.from_numpy(np.array(joint_equalities_idx, dtype=gs.np_int))
         kernel_build_equality_constraints(
@@ -5182,6 +5415,342 @@ class RigidConstraintHandler(RBC):
         return dell, d2ell, energy
 
 
+@qd.data_oriented
+class LinkEqualityHandler(DelassusRegularizationMixin, RBC):
+    """
+    The equality constraints coupling two rigid links in the SAP coupler: the connects, the welds and the screws.
+
+    The constraints follow the equalities each environment holds at every substep, those added after the build
+    included, with the rows of the rigid constraint solver (see func_equality_link_rows). A constraint acts on the links
+    at its two sides through their wrenches, as a contact pair does. The slots of an environment are its slots of
+    equalities, so that no environment runs out of them.
+    """
+
+    # The FEM vertices and the rigid links each constraint acts on (see BaseContactHandler)
+    n_fem_corners = 0
+    n_rigid_sides = 2
+    # The rows of the Delassus operator of the links, the linear velocity of a point then the angular velocity (see
+    # compute_delassus)
+    n_delassus_rows = 6
+
+    def __init__(self, simulator: "Simulator") -> None:
+        rigid_solver = simulator.rigid_solver
+        n_env_constraints = rigid_solver.n_candidate_equalities_
+        self.max_constraints = n_env_constraints * simulator._B
+        # The key of a constraint is its equality
+        self.key_bits = max(1, n_env_constraints - 1).bit_length()
+        self.link_equalities = SAPLinkEqualities(
+            sizes=dict(envs=simulator._B, link_equalities=self.max_constraints),
+            values=dict(beta=EQUALITY_BETA),
+        )
+
+    @qd.func
+    def n_constraints(self):
+        """Return the number of constraints over all environments."""
+        return self.link_equalities.n_constraints[None]
+
+    @qd.func
+    def envs_n_constraints(self, i_b: int):
+        """Return the number of constraints of an environment."""
+        return self.link_equalities.envs_n_constraints[i_b]
+
+    @qd.func
+    def constraint_env(self, i_c: int):
+        """Return the environment of a constraint."""
+        return self.link_equalities.constraints.batch_idx[i_c]
+
+    @qd.func
+    def constraint_key(self, i_c: int):
+        """Return the key of a constraint, unique among those of its environment (see kernel_order_constraints)."""
+        return qd.u64(self.link_equalities.constraints.equality_idx[i_c])
+
+    @qd.func
+    def rigid_side_link(self, i_c: int, i_side: int):
+        """Return the link at a side of a constraint, -1 for the world."""
+        i_l = self.link_equalities.constraints.link_idx0[i_c]
+        if i_side == 1:
+            i_l = self.link_equalities.constraints.link_idx1[i_c]
+        return i_l
+
+    @qd.func
+    def update(
+        self,
+        dyn_state: DynState,
+        constraint_state: ConstraintState,
+        dyn_info: DynInfo,
+        rigid_info: RigidInfo,
+        sap_info: SAPInfo,
+        rigid_config: qd.template(),
+    ):
+        """Build the constraints of the equalities coupling two links that each environment holds."""
+        n_envs = self.link_equalities.envs_n_constraints.shape[0]
+        dt_inv = 1.0 / sap_info.substep_dt[None]
+        self.link_equalities.n_constraints[None] = 0
+        for i_b in range(n_envs):
+            self.link_equalities.envs_n_constraints[i_b] = 0
+        for i_b, i_e in qd.ndrange(n_envs, self.link_equalities.constraints.batch_idx.shape[0] // n_envs):
+            if (
+                i_e < constraint_state.qd_n_equalities[i_b]
+                and dyn_info.equalities.eq_type[i_e, i_b] != gs.EQUALITY_TYPE.JOINT
+            ):
+                qd.atomic_add(self.link_equalities.envs_n_constraints[i_b], 1)
+                i_c = qd.atomic_add(self.link_equalities.n_constraints[None], 1)
+                _n_rows, point0, point1, lin_dirs, ang_dirs, errors, _rows_invweight = func_equality_link_rows(
+                    i_b, i_e, dyn_state, dyn_info, rigid_info, rigid_config
+                )
+                self.link_equalities.constraints.batch_idx[i_c] = i_b
+                self.link_equalities.constraints.equality_idx[i_c] = i_e
+                self.link_equalities.constraints.link_idx0[i_c] = dyn_info.equalities.eq_obj1id[i_e, i_b]
+                self.link_equalities.constraints.link_idx1[i_c] = dyn_info.equalities.eq_obj2id[i_e, i_b]
+                self.link_equalities.constraints.point0[i_c] = point0
+                self.link_equalities.constraints.point1[i_c] = point1
+                self.link_equalities.constraints.lin_dirs[i_c] = lin_dirs
+                self.link_equalities.constraints.ang_dirs[i_c] = ang_dirs
+                # The stabilization velocity brings the error of each row to zero over a substep
+                self.link_equalities.constraints.v_hat[i_c] = -errors * dt_inv
+
+    @qd.func
+    def compute_delassus(
+        self,
+        i_c: int,
+        i_lane: int,
+        i_slot0: int,
+        chains_dof: qd.Tensor,
+        chains_w: qd.Tensor,
+        fem_state: FEMState,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        fem_info: FEMInfo,
+        vertex_constraints: FEMVertexConstraints,
+        links_info: LinksInfo,
+        rigid_info: RigidInfo,
+        sap_config: qd.template(),
+        n_chain: int,
+    ):
+        """Return the Delassus operator of the links of a constraint, its linear velocity then its angular velocity.
+
+        The linear velocity is that of the middle of the two points of the constraint, which the stabilization keeps
+        together. The chains of the links take three rows, as those of a contact do: the linear and the angular blocks
+        come from a walk each, and the block coupling them from the diagonals of three more, each summing the linear
+        rows with the angular ones shifted by s rows, whose diagonal entry k is W_ll[k, k] + W_aa[j, j] + 2 W_la[k, j]
+        for j = (k + s) % 3.
+        """
+        pos = 0.5 * (self.link_equalities.constraints.point0[i_c] + self.link_equalities.constraints.point1[i_c])
+        W_lin = qd.Matrix.zero(gs.qd_float, 3, 3)
+        W_ang = qd.Matrix.zero(gs.qd_float, 3, 3)
+        W_mixed = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for mode in range(5):
+            W_mode = func_link_point_delassus(
+                self.link_equalities.constraints.link_idx0[i_c],
+                self.link_equalities.constraints.link_idx1[i_c],
+                self.link_equalities.constraints.batch_idx[i_c],
+                i_lane,
+                i_slot0,
+                pos,
+                chains_dof,
+                chains_w,
+                dofs_state,
+                links_state,
+                links_info,
+                rigid_info,
+                sap_config,
+                n_chain,
+                mode,
+            )
+            if mode == 0:
+                W_lin = W_mode
+            elif mode == 1:
+                W_ang = W_mode
+            else:
+                # Row s of the mixed diagonals holds the diagonal of the walk shifted by s rows
+                for k in qd.static(range(3)):
+                    if mode == 2:
+                        W_mixed[0, k] = W_mode[k, k]
+                    elif mode == 3:
+                        W_mixed[1, k] = W_mode[k, k]
+                    else:
+                        W_mixed[2, k] = W_mode[k, k]
+        W = qd.Matrix.zero(gs.qd_float, 6, 6)
+        W[:3, :3] = W_lin
+        W[3:, 3:] = W_ang
+        for k, shift in qd.static(qd.ndrange(3, 3)):
+            j = (k + shift) % 3
+            W[k, 3 + j] = 0.5 * (W_mixed[shift, k] - W_lin[k, k] - W_ang[j, j])
+            W[3 + j, k] = W[k, 3 + j]
+        return W
+
+    @qd.func
+    def regularize(
+        self,
+        i_c: int,
+        W: qd.types.matrix(6, 6),
+        fem_state: FEMState,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        sap_state: SAPState,
+        fem_info: FEMInfo,
+        links_info: LinksInfo,
+        sap_info: SAPInfo,
+        sap_config: qd.template(),
+    ):
+        """Set the regularization of the rows of a constraint from their Delassus operator.
+
+        The regularization is the near-rigid share of the whole Delassus operator of the rows, so that the rows of a
+        weld held far from its links, which their Delassus operator couples, stay near-rigid in every direction. Its
+        inverse is taken on its range, which leaves out the unused rows.
+        """
+        beta_factor = self.link_equalities.beta[None] ** 2 / (4.0 * qd.math.pi**2)
+        # The products with the directions D of the rows take one entry per iteration, so that they compile once. G
+        # holds D W D^T until its inverse replaces it.
+        for i_r, j_r in qd.ndrange(6, 6):
+            d_i = qd.Vector.zero(gs.qd_float, 6)
+            d_j = qd.Vector.zero(gs.qd_float, 6)
+            for k in qd.static(range(3)):
+                d_i[k] = self.link_equalities.constraints.lin_dirs[i_c][i_r, k]
+                d_i[k + 3] = self.link_equalities.constraints.ang_dirs[i_c][i_r, k]
+                d_j[k] = self.link_equalities.constraints.lin_dirs[i_c][j_r, k]
+                d_j[k + 3] = self.link_equalities.constraints.ang_dirs[i_c][j_r, k]
+            self.link_equalities.constraints.G[i_c][i_r, j_r] = beta_factor * d_i.dot(W @ d_j)
+        # The regularization has no stiffness floor: the rows of a weld mix linear and angular units, so that one
+        # stiffness floors the direction that their coupling leaves soft, letting a weld held far from its links sag.
+        G = func_inverse_psd6(self.link_equalities.constraints.G[i_c], sap_info.coarse_pivot_rtol[None])
+        self.link_equalities.constraints.G[i_c] = G
+        # K = D^T G D, the columns of D being the linear directions then the angular ones
+        for i_v, j_v in qd.ndrange(6, 6):
+            i_3 = i_v % 3
+            j_3 = j_v % 3
+            d_i = qd.Vector.zero(gs.qd_float, 6)
+            d_j = qd.Vector.zero(gs.qd_float, 6)
+            for k in qd.static(range(6)):
+                d_i[k] = self.link_equalities.constraints.lin_dirs[i_c][k, i_3]
+                d_j[k] = self.link_equalities.constraints.lin_dirs[i_c][k, j_3]
+                if i_v >= 3:
+                    d_i[k] = self.link_equalities.constraints.ang_dirs[i_c][k, i_3]
+                if j_v >= 3:
+                    d_j[k] = self.link_equalities.constraints.ang_dirs[i_c][k, j_3]
+            self.link_equalities.constraints.K[i_c][i_v, j_v] = d_i.dot(G @ d_j)
+
+    @qd.func
+    def compute_Jx(
+        self,
+        i_c: int,
+        x: qd.Tensor,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        links_info: LinksInfo,
+        sap_config: qd.template(),
+    ):
+        """Return the velocities of the rows of a constraint for a vector of the rigid dofs."""
+        i_b = self.link_equalities.constraints.batch_idx[i_c]
+        dv = qd.Vector.zero(gs.qd_float, 3)
+        dw = qd.Vector.zero(gs.qd_float, 3)
+        for i_side in range(2):
+            i_l = self.link_equalities.constraints.link_idx0[i_c]
+            pos = self.link_equalities.constraints.point0[i_c]
+            sign = 1.0
+            if i_side == 1:
+                i_l = self.link_equalities.constraints.link_idx1[i_c]
+                pos = self.link_equalities.constraints.point1[i_c]
+                sign = -1.0
+            Jx_lin, Jx_ang = func_link_point_jacobian_product(
+                i_l, i_b, pos, x, dofs_state, links_state, links_info, sap_config
+            )
+            dv = dv + sign * Jx_lin
+            dw = dw + sign * Jx_ang
+        return self.link_equalities.constraints.lin_dirs[i_c] @ dv + self.link_equalities.constraints.ang_dirs[i_c] @ dw
+
+    @qd.func
+    def side_wrench(self, i_c: int, i_side: int, pos_ref: qd.types.vector(3), op: qd.template()):
+        """Return the force and the torque about a point that a constraint applies to the link at one of its sides.
+
+        The impulse of the rows is gamma, or past the gradient the product of their Hessian with the Jacobian of the
+        search direction (see VertexDofOp).
+        """
+        x = self.link_equalities.constraints.gamma[i_c]
+        if qd.static(op != VertexDofOp.GRADIENT):
+            x = self.link_equalities.constraints.GJp[i_c]
+        f = self.link_equalities.constraints.lin_dirs[i_c].transpose() @ x
+        torque = self.link_equalities.constraints.ang_dirs[i_c].transpose() @ x
+        pos = self.link_equalities.constraints.point0[i_c]
+        if i_side == 1:
+            pos = self.link_equalities.constraints.point1[i_c]
+            f = -f
+            torque = -torque
+        return f, (pos - pos_ref).cross(f) + torque
+
+    @qd.func
+    def side_hessian(self, i_c: int, pos_ref: qd.types.vector(3)):
+        """Return the Hessian of the cost of a constraint with respect to the spatial velocity of a link at a side.
+
+        The spatial velocity stacks the linear velocity of the link at the point pos_ref and its angular velocity. The
+        velocity of the point and the angular velocity are T times it, T = [[I, -[r]x], [0, I]], r the position of the
+        middle of the two points of the constraint relative to pos_ref, so that the Hessian is T^T K T, K the Hessian
+        with respect to them (see SAPLinkEqualityConstraints), taken by blocks. The sign of the side cancels out, and
+        the middle point serves both sides, whose points the stabilization keeps together, the Hessian preconditioning
+        the solve alone.
+        """
+        K = self.link_equalities.constraints.K[i_c]
+        r_x = gu.qd_vec_to_skew(
+            0.5 * (self.link_equalities.constraints.point0[i_c] + self.link_equalities.constraints.point1[i_c])
+            - pos_ref
+        )
+        K_ll = qd.Matrix([[K[i, j] for j in qd.static(range(3))] for i in qd.static(range(3))])
+        K_la = qd.Matrix([[K[i, j + 3] for j in qd.static(range(3))] for i in qd.static(range(3))])
+        K_aa = qd.Matrix([[K[i + 3, j + 3] for j in qd.static(range(3))] for i in qd.static(range(3))])
+        # K T = [[K_ll, K_la - K_ll [r]x], [K_al, K_aa - K_al [r]x]], then T^T adds [r]x times its first block row
+        H_la = K_la - K_ll @ r_x
+        H_aa = K_aa - K_la.transpose() @ r_x + r_x @ H_la
+        hessian = qd.Matrix.zero(gs.qd_float, 6, 6)
+        hessian[:3, :3] = K_ll
+        hessian[:3, 3:] = H_la
+        hessian[3:, :3] = H_la.transpose()
+        hessian[3:, 3:] = H_aa
+        return hessian
+
+    @qd.func
+    def compute_solve_op(
+        self,
+        i_c: int,
+        dofs_state: DofsState,
+        links_state: LinksState,
+        sap_state: SAPState,
+        fem_info: FEMInfo,
+        links_info: LinksInfo,
+        sap_info: SAPInfo,
+        sap_config: qd.template(),
+        op: qd.template(),
+    ):
+        """Run an operation of the solve on a constraint, and return its share of the sums of the operation.
+
+        The shares are the cost and its first and second derivatives along the Newton step (see ConstraintOp).
+        """
+        dell = gs.qd_float(0.0)
+        d2ell = gs.qd_float(0.0)
+        energy = gs.qd_float(0.0)
+        # Each operation takes one product with the Hessian, the line search reading the one of the search direction
+        if qd.static(op == ConstraintOp.MATRIX_VECTOR_PRODUCT):
+            Jp = self.compute_Jx(i_c, sap_state.rigid_dofs.p, dofs_state, links_state, links_info, sap_config)
+            self.link_equalities.constraints.GJp[i_c] = self.link_equalities.constraints.G[i_c] @ Jp
+        elif qd.static(op == ConstraintOp.SEARCH_DIRECTION):
+            dvc = self.compute_Jx(i_c, sap_state.rigid_dofs.x, dofs_state, links_state, links_info, sap_config)
+            self.link_equalities.constraints.dvc[i_c] = dvc
+            self.link_equalities.constraints.G_dvc[i_c] = self.link_equalities.constraints.G[i_c] @ dvc
+        else:
+            vc = self.compute_Jx(i_c, sap_state.rigid_dofs.v, dofs_state, links_state, links_info, sap_config)
+            dv_hat = self.link_equalities.constraints.v_hat[i_c] - vc
+            y = self.link_equalities.constraints.G[i_c] @ dv_hat
+            if qd.static(op == ConstraintOp.ENERGY):
+                # 0.5 y^T R y with R y = dv_hat on the range of the regularization
+                energy = 0.5 * y.dot(dv_hat)
+            else:
+                self.link_equalities.constraints.gamma[i_c] = y
+                if qd.static(op == ConstraintOp.LINE_DERIVATIVES):
+                    dvc = self.link_equalities.constraints.dvc[i_c]
+                    dell = -dvc.dot(y)
+                    d2ell = dvc.dot(self.link_equalities.constraints.G_dvc[i_c])
+        return dell, d2ell, energy
+
+
 class ContactMode(IntEnum):
     STICK = 0
     SLIDE = 1
@@ -5189,7 +5758,7 @@ class ContactMode(IntEnum):
 
 
 @qd.data_oriented
-class BaseContactHandler(RBC):
+class BaseContactHandler(DelassusRegularizationMixin, RBC):
     """
     Base class for contact handling in SAPCoupler.
 
@@ -5201,11 +5770,13 @@ class BaseContactHandler(RBC):
     has_candidates = False
     # Whether the handler queries a tree, its results cleared with its contacts
     has_query = False
-    # The FEM vertices and the rigid links each contact pair acts on, see RigidConstraintHandler, and the FEM entities
+    # The FEM vertices and the rigid links each contact pair acts on, see JointEqualityHandler, and the FEM entities
     # whose rigid motions it acts on (see coarse_hessian).
     n_fem_corners = 0
     n_rigid_sides = 0
     n_coarse_sides = 1
+    # The rows of the Delassus operator of a contact pair (see compute_delassus)
+    n_delassus_rows = 3
 
     @qd.func
     def n_constraints(self):
@@ -5385,130 +5956,59 @@ class BaseContactHandler(RBC):
         return dell, d2ell, energy
 
     @qd.func
-    def compute_regularization(
+    def regularize(
         self,
+        i_p: int,
+        W: qd.types.matrix(3, 3),
         fem_state: FEMState,
         dofs_state: DofsState,
         links_state: LinksState,
         sap_state: SAPState,
         fem_info: FEMInfo,
-        vertex_constraints: FEMVertexConstraints,
         links_info: LinksInfo,
-        rigid_info: RigidInfo,
         sap_info: SAPInfo,
         sap_config: qd.template(),
     ):
         """
-        Compute the regularization of every contact pair from its Delassus operator, and with lagged friction the normal
-        impulse its friction scales with.
+        Set the regularization of a contact pair from its Delassus operator, and with lagged friction the normal impulse
+        its friction scales with.
         """
         dt = sap_info.substep_dt[None]
         taud = sap_info.taud[None]
-        # A handler without rigid side reads no chain, and keeps a chain of a single slot in registers
-        N_CHAIN = qd.static(sap_config.n_max_chain_dofs if self.n_rigid_sides > 0 else 1)
-        # The chains of a contact of a rigid handler in shared memory take a group of lanes, one block per contact (see
-        # func_link_point_delassus)
-        N_LANES = qd.static(32 if sap_config.chain_storage == ChainStorage.SHARED and self.n_rigid_sides > 0 else 1)
-        if qd.static(N_LANES > 1):
-            qd.loop_config(block_dim=N_LANES)
-        for i_p, i_lane in qd.ndrange(self.contact_pairs.n_pairs[None], N_LANES):
-            W = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if qd.static(N_LANES > 1):
-                sh_chains_dof = qd.simt.block.SharedArray((2 * N_CHAIN,), gs.qd_int)
-                sh_chains_w = qd.simt.block.SharedArray((6 * N_CHAIN,), gs.qd_float)
-                W = self.compute_delassus(
-                    i_p,
-                    i_lane,
-                    i_slot0=0,
-                    chains_dof=sh_chains_dof,
-                    chains_w=sh_chains_w,
-                    fem_state=fem_state,
-                    dofs_state=dofs_state,
-                    links_state=links_state,
-                    fem_info=fem_info,
-                    vertex_constraints=vertex_constraints,
-                    links_info=links_info,
-                    rigid_info=rigid_info,
-                    sap_config=sap_config,
-                    n_chain=N_CHAIN,
-                )
-            elif qd.static(sap_config.chain_storage == ChainStorage.SCRATCH):
-                n_chain = sap_info.n_chain_dofs[None]
-                # FIXME: quadrants#1097 - the thread index is a raw expression until bound to a local, which costs
-                # nothing but this extra line.
-                i_thread = qd.global_thread_idx()
-                i_slot0 = i_thread * 2 * n_chain
-                W = self.compute_delassus(
-                    i_p,
-                    i_lane,
-                    i_slot0,
-                    sap_state.chains_dof,
-                    sap_state.chains_w,
-                    fem_state,
-                    dofs_state,
-                    links_state,
-                    fem_info,
-                    vertex_constraints,
-                    links_info,
-                    rigid_info,
-                    sap_config,
-                    n_chain,
-                )
-            else:
-                chains_dof = qd.Vector([0] * (2 * N_CHAIN), dt=gs.qd_int)
-                chains_w = qd.Vector.zero(gs.qd_float, 6 * N_CHAIN)
-                W = self.compute_delassus(
-                    i_p,
-                    i_lane,
-                    i_slot0=0,
-                    chains_dof=chains_dof,
-                    chains_w=chains_w,
-                    fem_state=fem_state,
-                    dofs_state=dofs_state,
-                    links_state=links_state,
-                    fem_info=fem_info,
-                    vertex_constraints=vertex_constraints,
-                    links_info=links_info,
-                    rigid_info=rigid_info,
-                    sap_config=sap_config,
-                    n_chain=N_CHAIN,
-                )
-            # The lanes of a block hold the same operator, which the first writes
-            if i_lane == 0:
-                # A near-rigid patch is as stiff as one contact, whatever the number of its pairs: each pair takes the
-                # regularization of the patch over its share of the stiffness of the patch.
-                k = self.contact_pairs.contact_info.k[i_p]
-                w_rms = W.norm() / 3.0 * self.contact_pairs.contact_info.k_patch[i_p] / k
-                Rn = qd.max(sap_info.beta_factor[None] * w_rms, 1.0 / (dt * k * (dt + taud)))
-                Rt = sap_info.sigma[None] * w_rms
-                self.contact_pairs.contact_info.Rn[i_p] = Rn
-                self.contact_pairs.contact_info.Rt[i_p] = Rt
-                self.contact_pairs.contact_info.Rn_inv[i_p] = 1.0 / Rn
-                self.contact_pairs.contact_info.Rt_inv[i_p] = 1.0 / Rt
-                self.contact_pairs.contact_info.vn_hat[i_p] = -self.contact_pairs.contact_info.phi0[i_p] / (dt + taud)
-                self.contact_pairs.contact_info.mu_hat[i_p] = self.contact_pairs.contact_info.mu[i_p] * Rt / Rn
-                self.contact_pairs.contact_info.mu_factor[i_p] = 1.0 / (
-                    1.0 + self.contact_pairs.contact_info.mu[i_p] * self.contact_pairs.contact_info.mu_hat[i_p]
-                )
-                if qd.static(sap_config.enable_lagged_friction):
-                    # The normal impulse at the velocities the solve starts from, the start-of-step ones for the entities in
-                    # contact (see kernel_init_sap_solve), which a pair the last solve also held replaces with the impulse
-                    # it gave (see kernel_compute_regularization).
-                    vc = self.compute_Jx(
-                        i_p,
-                        sap_state.fem_vertices.v,
-                        sap_state.rigid_dofs.v,
-                        dofs_state,
-                        links_state,
-                        fem_info,
-                        links_info,
-                        sap_config,
-                    )
-                    self.contact_pairs.contact_info.mu_n0[i_p] = (
-                        self.contact_pairs.contact_info.mu[i_p]
-                        * qd.max(self.contact_pairs.contact_info.vn_hat[i_p] - vc[2], 0.0)
-                        / Rn
-                    )
+        # A near-rigid patch is as stiff as one contact, whatever the number of its pairs: each pair takes the
+        # regularization of the patch over its share of the stiffness of the patch.
+        k = self.contact_pairs.contact_info.k[i_p]
+        w_rms = W.norm() / 3.0 * self.contact_pairs.contact_info.k_patch[i_p] / k
+        Rn = qd.max(sap_info.beta_factor[None] * w_rms, 1.0 / (dt * k * (dt + taud)))
+        Rt = sap_info.sigma[None] * w_rms
+        self.contact_pairs.contact_info.Rn[i_p] = Rn
+        self.contact_pairs.contact_info.Rt[i_p] = Rt
+        self.contact_pairs.contact_info.Rn_inv[i_p] = 1.0 / Rn
+        self.contact_pairs.contact_info.Rt_inv[i_p] = 1.0 / Rt
+        self.contact_pairs.contact_info.vn_hat[i_p] = -self.contact_pairs.contact_info.phi0[i_p] / (dt + taud)
+        self.contact_pairs.contact_info.mu_hat[i_p] = self.contact_pairs.contact_info.mu[i_p] * Rt / Rn
+        self.contact_pairs.contact_info.mu_factor[i_p] = 1.0 / (
+            1.0 + self.contact_pairs.contact_info.mu[i_p] * self.contact_pairs.contact_info.mu_hat[i_p]
+        )
+        if qd.static(sap_config.enable_lagged_friction):
+            # The normal impulse at the velocities the solve starts from, the start-of-step ones for the entities in
+            # contact (see kernel_init_sap_solve), which a pair the last solve also held replaces with the impulse
+            # it gave (see kernel_compute_regularization).
+            vc = self.compute_Jx(
+                i_p,
+                sap_state.fem_vertices.v,
+                sap_state.rigid_dofs.v,
+                dofs_state,
+                links_state,
+                fem_info,
+                links_info,
+                sap_config,
+            )
+            self.contact_pairs.contact_info.mu_n0[i_p] = (
+                self.contact_pairs.contact_info.mu[i_p]
+                * qd.max(self.contact_pairs.contact_info.vn_hat[i_p] - vc[2], 0.0)
+                / Rn
+            )
 
     @qd.func
     def compute_contact_cost_gamma_G(
@@ -5694,6 +6194,7 @@ class RigidContactHandler(BaseContactHandler):
             rigid_info,
             sap_config,
             n_chain,
+            mode=0,
         )
 
     @qd.func
@@ -5708,7 +6209,7 @@ class RigidContactHandler(BaseContactHandler):
         links_info: LinksInfo,
         sap_config: qd.template(),
     ):
-        return func_link_point_jacobian_product(
+        Jx, _ = func_link_point_jacobian_product(
             self.contact_pairs.link_idx[i_p],
             self.contact_pairs.batch_idx[i_p],
             self.contact_pairs.contact_pos[i_p],
@@ -5718,6 +6219,7 @@ class RigidContactHandler(BaseContactHandler):
             links_info,
             sap_config,
         )
+        return Jx
 
 
 @qd.func
@@ -6273,6 +6775,11 @@ class FEMFloorContactHandler(FloorContactMixin, BaseContactHandler):
 class RigidFloorContactHandler(FloorContactMixin, RigidContactHandler):
     def __init__(self, simulator: "Simulator", options: SAPCouplerOptions) -> None:
         rigid_solver = simulator.rigid_solver
+        # The equalities of the environments, whose dynamic welds and screws to the ground drop the floor contacts of
+        # their links, as the collider does (see func_is_link_pair_bound)
+        self.constraint_state = rigid_solver.constraint_solver.constraint_state
+        self.equalities_info = rigid_solver.dyn_info.equalities
+        self.rigid_info = rigid_solver.rigid_info
         # The key of a pair is its vertex
         self.key_bits = max(1, rigid_solver.n_verts - 1).bit_length()
         # Every vertex of a geom lying flat may touch the floor
@@ -6316,6 +6823,11 @@ class RigidFloorContactHandler(FloorContactMixin, RigidContactHandler):
             if (geoms_info.contype[i_g] & geoms_info.conaffinity[i_g_ground]) == 0 and (
                 geoms_info.contype[i_g_ground] & geoms_info.conaffinity[i_g]
             ) == 0:
+                continue
+            i_l_ground = geoms_info.link_idx[i_g_ground]
+            if func_is_link_pair_bound(
+                i_l, i_l_ground, i_b, self.constraint_state, self.equalities_info, self.rigid_info
+            ):
                 continue
             i_fv = verts_info.verts_state_idx[i_v]
             pos_v = free_verts_state.pos[i_fv, i_b]
@@ -6595,6 +7107,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
             rigid_info,
             sap_config,
             n_chain,
+            mode=0,
         )
         i_e = self.contact_pairs.geom_idx0[i_p]
         for i in qd.static(range(4)):
@@ -6622,7 +7135,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e][i]
             Jx = Jx + self.contact_pairs.barycentric0[i_p][i] * x_fem[i_v, i_b]
-        Jx = Jx - func_link_point_jacobian_product(
+        Jx_rigid, _ = func_link_point_jacobian_product(
             self.contact_pairs.link_idx[i_p],
             i_b,
             self.contact_pairs.contact_pos[i_p],
@@ -6632,6 +7145,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
             links_info,
             sap_config,
         )
+        Jx = Jx - Jx_rigid
         return self.contact_frame(i_p).transpose() @ Jx
 
     @qd.func
@@ -6711,7 +7225,16 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
             sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
         )
         self.query = InstancesQuery(
-            RigidTetsQuery(self.query_results, self.rigid_geoms), tets_instances, rigid_solver.dyn_state.geoms
+            RigidTetsQuery(
+                self.query_results,
+                self.rigid_geoms,
+                rigid_solver.constraint_solver.constraint_state,
+                rigid_solver.dyn_info.geoms,
+                rigid_solver.dyn_info.equalities,
+                rigid_solver.rigid_info,
+            ),
+            tets_instances,
+            rigid_solver.dyn_state.geoms,
         )
 
     @qd.func
@@ -6950,6 +7473,7 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
             rigid_info,
             sap_config,
             n_chain,
+            mode=0,
         )
         return world.transpose() @ W @ world
 
@@ -6973,7 +7497,8 @@ class RigidRigidContactHandler(GeomsTreeMixin, RigidContactHandler):
             if i_s == 1:
                 i_l = self.contact_pairs.link_idx1[i_p]
                 sign = -1.0
-            Jx = Jx + sign * func_link_point_jacobian_product(
+            Jx_link, _ = func_link_point_jacobian_product(
                 i_l, i_b, self.contact_pairs.contact_pos[i_p], x_rigid, dofs_state, links_state, links_info, sap_config
             )
+            Jx = Jx + sign * Jx_link
         return self.contact_frame(i_p).transpose() @ Jx

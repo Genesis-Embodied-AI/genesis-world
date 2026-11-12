@@ -630,10 +630,11 @@ def test_sap_rigid_rigid_hydroelastic_contact(batch_links_info, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("model_name", ["scaled_mjcf_joint_equalities"])
+@pytest.mark.parametrize("model_name", ["scaled_mjcf_equalities"])
 @pytest.mark.parametrize("n_envs, is_batched", [(0, False), (2, True)])
-def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched, tol):
+def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol):
     DT = 1e-2
+    GRAVITY = 9.81
     SCALE = 2.0
     COEFFICIENTS = (0.2, 0.4, -0.3, 0.2, -0.1)
     DRIVER_POSITION = 0.5
@@ -646,10 +647,17 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
     TARGET_POSITION = 0.25
     UNRELATED_POSITION = 1.0
     MAX_RESIDUAL_RATIO = 1e-3
+    # Half extents of the welded box and of the bar, whose centers lie that far from the point their anchor holds
+    WELDED_HALF_SIZE = 0.05 * SCALE
+    BAR_HALF_SIZE = (0.1 * SCALE, 0.02 * SCALE)
+    BALL_RADIUS = 0.03 * SCALE
+    CUBE_HALF_SIZE = 0.03 * SCALE
+    GROUND_HEIGHT = -1.0
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
             batch_joints_info=is_batched,
@@ -662,6 +670,11 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
             camera_up=(0.0, 1.0, 0.0),
         ),
         show_viewer=show_viewer,
+    )
+    ground = scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.0, GROUND_HEIGHT),
+        ),
     )
     entity = scene.add_entity(
         morph=gs.morphs.MJCF(
@@ -681,6 +694,15 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
         joints_pairs.append((driver_joint, follower_joint, driver_scale, follower_scale))
     (i_target_q,) = entity.get_joint("target").qs_idx_local
     (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+    # The coordinates and the dofs of the joints of the joint equalities
+    joints = [
+        *[joint for joint_pair in joints_pairs for joint in joint_pair[:2]],
+        entity.get_joint("target"),
+        entity.get_joint("unrelated"),
+    ]
+    joints_qs_idx = [joint.qs_idx_local[0] for joint in joints]
+    joints_dofs_idx = [joint.dofs_idx_local[0] for joint in joints]
+    welded, bar, ball, cube = [entity.get_link(name) for name in ("welded", "bar", "ball", "cube")]
 
     # A velocity tangent to the polynomial triggers no constraint impulse
     qpos = entity.get_qpos()
@@ -693,9 +715,45 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
     qpos[..., i_target_q] = TARGET_POSITION * SCALE
     qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
     entity.set_qpos(qpos)
+    # In the last environment alone, the ball moves into its anchor and the cube into the ground, to which welds added
+    # after the build hold them
+    welded_envs_idx = [n_envs - 1] if is_batched else None
+    entity.set_qpos(
+        (1.5 * BALL_RADIUS, GROUND_HEIGHT + 0.5 * CUBE_HALF_SIZE),
+        [entity.get_joint(name).qs_idx_local[2] for name in ("ball_free", "cube_free")],
+        envs_idx=welded_envs_idx,
+    )
     entity.set_dofs_velocity(dofs_vel)
+    for anchor_link, link in ((entity.get_link("drop_anchor"), ball), (ground.base_link, cube)):
+        scene.sim.rigid_solver.add_weld_constraint(anchor_link.idx, link.idx, envs_idx=welded_envs_idx)
     scene.step()
-    assert_allclose(entity.get_qpos(), qpos + dofs_vel * DT, tol=tol)
+    qpos_expected = qpos[..., joints_qs_idx] + dofs_vel[..., joints_dofs_idx] * DT
+    assert_allclose(entity.get_qpos()[..., joints_qs_idx], qpos_expected, tol=tol)
+
+    # Starting from rest, the points held by an equality coupling two links move by the share of the regularization of
+    # what gravity alone gives them in a step. They are checked in this step, where no equality starts violated: in
+    # single precision, the solve of the next one, which pulls the target joint by half a meter, resolves the light
+    # bodies only to the precision of that impulse. The weld also keeps the box from turning about its anchor, which
+    # holds it off its center, while the connect lets the bar swing about its end at the angular acceleration of gravity
+    # about that point, m g r / (I + m r^2), I the inertia of the bar about its center, in which the mass cancels out.
+    free_fall_vel = GRAVITY * DT
+    assert_allclose(welded.get_vel(), 0.0, atol=MAX_RESIDUAL_RATIO * free_fall_vel)
+    welded_swing = GRAVITY * WELDED_HALF_SIZE / (2.0 * WELDED_HALF_SIZE**2 / 3.0 + WELDED_HALF_SIZE**2)
+    assert_allclose(welded.get_ang(), 0.0, atol=MAX_RESIDUAL_RATIO * welded_swing * DT)
+    bar_end_offset = torch.tensor((-BAR_HALF_SIZE[0], 0.0, 0.0), dtype=gs.tc_float, device=gs.device)
+    bar_end_vel = bar.get_vel() + torch.linalg.cross(bar.get_ang(), bar_end_offset.expand_as(bar.get_ang()))
+    assert_allclose(bar_end_vel, 0.0, atol=MAX_RESIDUAL_RATIO * free_fall_vel)
+    bar_swing = (
+        GRAVITY * BAR_HALF_SIZE[0] / ((BAR_HALF_SIZE[0] ** 2 + BAR_HALF_SIZE[1] ** 2) / 3.0 + BAR_HALF_SIZE[0] ** 2)
+    )
+    assert_allclose(bar.get_ang()[..., 1], bar_swing * DT, tol=MAX_RESIDUAL_RATIO)
+
+    # The welds hold the ball inside its anchor and the cube inside the ground, their contacts dropped, while in the
+    # other environments, which hold no weld, both fall freely.
+    for link in (ball, cube):
+        link_vel = np.atleast_2d(tensor_to_array(link.get_vel()))
+        assert_allclose(link_vel[-1], 0.0, atol=MAX_RESIDUAL_RATIO * free_fall_vel)
+        assert_allclose(link_vel[:-1], (0.0, 0.0, -free_fall_vel), tol=tol)
 
     # From rest, the solve leaves the share R / (R + J M^-1 J^T) of the linearized residual, which the regularization R
     # keeps below MAX_RESIDUAL_RATIO. Every driver at its reference pose checks the Jacobian at poly(0) = a0 and
