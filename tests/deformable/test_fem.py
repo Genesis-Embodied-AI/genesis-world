@@ -1345,12 +1345,13 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
 # Double precision, see test_cloth_contact_between_cloths
 @pytest.mark.precision("64")
 def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
-    DT = 0.01
-    VELOCITY_TOL = 5e-2
+    DT = 0.02
+    VELOCITY_TOL = 1e-2
     CONTACT_THICKNESS = 1e-3
-    D_HAT = 1e-2
     N_GRID = 8
+    N_DRAG_STEPS = 40
 
+    # The scene of test_cloth_ground_contact, the corner of the cloth dragged as CGQ's cloth_grab.py does
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
@@ -1359,11 +1360,12 @@ def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
             velocity_tol=VELOCITY_TOL,
         ),
         ipc_options=gs.options.IPCOptions(
-            d_hat=D_HAT,
+            d_hat=4e-3,
+            vertex_constraint_strength_ratio=1e5,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, -1.5, 0.8),
-            camera_lookat=(0.0, 0.0, 0.1),
+            camera_pos=(2.0, -2.0, 1.2),
+            camera_lookat=(0.0, 0.0, 0.3),
         ),
         show_viewer=show_viewer,
     )
@@ -1373,32 +1375,43 @@ def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
     cloth = scene.add_entity(
         morph=gs.morphs.Mesh(
             file=cloth_grid_obj_path,
-            pos=(0.0, 0.0, 0.005),
+            pos=(0.0, 0.0, 0.15),
         ),
         material=gs.materials.FEM.Cloth(
-            E=2e4,
-            shear_modulus=2e3,
-            bending_E=1e6,
+            E=5e4,
+            rho=400.0,
+            shear_modulus=2e4,
+            bending_E=2e6,
             contact_thickness=CONTACT_THICKNESS,
+            friction_mu=0.2,
+            contact_resistance=1e5,
         ),
     )
     scene.build(n_envs=2)
     # The four vertices of the corner at x = y = 0.5, the vertex 0 lying at the opposite corner
     grip_idx = [(N_GRID - k) * (N_GRID + 1) + N_GRID - l for k in (0, 1) for l in (0, 1)]
     grip_pos = cloth.get_verts_pos()[0, grip_idx]
-    # The first environment grabs the corner where it lies and drags it up and inward, the second one pulls it 0.1 m
-    # under the ground with soft constraints
+    # The first environment grabs the corner where it starts, the second one pulls it 0.15 m under the ground with soft
+    # constraints, the rest of the cloth falling onto the ground in both
     cloth.set_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
     cloth.set_vertex_constraints(
         verts_idx_local=grip_idx,
-        target_poss=grip_pos - torch.tensor([0.0, 0.0, 0.1], dtype=gs.tc_float, device=gs.device),
+        target_poss=grip_pos - torch.tensor([0.0, 0.0, 0.3], dtype=gs.tc_float, device=gs.device),
         is_soft_constraint=True,
         stiffness=1e3,
         envs_idx=[1],
     )
 
-    for i_step in range(1, 41):
-        targets_pos = grip_pos + torch.tensor([-0.3, 0.0, 0.2], dtype=gs.tc_float, device=gs.device) * i_step / 40
+    # The grabbed corner is lifted by 0.5 m, pulled inward by 0.3 m and turned up by 0.8 rad about the y axis
+    for i_step in range(1, N_DRAG_STEPS + 1):
+        ratio = i_step / N_DRAG_STEPS
+        cos, sin = math.cos(0.8 * ratio), math.sin(0.8 * ratio)
+        rotation = torch.tensor(
+            [[cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]], dtype=gs.tc_float, device=gs.device
+        )
+        targets_pos = grip_pos @ rotation.T + ratio * torch.tensor(
+            [-0.3, 0.0, 0.5], dtype=gs.tc_float, device=gs.device
+        )
         cloth.update_constraint_targets(verts_idx_local=grip_idx, target_poss=targets_pos, envs_idx=[0])
         scene.step()
         verts_pos = cloth.get_verts_pos()
@@ -1409,12 +1422,12 @@ def test_cloth_vertex_constraints(cloth_grid_obj_path, tmp_path, show_viewer):
     # The soft pull presses its corner deeper into the contact band than the free corner opposite it rests
     assert (verts_pos[1, grip_idx, 2] < verts_pos[1, 0, 2]).all()
 
-    # Released, the corner falls back onto the ground
+    # Released from about 0.9 m, the corner falls back onto the cloth and the ground within 0.6 s
     cloth.remove_vertex_constraints(verts_idx_local=grip_idx, envs_idx=[0])
-    for _ in range(40):
+    for _ in range(30):
         scene.step()
         assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
-    assert (cloth.get_verts_pos()[0, grip_idx, 2] < CONTACT_THICKNESS + D_HAT).all()
+    assert (cloth.get_verts_pos()[0, grip_idx, 2] < 0.2).all()
 
     # The drag never folds the cloth across itself
     path = str(tmp_path / "cloth.obj")
