@@ -372,6 +372,9 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     n_pcg_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     n_linesearch_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     pcg_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
+    # The root mean square of the displacements of the vertices over a Newton iteration below which an environment
+    # stops iterating
+    newton_dx_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # The squared residual, relative to the first one of the substep, at which the solve of a differentiable scene
     # stops: round-off, since its backward pass is the adjoint of the root of the solve.
     pcg_threshold_rel: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
@@ -508,6 +511,7 @@ class FEMData(Data):
                     n_pcg_iterations=solver._n_pcg_iterations,
                     n_linesearch_iterations=solver._n_linesearch_iterations,
                     pcg_threshold=solver._pcg_threshold,
+                    newton_dx_threshold=solver._newton_dx_threshold,
                     pcg_threshold_rel=(1e-5 if gs.qd_float == qd.f32 else 1e-12) ** 2,
                     linesearch_c=solver._linesearch_c,
                     linesearch_tau=solver._linesearch_tau,
@@ -989,6 +993,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # on the host for such scenes, reading the flag of each loop after every iteration.
         loops = self.fem_state.solve_loops
         args = (
+            loops.newton_counter,
             loops.pcg_counter,
             loops.linesearch_counter,
             self.fem_state,
@@ -1000,7 +1005,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if not is_adjoint:
             kernel_solve_stage(*args, stage=int(FEMSolveStage.INIT_NEWTON))
         # Each loop runs its body once before testing its flag, as a graph do-while does
-        for _ in range(1 if is_adjoint else max(self._n_newton_iterations, 1)):
+        n_newton_iterations = 1 if is_adjoint else max(self._n_newton_iterations, 1)
+        for i_newton in range(n_newton_iterations):
             stage = FEMSolveStage.INIT_ADJOINT if is_adjoint else FEMSolveStage.NEWTON_HEAD
             kernel_solve_stage(*args, stage=int(stage))
             is_looping = True
@@ -1019,6 +1025,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 kernel_solve_stage(*args, stage=int(FEMSolveStage.SKIP_LINESEARCH))
             if not is_adjoint:
                 kernel_solve_stage(*args, stage=int(FEMSolveStage.END_NEWTON))
+                if i_newton + 1 < n_newton_iterations and not qd_to_numpy(loops.newton_counter):
+                    break
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- gradient ---------------------------------------
@@ -1822,6 +1830,12 @@ def kernel_precompute_material_data(fem_state: FEMState, fem_info: FEMInfo, fem_
         func_element_precompute(i_e, i_b, F, fem_state, fem_info, fem_config)
 
 
+@qd.func
+def func_activate_envs(fem_state: FEMState):
+    for i_b in range(fem_state.envs_solve.is_active.shape[0]):
+        fem_state.envs_solve.is_active[i_b] = True
+
+
 @qd.kernel(fastcache=True)
 def kernel_init_pos_and_inertia(
     fem_state: FEMState,
@@ -1836,8 +1850,7 @@ def kernel_init_pos_and_inertia(
 
     Every environment enters the Newton iterations of the substep that follows.
     """
-    for i_b in range(fem_state.envs_solve.is_active.shape[0]):
-        fem_state.envs_solve.is_active[i_b] = True
+    func_activate_envs(fem_state)
     for i_v, i_b in qd.ndrange(*fem_state.vertices.pos.shape, axes=qd.static(eoa(fem_state.vertices.pos))):
         is_free = True
         if qd.static(fem_config.enable_vertex_constraints):
@@ -2801,6 +2814,44 @@ def func_skip_linesearch(fem_state: FEMState, fem_info: FEMInfo):
 
 
 @qd.func
+def func_end_newton(newton_counter: qd.Tensor, fem_state: FEMState, fem_info: FEMInfo, fem_config: qd.template()):
+    """
+    End a Newton iteration of each environment, which stops iterating once its vertices moved by less than the threshold
+    over the iteration, in root mean square.
+
+    The loop flag drops until an environment iterates on with iterations left.
+    """
+    # See BLOCK_DIM in 'func_init_pcg'
+    BLOCK_DIM = qd.static(256)
+
+    n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
+    n_vertices = fem_info.vertices.mass.shape[0]
+    fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
+    newton_counter[()] = 0
+    qd.loop_config(block_dim=qd.static(n_threads if n_threads > 1 else None))
+    for i_flat in range(fem_state.envs_solve.is_active.shape[0] * n_threads):
+        i_b = i_flat // n_threads
+        i_t = i_flat % n_threads
+        is_active = fem_state.envs_solve.is_active[i_b]
+        dx_sqr = gs.qd_float(0.0)
+        if is_active:
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    # The line search leaves the positions at its last trial, which its stored step factor may not match
+                    dx = fem_state.vertices_solve.x[i_v, i_b]
+                    if qd.static(fem_config.has_linesearch):
+                        dx = fem_state.vertices.pos_next[i_v, i_b] - fem_state.vertices_solve.x_prev[i_v, i_b]
+                    dx_sqr = dx_sqr + dx.norm_sqr()
+        dx_sqr = func_block_sum(i_t, values=qd.Vector([dx_sqr]), n_threads=n_threads)[0]
+        if i_t == 0 and is_active:
+            if dx_sqr < n_vertices * fem_info.newton_dx_threshold[None] ** 2:
+                fem_state.envs_solve.is_active[i_b] = False
+            elif fem_state.solve_loops.n_newton_left[()] > 0:
+                newton_counter[()] = 1
+
+
+@qd.func
 def func_newton_head(
     pcg_counter: qd.Tensor,
     fem_state: FEMState,
@@ -2862,9 +2913,7 @@ def kernel_batch_solve(
                 func_linesearch_iter(linesearch_counter, fem_state, fem_info, vertex_constraints, fem_config)
         else:
             func_skip_linesearch(fem_state, fem_info)
-        fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
-        if fem_state.solve_loops.n_newton_left[()] <= 0:
-            newton_counter[()] = 0
+        func_end_newton(newton_counter, fem_state, fem_info, fem_config)
 
 
 @qd.func
@@ -2884,6 +2933,7 @@ def kernel_solve_adjoint(
     fem_config: qd.template(),
 ):
     """Run the adjoint solve of a substep, which seeds the adjoint of the forces (see '_implicit_solve_grad')."""
+    func_activate_envs(fem_state)
     func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
     func_init_pcg(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint=True)
     func_pcg_solve(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config)
@@ -2892,6 +2942,7 @@ def kernel_solve_adjoint(
 
 @qd.kernel(fastcache=True)
 def kernel_solve_stage(
+    newton_counter: qd.types.ndarray(qd.i32, ndim=0),
     pcg_counter: qd.types.ndarray(qd.i32, ndim=0),
     linesearch_counter: qd.types.ndarray(qd.i32, ndim=0),
     fem_state: FEMState,
@@ -2909,10 +2960,11 @@ def kernel_solve_stage(
         func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
         fem_state.solve_loops.n_newton_left[()] = fem_info.n_newton_iterations[None]
     if qd.static(stage == FEMSolveStage.END_NEWTON):
-        fem_state.solve_loops.n_newton_left[()] = fem_state.solve_loops.n_newton_left[()] - 1
+        func_end_newton(newton_counter, fem_state, fem_info, fem_config)
     if qd.static(stage == FEMSolveStage.NEWTON_HEAD):
         func_newton_head(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config)
     if qd.static(stage == FEMSolveStage.INIT_ADJOINT):
+        func_activate_envs(fem_state)
         func_build_coarse(fem_state, fem_info, vertex_constraints, fem_config)
         func_init_pcg(pcg_counter, fem_state, fem_info, vertex_constraints, fem_config, is_adjoint=True)
     if qd.static(stage == FEMSolveStage.PCG_ITER):
