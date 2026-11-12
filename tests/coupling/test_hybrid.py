@@ -793,14 +793,11 @@ def test_sap_equality_constraints(show_viewer, xml_path, n_envs, is_batched, tol
     assert_allclose(qpos_after[..., i_target_q] / SCALE, TARGET_POSITION, atol=MAX_RESIDUAL_RATIO * TARGET_POSITION)
     assert_allclose(qpos_after[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
 
-    # The tolerance of the solve scales with the momentum of the whole environment, here the impulse pulling the target,
-    # which bounds the error of the light bar more loosely than the overshoot of a step left untried at the largest step
-    # size of the line search (that step size minus one), so the check sits halfway. The welds of the last environment
-    # pull the ball and the cube back by corrections that leave the bar unresolved within that tolerance, so that the
-    # environments without weld alone are checked.
-    if is_batched:
-        max_step_size = gs.options.SAPCouplerOptions().linesearch_max_step_size
-        assert_allclose(bar.get_ang()[:-1, 1], bar_swing * DT, rtol=0.5 * (max_step_size - 1.0))
+    # The solve leaves the light bar a velocity error, in the norm of its kinetic energy, of at most its convergence
+    # tolerance (MAX_RESIDUAL_RATIO at most by default) times its momentum, which exceeds its impulses, even next to the
+    # large corrections of the target pull and of the welds. Its rotation about its center of mass holds over a quarter
+    # of the kinetic energy of the bar swinging about its end, so the swing is off by twice that at most.
+    assert_allclose(bar.get_ang()[..., 1], bar_swing * DT, rtol=2.0 * MAX_RESIDUAL_RATIO)
 
 
 @pytest.mark.required

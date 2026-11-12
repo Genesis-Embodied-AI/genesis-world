@@ -166,8 +166,8 @@ RIGID_FLOOR_VERT_STIFFNESS = 1.0e6
 EQUALITY_BETA = 0.1
 EQUALITY_STIFFNESS = 1.0e8
 
-# Largest residual of a SAP solve stopped at its Newton iteration cap, relative to the momentum and the impulses of its
-# environment (see func_update_envs_active): a momentum left unbalanced above a tenth of them leaves velocities off by
+# Largest residual of a SAP solve stopped at its Newton iteration cap, relative to the momentum and the impulses of each
+# of its bodies (see func_update_envs_active): a momentum left unbalanced above a tenth of them leaves velocities off by
 # as much, which inject energy into the contacts, while a solve stopped below it, as on a rare spike of the iterations,
 # keeps a meaningful output.
 CAP_RESIDUAL_MAX = 0.1
@@ -386,7 +386,7 @@ class SAPEnvs(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     is_active: qd.Tensor = field(bool)
     is_pcg_active: qd.Tensor = field(bool)
     is_linesearch_active: qd.Tensor = field(bool)
-    # Residual at the last convergence check, relative to the momentum and the impulses
+    # Largest residual of the bodies at the last convergence check, each relative to its momentum and its impulses
     relative_residual: qd.Tensor = field(float)
     # The scalars of the preconditioned conjugate gradient (PCG) solve, those of the FEM vertices when it solves the
     # rigid dofs apart (see is_pcg_coupled)
@@ -1779,8 +1779,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 SAPErrorCode.OVERFLOW_CONTACTS: functools.partial(report_overflow, SAPErrorCode.OVERFLOW_CONTACTS),
                 SAPErrorCode.INVALID_SOLVE: lambda: (
                     "SAP solve stopped at its Newton iteration cap with a residual |gradient| / max(|momentum|, "
-                    f"|impulse|) of {CAP_RESIDUAL_MAX} or more, which leaves its velocities meaningless. Please "
-                    f"increase the value of {type(self).__name__}'s option 'n_sap_iterations'."
+                    f"|impulse|) of {CAP_RESIDUAL_MAX} or more on a kinematic tree or FEM entity, which leaves its "
+                    f"velocities meaningless. Please increase the value of {type(self).__name__}'s option "
+                    "'n_sap_iterations'."
                 ),
             },
         )
@@ -3158,6 +3159,7 @@ def func_update_envs_active(
     newton_counter: qd.Tensor,
     sap_state: SAPState,
     fem_info: FEMInfo,
+    rigid_info: RigidInfo,
     sap_info: SAPInfo,
     sap_config: qd.template(),
     constraint_handlers: qd.template(),
@@ -3165,8 +3167,10 @@ def func_update_envs_active(
     """
     Stop the environments whose gradient is small enough, the others adding up the coarse Hessians of the contacts.
 
-    The lanes of a chunk (see CHUNK_SIZE) take an environment, adding up its norms and the Hessians of its contacts
-    restricted to the rigid motions of each FEM entity, which they stride in their sorted order.
+    An environment stops once its gradient is small relative to its momentum, and the gradient of each of its bodies,
+    the kinematic trees of the rigid solver then the FEM entities, is small relative to the momentum and the impulses of
+    that body. The lanes of a chunk (see CHUNK_SIZE) take an environment, striding its bodies and adding up the Hessians
+    of its contacts restricted to the rigid motions of each FEM entity, which they stride in their sorted order.
     """
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     for i_t in range(sap_state.envs.is_active.shape[0] * N_LANES):
@@ -3177,31 +3181,76 @@ def func_update_envs_active(
             # The first lane overwrites the flag below, which nothing orders after the reads of the other lanes, so they
             # take the flag it read: lanes disagreeing on it would sum the coarse Hessians in divergent flow.
             is_active = su.qd_block_shuffle(qd.cast(is_active, qd.i32), 0) != 0
-        norms = func_chunks_total(
-            i_b,
-            0,
-            sap_state.vertices_dofs_partials.shape[0],
-            VertexDofSum.GRADIENT_NORM,
-            i_lane,
-            sap_state,
-            n_lanes=N_LANES,
-            n_sums=3,
-        )
-        gradient_norm = norms[VertexDofSum.GRADIENT_NORM]
-        momentum_norm = norms[VertexDofSum.MOMENTUM_NORM]
-        impulse_norm = norms[VertexDofSum.IMPULSE_NORM]
         if is_active:
-            # The sums are squared norms, compared as norms like the tolerances. The tolerance scales with the momentum
-            # alone: the impulses holding a resting body against gravity would otherwise dominate it, leaving the slow
-            # motions of that body under the threshold so that they never damp out. The residual checked at the
-            # iteration cap keeps the impulses in its scale, which a body at rest has alone.
-            norm_thr = sap_info.convergence_atol[None] + sap_info.convergence_rtol[None] * qd.sqrt(momentum_norm)
-            is_active = qd.sqrt(gradient_norm) >= norm_thr
+            atol = sap_info.convergence_atol[None]
+            rtol = sap_info.convergence_rtol[None]
+            n_trees = 0
+            if qd.static(sap_config.has_rigid):
+                n_trees = sap_info.n_rigid_trees[None]
+            n_entities = 0
+            if qd.static(sap_config.has_fem):
+                n_entities = sap_state.fem_coarse.mass.shape[0]
+            # Each lane sums the dofs of its own trees, then the lanes sum the vertex chunks of each FEM entity together,
+            # so that a large entity spreads over the lanes. The norms of the environment add up those of its bodies,
+            # each in a fixed order.
+            n_tree_rounds = (n_trees + N_LANES - 1) // N_LANES
+            norms = qd.Vector.zero(gs.qd_float, 3)
+            residual_max = gs.qd_float(0.0)
+            is_body_active = False
+            for i_round in range(n_tree_rounds + n_entities):
+                body_norms = qd.Vector.zero(gs.qd_float, 3)
+                if i_round < n_tree_rounds:
+                    if qd.static(sap_config.has_rigid):
+                        i_tree = i_round * N_LANES + i_lane
+                        if i_tree < n_trees:
+                            i_d_start = rigid_info.trees_dof_start[i_tree]
+                            for i_d in range(i_d_start, i_d_start + rigid_info.trees_n_dofs[i_tree]):
+                                mass = rigid_info.mass_mat[i_d, i_d, i_b]
+                                gradient = sap_state.rigid_dofs.gradient[i_d, i_b]
+                                v = sap_state.rigid_dofs.v[i_d, i_b]
+                                impulse = sap_state.rigid_dofs.impulse[i_d, i_b]
+                                body_norms = body_norms + qd.Vector(
+                                    [gradient**2 / mass, v**2 * mass, impulse**2 / mass]
+                                )
+                        norms = norms + body_norms
+                else:
+                    if qd.static(sap_config.has_fem):
+                        i_e = i_round - n_tree_rounds
+                        body_norms = func_chunks_total(
+                            i_b,
+                            sap_info.entities_chunk_start[i_e],
+                            sap_info.entities_chunk_start[i_e + 1],
+                            VertexDofSum.GRADIENT_NORM,
+                            i_lane,
+                            sap_state,
+                            n_lanes=N_LANES,
+                            n_sums=3,
+                        )
+                        # Every lane holds the sums of the entity, which the first one alone adds to those of the lanes
+                        if i_lane == 0:
+                            norms = norms + body_norms
+                # The momentum and the impulses of a body scale its own tolerance, so that a light body next to a large
+                # correction converges as well. The sums are squared norms, compared as norms like the tolerances.
+                gradient_norm = body_norms[VertexDofSum.GRADIENT_NORM]
+                scale_norm = qd.max(body_norms[VertexDofSum.MOMENTUM_NORM], body_norms[VertexDofSum.IMPULSE_NORM])
+                if qd.sqrt(gradient_norm) > atol + rtol * qd.sqrt(scale_norm):
+                    is_body_active = True
+                residual_max = qd.max(
+                    residual_max, qd.sqrt(gradient_norm / qd.max(scale_norm, sap_info.precision[None]))
+                )
+            if qd.static(N_LANES > 1):
+                for j in qd.static(range(3)):
+                    norms[j] = su.qd_block_sum(norms[j])
+                is_body_active = su.qd_block_any(is_body_active)
+                residual_max = su.qd_block_max(residual_max)
+            # The tolerance of the environment scales with its momentum alone: the impulses holding a resting body
+            # against gravity would otherwise dominate it, leaving the slow motions of that body under the threshold so
+            # that they never damp out.
+            norm_thr = atol + rtol * qd.sqrt(norms[VertexDofSum.MOMENTUM_NORM])
+            is_active = is_body_active or qd.sqrt(norms[VertexDofSum.GRADIENT_NORM]) >= norm_thr
             if i_lane == 0:
                 sap_state.envs.is_active[i_b] = is_active
-                sap_state.envs.relative_residual[i_b] = qd.sqrt(
-                    gradient_norm / qd.max(qd.max(momentum_norm, impulse_norm), sap_info.precision[None])
-                )
+                sap_state.envs.relative_residual[i_b] = residual_max
                 if is_active:
                     newton_counter[()] = sap_state.loops.n_newton_next[()]
         if qd.static(sap_config.has_fem):
@@ -3633,7 +3682,9 @@ def kernel_sap_solve(
             joint_equality_handler,
             op=VertexDofOp.GRADIENT,
         )
-        func_update_envs_active(newton_counter, sap_state, fem_info, sap_info, sap_config, constraint_handlers)
+        func_update_envs_active(
+            newton_counter, sap_state, fem_info, rigid_info, sap_info, sap_config, constraint_handlers
+        )
         if qd.static(sap_config.has_rigid):
             func_invert_rigid_hessian(dofs_state, sap_state, rigid_info, sap_info, sap_config)
 
@@ -4344,10 +4395,6 @@ def func_compute_rigid_dof(
         gradient = sap_state.rigid_dofs.gradient[i_d, i_b] - Jt_gamma
         sap_state.rigid_dofs.gradient[i_d, i_b] = gradient
         sap_state.rigid_dofs.impulse[i_d, i_b] = Jt_gamma
-        mass = rigid_info.mass_mat[i_d, i_d, i_b]
-        sums[VertexDofSum.GRADIENT_NORM] = gradient**2 / mass
-        sums[VertexDofSum.MOMENTUM_NORM] = sap_state.rigid_dofs.v[i_d, i_b] ** 2 * mass
-        sums[VertexDofSum.IMPULSE_NORM] = Jt_gamma**2 / mass
     if qd.static(op == VertexDofOp.PCG_INIT or op == VertexDofOp.PCG_UPDATE):
         # z = M^-1 r takes the row of the dof in the inverse of its mass block, which multiplies vectors that no dof
         # writes in this loop: the gradient, the opposite of r, then A p, along which the update steps r and z alike.
