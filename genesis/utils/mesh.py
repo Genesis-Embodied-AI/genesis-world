@@ -240,18 +240,27 @@ def cast_rays(
 
 
 def get_convex_width(verts: np.ndarray, faces: np.ndarray) -> float:
-    """Return the narrowest extent of a convex mesh along the normal of one of its faces."""
+    """Return the narrowest extent of a convex mesh along the normal of one of its faces.
+
+    A mesh whose faces all have no area spans no plane, so its width is 0.
+    """
     faces_normal = np.cross(verts[faces[:, 1]] - verts[faces[:, 0]], verts[faces[:, 2]] - verts[faces[:, 0]])
     faces_normal_norm = np.linalg.norm(faces_normal, axis=-1)
-    # A face of no area has no normal
-    is_valid = faces_normal_norm > gs.EPS
+    # A face of no area has no normal. The norm of the cross product is twice the area of the face, so it is compared
+    # with the squared diagonal of the bounding box to keep the small faces of a small mesh. The normal of a sliver face
+    # is harmless: the extent along any direction bounds the width from above.
+    verts_extent = verts.max(axis=0) - verts.min(axis=0)
+    is_valid = faces_normal_norm > gs.EPS * (verts_extent @ verts_extent)
     faces_normal = faces_normal[is_valid] / faces_normal_norm[is_valid, None]
     # The normals are projected on in chunks, which bounds the memory for a finely tessellated mesh
-    width = np.inf
-    for chunk in np.array_split(faces_normal, max(1, len(verts) * len(faces_normal) // 2**22)):
-        verts_proj = verts @ chunk.T
-        width = min(width, (verts_proj.max(axis=0) - verts_proj.min(axis=0)).min())
-    return width
+    n_normals_chunk = max(1, 2**22 // len(verts))
+    return min(
+        [
+            np.ptp(verts @ faces_normal[i : i + n_normals_chunk].T, axis=0).min()
+            for i in range(0, len(faces_normal), n_normals_chunk)
+        ],
+        default=0.0,
+    )
 
 
 def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float) -> float:
