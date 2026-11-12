@@ -1,0 +1,68 @@
+genesis/engine/entities/rigid_entity/description.py
+  s_c62ec9da443b15::t_a418e96f8f97dc 1456-1463
+genesis/engine/solvers/pbd_solver.py
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 365-373
+  s_c62ec9da443b15::t_528eaf008aaa57 14,16,18,36
+genesis/engine/solvers/sph_solver.py
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 353-361
+  s_c62ec9da443b15::t_528eaf008aaa57 14,16,42
+genesis/options/indices.py
+  s_c62ec9da443b15::t_a418e96f8f97dc 4,35-37
+genesis/engine/entities/fem_entity.py
+  s_c62ec9da443b15::t_60ce880f973d61 3,15-16,22-24
+  s_c62ec9da443b15::t_a802214e6adb2e 159-170,172
+  s_c62ec9da443b15::t_8ea460c7bd9e79 25
+genesis/engine/entities/particle_entity.py
+  s_c62ec9da443b15::t_a802214e6adb2e 98-109,111
+  s_c62ec9da443b15::t_60ce880f973d61 4,17-18,23-25
+  s_c62ec9da443b15::t_b44a53a96de2f0 26
+genesis/engine/simulator.py
+  s_c62ec9da443b15::t_a418e96f8f97dc 155-158,162
+  s_c62ec9da443b15::t_60ce880f973d61 2,38,41
+genesis/engine/entities/hybrid_entity.py
+  s_c62ec9da443b15::t_a418e96f8f97dc 70-79
+  s_c62ec9da443b15::t_60ce880f973d61 3,14-15,29-30
+  s_c62ec9da443b15::t_eb563648ca4eed 31
+genesis/engine/entities/mpm_entity.py
+  s_c62ec9da443b15::t_60ce880f973d61 2,9-10,15-17
+  s_c62ec9da443b15::t_a802214e6adb2e 61-71,73
+  s_c62ec9da443b15::t_6c452212cd6c53 18
+genesis/engine/entities/sph_entity.py
+  s_c62ec9da443b15::t_60ce880f973d61 1-2,6-7,11-13
+  s_c62ec9da443b15::t_a802214e6adb2e 43-51,53
+  s_c62ec9da443b15::t_3caa8fdea294ee 14
+genesis/engine/entities/pbd_entity.py
+  s_c62ec9da443b15::t_a802214e6adb2e 136-147,149
+  s_c62ec9da443b15::t_60ce880f973d61 1-2,14-19
+  s_c62ec9da443b15::t_a6bad34ff02224 268-280,282,385-397,399,510-518,520,583-591,593
+genesis/engine/solvers/kinematic_solver.py
+  s_c62ec9da443b15::t_528eaf008aaa57 13,27
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 185-192
+  s_c62ec9da443b15::t_138e46a4ddc8a3 11,193
+genesis/engine/solvers/fem_solver.py
+  s_c62ec9da443b15::t_528eaf008aaa57 40,42,79
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 854-862
+  s_c62ec9da443b15::t_b6dea2244bcec2 1232-1239,1264-1271
+genesis/engine/solvers/mpm_solver.py
+  s_c62ec9da443b15::t_528eaf008aaa57 22,24,47
+  s_c62ec9da443b15::t_fcd89cb1dcc2dd 482-490
+genesis/engine/entities/base_entity.py
+  s_c62ec9da443b15::t_60ce880f973d61 10,16
+  s_c62ec9da443b15::t_a802214e6adb2e 40-45,48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f710622164bff5fa859e4d14b2b0557fcbcf542c",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
