@@ -229,14 +229,14 @@ def test_halt_on_nan(show_viewer):
 
 @pytest.mark.required("sparse")
 @pytest.mark.parametrize(
-    "coupler_type, material_model, fem_floor_contact_type",
+    "coupler_type, material_model",
     [
-        (gs.options.SAPCouplerOptions, "linear", "tet"),
-        (gs.options.SAPCouplerOptions, "linear_corotated", "vert"),
-        (gs.options.LegacyCouplerOptions, "linear", None),
+        (gs.options.SAPCouplerOptions, "linear"),
+        (gs.options.SAPCouplerOptions, "linear_corotated"),
+        (gs.options.LegacyCouplerOptions, "linear"),
     ],
 )
-def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_contact_type, show_viewer):
+def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
     SPHERE_POS = (0.4, -0.1, 0.1)
     SPHERE_RADIUS = 0.1
     SPHERE_RHO = 500.0
@@ -252,14 +252,16 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
     REST_VEL_MAX = 2e-2
     # A sphere resting on vertex contacts deforms its coarse tessellation unevenly, which rolls it unless it is stiff
     # enough to keep its contact patch on a few vertices.
-    SPHERE_E = 3e5 if fem_floor_contact_type == "vert" else 1e5
+    SPHERE_E = 3e5 if coupler_type == gs.options.SAPCouplerOptions else 1e5
     SPHERE_DRIFT_MAX = 1e-2
     SPHERE_SPIN_MAX = 0.2
 
     # The hanging bar checks the exact physics of the solve, whose tolerance its bounds follow from
     coupler_kwargs = {}
     if coupler_type == gs.options.SAPCouplerOptions:
-        coupler_kwargs = dict(sap_convergence_rtol=SAP_RTOL, fem_floor_contact_type=fem_floor_contact_type)
+        coupler_kwargs = dict(
+            sap_convergence_rtol=SAP_RTOL,
+        )
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -936,7 +938,7 @@ def test_soft_constraint(asset_tmp_path, show_viewer):
 
 
 @pytest.mark.required
-def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
+def test_implicit_sap_coupler_collide_sphere_box(precision, asset_tmp_path, show_viewer):
     SPHERE_RADIUS = 0.1
     BOX_SIZE = 0.015
     CUBE_HALFSIZE = 0.05
@@ -944,6 +946,7 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     CUBE_HYDROELASTIC_MODULUS = 1e5
     PEDESTAL_HALFSIZE = 0.05
     BALL_RADIUS = 0.03
+    CUBES_GAP = 1e-3
     GRAVITY = 9.81
 
     scene = gs.Scene(
@@ -955,13 +958,16 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(),
+        # The capacity holds the contacts of the scene but not the pairs of tets of the sphere neighbouring each other
+        # at rest, which the contact search must skip.
+        coupler_options=gs.options.SAPCouplerOptions(
+            max_collision_pairs=8192,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, 0.45),
             camera_lookat=(0.0, 0.0, 0.15),
         ),
         show_viewer=show_viewer,
-        show_FPS=False,
     )
     scene.add_entity(
         morph=gs.morphs.Plane(),
@@ -1019,6 +1025,24 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         ),
         material=gs.materials.FEM.Elastic(),
     )
+    # A single entity of two cubes apart at rest, the upper one falling onto the lower one. Their surface is the one of
+    # the cubes above, which the closed form of their overlap relies on.
+    cube = gs.utils.mesh.create_box(extents=(2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE, 2 * CUBE_HALFSIZE))
+    cubes_verts = np.concatenate(
+        [cube.vertices + (0.0, 0.0, (2 * i + 1) * CUBE_HALFSIZE + i * CUBES_GAP) for i in range(2)]
+    )
+    cubes_path = str(asset_tmp_path / "two_cubes.obj")
+    igl.write_triangle_mesh(cubes_path, cubes_verts, np.concatenate([cube.faces, cube.faces + len(cube.vertices)]))
+    cubes = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cubes_path,
+            pos=(0.3, 0.3, 0.0),
+        ),
+        material=gs.materials.FEM.Elastic(
+            rho=CUBE_RHO,
+            hydroelastic_modulus=CUBE_HYDROELASTIC_MODULUS,
+        ),
+    )
     scene.build()
 
     # Run simulation
@@ -1046,6 +1070,16 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
     cubes_overlap_ref *= (2.0 * CUBE_HALFSIZE / (2.0 * CUBE_HALFSIZE - cubes_overlap_ref)) ** 2
     assert_allclose(cubes_overlap, cubes_overlap_ref, rtol=0.02)
 
+    # The upper cube of the single entity comes to rest on its lower one as the separate cubes do
+    is_upper = tensor_to_array(cubes.init_positions)[:, 2] > 2 * CUBE_HALFSIZE + CUBES_GAP / 2
+    cubes_pos = tensor_to_array(cubes.get_verts_pos())
+    assert_allclose(cubes.get_verts_vel(), 0.0, atol=1e-3)
+    assert_allclose(
+        cubes_pos[~is_upper, 2].max() - cubes_pos[is_upper, 2].min(),
+        cubes_overlap_ref,
+        rtol=0.02 if precision == "64" else 0.05,
+    )
+
     # The ball settles on the pedestal.
     # FIXME: No closed form gives this depth: the elastic flattening of the ball and its pressure field near the contact
     # depend on its TetGen mesh. A mesher-independent ball mesh and the elastic contact solution would make it derivable.
@@ -1053,16 +1087,26 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 
 
 @pytest.mark.required("sparse")
-@pytest.mark.parametrize("capacity_option", ["max_collision_pairs", "max_contacts", "n_sap_iterations"])
-def test_sap_coupler_capacity(capacity_option, show_viewer):
+@pytest.mark.parametrize(
+    "capacity_option, capacity, enable_fem_neutral_collision",
+    [
+        ("max_collision_pairs", 1, False),
+        ("max_contacts", 1, False),
+        ("n_sap_iterations", 1, False),
+        ("max_collision_pairs", 8192, True),
+    ],
+)
+def test_sap_coupler_capacity(capacity_option, capacity, enable_fem_neutral_collision, show_viewer):
     SPHERE_RADIUS = 0.1
 
     scene = gs.Scene(
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
+        # With neutral collision, the pairs of tets of the sphere adjacent at rest exceed the capacity holding the scene
         coupler_options=gs.options.SAPCouplerOptions(
-            **{capacity_option: 1},
+            enable_fem_neutral_collision=enable_fem_neutral_collision,
+            **{capacity_option: capacity},
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, 0.6, 0.3),
@@ -1079,6 +1123,13 @@ def test_sap_coupler_capacity(capacity_option, show_viewer):
             radius=SPHERE_RADIUS,
         ),
         material=gs.materials.FEM.Elastic(),
+    )
+    # A rigid box resting on the sphere, whose contact search tests pairs of its triangles and of the tets of the sphere
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 1.9 * SPHERE_RADIUS + 0.025),
+            size=(0.05, 0.05, 0.05),
+        ),
     )
     scene.build(n_envs=2)
 
@@ -1141,6 +1192,21 @@ def test_sap_coupler_default_capacity(show_viewer):
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
         ),
     )
+    # A FEM cube falling onto another one, away from the rigid boxes
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.0, 0.0, BOX_SIZE),
+            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    stacked_cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.0, 0.0, 3 * BOX_SIZE + 1e-3),
+            size=(2 * BOX_SIZE, 2 * BOX_SIZE, 2 * BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
     scene.build(n_envs=2)
 
     # The default capacities of the contacts hold both landings
@@ -1154,6 +1220,7 @@ def test_sap_coupler_default_capacity(show_viewer):
     stacked_box_pos = tensor_to_array(stacked_box.get_pos())
     assert_allclose(stacked_box_pos[..., :2], (1.0, 0.0), atol=2e-3)
     assert_allclose(stacked_box_pos[..., 2], 2 * BOX_SIZE + BOX_SIZE / 2, atol=2e-3)
+    assert_allclose(stacked_cube.get_verts_pos().mean(dim=-2), (-1.0, 0.0, 3 * BOX_SIZE), atol=2e-3)
 
 
 @pytest.mark.slow("gpu")  # gpu ~120s

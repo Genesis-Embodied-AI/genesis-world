@@ -343,17 +343,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             {
                 RigidErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
                     "Exceeding max number of broad phase candidate contact pairs "
-                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
-                    "option 'multiplier_collision_broad_phase'."
+                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of "
+                    f"{type(self).__name__}'s option 'multiplier_collision_broad_phase'."
                 ),
                 RigidErrorCode.OVERFLOW_COLLISION_PAIRS: (
                     f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
-                    "Please increase the value of RigidSolver's option 'max_collision_pairs'."
+                    f"Please increase the value of {type(self).__name__}'s option 'max_collision_pairs'."
                 ),
                 RigidErrorCode.OVERFLOW_CONTACTS: (
                     f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
-                    "supported by the constraint solver. Please increase the value of RigidSolver's option "
-                    "'max_contacts'."
+                    "supported by the constraint solver. Please increase the value of "
+                    f"{type(self).__name__}'s option 'max_contacts'."
                 ),
                 RigidErrorCode.UNSUPPORTED_COLLISION_PAIR: (
                     "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "

@@ -516,8 +516,9 @@ class ConstraintSolver:
         n_equalities = (eq_const_info["type"] >= 0).sum(dim=-1)
         if (n_equalities[envs_idx] >= self._solver.n_equalities + self._solver._options.max_dynamic_constraints).any():
             gs.raise_exception(
-                f"No room left for another dynamic constraint. Please increase the value of RigidSolver's option "
-                f"'max_dynamic_constraints' ({self._solver._options.max_dynamic_constraints})."
+                "No room left for another dynamic constraint. Please increase the value of "
+                f"{type(self._solver).__name__}'s option 'max_dynamic_constraints' "
+                f"({self._solver._options.max_dynamic_constraints})."
             )
 
         # The type-specific data is padded to its 8 entries (see kernel_add_dynamic_constraint).

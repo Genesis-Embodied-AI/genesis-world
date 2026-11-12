@@ -631,9 +631,7 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
             batch_joints_info=is_batched,
             batch_dofs_info=is_batched,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(
-            rigid_rigid_contact_type="none",
-        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.15, -0.75, 4.0),
             camera_lookat=(0.15, -0.75, 0.0),
@@ -714,9 +712,9 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
     assert_allclose(qpos_after[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
 
 
-@pytest.mark.required("sparse")
-@pytest.mark.parametrize("rigid_floor_contact_type", ["tet", "vert"])
-def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_viewer):
+@pytest.mark.required
+@pytest.mark.parametrize("model_name", ["box_on_masked_stick"])
+def test_sap_rigid_floor_contact(xml_path, asset_tmp_path, show_viewer):
     SLAB_SIZE = (0.4, 0.4, 0.2)
     CUBE_SIZE = (0.1, 0.1, 0.1)
     RHO = 1000.0
@@ -740,7 +738,6 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
             sap_taud=SAP_TAUD,
             sap_beta=SAP_BETA,
             stiction_tolerance=STICTION_TOLERANCE,
-            rigid_floor_contact_type=rigid_floor_contact_type,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, -2.0, 1.0),
@@ -817,6 +814,16 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
             coup_friction=FRICTION_MU,
         ),
     )
+    # A cube resting flat on the ground, a stick hanging below it whose collision mask leaves out the ground
+    masked_stick_cube = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=xml_path,
+            pos=(1.5, 1.5, 0.5 * CUBE_SIZE[2]),
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
     scene.build(n_envs=2)
 
     push_force = 0.5 * FRICTION_MU * RHO * np.prod(SLAB_SIZE) * GRAVITY
@@ -825,7 +832,7 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
         scene.step()
 
     # Each environment rests still on its own variant, and the other cubes rest still, flat on the ground
-    for entity in (variants, dropped_cube, tilted_cube, refined_cube):
+    for entity in (variants, dropped_cube, tilted_cube, refined_cube, masked_stick_cube):
         assert_allclose(entity.get_vel(), 0.0, atol=1e-5)
         assert_allclose(entity.get_ang(), 0.0, atol=1e-4)
         assert_allclose(entity.get_quat()[..., 1:3], 0.0, atol=1e-3)
@@ -833,13 +840,15 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
     # The pushed slab sticks, creeping at most at the stiction tolerance
     assert (torch.linalg.norm(pushed_slab.get_vel(), dim=-1) < STICTION_TOLERANCE).all()
 
+    # The stick passes through the ground, the cube resting on its own bottom face
+    assert_allclose(masked_stick_cube.get_pos()[..., 2], 0.5 * CUBE_SIZE[2], atol=1e-3)
+
     # The contacts of a body at rest form one patch, regularized as one contact whatever their number. Each contact of
     # stiffness k takes the regularization max(beta^2 / (4 pi^2) * |W| / 3 * K / k, 1 / (dt * k * (dt + taud))), from the
     # Delassus operator W = I / m + [r]x I^-1 [r]x^T of the contact at r from the center of mass and the stiffness K of
     # the patch, the near-rigid one for light bodies and the compliant one for heavy ones. At rest, each contact carries
-    # the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The vertex floor holds a
-    # box on the vertices of its bottom face, all of stiffness VERT_STIFFNESS. The tet floor holds it on slices spread
-    # over that face, closer to its center of mass than the corners, so that it rests less deep.
+    # the impulse vn_hat / Rn, vn_hat = depth / (dt + taud), and together they hold the weight. The floor holds a box
+    # on the vertices of its bottom face, all of stiffness VERT_STIFFNESS.
     substep_dt = DT / SUBSTEPS
     rest_depths = []
     for size, mesh in (
@@ -859,20 +868,15 @@ def test_sap_rigid_floor_contact(rigid_floor_contact_type, asset_tmp_path, show_
         rest_depths.append(mass * GRAVITY * substep_dt * (substep_dt + SAP_TAUD) / np.sum(1.0 / regularizations))
     rest_depths = torch.tensor(rest_depths, dtype=gs.tc_float, device=gs.device)
     rest_heights = 0.5 * torch.tensor((SLAB_SIZE[2], CUBE_SIZE[2]), dtype=gs.tc_float, device=gs.device)
-    # The tet floor bounds the depth of the refined cube by that of a cube held on its corners
-    refined_cube_rest_depth = rest_depths[2] if rigid_floor_contact_type == "vert" else rest_depths[1]
     for entity, entity_rest_heights, entity_rest_depths in (
         (variants, rest_heights, rest_depths[:2]),
         (dropped_cube, rest_heights[1], rest_depths[1]),
         (tilted_cube, rest_heights[1], rest_depths[1]),
-        (refined_cube, rest_heights[1], refined_cube_rest_depth),
+        (refined_cube, rest_heights[1], rest_depths[2]),
     ):
+        # A few roundings of the height of a body in single precision take a share of its depth
         entity_depths = entity_rest_heights - entity.get_pos()[..., 2]
-        if rigid_floor_contact_type == "vert":
-            # A few roundings of the height of a body in single precision take a share of its depth
-            assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
-        else:
-            assert ((entity_depths > 0.0) & (entity_depths < entity_rest_depths)).all()
+        assert_allclose(entity_depths, entity_rest_depths, rtol=5e-3)
 
 
 @pytest.mark.required("sparse")
@@ -892,7 +896,7 @@ def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
         # Rigid-FEM contact without FEM self-contact, which no other test covers
         coupler_options=gs.options.SAPCouplerOptions(
             enable_lagged_friction=enable_lagged_friction,
-            enable_fem_self_tet_contact=False,
+            enable_fem_self_collision=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 1.5, 1.2),

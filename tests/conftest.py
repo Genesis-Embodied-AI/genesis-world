@@ -110,6 +110,19 @@ def scaled_mjcf_joint_equalities():
     return mjcf
 
 
+@pytest.fixture(scope="session")
+def box_on_masked_stick():
+    # A free box with a stick hanging below it, whose collision mask shares no bit with the default one of the ground
+    mjcf = ET.Element("mujoco", model="box_on_masked_stick")
+    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="box")
+    ET.SubElement(body, "freejoint")
+    ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05")
+    ET.SubElement(
+        body, "geom", type="box", size="0.01 0.01 0.05", pos="0 0 -0.08", contype="65536", conaffinity="65536"
+    )
+    return mjcf
+
+
 # Canonical skip reason registry.
 # When a test is skipped during setup with one of these reasons, the skip trace location is
 # normalized to point to the definition line below instead of scattered test function locations.
