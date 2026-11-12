@@ -1221,9 +1221,13 @@ class KinematicEntityDescription(EntityDescription):
         variant, each against its own inertia and geoms. This delivers the 'align' option's promise (a COM-centered,
         principal-axis frame, which also conditions the constraint solve) for mesh and fixed-child bodies, not just
         primitives, while keeping a heterogeneous entity bit-identical to its variants' separate entities.
+
+        Returns the transform taking the coordinates of the authored frame of each link the primary variant anchors to
+        its anchored frame, keyed by link name.
         """
         links = self.links
         variants = self.variants
+        links_alignment_inv = {}
         for i_root, root in enumerate(links):
             if root.parent_idx != -1 or not root.is_aligned:
                 continue
@@ -1311,6 +1315,8 @@ class KinematicEntityDescription(EntityDescription):
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(link_pos, link_quat, com_root, principal_quat)
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
                     alignment_inv_in_link[i_l] = (pos, quat)
+                    if i_v == 0:
+                        links_alignment_inv[links[i_l].name] = (pos, quat)
                     link_desc = variant_links[i_l]
                     geoms = list(link_desc.vgeoms)
                     if isinstance(link_desc, (RigidLinkDescription, RigidVariantLinkDescription)):
@@ -1360,6 +1366,8 @@ class KinematicEntityDescription(EntityDescription):
         # Only the estimates and the anchors need the inertial info. The alignment now lives in the persistent
         # geometry, offset and init_qpos.
         resolution.links_inertial_info.clear()
+
+        return links_alignment_inv
 
     def _resolve_link(self, l_info, j_infos, g_infos, morph, resolution: Resolution):
         """Describe one link from what a parse states about it, and add that description to the entity's own.
@@ -1652,6 +1660,27 @@ class RigidEntityDescription(KinematicEntityDescription):
 
         # Add equality constraints sequentially
         self.equalities.extend(description_from_info(RigidEqualityDescription, e_info) for e_info in eqs_info)
+
+    def _align_free_roots(self, resolution: Resolution):
+        links_alignment_inv = super()._align_free_roots(resolution)
+
+        # The anchors and the relative orientation of a connect or a weld are stated in the authored frames of its
+        # links, which the anchoring moves (see 'func_equality_links' for the data layout).
+        transform_identity = (gu.zero_pos(), gu.identity_quat())
+        for eq_desc in self.equalities:
+            if eq_desc.type == EQUALITY_TYPE.JOINT:
+                continue
+            (pos1, quat1), (pos2, quat2) = [
+                links_alignment_inv.get(name, transform_identity) for name in eq_desc.objs_name
+            ]
+            data = eq_desc.data
+            if eq_desc.type == EQUALITY_TYPE.CONNECT:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos1, quat1)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos2, quat2)
+            else:
+                data[:3] = gu.transform_by_trans_quat(data[:3], pos2, quat2)
+                data[3:6] = gu.transform_by_trans_quat(data[3:6], pos1, quat1)
+                data[6:10] = gu.transform_quat_by_quat(gu.transform_quat_by_quat(gu.inv_quat(quat2), data[6:10]), quat1)
 
     def _describe_geoms(self, cg_infos):
         """Resolve what a parse stated about each collision geom into the description the geom is built from.

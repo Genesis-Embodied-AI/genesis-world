@@ -3093,7 +3093,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             link2_idx,
             anchor_link_idx=link1_idx,
             anchor_pos=np.zeros(3, dtype=gs.np_float),
-            eq_data_tail=(1.0,),
+            eq_data_tail=torch.ones(1, dtype=gs.tc_float, device=gs.device),
             envs_idx=envs_idx,
         )
 
@@ -3181,14 +3181,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             pitch_norm = np.hypot(1.0, pitch / (2.0 * np.pi))
             pitch_cos, pitch_sin = 1.0 / pitch_norm, pitch / (2.0 * np.pi) / pitch_norm
 
+        # The axis and its point are given in the authored link frames, which the morph offset and the inertial
+        # alignment move away from the internal ones the constraint is solved in (see '_offset_world_shift'). The
+        # offsets follow the sorted unique envs that 'add_dynamic_constraint' fills.
+        envs_idx_unique = torch.unique(self._scene._sanitize_envs_idx(envs_idx))
         anchor_link_idx = link2_idx if pos is None else link1_idx
+        anchor_offset_pos = _select_links_offset(self._links_offset_pos, anchor_link_idx, envs_idx_unique)[..., 0, :]
+        anchor_offset_quat = _select_links_offset(self._links_offset_quat, anchor_link_idx, envs_idx_unique)[..., 0, :]
+        link1_offset_quat = _select_links_offset(self._links_offset_quat, link1_idx, envs_idx_unique)[..., 0, :]
+        anchor_pos = gu.inv_transform_by_trans_quat(
+            torch.as_tensor(anchor_pos, dtype=gs.tc_float, device=gs.device), anchor_offset_pos, anchor_offset_quat
+        )
+        axis = gu.inv_transform_by_quat(
+            torch.as_tensor(axis / axis_norm, dtype=gs.tc_float, device=gs.device), link1_offset_quat
+        )
+        pitch_params = torch.tensor((pitch_cos, pitch_sin, *limit, frictionloss), dtype=gs.tc_float, device=gs.device)
         self.constraint_solver.add_dynamic_constraint(
             gs.EQUALITY_TYPE.SCREW,
             link1_idx,
             link2_idx,
             anchor_link_idx,
             anchor_pos,
-            eq_data_tail=(*(axis / axis_norm), pitch_cos, pitch_sin, *limit, frictionloss),
+            eq_data_tail=torch.cat((axis, pitch_params.expand(*axis.shape[:-1], 5)), dim=-1),
             envs_idx=envs_idx,
         )
 

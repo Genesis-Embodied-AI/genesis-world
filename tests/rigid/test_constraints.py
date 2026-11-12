@@ -141,7 +141,9 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     # angle phi such that gap / 2 * cos(phi) - 2 * h * sin(phi) = -gap / 2, h being the half size of the boxes.
     BOX_HALF_SIZE = 0.02
     box_hung = boxes.get_link("box_hung")
-    (connect,) = boxes.equalities
+    box_welded = boxes.get_link("box_welded")
+    welded_pos, welded_quat = box_welded.get_pos(), box_welded.get_quat()
+    connect, _ = boxes.equalities
     gap = 2.0 * (connect.eq_data[0] - BOX_HALF_SIZE)
     rest_angle = np.arctan2(-2.0 * BOX_HALF_SIZE, 0.5 * gap) + np.arccos(
         -0.5 * gap / np.hypot(0.5 * gap, 2.0 * BOX_HALF_SIZE)
@@ -194,8 +196,17 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     links_ab = torch.stack((weld_const_info["link_a"], weld_const_info["link_b"]), dim=-1)
     box_weld = (hanging_box.base_link.idx, fixed_box.base_link.idx)
     cube_weld = (cube.base_link.idx, end_effector.idx)
+    mjcf_weld = (box_welded.idx, boxes.get_link("box_fixed").idx)
     no_weld = (-1, -1)
-    assert_equal(links_ab, [[box_weld, no_weld], [box_weld, no_weld], [cube_weld, box_weld], [box_weld, no_weld]])
+    assert_equal(
+        links_ab,
+        [
+            [mjcf_weld, box_weld, no_weld],
+            [mjcf_weld, box_weld, no_weld],
+            [mjcf_weld, cube_weld, box_weld],
+            [mjcf_weld, box_weld, no_weld],
+        ],
+    )
     for _ in range(110):
         scene.step()
     cubes_pos, cubes_quat = cube.get_pos(), tensor_to_array(cube.get_quat())
@@ -204,6 +215,8 @@ def test_weld_and_connect(connected_boxes, show_viewer, tol):
     assert_allclose(cubes_pos[2] - cubes_pos[0], ee_pos_up - ee_pos_down, tol=1e-3)
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
     assert_allclose(gu.quat_to_rotvec(tensor_to_array(box_hung.get_quat())), (0.0, rest_angle, 0.0), atol=1e-2)
+    assert_allclose(box_welded.get_pos(), welded_pos, tol=1e-3)
+    assert_allclose(box_welded.get_quat(), welded_quat, tol=1e-3)
 
 
 @pytest.mark.required
@@ -228,7 +241,7 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
         ),
         rigid_options=gs.options.RigidOptions(
             integrator=gs.integrator.Euler,
-            max_dynamic_constraints=7,
+            max_dynamic_constraints=8,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.0, -5.0, 1.85),
@@ -236,12 +249,15 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    # Every nut is screwed to a post going through it, the two staying overlapped because the screw stops their collision
+    # Every nut is screwed to a post going through it, the two staying overlapped because the screw stops their
+    # collision. Each post is a box lying along its y axis, stood up by an orientation offset like an asset authored
+    # Y-up, so the upright screw axis given in its frame differs from the axis of the box.
     post_helix, post_free, post_held, post_stopped = (
         scene.add_entity(
             gs.morphs.Box(
-                size=(0.02, 0.02, POST_HEIGHT),
+                size=(0.02, POST_HEIGHT, 0.02),
                 pos=(x, 0.0, 0.5 * POST_HEIGHT),
+                offset_euler=(90.0, 0.0, 0.0),
                 fixed=True,
             ),
             vis_mode="collision",
@@ -338,7 +354,8 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
 
     spindle_link = spindle.get_link("spindle")
     free_nut_link = spindle.get_link("free_nut")
-    for nut_link in (spindle.get_link("nut"), free_nut_link):
+    eccentric_nut_link = spindle.get_link("eccentric_nut")
+    for nut_link in (spindle.get_link("nut"), free_nut_link, eccentric_nut_link):
         rigid.add_screw_constraint(spindle_link.idx, nut_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
     spindle.set_dofs_velocity(SWING_RATE, dofs_idx_local=0)
 
@@ -387,6 +404,11 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
         free_nut_link.get_pos(), spindle_link.get_pos(), spindle_link.get_quat()
     )
     assert_allclose(free_nut_pos[..., :2], 0.0, atol=2e-5)
+    # The swing pulls the eccentric nut radially, and the compliance of the screw rows lets it drift slightly off axis.
+    eccentric_nut_pos = gu.inv_transform_by_trans_quat(
+        eccentric_nut_link.get_pos(), spindle_link.get_pos(), spindle_link.get_quat()
+    )
+    assert_allclose(eccentric_nut_pos[..., :2], 0.0, atol=1e-3)
 
     rest_z = POST_HEIGHT + 0.01
     assert_allclose(nut_resting.get_pos()[..., 2], rest_z, atol=1e-3)
@@ -418,7 +440,7 @@ def test_dynamic_screw(swinging_spindle, show_viewer, tol):
         post_helix.base_link.idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, envs_idx=[1, 1]
     )
     n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
-    assert_equal(n_screws, (6, 7))
+    assert_equal(n_screws, (7, 8))
     with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
         rigid.add_weld_constraint(post_helix.base_link.idx, nut_helix.base_link.idx, envs_idx=[1])
 

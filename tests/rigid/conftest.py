@@ -271,24 +271,54 @@ def mimic_hinges():
 @pytest.fixture(scope="session")
 def connected_boxes():
     # The hung box starts lifted away from the fixed box by a rotation about its pivot, the top edge of the 5 mm gap
-    # between their facing sides
+    # between their facing sides. The welded box is held beside the fixed box by a weld between two sites at its
+    # center, which gravity leaves without torque. The frame of both free boxes stands off their center of mass.
     fixed_pos = np.array((0.0, 0.0, 0.3))
     pivot_pos = np.array((0.0225, 0.0, 0.02))
     hung_angle = -1.2
     hung_quat = gu.xyz_to_quat(np.array((0.0, hung_angle, 0.0)))
-    hung_pos = fixed_pos + pivot_pos - gu.transform_by_quat(np.array((-0.0225, 0.0, 0.02)), hung_quat)
+    hung_geom_pos = np.array((0.01, 0.0, -0.015))
+    hung_pos = fixed_pos + pivot_pos - gu.transform_by_quat(np.array((-0.0225, 0.0, 0.02)) + hung_geom_pos, hung_quat)
+    welded_pos = fixed_pos + np.array((0.02, 0.12, 0.01))
+    welded_quat = gu.xyz_to_quat(np.array((0.4, -0.2, 0.7)))
+    welded_geom_pos = np.array((0.02, 0.01, 0.0))
+    site_fixed_pos = welded_pos + gu.transform_by_quat(welded_geom_pos, welded_quat) - fixed_pos
+    site_fixed_quat = gu.xyz_to_quat(np.array((0.3, 0.5, 0.0)))
+    site_welded_quat = gu.transform_quat_by_quat(site_fixed_quat, gu.inv_quat(welded_quat))
     mjcf = ET.Element("mujoco", model="connected_boxes")
     ET.SubElement(mjcf, "compiler", angle="radian")
     worldbody = ET.SubElement(mjcf, "worldbody")
     box_fixed = ET.SubElement(worldbody, "body", name="box_fixed", pos=" ".join(map(str, fixed_pos)))
     ET.SubElement(box_fixed, "geom", type="box", size="0.02 0.02 0.02")
+    ET.SubElement(
+        box_fixed,
+        "site",
+        name="site_fixed",
+        pos=" ".join(map(str, site_fixed_pos)),
+        quat=" ".join(map(str, site_fixed_quat)),
+    )
     box_hung = ET.SubElement(
         worldbody, "body", name="box_hung", pos=" ".join(map(str, hung_pos)), axisangle=f"0 1 0 {hung_angle}"
     )
     ET.SubElement(box_hung, "freejoint")
-    ET.SubElement(box_hung, "geom", type="box", size="0.02 0.02 0.02")
+    ET.SubElement(box_hung, "geom", type="box", size="0.02 0.02 0.02", pos=" ".join(map(str, hung_geom_pos)))
+    box_welded = ET.SubElement(
+        worldbody, "body", name="box_welded", pos=" ".join(map(str, welded_pos)), quat=" ".join(map(str, welded_quat))
+    )
+    ET.SubElement(box_welded, "freejoint")
+    ET.SubElement(
+        box_welded, "geom", type="box", size="0.03 0.015 0.01", pos=" ".join(map(str, welded_geom_pos)), euler="0 0 0.4"
+    )
+    ET.SubElement(
+        box_welded,
+        "site",
+        name="site_welded",
+        pos=" ".join(map(str, welded_geom_pos)),
+        quat=" ".join(map(str, site_welded_quat)),
+    )
     equality = ET.SubElement(mjcf, "equality")
     ET.SubElement(equality, "connect", body1="box_fixed", body2="box_hung", anchor=" ".join(map(str, pivot_pos)))
+    ET.SubElement(equality, "weld", site1="site_welded", site2="site_fixed")
     return ET.tostring(mjcf, encoding="unicode")
 
 
@@ -303,10 +333,14 @@ def swinging_spindle():
     ET.SubElement(nut, "joint", name="travel", type="slide", axis="0 0 1")
     ET.SubElement(nut, "joint", name="turn", type="hinge", axis="0 0 1")
     ET.SubElement(nut, "geom", type="box", size="0.05 0.05 0.01")
-    # The spindle passes through the solid free nut, which only stays on it because the screw stops their collision
+    # The spindle passes through the solid free nuts, which only stay on it because the screw stops their collision.
+    # The frame of the eccentric nut stands off its center of mass.
     free_nut = ET.SubElement(worldbody, "body", name="free_nut", pos="0 0 0.5")
     ET.SubElement(free_nut, "freejoint")
     ET.SubElement(free_nut, "geom", type="box", size="0.05 0.05 0.01")
+    eccentric_nut = ET.SubElement(worldbody, "body", name="eccentric_nut", pos="0 0 0.85")
+    ET.SubElement(eccentric_nut, "freejoint")
+    ET.SubElement(eccentric_nut, "geom", type="box", size="0.05 0.05 0.01", pos="0.02 0.01 0", euler="20 0 0")
     return ET.tostring(mjcf, encoding="unicode")
 
 
