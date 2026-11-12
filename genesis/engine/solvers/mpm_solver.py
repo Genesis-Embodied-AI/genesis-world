@@ -317,6 +317,7 @@ class MPMMaterials:
         S: qd.types.matrix(3, 3),
         V: qd.types.matrix(3, 3),
         Jp: float,
+        eps: float,
     ):
         """
         Return the deformation gradient, its singular values and the plastic volume ratio once plasticity applies.
@@ -328,7 +329,7 @@ class MPMMaterials:
         Jp_new = gs.qd_float(1.0)
         for j_mat in qd.static(range(len(self.materials))):
             if i_mat == j_mat:
-                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp)
+                F_new, S_new, Jp_new = self.materials[j_mat].update_F_S_Jp(J, F_tmp, U, S, V, Jp, eps)
         return F_new, S_new, Jp_new
 
     @qd.func
@@ -980,6 +981,7 @@ def kernel_transfer_particles_to_grid(
                 mpm_state.particles.S[i_p, i_b],
                 mpm_state.particles.V[i_p, i_b],
                 mpm_state.particles.Jp[i_p, i_b],
+                mpm_info.EPS[None],
             )
             mpm_state.particles.F_next[i_p, i_b] = F_new
             mpm_state.particles.Jp_next[i_p, i_b] = Jp_new
@@ -1360,7 +1362,7 @@ def func_advect_particle(
     mpm_state.particles.pos_next[i_p, i_b] = pos
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_integrate_particles(
     mpm_state: MPMState,
     links_state: LinksState,
@@ -1390,7 +1392,7 @@ def kernel_integrate_particles(
             mpm_state.particles.Jp_next[i_p, i_b] = mpm_state.particles.Jp[i_p, i_b]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_transfer_grid_to_particles_grad(
     mpm_state: MPMState,
     links_state: LinksState,
@@ -1461,7 +1463,7 @@ def kernel_transfer_grid_to_particles_grad(
 # The gather is reversed by hand, which reduces the adjoint of the cells of the grid in a fixed order where autodiff
 # would add it with atomic additions. The backward takes the arguments of the launch.
 @register_custom_backward(kernel_transfer_grid_to_particles_grad)
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_transfer_grid_to_particles(
     mpm_state: MPMState,
     links_state: LinksState,

@@ -40,7 +40,7 @@ class RigidMPMHybridInfo(Data, kind=DataKind.CONSTANT):
 
 
 @reversed_with(is_backward=True)
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_update_hybrid_soft_part(
     substep_dt: float,
     dt: float,

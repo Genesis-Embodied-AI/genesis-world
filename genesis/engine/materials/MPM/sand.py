@@ -44,7 +44,7 @@ class Sand(Base):
         self.update_stress = self._update_stress_sand
 
     @qd.func
-    def _sand_projection(self, S, Jp):
+    def _sand_projection(self, S, Jp, eps):
         S_out = qd.Matrix.zero(gs.qd_float, 3, 3)
         epsilon = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(3)):
@@ -52,7 +52,7 @@ class Sand(Base):
             S_out[i, i] = 1
         tr = epsilon.sum() + Jp
         epsilon_hat = epsilon - tr / 3
-        epsilon_hat_norm = epsilon_hat.norm(gs.EPS)
+        epsilon_hat_norm = epsilon_hat.norm(eps)
 
         Jp_new = gs.qd_float(0.0)
         if tr >= 0.0:
@@ -66,8 +66,8 @@ class Sand(Base):
         return S_out, Jp_new
 
     @qd.func
-    def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp):
-        S_new, Jp_new = self._sand_projection(S, Jp)
+    def _update_F_S_Jp_sand(self, J, F_tmp, U, S, V, Jp, eps):
+        S_new, Jp_new = self._sand_projection(S, Jp, eps)
         F_new = U @ S_new @ V.transpose()
         return F_new, S_new, Jp_new
 

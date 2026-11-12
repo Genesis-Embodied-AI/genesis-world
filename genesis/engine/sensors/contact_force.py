@@ -58,7 +58,7 @@ def _drop_filtered_counterpart_contacts(
     is_b[:, filtered_sensors, :] &= ~(link_a[:, None, :, None] == filter_rows).any(dim=-1)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_get_contacts_forces(
     sensors_link_idx: qd.types.ndarray(),
     filter_links_idx: qd.types.ndarray(),

@@ -38,7 +38,7 @@ class Liquid(Base):
         self.needs_svd = self.viscous
 
     @qd.func
-    def _update_F_S_Jp_liquid(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_liquid(self, J, F_tmp, U, S, V, Jp, eps):
         F_new = qd.Matrix.identity(gs.qd_float, 3) * qd.pow(J, 1.0 / 3.0)
         S_new = S
         Jp_new = Jp

@@ -90,7 +90,7 @@ class Base(Material["MPMEntity"]):
             self.update_stress = self._update_stress_default
 
     @qd.func
-    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp):
+    def _update_F_S_Jp_noop(self, J, F_tmp, U, S, V, Jp, eps):
         raise NotImplementedError
 
     @qd.func
