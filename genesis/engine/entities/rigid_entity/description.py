@@ -86,9 +86,9 @@ class SignedDistanceFieldDescription:
         """Resolve the grid sampling the signed distance field (SDF) of a geometry, at the resolution its material asks.
 
         The grid extends past the bounding box of the geometry by a margin along each axis. Its cells have the size the
-        material asks, refined further for a closed non-convex geometry to fit 2 across its thinnest walls, and clipped
-        along each axis to the minimum and maximum resolutions of the material. A terrain carries no gradient, since it
-        derives its gradient from its height field instead.
+        material asks, refined further to fit 2 across the width of a convex geometry or the thinnest walls of a closed
+        non-convex one, and clipped along each axis to the minimum and maximum resolutions of the material. A terrain
+        carries no gradient, since it derives its gradient from its height field instead.
         """
         # The vertices are a trimesh array subclass, which the grid parameters derived from them would carry into an
         # exported description
@@ -100,7 +100,8 @@ class SignedDistanceFieldDescription:
         # leave primitive-vs-mesh contacts noisy whenever the smallest dimension of the primitive is below it.
         cell_size_lower = grid_size / (material.sdf_max_res - 1)
         cell_size_upper = grid_size / max(material.sdf_min_res - 1, 2)
-        # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
+        # A thin convex geom, such as a piece of the convex decomposition of a thin shell, fits 2 cells across its
+        # width, so that the queries near its faces resolve the side they lie on. A non-convex geom tunnels when the
         # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
         # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
         # so a wall is finely sampled along its tangent axes too. For example, the thin vertical wall of a mug extends
@@ -110,7 +111,12 @@ class SignedDistanceFieldDescription:
         # watertightness.
         sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
         cell_size_target = material.sdf_cell_size
-        if not mesh.is_convex:
+        if mesh.is_convex:
+            convex_width = mu.get_convex_width(
+                np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+            )
+            cell_size_target = min(cell_size_target, convex_width / 2.0)
+        else:
             if mesh.is_watertight:
                 wall_thickness = mu.get_wall_thickness(
                     np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces), quantile=0.25
