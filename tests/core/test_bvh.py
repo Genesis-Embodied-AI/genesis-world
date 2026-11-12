@@ -34,7 +34,7 @@ def bvh(n_leaves, n_trees, boxes_layout):
         leaves_max[:] = leaves_max[:, :1]
     bvh_state.leaves.aabbs_min.from_numpy(leaves_min)
     bvh_state.leaves.aabbs_max.from_numpy(leaves_max)
-    build_bvh(bvh_state, bvh_config, eps=gs.EPS)
+    build_bvh(bvh_state, bvh_config, eps=gs.EPS, node_fit=None)
     return bvh_state, bvh_config
 
 

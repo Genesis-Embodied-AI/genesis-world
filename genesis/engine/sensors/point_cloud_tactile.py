@@ -337,7 +337,14 @@ class ProximityPoints:
 
     @qd.func
     def is_node_hit(
-        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+        self,
+        i_t: int,
+        i_q: int,
+        i_n: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
     ) -> bool:
         return func_sphere_intersects_aabb(query.probe, bound, node_min, node_max)
 
@@ -1259,6 +1266,7 @@ class SurfacePoints:
         self,
         i_t: int,
         i_q: int,
+        i_n: int,
         node_min: qd.types.vector(3),
         node_max: qd.types.vector(3),
         query,

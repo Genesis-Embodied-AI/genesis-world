@@ -547,7 +547,14 @@ class RayTriangles:
 
     @qd.func
     def is_node_hit(
-        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+        self,
+        i_t: int,
+        i_q: int,
+        i_n: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
     ) -> bool:
         aabb_t = ray_aabb_intersection(query.start, query.dir, node_min, node_max, self.eps[None])
         return aabb_t >= 0.0 and aabb_t < bound
@@ -622,7 +629,14 @@ class ClosestTriangles:
 
     @qd.func
     def is_node_hit(
-        self, i_t: int, i_q: int, node_min: qd.types.vector(3), node_max: qd.types.vector(3), query, bound: float
+        self,
+        i_t: int,
+        i_q: int,
+        i_n: int,
+        node_min: qd.types.vector(3),
+        node_max: qd.types.vector(3),
+        query,
+        bound: float,
     ) -> bool:
         return func_sphere_intersects_aabb(query.point, bound, node_min, node_max)
 
