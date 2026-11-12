@@ -2660,31 +2660,72 @@ def kernel_init_sap_solve(
     N_LANES = qd.static(32 if sap_config.enable_cooperative_kernels else 1)
     newton_counter[()] = sap_info.n_newton_iterations[None]
     if qd.static(sap_config.has_fem):
-        # The velocities of the FEM vertices of each entity, which are also the reference of its cost. A free vertex of
-        # an entity in contact starts from its velocity at the start of the substep, and of an entity without contact
-        # from the inertia guess, which gravity alone moves. A constrained vertex starts from the velocity that follows
-        # its constraint.
+        # The velocities of the FEM vertices of each entity, which are also the reference of its cost, and the inertia of
+        # the rigid motions of the entity, which their Hessian starts from at every Newton iteration. A free vertex of an
+        # entity in contact starts from its velocity at the start of the substep, and of an entity without contact from
+        # the inertia guess, which gravity alone moves. A constrained vertex starts from the velocity that follows its
+        # constraint. The rigid motion (c_lin, c_ang) moves a vertex at c_lin + c_ang x d, d its position relative to
+        # x_ref, whose inertia sums a d^T d terms over the vertices that move, a being the inertia of a vertex in the
+        # cost. The lanes of a chunk take an environment and an entity, striding its vertices.
         dt = sap_info.substep_dt[None]
-        for i_e, i_b in qd.ndrange(sap_state.fem_coarse.mass.shape[0], sap_state.fem_coarse.mass.shape[1]):
-            is_in_contact = False
-            for i_k in range(sap_info.entities_chunk_start[i_e], sap_info.entities_chunk_start[i_e + 1]):
-                for i_v in range(sap_info.chunks_vertex_start[i_k], sap_info.chunks_vertex_end[i_k]):
-                    if qd.static(sap_config.has_fem_contacts):
+        inertia_factor = fem_info.dt2[None] * (fem_info.damping_alpha_dt[None] + 1.0)
+        for i_t in range(sap_state.fem_coarse.mass.shape[1] * sap_state.fem_coarse.mass.shape[0] * N_LANES):
+            n_entities = sap_state.fem_coarse.mass.shape[0]
+            i_lane = i_t % N_LANES
+            i_e = i_t // N_LANES % n_entities
+            i_b = i_t // (N_LANES * n_entities)
+            i_k_start = sap_info.entities_chunk_start[i_e]
+            i_k_last = sap_info.entities_chunk_start[i_e + 1] - 1
+            i_v_start = sap_info.chunks_vertex_start[i_k_start]
+            i_v_end = sap_info.chunks_vertex_end[i_k_last]
+            # The vertices of the entity holding a contact, summed over the lanes
+            n_contact_verts = 0
+            if qd.static(sap_config.has_fem_contacts):
+                for i_v_ in range((i_v_end - i_v_start + N_LANES - 1) // N_LANES):
+                    i_v = i_v_start + i_v_ * N_LANES + i_lane
+                    if i_v < i_v_end:
                         if (
                             sap_state.constraint_order.fem_incidence_start[i_v + 1, i_b]
                             > sap_state.constraint_order.fem_incidence_start[i_v, i_b]
                         ):
-                            is_in_contact = True
-            for i_k in range(sap_info.entities_chunk_start[i_e], sap_info.entities_chunk_start[i_e + 1]):
-                for i_v in range(sap_info.chunks_vertex_start[i_k], sap_info.chunks_vertex_end[i_k]):
+                            n_contact_verts = n_contact_verts + 1
+                if qd.static(N_LANES > 1):
+                    n_contact_verts = su.qd_block_sum(n_contact_verts)
+            x_ref = fem_state.vertices.pos[i_v_start, i_b]
+            # The mass, then its first and second moments
+            mass = gs.qd_float(0.0)
+            mass_first = qd.Vector.zero(gs.qd_float, 3)
+            mass_second = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for i_v_ in range((i_v_end - i_v_start + N_LANES - 1) // N_LANES):
+                i_v = i_v_start + i_v_ * N_LANES + i_lane
+                if i_v < i_v_end:
                     v = fem_state.vertices.vel_next[i_v, i_b]
                     if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
                         v = fem_state.vertices.vel[i_v, i_b]
-                        if not is_in_contact:
+                        if n_contact_verts == 0:
                             v = v + fem_info.gravity[i_b] * dt
                         fem_state.vertices.vel_next[i_v, i_b] = v
                         fem_state.vertices.pos_next[i_v, i_b] = fem_state.vertices.pos[i_v, i_b] + v * dt
+                        a = fem_info.vertices.mass_over_dt2[i_v] * inertia_factor
+                        d = fem_state.vertices.pos[i_v, i_b] - x_ref
+                        mass = mass + a
+                        mass_first = mass_first + a * d
+                        mass_second = mass_second + a * (
+                            d.norm_sqr() * qd.Matrix.identity(gs.qd_float, 3) - d.outer_product(d)
+                        )
                     sap_state.fem_vertices.v[i_v, i_b] = v
+            if qd.static(N_LANES > 1):
+                # The lanes sum scalars alone
+                mass = su.qd_block_sum(mass)
+                for k in qd.static(range(3)):
+                    mass_first[k] = su.qd_block_sum(mass_first[k])
+                    for l in qd.static(range(3)):
+                        mass_second[k, l] = su.qd_block_sum(mass_second[k, l])
+            if i_lane == 0:
+                sap_state.fem_coarse.x_ref[i_e, i_b] = x_ref
+                sap_state.fem_coarse.mass[i_e, i_b] = mass
+                sap_state.fem_coarse.mass_first[i_e, i_b] = mass_first
+                sap_state.fem_coarse.mass_second[i_e, i_b] = mass_second
     if qd.static(sap_config.has_rigid):
         # The rigid dofs of each kinematic tree, in contact when the contact lists of the links of the subtree of its
         # root hold any contact.
@@ -2747,48 +2788,6 @@ def kernel_init_sap_solve(
             if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
                 gradient_ref = -fem_info.substep_dt[None] * fem_state.vertices_energy.force[i_v, i_b]
             sap_state.fem_vertices.gradient_ref[i_v, i_b] = gradient_ref
-        # The inertia of the rigid motions of each FEM entity, which their Hessian starts from at every Newton
-        # iteration. The rigid motion (c_lin, c_ang) moves a vertex at c_lin + c_ang x d, d its position relative to
-        # x_ref, whose inertia sums a d^T d terms over the vertices that move, a being the inertia of a vertex in the
-        # cost. The lanes of a chunk take an environment and an entity, striding its vertices.
-        inertia_factor = fem_info.dt2[None] * (fem_info.damping_alpha_dt[None] + 1.0)
-        for i_t in range(sap_state.fem_coarse.mass.shape[1] * sap_state.fem_coarse.mass.shape[0] * N_LANES):
-            n_entities = sap_state.fem_coarse.mass.shape[0]
-            i_lane = i_t % N_LANES
-            i_e = i_t // N_LANES % n_entities
-            i_b = i_t // (N_LANES * n_entities)
-            i_k_start = sap_info.entities_chunk_start[i_e]
-            i_k_last = sap_info.entities_chunk_start[i_e + 1] - 1
-            i_v_start = sap_info.chunks_vertex_start[i_k_start]
-            i_v_end = sap_info.chunks_vertex_end[i_k_last]
-            x_ref = fem_state.vertices.pos[i_v_start, i_b]
-            # The mass, then its first and second moments
-            mass = gs.qd_float(0.0)
-            mass_first = qd.Vector.zero(gs.qd_float, 3)
-            mass_second = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for i_v_ in range((i_v_end - i_v_start + N_LANES - 1) // N_LANES):
-                i_v = i_v_start + i_v_ * N_LANES + i_lane
-                if i_v < i_v_end:
-                    if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
-                        a = fem_info.vertices.mass_over_dt2[i_v] * inertia_factor
-                        d = fem_state.vertices.pos[i_v, i_b] - x_ref
-                        mass = mass + a
-                        mass_first = mass_first + a * d
-                        mass_second = mass_second + a * (
-                            d.norm_sqr() * qd.Matrix.identity(gs.qd_float, 3) - d.outer_product(d)
-                        )
-            if qd.static(N_LANES > 1):
-                # The lanes sum scalars alone
-                mass = su.qd_block_sum(mass)
-                for k in qd.static(range(3)):
-                    mass_first[k] = su.qd_block_sum(mass_first[k])
-                    for l in qd.static(range(3)):
-                        mass_second[k, l] = su.qd_block_sum(mass_second[k, l])
-            if i_lane == 0:
-                sap_state.fem_coarse.x_ref[i_e, i_b] = x_ref
-                sap_state.fem_coarse.mass[i_e, i_b] = mass
-                sap_state.fem_coarse.mass_first[i_e, i_b] = mass_first
-                sap_state.fem_coarse.mass_second[i_e, i_b] = mass_second
 
 
 @qd.func
