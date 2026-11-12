@@ -6,7 +6,9 @@ The simulation engine is [Genesis World](https://github.com/Genesis-Embodied-AI/
 
 ## Demo
 
-[Watch the demo video (77 seconds, with captions)](Physical_AI_Probability.mp4)
+[![Silent preview of the demo, sped up about six times](demo_preview.gif)](Physical_AI_Probability.mp4?raw=true)
+
+Click the preview to open the full video file (77 seconds, with captions, 31 MB). Depending on the browser, it may download first.
 
 The video shows a coin flip and a die roll, the forecast curves while a toss is still in the air, and a batch of 1,000 die rolls filling the frequency table.
 
