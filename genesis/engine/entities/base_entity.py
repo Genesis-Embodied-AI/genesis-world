@@ -125,6 +125,9 @@ class Entity(RBC):
         The options are immutable, and the morph and the surface they hold are copies, so editing them leaves the entity
         as it is.
         """
+        # FIXME: Copy the morph and the surface once as the entity is added and freeze them, rather than copying them at
+        # every read. The resolution writes its defaults into the morph the user gives, which a morph shared by a rigid
+        # and a kinematic entity relies on, since a non-convex kinematic mesh exhausts the memory otherwise.
         return self._options.model_copy(
             update={"morph": copy.deepcopy(self._options.morph), "surface": copy.deepcopy(self._options.surface)}
         )
