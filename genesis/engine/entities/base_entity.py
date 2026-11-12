@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -119,8 +120,14 @@ class Entity(RBC):
 
     @property
     def options(self) -> gs.entities.BaseEntity:
-        """The options this entity was constructed from."""
-        return self._options
+        """The options this entity was constructed from.
+
+        The options are immutable, and the morph and the surface they hold are copies, so editing them leaves the entity
+        as it is.
+        """
+        return self._options.model_copy(
+            update={"morph": copy.deepcopy(self._options.morph), "surface": copy.deepcopy(self._options.surface)}
+        )
 
     @property
     def material(self) -> Material:
