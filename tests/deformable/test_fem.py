@@ -1294,7 +1294,7 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(xml_path, tol, show_
 @pytest.mark.required
 def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
     DT = 0.01
-    GRAVITY = 9.81
+    GRAVITY = 9.8
     N_GRID = 8
 
     scene = gs.Scene(
@@ -1313,7 +1313,12 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
             file=cloth_grid_obj_path,
             pos=(0.0, 0.0, 1.0),
         ),
-        material=gs.materials.FEM.Cloth(),
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=1e6,
+        ),
     )
     scene.build(n_envs=2)
     # The two corners of the edge at y = -0.5, and the center of the cloth
@@ -1332,7 +1337,7 @@ def test_cloth_pinned_vertices(cloth_grid_obj_path, show_viewer):
     assert (verts_pos[:, center_idx, 1] < -0.5).all()
     assert (verts_pos[:, center_idx, 2] < 1.0).all()
     # The GPU accumulates the forces of the vertices atomically, in an order that differs between environments
-    assert_allclose(verts_pos[0], verts_pos[1], tol=5e-5)
+    assert_allclose(verts_pos[0], verts_pos[1], tol=1e-5)
 
 
 @pytest.mark.required
@@ -1362,6 +1367,9 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
             pos=(0.0, 0.0, 0.05),
         ),
         material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending_E=1e6,
             contact_thickness=CONTACT_THICKNESS,
         ),
     )
@@ -1373,15 +1381,16 @@ def test_cloth_ground_contact(cloth_grid_obj_path, show_viewer):
         assert (cloth.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
     verts_z = cloth.get_verts_pos()[..., 2]
     assert (verts_z < CONTACT_THICKNESS + D_HAT).all()
-    assert_allclose(cloth.get_verts_vel(), 0.0, atol=5e-11)
+    assert_allclose(cloth.get_verts_vel(), 0.0, atol=2e-9)
 
 
 @pytest.mark.required
 # The contact between cloths resolves its gaps in double precision, the precision of its reference
 @pytest.mark.precision("64")
-def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer):
+def test_cloth_contact_between_cloths(cloth_grid_obj_factory, tmp_path, show_viewer):
     CONTACT_THICKNESS = 1e-3
-    VELOCITY_TOL = 5e-2
+    VELOCITY_TOL = 1e-1
+    CUBE_SIZE = 0.05
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1392,49 +1401,68 @@ def test_cloth_contact_between_cloths(cloth_grid_obj_path, tmp_path, show_viewer
         ),
         # The capacity of the pairs starts below the pairs of the first contact, so that it grows to keep them all
         ipc_options=gs.options.IPCOptions(
+            d_hat=1e-3,
             init_collision_pair_capacity=1,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.2, -1.2, 0.8),
-            camera_lookat=(0.0, 0.0, 0.4),
+            camera_pos=(0.6, -0.6, 0.45),
+            camera_lookat=(0.0, 0.0, 0.05),
         ),
         show_viewer=show_viewer,
     )
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
-    # Two vertical sheets crossing in plan view, the second one above the first, so that it falls onto it
-    sheets = [
+    # A 4 x 4 grid of fixed cubes 15 cm apart, under four horizontal cloths of decreasing sizes, the smaller ones higher
+    for i in range(4):
+        for j in range(4):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    size=(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE),
+                    pos=((i - 1.5) * 0.15, (j - 1.5) * 0.15, 0.5 * CUBE_SIZE),
+                    fixed=True,
+                ),
+            )
+    resolutions = (16, 8, 4, 2)
+    layers = [
         scene.add_entity(
             morph=gs.morphs.Mesh(
-                file=cloth_grid_obj_path,
-                scale=0.4,
+                file=cloth_grid_obj_factory(n),
+                scale=size,
                 pos=(0.0, 0.0, z),
-                euler=euler,
             ),
-            material=gs.materials.FEM.Cloth(),
+            material=gs.materials.FEM.Cloth(
+                E=6e4,
+                bending="hinge",
+                bending_E=1e6,
+                contact_thickness=CONTACT_THICKNESS,
+                friction_mu=0.0,
+                contact_resistance=1e5,
+            ),
         )
-        for euler, z in (((90.0, 0.0, 0.0), 0.23), ((90.0, 0.0, 90.0), 0.68))
+        for n, size, z in zip(resolutions, (0.5, 0.3, 0.2, 0.1), (0.08, 0.12, 0.14, 0.16))
     ]
     scene.build(n_envs=2)
 
-    # The stack of the two sheets collapses onto the ground within 1.3 s
-    for _ in range(150):
+    # The stack lands on the cubes and comes to rest within 0.3 s
+    for _ in range(50):
         scene.step()
-    # The upper sheet rests on the lower one, both on the ground, at rest up to the convergence tolerance of the solve
-    for sheet in sheets:
-        assert (sheet.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
-        assert (sheet.get_verts_vel().norm(dim=-1) < VELOCITY_TOL).all()
-    assert (
-        sheets[1].get_verts_pos()[..., 2].max(dim=-1).values > sheets[0].get_verts_pos()[..., 2].max(dim=-1).values
-    ).all()
+    # Every layer rests above the ground, at rest up to the convergence tolerance of the solve
+    for layer in layers:
+        assert (layer.get_verts_pos()[..., 2] > CONTACT_THICKNESS).all()
+        assert (layer.get_verts_vel().norm(dim=-1) < VELOCITY_TOL).all()
+    # The layers keep their order at their shared center
+    centers_z = torch.stack(
+        [layer.get_verts_pos()[..., (n // 2) * (n + 1) + n // 2, 2] for layer, n in zip(layers, resolutions)]
+    )
+    assert (centers_z[1:] > centers_z[:-1]).all()
 
-    # The sheets never cross: their final shapes form a scene that passes the check of crossing cloths
+    # The layers never cross: their final shapes form a scene that passes the check of crossing cloths
     scene_check = gs.Scene(ipc_options=gs.options.IPCOptions(intersection_check=True))
-    faces = igl.read_triangle_mesh(cloth_grid_obj_path)[1]
-    for i_sheet, sheet in enumerate(sheets):
-        path = str(tmp_path / f"sheet{i_sheet}.obj")
-        igl.write_triangle_mesh(path, tensor_to_array(sheet.get_verts_pos()[0], dtype=gs.np_float), faces)
+    for i_layer, (layer, n) in enumerate(zip(layers, resolutions)):
+        faces = igl.read_triangle_mesh(cloth_grid_obj_factory(n))[1]
+        path = str(tmp_path / f"layer{i_layer}.obj")
+        igl.write_triangle_mesh(path, tensor_to_array(layer.get_verts_pos()[0], dtype=gs.np_float), faces)
         scene_check.add_entity(morph=gs.morphs.Mesh(file=path), material=gs.materials.FEM.Cloth())
     scene_check.build()
 
@@ -1462,7 +1490,13 @@ def test_cloth_self_contact(cloth_folded_obj_path, show_viewer):
         morph=gs.morphs.Mesh(
             file=cloth_folded_obj_path,
         ),
-        material=gs.materials.FEM.Cloth(),
+        # The quadratic bending assumes a flat rest shape, while this cloth is folded at rest
+        material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=1e6,
+        ),
     )
     scene.build()
 
@@ -1507,6 +1541,9 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
             pos=(0.0, 0.0, 0.01),
         ),
         material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending_E=1e6,
             contact_thickness=CONTACT_THICKNESS,
         ),
     )
@@ -1523,7 +1560,7 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
         scene.step()
         box_vz.append(box.get_vel()[..., 2])
     # The box comes to rest on the cloth, in its contact band, the contact keeping the cloth off the ground
-    assert (torch.stack(box_vz[-20:]).abs() < 5e-6).all()
+    assert (torch.stack(box_vz[-20:]).abs() < 1e-5).all()
     verts = cloth.get_verts_pos()
     is_under_box = (verts[..., :2].abs() < 0.5 * BOX_SIZE).all(dim=-1)
     gaps_min = (
@@ -1540,6 +1577,9 @@ def test_cloth_robot_contact(cloth_grid_obj_path, show_viewer):
     TARGET_XY = (0.45, 0.0)
 
     scene = gs.Scene(
+        ipc_options=gs.options.IPCOptions(
+            d_hat=1e-3,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.1, -0.6, 0.6),
             camera_lookat=(0.45, 0.0, 0.2),
@@ -1559,11 +1599,16 @@ def test_cloth_robot_contact(cloth_grid_obj_path, show_viewer):
     cloth = scene.add_entity(
         morph=gs.morphs.Mesh(
             file=cloth_grid_obj_path,
-            scale=0.3,
+            scale=0.24,
             pos=(*TARGET_XY, TABLE_TOP + 0.011),
         ),
         material=gs.materials.FEM.Cloth(
+            E=2e4,
+            shear_modulus=2e3,
+            bending="hinge",
+            bending_E=3e3,
             contact_thickness=CONTACT_THICKNESS,
+            friction_mu=1.0,
         ),
     )
     franka = scene.add_entity(

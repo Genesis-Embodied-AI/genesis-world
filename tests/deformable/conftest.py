@@ -12,18 +12,31 @@ with lazy_imports():
 
 
 @pytest.fixture(scope="session")
-def cloth_grid_obj_path(asset_tmp_path):
+def cloth_grid_obj_factory(asset_tmp_path):
+    """Return a function that writes a flat 1 m x 1 m square cloth in the xy plane and returns the path of its file.
+
+    The function takes the number n of squares along each side, each square split into two triangles. The vertex of
+    index j * (n + 1) + i lies at x = i / n - 0.5, y = j / n - 0.5.
+    """
+
+    def write_cloth_grid(n):
+        verts = np.array([[i / n - 0.5, j / n - 0.5, 0.0] for j in range(n + 1) for i in range(n + 1)])
+        faces = []
+        for j in range(n):
+            for i in range(n):
+                v00 = j * (n + 1) + i
+                faces += [[v00, v00 + 1, v00 + n + 1], [v00 + 1, v00 + n + 2, v00 + n + 1]]
+        path = str(asset_tmp_path / f"cloth_grid_{n}.obj")
+        igl.write_triangle_mesh(path, verts, np.array(faces))
+        return path
+
+    return write_cloth_grid
+
+
+@pytest.fixture(scope="session")
+def cloth_grid_obj_path(cloth_grid_obj_factory):
     """Write a flat 1 m x 1 m square cloth in the xy plane, split into 8 x 8 squares of two triangles each."""
-    n = 8
-    verts = np.array([[i / n - 0.5, j / n - 0.5, 0.0] for j in range(n + 1) for i in range(n + 1)])
-    faces = []
-    for j in range(n):
-        for i in range(n):
-            v00 = j * (n + 1) + i
-            faces += [[v00, v00 + 1, v00 + n + 1], [v00 + 1, v00 + n + 2, v00 + n + 1]]
-    path = str(asset_tmp_path / "cloth_grid.obj")
-    igl.write_triangle_mesh(path, verts, np.array(faces))
-    return path
+    return cloth_grid_obj_factory(8)
 
 
 @pytest.fixture(scope="session")
