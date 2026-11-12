@@ -45,6 +45,7 @@ from genesis.engine.solvers.fem_solver import (
     func_elastic_product,
     func_element_energy_gradient_damped,
     func_element_mapping_matrix,
+    func_is_vertex_free,
 )
 from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 from genesis.engine.solvers.rigid.collider.broadphase import func_is_link_pair_bound
@@ -959,7 +960,6 @@ class SAPConfig(Config):
     has_fem_contacts: bool
     has_link_constraints: bool
     enable_lagged_friction: bool
-    enable_vertex_constraints: bool
     batch_links_info: bool
     # Whether the lanes of a GPU subgroup take the items of a chunk together (see CHUNK_SIZE), a link summing the wrench
     # of its contacts in several shares (see N_LINK_WRENCH_SHARES), where one CPU thread takes them in a row.
@@ -1720,7 +1720,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_fem_contacts=n_env_fem_entries > 0,
             has_link_constraints=has_link_constraints,
             enable_lagged_friction=self._enable_lagged_friction,
-            enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
             enable_cooperative_kernels=enable_cooperative_kernels,
             chain_storage=chain_storage,
@@ -2807,11 +2806,12 @@ def kernel_init_sap_solve(
             mass = gs.qd_float(0.0)
             mass_first = qd.Vector.zero(gs.qd_float, 3)
             mass_second = qd.Matrix.zero(gs.qd_float, 3, 3)
+            has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
             for i_v_ in range((i_v_end - i_v_start + N_LANES - 1) // N_LANES):
                 i_v = i_v_start + i_v_ * N_LANES + i_lane
                 if i_v < i_v_end:
                     v = fem_state.vertices.vel_next[i_v, i_b]
-                    if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+                    if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
                         v = fem_state.vertices.vel[i_v, i_b]
                         if n_contact_verts == 0:
                             v = v + fem_info.gravity[i_b] * dt
@@ -2877,9 +2877,7 @@ def kernel_init_sap_solve(
         for i_e, i_b in qd.ndrange(
             *fem_state.elements_energy.energy.shape, axes=qd.static(eoa(fem_state.elements_energy.energy))
         ):
-            energy, gradient = func_element_energy_gradient_damped(
-                i_e, i_b, fem_state, fem_info, vertex_constraints, fem_config
-            )
+            energy, gradient = func_element_energy_gradient_damped(i_e, i_b, fem_state, fem_info, fem_config)
             fem_state.elements_energy.energy[i_e, i_b] = energy
             fem_state.elements_energy.stress[i_e, i_b] = -fem_info.elements.V[i_e] * gradient
         func_accumulate_vertices(
@@ -2896,29 +2894,14 @@ def kernel_init_sap_solve(
         )
         for i_v, i_b in qd.ndrange(*sap_state.fem_vertices.v.shape, axes=qd.static(eoa(sap_state.fem_vertices.v))):
             gradient_ref = qd.Vector.zero(gs.qd_float, 3)
-            if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+            has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+            if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
                 gradient_ref = -fem_info.substep_dt[None] * fem_state.vertices_energy.force[i_v, i_b]
             sap_state.fem_vertices.gradient_ref[i_v, i_b] = gradient_ref
 
 
 @qd.func
-def func_is_fem_vertex_free(
-    i_v: int, i_b: int, vertex_constraints: FEMVertexConstraints, sap_config: qd.template()
-) -> bool:
-    """Whether a FEM vertex moves in the solve, unconstrained.
-
-    The vertex is i_v of the environment i_b.
-    """
-    is_free = True
-    if qd.static(sap_config.enable_vertex_constraints):
-        is_free = not vertex_constraints.is_constrained[i_v, i_b]
-    return is_free
-
-
-@qd.func
-def func_is_fem_element_free(
-    i_e: int, i_b: int, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints, sap_config: qd.template()
-) -> bool:
+def func_is_fem_element_free(i_e: int, i_b: int, fem_info: FEMInfo, vertex_constraints: FEMVertexConstraints):
     """Whether any vertex of a FEM element moves in the solve, unconstrained.
 
     The element is i_e of the environment i_b. A contact of elements whose vertices are all constrained against the
@@ -2926,9 +2909,10 @@ def func_is_fem_element_free(
     drops it.
     """
     is_free = False
+    has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
     for i in qd.static(range(4)):
         i_v = fem_info.elements.el2v[i_e][i]
-        is_free = is_free or func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config)
+        is_free = is_free or func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints)
     return is_free
 
 
@@ -3015,6 +2999,9 @@ def func_gather_fem_vertex(
     elastic = qd.Vector.zero(gs.qd_float, 3)
     Jt_x = qd.Vector.zero(gs.qd_float, 3)
     JtGJ = qd.Matrix.zero(gs.qd_float, 3, 3)
+    # A constrained vertex follows its target, the elastic forces and the contacts on it dropped
+    has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+    is_free = func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints)
     if envs_is_active[i_b]:
         i_corner_start = fem_info.vertices_corners_start[i_v]
         n_corners = fem_info.vertices_corners_start[i_v + 1] - i_corner_start
@@ -3022,7 +3009,7 @@ def func_gather_fem_vertex(
         i_n_start = 0
         if qd.static(sap_config.has_fem_contacts and op != VertexDofOp.LINESEARCH_D2ELLA):
             i_n_start = sap_state.constraint_order.fem_incidence_start[i_v, i_b]
-            if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+            if is_free:
                 n_contacts = sap_state.constraint_order.fem_incidence_start[i_v + 1, i_b] - i_n_start
         for i_k_ in range((n_corners + n_contacts + N_LANES - 1) // N_LANES):
             i_k = i_k_ * N_LANES + i_lane
@@ -3048,6 +3035,8 @@ def func_gather_fem_vertex(
             if qd.static(op == VertexDofOp.GRADIENT):
                 for j in qd.static(range(3)):
                     JtGJ[i, j] = su.qd_block_sum(JtGJ[i, j], LOG2_GATHER_LANES)
+    if not is_free:
+        elastic = qd.Vector.zero(gs.qd_float, 3)
     if i_lane == 0 and envs_is_active[i_b]:
         if qd.static(op == VertexDofOp.GRADIENT):
             sap_state.fem_vertices.gradient[i_v, i_b] = (
@@ -3291,7 +3280,6 @@ def func_compute_fem_matrix_vector_product(
     fem_state: FEMState,
     sap_state: SAPState,
     fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
     sap_info: SAPInfo,
     fem_config: qd.template(),
 ):
@@ -3306,9 +3294,7 @@ def func_compute_fem_matrix_vector_product(
             dst[i_v, i_b] = fem_info.vertices.mass_over_dt2[i_v] * src[i_v, i_b] * inertia_factor
     for i_e, i_b in qd.ndrange(fem_info.elements.V.shape[0], dst.shape[1], axes=qd.static(eoa(dst))):
         if envs_is_active[i_b]:
-            func_compute_fem_corner_force(
-                i_e, i_b, src, fem_state, sap_state, fem_info, vertex_constraints, sap_info, fem_config
-            )
+            func_compute_fem_corner_force(i_e, i_b, src, fem_state, sap_state, fem_info, sap_info, fem_config)
 
 
 @qd.func
@@ -3319,7 +3305,6 @@ def func_compute_fem_corner_force(
     fem_state: FEMState,
     sap_state: SAPState,
     fem_info: FEMInfo,
-    vertex_constraints: FEMVertexConstraints,
     sap_info: SAPInfo,
     fem_config: qd.template(),
 ):
@@ -3330,7 +3315,7 @@ def func_compute_fem_corner_force(
     Hessian with the displacement, computed once per element, which func_gather_fem_vertex sums at each vertex.
     """
     i_vs = fem_info.elements.el2v[i_e]
-    S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+    S = func_element_mapping_matrix(i_e, fem_info)
     x = qd.Matrix.cols([src[i_vs[i], i_b] for i in qd.static(range(4))])
     _, dP = func_elastic_product(i_e, i_b, S, x, fem_state, fem_info, fem_config)
     forces = fem_info.elements.V[i_e] * fem_info.dt2[None] * fem_info.damping_beta_factor[None] * dP @ S.transpose()
@@ -3509,7 +3494,6 @@ def func_fem_delassus_vertex(
     fem_state: FEMState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
-    sap_config: qd.template(),
 ):
     """Return the share of a weighted FEM vertex in the Delassus operator of a contact, J A^-1 J^T.
 
@@ -3517,7 +3501,8 @@ def func_fem_delassus_vertex(
     contact impulse, so that it has no share.
     """
     W = qd.Matrix.zero(gs.qd_float, 3, 3)
-    if func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+    has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+    if func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
         W = w**2 * fem_info.dt2_inv[None] * fem_state.vertices_solve.prec[i_v, i_b]
     return W
 
@@ -3763,7 +3748,6 @@ def func_init_unconstrained_gradient(
             fem_state,
             sap_state,
             fem_info,
-            vertex_constraints,
             sap_info,
             fem_config,
         )
@@ -3860,6 +3844,10 @@ def func_compute_vertices_dofs(
                 alpha = rTz / pTAp
         sums = qd.Vector.zero(gs.qd_float, N_SUMS)
         if envs_is_active[i_b]:
+            # A scene without FEM entity holds a placeholder for their constraints
+            has_constraints = False
+            if qd.static(sap_config.has_fem):
+                has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
             for i_i_ in range(CHUNK_DIM // N_LANES):
                 i_i = i_i_ * N_LANES + i_lane
                 if qd.static(sap_config.has_fem):
@@ -3869,13 +3857,13 @@ def func_compute_vertices_dofs(
                             sums = sums + func_compute_fem_vertex(
                                 i_v,
                                 i_b,
+                                has_constraints,
                                 alpha,
                                 fem_state,
                                 sap_state,
                                 fem_info,
                                 vertex_constraints,
                                 sap_info,
-                                sap_config,
                                 op=op,
                             )
                 if qd.static(sap_config.has_rigid):
@@ -4015,7 +4003,6 @@ def func_compute_constraints(
                             fem_state,
                             sap_state,
                             fem_info,
-                            vertex_constraints,
                             sap_info,
                             fem_config,
                         )
@@ -4126,13 +4113,13 @@ def func_gather_constraints(
 def func_compute_fem_vertex(
     i_v: int,
     i_b: int,
+    has_constraints: bool,
     alpha: float,
     fem_state: FEMState,
     sap_state: SAPState,
     fem_info: FEMInfo,
     vertex_constraints: FEMVertexConstraints,
     sap_info: SAPInfo,
-    sap_config: qd.template(),
     op: qd.template(),
 ):
     """
@@ -4147,7 +4134,7 @@ def func_compute_fem_vertex(
     N_SUMS = qd.static(8)
     sums = qd.Vector.zero(gs.qd_float, N_SUMS)
     i_e = sap_info.fem_vertices_entity_idx[i_v]
-    is_free = func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config)
+    is_free = func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints)
     d = fem_state.vertices.pos[i_v, i_b] - sap_state.fem_coarse.x_ref[i_e, i_b]
     dt2 = fem_info.dt2[None]
     inertia = fem_info.vertices.mass_over_dt2[i_v] * dt2 * (fem_info.damping_alpha_dt[None] + 1.0)
@@ -4798,7 +4785,7 @@ def func_init_exact_linesearch(
                 for i_i_ in range(CHUNK_DIM // N_LANES):
                     i_e = i_k * CHUNK_DIM + i_i_ * N_LANES + i_lane
                     if i_e < n_elements:
-                        S = func_element_mapping_matrix(i_e, i_b, fem_info, vertex_constraints, fem_config)
+                        S = func_element_mapping_matrix(i_e, fem_info)
                         i_vs = fem_info.elements.el2v[i_e]
                         x = qd.Matrix.cols([sap_state.fem_vertices.v_diff[i_vs[i], i_b] for i in qd.static(range(4))])
                         dF, dP = func_elastic_product(i_e, i_b, S, x, fem_state, fem_info, fem_config)
@@ -4835,7 +4822,6 @@ def func_init_exact_linesearch(
             fem_state,
             sap_state,
             fem_info,
-            vertex_constraints,
             sap_info,
             fem_config,
         )
@@ -6400,8 +6386,8 @@ class FEMSelfContactHandler(BaseContactHandler):
             i_a = fem_info.surface_elements[i_sa]
             i_q = fem_info.surface_elements[i_sq]
             if not (
-                func_is_fem_element_free(i_a, i_b, fem_info, vertex_constraints, sap_config)
-                or func_is_fem_element_free(i_q, i_b, fem_info, vertex_constraints, sap_config)
+                func_is_fem_element_free(i_a, i_b, fem_info, vertex_constraints)
+                or func_is_fem_element_free(i_q, i_b, fem_info, vertex_constraints)
             ):
                 continue
             i_v0 = fem_info.elements.el2v[i_a][0]
@@ -6642,11 +6628,11 @@ class FEMSelfContactHandler(BaseContactHandler):
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e0][i]
             w = self.contact_pairs.barycentric0[i_p][i]
-            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints)
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e1][i]
             w = self.contact_pairs.barycentric1[i_p][i]
-            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints)
         world = self.contact_frame(i_p)
         return world.transpose() @ W @ world
 
@@ -6701,7 +6687,8 @@ class FEMFloorContactHandler(FloorContactMixin, BaseContactHandler):
             pos_v = fem_state.vertices.pos[i_v, i_b]
             i_g = sap_info.ground_geom_idx[None]
             distance = pos_v.z - geoms_state.pos[i_g, i_b].z
-            if distance > 0.0 or not func_is_fem_vertex_free(i_v, i_b, vertex_constraints, sap_config):
+            has_constraints = vertex_constraints.envs_n_constraints[i_b] > 0
+            if distance > 0.0 or not func_is_vertex_free(i_v, i_b, has_constraints, vertex_constraints):
                 continue
             i_p = func_add_slot(
                 i_b,
@@ -6781,7 +6768,7 @@ class FEMFloorContactHandler(FloorContactMixin, BaseContactHandler):
         # With floor, J is Identity
         i_v = self.contact_pairs.geom_idx[i_p]
         i_b = self.contact_pairs.batch_idx[i_p]
-        return func_fem_delassus_vertex(i_v, i_b, 1.0, fem_state, fem_info, vertex_constraints, sap_config)
+        return func_fem_delassus_vertex(i_v, i_b, 1.0, fem_state, fem_info, vertex_constraints)
 
 
 @qd.data_oriented
@@ -6949,9 +6936,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
             i_g = faces_info.geom_idx[i_a]
             i_l = geoms_info.link_idx[i_g]
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if links_info.is_fixed[I_l] and not func_is_fem_element_free(
-                i_q, i_b, fem_info, vertex_constraints, sap_config
-            ):
+            if links_info.is_fixed[I_l] and not func_is_fem_element_free(i_q, i_b, fem_info, vertex_constraints):
                 continue
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
@@ -7126,7 +7111,7 @@ class RigidFEMContactHandler(GeomsTreeMixin, RigidContactHandler):
         for i in qd.static(range(4)):
             i_v = fem_info.elements.el2v[i_e][i]
             w = self.contact_pairs.barycentric0[i_p][i]
-            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints, sap_config)
+            W = W + func_fem_delassus_vertex(i_v, i_b, w, fem_state, fem_info, vertex_constraints)
         world = self.contact_frame(i_p)
         return world.transpose() @ W @ world
 
