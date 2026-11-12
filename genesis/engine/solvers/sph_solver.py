@@ -314,9 +314,8 @@ class SPHSolver(ParticleSolver):
                 # full Jacobi update leaves the mode alternating from one particle to the next undamped, and overshoots
                 # once the liquid compresses abruptly. Half the update cancels that mode, the others still converging.
                 jacobi_relaxation=0.5,
-                # FIXME: A larger share saves more density iterations, but turns a thin slab unstable from three quarters
-                # on, for a reason not found yet: the excess of the carried-over pressure over hydrostatics neither drifts
-                # nor scatters more between neighbors than at half the share.
+                # A larger share saves density iterations, but leaves undamped a breathing mode of the pressure that the
+                # average density error barely sees, which the loss of the other half damps.
                 warm_start_scale=0.5,
                 factor_eps=1e-6,
                 n_neighbors_min=20,
@@ -729,12 +728,26 @@ def func_for_all_neighbors(
     lane `i_lane` taking every `n_lanes`-th neighbor of each cell, and their shares of `ret` sum up after.
     """
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, sph_state.hash_grid) - 1, sph_state.hash_grid)
+    cell_i = func_hash_pos_to_grid(pos_i, sph_state.hash_grid)
+    base = func_hash_wrap_cell(cell_i - 1, sph_state.hash_grid)
     n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+    # The distance from the particle to the lower and upper faces of its cell, along each axis
+    cell_size = sph_state.hash_grid.cell_size[None]
+    dist_lower = pos_i - cell_i * cell_size
+    dist_upper = cell_size - dist_lower
+    support_radius_sqr = sph_info.support_radius[None] ** 2
     for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-        i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
-        slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
-        slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
+        # The cells beyond the support radius of the particle are skipped. Along an axis whose run of cells wraps into
+        # fewer than three slots, every cell counts as touching the particle.
+        dist_cell = qd.select(
+            n_cells < 3, 0.0, qd.select(offset == 0, dist_lower, qd.select(offset == 2, dist_upper, 0.0))
+        )
+        slot_size = 0
+        slot_start = 0
+        if dist_cell.norm_sqr() < support_radius_sqr:
+            i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
+            slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
+            slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
         for j_p_ in range((slot_size + n_lanes - 1) // n_lanes):
             j_p = slot_start + j_p_ * n_lanes + i_lane
             if j_p < slot_start + slot_size:
@@ -1026,6 +1039,9 @@ def func_compute_density_rate(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
+        # The pass counter advances here, where no thread reads it (see func_update_convergence)
+        if i_t == 0:
+            sph_state.solve_loop.n_passes[None] = sph_state.solve_loop.n_passes[None] + 1
         is_solved = sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         ret = qd.Struct(drho=gs.qd_float(0.0), n_neighbors=0)
         if is_solved:
@@ -1135,10 +1151,11 @@ def func_task_solver_iteration(
 
     # The stiffness and the position of the neighbors, weighted for the stiffness of the walls (see
     # func_solver_iteration)
-    kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
-    ret.weight_sum = ret.weight_sum + kernel_ij
-    ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
-    ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
+    if ret.is_near_boundary:
+        kernel_ij = func_cubic_kernel(offset_ij.norm(), sph_info.support_radius[None], sph_info.kernel_norm[None])
+        ret.weight_sum = ret.weight_sum + kernel_ij
+        ret.k_sum_w = ret.k_sum_w + kernel_ij * k_j
+        ret.pos_sum = ret.pos_sum + kernel_ij * sph_state.particles_reordered.pos[j_p, i_b]
 
 
 @qd.func
@@ -1154,13 +1171,6 @@ def func_solver_iteration(
     solve is its warm start, and the divergence solve checks its convergence before its first iteration, so its first
     pass leaves the velocities untouched.
     """
-    is_first_pass = sph_state.solve_loop.n_passes[None] == 0
-    warm_start = False
-    is_iterating = True
-    if qd.static(solve_density):
-        warm_start = is_first_pass
-    else:
-        is_iterating = not is_first_pass
     # On GPU, the lanes of a subgroup tile take a particle together (see func_for_all_neighbors)
     N_LANES = qd.static(2**sph_config.log2_neighbor_lanes)
     n_particles, n_envs = sph_state.particles_reordered.pos.shape
@@ -1169,6 +1179,17 @@ def func_solver_iteration(
         i_lane = i_t % N_LANES
         i_b = i_t // N_LANES % n_envs
         i_p = i_t // (N_LANES * n_envs)
+        # Every thread reads the pass counter and one thread clears the loop flag, which spares the pass the launches of
+        # serial statements (see func_update_convergence).
+        if i_t == 0:
+            sph_state.solve_loop.is_looping[()] = 0
+        is_first_pass = sph_state.solve_loop.n_passes[None] == 0
+        warm_start = False
+        is_iterating = True
+        if qd.static(solve_density):
+            warm_start = is_first_pass
+        else:
+            is_iterating = not is_first_pass
         is_solved = (
             is_iterating and sph_state.envs_solve.is_solving[i_b] and sph_state.particles_reordered.is_active[i_p, i_b]
         )
@@ -1176,10 +1197,22 @@ def func_solver_iteration(
         if qd.static(solve_density):
             dv_scale = sph_info.substep_dt[None]
         k_i = sph_state.particles_k_reordered[i_p, i_b]
+        # The neighbors weigh the stiffness of the walls, which acts through kernel gradients that are all zero beyond
+        # the support radius of the particle (see func_wall_volume). The distance to the surface of the moving
+        # boundaries takes a margin of one particle size, as their quadrature points lie on that surface.
+        pos = sph_state.particles_reordered.pos[i_p, i_b]
+        support_radius = sph_info.support_radius[None]
+        walls_dist = qd.min((pos - sph_info.boundary.lower[None]).min(), (sph_info.boundary.upper[None] - pos).min())
+        is_near_boundary = walls_dist < support_radius
+        if qd.static(sph_config.has_boundary):
+            i_o = sph_state.hash_grid.particles_idx[i_p, i_b]
+            if sph_state.boundary.surface_dist[i_o, i_b] < support_radius + sph_info.particle_size[None]:
+                is_near_boundary = True
         ret = qd.Struct(
             dv=qd.Vector.zero(gs.qd_float, 3),
             k_i=k_i,
             dv_scale=dv_scale,
+            is_near_boundary=is_near_boundary,
             weight_sum=gs.qd_float(0.0),
             k_sum_w=gs.qd_float(0.0),
             pos_sum=qd.Vector.zero(gs.qd_float, 3),
@@ -1199,7 +1232,6 @@ def func_solver_iteration(
         )
         if is_solved and i_lane == 0:
             # The particle itself weighs into the stiffness and the position its neighbors give the walls
-            pos = sph_state.particles_reordered.pos[i_p, i_b]
             kernel_self = func_cubic_kernel(0.0, sph_info.support_radius[None], sph_info.kernel_norm[None])
             ret.weight_sum = ret.weight_sum + kernel_self
             ret.k_sum_w = ret.k_sum_w + kernel_self * k_i
@@ -1247,14 +1279,14 @@ def func_update_convergence(
     Each environment stops once the average density error of its own particles meets the tolerance, so that its result
     is the same whatever the other environments simulate alongside it, and the density solve only after its warm start.
     The error summed by the density rate pass is reset once read, for the next pass. The loop runs on as long as an
-    environment iterates on, for `n_iters_max` iterations at most after its first pass.
+    environment iterates on, for `n_iters_max` iterations at most after its first pass. The pass counter already counts
+    the current pass, and the loop flag starts the pass cleared (see func_solver_iteration).
     """
-    n_passes = sph_state.solve_loop.n_passes[None]
-    can_stop = True
-    if qd.static(solve_density):
-        can_stop = n_passes > 0
-    sph_state.solve_loop.is_looping[()] = 0
     for i_b in range(sph_state.envs_solve.is_solving.shape[0]):
+        n_passes = sph_state.solve_loop.n_passes[None]
+        can_stop = True
+        if qd.static(solve_density):
+            can_stop = n_passes > 1
         if sph_state.envs_solve.is_solving[i_b]:
             err_tol = sph_info.divergence_err_tol[None]
             if qd.static(solve_density):
@@ -1267,9 +1299,8 @@ def func_update_convergence(
                 sph_state.envs_solve.err_sum[i_b] = 0.0
             if can_stop and err <= err_tol * sph_state.envs_solve.n_active[i_b]:
                 sph_state.envs_solve.is_solving[i_b] = False
-            elif n_passes < n_iters_max:
+            elif n_passes <= n_iters_max:
                 sph_state.solve_loop.is_looping[()] = 1
-    sph_state.solve_loop.n_passes[None] = n_passes + 1
 
 
 @qd.kernel(graph=True, fastcache=True)
