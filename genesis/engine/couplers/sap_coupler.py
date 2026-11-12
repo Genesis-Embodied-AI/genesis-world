@@ -34,6 +34,7 @@ from genesis.engine.bvh import (
 from genesis.engine.solvers.base_solver import CheckpointMixin, ErrnoMixin, ErrorCode
 from genesis.engine.solvers.fem_solver import (
     ELEMENTS,
+    SURFACE_ELEMENTS,
     VERTICES,
     FEMInfo,
     FEMState,
@@ -753,6 +754,15 @@ class RigidRigidTetCandidates(SAPTetTetCandidates):
     """The pairs of rigid tets crossing their equal-pressure plane."""
 
 
+class FEMSurfaceTets(Data, kind=DataKind.CONSTANT):
+    """The entity of each surface tet of the FEM entities, and its box in the rest configuration."""
+
+    entity_idx: qd.Tensor = field(int, shape=(SURFACE_ELEMENTS,))
+    # Bounds of the box of each surface tet over the rest positions of its vertices (see FEMSurfaceTetsQuery)
+    rest_aabb_min: qd.Tensor = field((float, 3), shape=(SURFACE_ELEMENTS,))
+    rest_aabb_max: qd.Tensor = field((float, 3), shape=(SURFACE_ELEMENTS,))
+
+
 class RigidRigidGeoms(Data, kind=DataKind.CONSTANT):
     """The geoms of the tets of the rigid-rigid contacts, and the pairs of geoms that may collide."""
 
@@ -887,24 +897,32 @@ class SAPConfig(Config):
 @qd.data_oriented
 class FEMSurfaceTetsQuery(BoxQuery):
     """The visitor of the box query of the FEM surface tets against their own tree, keeping each unordered pair once and
-    dropping the pairs sharing a vertex.
+    dropping the pairs of tets of one entity, except those apart in its rest configuration with self-contact.
 
-    It reads the surface elements and the vertices of the elements of the FEM solver (see FEMInfo).
+    Two tets of one entity whose boxes overlap at rest, tets sharing a vertex included, never collide, as the rigid
+    collider drops the pairs of links colliding in their neutral configuration. With `has_self_contact`, distant parts
+    of one entity folding onto each other keep their contacts. It reads the surface tets of the FEM entities (see
+    FEMSurfaceTets).
     """
 
-    def __init__(self, results: BVHQueryResults, fem_info: FEMInfo) -> None:
+    def __init__(self, results: BVHQueryResults, surface_tets: FEMSurfaceTets, has_self_contact: bool) -> None:
         super().__init__(results)
-        self.fem_info = fem_info
+        self.surface_tets = surface_tets
+        self.has_self_contact = has_self_contact
 
     @qd.func
     def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
         is_kept = i_a < i_q
-        i_ea = self.fem_info.surface_elements[i_a]
-        i_eq = self.fem_info.surface_elements[i_q]
-        i_av = self.fem_info.elements.el2v[i_ea]
-        i_qv = self.fem_info.elements.el2v[i_eq]
-        for i, j in qd.static(qd.ndrange(4, 4)):
-            if i_av[i] == i_qv[j]:
+        if self.surface_tets.entity_idx[i_a] == self.surface_tets.entity_idx[i_q]:
+            is_neighbour = True
+            if qd.static(self.has_self_contact):
+                is_neighbour = func_aabb_intersects_aabb(
+                    self.surface_tets.rest_aabb_min[i_a],
+                    self.surface_tets.rest_aabb_max[i_a],
+                    self.surface_tets.rest_aabb_min[i_q],
+                    self.surface_tets.rest_aabb_max[i_q],
+                )
+            if is_neighbour:
                 is_kept = False
         return is_kept
 
@@ -950,7 +968,7 @@ class FEMFloorContactType(IntEnum):
     Enum for FEM floor contact types.
     """
 
-    NONE = 0  # No contact
+    NONE = 0  # No floor in the scene
     TET = 1  # Tetrahedral contact
     VERT = 2  # Vertex contact
 
@@ -960,18 +978,9 @@ class RigidFloorContactType(IntEnum):
     Enum for rigid floor contact types.
     """
 
-    NONE = 0  # No contact
+    NONE = 0  # No floor in the scene, or no rigid geom to touch it
     VERT = 1  # Vertex contact
     TET = 2  # Tetrahedral contact
-
-
-class RigidRigidContactType(IntEnum):
-    """
-    Enum for rigid-rigid contact types.
-    """
-
-    NONE = 0  # No contact
-    TET = 1  # Tetrahedral contact
 
 
 def get_contact_capacities(options: SAPCouplerOptions, n_contacts_max: int, n_candidates_max: int) -> tuple[int, int]:
@@ -1115,45 +1124,13 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         if self._sap_convergence_rtol is None:
             self._sap_convergence_rtol = CONVERGENCE_RTOL_DEFAULT[gs.np_float]
         self._enable_lagged_friction = options.enable_lagged_friction
-        if options.fem_floor_contact_type == "tet":
-            self._fem_floor_contact_type = FEMFloorContactType.TET
-        elif options.fem_floor_contact_type == "vert":
-            self._fem_floor_contact_type = FEMFloorContactType.VERT
-        elif options.fem_floor_contact_type == "none":
-            self._fem_floor_contact_type = FEMFloorContactType.NONE
-        else:
-            gs.raise_exception(
-                textwrap.dedent(
-                    f"""\
-                    Invalid FEM floor contact type: {options.fem_floor_contact_type}. Must be one of 'tet', 'vert', or
-                    'none'."""
-                )
-            )
-        self._enable_fem_self_tet_contact = options.enable_fem_self_tet_contact
-        if options.rigid_floor_contact_type == "vert":
-            self._rigid_floor_contact_type = RigidFloorContactType.VERT
-        elif options.rigid_floor_contact_type == "tet":
-            self._rigid_floor_contact_type = RigidFloorContactType.TET
-        elif options.rigid_floor_contact_type == "none":
-            self._rigid_floor_contact_type = RigidFloorContactType.NONE
-        else:
-            gs.raise_exception(
-                textwrap.dedent(
-                    f"""\
-                    Invalid rigid floor contact type: {options.rigid_floor_contact_type}. Must be one of 'vert', 'tet'
-                    or 'none'."""
-                )
-            )
-        self._enable_rigid_fem_contact = options.enable_rigid_fem_contact
-
-        if options.rigid_rigid_contact_type == "tet":
-            self._rigid_rigid_contact_type = RigidRigidContactType.TET
-        elif options.rigid_rigid_contact_type == "none":
-            self._rigid_rigid_contact_type = RigidRigidContactType.NONE
-        else:
-            gs.raise_exception(
-                f"Invalid rigid-rigid contact type: {options.rigid_rigid_contact_type}. Must be one of 'tet' or 'none'."
-            )
+        self._fem_floor_contact_type = (
+            FEMFloorContactType.TET if options.fem_floor_contact_type == "tet" else FEMFloorContactType.VERT
+        )
+        self._rigid_floor_contact_type = (
+            RigidFloorContactType.TET if options.rigid_floor_contact_type == "tet" else RigidFloorContactType.VERT
+        )
+        self._has_rigid_fem_contact = False
 
         self._rigid_compliant = False
         self._has_fem_pressure = False
@@ -1167,8 +1144,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
     def build(self) -> None:
         self._B = self.sim._B
-        self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active
-        self._enable_fem_self_tet_contact &= self.fem_solver.is_active
+        # Distinct FEM entities always collide, an entity with itself on demand
+        self._has_fem_tet_contact = self.fem_solver.is_active and (
+            len(self.fem_solver.entities) > 1 or self.options.enable_fem_self_tet_contact
+        )
 
         # The coupler enforces the joint equalities of the rigid solver alone, unless constraints are disabled
         if not self.rigid_solver._options.disable_constraint:
@@ -1211,8 +1190,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self._rigid_floor_contact_type = RigidFloorContactType.NONE
 
         # The rigid geoms touching FEM leave the ground plane out (see 'ground_geom_idx' above)
-        self._enable_rigid_fem_contact &= any(
-            [geom.idx != ground_geom_idx and geom.n_faces > 0 for geom in self.rigid_solver.geoms]
+        self._has_rigid_fem_contact = (
+            self.rigid_solver.is_active
+            and self.fem_solver.is_active
+            and any([geom.idx != ground_geom_idx and geom.n_faces > 0 for geom in self.rigid_solver.geoms])
         )
 
         has_tet_tables = False
@@ -1225,11 +1206,9 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                         options."""
                     )
                 )
-            has_tet_tables = (
-                self._fem_floor_contact_type == FEMFloorContactType.TET or self._enable_fem_self_tet_contact
-            )
+            has_tet_tables = self._fem_floor_contact_type == FEMFloorContactType.TET or self._has_fem_tet_contact
             # The rigid-FEM handler reads the FEM pressure field and gradient as the hydroelastic FEM handlers do
-            self._has_fem_pressure = has_tet_tables or self._enable_rigid_fem_contact
+            self._has_fem_pressure = has_tet_tables or self._has_rigid_fem_contact
 
         rigid_rigid_geoms, floor_geoms, collision_pair_idx = [], [], None
         if self.rigid_solver.is_active:
@@ -1242,35 +1221,25 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 if (geom.contype or geom.conaffinity) and geom.idx != ground_geom_idx
             ]
             collision_pair_idx = qd_to_numpy(self.rigid_solver.collider.collider_info.collision_pair_idx)
-            if self._rigid_rigid_contact_type == RigidRigidContactType.TET:
-                rigid_rigid_geoms = [
-                    geom
-                    for geom in volume_geoms
-                    if any(
-                        [
-                            collision_pair_idx[min(geom.idx, other.idx), max(geom.idx, other.idx)] >= 0
-                            for other in volume_geoms
-                            if other is not geom
-                        ]
-                    )
-                ]
+            rigid_rigid_geoms = [
+                geom
+                for geom in volume_geoms
+                if any(
+                    [
+                        collision_pair_idx[min(geom.idx, other.idx), max(geom.idx, other.idx)] >= 0
+                        for other in volume_geoms
+                        if other is not geom
+                    ]
+                )
+            ]
             if self._rigid_floor_contact_type == RigidFloorContactType.TET:
                 floor_geoms = [geom for geom in volume_geoms if not geom.link.is_fixed]
-            if not volume_geoms and not any([geom.contype or geom.conaffinity for geom in self.rigid_solver.geoms]):
-                if (
-                    self._rigid_floor_contact_type == RigidFloorContactType.TET
-                    or self._rigid_rigid_contact_type == RigidRigidContactType.TET
-                ):
-                    gs.raise_exception("No rigid collision geometries found.")
-            if not rigid_rigid_geoms:
-                self._rigid_rigid_contact_type = RigidRigidContactType.NONE
             if self._rigid_floor_contact_type == RigidFloorContactType.TET and not floor_geoms:
                 self._rigid_floor_contact_type = RigidFloorContactType.NONE
             if self._rigid_floor_contact_type == RigidFloorContactType.VERT and not volume_geoms:
                 self._rigid_floor_contact_type = RigidFloorContactType.NONE
             self._rigid_compliant = (
-                self._rigid_floor_contact_type == RigidFloorContactType.TET
-                or self._rigid_rigid_contact_type == RigidRigidContactType.TET
+                self._rigid_floor_contact_type == RigidFloorContactType.TET or len(rigid_rigid_geoms) > 0
             )
             has_tet_tables |= self._rigid_compliant
             # The rigid solver leaves its joint equality constraints to this coupler, unless constraints are disabled
@@ -1278,9 +1247,6 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             self._has_equality_constraints = not self.rigid_solver._options.disable_constraint and any(
                 [equality.type == gs.EQUALITY_TYPE.JOINT for equality in self.rigid_solver.equalities]
             )
-        has_rigid_rigid_contact = (
-            self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
-        )
 
         fem_pressure = []
         if self._has_fem_pressure:
@@ -1331,7 +1297,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 fem_floor_tet = FEMFloorTetContactHandler(self.sim, options)
             if self._fem_floor_contact_type == FEMFloorContactType.VERT:
                 fem_floor_vert = FEMFloorVertContactHandler(self.sim, options)
-            if self._enable_fem_self_tet_contact:
+            if self._has_fem_tet_contact:
                 fem_self_tet = FEMSelfTetContactHandler(self.sim, options)
         if self.rigid_solver.is_active:
             if self._rigid_floor_contact_type == RigidFloorContactType.VERT:
@@ -1340,11 +1306,11 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid_floor_tet = RigidFloorTetContactHandler(
                     self.sim, options, n_rigid_volume_elems, n_floor_volume_elems
                 )
-            if has_rigid_rigid_contact:
+            if rigid_rigid_geoms:
                 rigid_rigid_tet = RigidRigidTetContactHandler(
                     self.sim, options, n_rigid_volume_elems, rigid_rigid_volumes, collision_pair_idx
                 )
-        if self._enable_rigid_fem_contact:
+        if self._has_rigid_fem_contact:
             rigid_fem_tri_tet = RigidFemTriTetContactHandler(self.sim, options, ground_geom_idx)
         if self._has_equality_constraints:
             equality = RigidConstraintHandler(self.sim)
@@ -1376,7 +1342,10 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
         # The slots of the constraints of each handler start at the total capacity of the handlers before it. The key of
         # a constraint is its environment, then its handler, then its key in the handler. The radix sort orders a
         # positive even multiple of 8 bits.
-        handlers_slot_start = np.cumsum([0, *[handler.max_constraints for handler in self.handlers.constraints]])
+        # A scene without constraint handlers, such as a single FEM entity without floor, keeps the single slot every
+        # array holds at least (see 'Size' in data.py), here one handler without constraint.
+        handlers_max_constraints = [handler.max_constraints for handler in self.handlers.constraints]
+        handlers_slot_start = np.cumsum([0, *(handlers_max_constraints or [0])])
         n_slots = int(handlers_slot_start[-1])
         key_bits = max([handler.key_bits for handler in self.handlers.constraints] + [1])
         handler_bits = max(1, len(self.handlers.constraints) - 1).bit_length()
@@ -1593,7 +1562,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
             has_equality_constraints=self._has_equality_constraints,
             has_fem_contacts=n_env_fem_entries > 0,
             has_rigid_contacts=has_rigid_contacts,
-            enable_fem_self_tet_contact=self._enable_fem_self_tet_contact,
+            enable_fem_self_tet_contact=self._has_fem_tet_contact and self.options.enable_fem_self_tet_contact,
             enable_lagged_friction=self._enable_lagged_friction,
             enable_vertex_constraints=self.fem_solver.fem_config.enable_vertex_constraints,
             batch_links_info=self.rigid_solver._options.batch_links_info,
@@ -1637,7 +1606,7 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
 
         # The tree of the FEM surface tets, which the FEM self contacts and the rigid-FEM contacts query, the contact
         # kernel taking it as an argument, so a scene without these contacts holds placeholders.
-        has_fem_tet_tree = self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact
+        has_fem_tet_tree = self._has_fem_tet_contact or self._has_rigid_fem_contact
         n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
         self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
             self.sim._B, n_tets, is_active=has_fem_tet_tree
@@ -1674,11 +1643,11 @@ class SAPCoupler(ErrnoMixin, CheckpointMixin, RBC):
                 rigid_solver.dyn_state.geoms, self.sap_state, self.sap_info
             )
 
-        if self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact:
+        if self._has_fem_tet_contact or self._has_rigid_fem_contact:
             kernel_compute_fem_surface_tet_aabb(
                 fem_solver.fem_state, self.fem_surface_tet_bvh_state.leaves, fem_solver.fem_info
             )
-        if self._enable_fem_self_tet_contact:
+        if self._has_fem_tet_contact:
             build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
         for contact in (self.handlers.rigid_rigid_tet, self.handlers.rigid_fem_tri_tet):
             if contact is not None:
@@ -5722,11 +5691,27 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         self.max_contact_pairs = n_contacts * simulator._B
         self.contact_pairs = FEMSelfTetPairs(sizes=dict(envs=simulator._B, contact_pairs=self.max_contact_pairs))
 
+        # The entity and the rest box of each surface tet, from the rest positions of the vertices of each entity
+        entities = fem_solver.entities
+        surface_elements = qd_to_numpy(fem_solver.fem_info.surface_elements, transpose=True)
+        elements_entity_idx = np.repeat(
+            np.arange(len(entities), dtype=gs.np_int), [entity.n_elements for entity in entities]
+        )
+        el2v = qd_to_numpy(fem_solver.fem_info.elements.el2v, transpose=True)
+        rest_pos = np.concatenate([tensor_to_array(entity.init_positions) for entity in entities])
+        surface_tets_rest_pos = rest_pos[el2v[surface_elements]]
+        self.surface_tets = FEMSurfaceTets(sizes=dict(surface_elements=len(surface_elements)))
+        self.surface_tets.entity_idx.from_numpy(elements_entity_idx[surface_elements])
+        self.surface_tets.rest_aabb_min.from_numpy(surface_tets_rest_pos.min(axis=1))
+        self.surface_tets.rest_aabb_max.from_numpy(surface_tets_rest_pos.max(axis=1))
+
         # The pairs of surface tets that the tets of each environment find in their own tree
         self.query_results = BVHQueryResults(
             sizes=dict(query_results=self.max_contact_candidates, bvh_trees=simulator._B)
         )
-        self.query = FEMSurfaceTetsQuery(self.query_results, fem_solver.fem_info)
+        self.query = FEMSurfaceTetsQuery(
+            self.query_results, self.surface_tets, has_self_contact=options.enable_fem_self_tet_contact
+        )
 
     @qd.func
     def detection(

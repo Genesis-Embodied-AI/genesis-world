@@ -631,9 +631,7 @@ def test_sap_joint_equality_polynomial(show_viewer, xml_path, n_envs, is_batched
             batch_joints_info=is_batched,
             batch_dofs_info=is_batched,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(
-            rigid_rigid_contact_type="none",
-        ),
+        coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.15, -0.75, 4.0),
             camera_lookat=(0.15, -0.75, 0.0),
@@ -889,10 +887,8 @@ def test_sap_fem_vs_robot(enable_lagged_friction, show_viewer):
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        # Rigid-FEM contact without FEM self-contact, which no other test covers
         coupler_options=gs.options.SAPCouplerOptions(
             enable_lagged_friction=enable_lagged_friction,
-            enable_fem_self_tet_contact=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 1.5, 1.2),

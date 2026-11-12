@@ -165,21 +165,20 @@ class SAPCouplerOptions(BaseCouplerOptions):
     point_contact_stiffness : float, optional
         Stiffness for point contact. Defaults to 1e8.
     fem_floor_contact_type : str, optional
-        Type of contact against the floor. Defaults to "tet". Can be "tet", "vert", or "none". The floor is the rigid
-        ground plane of the scene, which must be a single fixed plane facing up. A scene without one has no floor.
+        Type of contact against the floor. Defaults to "tet". Can be "tet" or "vert". The floor is the rigid ground
+        plane of the scene, which must be a single fixed plane facing up. A scene without one has no floor.
         TET would be the default choice for most cases.
         VERT would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
     enable_fem_self_tet_contact : bool, optional
-        Whether to use tetrahedral based self-contact. Defaults to True.
-    rigid_rigid_type : str, optional
-        Type of contact between rigid bodies. Defaults to "tet". Can be "tet", "vert", or "none".
+        Whether a FEM entity collides with itself where distant parts of it meet, such as a long soft body folding
+        onto itself. Distinct FEM entities always collide with each other. Self-contact searches each entity against
+        itself at every step, a cost growing with the resolution of its mesh that can dominate the contact search, so
+        enable it only for entities that can fold or wrap onto themselves. Parts adjacent in the rest shape of an entity
+        never collide. Defaults to False.
     rigid_floor_contact_type : str, optional
-        Type of contact against the floor, as for `fem_floor_contact_type`. Defaults to "tet". Can be "tet", "vert",
-        or "none".
+        Type of contact against the floor, as for `fem_floor_contact_type`. Defaults to "tet". Can be "tet" or "vert".
         Tet would be the default choice for most cases.
         Vert would be preferable when the mesh is very coarse, such as a single cube or a tetrahedron.
-    enable_rigid_fem_contact : bool, optional
-        Whether to enable coupling between rigid and FEM solvers. Defaults to True.
     max_collision_pairs : int, optional
         Maximum number of collision pairs of each kind of contact in each environment: the pairs of overlapping bounding
         boxes the contact detection tests, and the pairs of elements, or of an element and the floor, that may touch. A
@@ -208,11 +207,9 @@ class SAPCouplerOptions(BaseCouplerOptions):
     linesearch_max_step_size: PositiveFloat = 1.5
     hydroelastic_stiffness: PositiveFloat = 1e8
     point_contact_stiffness: PositiveFloat = 1e8
-    fem_floor_contact_type: Literal["tet", "vert", "none"] = "tet"
-    enable_fem_self_tet_contact: StrictBool = True
-    rigid_floor_contact_type: Literal["tet", "vert", "none"] = "tet"
-    enable_rigid_fem_contact: StrictBool = True
-    rigid_rigid_contact_type: Literal["tet", "vert", "none"] = "tet"
+    fem_floor_contact_type: Literal["tet", "vert"] = "tet"
+    enable_fem_self_tet_contact: StrictBool = False
+    rigid_floor_contact_type: Literal["tet", "vert"] = "tet"
     max_collision_pairs: NonNegativeInt = 32768
     max_contacts: NonNegativeInt = 4096
 
