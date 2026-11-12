@@ -126,8 +126,8 @@ class _GeomFields(_FrozenOptions):
 class Geom(_GeomFields):
     """Options of the collision geoms of a rigid entity that a ``gs.GeomIndex`` selects.
 
-    The fields given explicitly override those of the link and of the entity material for the selected geoms, while the
-    fields left unset keep theirs.
+    The fields given explicitly override those of the entity material for the selected geoms, and those of the link
+    options as well when the link options hold them. The fields left unset keep theirs.
 
     Parameters
     ----------
@@ -152,8 +152,8 @@ class Link(_GeomFields):
     """Options of the links of a rigid entity that a ``gs.LinkIndex`` selects.
 
     The density and the friction coefficients given explicitly apply to every collision geom of the selected links,
-    overriding those of the entity material. If None, the links take those of the entity material. Parameters follow
-    ``gs.options.Geom``, plus the following.
+    overriding those of the entity material and of the geom options of the entity. If None, the links keep those.
+    Parameters follow ``gs.options.Geom``, plus the following.
 
     Parameters
     ----------
@@ -184,12 +184,9 @@ class Rigid(BaseEntity["RigidEntity"]):
         select it. Two keys selecting one link stand at equal specificity whatever the number of links they name, so
         they cannot give one field. Default is no link options.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
-        The options of the collision geoms each key selects, which override those of the entity and the material of
-        the links. They stand at the specificity of the geom options of the links, so the two giving one field of one
-        geom raise an error.
-        Each key is ``gs.GeomIndex.all()``, selecting every collision geom of the entity, or ``gs.GeomIndex.named``,
-        selecting the geoms of the given names in any of its links and raising if no link has one. Select geoms by
-        ordinal through the options of their link in 'links'. Default is no geom options.
+        The options of the collision geoms each key selects by name in any link of the entity, raising if no link has a
+        geom of that name. They override the material of the entity, and the options of the links override them in
+        turn. Select geoms by ordinal through the options of their link in 'links'. Default is no geom options.
     """
 
     _solver_options_cls = RigidOptions
@@ -201,10 +198,10 @@ class Rigid(BaseEntity["RigidEntity"]):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "Rigid":
-        if any(not geom_index.is_all and geom_index.names is None for geom_index in self.geoms):
+        if any(geom_index.names is None for geom_index in self.geoms):
             gs.raise_exception(
-                "Geom options of an entity select geoms with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named'. Select geoms "
-                "by ordinal through the options of their link."
+                "Geom options of an entity select geoms with 'gs.GeomIndex.named'. Select geoms by ordinal through the "
+                "options of their link."
             )
         return self
 

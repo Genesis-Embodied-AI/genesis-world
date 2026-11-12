@@ -571,7 +571,7 @@ def test_collision_filtering(collision_filtering_usd, show_viewer, caplog):
             ),
         ),
     )
-    with pytest.raises(gs.GenesisException, match="no link options"):
+    with pytest.raises(gs.GenesisException, match="no link or geom options"):
         scene.add_stage(
             options=gs.entities.Rigid(
                 morph=gs.morphs.USD(file=collision_filtering_usd), links={gs.LinkIndex.named("base"): gs.options.Link()}

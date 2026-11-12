@@ -127,7 +127,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                     fixed=True,
                 ),
                 geoms={
-                    gs.GeomIndex.all(): gs.options.Geom(
+                    gs.GeomIndex.named("*"): gs.options.Geom(
                         friction=friction,
                     ),
                 },
@@ -173,8 +173,10 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                     },
                 ),
             },
+            # The caps take the rolling friction of the entity, while the slice of their link overrides its torsional one
             geoms={
                 gs.GeomIndex.named("*_cap"): gs.options.Geom(
+                    friction_torsional=0.05,
                     friction_rolling=0.002,
                 ),
             },
@@ -231,7 +233,7 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
             ),
         },
         geoms={
-            gs.GeomIndex.all(): gs.options.Geom(),
+            gs.GeomIndex.named("*"): gs.options.Geom(),
         },
     )
     fem_options = gs.entities.FEM(
@@ -257,10 +259,12 @@ def test_selection_precedence(tmp_path, show_viewer, tol, two_box_free_mjcf, tor
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
                 links={
                     gs.LinkIndex.named("box_baselink"): gs.options.Link(
-                        geoms={gs.GeomIndex.at(0): gs.options.Geom(friction=2.0)}
+                        geoms={
+                            gs.GeomIndex.at(0): gs.options.Geom(friction=2.0),
+                            gs.GeomIndex.at([True]): gs.options.Geom(friction=1.0),
+                        }
                     )
                 },
-                geoms={gs.GeomIndex.all(): gs.options.Geom(friction=1.0)},
             )
         )
     with pytest.raises(gs.GenesisException, match="selects no valid geom"):
