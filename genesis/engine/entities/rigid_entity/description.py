@@ -427,6 +427,8 @@ class KinematicEntityDescription(EntityDescription):
     def __post_init__(self):
         if self.options is None:
             options_cls = get_entity_options_cls(self.material)
+            if options_cls is None:
+                gs.raise_exception(f"No entity options admit material {type(self.material).__name__}.")
             entity_fields = {"material": self.material, "surface": self.surface, "name": self.name}
             entity_fields["morph"] = self.morphs[0] if len(self.morphs) == 1 else tuple(self.morphs)
             if self.visualize_contact:

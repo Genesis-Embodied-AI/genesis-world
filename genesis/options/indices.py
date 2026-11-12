@@ -128,6 +128,8 @@ class _OrdinalIndex(_Selection):
         idx = np.atleast_1d(idx)
         if idx.dtype == np.bool_:
             return cls(mask=tuple(idx.tolist()))
+        if not np.issubdtype(idx.dtype, np.integer):
+            gs.raise_exception(f"{cls.__name__}.at takes integer ordinals, a boolean mask or a slice, not {idx.dtype}.")
         return cls(ordinals=tuple(idx.tolist()))
 
     def _resolve_ordinals(self, n: int, domain: str) -> np.ndarray:
