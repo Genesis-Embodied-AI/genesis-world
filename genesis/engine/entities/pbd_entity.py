@@ -168,7 +168,7 @@ class PBDTetEntity(PBDBaseEntity):
         self._solver.add_particles(
             self._particle_start,
             is_active=True,
-            material_type=self.material_type,
+            material_type=self._material_type,
             mass=float(self._particle_mass),
             rho_rest=0.0,
             mu_s=self.material.static_friction,
@@ -294,7 +294,7 @@ class PBD2DEntity(PBDTetEntity):
         )
 
         self._inner_edge_start = inner_edge_start
-        self.material_type = int(self.solver.MATERIAL.CLOTH)
+        self._material_type = int(self.solver.MATERIAL.CLOTH)
 
     def sample(self):
         """Sample and preprocess the 2D mesh for the PBD cloth-like entity."""
@@ -408,7 +408,7 @@ class PBD3DEntity(PBDTetEntity):
 
         self._elem_start = elem_start
 
-        self.material_type = int(self.solver.MATERIAL.ELASTIC)
+        self._material_type = int(self.solver.MATERIAL.ELASTIC)
 
     def sample(self):
         super().sample()

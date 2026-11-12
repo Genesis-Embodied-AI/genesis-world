@@ -56,9 +56,8 @@ class LinkIndex(_Selection):
 
     Each name is an exact link name or a glob pattern such as 'finger*', and a name matching no link raises an error.
     A glob metacharacter ('*', '?' or '[') in a link name is matched literally by enclosing it in brackets, so
-    'arm[[]1]' selects the link 'arm[1]'. A name or a tuple of names keying the 'links' of entity options stands for
-    ``LinkIndex.named(*names)``. A link merged into its parent by the asset parser has no name of its own any more, so a
-    selection naming it raises an error too (see 'links_to_keep' of the morph).
+    'arm[[]1]' selects the link 'arm[1]'. A link merged into its parent by the asset parser has no name of its own any
+    more, so a selection naming it raises an error too (see 'links_to_keep' of the morph).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -111,8 +110,8 @@ class LinkIndex(_Selection):
 class _OrdinalIndex(_Selection):
     """Select elements by their ordinal, as numpy indexes a range of the number of elements.
 
-    The selection is ordinals, a boolean mask over every element, or a span (a slice), at most one of them. None of them
-    selects every element.
+    The selection is ordinals, a boolean mask over every element, or a span (a slice). Each subclass checks that a
+    selection states exactly one of what it admits.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -120,12 +119,6 @@ class _OrdinalIndex(_Selection):
     ordinals: IArrayType | None = None
     mask: BArrayType | None = None
     span: tuple[StrictInt | None, StrictInt | None, StrictInt | None] | None = None
-
-    @model_validator(mode="after")
-    def _check_single_selection(self) -> Self:
-        if sum(selection is not None for selection in (self.ordinals, self.mask, self.span)) > 1:
-            gs.raise_exception(f"{type(self).__name__} takes one of ordinals, a mask and a span.")
-        return self
 
     @classmethod
     def at(cls, idx: "int | slice | np.typing.ArrayLike") -> Self:
@@ -138,12 +131,7 @@ class _OrdinalIndex(_Selection):
         return cls(ordinals=tuple(idx.tolist()))
 
     def _resolve_ordinals(self, n: int, domain: str) -> np.ndarray:
-        """Return the sorted ordinals selected among 'n' elements, raising on an ordinal out of range or no match.
-
-        A selection of every element selects none among no element, without raising.
-        """
-        if self.is_all:
-            return np.arange(n, dtype=gs.np_int)
+        """Return the sorted ordinals selected among 'n' elements, raising on an ordinal out of range or no match."""
         if self.span is not None:
             idx = slice(*self.span)
         elif self.mask is not None:
@@ -158,11 +146,6 @@ class _OrdinalIndex(_Selection):
             gs.raise_exception(f"{type(self).__name__} selects no {domain}: {self}.")
         return ordinals
 
-    @property
-    def is_all(self) -> bool:
-        """Whether the selection holds every element."""
-        return self.ordinals is None and self.mask is None and self.span is None
-
 
 class _NamedOrdinalIndex(_OrdinalIndex):
     """Select the geoms of a link by their ordinal in the asset, counted within the link, or by name.
@@ -174,7 +157,7 @@ class _NamedOrdinalIndex(_OrdinalIndex):
 
     @model_validator(mode="after")
     def _check_single_selection(self) -> Self:
-        if (self.names is not None) != super().is_all:
+        if sum(selection is not None for selection in (self.ordinals, self.mask, self.span, self.names)) != 1:
             gs.raise_exception(f"{type(self).__name__} takes one of ordinals, a mask, a span and names.")
         return self
 
@@ -242,11 +225,6 @@ class VertexIndex(_OrdinalIndex):
     def closest_to(cls, pos: Vec3FType, max_distance: float) -> Self:
         """Select the vertex closest to a point of the frame of the morph, which must lie within 'max_distance'."""
         return cls(closest_pos=pos, max_distance=max_distance)
-
-    @property
-    def is_all(self) -> bool:
-        """Whether the selection holds every vertex, which no vertex selection does since each states its vertices."""
-        return False
 
     def __or__(self, other: "VertexIndex") -> "VertexIndex":
         if not isinstance(other, VertexIndex):

@@ -134,8 +134,8 @@ class Geom(_GeomFields):
     rho : float | None, optional
         The density (kg/m^3). It estimates the mass and the inertia of a link the asset states none for, or of every
         moving link under the 'recompute_inertia' option of the morph. The frame of an aligned body stays where the
-        densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects it on a link
-        it simulates. If None, the geoms take the density of their link. Default is None.
+        densities of the asset put it, so the body is then simulated as unaligned. The IPC coupler rejects it, since it
+        simulates an entity at the density of its material. If None, the geoms take the density of their link. Default is None.
     friction : float | None, optional
         The sliding friction coefficient of the contacts of the geoms (see ``gs.materials.Rigid.friction``). If None,
         the geoms take that of their link. Default is None.
