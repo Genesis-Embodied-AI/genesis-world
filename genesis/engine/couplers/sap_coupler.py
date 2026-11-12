@@ -4906,11 +4906,13 @@ def func_one_exact_linesearch_iter(
     Run one pass of the exact line search using rtsafe, a Newton-Raphson iteration safeguarded by bisection.
 
     Each pass steps the velocities by the current step size and evaluates the derivative of the cost along the Newton
-    step f and its own derivative df there. The first pass evaluates the largest step size. An environment whose Newton
-    iteration decreased its cost by no more than its round-off stops its solve there, one whose cost still decreases at
-    the largest step size takes it, and the others start the bracket [alpha_min, alpha_max] holding the root of f. The
-    next passes shrink the bracket to the step size on the side where f has the sign it has at that end, and the next
-    step size takes a Newton step on f, or bisects the bracket when the Newton step leaves it or reduces f too slowly.
+    step f and its own derivative df there. The first pass evaluates the largest step size. An environment whose slope
+    along the Newton step is round-off takes the full step, or the largest step size where its cost still decreases, and
+    stops its solve when its last Newton iteration decreased its cost by no more than its round-off too. One whose cost
+    still decreases at the largest step size takes it, and the others start the bracket [alpha_min, alpha_max] holding
+    the root of f. The next passes shrink the bracket to the step size on the side where f has the sign it has at that
+    end, and the next step size takes a Newton step on f, or bisects the bracket when the Newton step leaves it or
+    reduces f too slowly.
     """
     func_compute_vertices_dofs(
         sap_state.envs.is_linesearch_active,
@@ -4953,6 +4955,7 @@ def func_one_exact_linesearch_iter(
         # The first pass evaluates the largest step size, which the kernel counts as an extra iteration
         is_first_pass = sap_state.loops.n_linesearch_next[()] == sap_info.n_linesearch_iterations[None]
         cost_tol = gs.qd_float(0.0)
+        is_stagnating = False
         if is_first_pass:
             totals = func_chunks_total(
                 i_b,
@@ -4988,15 +4991,14 @@ def func_one_exact_linesearch_iter(
                 + energy_constraints
             )
             sap_state.envs.prev_energy[i_b] = energy_scale
-            # The solve stops once a Newton iteration decreases its cost by no more than its round-off: a tolerance on
-            # its gradient below what the precision of the simulation resolves would otherwise run it to the cap.
+            # The solve stops once the last Newton iteration decreased its cost by no more than its round-off and the
+            # slope of this one is round-off too (see below): a tolerance on its gradient below what the precision of
+            # the simulation resolves would otherwise run it to the cap. The slope keeps an inexact Newton step that
+            # left a light body aside from stopping the step that resolves it.
             energy_decrease = sap_state.envs.energy_newton_prev[i_b] - energy
             sap_state.envs.energy_newton_prev[i_b] = energy
             cost_tol = sap_info.linesearch_cost_atol[None] + sap_info.linesearch_cost_rtol[None] * energy_scale
-            if energy_decrease < cost_tol:
-                sap_state.envs.is_active[i_b] = False
-                sap_state.envs.is_linesearch_active[i_b] = False
-                continue
+            is_stagnating = energy_decrease < cost_tol
             sap_state.envs.d2ellA_dalpha2[i_b] = totals[VertexDofSum.D2ELLA]
         dell_dalpha = func_chunks_total(
             i_b,
@@ -5016,8 +5018,11 @@ def func_one_exact_linesearch_iter(
         )
         if is_first_pass:
             sap_state.envs.is_linesearch_active[i_b] = sap_state.envs.dell_dalpha[i_b] > 0.0
+            is_slope_roundoff = -sap_state.envs.m[i_b] < cost_tol
+            if is_slope_roundoff and is_stagnating:
+                sap_state.envs.is_active[i_b] = False
             # When the slope is round-off, the full step is taken and the line search ends
-            if sap_state.envs.is_linesearch_active[i_b] and -sap_state.envs.m[i_b] < cost_tol:
+            if sap_state.envs.is_linesearch_active[i_b] and is_slope_roundoff:
                 sap_state.envs.is_linesearch_active[i_b] = False
                 sap_state.envs.step_size[i_b] = 1.0
                 if qd.static(sap_config.has_fem):
