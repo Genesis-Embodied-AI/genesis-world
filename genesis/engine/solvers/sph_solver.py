@@ -728,12 +728,26 @@ def func_for_all_neighbors(
     lane `i_lane` taking every `n_lanes`-th neighbor of each cell, and their shares of `ret` sum up after.
     """
     pos_i = sph_state.particles_reordered.pos[i_p, i_b]
-    base = func_hash_wrap_cell(func_hash_pos_to_grid(pos_i, sph_state.hash_grid) - 1, sph_state.hash_grid)
+    cell_i = func_hash_pos_to_grid(pos_i, sph_state.hash_grid)
+    base = func_hash_wrap_cell(cell_i - 1, sph_state.hash_grid)
     n_cells = func_hash_n_cells(3, sph_state.hash_grid)
+    # The distance from the particle to the lower and upper faces of its cell, along each axis
+    cell_size = sph_state.hash_grid.cell_size[None]
+    dist_lower = pos_i - cell_i * cell_size
+    dist_upper = cell_size - dist_lower
+    support_radius_sqr = sph_info.support_radius[None] ** 2
     for offset in qd.grouped(qd.ndrange(n_cells[0], n_cells[1], n_cells[2])):
-        i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
-        slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
-        slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
+        # The cells beyond the support radius of the particle are skipped. Along an axis whose run of cells wraps into
+        # fewer than three slots, every cell counts as touching the particle.
+        dist_cell = qd.select(
+            n_cells < 3, 0.0, qd.select(offset == 0, dist_lower, qd.select(offset == 2, dist_upper, 0.0))
+        )
+        slot_size = 0
+        slot_start = 0
+        if dist_cell.norm_sqr() < support_radius_sqr:
+            i_s = func_hash_cell_to_slot(base + offset, sph_state.hash_grid)
+            slot_start = sph_state.hash_grid.slot_start[i_s, i_b]
+            slot_size = sph_state.hash_grid.slot_size[i_s, i_b]
         for j_p_ in range((slot_size + n_lanes - 1) // n_lanes):
             j_p = slot_start + j_p_ * n_lanes + i_lane
             if j_p < slot_start + slot_size:
