@@ -314,15 +314,16 @@ class Simulator(RBC):
         self._sensor_manager.destroy()
 
         # The ndarrays of a solver are freed with its scene, whatever still references them, or else by 'qd.reset'.
-        # They are gathered first, since 'data' reads the gradient of an array after yielding it.
+        # They are gathered first, since 'data' reads the gradient of an array after yielding it, and once each, since
+        # an array bound into another struct is yielded under both names (see nt_H in ConstraintState).
         for system in self._active_systems:
             if system.is_checkpointable:
-                arrays = [
-                    item.array
+                arrays = {
+                    id(item.array): item.array
                     for item in system.data
                     if isinstance(item, ArrayItem) and not isinstance(item.array, torch.Tensor)
-                ]
-                for array in arrays:
+                }
+                for array in arrays.values():
                     qd_destroy_data(array)
 
     def reset(self, state: SimState, envs_idx=None):
