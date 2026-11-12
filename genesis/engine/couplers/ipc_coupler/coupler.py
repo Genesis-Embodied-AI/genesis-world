@@ -281,10 +281,11 @@ class IPCCoupler(ErrnoMixin, CheckpointMixin, RBC):
                     )
             gs.logger.debug(f"Rigid entity {i_e}: coupling type '{coup_type.name.lower()}'")
 
-            # FIXME: Support per link/geom density for IPC coupler
-            links_options = entity._options.links.values()
+            # The IPC coupler builds the affine bodies of an entity from the density of its material alone
+            entity_options = entity.options
+            links_options = entity_options.links.values()
             geoms_options = [
-                *entity._options.geoms.values(),
+                *entity_options.geoms.values(),
                 *(geom_options for link_options in links_options for geom_options in link_options.geoms.values()),
             ]
             if any(options.rho is not None for options in (*links_options, *geoms_options)):
