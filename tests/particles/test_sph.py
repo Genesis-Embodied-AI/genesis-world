@@ -353,8 +353,8 @@ def test_dfsph_resting_liquid_stability(show_viewer):
 
 
 @pytest.mark.required
-# The wide column runs on the GPU, while the CPU runs the slab
-@pytest.mark.parametrize("liquid_width, backend", [(0.3, gs.gpu), (0.02, gs.cpu)])
+# The wide column runs on the GPU alone, as it takes minutes on the CPU
+@pytest.mark.parametrize("liquid_width, backend", [(0.3, gs.gpu), (0.02, gs.cpu), (0.02, gs.gpu)])
 def test_pressure_carries_column_weight(show_viewer, liquid_width):
     GRAVITY = 9.81
     PARTICLE_SIZE = 0.02
@@ -420,13 +420,21 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
             axis=-1,
         )
         liquid.set_particles_pos(columns_layers_pos[is_filled][None], envs_idx=[1])
+    # Every other column of the lattice starts a twentieth of a particle size higher, which seeds the packing of
+    # staggered columns that the liquid settles into, so that the checks see a settled liquid.
+    particles_pos = tensor_to_array(liquid.get_particles_pos())
+    is_column_odd = np.round(particles_pos[..., :2] / PARTICLE_SIZE).sum(axis=-1) % 2 > 0.5
+    particles_pos[..., 2] += 0.05 * PARTICLE_SIZE * is_column_odd
+    liquid.set_particles_pos(particles_pos)
     rho_rest = qd_to_numpy(sph_solver.sph_info.particles.rho)[0]
     p_bottoms, p_middles, p_tops, p_hydrostatics, tilted_ratios = [], [], [], [], []
-    is_settled = True
-    n_steps = 100
+    # A late reordering of the packing drops a particle at most from its site on the cubic lattice into a hollow of the
+    # close-packed layer below, by the difference of their layer spacings at the same density, in free fall.
+    speed_max = np.sqrt(2.0 * GRAVITY * (1.0 - 4.0 ** (1.0 / 3.0) / np.sqrt(3.0)) * PARTICLE_SIZE)
+    n_steps = 150
     for i_step in range(n_steps):
         scene.step()
-        if is_tilt_checked and i_step >= 50:
+        if is_tilt_checked and i_step >= 100:
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[1]
             positions = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[1]
             heights = positions @ (-gravity_tilted / GRAVITY)
@@ -436,15 +444,12 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
             ).any(axis=-1)
             is_deep_wall = is_wall & (depths > 4 * PARTICLE_SIZE)
             tilted_ratios.append(pressures[is_deep_wall].mean() / (rho_rest * GRAVITY * depths[is_deep_wall]).mean())
-        if i_step >= n_steps - 10:
-            # The settled column only keeps a residual sloshing, far slower than a gravity wave over its depth
-            speeds = liquid.get_particles_vel()[0].norm(dim=-1)
-            is_settled &= bool((speeds < 0.05 * np.sqrt(GRAVITY * LIQUID_SIZE[2])).all())
-        if 50 <= i_step < 100:
+        if i_step >= 100:
+            assert (liquid.get_particles_vel()[0].norm(dim=-1) < speed_max).all()
             pressures = qd_to_numpy(sph_solver.sph_state.particles_reordered.p, transpose=True)[0]
             heights = qd_to_numpy(sph_solver.sph_state.particles_reordered.pos, transpose=True)[0, :, 2]
             p_bottom = pressures[heights < 0.05].mean()
-            if i_step >= 80:
+            if i_step >= 130:
                 assert_allclose(p_bottom, weight_per_area, rtol=0.5)
             p_bottoms.append(p_bottom)
             p_middles.append(pressures[(heights >= 0.2) & (heights < 0.25)].mean())
@@ -456,16 +461,19 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     (rising_idx,) = np.nonzero((p_bottoms[:-1] < p_bottoms.mean()) & (p_bottoms[1:] >= p_bottoms.mean()))
     window = slice(rising_idx[0] + 1, rising_idx[-1] + 1)
 
-    # The bound covers the scatter of the pressure of DFSPH from one step to the next, which its density tolerance
-    # leaves loosely set, over the window.
-    assert_allclose(p_bottoms[window].mean(), p_hydrostatics[window].mean(), rtol=0.1)
+    # The kernel moments of the staggered packing set the pressure gradient, and the layers next to the floor shift the
+    # bottom pressure.
+    assert_allclose(p_bottoms[window].mean(), p_hydrostatics[window].mean(), rtol=0.03)
 
     if is_tilt_checked:
         assert_allclose(np.mean(tilted_ratios), 1.0, atol=1e-2)
 
-    # The liquid keeps the volume of the box it was sampled from, up to the compression of the column under its own
-    # weight, so its particles rest around the center of the box.
-    assert_allclose(liquid.get_particles_pos()[..., 2].mean(dim=-1), 0.5 * LIQUID_SIZE[2], atol=0.005)
+    # The staggered packing sums the kernel lower than the lattice, so the liquid compresses until it reaches its rest
+    # density again, its top layer sinking at most half a layer, while the seeded columns start higher.
+    settlement_max = 0.5 * 4.73e-3 * LIQUID_SIZE[2] + 0.5 * PARTICLE_SIZE / round(LIQUID_SIZE[2] / PARTICLE_SIZE)
+    particles_height_mean = liquid.get_particles_pos()[..., 2].mean(dim=-1)
+    assert (particles_height_mean > 0.5 * LIQUID_SIZE[2] - settlement_max).all()
+    assert (particles_height_mean < 0.5 * LIQUID_SIZE[2] + 0.025 * PARTICLE_SIZE).all()
 
     # The pressure must decrease with height, following the hydrostatic gradient. The factors are lower bounds
     # on the ratio of the hydrostatic depths at the band centers, with slack for pressure fluctuations.
@@ -540,9 +548,3 @@ def test_pressure_carries_column_weight(show_viewer, liquid_width):
     for _ in range(3):
         scene_pools.step()
         assert_allclose(wrapped_pool.get_particles_vel(), isolated_pool.get_particles_vel(), atol=1e-3)
-
-    # FIXME: The DFSPH pressure solve leaves the wide column breathing in a weakly damped bulk mode, whose peak speed
-    # reaches the bound of the settled column.
-    if liquid_width > 2 * PARTICLE_SIZE and not is_settled:
-        pytest.xfail("The DFSPH pressure solve leaves the wide column breathing in a weakly damped bulk mode.")
-    assert is_settled
