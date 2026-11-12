@@ -28,7 +28,7 @@ from genesis.engine.couplers.mpm_rigid_global_newton import (
     func_mark_constrained_links,
 )
 from genesis.engine.materials import FEM
-from genesis.engine.numerics.bcoo import assemble_bcoo_matrix, func_add_by_key
+from genesis.engine.numerics.bcoo import func_add_by_key, func_reduce_triplets, func_sort_triplets
 from genesis.engine.numerics.newton_rows import (
     NewtonRows,
     NewtonSegment,
@@ -826,19 +826,7 @@ class NewtonSolver(Solver):
                 self.newton_rows,
                 self._newton_rows_replaced,
             )
-            if mpm_solver.mpm_config.has_rigid_contact:
-                kernel_assemble_mpm_rigid_coupling(
-                    mpm_state,
-                    sparse_grid,
-                    self.rigid_dofs,
-                    self.rigid_links,
-                    dyn_state,
-                    mpm_info,
-                    dyn_info,
-                    rigid_solver.rigid_config,
-                    self.newton_config,
-                )
-            kernel_assemble_rows(
+            kernel_newton_direction(
                 n_mpm_rows,
                 n_mpm_triplets,
                 n_cloth_rows,
@@ -848,28 +836,12 @@ class NewtonSolver(Solver):
                 fem_solver.n_vertices,
                 self.newton_rows,
                 self.newton_envs,
-                *args_state,
-                *args_info,
-                *args_config,
-            )
-            assemble_bcoo_matrix(self.newton_rows.matrix, block_scalars=9)
-            if self.newton_config.has_rigid_dofs:
-                kernel_assemble_rigid(
-                    self.newton_rows,
-                    self.newton_envs,
-                    *args_state,
-                    *args_info,
-                    *args_config,
-                    self._rigid_contact_stiffness,
-                )
-            kernel_newton_direction(
-                self.newton_rows,
-                self.newton_envs,
                 self.newton_loops,
                 *args_state,
                 self.newton_info,
                 *args_info,
                 *args_config,
+                self._rigid_contact_stiffness,
             )
             if contact is not None:
                 # The candidates over the sweep along the direction serve the step bound, the line search and the
@@ -1246,8 +1218,8 @@ def func_refresh_energy_start(
 # ------------------------------------------------------------------------------------
 
 
-@qd.kernel(fastcache=True)
-def kernel_assemble_mpm_rigid_coupling(
+@qd.func(requires_top_level=True)
+def func_assemble_mpm_rigid_coupling_terms(
     mpm_state: MPMState,
     sparse_grid: MPMSparseGrid,
     rigid_dofs: NewtonRigidDofs,
@@ -1273,8 +1245,8 @@ def kernel_assemble_mpm_rigid_coupling(
     )
 
 
-@qd.kernel(fastcache=True)
-def kernel_assemble_rows(
+@qd.func(requires_top_level=True)
+def func_assemble_rows(
     n_mpm_rows: int,
     n_mpm_triplets: int,
     n_cloth_rows: int,
@@ -1390,8 +1362,8 @@ def kernel_assemble_rows(
         )
 
 
-@qd.kernel(fastcache=True)
-def kernel_assemble_rigid(
+@qd.func(requires_top_level=True)
+def func_assemble_rigid(
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     mpm_state: MPMState,
@@ -1428,7 +1400,7 @@ def kernel_assemble_rigid(
     of the Hessian.
 
     The assembly takes the terms of the contacts of the particles that the coupling staged (see
-    'kernel_assemble_mpm_rigid_coupling'), and the factor preconditions the dofs in the linear solve. The gradient holds
+    'func_assemble_mpm_rigid_coupling_terms'), and the factor preconditions the dofs in the linear solve. The gradient holds
     that of the cost of the rigid solver and the forces of the contacts of the particles on the links (see
     'func_add_contact_link_terms' in couplers/mpm_rigid_global_newton.py). The block holds the Hessian of the rigid
     solver and the stiffness of these contacts (see RigidContactStiffness), or of the moving proxies from the assembled
@@ -1722,6 +1694,13 @@ def func_pcg_iteration(
 
 @qd.kernel(graph=True, fastcache=True)
 def kernel_newton_direction(
+    n_mpm_rows: int,
+    n_mpm_triplets: int,
+    n_cloth_rows: int,
+    n_cloth_triplets: int,
+    n_contact_triplets: int,
+    n_proxy_rows: int,
+    proxy_vertex_start: int,
     newton_rows: NewtonRows,
     newton_envs: NewtonEnvs,
     newton_loops: NewtonLoops,
@@ -1753,15 +1732,99 @@ def kernel_newton_direction(
     fem_config: qd.template(),
     rigid_config: qd.template(),
     newton_config: qd.template(),
+    rigid_contact_stiffness: qd.template(),
 ):
     """
-    Solve the Newton direction of every environment still iterating as one graph, and start its line search.
+    Assemble and solve the Newton direction of every environment still iterating as one graph, and start its line
+    search.
 
-    The gradient of moving proxies reduces to the unknowns (see 'func_proxies_reduce_gradient' in
-    rigid/contact_proxy.py), the preconditioned conjugate gradient (PCG) starts (see 'func_pcg_start') and iterates
-    until every environment converges or the iterations run out (see 'func_pcg_iteration'), and the direction and the
-    first step of the line search follow (see 'func_start_line_search').
+    The coupling of the particles with the rigid geoms stages its terms (see 'func_assemble_mpm_rigid_coupling_terms'),
+    the rows are assembled (see 'func_assemble_rows', which takes the sizes of the segments, `n_contact_triplets` and
+    `proxy_vertex_start`) and their triplets summed into the matrix (see 'func_sort_triplets' and
+    'func_reduce_triplets' in numerics/bcoo.py), and the dofs assembled and factored with `rigid_contact_stiffness` (see
+    'func_assemble_rigid'). The gradient of moving proxies then reduces to the unknowns (see
+    'func_proxies_reduce_gradient' in rigid/contact_proxy.py), the preconditioned conjugate gradient (PCG) starts (see
+    'func_pcg_start') and iterates until every environment converges or the iterations run out (see
+    'func_pcg_iteration'), and the direction and the first step of the line search follow (see
+    'func_start_line_search').
     """
+    if qd.static(mpm_config.has_rigid_contact):
+        func_assemble_mpm_rigid_coupling_terms(
+            mpm_state, sparse_grid, rigid_dofs, rigid_links, dyn_state, mpm_info, dyn_info, rigid_config, newton_config
+        )
+    func_assemble_rows(
+        n_mpm_rows,
+        n_mpm_triplets,
+        n_cloth_rows,
+        n_cloth_triplets,
+        n_contact_triplets,
+        n_proxy_rows,
+        proxy_vertex_start,
+        newton_rows,
+        newton_envs,
+        mpm_state,
+        sparse_grid,
+        fem_state,
+        ipc_pairs,
+        friction_pairs,
+        ipc_state,
+        proxies_state,
+        proxies,
+        proxies_envs,
+        proxies_filter,
+        proxy_kinematics,
+        rigid_dofs,
+        rigid_links,
+        dyn_state,
+        constraint_state,
+        mpm_info,
+        fem_info,
+        ipc_info,
+        proxies_info,
+        proxy_vertices_info,
+        proxy_dofs_info,
+        dyn_info,
+        rigid_info,
+        mpm_config,
+        fem_config,
+        rigid_config,
+        newton_config,
+    )
+    func_sort_triplets(newton_rows.matrix)
+    func_reduce_triplets(newton_rows.matrix, block_scalars=9)
+    if qd.static(newton_config.has_rigid_dofs):
+        func_assemble_rigid(
+            newton_rows,
+            newton_envs,
+            mpm_state,
+            sparse_grid,
+            fem_state,
+            ipc_pairs,
+            friction_pairs,
+            ipc_state,
+            proxies_state,
+            proxies,
+            proxies_envs,
+            proxies_filter,
+            proxy_kinematics,
+            rigid_dofs,
+            rigid_links,
+            dyn_state,
+            constraint_state,
+            mpm_info,
+            fem_info,
+            ipc_info,
+            proxies_info,
+            proxy_vertices_info,
+            proxy_dofs_info,
+            dyn_info,
+            rigid_info,
+            mpm_config,
+            fem_config,
+            rigid_config,
+            newton_config,
+            rigid_contact_stiffness,
+        )
     if qd.static(newton_config.has_moving_proxies):
         func_proxies_reduce_gradient(
             newton_envs.is_active,

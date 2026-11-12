@@ -277,7 +277,7 @@ class MPMRigidContacts(Data, kind=DataKind.SCRATCH, shape=(SORTED_PARTICLES,)):
     the friction pyramid of the contact (see 'func_pyramid_rows'), of outward normal `normal` and friction `friction`.
     `gradient` and `hessian` are those of its rows in the displacement of the particle relative to the point of the geom
     it touches, at the current iterate of the Newton solve, which the MPM solver and the rigid solver map onto their own
-    unknowns (see 'kernel_assemble_mpm_rigid_coupling' in newton_solver.py).
+    unknowns (see 'func_assemble_mpm_rigid_coupling_terms' in newton_solver.py).
     """
 
     geom_idx: qd.Tensor = field(int, ndarray=True)
@@ -3316,7 +3316,7 @@ STENCIL_PAIRS = STENCIL_NODES * (STENCIL_NODES + 1) // 2
 @qd.func
 def func_staged_contact_terms(i_s: int, mpm_state: MPMState, mpm_config: qd.template()):
     """Return the gradient and the Hessian of the contact of a sorted particle with a rigid geom staged at the current
-    iterate (see 'kernel_assemble_mpm_rigid_coupling' in newton_solver.py), zero for a particle in no contact."""
+    iterate (see 'func_assemble_mpm_rigid_coupling_terms' in newton_solver.py), zero for a particle in no contact."""
     gradient = qd.Vector.zero(gs.qd_float, 3)
     hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
     if qd.static(mpm_config.has_rigid_contact):

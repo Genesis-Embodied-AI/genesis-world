@@ -7,8 +7,8 @@ import genesis as gs
 from genesis.utils.data import Data, DataKind, Size, field
 from genesis.utils.simt import qd_segmented_sum, qd_slot_neighbors
 
-from .exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum, kernel_exclusive_sum
-from .radix_sort import RadixSortScratch, func_radix_sort, kernel_radix_sort, radix_sort_sizes
+from .exclusive_sum import ExclusiveSumScratch, exclusive_sum_sizes, func_exclusive_sum
+from .radix_sort import RadixSortScratch, func_radix_sort, radix_sort_sizes
 
 # The blocks a matrix holds at most, the same count padded to whole tiles of 64 for the sort and the scan, and the
 # scalars of a block
@@ -217,43 +217,3 @@ def func_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()
             matrix.entries_col[i_entry] = gs.qd_int(key & qd.u64(0xFFFFFFFF))
             if i_t == matrix.n_triplets[()] - 1:
                 matrix.n_entries[()] = i_entry + 1
-
-
-@qd.kernel(fastcache=True)
-def kernel_compose_triplets_key(matrix: BCOOMatrixScratch):
-    func_compose_triplets_key(matrix)
-
-
-@qd.kernel(fastcache=True)
-def kernel_mark_entry_ends(matrix: BCOOMatrixScratch):
-    func_mark_entry_ends(matrix)
-
-
-@qd.kernel(fastcache=True)
-def kernel_reduce_triplets(matrix: BCOOMatrixScratch, block_scalars: qd.template()):
-    func_reduce_triplets(matrix, block_scalars)
-
-
-def sort_triplets(matrix: BCOOMatrixScratch) -> None:
-    """Sort the triplets of a matrix by row then column (see 'func_sort_triplets'), launching the sort and the scan
-    shared by every matrix on their own."""
-    kernel_compose_triplets_key(matrix)
-    kernel_radix_sort(
-        matrix.sorter,
-        matrix.triplets_key,
-        matrix.keys_buffer,
-        matrix.triplets_source_idx,
-        matrix.sources_idx_buffer,
-        matrix.n_padded_triplets,
-        key_bits=64,
-    )
-    kernel_mark_entry_ends(matrix)
-    kernel_exclusive_sum(
-        matrix.scanner, matrix.triplets_is_entry_end, matrix.triplets_entry_idx, matrix.n_padded_triplets
-    )
-
-
-def assemble_bcoo_matrix(matrix: BCOOMatrixScratch, block_scalars: int) -> None:
-    """Sort the triplets of a matrix and sum them into its entries."""
-    sort_triplets(matrix)
-    kernel_reduce_triplets(matrix, block_scalars)
