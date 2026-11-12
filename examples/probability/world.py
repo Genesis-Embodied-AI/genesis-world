@@ -1,7 +1,7 @@
 """Genesis rigid bodies with decorative, non-colliding, massless markings."""
 
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 
 import genesis as gs
 import numpy as np
@@ -176,13 +176,28 @@ class World:
 
     def run(self, initial: State, seeds: list[int], progress: Callable[[float], bool] | None = None,
             horizon: float | None = None) -> list[Trial]:
+        rollout = self.run_steps(initial, seeds, horizon)
+        step = 0
+        while True:
+            try:
+                elapsed = next(rollout)
+            except StopIteration as finished:
+                return finished.value
+            if step % 20 == 0 and progress is not None and not progress(elapsed):
+                rollout.close()
+                return []
+            step += 1
+
+    def run_steps(self, initial: State, seeds: list[int],
+                  horizon: float | None = None) -> Generator[float, None, list[Trial]]:
+        """Yield between physics steps so the worker can keep drawing the visible toss."""
         horizon = self.config.horizon if horizon is None else horizon
         self.reset(initial)
         outcomes = np.full(self.count, -1, dtype=int)
         ended = np.zeros(self.count, dtype=bool)
         times = np.full(self.count, horizon)
         final = State(initial.position.copy(), initial.quaternion.copy(), initial.velocity.copy())
-        for step in range(round(horizon / self.config.dt)):
+        for _ in range(round(horizon / self.config.dt)):
             resting, faces = self.step()
             newly_ended = resting & ~ended
             if newly_ended.any():
@@ -195,8 +210,7 @@ class World:
                 ended |= newly_ended
             if ended.all():
                 break
-            if step % 20 == 0 and progress is not None and not progress(self.elapsed):
-                return []
+            yield self.elapsed
         current = self.state()
         final.position[~ended] = current.position[~ended]
         final.quaternion[~ended] = current.quaternion[~ended]

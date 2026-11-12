@@ -24,7 +24,7 @@ from examples.probability.vectors import (
     ANGULAR_COLOR, CONTACT_COLOR, FLOOR_COLOR, INITIAL_ANGULAR_COLOR, INITIAL_LINEAR_COLOR, LINEAR_COLOR,
     NORMAL_COLOR, SLIP_COLOR, SLIP_THRESHOLD, STICK_COLOR, TRAIL_COLOR, Layers,
 )
-from examples.probability.worker import Command, Frame, worker
+from examples.probability.worker import Command, Frame, select_frame, worker
 from examples.probability.world import World
 
 
@@ -72,8 +72,12 @@ class Dashboard:
         self.current_forecasts: list[Forecast] = []
         self.frame: Frame | None = None
         self.terminal_frame: Frame | None = None
+        self.experiment_id = 0
+        self.roll_id = 0
+        self.smoke_motion_during_forecast = False
         self.texture = None
         self.busy = True
+        self.forecasting = False
         self.failed = False
         self.status = "Starting Genesis. The first launch compiles kernels."
         self.auto_forecast = True
@@ -97,7 +101,9 @@ class Dashboard:
         self.process = context.Process(target=worker, args=(config, gpu, self.commands, self.events, self.frames))
         self.process.start()
         self.params = hello_imgui.RunnerParams()
-        self.params.app_window_params.window_title = "Genesis | Probability Lab - Live vectors"
+        self.params.app_window_params.window_title = "Genesis | Probability Lab - Continuous motion"
+        if smoke:
+            self.params.app_window_params.window_title += " (automated check)"
         self.params.app_window_params.window_geometry.size = (1360, 900)
         self.params.ini_disable = True
         self.params.fps_idling.fps_idle = 30
@@ -114,9 +120,19 @@ class Dashboard:
         style.child_rounding = 8
 
     def send(self, command: Command):
-        if command.action in ("configure", "forecast", "batch"):
+        if command.action in ("configure", "roll"):
+            if command.action == "configure":
+                self.experiment_id += 1
+                self.roll_id = 0
+            else:
+                self.roll_id += 1
+            self.current_forecasts = []
+            self.frame = self.terminal_frame = None
+            self.roll_seed = None
+            self.forecasting = False
+        if command.action in ("configure", "batch"):
             self.busy = True
-        self.commands.put(command)
+        self.commands.put(replace(command, experiment_id=self.experiment_id, roll_id=self.roll_id))
 
     def save(self):
         self.saved_path = str(export_results(self.results, self.forecasts, self.output, self.gpu))
@@ -148,23 +164,31 @@ class Dashboard:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
+            if event.kind == "error":
+                self.failed = True
+                self.busy = False
+                self.status = event.message
+                continue
+            if event.experiment_id != self.experiment_id:
+                continue
+            if event.kind == "trials":
+                self.results.trials.extend(event.trials)
+            elif event.kind == "forecast":
+                self.forecasts.append(event.forecast)
+            if event.roll_id != self.roll_id:
+                continue
             if event.kind == "busy":
                 self.busy = True
             elif event.kind == "ready":
                 self.busy = False
-            elif event.kind == "error":
-                self.failed = True
-                self.busy = False
-            elif event.kind == "trials":
-                self.results.trials.extend(event.trials)
+            elif event.kind == "forecasting":
+                self.forecasting = True
+            elif event.kind in ("forecast_idle", "forecast_cancelled"):
+                self.forecasting = False
             elif event.kind == "forecast":
-                self.forecasts.append(event.forecast)
                 self.current_forecasts.append(event.forecast)
             elif event.kind == "roll":
                 self.roll_seed = event.seed
-                self.current_forecasts = []
-                self.terminal_frame = None
-                self.frame = None
             elif event.kind == "terminal":
                 self.terminal_frame = event.frame
             if event.message:
@@ -173,21 +197,18 @@ class Dashboard:
 
     def poll(self):
         self.receive_events()
-        newest = None
+        newest = select_frame(self.frame, self.terminal_frame, self.experiment_id, self.roll_id)
+        self.terminal_frame = None
         while True:
             try:
-                newest = self.frames.get_nowait()
+                candidate = self.frames.get_nowait()
             except queue.Empty:
                 break
-        if self.terminal_frame is not None and (newest is None or newest.seconds <= self.terminal_frame.seconds):
-            newest = self.terminal_frame
-        self.terminal_frame = None
-        expected_seed = self.config.seed if self.roll_seed is None else self.roll_seed
-        if newest is not None and (newest.seed != expected_seed or newest.kind != self.config.kind):
-            newest = None
-        if newest is not None and self.frame is not None and newest.seconds < self.frame.seconds:
-            newest = None
-        if newest is not None:
+            newest = select_frame(newest, candidate, self.experiment_id, self.roll_id)
+        if newest is not None and newest is not self.frame:
+            if (self.smoke and self.forecasting and self.frame is not None
+                    and newest.seconds > self.frame.seconds):
+                self.smoke_motion_during_forecast = True
             self.frame = newest
             if self.texture is None:
                 self.texture = immvision.GlTexture(newest.rgb)
@@ -199,7 +220,7 @@ class Dashboard:
 
     def controls(self):
         imgui.separator_text("EXPERIMENT")
-        imgui.begin_disabled(self.busy or self.failed)
+        imgui.begin_disabled(self.busy or self.failed or self.smoke)
         imgui.set_next_item_width(175)
         _, self.kind_index = imgui.combo("Object", self.kind_index, ["Coin: H / T", "Die: 1 to 6"])
         imgui.same_line()
@@ -338,7 +359,7 @@ class Dashboard:
         else:
             imgui.dummy((width - 25, 290))
             imgui.text_wrapped(self.status)
-        imgui.begin_disabled(self.busy or self.failed)
+        imgui.begin_disabled(self.busy or self.failed or self.smoke)
         if imgui.button("Flip coin" if self.config.kind == "coin" else "Roll die"):
             self.send(Command("roll", auto_forecast=self.auto_forecast))
         imgui.same_line()
@@ -367,7 +388,7 @@ class Dashboard:
         if imgui.button("Export JSON + CSV"):
             self.save()
         imgui.end_disabled()
-        if self.busy and imgui.button("Cancel calculation"):
+        if not self.smoke and (self.busy or self.forecasting) and imgui.button("Cancel calculation"):
             self.send(Command("cancel"))
         self.vector_controls()
         if imgui.collapsing_header("Force magnitudes, floor and starting-pose details"):
@@ -525,7 +546,7 @@ class Dashboard:
                 elif self.smoke_stage == 4:
                     self.send(Command("pause"))
                     self.smoke_stage = 5
-                elif self.smoke_stage == 5 and len(self.results.trials) == 1:
+                elif self.smoke_stage == 5 and len(self.results.trials) == 1 and not self.forecasting:
                     self.send(Command("batch", amount=64))
                     self.smoke_stage = 6
                 elif self.smoke_stage == 6 and len(self.results.trials) == 65:
@@ -562,10 +583,11 @@ class Dashboard:
             screenshot = hello_imgui.final_app_window_screenshot()
             self.output.mkdir(parents=True, exist_ok=True)
             Image.fromarray(screenshot).save(self.output / f"{self.config.kind}-dashboard.png")
-            if self.failed or self.smoke_stage != 7 or len(self.forecasts) < 4 or self.process.exitcode != 0:
+            if (self.failed or self.smoke_stage != 7 or len(self.forecasts) < 4
+                    or not self.smoke_motion_during_forecast or self.process.exitcode != 0):
                 raise RuntimeError(f"GUI smoke incomplete (worker exit {self.process.exitcode}): {self.status}")
             print(f"GUI smoke passed: {len(self.results.trials)} trials, "
-                  f"{len(self.forecasts)} forecasts; {self.saved_path}")
+                  f"{len(self.forecasts)} forecasts; motion continued during forecasts; {self.saved_path}")
 
 
 def main():

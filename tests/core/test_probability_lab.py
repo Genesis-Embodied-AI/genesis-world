@@ -1,6 +1,7 @@
 """Outcome geometry, experiment accounting, reproducibility and real contact checks."""
 
 from dataclasses import replace
+from unittest.mock import sentinel
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from genesis.utils.misc import tensor_to_array
 from examples.probability.model import Config, Results, State, Trial, classify, perturb_observation, sample_launch
 from examples.probability.model import wilson_interval
 from examples.probability.vectors import contact_components, display_vector
+from examples.probability.worker import Frame, select_frame
 from examples.probability.world import World, object_xml
 
 
@@ -110,6 +112,21 @@ def test_arrow_scaling_preserves_measurement_and_direction():
     displayed, capped = display_vector(np.zeros(3), .3, .45)
     np.testing.assert_array_equal(displayed, [0, 0, 0])
     assert not capped
+
+
+@pytest.mark.parametrize("backend", [None])
+def test_live_frames_ignore_old_rolls_and_out_of_order_updates():
+    # Transport ordering must not inspect or alter the opaque render/physics payload.
+    frame = Frame(sentinel.image, .3, [], [], "In motion", 7, "coin", sentinel.diagnostics,
+                  experiment_id=1, roll_id=2, sequence=10)
+    assert select_frame(None, frame, 1, 2) is frame
+    for stale in (replace(frame, experiment_id=0, sequence=100),
+                  replace(frame, roll_id=1, seconds=6., sequence=100),
+                  replace(frame, sequence=9)):
+        assert select_frame(frame, stale, 1, 2) is frame
+    newer = replace(frame, sequence=11, seconds=.33)
+    assert select_frame(frame, newer, 1, 2) is newer
+    assert select_frame(frame, None, 2, 0) is None
 
 
 def test_world_vectors_use_com_and_world_angular_velocity(show_viewer):

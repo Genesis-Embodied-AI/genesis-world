@@ -22,9 +22,13 @@ completed trials. No separate Genesis viewer window or screen capture is used.
    and zoom in/out are available. A new roll abandons any unfinished visible roll;
    abandoned rolls do not enter the statistics.
 3. Leave **Auto forecasts** enabled to evaluate the physical state near simulated
-   times 0, 0.30 and 0.65 seconds. The visible world pauses during this computation;
-   simulation time is distinct from wall-clock time. **Forecast now** also works
-   during an active roll, including while paused.
+   times 0, 0.30 and 0.65 seconds. The animation continues while the worker
+   calculates forecasts. Each result is plotted at the time its state was
+   observed. **Forecast now** also works during an active roll, including while
+   paused. Starting a new toss or batch clears unfinished forecasts.
+   Forecasts retain their observation timestamps while the visible simulation
+   continues; there is no automatic checkpoint pause or display acknowledgement.
+   Experiment/roll identifiers reject late messages from older runs.
 4. Run a batch (128 trials by default) to grow the observed frequency table.
    **Cancel calculation** retains completed chunks and discards the current
    incomplete chunk. Compilation itself cannot be cancelled except by closing.
@@ -219,13 +223,16 @@ forecasts, pause/resume and a checked single step, a batch of 64 trials, an expo
 then closes and saves the application's own framebuffer
 as a dashboard PNG. It does not record the desktop. The results are experiment
 artifacts, not evidence that this model reproduces real coin or die frequencies.
-Avoid interacting during `--smoke`; interactive commands can start additional
-throws. Use the headless `--batch` command for a fixed-size experiment.
+Experiment controls are disabled during `--smoke` so clicks cannot change the
+automated sequence. It also verifies that simulation time advances while a
+forecast is being calculated. Use headless `--batch` for a fixed-size experiment.
 
 ### Verified locally on 2026-11-11
 
-- The targeted pytest suite passed: **18 cases**, including both GPU contact tests
-  and world-frame vector diagnostics.
+- The targeted pytest suite passed: **19 cases**, including both GPU contact tests,
+  world-frame vector diagnostics and rejection of stale/out-of-order frames.
+- A direct worker check confirmed that simulation time advanced to 0.98 s while
+  computing the forecast from 0.00 s, without a display acknowledgement.
 - Both GUI smoke runs completed, exported their data, produced inspected
   framebuffer images and exited their workers cleanly (65 trials and four
   forecasts each). Additional runs exercised the enlarged graphs window for
