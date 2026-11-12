@@ -551,10 +551,12 @@ def func_pair_barrier(
     kappa: float,
     ipc_info: IPCInfo,
     is_edge_edge: qd.template(),
+    is_assembly: qd.template(),
 ):
     """
     Compute the distance flag of a stencil at positions `x`, whether it lies in the band, its gap over d_hat beyond the
-    thickness, and the energy, the gradient and the positive semi-definite Hessian of its barrier.
+    thickness, and the energy of its barrier, with `is_assembly` its gradient and positive semi-definite Hessian too
+    (zero otherwise).
 
     An edge-edge barrier is mollified once the squared cross norm of the edges falls below `mollifier_threshold`.
     """
@@ -572,27 +574,29 @@ def func_pair_barrier(
             is_mollified = cross_norm2 < mollifier_threshold
         if is_mollified:
             energy = func_mollified_barrier(distance2, cross_norm2, mollifier_threshold, d_hat, thickness, kappa)
-            gradient, hessian = func_mollified_barrier_gradient_hessian(
-                flag,
-                x[0, :],
-                x[1, :],
-                x[2, :],
-                x[3, :],
-                distance2,
-                distance2_gradient,
-                mollifier_threshold,
-                d_hat,
-                thickness,
-                kappa,
-                ipc_info.projection_rank_tolerance[None],
-                ipc_info.projection_eigen_tolerance[None],
-                ipc_info.projection_max_sweeps[None],
-            )
+            if qd.static(is_assembly):
+                gradient, hessian = func_mollified_barrier_gradient_hessian(
+                    flag,
+                    x[0, :],
+                    x[1, :],
+                    x[2, :],
+                    x[3, :],
+                    distance2,
+                    distance2_gradient,
+                    mollifier_threshold,
+                    d_hat,
+                    thickness,
+                    kappa,
+                    ipc_info.projection_rank_tolerance[None],
+                    ipc_info.projection_eigen_tolerance[None],
+                    ipc_info.projection_max_sweeps[None],
+                )
         else:
             energy, _, _ = func_barrier(distance2, d_hat, thickness, kappa)
-            gradient, hessian = func_barrier_gradient_hessian(
-                distance2, distance2_gradient, d_hat, thickness, kappa, ipc_info.hessian_clamp_ratio[None]
-            )
+            if qd.static(is_assembly):
+                gradient, hessian = func_barrier_gradient_hessian(
+                    distance2, distance2_gradient, d_hat, thickness, kappa, ipc_info.hessian_clamp_ratio[None]
+                )
         gap = (qd.sqrt(distance2) - thickness) / d_hat
     return flag, is_active, gap, energy, gradient, hessian
 
@@ -660,12 +664,13 @@ def func_pair_terms(
     newton_config: qd.template(),
     is_edge_edge: qd.template(),
     is_friction: qd.template(),
+    is_assembly: qd.template(),
 ):
     """
     Compute the barrier of a candidate pair, or the friction of a friction pair, of primitives i_a_prim and i_b_prim in
     environment i_b at the positions of its vertices: its stencil, its distance flag, whether it lies in the band, its
-    gap over d_hat beyond the thickness, and its energy, gradient and positive semi-definite Hessian, scaled by dt^2
-    times its area weight.
+    gap over d_hat beyond the thickness, and its energy, with `is_assembly` its gradient and positive semi-definite
+    Hessian too (zero otherwise), scaled by dt^2 times its area weight.
 
     The friction of a pair takes its frame from its distance flag `flag_lagged` at the lagged positions of its vertices,
     and its normal force `normal_force` there at the stiffness of the material, both scaled by its adaptive stiffness.
@@ -685,7 +690,8 @@ def func_pair_terms(
         eps_vh = ipc_info.friction_eps_v[None] * ipc_info.substep_dt[None]
         force = kappa_scale * normal_force
         energy = func_friction_energy(basis, weights, x - x_lagged, force, friction_mu, eps_vh)
-        gradient, hessian = func_friction_gradient_hessian(basis, weights, x - x_lagged, force, friction_mu, eps_vh)
+        if qd.static(is_assembly):
+            gradient, hessian = func_friction_gradient_hessian(basis, weights, x - x_lagged, force, friction_mu, eps_vh)
     else:
         mollifier_threshold = gs.qd_float(0.0)
         if qd.static(is_edge_edge):
@@ -696,7 +702,14 @@ def func_pair_terms(
                 * ipc_info.edges.rest_length2[i_b_prim]
             )
         flag, is_active, gap, energy, gradient, hessian = func_pair_barrier(
-            x, mollifier_threshold, d_hat, thickness, resistance * kappa_scale, ipc_info, is_edge_edge
+            x,
+            mollifier_threshold,
+            d_hat,
+            thickness,
+            kappa=resistance * kappa_scale,
+            ipc_info=ipc_info,
+            is_edge_edge=is_edge_edge,
+            is_assembly=is_assembly,
         )
     scale = ipc_info.substep_dt[None] * ipc_info.substep_dt[None] * area_weight
     return verts_idx, flag, is_active, gap, scale * energy, scale * gradient, scale * hessian
@@ -712,8 +725,8 @@ def func_halfplanes_terms(
     is_assembly: qd.template(),
 ):
     """
-    Compute the contact energy of a contact vertex against every plane at its position, and its gradient and positive
-    semi-definite Hessian (see the module docstring).
+    Compute the contact energy of a contact vertex against every plane at its position, with `is_assembly` its gradient
+    and positive semi-definite Hessian too (zero otherwise, see the module docstring).
 
     The assembly lowers the smallest gap of the vertex with the adaptive stiffness.
     """
@@ -734,11 +747,12 @@ def func_halfplanes_terms(
         if distance > thickness and distance < thickness + d_hat:
             barrier, _, _ = func_barrier(distance * distance, d_hat, thickness, kappa)
             energy += barrier
-            gradient_pair, hessian_pair = func_point_halfplane_barrier_gradient_hessian(
-                distance, normal, d_hat, thickness, kappa
-            )
-            gradient += gradient_pair
-            hessian += hessian_pair
+            if qd.static(is_assembly):
+                gradient_pair, hessian_pair = func_point_halfplane_barrier_gradient_hessian(
+                    distance, normal, d_hat, thickness, kappa
+                )
+                gradient += gradient_pair
+                hessian += hessian_pair
             if qd.static(is_assembly and newton_config.has_adaptive_kappa):
                 func_report_gap(
                     i_b, qd.Vector([i_v]), (distance - thickness) / d_hat, ipc_state, newton_config.is_kappa_tick_newton
@@ -749,11 +763,12 @@ def func_halfplanes_terms(
             displacements = qd.Matrix.rows([x - x_lagged])
             force = kappa_scale * friction_force
             energy += func_friction_energy(basis, weights, displacements, force, friction_mu, eps_vh)
-            gradient_pair, hessian_pair = func_friction_gradient_hessian(
-                basis, weights, displacements, force, friction_mu, eps_vh
-            )
-            gradient += gradient_pair
-            hessian += hessian_pair
+            if qd.static(is_assembly):
+                gradient_pair, hessian_pair = func_friction_gradient_hessian(
+                    basis, weights, displacements, force, friction_mu, eps_vh
+                )
+                gradient += gradient_pair
+                hessian += hessian_pair
     scale = ipc_info.substep_dt[None] * ipc_info.substep_dt[None] * ipc_info.vertices.area_weight[i_v]
     scale = scale * d_hat
     return scale * energy, scale * gradient, scale * hessian
@@ -1014,6 +1029,7 @@ def func_contact_assemble(
                 newton_config,
                 is_edge_edge=is_edge_edge,
                 is_friction=is_friction,
+                is_assembly=True,
             )
             if qd.static(not is_friction):
                 if qd.static(is_edge_edge):
@@ -1142,6 +1158,7 @@ def func_contact_energy(
                         newton_config,
                         is_edge_edge=is_edge_edge,
                         is_friction=is_friction,
+                        is_assembly=False,
                     )
             func_add_by_key(i_b_key, energy, energies)
 
