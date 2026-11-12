@@ -915,7 +915,9 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     n_linesearch_iterations : int, optional
         Maximum number of line search iterations. Defaults to 0. Only used when `use_implicit_solver` is True.
     newton_dx_threshold : float, optional
-        Threshold for the Newton solver. Defaults to 1e-6. Only used when `use_implicit_solver` is True.
+        Displacement of the vertices over a Newton iteration, in meters and root mean square, below which the Newton
+        iterations of an environment stop. A larger value saves iterations and leaves a larger error in the solve.
+        Defaults to 1e-6. Only used when `use_implicit_solver` is True.
     pcg_threshold : float, optional
         Threshold for the PCG solver. Defaults to 1e-6. Only used when `use_implicit_solver` is True, without
         `requires_grad`: a differentiable scene solves to the precision of the simulation instead, which its gradients

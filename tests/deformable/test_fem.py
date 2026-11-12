@@ -414,6 +414,47 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, fem_floor_con
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+def test_implicit_newton_dx_threshold(show_viewer):
+    # A truncated PCG solve leaves the first Newton iteration short of the solution, so that later iterations move the
+    # vertices, unless a threshold above the first displacement ends them.
+    N_PCG_ITERATIONS = 5
+
+    verts_pos = []
+    # The options of the solver hold for the whole scene, hence a second build for the single Newton iteration
+    for n_newton_iterations, newton_dx_threshold in ((10, 1.0), (1, 1e-6)):
+        scene = gs.Scene(
+            fem_options=gs.options.FEMOptions(
+                use_implicit_solver=True,
+                n_newton_iterations=n_newton_iterations,
+                n_pcg_iterations=N_PCG_ITERATIONS,
+                newton_dx_threshold=newton_dx_threshold,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(0.6, 0.0, 0.6),
+                camera_lookat=(0.0, 0.0, 0.5),
+            ),
+            show_viewer=show_viewer,
+        )
+        sphere = scene.add_entity(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, 0.5),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                model="linear_corotated",
+            ),
+        )
+        scene.build(n_envs=2)
+        # Distinct stretches per environment, each of them converging on its own
+        stretch = sphere.init_positions.new_tensor(((1.0, 1.0, 1.2), (1.1, 1.0, 1.0)))
+        sphere.set_position(sphere.init_positions * stretch[:, None])
+        scene.step()
+        verts_pos.append(sphere.get_verts_pos())
+    assert_equal(verts_pos[0], verts_pos[1])
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_legacy_coupler_rigid_velocity_correction(show_viewer):
     DT = 0.01
     GRAVITY = 9.81
