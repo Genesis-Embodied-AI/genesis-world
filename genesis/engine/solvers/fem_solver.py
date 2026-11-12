@@ -85,6 +85,10 @@ MAX_ENTITY_CLUSTERS = 8
 MIN_CLUSTER_VERTICES = 64
 MAX_SCENE_CLUSTERS = 16
 
+# Default threshold of the PCG solves of a forward simulation on their squared residual relative to its initial one, by
+# precision (see FEMOptions)
+PCG_THRESHOLD_DEFAULT = {np.float64: 1e-9, np.float32: 1e-6}
+
 
 class FEMErrorCode(ErrorCode):
     """The error flags the finite element method (FEM) solver writes in its errno (see 'Solver.register_errors')."""
@@ -216,8 +220,8 @@ class FEMEnvsSolve(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     The progress and scalars of the implicit solve of each environment.
 
     They are whether its Newton iterations, its preconditioned conjugate gradient (PCG) solve and its line search go on,
-    the scalars of the PCG solve, the squared residual below which the PCG solve of a differentiable scene stops (see
-    'pcg_threshold_rel'), and the energy, step and slope of the line search.
+    the scalars of the PCG solve, the squared residual below which its PCG solve stops (see 'pcg_threshold' in
+    FEMInfo), and the energy, step and slope of the line search.
     """
 
     is_active: qd.Tensor = field(bool)
@@ -371,13 +375,12 @@ class FEMInfo(Data, kind=DataKind.CONSTANT):
     n_newton_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     n_pcg_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
     n_linesearch_iterations: qd.Tensor = field(int, shape=(), labels=IMPLICIT)
+    # The squared residual at which a PCG solve stops, relative to its initial one, at least the square of the precision
+    # of the simulation, below which the residual is round-off
     pcg_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # The root mean square of the displacements of the vertices over a Newton iteration below which an environment
     # stops iterating
     newton_dx_threshold: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
-    # The squared residual, relative to the first one of the substep, at which the solve of a differentiable scene
-    # stops: round-off, since its backward pass is the adjoint of the root of the solve.
-    pcg_threshold_rel: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     # The sufficient decrease constant and the backtracking factor of the line search
     linesearch_c: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
     linesearch_tau: qd.Tensor = field(float, shape=(), labels=IMPLICIT)
@@ -440,7 +443,6 @@ class FEMConfig(Config):
     """The compile-time configuration of the kernels of the finite element method (FEM) solver."""
 
     use_implicit_solver: bool
-    requires_grad: bool
     enable_vertex_constraints: bool
     # Whether a block of threads sums the terms of each environment and the lanes of a subgroup tile those of each
     # vertex, on GPU, where a single thread runs each environment on CPU
@@ -510,9 +512,8 @@ class FEMData(Data):
                     n_newton_iterations=solver._n_newton_iterations,
                     n_pcg_iterations=solver._n_pcg_iterations,
                     n_linesearch_iterations=solver._n_linesearch_iterations,
-                    pcg_threshold=solver._pcg_threshold,
+                    pcg_threshold=max(solver._pcg_threshold, np.finfo(gs.np_float).eps ** 2),
                     newton_dx_threshold=solver._newton_dx_threshold,
-                    pcg_threshold_rel=(1e-5 if gs.qd_float == qd.f32 else 1e-12) ** 2,
                     linesearch_c=solver._linesearch_c,
                     linesearch_tau=solver._linesearch_tau,
                     # The elimination runs in single precision (see 'FEMCoarseSolve')
@@ -578,7 +579,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_newton_iterations = options.n_newton_iterations
         self._newton_dx_threshold = options.newton_dx_threshold
         self._n_pcg_iterations = options.n_pcg_iterations
+        # A differentiable scene solves to round-off, which the adjoint of the root of the solve needs to match the finite
+        # differences of the simulation
         self._pcg_threshold = options.pcg_threshold
+        if self._pcg_threshold is None:
+            self._pcg_threshold = 0.0 if self._requires_grad else PCG_THRESHOLD_DEFAULT[gs.np_float]
         self._n_linesearch_iterations = options.n_linesearch_iterations
         self._linesearch_c = options.linesearch_c
         self._linesearch_tau = options.linesearch_tau
@@ -641,7 +646,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         self.fem_config = FEMConfig(
             use_implicit_solver=self._use_implicit_solver,
-            requires_grad=self._requires_grad,
             enable_vertex_constraints=self._enable_vertex_constraints,
             enable_cooperative_kernels=enable_cooperative_kernels,
             # The generic kernels outside performance mode serve every scene with the largest bound, sparing a
@@ -2466,14 +2470,8 @@ def func_init_pcg(
             if is_active:
                 fem_state.envs_solve.rTr[i_b] = rTr
                 fem_state.envs_solve.rTz[i_b] = rTz
-            rTr_threshold = fem_info.pcg_threshold[None]
-            if qd.static(fem_config.requires_grad):
-                is_first_residual = True
-                if qd.static(not is_adjoint):
-                    is_first_residual = fem_state.solve_loops.n_newton_left[()] == fem_info.n_newton_iterations[None]
-                if is_first_residual:
-                    fem_state.envs_solve.rTr_threshold[i_b] = fem_info.pcg_threshold_rel[None] * rTr
-                rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
+            rTr_threshold = fem_info.pcg_threshold[None] * rTr
+            fem_state.envs_solve.rTr_threshold[i_b] = rTr_threshold
             is_pcg_active = is_active and rTr > rTr_threshold
             fem_state.envs_solve.is_pcg_active[i_b] = is_pcg_active
             if is_pcg_active:
@@ -2522,10 +2520,7 @@ def func_update_pcg_env(
     rTr_new, rTz_new = func_block_sum(i_t, values=qd.Vector([rTr_new, rTz_new]), n_threads=n_threads)
 
     # Convergence check, then the new search direction
-    rTr_threshold = fem_info.pcg_threshold[None]
-    if qd.static(fem_config.requires_grad):
-        rTr_threshold = fem_state.envs_solve.rTr_threshold[i_b]
-    is_still_active = is_active and rTr_new > rTr_threshold
+    is_still_active = is_active and rTr_new > fem_state.envs_solve.rTr_threshold[i_b]
     beta = gs.qd_float(0.0)
     if is_still_active:
         beta = rTz_new / rTz
@@ -2754,6 +2749,7 @@ def func_linesearch_iter(
     n_threads = qd.static(BLOCK_DIM if fem_config.enable_cooperative_kernels else 1)
 
     _B = fem_state.envs_solve.is_active.shape[0]
+    n_vertices = fem_info.vertices.mass.shape[0]
     for i_v, i_b in qd.ndrange(*fem_state.vertices_solve.x.shape, axes=qd.static(eoa(fem_state.vertices_solve.x))):
         # A line search iteration starts here: its loop flag drops until an environment iterates on
         if i_b == 0 and i_v == 0:
@@ -2790,17 +2786,25 @@ def func_linesearch_iter(
             energy = func_env_energy_part(i_b, i_t, fem_state, fem_info, fem_config, n_threads, add_damping_alpha=True)
         energy = func_block_sum(i_t, values=qd.Vector([energy]), n_threads=n_threads)[0]
 
+        step_size = fem_state.envs_solve.step_size[i_b]
+        is_rejected = is_active and (
+            energy
+            > fem_state.envs_solve.prev_energy[i_b]
+            + fem_info.linesearch_c[None] * step_size * fem_state.envs_solve.m[i_b]
+        )
+        # A search that runs out of trials takes no step, so that the positions always follow the stored step
+        is_exhausted = is_rejected and fem_state.solve_loops.n_linesearch_left[()] <= 0
+        if is_exhausted:
+            for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
+                i_v = i_v_ * n_threads + i_t
+                if i_v < n_vertices:
+                    fem_state.vertices.pos_next[i_v, i_b] = fem_state.vertices_solve.x_prev[i_v, i_b]
         if i_t == 0 and is_active:
-            step_size = fem_state.envs_solve.step_size[i_b]
-            is_still_active = (
-                energy
-                > fem_state.envs_solve.prev_energy[i_b]
-                + fem_info.linesearch_c[None] * step_size * fem_state.envs_solve.m[i_b]
-            )
-            fem_state.envs_solve.is_linesearch_active[i_b] = is_still_active
-            if is_still_active:
-                if fem_state.solve_loops.n_linesearch_left[()] > 0:
-                    linesearch_counter[()] = 1
+            fem_state.envs_solve.is_linesearch_active[i_b] = is_rejected and not is_exhausted
+            if is_exhausted:
+                fem_state.envs_solve.step_size[i_b] = 0.0
+            elif is_rejected:
+                linesearch_counter[()] = 1
                 fem_state.envs_solve.step_size[i_b] = step_size * fem_info.linesearch_tau[None]
 
 
@@ -2808,6 +2812,8 @@ def func_linesearch_iter(
 def func_skip_linesearch(fem_state: FEMState, fem_info: FEMInfo):
     for i_v, i_b in qd.ndrange(*fem_state.vertices_solve.x.shape, axes=qd.static(eoa(fem_state.vertices_solve.x))):
         if fem_state.envs_solve.is_active[i_b]:
+            if i_v == 0:
+                fem_state.envs_solve.step_size[i_b] = 1.0
             fem_state.vertices.pos_next[i_v, i_b] = (
                 fem_state.vertices.pos_next[i_v, i_b] + fem_state.vertices_solve.x[i_v, i_b]
             )
@@ -2835,14 +2841,11 @@ def func_end_newton(newton_counter: qd.Tensor, fem_state: FEMState, fem_info: FE
         is_active = fem_state.envs_solve.is_active[i_b]
         dx_sqr = gs.qd_float(0.0)
         if is_active:
+            step_size = fem_state.envs_solve.step_size[i_b]
             for i_v_ in range((n_vertices + n_threads - 1) // n_threads):
                 i_v = i_v_ * n_threads + i_t
                 if i_v < n_vertices:
-                    # The line search leaves the positions at its last trial, which its stored step factor may not match
-                    dx = fem_state.vertices_solve.x[i_v, i_b]
-                    if qd.static(fem_config.has_linesearch):
-                        dx = fem_state.vertices.pos_next[i_v, i_b] - fem_state.vertices_solve.x_prev[i_v, i_b]
-                    dx_sqr = dx_sqr + dx.norm_sqr()
+                    dx_sqr = dx_sqr + (step_size * fem_state.vertices_solve.x[i_v, i_b]).norm_sqr()
         dx_sqr = func_block_sum(i_t, values=qd.Vector([dx_sqr]), n_threads=n_threads)[0]
         if i_t == 0 and is_active:
             if dx_sqr < n_vertices * fem_info.newton_dx_threshold[None] ** 2:
