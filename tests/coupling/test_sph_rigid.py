@@ -228,6 +228,8 @@ def test_flotation_follows_density_ratio(n_envs, show_viewer):
     )
 
 
+# On CPU, the test takes several minutes in the configuration of the CI (debug mode, ndarray, one thread per worker)
+@pytest.mark.slow("cpu")
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_coupling_force_wakes_hibernated_link(n_envs, show_viewer):
     scene = gs.Scene(
