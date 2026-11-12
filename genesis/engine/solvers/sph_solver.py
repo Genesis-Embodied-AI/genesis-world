@@ -314,9 +314,8 @@ class SPHSolver(ParticleSolver):
                 # full Jacobi update leaves the mode alternating from one particle to the next undamped, and overshoots
                 # once the liquid compresses abruptly. Half the update cancels that mode, the others still converging.
                 jacobi_relaxation=0.5,
-                # FIXME: A larger share saves more density iterations, but turns a thin slab unstable from three quarters
-                # on, for a reason not found yet: the excess of the carried-over pressure over hydrostatics neither drifts
-                # nor scatters more between neighbors than at half the share.
+                # A larger share saves density iterations, but leaves undamped a breathing mode of the pressure that the
+                # average density error barely sees, which the loss of the other half damps.
                 warm_start_scale=0.5,
                 factor_eps=1e-6,
                 n_neighbors_min=20,
