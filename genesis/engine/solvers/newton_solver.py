@@ -408,11 +408,7 @@ class NewtonSolver(Solver):
                     geoms = []
                     for geom in link.geoms:
                         if geom.type == gs.GEOM_TYPE.PLANE:
-                            if not geom.is_fixed:
-                                gs.raise_exception(
-                                    f"The cloth supports fixed planes alone, got a plane on the moving link "
-                                    f"'{link.name}' of entity '{entity.name}'."
-                                )
+                            assert geom.is_fixed
                             halfplanes_geom_idx.append(geom.idx)
                         elif entity.material.needs_coup:
                             geoms.append(geom)

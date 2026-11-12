@@ -1534,6 +1534,71 @@ def test_cloth_rigid_contact(cloth_grid_obj_path, show_viewer):
 
 
 @pytest.mark.required
+def test_cloth_robot_contact(cloth_grid_obj_path, show_viewer):
+    CONTACT_THICKNESS = 1e-3
+    TABLE_TOP = 0.2
+    TARGET_XY = (0.45, 0.0)
+
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.1, -0.6, 0.6),
+            camera_lookat=(0.45, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.5, 0.5, TABLE_TOP),
+            pos=(*TARGET_XY, 0.5 * TABLE_TOP),
+            fixed=True,
+        ),
+    )
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=cloth_grid_obj_path,
+            scale=0.3,
+            pos=(*TARGET_XY, TABLE_TOP + 0.011),
+        ),
+        material=gs.materials.FEM.Cloth(
+            contact_thickness=CONTACT_THICKNESS,
+        ),
+    )
+    franka = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build(n_envs=2)
+
+    # The fingertips start 1.5 cm above the cloth, and the joint targets of the press would bring them 2 cm into the
+    # table, which the cloth between them stops
+    hand = franka.get_link("hand")
+    fingers = (franka.get_link("left_finger"), franka.get_link("right_finger"))
+    qpos_start, qpos_press = (
+        franka.inverse_kinematics(link=hand, pos=(*TARGET_XY, TABLE_TOP + height), quat=(0.0, 1.0, 0.0, 0.0))
+        for height in (0.138, 0.09)
+    )
+    qpos_start[..., -2:] = 0.02
+    qpos_press[..., -2:] = 0.02
+    franka.set_qpos(qpos_start)
+    franka.control_dofs_position(qpos_press)
+    for _ in range(40):
+        scene.step()
+        fingers_min_z = torch.stack([finger.get_AABB()[..., 0, 2] for finger in fingers]).min(dim=0).values
+        assert (fingers_min_z > TABLE_TOP + CONTACT_THICKNESS).all()
+        assert (cloth.get_verts_pos()[..., 2] > TABLE_TOP + CONTACT_THICKNESS).all()
+    # The press holds the cloth under the fingertips without crossing it
+    verts = cloth.get_verts_pos()
+    for finger in fingers:
+        aabb = finger.get_AABB()
+        is_under = ((verts[..., :2] > aabb[:, None, 0, :2]) & (verts[..., :2] < aabb[:, None, 1, :2])).all(dim=-1)
+        assert (torch.where(is_under, verts[..., 2], -1.0).max(dim=-1).values < aabb[..., 0, 2]).all()
+
+
+@pytest.mark.required
 def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     scene = gs.Scene(mpm_options=gs.options.MPMOptions(use_implicit_solver=True))
     scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
@@ -1553,6 +1618,12 @@ def test_cloth_unsupported_scenes(cloth_grid_obj_path, box_obj_path):
     scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
     scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
     with pytest.raises(gs.GenesisException, match="does not support RigidOptions"):
+        scene.build()
+
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(use_hibernation=True))
+    scene.add_entity(morph=gs.morphs.Mesh(file=cloth_grid_obj_path), material=gs.materials.FEM.Cloth())
+    scene.add_entity(morph=gs.morphs.Box(pos=(0.0, 0.0, 1.0), size=(0.1, 0.1, 0.1)))
+    with pytest.raises(gs.GenesisException, match="use_hibernation=False"):
         scene.build()
 
     scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True))
