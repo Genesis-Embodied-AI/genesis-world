@@ -35,15 +35,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.bvh import (
-    BoxQuery,
-    BVHLeaves,
-    BVHQueryResults,
-    BVHTreeState,
-    build_bvh,
-    func_bvh_query_leaves,
-    get_bvh_data,
-)
 from genesis.engine.ipc.barrier import (
     func_barrier,
     func_barrier_gradient_hessian,
@@ -53,6 +44,7 @@ from genesis.engine.ipc.barrier import (
     func_pair_barrier_parameters,
     func_point_halfplane_barrier_gradient_hessian,
 )
+from genesis.engine.ipc.broad_phase import EFBroadPhase, EFSubPairs, func_vertex_bulge
 from genesis.engine.ipc.ccd import (
     func_additive_ccd,
     func_candidate_reach,
@@ -68,6 +60,7 @@ from genesis.engine.ipc.distance import (
     func_point_triangle_distance_flag,
     func_point_triangle_flagged_distance2,
 )
+from genesis.engine.ipc.dop_bvh import DOPBVHHits
 from genesis.engine.ipc.friction import (
     func_edge_edge_friction_frame,
     func_friction_energy,
@@ -339,103 +332,41 @@ class IPCFrictionPairs(Data, kind=DataKind.SCRATCH):
     counts: qd.Tensor = field(int, shape=(2,), ndarray=True)
 
 
-@qd.data_oriented
-class PointTriangleQuery(BoxQuery):
-    """The box query of the contact vertices against the contact triangles, dropping a vertex of the triangle and a rigid
-    vertex against a rigid triangle."""
-
-    def __init__(self, results: BVHQueryResults, triangles_verts_idx: qd.Tensor, is_rigid: qd.Tensor) -> None:
-        super().__init__(results)
-        self.triangles_verts_idx = triangles_verts_idx
-        self.is_rigid = is_rigid
-
-    @qd.func
-    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
-        tri = self.triangles_verts_idx[i_a]
-        i_v_tri = tri[0]
-        return i_q != tri[0] and i_q != tri[1] and i_q != tri[2] and not (self.is_rigid[i_q] and self.is_rigid[i_v_tri])
-
-
-@qd.data_oriented
-class EdgeEdgeQuery(BoxQuery):
-    """The box query of the contact edges against the contact edges, each pair once with the edge of lower index
-    querying, dropping the edges that share a vertex and two rigid edges."""
-
-    def __init__(self, results: BVHQueryResults, edges_verts_idx: qd.Tensor, is_rigid: qd.Tensor) -> None:
-        super().__init__(results)
-        self.edges_verts_idx = edges_verts_idx
-        self.is_rigid = is_rigid
-
-    @qd.func
-    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
-        is_kept = i_q < i_a
-        if is_kept:
-            edge_q = self.edges_verts_idx[i_q]
-            edge_a = self.edges_verts_idx[i_a]
-            for i, j in qd.static(qd.ndrange(2, 2)):
-                if edge_q[i] == edge_a[j]:
-                    is_kept = False
-            i_v_q = edge_q[0]
-            i_v_a = edge_a[0]
-            if self.is_rigid[i_v_q] and self.is_rigid[i_v_a]:
-                is_kept = False
-        return is_kept
-
-
-@qd.data_oriented
-class EdgeTriangleQuery(BoxQuery):
-    """The box query of the contact edges against the contact triangles, keeping the edges that cross a triangle they do
-    not share a vertex with (see 'func_edge_triangle_intersect' in genesis/engine/ipc/intersection.py), but a rigid
-    edge against a rigid triangle."""
-
-    def __init__(
-        self,
-        results: BVHQueryResults,
-        edges_verts_idx: qd.Tensor,
-        triangles_verts_idx: qd.Tensor,
-        is_rigid: qd.Tensor,
-        positions: qd.Tensor,
-        tolerance: qd.Tensor,
-    ) -> None:
-        super().__init__(results)
-        self.edges_verts_idx = edges_verts_idx
-        self.triangles_verts_idx = triangles_verts_idx
-        self.is_rigid = is_rigid
-        self.positions = positions
-        self.tolerance = tolerance
-
-    @qd.func
-    def is_kept(self, i_t: int, i_q: int, i_k: int, i_a: int) -> bool:
-        edge = self.edges_verts_idx[i_q]
-        tri = self.triangles_verts_idx[i_a]
+@qd.kernel(fastcache=True)
+def kernel_contact_intersections(hits: DOPBVHHits, intersections: DOPBVHHits, ipc_state: IPCState, ipc_info: IPCInfo):
+    """
+    Collect the (environment, edge, triangle) triplets of the contact edges that cross a contact triangle they do not
+    share a vertex with (see 'func_edge_triangle_intersect' in genesis/engine/ipc/intersection.py), but a rigid edge
+    against a rigid triangle, among the hits of the edges against the triangles of the broad phase.
+    """
+    for _ in range(1):
+        intersections.count[()] = 0
+    for i_h in range(qd.min(hits.count[()], hits.hits.shape[0])):
+        hit = hits.hits[i_h]
+        i_b, i_e, i_t = hit[0], hit[1], hit[2]
+        edge = ipc_info.edges.verts_idx[i_e]
+        tri = ipc_info.triangles.verts_idx[i_t]
         is_kept = True
         for i, j in qd.static(qd.ndrange(2, 3)):
             if edge[i] == tri[j]:
                 is_kept = False
         i_v_edge = edge[0]
         i_v_tri = tri[0]
-        if self.is_rigid[i_v_edge] and self.is_rigid[i_v_tri]:
+        if ipc_info.vertices.is_rigid[i_v_edge] and ipc_info.vertices.is_rigid[i_v_tri]:
             is_kept = False
         if is_kept:
             is_kept = func_edge_triangle_intersect(
-                self.positions[tri[0], i_t],
-                self.positions[tri[1], i_t],
-                self.positions[tri[2], i_t],
-                self.positions[edge[0], i_t],
-                self.positions[edge[1], i_t],
-                self.tolerance[None],
+                ipc_state.vertices.pos[tri[0], i_b],
+                ipc_state.vertices.pos[tri[1], i_b],
+                ipc_state.vertices.pos[tri[2], i_b],
+                ipc_state.vertices.pos[edge[0], i_b],
+                ipc_state.vertices.pos[edge[1], i_b],
+                ipc_info.intersection_tolerance[None],
             )
-        return is_kept
-
-
-@qd.kernel
-def kernel_contact_intersections(edges_query: BVHLeaves, triangles_tree: BVHTreeState, visitor: qd.template()):
-    """Collect the contact edges that cross a contact triangle, in every environment (see EdgeTriangleQuery)."""
-    for _ in range(1):
-        visitor.results.count[0] = 0
-    for i_b in range(visitor.results.trees_count.shape[0]):
-        visitor.results.trees_count[i_b] = 0
-    func_bvh_query_leaves(edges_query, triangles_tree, visitor)
+        if is_kept:
+            i_x = qd.atomic_add(intersections.count[()], 1)
+            if i_x < intersections.hits.shape[0]:
+                intersections.hits[i_x] = hit
 
 
 # ------------------------------------------------------------------------------------
@@ -1269,107 +1200,6 @@ def func_contact_kappa_iteration(envs_mask: qd.Tensor, ipc_state: IPCState, ipc_
 
 
 @qd.func
-def func_vertex_inflation(i_v: int, i_b: int, ipc_state: IPCState, has_rigid: qd.template()) -> float:
-    """Return how far the screw path of a contact vertex bulges out of its chord over the sweep, r |w|^2 / 8 for a lever
-    arm r and a rotation w (the sagitta of the arc), zero for a vertex moving straight."""
-    inflation = gs.qd_float(0.0)
-    if qd.static(has_rigid):
-        lever = ipc_state.vertices.pos[i_v, i_b] - ipc_state.vertices.pivot[i_v, i_b]
-        inflation = 0.125 * lever.norm() * ipc_state.vertices.rotation[i_v, i_b].norm_sqr()
-    return inflation
-
-
-@qd.func
-def func_sweep_box(verts_idx, i_b: int, ipc_state: IPCState, has_rigid: qd.template(), is_swept: qd.template()):
-    """Return the box of the positions of the vertices of a primitive in environment i_b over their sweep along the
-    Newton direction, the bulge of a screw path included, or at their positions."""
-    lower = qd.Vector([1e300] * 3, dt=gs.qd_float)
-    upper = qd.Vector([-1e300] * 3, dt=gs.qd_float)
-    for k in qd.static(range(verts_idx.n)):
-        x = ipc_state.vertices.pos[verts_idx[k], i_b]
-        lower = qd.min(lower, x)
-        upper = qd.max(upper, x)
-        if qd.static(is_swept):
-            end = x + ipc_state.vertices.displacement[verts_idx[k], i_b]
-            lower = qd.min(lower, end)
-            upper = qd.max(upper, end)
-            if qd.static(has_rigid):
-                inflation = func_vertex_inflation(verts_idx[k], i_b, ipc_state, has_rigid)
-                lower = lower - inflation
-                upper = upper + inflation
-    return lower, upper
-
-
-@qd.kernel(fastcache=True)
-def kernel_contact_boxes(
-    ipc_state: IPCState,
-    ipc_info: IPCInfo,
-    triangles_leaves: BVHLeaves,
-    edges_leaves: BVHLeaves,
-    points_query: BVHLeaves,
-    edges_query: BVHLeaves,
-    has_rigid: qd.template(),
-    is_swept: qd.template(),
-):
-    """
-    Set the boxes of the contact triangles and edges, and the query boxes of the contact vertices and edges, over the
-    sweep of the vertices from their positions along the Newton direction, or at their positions.
-
-    A triangle or an edge is inflated by the largest thickness of its vertices and by its activation distance, a vertex
-    by its thickness and its activation distance, and a query edge by its activation distance once more, the gap of the
-    two edge boxes.
-    """
-    n_envs = ipc_state.vertices.pos.shape[1]
-    for i_t, i_b in qd.ndrange(ipc_info.triangles.verts_idx.shape[0], n_envs):
-        tri = ipc_info.triangles.verts_idx[i_t]
-        lower, upper = func_sweep_box(tri, i_b, ipc_state, has_rigid, is_swept)
-        thickness = ipc_info.vertices.thickness[tri[0]]
-        for k in qd.static(range(1, 3)):
-            thickness = qd.max(thickness, ipc_info.vertices.thickness[tri[k]])
-        i_v0 = tri[0]
-        margin = thickness + ipc_info.vertices.d_hat[i_v0]
-        triangles_leaves.aabbs_min[i_b, i_t] = lower - margin
-        triangles_leaves.aabbs_max[i_b, i_t] = upper + margin
-    for i_e, i_b in qd.ndrange(ipc_info.edges.verts_idx.shape[0], n_envs):
-        edge = ipc_info.edges.verts_idx[i_e]
-        lower, upper = func_sweep_box(edge, i_b, ipc_state, has_rigid, is_swept)
-        thickness = qd.max(ipc_info.vertices.thickness[edge[0]], ipc_info.vertices.thickness[edge[1]])
-        i_v0 = edge[0]
-        d_hat = ipc_info.vertices.d_hat[i_v0]
-        margin = thickness + d_hat
-        edges_leaves.aabbs_min[i_b, i_e] = lower - margin
-        edges_leaves.aabbs_max[i_b, i_e] = upper + margin
-        edges_query.aabbs_min[i_b, i_e] = lower - (margin + d_hat)
-        edges_query.aabbs_max[i_b, i_e] = upper + (margin + d_hat)
-    for i_v, i_b in qd.ndrange(*ipc_state.vertices.pos.shape):
-        lower, upper = func_sweep_box(qd.Vector([i_v]), i_b, ipc_state, has_rigid, is_swept)
-        gap = ipc_info.vertices.d_hat[i_v] + ipc_info.vertices.thickness[i_v]
-        points_query.aabbs_min[i_b, i_v] = lower - gap
-        points_query.aabbs_max[i_b, i_v] = upper + gap
-
-
-@qd.kernel
-def kernel_contact_query(
-    points_query: BVHLeaves,
-    triangles_tree: BVHTreeState,
-    edges_query: BVHLeaves,
-    edges_tree: BVHTreeState,
-    pt_visitor: qd.template(),
-    ee_visitor: qd.template(),
-):
-    """Collect the triangles that the box of every vertex meets and the edges that the box of every edge meets, in the
-    tree of its environment (see PointTriangleQuery and EdgeEdgeQuery)."""
-    for _ in range(1):
-        pt_visitor.results.count[0] = 0
-        ee_visitor.results.count[0] = 0
-    for i_b in range(pt_visitor.results.trees_count.shape[0]):
-        pt_visitor.results.trees_count[i_b] = 0
-        ee_visitor.results.trees_count[i_b] = 0
-    func_bvh_query_leaves(points_query, triangles_tree, pt_visitor)
-    func_bvh_query_leaves(edges_query, edges_tree, ee_visitor)
-
-
-@qd.func
 def func_set_link(i_b: int, i_body_a: int, i_body_b: int, ipc_state: IPCState):
     """Link two contact bodies of environment i_b, which then take the same step (see IPCBodies). A vertex that never
     moves belongs to no body and links nothing."""
@@ -1382,11 +1212,21 @@ def func_set_link(i_b: int, i_body_a: int, i_body_b: int, ipc_state: IPCState):
 def func_stencil_inflations(
     i_b: int, verts_idx, ipc_state: IPCState, has_rigid: qd.template(), is_edge_edge: qd.template()
 ):
-    """Return the bulges of the paths of the vertices of a stencil out of their chords (see 'func_vertex_inflation'),
-    split into its two sides."""
+    """Return the bulges of the paths of the vertices of a stencil out of their chords (see 'func_vertex_bulge' in
+    genesis/engine/ipc/broad_phase.py), split into its two sides."""
     N_A = qd.static(2 if is_edge_edge else 1)
     inflations = qd.Vector(
-        [func_vertex_inflation(verts_idx[k], i_b, ipc_state, has_rigid) for k in qd.static(range(4))]
+        [
+            func_vertex_bulge(
+                verts_idx[k],
+                i_b,
+                ipc_state.vertices.pos,
+                ipc_state.vertices.pivot,
+                ipc_state.vertices.rotation,
+                is_screw=has_rigid,
+            )
+            for k in qd.static(range(4))
+        ]
     )
     return qd.Vector([inflations[k] for k in qd.static(range(N_A))]), qd.Vector(
         [inflations[k] for k in qd.static(range(N_A, 4))]
@@ -1394,8 +1234,9 @@ def func_stencil_inflations(
 
 
 @qd.func(requires_top_level=True)
-def func_filter_hits(
-    hits: BVHQueryResults,
+def func_filter_sub_pairs(
+    sub_pairs: qd.Tensor,
+    n_sub_pairs: int,
     ipc_pairs: IPCPairs,
     ipc_state: IPCState,
     ipc_info: IPCInfo,
@@ -1403,14 +1244,14 @@ def func_filter_hits(
     is_edge_edge: qd.template(),
     is_swept: qd.template(),
 ):
-    """Keep the pairs of the hits of a box query that may enter the band over the sweep of their vertices (see
+    """Keep the sub-pairs of the broad phase that may enter the band over the sweep of their vertices (see
     'kernel_contact_filter')."""
     i_kind = qd.static(1 if is_edge_edge else 0)
     N_A = qd.static(2 if is_edge_edge else 1)
-    for i_r in range(hits.count[0]):
-        i_b = hits.triplets[i_r][0]
-        i_a = hits.triplets[i_r][1]
-        i_q = hits.triplets[i_r][2]
+    for i_r in range(qd.min(n_sub_pairs, sub_pairs.shape[0])):
+        i_b = sub_pairs[i_r][0]
+        i_q = sub_pairs[i_r][1]
+        i_a = sub_pairs[i_r][2]
         verts_idx, d_hat, thickness, _, _, _ = func_pair_parameters(i_q, i_a, ipc_info, is_edge_edge)
         x = func_stencil_positions(i_b, verts_idx, ipc_state.vertices.pos)
         end = x
@@ -1453,8 +1294,9 @@ def func_filter_hits(
 
 @qd.kernel(fastcache=True)
 def kernel_contact_filter(
-    pt_hits: BVHQueryResults,
-    ee_hits: BVHQueryResults,
+    groups_hits: DOPBVHHits,
+    hits: DOPBVHHits,
+    sub_pairs: EFSubPairs,
     ipc_pairs: IPCPairs,
     ipc_state: IPCState,
     ipc_info: IPCInfo,
@@ -1462,8 +1304,9 @@ def kernel_contact_filter(
     is_swept: qd.template(),
 ):
     """
-    Keep the pairs of the hits of the box queries that may enter the band over the sweep of their vertices (see
-    'func_candidate_reach' in genesis/engine/ipc/ccd.py), the candidates.
+    Keep the sub-pairs of the broad phase that may enter the band over the sweep of their vertices (see
+    'func_candidate_reach' in genesis/engine/ipc/ccd.py), the candidates, and gather the counts of the search in
+    `sub_pairs.summary`.
 
     A pair that only stays out of the band if its two sides take the same step links their contact bodies, with the
     partition of the step into contact bodies (see IPCBodies).
@@ -1474,8 +1317,21 @@ def kernel_contact_filter(
     if qd.static(newton_config.has_ccd_partition):
         for i_body_a, i_body_b, i_b in qd.ndrange(*ipc_state.bodies.is_linked.shape):
             ipc_state.bodies.is_linked[i_body_a, i_body_b, i_b] = False
-    func_filter_hits(pt_hits, ipc_pairs, ipc_state, ipc_info, newton_config, is_edge_edge=False, is_swept=is_swept)
-    func_filter_hits(ee_hits, ipc_pairs, ipc_state, ipc_info, newton_config, is_edge_edge=True, is_swept=is_swept)
+    n_sub_pt = sub_pairs.counts[0]
+    n_sub_ee = sub_pairs.counts[1]
+    func_filter_sub_pairs(
+        sub_pairs.pt, n_sub_pt, ipc_pairs, ipc_state, ipc_info, newton_config, is_edge_edge=False, is_swept=is_swept
+    )
+    func_filter_sub_pairs(
+        sub_pairs.ee, n_sub_ee, ipc_pairs, ipc_state, ipc_info, newton_config, is_edge_edge=True, is_swept=is_swept
+    )
+    for _ in range(1):
+        sub_pairs.summary[0] = groups_hits.count[()]
+        sub_pairs.summary[1] = hits.count[()]
+        sub_pairs.summary[2] = sub_pairs.counts[0]
+        sub_pairs.summary[3] = sub_pairs.counts[1]
+        sub_pairs.summary[4] = ipc_pairs.counts[0]
+        sub_pairs.summary[5] = ipc_pairs.counts[1]
 
 
 @qd.func(requires_top_level=True)
@@ -1754,10 +1610,12 @@ class IPCContact:
     """
     The broad phase of the contact and the pairs it finds, owned by the Newton solver.
 
-    The contact triangles and edges of every environment span one tree each (see genesis/engine/bvh.py). A query
-    collects the raw hits of the boxes, which a filter turns into the candidate pairs (see 'kernel_contact_filter'). The
-    raw hits and the pairs start at 'IPCOptions.init_collision_pair_capacity' per environment, and once a search finds
-    more, their capacity grows to 'IPCOptions.capacity_grow_factor' times the count and the search runs again.
+    The edge-face broad phase finds the point-triangle and edge-edge sub-pairs whose bounds come within their gaps (see
+    genesis/engine/ipc/broad_phase.py), the vertices of every contact body forming one group and the vertices that never
+    move another one, and a filter turns them into the candidate pairs (see 'kernel_contact_filter'). The pairs start at
+    'IPCOptions.init_collision_pair_capacity' per environment, and once a search finds more, their capacity grows to
+    'IPCOptions.capacity_grow_factor' times the count and the search runs again, as it does when a list of the broad
+    phase overflows.
     """
 
     def __init__(self, n_envs: int, ipc_info: IPCInfo, has_rigid: bool, ipc_options) -> None:
@@ -1765,20 +1623,22 @@ class IPCContact:
         self._ipc_info = ipc_info
         self._has_rigid = has_rigid
         self._grow_factor = ipc_options.capacity_grow_factor
-        n_edges = ipc_info.edges.verts_idx.shape[0]
-        self._triangles_bvh = get_bvh_data(n_envs, ipc_info.triangles.verts_idx.shape[0])
-        self._edges_bvh = get_bvh_data(n_envs, n_edges)
-        self._points_query = BVHLeaves(sizes=dict(bvh_trees=n_envs, bvh_leaves=ipc_info.vertices.is_rigid.shape[0]))
-        self._edges_query = BVHLeaves(sizes=dict(bvh_trees=n_envs, bvh_leaves=n_edges))
         # FIXME: quadrants#1074 - a launch is cached under the identity of its struct arguments, which a new struct could
         # take over from a dead one, so the structs replaced stay referenced, with their arrays freed.
         self._replaced: list = []
         capacity = ipc_options.init_collision_pair_capacity * n_envs
-        self._pt_hits: BVHQueryResults | None = None
-        self._ee_hits: BVHQueryResults | None = None
-        self._pt_visitor: PointTriangleQuery | None = None
-        self._ee_visitor: EdgeEdgeQuery | None = None
-        self._grow_hits(capacity)
+        vertices_body_idx = qd_to_numpy(ipc_info.vertices.body_idx)
+        self._broad_phase = EFBroadPhase(
+            n_envs,
+            ipc_info.edges.verts_idx,
+            ipc_info.triangles.verts_idx,
+            ipc_info.vertices.thickness,
+            ipc_info.vertices.d_hat,
+            np.where(vertices_body_idx >= 0, vertices_body_idx, vertices_body_idx.max(initial=-1) + 1),
+            ipc_info.vertices.is_rigid,
+            capacity,
+            self._retire,
+        )
         self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
         self.friction_pairs = IPCFrictionPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
         # The numbers of point-triangle and edge-edge candidates and friction pairs, read back after each search
@@ -1789,16 +1649,6 @@ class IPCContact:
         for _, array in iter_state_arrays(struct):
             qd_destroy_data(array)
         self._replaced.append(struct)
-
-    def _grow_hits(self, capacity: int) -> None:
-        for hits in (self._pt_hits, self._ee_hits):
-            if hits is not None:
-                self._retire(hits)
-        self._pt_hits = BVHQueryResults(sizes=dict(query_results=capacity, bvh_trees=self._n_envs))
-        self._ee_hits = BVHQueryResults(sizes=dict(query_results=capacity, bvh_trees=self._n_envs))
-        is_rigid = self._ipc_info.vertices.is_rigid
-        self._pt_visitor = PointTriangleQuery(self._pt_hits, self._ipc_info.triangles.verts_idx, is_rigid)
-        self._ee_visitor = EdgeEdgeQuery(self._ee_hits, self._ipc_info.edges.verts_idx, is_rigid)
 
     def _grown_capacity(self, count: int, capacity: int) -> int:
         return max(int(math.ceil(count * self._grow_factor)), capacity)
@@ -1817,42 +1667,34 @@ class IPCContact:
     def search(self, ipc_state: IPCState, ipc_info: IPCInfo, newton_config, is_swept) -> None:
         """Find the candidate pairs over the sweep of the vertices along the Newton direction, or at their positions,
         growing the capacities until they hold every hit and every pair."""
-        kernel_contact_boxes(
-            ipc_state,
-            ipc_info,
-            self._triangles_bvh.state.leaves,
-            self._edges_bvh.state.leaves,
-            self._points_query,
-            self._edges_query,
-            self._has_rigid,
-            is_swept,
-        )
-        for bvh in (self._triangles_bvh, self._edges_bvh):
-            build_bvh(bvh.state, bvh.config, eps=gs.EPS)
         is_complete = False
         while not is_complete:
-            kernel_contact_query(
-                self._points_query,
-                self._triangles_bvh.state.tree,
-                self._edges_query,
-                self._edges_bvh.state.tree,
-                self._pt_visitor,
-                self._ee_visitor,
+            self._broad_phase.run(
+                ipc_state.vertices.pos,
+                ipc_state.vertices.displacement,
+                ipc_state.vertices.pivot,
+                ipc_state.vertices.rotation,
+                is_screw=self._has_rigid and is_swept,
+                is_swept=is_swept,
+                is_expanded=True,
             )
-            share = self._pt_hits.triplets.shape[0] // self._n_envs
-            n_hits = max(int(qd_to_numpy(hits.trees_count).max()) for hits in (self._pt_hits, self._ee_hits))
-            is_complete = n_hits <= share
-            if not is_complete:
-                self._grow_hits(self._grown_capacity(n_hits, share) * self._n_envs)
-        is_complete = False
-        while not is_complete:
             kernel_contact_filter(
-                self._pt_hits, self._ee_hits, self.pairs, ipc_state, ipc_info, newton_config, is_swept
+                self._broad_phase.groups_hits,
+                self._broad_phase.hits,
+                self._broad_phase.sub_pairs,
+                self.pairs,
+                ipc_state,
+                ipc_info,
+                newton_config,
+                is_swept,
             )
-            n_pt, n_ee = (int(count) for count in qd_to_numpy(self.pairs.counts))
+            n_groups_hits, n_hits, n_sub_pt, n_sub_ee, n_pt, n_ee = (
+                int(count) for count in qd_to_numpy(self._broad_phase.sub_pairs.summary)
+            )
+            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt, n_sub_ee)
             capacity = self.pairs.pt.shape[0]
-            is_complete = max(n_pt, n_ee) <= capacity
-            if not is_complete:
+            if max(n_pt, n_ee) > capacity:
+                is_complete = False
                 self._retire(self.pairs)
                 capacity = self._grown_capacity(max(n_pt, n_ee), capacity)
                 self.pairs = IPCPairs(sizes={PT_PAIRS: capacity, EE_PAIRS: capacity})
@@ -1861,40 +1703,31 @@ class IPCContact:
     def find_intersections(self, ipc_state: IPCState, ipc_info: IPCInfo) -> np.ndarray:
         """Return the (environment, edge, triangle) triplets of the contact edges that cross a contact triangle at the
         positions of the vertices, in no particular order."""
-        kernel_contact_boxes(
-            ipc_state,
-            ipc_info,
-            self._triangles_bvh.state.leaves,
-            self._edges_bvh.state.leaves,
-            self._points_query,
-            self._edges_query,
-            self._has_rigid,
-            False,
-        )
-        build_bvh(self._triangles_bvh.state, self._triangles_bvh.config, eps=gs.EPS)
-        capacity = self._pt_hits.triplets.shape[0]
-        triplets = np.zeros((0, 3), dtype=gs.np_int)
+        intersections = DOPBVHHits(sizes=dict(dop_hits=self.pairs.pt.shape[0]))
         is_complete = False
         while not is_complete:
-            hits = BVHQueryResults(sizes=dict(query_results=capacity, bvh_trees=self._n_envs))
-            visitor = EdgeTriangleQuery(
-                hits,
-                ipc_info.edges.verts_idx,
-                ipc_info.triangles.verts_idx,
-                ipc_info.vertices.is_rigid,
+            self._broad_phase.run(
                 ipc_state.vertices.pos,
-                ipc_info.intersection_tolerance,
+                ipc_state.vertices.displacement,
+                ipc_state.vertices.pivot,
+                ipc_state.vertices.rotation,
+                is_screw=False,
+                is_swept=False,
+                is_expanded=False,
             )
-            kernel_contact_intersections(self._edges_query, self._triangles_bvh.state.tree, visitor)
-            share = capacity // self._n_envs
-            n_hits = int(qd_to_numpy(hits.trees_count).max())
-            is_complete = n_hits <= share
-            if is_complete:
-                # The hits are (environment, triangle, edge) triplets
-                triplets = qd_to_numpy(hits.triplets, copy=True)[: int(qd_to_numpy(hits.count)[0]), (0, 2, 1)]
-            else:
-                capacity = self._grown_capacity(n_hits, share) * self._n_envs
-            self._retire(hits)
+            kernel_contact_intersections(self._broad_phase.hits, intersections, ipc_state, ipc_info)
+            n_groups_hits, n_hits = (
+                int(qd_to_numpy(hits.count)) for hits in (self._broad_phase.groups_hits, self._broad_phase.hits)
+            )
+            is_complete = not self._broad_phase.grow(n_groups_hits, n_hits, n_sub_pt=0, n_sub_ee=0)
+            n_intersections = int(qd_to_numpy(intersections.count))
+            capacity = intersections.hits.shape[0]
+            if n_intersections > capacity:
+                is_complete = False
+                self._retire(intersections)
+                intersections = DOPBVHHits(sizes=dict(dop_hits=self._grown_capacity(n_intersections, capacity)))
+        triplets = qd_to_numpy(intersections.hits, copy=True)[:n_intersections]
+        self._retire(intersections)
         return triplets
 
     def set_friction_pairs(
