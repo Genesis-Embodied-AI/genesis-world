@@ -333,10 +333,11 @@ class SPHSolver(ParticleSolver):
 
             # Compute stable timestep for the given particle properties (mu) and support radius and print warning
             # if the current timestep is larger than the stable timestep. This formula is derived from
-            # 'func_task_compute_non_pressure_forces', which computes the acceleration due to non-pressure forces.
+            # 'func_task_compute_non_pressure_forces', which computes the acceleration due to non-pressure forces. The
+            # timestep is compared through its product with the viscosity, which is zero for an inviscid liquid.
             mu_max = max([entity.material.mu for entity in self._entities])
-            stable_dt = self._stable_dt_coef * viscosity_eps / mu_max
-            if self.substep_dt > stable_dt:
+            if self.substep_dt * mu_max > self._stable_dt_coef * viscosity_eps:
+                stable_dt = self._stable_dt_coef * viscosity_eps / mu_max
                 gs.logger.warning(
                     f"""Current timestep ({self.substep_dt:.4g}) is larger than the stable timestep ({stable_dt:.4g}) for SPH
 solver. Please consider reducing the timestep, liquid viscosity (mu), or increasing the particle size."""
@@ -816,14 +817,16 @@ def func_task_compute_non_pressure_forces(
         curvature = -vol_j * (normal_j.normalized() - normal_i.normalized()).dot(grad_ij)
         ret.acc += ret.surface_tension_i * curvature / sph_state.particles_reordered.rho[i_p, i_b] * normal_i
 
-    # Viscosity, normalized by twice the dimension plus two
+    # Viscosity, normalized by twice the dimension plus two. The pair takes the mean of the viscosities and of the
+    # densities of both particles, so that the forces between them cancel and the viscosity conserves momentum.
     viscosity_coef = 2 * (3 + 2)
     vel_ij = (sph_state.particles_reordered.vel[i_p, i_b] - sph_state.particles_reordered.vel[j_p, i_b]).dot(offset_ij)
-    rho_j = sph_state.particles_reordered.rho[j_p, i_b]
+    mu_ij = 0.5 * (ret.mu_i + sph_info.particles.mu[j_o])
+    rho_ij = 0.5 * (ret.rho_i + sph_state.particles_reordered.rho[j_p, i_b])
     ret.acc += (
         viscosity_coef
-        * ret.mu_i
-        * (mass_j / rho_j)
+        * mu_ij
+        * (mass_j / rho_ij)
         * vel_ij
         / (dist**2 + sph_info.viscosity_eps[None])
         * func_cubic_kernel_derivative(
@@ -856,6 +859,7 @@ def kernel_compute_non_pressure_forces(
             acc=qd.Vector.zero(gs.qd_float, 3),
             surface_tension_i=sph_info.particles.surface_tension[i_o],
             mu_i=sph_info.particles.mu[i_o],
+            rho_i=sph_state.particles_reordered.rho[i_p, i_b],
         )
         if is_active:
             func_for_all_neighbors(

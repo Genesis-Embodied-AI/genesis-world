@@ -729,6 +729,11 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
     Options configuring the SPHSolver, which keeps the liquid incompressible with divergence-free smoothed particle
     hydrodynamics (DFSPH).
 
+    The liquid is a single incompressible phase, without air to cushion its impacts, so the pressure it exerts on a wall
+    it strikes exceeds measured values: averaged over a few milliseconds, the first impact of a dam break on the
+    opposite wall peaks at about 1.4 to 1.8 times the experimental median, and the instantaneous peak grows sharper as
+    the substep shrinks. Read wall pressures and forces averaged over the timescale of interest.
+
     Note
     ----
     If spatial hashing parameters are not given, we will compute them automatically this way: For `hash_grid_cell_size`, we will set it to be the `support_radius`, which is essentially 2 * `particle_size`. For `hash_grid_res`, if a small bound is given, it's used for the hash grid; otherwise, we use a default value of a 150^3 cube. Any grid bigger than that will results in too many cells hence not ideal.
