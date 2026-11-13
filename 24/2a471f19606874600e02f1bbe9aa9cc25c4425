@@ -565,6 +565,7 @@ examples/sap_coupling/franka_grasp_rigid_cube.py
   s_c62ec9da443b15::t_c8dbebe2ee1117 39-46,50-58
 tests/particles/test_sph.py
   s_c62ec9da443b15::t_2763f42ac17359 41-50,52-53,386-393
+  s_ba9e702b72d5c4::t_8acf85ac016ea6 51
 examples/kinematic/go2_kinematic.py
   s_c62ec9da443b15::t_f52ba08192b435 43-51
 examples/viewer_plugin/mesh_point_selector.py
@@ -600,6 +601,14 @@ examples/coupling/cloth_attached_to_rigid.py
       "agent_id": {
         "tool": "claude",
         "id": "ab33ce15-98b7-4194-84ee-8d2170e1868a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_ba9e702b72d5c4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "494dea4c-0e95-5885-a94a-756d1b3a7b49",
         "model": "claude-opus-5-5"
       },
       "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
