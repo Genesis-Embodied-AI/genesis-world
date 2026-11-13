@@ -1524,9 +1524,9 @@ class KinematicEntityDescription(EntityDescription):
         # The link and geom options are set on the collision geoms before post-processing, so that geoms of different
         # options never fuse. Their density stays out of the authored ones, which anchor an aligned link where a
         # kinematic entity of the same asset anchors it (see '_resolve_inertial'). The geom options of the entity rank
-        # below the link options, which rank below the geom options of the links, and two selections of one rank giving
-        # one field of one geom raise an error. A selection may match no geom of this link, as long as it matches a geom
-        # of the entity.
+        # below the link options, which rank below the geom options of the links. Of two selections of one rank giving
+        # one field of one geom, the first one applies. A selection may match no geom of this link, as long as it
+        # matches a geom of the entity.
         geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
         resolution.geoms_name += geoms_name
         geoms_start = resolution.geoms_start
@@ -1549,8 +1549,11 @@ class KinematicEntityDescription(EntityDescription):
             for fields, options, target in fields_options:
                 for name, value in options.model_dump(exclude={"geoms"}, exclude_unset=True, exclude_none=True).items():
                     if name in fields:
-                        gs.raise_exception(f"Two selections of equal specificity give '{name}' of {target}.")
-                    fields[name] = value
+                        gs.logger.warning(
+                            f"Two selections of equal specificity give '{name}' of {target}. The first one applies."
+                        )
+                    else:
+                        fields[name] = value
             for g_info, entity_geom_fields, link_geom_fields in zip(cg_infos, entity_geoms_fields, link_geoms_fields):
                 geom_fields = {**entity_geom_fields, **link_fields, **link_geom_fields}
                 if geom_fields:

@@ -184,11 +184,12 @@ class Rigid(BaseEntity["RigidEntity"]):
         The options of the links each key selects, which override the material of the entity. A link the asset parser
         merges into its parent has no name of its own, so keep it with the 'links_to_keep' option of the morph to
         select it. Two keys selecting one link stand at equal specificity whatever the number of links they name, so
-        they cannot give one field. Default is no link options.
+        where both give one field, the first key applies, with a warning. Default is no link options.
     geoms : dict[gs.GeomIndex, gs.options.Geom], optional
         The options of the collision geoms each key selects among the collision geoms of the whole entity, by ordinal
         (see ``gs.GeomIndex.at``) or by name in any of its links, raising if it selects no geom. They override the
-        material of the entity, and the options of the links override them in turn. Default is no geom options.
+        material of the entity, and the options of the links override them in turn. Where two keys give one field of
+        one geom, the first key applies, with a warning. Default is no geom options.
     """
 
     _solver_options_cls = RigidOptions
