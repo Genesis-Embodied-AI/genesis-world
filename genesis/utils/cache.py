@@ -27,8 +27,8 @@ import genesis as gs
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
-WT_CACHE_VERSION = 7
-# Bumped when the wall-thickness estimate changes for a fixed (mesh, quantile): forces a cache miss on stale entries.
+WT_CACHE_VERSION = 8
+# Bumped when the wall-thickness estimate changes for a fixed mesh and parameters: forces a cache miss on stale entries.
 WTH_CACHE_VERSION = 3
 # Bumped when the particles sampled for a fixed key change or when the layout of an entry does: forces a cache miss on
 # stale entries.
@@ -328,8 +328,8 @@ def get_wt_cache(verts, faces, aggressiveness):
     return MeshCache(get_wt_cache_dir(), "wt", verts, faces, aggressiveness, WT_CACHE_VERSION)
 
 
-def get_wth_cache(verts, faces, quantile):
-    return MeshCache(get_wth_cache_dir(), "wth", verts, faces, quantile, WTH_CACHE_VERSION)
+def get_wth_cache(verts, faces, quantile, weight_by_area):
+    return MeshCache(get_wth_cache_dir(), "wth", verts, faces, quantile, weight_by_area, WTH_CACHE_VERSION)
 
 
 def get_exr_path(file_path):

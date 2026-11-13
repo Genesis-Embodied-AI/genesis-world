@@ -26,6 +26,7 @@ from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
+from genesis.utils.watertighten import watertighten_mesh
 
 from ..conftest import TOL_DOUBLE
 from ..utils.assertions import assert_allclose, assert_equal
@@ -662,6 +663,7 @@ def test_mesh_inertial_properties():
 def test_mesh_wall_thickness():
     WALL = 5e-4
     FIN = 2e-3
+    FOIL = 5e-6
 
     # A hollow cube whose walls are far thinner than its size, at several scales
     outer = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
@@ -689,6 +691,34 @@ def test_mesh_wall_thickness():
         assert_allclose(mu.get_convex_width(scale * box.vertices, box.faces), scale * 0.2, rtol=TOL_DOUBLE)
     for axes_scale in ((1.0, 1.0, 0.0), (1.0, 0.0, 0.0)):
         assert_equal(mu.get_convex_width(axes_scale * box.vertices, box.faces), 0.0)
+
+    # An open slab next to a foil far thinner than the mesh, holding most of the faces with a small share of the area
+    slab_open = trimesh.creation.box(extents=(1.0, 1.0, 0.2))
+    slab_open = trimesh.Trimesh(slab_open.vertices, slab_open.faces[1:], process=False)
+    foil = trimesh.creation.box(extents=(0.2, FOIL, 0.3))
+    for _ in range(5):
+        foil = foil.subdivide()
+    foil.apply_translation((0.0, 0.7, 0.0))
+    slab_foil = trimesh.util.concatenate((slab_open, foil))
+    for weight_by_area, wall_thickness in ((False, FOIL), (True, 0.2)):
+        assert_allclose(
+            mu.get_wall_thickness(slab_foil.vertices, slab_foil.faces, quantile=0.1, weight_by_area=weight_by_area),
+            wall_thickness,
+            rtol=TOL_DOUBLE,
+        )
+
+    # The watertight wrap of a tilted open hollow box smaller than 10 cm is the scaled-down wrap of the same box ten
+    # times larger, the resolution of the wrap following the thickness of its walls at both scales.
+    box_outer = trimesh.creation.box(extents=(0.04, 0.04, 0.04))
+    box_inner = trimesh.creation.box(extents=(0.032, 0.032, 0.032))
+    box_inner.invert()
+    box_hollow = trimesh.util.concatenate((box_outer, box_inner)).subdivide().subdivide()
+    box_hollow.apply_transform(trimesh.transformations.rotation_matrix(0.5, (1.0, 2.0, 3.0)))
+    box_open = trimesh.Trimesh(box_hollow.vertices, box_hollow.faces[1:], process=False)
+    wrap_small = trimesh.Trimesh(*watertighten_mesh(box_open.vertices, box_open.faces), process=False)
+    wrap_large = trimesh.Trimesh(*watertighten_mesh(10.0 * box_open.vertices, box_open.faces), process=False)
+    assert_equal(len(wrap_small.faces), len(wrap_large.faces))
+    assert_allclose(1000.0 * wrap_small.volume, wrap_large.volume, rtol=TOL_DOUBLE)
 
 
 @pytest.mark.required

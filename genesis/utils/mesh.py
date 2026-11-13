@@ -263,35 +263,36 @@ def get_convex_width(verts: np.ndarray, faces: np.ndarray) -> float:
     )
 
 
-def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float) -> float:
-    """Estimate the wall thickness of a watertight mesh, as a quantile of its local diameter over its surface.
+def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float, weight_by_area: bool = True) -> float:
+    """Estimate the wall thickness of a mesh, as a quantile of its local diameter over its surface.
 
     'quantile' is the fraction of the surface thinner than the estimate: a low quantile approximates the thinnest wall
-    and the median the typical one. The estimate is deterministic, scales with the mesh, and weights the surface by area
-    rather than by number of faces. An exception is raised if the mesh is not watertight, since the inward rays probing
-    the local diameter escape an open surface through its holes.
+    and the median the typical one. 'weight_by_area' measures this fraction by area, which makes the estimate
+    independent of the tessellation. Otherwise it is measured by number of faces, which lets a finely tessellated detail
+    drive the estimate. The estimate is deterministic and scales with the mesh. The inward rays probing the local
+    diameter escape an open surface through its holes and are left out, the estimate being infinite when all escape.
     """
-    cache = get_wth_cache(verts, faces, quantile)
+    cache = get_wth_cache(verts, faces, quantile, weight_by_area)
     wall_thickness = cache.load()
     if wall_thickness is not None:
         return wall_thickness
 
     mesh = trimesh.Trimesh(verts, faces, process=False)
-    if not mesh.is_watertight:
-        gs.raise_exception("Wall-thickness estimation requires a watertight mesh.")
-    # A fixed number of rays starts from points spread over the surface in proportion to area, so the estimate measures
-    # surface rather than tessellation density: a thin wall made of a few large faces must not be outvoted by many small
-    # facets. Stratifying the cumulative area gives each face its share of the points up to one, which spares the
-    # variance of drawing the faces at random. A face of no area gets none, having no normal to cast a ray along.
-    areas_cum = np.cumsum(mesh.area_faces)
-    rays_area_cum = (np.arange(WALL_THICKNESS_N_RAYS) + 0.5) * (areas_cum[-1] / WALL_THICKNESS_N_RAYS)
-    rays_face_idx = np.searchsorted(areas_cum, rays_area_cum)
+    # A fixed number of rays starts from points spread over the surface in proportion to the weight of each face.
+    # Weighting by area measures surface rather than tessellation density: a thin wall made of a few large faces is not
+    # outvoted by many small facets. Stratifying the cumulative weight gives each face its share of the points up to
+    # one, which spares the variance of drawing the faces at random. A face of no area gets none, having no normal to
+    # cast a ray along.
+    faces_weight = mesh.area_faces if weight_by_area else mesh.area_faces > 0.0
+    weights_cum = np.cumsum(faces_weight)
+    rays_weight_cum = (np.arange(WALL_THICKNESS_N_RAYS) + 0.5) * (weights_cum[-1] / WALL_THICKNESS_N_RAYS)
+    rays_face_idx = np.searchsorted(weights_cum, rays_weight_cum)
     tris = mesh.triangles
     rays_bary = np.random.default_rng(seed=0).dirichlet(np.ones(3), WALL_THICKNESS_N_RAYS)
     rays_start = np.einsum("ij,ijk->ik", rays_bary, tris[rays_face_idx])
     # The rays start on the surface and skip the face they start from, so no offset biases their length. They go against
     # the normals, into the solid as the signed distance field sees it from the winding of the faces (see
-    # 'Mesh.get_sdf_grid'). The rays of a shell wound inward escape it, and the thickness is infinite when all do.
+    # 'Mesh.get_sdf_grid'). The rays of a shell wound inward escape it.
     rays_dist = cast_rays(tris, rays_start, -mesh.face_normals[rays_face_idx], rays_face_idx)
     rays_dist = rays_dist[np.isfinite(rays_dist)]
     wall_thickness = np.quantile(rays_dist, quantile, method="inverted_cdf") if len(rays_dist) > 0 else np.inf

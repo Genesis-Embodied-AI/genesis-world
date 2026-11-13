@@ -11,6 +11,7 @@ import numba as nb
 import trimesh
 
 import genesis as gs
+from genesis.utils.mesh import get_wall_thickness
 from genesis.utils.misc import unique_rows
 
 
@@ -22,9 +23,9 @@ MAX_ALPHA = 0.05
 MAX_CELLS_AXIS = 450
 PITCH_FEATURE_FRACTION = 0.4
 PITCH_RATIO = 1.5
-# Low percentile so a small rim region inside a bulkier asset still drives the pitch; the strict minimum is avoided so
+# Low quantile so a small rim region inside a bulkier asset still drives the pitch. The strict minimum is avoided so
 # degenerate / grazing / open-shell rays cannot pull the estimate to zero.
-FEATURE_SIZE_PERCENTILE = 10.0
+FEATURE_SIZE_QUANTILE = 0.1
 
 
 # ===============================================================================================================
@@ -1047,32 +1048,6 @@ def _sdf_field(verts: np.ndarray, faces: np.ndarray, alpha: float, pitch: float,
     return field, aabb_min
 
 
-def _estimate_feature_size(verts: np.ndarray, faces: np.ndarray) -> float:
-    """Return the `FEATURE_SIZE_PERCENTILE`-th percentile local solid thickness across the surface.
-
-    For each face we cast a ray from its centroid along the inward normal and measure the distance to the first
-    other-side hit; that distance is the local solid thickness (= the largest inscribed sphere touching the face). The
-    asset-wide percentile is the wrap's pitch driver. Falls back to `bbox_diag` if no rays land.
-    """
-    src = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    bbox_diag = np.linalg.norm(src.extents)
-    if bbox_diag <= 0.0 or len(src.faces) == 0:
-        return bbox_diag
-    centroids = src.triangles_center
-    normals = src.face_normals
-    # Subsample - ray casting on the BVH is linear in ray count and a few thousand rays already saturates coverage.
-    if len(centroids) > 4000:
-        idx = np.random.default_rng(0).choice(len(centroids), 4000, replace=False)
-        centroids = centroids[idx]
-        normals = normals[idx]
-    origins = centroids - (bbox_diag * 1e-5) * normals
-    locs, ray_idx, _ = src.ray.intersects_location(origins, -normals, multiple_hits=False)
-    if len(locs) == 0:
-        return bbox_diag
-    distances = np.linalg.norm(locs - origins[ray_idx], axis=1)
-    return np.percentile(distances, FEATURE_SIZE_PERCENTILE)
-
-
 def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):
     """Pick alpha / pitch / max_cost from the input's estimated feature size, with a bbox-derived compute floor.
 
@@ -1084,7 +1059,14 @@ def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):
     aggressiveness collapses: the default (5) roughly halves the face count of the wrap relative to leaving detail in.
     """
     bbox_diag = np.linalg.norm(verts.max(axis=0) - verts.min(axis=0))
-    feature_size = _estimate_feature_size(verts, faces)
+    # The local thickness of the solid bounds the size of its features. It is counted per face rather than per area, so
+    # that a finely tessellated small detail drives the pitch and survives the wrap. The bounding box diagonal stands
+    # for it when every ray escapes an open surface through its holes.
+    feature_size = bbox_diag
+    if len(faces) > 0:
+        feature_size = min(
+            get_wall_thickness(verts, faces, quantile=FEATURE_SIZE_QUANTILE, weight_by_area=False), bbox_diag
+        )
     pitch_feature = max(MIN_PITCH_ABS, feature_size * PITCH_FEATURE_FRACTION)
     pitch_compute = bbox_diag / MAX_CELLS_AXIS
     # Cap the feature-driven pitch by the offset limit, but never below the compute floor. On a mesh large enough that
@@ -1235,14 +1217,14 @@ def watertighten_mesh(
     target_face_num: int = 500,
     sigma: float = 0.8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return a watertight wrap of the input triangle soup, strictly outside it and within `alpha` of it.
+    """Return a watertight wrap of the input triangle soup, whose vertices lie on its surface.
 
     Pipeline: padded unsigned distance field on a regular grid (`_sdf_field`); separable Gaussian blur to kill
     sub-voxel aliasing; manifold dual-contouring iso-surface extraction at level `alpha`
     (`_extract_dual_contour_mesh`); analytical snap onto the `alpha`-isosurface to remove SDF-grid noise; quadric-error
-    decimation with manifold + normal-flip guards (`_decimate_quadric_error`); inward ray-cast snap of each wrap vertex
-    onto the source surface where the source is locally closed (vertices that bridge open holes stay at the `alpha`-iso
-    to preserve the wrap closure). All adaptive parameters (`alpha`, `pitch`, cost cutoff) come from `_adaptive_params`.
+    decimation with manifold + normal-flip guards (`_decimate_quadric_error`); snap of each wrap vertex onto its closest
+    source point, which removes the `alpha` offset (a vertex bridging a hole of the source lands on its rim). All
+    adaptive parameters (`alpha`, `pitch`, cost cutoff) come from `_adaptive_params`.
 
     Parameters
     ----------
@@ -1277,20 +1259,5 @@ def watertighten_mesh(
     moved = out_norm[:, 0] > 1e-9
     v[moved] = (closest + alpha * (outward / np.maximum(out_norm, 1e-12)))[moved]
     v, f = _decimate_quadric_error(v, f, target_faces=max(2 * target_face_num, 1), max_cost=max_cost)
-    # Snap each wrap vertex onto its nearest source point - removes the `alpha`-offset inflation entirely on solid
-    # bulk regions where the source has well-defined two-sided geometry. Vertices that bridge an open hole in the
-    # source must NOT be snapped: their nearest source point sits on the hole's rim, and pulling them onto it would
-    # collapse the wrap onto a sliver of geometry, destroying the closure that the wrap is supposed to provide.
-    # We distinguish the two cases with a single inward ray cast: bulk vertices hit the source on their way inward,
-    # hole-bridging vertices do not.
     _, _, closest = igl.point_mesh_squared_distance(v, verts, faces)
-    direction = closest - v
-    norm = np.linalg.norm(direction, axis=1, keepdims=True)
-    inward = direction / np.maximum(norm, 1e-12)
-    src = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    _, ray_idx, _ = src.ray.intersects_location(v, inward, multiple_hits=False)
-    has_hit = np.zeros(v.shape[0], dtype=np.bool_)
-    has_hit[ray_idx] = True
-    snapped = v.copy()
-    snapped[has_hit] = closest[has_hit]
-    return snapped, f
+    return closest, f
