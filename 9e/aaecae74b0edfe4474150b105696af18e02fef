@@ -1,0 +1,25 @@
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_c62ec9da443b15::t_e25e21900e9301 43
+  s_c62ec9da443b15::t_a112f5593a1ad8 150
+  s_c62ec9da443b15::t_0769b1c721cb7c 50-51,53-61,63-65
+  s_c62ec9da443b15::t_daa5aa82fae42e 111
+  s_c62ec9da443b15::t_1f36003260c12f 156,164
+  s_c62ec9da443b15::t_8a8b710f496a5d 44-48,52,62,85,96,147-149
+  s_c62ec9da443b15::t_bdec65d2cd7160 84,86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9eaaecae74b0edfe4474150b105696af18e02fef",
+  "prompts": {},
+  "sessions": {
+    "s_c62ec9da443b15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "80f86e9d-1706-482f-b6cd-3ab553672827",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
