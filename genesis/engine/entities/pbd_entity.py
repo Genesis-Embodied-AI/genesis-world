@@ -11,7 +11,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.particle_entity import ParticleEntity
-from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 
 if TYPE_CHECKING:
@@ -111,8 +110,8 @@ class PBDTetEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    morph : Morph
-        Morph object specifying shape and initial transform (position and rotation).
+    options : gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -133,7 +132,6 @@ class PBDTetEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
@@ -142,19 +140,16 @@ class PBDTetEntity(PBDBaseEntity):
         vvert_start: int,
         vface_start: int,
         options: "gs.entities.PBD",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
             particle_start,
             vvert_start=vvert_start,
             vface_start=vface_start,
-            name=name,
             options=options,
         )
         self._edge_start = edge_start
@@ -237,8 +232,8 @@ class PBD2DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    morph : Morph
-        Morph object specifying shape and initial transform (position and rotation).
+    options : gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -261,7 +256,6 @@ class PBD2DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
@@ -271,12 +265,10 @@ class PBD2DEntity(PBDTetEntity):
         vvert_start: int,
         vface_start: int,
         options: "gs.entities.PBD",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
@@ -284,7 +276,6 @@ class PBD2DEntity(PBDTetEntity):
             edge_start,
             vvert_start,
             vface_start,
-            name=name,
             options=options,
         )
 
@@ -350,8 +341,8 @@ class PBD3DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    morph : Morph
-        Morph object specifying shape and initial transform (position and rotation).
+    options : gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -374,7 +365,6 @@ class PBD3DEntity(PBDTetEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
@@ -384,12 +374,10 @@ class PBD3DEntity(PBDTetEntity):
         vvert_start: int,
         vface_start: int,
         options: "gs.entities.PBD",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
@@ -397,7 +385,6 @@ class PBD3DEntity(PBDTetEntity):
             edge_start,
             vvert_start,
             vface_start,
-            name=name,
             options=options,
         )
 
@@ -479,8 +466,8 @@ class PBDParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    morph : Morph
-        Morph object specifying shape and initial transform (position and rotation).
+    options : gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -495,24 +482,20 @@ class PBDParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
         particle_start: int,
         options: "gs.entities.PBD",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
             particle_start,
             need_skinning=False,
-            name=name,
             options=options,
         )
 
@@ -548,8 +531,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    morph : Morph
-        Morph object specifying shape and initial transform (position and rotation).
+    options : gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -564,24 +547,20 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         self,
         scene: "Scene",
         solver: "PBDSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
         particle_start: int,
         options: "gs.entities.PBD",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
             particle_start,
             need_skinning=False,
-            name=name,
             options=options,
         )
 

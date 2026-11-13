@@ -37,7 +37,6 @@ from genesis.engine.solvers.rigid.data import LinksState
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import SolverCheckpoint
 from genesis.grad.bridge import custom_backward, no_grad
-from genesis.options.morphs import Morph
 from genesis.options.solvers import FEMOptions
 from genesis.options.surfaces import Surface
 from genesis.typing import IndexType
@@ -836,16 +835,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self,
         idx: int,
-        morph: Morph,
         surface: Surface,
         options: "gs.entities.FEM",
-        name: str | None = None,
         desc: "EntityDescription | None" = None,
     ) -> "FEMEntity":
         entity = FEMEntity(
             scene=self._scene,
             solver=self,
-            morph=morph,
             surface=surface,
             idx=idx,
             v_start=self.n_vertices,
@@ -853,7 +849,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             s_start=self.n_surfaces,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            name=name,
             options=options,
         )
         self._entities.append(entity)

@@ -1,5 +1,3 @@
-import collections.abc
-import copy
 import dataclasses
 import gc
 import hashlib
@@ -19,7 +17,6 @@ import numpy as np
 import torch
 
 import trimesh
-from pydantic import BaseModel
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -61,6 +58,7 @@ from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
+    from genesis.engine.entities.emitter import Emitter
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
@@ -398,12 +396,9 @@ class Scene(RBC):
             gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
         if options.morph is None:
             gs.raise_exception("Entity construction requires a morph.")
-        # The entity holds a read-only copy, so that later edits of the options leave it as it is
-        options = copy.copy(options)
-        options._is_read_only = True
-        morph = options.morph
+        # The entity holds a frozen copy, so that later records on the options leave it as it is
+        options = options._frozen_copy()
         material = options.material
-        name = options.name
         # The surface resolves on a copy, since other entities may share it. The morph resolves in place, as shared
         # morphs rely on (see 'Entity.options').
         surface = gs.surfaces.Default() if options.surface is None else options.surface.model_copy()
@@ -445,7 +440,7 @@ class Scene(RBC):
                 f"Expected one of: {list(vis_modes)}."
             )
 
-        return self._sim._add_entity(morph, surface, name, options)
+        return self._sim._add_entity(surface, options)
 
     @overload
     def add_stage(self, *, options: gs.entities.Kinematic) -> list[KinematicEntity]: ...
@@ -792,6 +787,14 @@ class Scene(RBC):
             res, pos, lookat, up, model, fov, aperture, focus_dist, GUI, spp, denoise, near, far, env_idx, debug
         )
 
+    @overload
+    def add_emitter(
+        self, *, options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD, max_particles: int = ...
+    ) -> "Emitter": ...
+
+    @overload
+    def add_emitter(self, material: Material, max_particles: int = ..., surface: Surface | None = ...) -> "Emitter": ...
+
     @gs.assert_unbuilt
     def add_emitter(
         self,
@@ -800,7 +803,7 @@ class Scene(RBC):
         surface: Surface | None = None,
         *,
         options: gs.entities.MPM | gs.entities.SPH | gs.entities.PBD | None = None,
-    ):
+    ) -> "Emitter":
         """
         Add a fluid emitter to the scene.
 
@@ -920,19 +923,6 @@ class Scene(RBC):
 
             with namespace(self._namespace):
                 self._sim.build()
-
-            # Detach the morph and the surface from the caller. The material stays shared, since the solvers hold it.
-            for entity in self._sim.entities:
-                morph, surface = copy.deepcopy((entity._options.morph, entity._options.surface))
-                for options in (*(morph if isinstance(morph, tuple) else (morph,)), surface):
-                    if options is not None:
-                        options._make_read_only()
-                # A copy without validation, which keeps every field held, defaults included
-                entity._options = BaseModel.model_copy(entity._options, update={"morph": morph, "surface": surface})
-                entity._options._is_read_only = True
-                # The description records the options the entity holds, which a rebuild compares against
-                if entity.desc is not None:
-                    entity.desc.options = entity._options
 
             # reset state
             self._reset()

@@ -6,7 +6,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
@@ -38,8 +37,8 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    morph : Morph
-        Shape description used for particle sampling.
+    options : gs.entities.MPM
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface or texture representation.
     particle_size : float
@@ -58,7 +57,6 @@ class MPMEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "MPMSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
@@ -66,7 +64,6 @@ class MPMEntity(ParticleEntity):
         vvert_start: int,
         vface_start: int,
         options: "gs.entities.MPM",
-        name: str | None = None,
     ) -> None:
         need_skinning = not isinstance(
             options.material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
@@ -74,7 +71,6 @@ class MPMEntity(ParticleEntity):
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
@@ -82,7 +78,6 @@ class MPMEntity(ParticleEntity):
             vvert_start=vvert_start,
             vface_start=vface_start,
             need_skinning=need_skinning,
-            name=name,
             options=options,
         )
 

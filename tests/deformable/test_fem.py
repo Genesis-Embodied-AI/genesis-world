@@ -657,7 +657,7 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     top_verts_idx = np.flatnonzero(probe_verts_pos[:, 2] > BOX_SIZE - 1e-6)
     top_face_selection = [
         gs.VertexIndex.at(top_verts_idx[:2]),
-        *(gs.VertexIndex.closest_to(pos=pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
+        *(gs.VertexIndex.closest_to(pos, max_distance=1e-3) for pos in probe_verts_pos[top_verts_idx[2:]]),
     ]
     hanging_box_options = gs.entities.FEM(
         morph=gs.morphs.Box(
@@ -674,8 +674,6 @@ def test_hard_constraint(use_implicit_solver, precision, show_viewer):
     cloth_options = gs.entities.FEM(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Cloth())
     with pytest.raises(gs.GenesisException, match="vertices"):
         cloth_options.select(gs.VertexIndex.at(0)).set_is_fixed(True)
-    with pytest.raises(gs.GenesisException, match="vertices"):
-        hanging_box_options.material = gs.materials.FEM.Cloth()
     for selectors, match in (
         ((gs.VertexIndex.closest_to(pos=(0.1, 0.1, 0.2), max_distance=0.05),), "max_distance"),
         ((gs.VertexIndex.in_box(lower=(0.2, 0.2, 0.2), upper=(0.3, 0.3, 0.3)),), "No vertex"),

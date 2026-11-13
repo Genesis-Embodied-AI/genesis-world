@@ -35,7 +35,7 @@ def torus_box_sphere_mjcf(asset_tmp_path):
     ET.SubElement(body, "freejoint")
     ET.SubElement(body, "geom", name="torus", type="mesh", mesh="torus")
     ET.SubElement(body, "geom", name="top_cap", type="box", size="0.03 0.03 0.03", pos="0 0 0.1")
-    ET.SubElement(body, "geom", name="bottom_cap", type="sphere", size="0.03", pos="0 0 -0.1")
+    ET.SubElement(body, "geom", name="bottom_cap[1]", type="sphere", size="0.03", pos="0 0 -0.1")
     ET.SubElement(body, "geom", name="ring", type="mesh", mesh="torus", pos="0 0.3 0")
     tip = ET.SubElement(body, "body", name="tip", pos="0 0 0.2")
     ET.SubElement(tip, "joint", type="hinge")
@@ -103,12 +103,12 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
             friction_rolling=0.0005,
         ),
     )
-    caps = [gs.GeomIndex.named("top_cap"), gs.GeomIndex.named("bottom_cap")]
+    caps = [gs.GeomIndex.named("top_cap"), gs.GeomIndex.named("bottom_cap[[]1]")]
     mixed_geoms_options.select(caps).set(gs.options.Geom(friction_torsional=0.05, friction_rolling=0.002))
-    mixed_geoms_options.select(gs.LinkIndex.subtree("body"), gs.GeomIndex.named("tip")).set_friction(1.2)
+    mixed_geoms_options.select(gs.LinkIndex.subtree("body")).select(gs.GeomIndex.named("tip")).set_friction(1.2)
     with mixed_geoms_options.select(gs.LinkIndex.named("body")) as body:
         body.select(gs.GeomIndex.named("tor*")).set_friction(0.7)
-        body.select(gs.GeomIndex.at([False, True, False, False, False])).set_friction(1.5)
+        body.select(gs.GeomIndex.at(1)).set_friction(1.5)
         body.select(gs.GeomIndex.at(slice(1, 3))).set_friction_torsional(0.03)
     # The fifth collision geom of the entity is the capsule of the second link
     mixed_geoms_options.select(gs.GeomIndex.at(4)).set_friction_rolling(0.001)
@@ -142,10 +142,10 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
         ),
     )
     box_options.select(gs.GeomIndex.at(0)).set_friction(2.0)
-    box_options.select(gs.GeomIndex.at([True])).set_friction(1.0)
+    box_options.select(gs.GeomIndex.at([0])).set_friction(1.0)
     box = scene.add_entity(options=box_options)
     box_options.select(gs.GeomIndex.at(0)).set_friction(3.0)
-    with pytest.raises(gs.GenesisException, match="read-only"):
+    with pytest.raises(gs.GenesisException, match="frozen"):
         box.options.select(gs.GeomIndex.at(0)).set_friction(3.0)
 
     exported = tmp_path / f"selections{SCENE_FORMAT}"
@@ -157,7 +157,6 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     rigid_options.select(gs.LinkIndex.subtree("box_*")).set_friction(1.0)
     with rigid_options.select(gs.LinkIndex.named("box_baselink")) as box_link:
         box_link.select(gs.GeomIndex.at([0])).set_rho(1000.0)
-        box_link.select(gs.GeomIndex.at([True])).set_friction_torsional(0.01)
         box_link.select(gs.GeomIndex.at(slice(0, 1))).set_friction_rolling(0.001)
     rigid_options.select([gs.GeomIndex.named("box*"), gs.GeomIndex.named("*")]).set_friction(2.0)
     fem_options = gs.entities.FEM(
@@ -188,18 +187,22 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     assert type(gs.Scene().add_entity(gs.morphs.Sphere()).options) is gs.entities.Rigid
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(morph=gs.morphs.Sphere(), options=gs.entities.Rigid(morph=gs.morphs.Sphere()))
-    with pytest.raises(gs.GenesisException, match="gs.LinkIndex and gs.GeomIndex alone"):
+    with pytest.raises(gs.GenesisException, match="got VertexIndex"):
         gs.entities.Rigid(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))).select(gs.VertexIndex.at(0)).set_friction(1.0)
-    with pytest.raises(gs.GenesisException, match="one kind of part"):
-        box_options.select([gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(0)]).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="selectors of one type"):
+        box_options.select(gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(0)).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="got LinkIndex"):
+        box_options.select(gs.GeomIndex.at(0)).select(gs.LinkIndex.named("box_baselink")).set_friction(1.0)
+    with pytest.raises(gs.GenesisException, match="frozen"):
+        box.options.name = "renamed_box"
     with pytest.raises(gs.GenesisException, match="sets no quantity"):
         box_options.select(gs.GeomIndex.at(0)).set(gs.options.Geom())
     out_of_range_options = box_options.model_copy()
-    out_of_range_options.select(gs.LinkIndex.named("box_baselink"), gs.GeomIndex.at(1)).set_friction(1.0)
+    out_of_range_options.select(gs.LinkIndex.named("box_baselink")).select(gs.GeomIndex.at(1)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="selects no valid geom among 1"):
         scene.add_entity(options=out_of_range_options)
     disjoint_options = arm.options.model_copy()
-    disjoint_options.select(gs.LinkIndex.named("arm1"), gs.GeomIndex.at(1)).set_friction(1.0)
+    disjoint_options.select(gs.LinkIndex.named("arm1")).select(gs.GeomIndex.at(1)).set_friction(1.0)
     with pytest.raises(gs.GenesisException, match="holds no collision geom"):
         scene.add_entity(options=disjoint_options)
     unknown_link_options = arm.options.model_copy()
@@ -208,8 +211,6 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
         scene.add_entity(options=unknown_link_options)
 
     scene.build(n_envs=2)
-    with pytest.raises(gs.GenesisException, match="read-only"):
-        arm.options.morph.pos = (9.0, 9.0, 9.0)
 
     # The mass of each box is its volume, 0.2^3 m^3, times the density set on its geom
     assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)

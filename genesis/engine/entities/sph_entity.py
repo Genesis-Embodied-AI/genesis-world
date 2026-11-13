@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING
 import quadrants as qd
 
 import genesis as gs
-from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 
 from .particle_entity import ParticleEntity
@@ -24,8 +23,8 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    morph : Morph
-        Morphological configuration.
+    options : gs.entities.SPH
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface constraints or geometry.
     particle_size : float
@@ -40,24 +39,20 @@ class SPHEntity(ParticleEntity):
         self,
         scene: "Scene",
         solver: "SPHSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
         particle_start: int,
         options: "gs.entities.SPH",
-        name: str | None = None,
     ) -> None:
         super().__init__(
             scene,
             solver,
-            morph,
             surface,
             particle_size,
             idx,
             particle_start,
             need_skinning=False,
-            name=name,
             options=options,
         )
 

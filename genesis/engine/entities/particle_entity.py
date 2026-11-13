@@ -14,7 +14,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
-from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor
 
@@ -73,8 +72,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    morph : Morph
-        Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
+    options : gs.entities.MPM | gs.entities.SPH | gs.entities.PBD
+        The entity options the entity is constructed from, whose morph gives its geometry.
     surface : Surface
         Surface material or texture information associated with the entity.
     particle_size : float
@@ -95,7 +94,6 @@ class ParticleEntity(Entity):
         self,
         scene: "Scene",
         solver: "ParticleSolver",
-        morph: Morph,
         surface: Surface,
         particle_size: float,
         idx: int,
@@ -104,9 +102,8 @@ class ParticleEntity(Entity):
         vvert_start: int | None = None,
         vface_start: int | None = None,
         need_skinning: bool = True,
-        name: str | None = None,
     ) -> None:
-        super().__init__(idx, scene, morph, solver, surface, name=name, options=options)
+        super().__init__(idx, scene, solver, surface, options)
 
         self._particle_size = particle_size
         self._particle_start = particle_start

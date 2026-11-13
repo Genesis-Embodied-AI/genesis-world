@@ -1,5 +1,5 @@
 import weakref
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
@@ -7,7 +7,6 @@ import torch
 import genesis as gs
 from genesis.engine.solvers.base_solver import BackwardErrorCode
 from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
-from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.data import ArrayItem, DataItem, DataKind, check_data, iter_data
@@ -123,6 +122,15 @@ class Simulator(RBC):
                 self.fem_solver,
             ]
         )
+        # The solver simulating the entities of each class of entity options, a subclass going where its base goes
+        self._solvers_by_options_cls: dict[type[gs.entities.BaseEntity], "Solver"] = {
+            gs.entities.Rigid: self.rigid_solver,
+            gs.entities.Kinematic: self.kinematic_solver,
+            gs.entities.MPM: self.mpm_solver,
+            gs.entities.SPH: self.sph_solver,
+            gs.entities.PBD: self.pbd_solver,
+            gs.entities.FEM: self.fem_solver,
+        }
 
         self._active_solvers: list["Solver"] = gs.List()
         # What runs in the scene in its own right: the active solvers, then the coupler when one is active
@@ -151,9 +159,7 @@ class Simulator(RBC):
 
     def _add_entity(
         self,
-        morph: Morph | Sequence[Morph] | None = None,
         surface: "Surface | None" = None,
-        name: str | None = None,
         options: "gs.entities.BaseEntity | None" = None,
         desc: "EntityDescription | None" = None,
     ) -> "Entity":
@@ -161,14 +167,18 @@ class Simulator(RBC):
             options = desc.options
         if isinstance(options, gs.entities.Hybrid):
             # A hybrid entity adds its parts to the scene itself, as entities of their own
-            entity = HybridEntity(self.n_entities, self.scene, morph, surface, options, name)
+            entity = HybridEntity(self.n_entities, self.scene, surface, options)
         else:
-            for solver in self._solvers:
-                if isinstance(solver._options, options._solver_options_cls):
-                    break
-            else:
-                gs.raise_exception(f"No solver simulates entities of options {type(options).__name__}.")
-            entity = solver.add_entity(self.n_entities, morph, surface, options, name, desc)
+            solver = next(
+                (
+                    self._solvers_by_options_cls[options_cls]
+                    for options_cls in type(options).__mro__
+                    if options_cls in self._solvers_by_options_cls
+                ),
+                None,
+            )
+            assert solver is not None
+            entity = solver.add_entity(self.n_entities, surface, options, desc)
         self._entities.append(entity)
         if entity.desc is not None:
             self.scene._desc.entities.append(entity.desc)

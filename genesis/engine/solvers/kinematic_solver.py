@@ -180,28 +180,23 @@ class KinematicSolver(Solver):
     def add_entity(
         self,
         idx: int,
-        morph: Morph | Sequence[Morph] | None,
         surface: Surface | None,
-        options: "gs.entities.Kinematic | gs.entities.Rigid",
-        name: str | None = None,
+        options: "gs.entities.Kinematic | gs.entities.Rigid | None",
         desc: KinematicEntityDescription | None = None,
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
-        Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
-        says which kind it holds. Creation from a description reads no asset.
+        Given no description, one is resolved from the entity options and the surface resolved from them (see
+        'KinematicEntityDescription'), the primary morph deciding the kind of entity among those the solver builds
+        ('_entity_classes'). The class of a given description says which kind it holds. Creation from a description
+        reads no asset.
         """
         if desc is None:
-            morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
-            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
+            entity_cls = next(
+                cls for morph_cls, cls in self._entity_classes if isinstance(options.morphs[0], morph_cls)
+            )
             desc = entity_cls._description_cls.resolve(
-                morphs,
-                surface,
-                self._options,
-                self._enable_mujoco_compatibility,
-                options,
-                name,
+                options, surface, self._options, self._enable_mujoco_compatibility
             )
         else:
             for _, entity_cls in self._entity_classes:
