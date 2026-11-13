@@ -78,3 +78,67 @@ def test_muscle(n_envs, muscle_material, use_implicit_solver, show_viewer):
     assert (length < length_init - 5e-3).all()
     assert (pos[..., 2].mean(-1) > pos_init[..., 2].mean(-1) + 5e-4).all()
     assert (pos[..., 2] > -gs.EPS).all()
+
+
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
+def test_implicit_mpm_muscle(n_envs, show_viewer):
+    N_STEPS_SETTLE = 20
+    N_STEPS = 50
+
+    scene = gs.Scene(
+        mpm_options=gs.options.MPMOptions(
+            lower_bound=(-1.0, -1.0, -0.2),
+            upper_bound=(1.0, 1.0, 1.0),
+            use_implicit_solver=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -0.6, 0.5),
+            camera_lookat=(0.0, 0.0, 0.05),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_friction=5.0,
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.05),
+            size=(0.1, 0.5, 0.1),
+        ),
+        material=gs.materials.MPM.Muscle(
+            E=5e5,
+            nu=0.45,
+            rho=10000.0,
+            n_groups=4,
+        ),
+        vis_mode="particle",
+    )
+    scene.build(n_envs=n_envs)
+
+    # Four groups: upper or lower part of the body, fore or hind part
+    pos = box.get_particles_pos() if n_envs == 0 else box.get_particles_pos()[0]
+    pos_min, pos_max = pos.amin(0), pos.amax(0)
+    is_lower = pos[:, 2] <= pos_min[2] + 0.3 * (pos_max[2] - pos_min[2])
+    is_hind = pos[:, 1] >= pos_min[1] + 0.6 * (pos_max[1] - pos_min[1])
+    box.set_muscle(muscle_group=2 * is_lower + is_hind, muscle_direction=(0.0, 1.0, 0.0))
+
+    # The body first settles onto the plane, whose contact holds it at its softness below the height it is sampled at
+    for _ in range(N_STEPS_SETTLE):
+        scene.step()
+    pos_init = box.get_particles_pos()
+    for i in range(N_STEPS):
+        box.set_actuation([0.0, 0.0, 0.0, 0.5 + np.sin(0.005 * np.pi * i)])
+        scene.step()
+    pos = box.get_particles_pos()
+
+    # Contracting the lower hind fibers along the body axis shortens the body, and bends its hind part upward off the
+    # plane, which raises its center of mass
+    length_init = pos_init[..., 1].amax(-1) - pos_init[..., 1].amin(-1)
+    length = pos[..., 1].amax(-1) - pos[..., 1].amin(-1)
+    assert (length < length_init - 5e-3).all()
+    assert (pos[..., 2].mean(-1) > pos_init[..., 2].mean(-1) + 5e-4).all()
+    assert (pos[..., 2] > -gs.EPS).all()

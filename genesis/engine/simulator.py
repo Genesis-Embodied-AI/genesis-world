@@ -30,6 +30,7 @@ from .solvers.base_solver import (
     kernel_set_time,
     merge_errno,
 )
+from .solvers.newton_solver import NewtonSolver
 from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
@@ -111,9 +112,13 @@ class Simulator(RBC):
         self.sph_solver = SPHSolver(self.scene, self, options.sph)
         self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
         self.fem_solver = FEMSolver(self.scene, self, options.fem)
+        self.newton_solver = NewtonSolver(self.scene, self, options.newton)
 
+        # The Newton solver goes first, so that it solves a substep once every other solver prepared it and the coupler
+        # ran, and before the others finish it (see 'NewtonSolver.substep_post_coupling')
         self._solvers: list["Solver"] = gs.List(
             [
+                self.newton_solver,
                 self.rigid_solver,
                 self.kinematic_solver,
                 self.mpm_solver,
